@@ -13,9 +13,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
+import type { JsonObject } from "../src/config.js";
 import {
   FindingWorkflow,
   workflowDestination,
+  type WorkflowState,
 } from "../src/finding-workflow.js";
 import { publishScanToCustomInternal } from "../src/custom-publish.js";
 import { deduplicateScanInternal } from "../src/deduplication/scan.js";
@@ -94,6 +96,58 @@ async function fixture() {
   };
 }
 
+async function restoreLegacyWorkflow(
+  environment: NodeJS.ProcessEnv,
+  state: object,
+  reviews: object[],
+) {
+  const probe = await runCodexCommand(
+    { command: await resolvePluginPython({ environment }) },
+    [
+      "-I",
+      "-B",
+      "-c",
+      `import json, sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+from workbench_schema import MIGRATIONS, apply_migrations, sql_statements
+db = sqlite3.connect(sys.argv[2])
+db.row_factory = sqlite3.Row
+db.execute("PRAGMA foreign_keys = ON")
+payload = json.load(sys.stdin)
+state = payload["state"]
+timestamp = "2026-08-01T00:00:00Z"
+with db:
+    db.execute("DROP TABLE finding_workflow_reviews")
+    db.execute("DROP TABLE finding_workflows")
+    db.execute("DELETE FROM schema_migrations WHERE version >= 38")
+    for version, _, sql in MIGRATIONS:
+        if version in (36, 37):
+            for statement in sql_statements(sql):
+                db.execute(statement)
+    db.execute("INSERT INTO finding_workflows VALUES (?, ?, ?, ?)",
+               (state["id"], json.dumps(state), timestamp, timestamp))
+    for review in payload["reviews"]:
+        db.execute("INSERT INTO finding_workflow_reviews VALUES (?, ?, ?, ?, ?)",
+                   (state["id"], review["key"], json.dumps(review["binding"]), json.dumps(review["result"]), timestamp))
+before = list(db.iterdump())
+try:
+    apply_migrations(db, (*MIGRATIONS, (999, "synthetic failure", "INSERT INTO synthetic_missing_table VALUES (1);")), lambda: timestamp, lambda _: None)
+except sqlite3.OperationalError:
+    pass
+else:
+    raise AssertionError("Migration should fail")
+assert not db.in_transaction
+assert list(db.iterdump()) == before, "Failed migration must preserve workflow and review rows together"
+db.close()`,
+      join(PLUGIN_ROOT, "scripts"),
+      join(environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
+    ],
+    environment,
+    JSON.stringify({ state, reviews }),
+  );
+  expect(probe.exitCode, probe.stderr).toBe(0);
+}
+
 test("migrates workflow columns atomically without losing receipts, pending writes, or resume state", async () => {
   const { environment, repository, scanDir, workbenchOptions } =
     await fixture();
@@ -125,7 +179,7 @@ test("migrates workflow columns atomically without losing receipts, pending writ
         pendingWrite: { groups: [["a", "b"]] },
       },
     },
-  } as const;
+  } satisfies WorkflowState;
   const pending = {
     id: "migrated-pending",
     stages: {
@@ -680,7 +734,13 @@ test.each(["screen", "pair", "group"])(
   },
 );
 
-test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
+test.each([
+  "before-post",
+  "before-write",
+  "lost-ack",
+  "lost-completion",
+  "migrated-lost-ack",
+])(
   "replays the exact saved group payload after %s without models",
   async (failure) => {
     const { environment, document, history } = await fixture();
@@ -693,6 +753,7 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
       findingsUrl: "http://synthetic.test",
     };
     const bodies: string[] = [];
+    const checkpoints: object[] = [];
     let modelCalls = 0;
     let failed = false;
     const reviewRunner = {
@@ -758,7 +819,9 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
         failed = true;
         throw new Error("Synthetic completion receipt failure");
       }
-      return await history(args, input);
+      const result = await history(args, input);
+      if (payload.action === "save-review") checkpoints.push(payload);
+      return result;
     };
     await expect(
       deduplicateScanInternal(document.scanId, options, {
@@ -768,6 +831,13 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
         fetch,
       }),
     ).rejects.toThrow();
+    if (failure === "migrated-lost-ack") {
+      await restoreLegacyWorkflow(
+        environment,
+        (await new FindingWorkflow(options.workflowId, environment).get())!,
+        checkpoints,
+      );
+    }
     expect(
       (await new FindingWorkflow(options.workflowId, environment).get())?.stages
         .dedupe.status,
@@ -788,55 +858,143 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
   },
 );
 
-test("persists DISTINCT screening, pair and group reviews and retains complete SAME decisions", async () => {
-  const { environment, repository, document } = await fixture();
-  const workflow = new FindingWorkflow("all-decisions", environment);
-  await workflow.bind({});
-  const originals = [
-    document.findings[0]!,
-    { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
-  ];
-  let calls = 0;
-  const runner = {
-    async run<T>(review: CodexReview<T>): Promise<T> {
-      calls++;
-      return review.validate(
-        review.model === "gpt-5.6-luna"
-          ? {
-              decisions: [
-                {
-                  findingIds: originals.map((finding) => finding.findingId),
-                  ...distinct,
-                },
-              ],
-            }
-          : review.prompt.startsWith(groupReviewInstructions)
-            ? distinct
-            : merged(originals),
+test.each(["current", "legacy", "workflow-columns"])(
+  "persists DISTINCT and complete SAME checkpoints across %s databases",
+  async (version) => {
+    const { environment, repository, document, workbenchOptions } =
+      await fixture();
+    const workflow = new FindingWorkflow("all-decisions", environment);
+    await workflow.bind({});
+    if (version === "workflow-columns") {
+      const probe = await runCodexCommand(
+        { command: workbenchOptions.python },
+        [
+          "-I",
+          "-B",
+          "-c",
+          `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("DROP TABLE finding_workflow_reviews")
+    db.execute("DELETE FROM schema_migrations WHERE version IN (37, 39)")`,
+          join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+        ],
+        environment,
       );
-    },
-  };
-  const makeReviewer = async () =>
-    new CodexDeduplicationReviewer(
-      new CheckpointedReviewRunner(
-        new FindingWorkflow(workflow.id, environment),
-        runner,
-        await workflow.sourceSnapshot(repository),
-        { allRepositories: true },
-      ),
+      expect(probe.exitCode, probe.stderr).toBe(0);
+    }
+    const originals = [
+      document.findings[0]!,
+      { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
+    ];
+    let calls = 0;
+    const checkpoints: Array<{
+      key: string;
+      binding: JsonObject;
+      result: unknown;
+    }> = [];
+    const recordCheckpoint: typeof runWorkbench = async (
+      options,
+      args,
+      input,
+    ) => {
+      const result = await runWorkbench(options, args, input);
+      const payload = input ? JSON.parse(input) : {};
+      if (payload.action === "save-review") checkpoints.push(payload);
+      return result;
+    };
+    const runner = {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        calls++;
+        return review.validate(
+          review.model === "gpt-5.6-luna"
+            ? {
+                decisions: [
+                  {
+                    findingIds: originals.map((finding) => finding.findingId),
+                    ...distinct,
+                  },
+                ],
+              }
+            : review.prompt.startsWith(groupReviewInstructions)
+              ? distinct
+              : merged(originals),
+        );
+      },
+    };
+    const makeReviewer = async () =>
+      new CodexDeduplicationReviewer(
+        new CheckpointedReviewRunner(
+          new FindingWorkflow(workflow.id, environment, recordCheckpoint),
+          runner,
+          await workflow.sourceSnapshot(repository),
+          { allRepositories: true },
+          "synthetic-settings-hash",
+        ),
+      );
+    const first = await makeReviewer();
+    const screening = await first.screen(originals);
+    const pair = await first.reviewPair(originals);
+    const group = await first.reviewGroup(originals);
+    if (version === "legacy")
+      await restoreLegacyWorkflow(
+        environment,
+        (await workflow.get())!,
+        checkpoints,
+      );
+    const resumed = await makeReviewer();
+    expect(await resumed.screen(originals)).toEqual(screening);
+    expect(await resumed.reviewPair(originals)).toEqual(pair);
+    expect(await resumed.reviewGroup(originals)).toEqual(group);
+    expect(pair).toEqual(merged(originals));
+    expect(group).toEqual(distinct);
+    expect(calls).toBe(3);
+    expect(checkpoints).toHaveLength(3);
+    const probe = await runCodexCommand(
+      { command: workbenchOptions.python },
+      [
+        "-I",
+        "-B",
+        "-c",
+        `import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.row_factory = sqlite3.Row
+assert "binding_json" not in {row["name"] for row in db.execute("PRAGMA table_info(finding_workflow_reviews)")}
+assert list(db.execute("PRAGMA foreign_key_check")) == []
+assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+print(json.dumps([dict(row) for row in db.execute("SELECT * FROM finding_workflow_reviews ORDER BY review_key")]))`,
+        join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      ],
+      environment,
     );
-  const first = await makeReviewer();
-  const screening = await first.screen(originals);
-  const pair = await first.reviewPair(originals);
-  const group = await first.reviewGroup(originals);
-  const resumed = await makeReviewer();
-  expect(await resumed.screen(originals)).toEqual(screening);
-  expect(await resumed.reviewPair(originals)).toEqual(pair);
-  expect(await resumed.reviewGroup(originals)).toEqual(group);
-  expect(pair).toEqual(merged(originals));
-  expect(group).toEqual(distinct);
-  expect(calls).toBe(3);
-});
+    expect(probe.exitCode, probe.stderr).toBe(0);
+    const rows = JSON.parse(probe.stdout);
+    for (const { key, binding, result } of checkpoints) {
+      const source = binding["source"] as JsonObject;
+      const row = rows.find(
+        (row: { review_key: string }) => row.review_key === key,
+      );
+      expect(row).toMatchObject({
+        workflow_id: workflow.id,
+        review_contract_version: binding["version"],
+        codex_version: binding["codexVersion"],
+        source_repository_path: source["repository"],
+        source_revision: source["revision"],
+        source_refs_digest: source["refsDigest"],
+        source_content_digest: source["content"],
+        scope_repository_id: null,
+        scope_all_repositories: 1,
+        model: binding["model"],
+        effort: binding["effort"],
+        settings_digest: binding["settingsDigest"],
+        prompt_digest: binding["promptDigest"],
+        contract_digest: binding["contractDigest"],
+      });
+      if (version === "legacy")
+        expect(row.created_at).toBe("2026-08-01T00:00:00Z");
+      expect(JSON.parse(row.result_json)).toEqual(result);
+    }
+  },
+);
 
 test.each([
   "finding",

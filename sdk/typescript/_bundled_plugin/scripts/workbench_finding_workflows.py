@@ -132,13 +132,25 @@ def finding_workflow(
         ).fetchone()
         return {"review": json.loads(row["result_json"]) if row is not None else None}
     if payload["action"] == "save-review":
+        binding = payload["binding"]
+        source = binding["source"]
+        scope = binding["scope"]
         with connection:
             connection.execute(
                 """INSERT INTO finding_workflow_reviews
-                (workflow_id, review_key, binding_json, result_json, created_at)
-                VALUES (?, ?, ?, ?, ?) ON CONFLICT(workflow_id, review_key) DO NOTHING""",
-                (workflow_id, payload["key"], json.dumps(payload["binding"], allow_nan=False),
-                 json.dumps(payload["result"], allow_nan=False), timestamp),
+                (workflow_id, review_key, review_contract_version, codex_version,
+                 source_repository_path, source_revision, source_refs_digest, source_content_digest,
+                 scope_repository_id, scope_all_repositories, model, effort, settings_digest,
+                 prompt_digest, contract_digest, result_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workflow_id, review_key) DO NOTHING""",
+                (
+                    workflow_id, payload["key"], binding["version"], binding["codexVersion"],
+                    source["repository"], source["revision"], source["refsDigest"], source["content"],
+                    scope.get("repositoryId"), scope.get("allRepositories"), binding["model"],
+                    binding["effort"], binding.get("settingsDigest"), binding["promptDigest"],
+                    binding["contractDigest"], json.dumps(payload["result"], allow_nan=False), timestamp,
+                ),
             )
         return {}
     connection.execute("BEGIN IMMEDIATE")

@@ -42,15 +42,17 @@ with sqlite3.connect("/state/workbench.sqlite3") as db:
             assert status == "completed"
             assert results["dedupe"]["duplicateGroups"] == [imported_ids[:3]]
             assert "dedupePendingWrite" not in results
-        reviews = db.execute("SELECT binding_json, result_json FROM finding_workflow_reviews").fetchall()
+        reviews = db.execute(
+            "SELECT model, source_content_digest, prompt_digest, contract_digest, result_json "
+            "FROM finding_workflow_reviews"
+        ).fetchall()
         models = set()
         decisions = set()
-        for binding_json, result_json in reviews:
-            binding = json.loads(binding_json)
+        for model, content_digest, prompt_digest, contract_digest, result_json in reviews:
             result = json.loads(result_json)
-            models.add(binding["model"])
-            assert binding["source"]["content"]
-            assert binding["promptDigest"] and binding["contractDigest"]
+            models.add(model)
+            assert content_digest
+            assert prompt_digest and contract_digest
             for decision in result.get("decisions", [result]):
                 decisions.add(decision["decision"])
                 if decision["decision"] == "SAME":
