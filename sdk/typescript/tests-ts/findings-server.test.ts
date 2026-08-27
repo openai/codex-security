@@ -11,6 +11,7 @@ import { FindingsError } from "../src/server/errors.js";
 import { startFindingsServer } from "../src/server/server.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { EmbeddedFinding, FindingsPage } from "../src/server/storage.js";
+import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const servers: Server[] = [];
@@ -113,6 +114,232 @@ function storeGroups(base: string, groups: unknown) {
     body: JSON.stringify({ groups }),
   });
 }
+
+async function dashboard(
+  base: string,
+  parameters: Record<string, string> = {},
+) {
+  const response = await fetch(
+    `${base}/v1/dashboard?${new URLSearchParams(parameters)}`,
+  );
+  expect(response.status).toBe(200);
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  return (await response.json()) as DashboardSnapshot;
+}
+
+test("dashboard works with no scans or workflows, and never calls an embedding provider", async () => {
+  const { store } = await fixture();
+  const base = await start(store, {
+    async embed() {
+      throw new Error("Read-only dashboard called embeddings");
+    },
+  });
+  for (const view of ["scans", "workflows", "findings", "groups"]) {
+    const result = await dashboard(base, { view });
+    expect(result).toMatchObject({
+      items: [],
+      total: 0,
+      nextOffset: null,
+      detail: null,
+      overview: { scans: {}, workflows: {}, findings: 0, groups: 0 },
+    });
+  }
+  for (const parameters of [
+    "view=unknown",
+    "sort=unknown",
+    "offset=-1",
+    "limit=0",
+  ]) {
+    expect((await fetch(`${base}/v1/dashboard?${parameters}`)).status).toBe(
+      400,
+    );
+  }
+  expect(
+    (await fetch(`${base}/v1/dashboard`, { method: "POST", body: "{}" }))
+      .status,
+  ).toBe(404);
+  expect((await fetch(`${base}/dashboard/not-a-bundled-asset`)).status).toBe(
+    404,
+  );
+});
+
+test("dashboard browses imported findings and overlapping groups without local runs", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store);
+  const first = finding(1),
+    second = finding(2),
+    third = finding(3);
+  await store.insert([embedded(1), embedded(2)], "repository-a");
+  await store.insert([embedded(3)], "repository-b");
+  const groups = await store.storeDedupeGroups([
+    [first.findingId, second.findingId],
+    [second.findingId, third.findingId],
+  ]);
+  const before = await database(
+    environment,
+    "print(json.dumps(list(db.iterdump())))",
+  );
+  const page = await dashboard(base, {
+    view: "findings",
+    limit: "1",
+    repository: "repository-a",
+    id: first.findingId,
+  });
+  expect(page.total).toBe(2);
+  expect(page.nextOffset).toBe(1);
+  expect(page.overview).toEqual({
+    scans: {},
+    workflows: {},
+    findings: 3,
+    groups: 2,
+  });
+  expect(page.detail).toMatchObject({
+    finding: first,
+    scanIds: [],
+    groups: [groups[0]],
+  });
+  const next = await dashboard(base, {
+    view: "findings",
+    limit: "1",
+    offset: "1",
+    repository: "repository-a",
+  });
+  expect(next.items[0]!.id).not.toBe(page.items[0]!.id);
+  expect(next.nextOffset).toBeNull();
+  expect(
+    (await dashboard(base, { view: "findings", query: first.title })).items.map(
+      (item) => item.id,
+    ),
+  ).toEqual([first.findingId]);
+  expect(
+    (
+      await dashboard(base, { view: "groups", repository: "repository-b" })
+    ).items.map((item) => item.id),
+  ).toEqual([groups[1]!.groupId]);
+  const group = await dashboard(base, {
+    view: "groups",
+    id: groups[0]!.groupId,
+  });
+  expect(group.detail!.group).toEqual(groups[0]!);
+  expect(group.items).toHaveLength(2);
+  expect(
+    (await dashboard(base, { view: "findings", id: "not-stored" })).detail,
+  ).toBeNull();
+  expect(
+    await database(environment, "print(json.dumps(list(db.iterdump())))"),
+  ).toEqual(before);
+});
+
+test("dashboard lists standalone scans with progress, missing progress, and cancellation", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store);
+  await database(
+    environment,
+    `
+with db:
+    for scan_id, status, canceled, created, path in [
+        ('standalone', 'running', None, '2026-01-01T00:00:00Z', '/synthetic/repo'),
+        ('finished', 'complete', None, '2026-01-02T00:00:00Z', '/synthetic/repo'),
+        ('stopped', 'running', '2026-01-03T00:00:00Z', '2026-01-03T00:00:00Z', 'C:\\\\synthetic\\\\repo'),
+    ]:
+        db.execute("INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)", (scan_id, created, created))
+        db.execute("INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at, canceled_at) VALUES (?, ?, ?, 'revision', 'src', 'standard', ?, ?, 'discovery', ?, ?, ?, ?)", (scan_id, scan_id, path, '/unavailable/artifacts/' + scan_id, status, created, created, created, canceled))
+    db.execute("INSERT INTO scan_progress (scan_id, review_items_completed, review_items_total, reportable_findings_count, updated_at) VALUES ('standalone', 3, 10, 2, '2026-01-04T00:00:00Z')")
+print('null')`,
+  );
+  const before = await database(
+    environment,
+    "print(json.dumps(list(db.iterdump())))",
+  );
+  const result = await dashboard(base, { id: "standalone" });
+  expect(result.items.map((item) => item.id)).toEqual([
+    "standalone",
+    "stopped",
+    "finished",
+  ]);
+  expect(result.overview.scans).toEqual({
+    running: 1,
+    completed: 1,
+    canceled: 1,
+  });
+  expect(result.overview.workflows).toEqual({});
+  expect(result.detail!.scan).toMatchObject({
+    scanId: "standalone",
+    status: "running",
+    phase: "discovery",
+    scope: "src",
+    progress: { reviewed: 3, total: 10, reportable: 2, deepPass: null },
+    workflowIds: [],
+    findingIds: [],
+    updatedAt: "2026-01-04T00:00:00Z",
+  });
+  expect(
+    (await dashboard(base, { status: "canceled" })).items.map(
+      (item) => item.id,
+    ),
+  ).toEqual(["stopped"]);
+  expect((await dashboard(base, { repository: "/synthetic/repo" })).total).toBe(
+    2,
+  );
+  expect((await dashboard(base, { query: "standalone" })).total).toBe(1);
+  expect((await dashboard(base, { sort: "newest" })).items[0]!.id).toBe(
+    "stopped",
+  );
+  const finished = await dashboard(base, { id: "finished" });
+  expect(finished.detail!.scan!.progress.total).toBeNull();
+  expect(finished.detail!.item.findingCount).toBe(0);
+  expect(
+    await database(environment, "print(json.dumps(list(db.iterdump())))"),
+  ).toEqual(before);
+});
+
+test("dashboard reads optional workflow stages and distinguishes empty results from unfinished work", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store);
+  await database(
+    environment,
+    `
+from workbench_finding_workflows import finding_workflow
+for workflow_id in ('empty-run', 'failed-run'):
+    finding_workflow(db, {'id': workflow_id, 'action': 'bind', 'binding': {'scanId': 'unavailable-scan', 'destination': 'http://localhost:3000/', 'scope': {'repositoryId': 'repository-a'}}}, '2026-01-01T00:00:00Z')
+    finding_workflow(db, {'id': workflow_id, 'action': 'complete', 'stage': 'scan', 'result': None}, '2026-01-01T00:00:00Z')
+finding_workflow(db, {'id': 'empty-run', 'action': 'complete', 'stage': 'publish', 'result': {'findingIds': [], 'findingCount': 0}}, '2026-01-02T00:00:00Z')
+finding_workflow(db, {'id': 'empty-run', 'action': 'complete', 'stage': 'dedupe', 'result': {'uniqueFindingIds': [], 'duplicateGroups': [], 'deduplicationStatus': 'completed'}}, '2026-01-02T00:00:00Z')
+finding_workflow(db, {'id': 'failed-run', 'action': 'fail', 'stage': 'publish', 'error': 'Synthetic publication failure'}, '2026-01-03T00:00:00Z')
+print('null')`,
+  );
+  const result = await dashboard(base, { view: "workflows", id: "empty-run" });
+  expect(result.overview.workflows).toEqual({ completed: 1, failed: 1 });
+  expect(result.detail!.item).toMatchObject({
+    stage: "dedupe",
+    status: "completed",
+    findingCount: null,
+    publishedCount: 0,
+    uniqueCount: 0,
+  });
+  expect(result.detail!.scan).toBeUndefined();
+  const failed = await dashboard(base, {
+    view: "workflows",
+    status: "failed",
+    stage: "publish",
+    id: "failed-run",
+  });
+  expect(failed.total).toBe(1);
+  expect(failed.detail!.workflow!.stages).toMatchObject({
+    scan: { status: "completed" },
+    publish: { status: "failed", error: "Synthetic publication failure" },
+    dedupe: { status: "pending" },
+  });
+  expect(failed.detail!.item.publishedCount).toBeNull();
+  expect(
+    (await dashboard(base, { view: "workflows", query: "unavailable-scan" }))
+      .total,
+  ).toBe(2);
+  expect(
+    (await dashboard(base, { view: "workflows", repository: "repository-a" }))
+      .total,
+  ).toBe(2);
+});
 
 async function getGroups(
   base: string,

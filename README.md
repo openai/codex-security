@@ -50,7 +50,9 @@ Use the included Docker Compose configuration for scans of many repositories. Se
 
 The [findings service](sdk/typescript/README.md#findings-service-preview) runs
 from the SDK in Docker, stores findings and embeddings in SQLite, and lists
-findings with pagination. It also returns potential duplicates by embedding
+findings with pagination. Its read-only dashboard at `/dashboard` refreshes every five seconds
+and shows standalone scans, stored findings, duplicate groups, and optional
+workflows from the service's configured state database. It also returns potential duplicates by embedding
 similarity within a repository or an explicit all-repository scope. The
 `codex-security publish scan --to custom --findings-url http://localhost:3000`
 command uploads completed findings and their repository ID. The SDK and
@@ -59,7 +61,6 @@ reviews locally, and persist accepted duplicate groups; `--all-repositories`
 opts into the broader scope.
 
 ## Other providers
-
 
 To use another inference provider, set its API key and select a model:
 

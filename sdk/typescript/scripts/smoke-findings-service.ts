@@ -9,6 +9,7 @@ import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import type { DeduplicateScanResult } from "../src/deduplication/scan.js";
 import type { FindingsPage } from "../src/server/storage.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
+import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const container = "findings-ci";
@@ -166,6 +167,25 @@ async function checkHostPublication(): Promise<void> {
     finding: example,
     potentialDuplicates: [],
   });
+}
+
+async function checkDashboard(): Promise<void> {
+  for (const [path, type] of [
+    ["/dashboard", "text/html"],
+    ["/dashboard/app.js", "text/javascript"],
+    ["/dashboard/app.css", "text/css"],
+  ]) {
+    const response = await fetch(`${base}${path}`);
+    assert.equal(response.status, 200);
+    assert.ok(response.headers.get("content-type")?.startsWith(type!));
+    assert.ok((await response.text()).length > 0);
+  }
+  const response = await fetch(`${base}/v1/dashboard?view=findings`);
+  assert.equal(response.status, 200);
+  const snapshot = (await response.json()) as DashboardSnapshot;
+  assert.equal(snapshot.total, findings.length);
+  assert.deepEqual(snapshot.overview.workflows, {});
+  assert.equal(snapshot.items.length, findings.length);
 }
 
 async function checkInsertions(): Promise<void> {
@@ -356,6 +376,7 @@ try {
   await startService();
   await checkHostPublication();
   await checkInsertions();
+  await checkDashboard();
   await checkCandidates();
   await checkPages();
   checkStorage();

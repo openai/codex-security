@@ -1301,6 +1301,65 @@ packaged `start:server` script, without invoking the CLI. Docker runs Node
 directly so stop signals reach the server. The existing default Docker target
 and bulk-scan Compose configuration are unchanged.
 
+### Read-only dashboard
+
+Open `http://localhost:3000/dashboard` on the running findings service. The UI
+uses the public OpenAI Apps SDK UI design system, follows the browser's light
+or dark preference, and polls the service every five seconds. It never starts,
+cancels, resumes, publishes, edits, or deduplicates anything.
+
+The dashboard has independent Scans, Findings, Duplicate groups, and Workflows
+views. Workflows are optional: standalone scans remain visible, and a service
+with only imported findings can browse those findings and their stored groups
+without any local scan or workflow history. Each view supports search,
+repository filtering, sorting, pagination, and record details. Scan and workflow
+views also filter by status; workflows can filter by stage.
+
+Scans show saved phase and review-item progress, timing, scope, revision, finding
+IDs, and errors. Workflows add scan/publish/dedupe stage status, publication
+receipts, and completed dedupe results. Findings show stored content and links to
+local scan occurrences and duplicate groups. The dashboard preserves separate
+overlapping groups and original findings. It does not read arbitrary report or
+source paths from stored records.
+
+The dashboard reads **only the server's configured workbench database**, under
+the existing `CODEX_SECURITY_STATE_DIR`. When the server and scanner use that
+same state directory, standalone scans appear before completion. A Docker
+service's private `/state` volume does not automatically contain the host's
+scan history: use the same state storage for the server and local runner if you
+want their scan/workflow progress together. Publication alone sends findings,
+not remote scan or workflow telemetry. Missing local records do not prevent
+browsing imported findings or groups.
+
+Statuses are last recorded values, not process heartbeats. A quiet or stopped
+runner is not automatically declared failed. Missing counts display as unknown;
+successful empty results display zero. The UI retains the last successful data
+on a refresh failure and shows a connection warning until polling succeeds.
+It does not estimate completion times or individual dedupe-review progress.
+
+`GET /v1/dashboard` returns a consistent read snapshot with overview counts,
+repository choices, a page of records, and optional selected-record details:
+
+- `view`: `scans` (default), `findings`, `groups`, or `workflows`.
+- `query`, `repository`: optional search text and exact repository ID (or saved
+  repository path when a scan has no repository ID).
+- `status`, `stage`: optional exact filters for scan/workflow views.
+- `sort`: `activity` (default; running scans/workflows first) or `newest`.
+- `limit`, `offset`: existing pagination conventions, defaulting to 50 and 0.
+- `id`: optional exact record ID to include in `detail`; unknown IDs return
+  `detail: null` without hiding the list.
+
+Overview counts are service-wide, not filtered page totals. Responses and UI
+assets are served by the same Node process; no separate frontend server, CDN,
+model credentials, or new CLI flags are needed to view the dashboard. Compiled
+HTML, JavaScript, and CSS are included in the npm package and container. Frontend
+source, build tools, and tests are not shipped as runtime dependencies.
+
+The existing preview access boundary is unchanged. The dashboard contains
+sensitive finding content: keep the service on a trusted local endpoint or behind
+an authenticated proxy. It does not add authentication or broaden the default
+network binding.
+
 ### API
 
 `POST /v1/bulk/findings` accepts `{"findings": [...]}`, using the existing SDK

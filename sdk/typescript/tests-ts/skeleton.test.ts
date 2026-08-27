@@ -278,7 +278,7 @@ describe("TypeScript package skeleton", () => {
     );
 
     expect(packageJson.scripts.build).toBe(
-      "node --run clean && tsc -p tsconfig.build.json",
+      "node --run clean && tsc -p tsconfig.build.json && node scripts/build-dashboard.mjs",
     );
     expect(packageJson.scripts.prepack).toBe("node --run build");
     expect(packageJson.scripts["audit:prod"]).toBe(
