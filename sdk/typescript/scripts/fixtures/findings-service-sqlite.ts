@@ -104,6 +104,7 @@ try {
         : [result]) {
         decisions.add(decision.decision);
         if (decision.decision === "SAME") {
+          assert.equal(typeof decision.canonicalFindingId, "string");
           assert.equal(
             decision.mergedFinding.findingId,
             decision.canonicalFindingId,
