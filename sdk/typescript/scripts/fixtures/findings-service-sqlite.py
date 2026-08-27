@@ -35,6 +35,29 @@ with sqlite3.connect("/state/workbench.sqlite3") as db:
             "SELECT finding_id FROM finding_dedupe_group_members ORDER BY finding_id"
         ).fetchall()
         assert [row[0] for row in members] == sorted(imported_ids[:3])
+        workflows = db.execute("SELECT state_json FROM finding_workflows").fetchall()
+        assert len(workflows) == 2
+        for (state_json,) in workflows:
+            stage = json.loads(state_json)["stages"]["dedupe"]
+            assert stage["status"] == "completed"
+            assert stage["result"]["duplicateGroups"] == [imported_ids[:3]]
+            assert "pendingWrite" not in stage
+        reviews = db.execute("SELECT binding_json, result_json FROM finding_workflow_reviews").fetchall()
+        models = set()
+        decisions = set()
+        for binding_json, result_json in reviews:
+            binding = json.loads(binding_json)
+            result = json.loads(result_json)
+            models.add(binding["model"])
+            assert binding["source"]["content"]
+            assert binding["promptDigest"] and binding["contractDigest"]
+            for decision in result.get("decisions", [result]):
+                decisions.add(decision["decision"])
+                if decision["decision"] == "SAME":
+                    assert decision["mergedFinding"]["findingId"] == decision["canonicalFindingId"]
+                    assert decision["mergedFinding"]["extensions"]["mergedOriginals"]
+        assert models == {"gpt-5.6-luna", "gpt-5.6-sol"}
+        assert decisions == {"SAME", "DISTINCT"}
 
     if "--prepare-scan" in sys.argv:
         source_dir = Path("/state/smoke-source")

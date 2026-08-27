@@ -198,6 +198,7 @@ const distFiles = new Set(
     "scan-sessions",
     "server/index",
     "deduplication/codex-review",
+    "deduplication/checkpointed-review",
     "deduplication/deduplication",
     "finding-retrieval",
     "finding-workflow",

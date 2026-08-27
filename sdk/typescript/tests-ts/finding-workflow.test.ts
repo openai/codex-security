@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
@@ -20,7 +20,17 @@ import {
 import { publishScanToCustomInternal } from "../src/custom-publish.js";
 import { deduplicateScanInternal } from "../src/deduplication/scan.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
-import type { FindingsDocument, ScanManifest } from "../src/models.js";
+import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
+import type { CodexReview } from "../src/deduplication/codex-review.js";
+import {
+  CheckpointedReviewRunner,
+  reviewSettingsDigest,
+} from "../src/deduplication/checkpointed-review.js";
+import {
+  CodexDeduplicationReviewer,
+  type DuplicateDecision,
+} from "../src/deduplication/deduplication-reviewer.js";
+import { groupReviewInstructions } from "../src/deduplication/deduplication-prompts.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const directories: string[] = [];
@@ -396,4 +406,464 @@ test("does not write workflow metadata into sealed artifacts", async () => {
       },
     ),
   ).rejects.toThrow("outside the sealed scan artifacts");
+});
+
+function merged(findings: readonly Finding[]) {
+  return {
+    decision: "SAME" as const,
+    rationale: "REVIEW_OUTPUT_ONLY: one correction covers the supplied paths.",
+    canonicalFindingId: findings[0]!.findingId,
+    mergedFinding: {
+      ...findings[0]!,
+      title: "MERGED_OUTPUT_ONLY",
+      extensions: { originals: findings },
+    },
+  };
+}
+const distinct: DuplicateDecision = {
+  decision: "DISTINCT",
+  rationale: "REVIEW_OUTPUT_ONLY: independent corrections are required.",
+};
+
+test.each(["screen", "pair", "group"])(
+  "resumes unfinished %s reviews using validated checkpoints and original inputs",
+  async (interruptAt) => {
+    const { scanDir, environment, document, history } = await fixture();
+    const findings = [
+      document.findings[0]!,
+      ...[1, 2, 3].map((index) => ({
+        ...structuredClone(document.findings[0]!),
+        findingId: `csf_${"f".repeat(23)}${index}`,
+        title: `Synthetic original ${index}`,
+      })),
+    ];
+    const options = {
+      workflowId: `reviews-${interruptAt}`,
+      findingsUrl: "http://synthetic.test",
+    };
+    const calls: string[] = [];
+    let interrupted = false;
+    const reviewRunner = {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        expect(review.prompt).not.toContain("REVIEW_OUTPUT_ONLY");
+        expect(review.prompt).not.toContain("MERGED_OUTPUT_ONLY");
+        const originals = JSON.parse(
+          review.prompt.slice(review.prompt.lastIndexOf("\n\n") + 2),
+        ).findings as Finding[];
+        for (const finding of originals)
+          expect(finding).toEqual(
+            findings.find(
+              (original) => original.findingId === finding.findingId,
+            )!,
+          );
+        const stage =
+          review.model === "gpt-5.6-luna"
+            ? "screen"
+            : review.prompt.startsWith(groupReviewInstructions)
+              ? "group"
+              : "pair";
+        calls.push(stage);
+        if (
+          !interrupted &&
+          stage === interruptAt &&
+          (stage !== "pair" ||
+            calls.filter((call) => call === "pair").length === 2)
+        ) {
+          interrupted = true;
+          throw new Error("Synthetic interrupted review");
+        }
+        return review.validate(
+          stage === "screen"
+            ? {
+                decisions: originals.slice(1).map((finding) => ({
+                  findingIds: [originals[0]!.findingId, finding.findingId],
+                  ...merged([originals[0]!, finding]),
+                })),
+              }
+            : originals.some(
+                  (finding) => finding.findingId === findings[3]!.findingId,
+                )
+              ? distinct
+              : merged(originals),
+        );
+      },
+    };
+    const fetch = async (url: URL) =>
+      url.pathname.endsWith("/bulk/findings")
+        ? Response.json([findings[0]!.findingId])
+        : url.pathname.endsWith("/dedupe-groups")
+          ? Response.json([])
+          : Response.json({
+              finding: findings[0],
+              potentialDuplicates: findings.slice(1),
+            });
+    await publishScanToCustomInternal(scanDir, options, { environment, fetch });
+    await expect(
+      deduplicateScanInternal(document.scanId, options, {
+        environment,
+        runWorkbench: history,
+        reviewRunner,
+        fetch,
+      }),
+    ).rejects.toThrow("Synthetic interrupted review");
+    const result = await deduplicateScanInternal(document.scanId, options, {
+      environment,
+      runWorkbench: history,
+      reviewRunner,
+      fetch,
+    });
+    expect(result.duplicateGroups).toEqual([
+      findings.slice(0, 3).map((finding) => finding.findingId),
+    ]);
+    expect(calls.filter((stage) => stage === "screen")).toHaveLength(
+      interruptAt === "screen" ? 2 : 1,
+    );
+    expect(calls.filter((stage) => stage === "pair")).toHaveLength(
+      interruptAt === "pair" ? 4 : 3,
+    );
+    expect(calls.filter((stage) => stage === "group")).toHaveLength(
+      interruptAt === "group" ? 2 : 1,
+    );
+    const count = calls.length;
+    expect(
+      await deduplicateScanInternal(document.scanId, options, {
+        environment,
+        runWorkbench: history,
+        reviewRunner,
+        fetch: async () => {
+          throw new Error("Completed workflow must use its saved result");
+        },
+      }),
+    ).toEqual(result);
+    expect(calls).toHaveLength(count);
+  },
+);
+
+test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
+  "replays the exact saved group payload after %s without models",
+  async (failure) => {
+    const { environment, document, history } = await fixture();
+    const originals = [
+      document.findings[0]!,
+      { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
+    ];
+    const options = {
+      workflowId: `write-${failure}`,
+      findingsUrl: "http://synthetic.test",
+    };
+    const bodies: string[] = [];
+    let modelCalls = 0;
+    let failed = false;
+    const reviewRunner = {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        modelCalls++;
+        return review.validate(
+          review.model === "gpt-5.6-luna"
+            ? {
+                decisions: [
+                  {
+                    findingIds: originals.map((finding) => finding.findingId),
+                    ...merged(originals),
+                  },
+                ],
+              }
+            : merged(originals),
+        );
+      },
+    };
+    const fetch = async (url: URL, init: RequestInit) => {
+      if (url.pathname.endsWith("/bulk/findings"))
+        return Response.json([originals[0]!.findingId]);
+      if (!url.pathname.endsWith("/dedupe-groups"))
+        return Response.json({
+          finding: originals[0],
+          potentialDuplicates: [originals[1]],
+        });
+      const saved = (await new FindingWorkflow(
+        options.workflowId,
+        environment,
+      ).get())!.stages.dedupe;
+      expect(saved.status).toBe("running");
+      expect(saved.result).toMatchObject({
+        duplicateGroups: [originals.map((finding) => finding.findingId)],
+      });
+      expect(saved.pendingWrite).toEqual(JSON.parse(init.body as string));
+      bodies.push(init.body as string);
+      if (!failed && failure !== "lost-completion") {
+        failed = true;
+        if (failure === "before-write")
+          return new Response("", { status: 503 });
+        return new Response("incomplete acknowledgement", { status: 201 });
+      }
+      return Response.json([]);
+    };
+    const runWorkbench = async (args: readonly string[], input?: string) => {
+      const payload = input ? JSON.parse(input) : {};
+      if (
+        !failed &&
+        failure === "before-post" &&
+        payload.action === "prepare-dedupe"
+      ) {
+        await history(args, input);
+        failed = true;
+        throw new Error("Synthetic stop before posting");
+      }
+      if (
+        !failed &&
+        failure === "lost-completion" &&
+        payload.action === "complete" &&
+        payload.stage === "dedupe"
+      ) {
+        failed = true;
+        throw new Error("Synthetic completion receipt failure");
+      }
+      return await history(args, input);
+    };
+    await expect(
+      deduplicateScanInternal(document.scanId, options, {
+        environment,
+        runWorkbench,
+        reviewRunner,
+        fetch,
+      }),
+    ).rejects.toThrow();
+    expect(
+      (await new FindingWorkflow(options.workflowId, environment).get())?.stages
+        .dedupe.status,
+    ).toBe("failed");
+    const result = await deduplicateScanInternal(document.scanId, options, {
+      environment,
+      runWorkbench: history,
+      reviewRunner,
+      fetch,
+    });
+    expect(bodies).toHaveLength(failure === "before-post" ? 1 : 2);
+    expect(new Set(bodies).size).toBe(1);
+    expect(modelCalls).toBe(2);
+    expect(
+      (await new FindingWorkflow(options.workflowId, environment).get())?.stages
+        .dedupe,
+    ).toEqual({ status: "completed", result });
+  },
+);
+
+test("persists DISTINCT screening, pair and group reviews and retains complete SAME decisions", async () => {
+  const { environment, repository, document } = await fixture();
+  const workflow = new FindingWorkflow("all-decisions", environment);
+  await workflow.bind({});
+  const originals = [
+    document.findings[0]!,
+    { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
+  ];
+  let calls = 0;
+  const runner = {
+    async run<T>(review: CodexReview<T>): Promise<T> {
+      calls++;
+      return review.validate(
+        review.model === "gpt-5.6-luna"
+          ? {
+              decisions: [
+                {
+                  findingIds: originals.map((finding) => finding.findingId),
+                  ...distinct,
+                },
+              ],
+            }
+          : review.prompt.startsWith(groupReviewInstructions)
+            ? distinct
+            : merged(originals),
+      );
+    },
+  };
+  const makeReviewer = async () =>
+    new CodexDeduplicationReviewer(
+      new CheckpointedReviewRunner(
+        new FindingWorkflow(workflow.id, environment),
+        runner,
+        await workflow.sourceSnapshot(repository),
+        { allRepositories: true },
+      ),
+    );
+  const first = await makeReviewer();
+  const screening = await first.screen(originals);
+  const pair = await first.reviewPair(originals);
+  const group = await first.reviewGroup(originals);
+  const resumed = await makeReviewer();
+  expect(await resumed.screen(originals)).toEqual(screening);
+  expect(await resumed.reviewPair(originals)).toEqual(pair);
+  expect(await resumed.reviewGroup(originals)).toEqual(group);
+  expect(pair).toEqual(merged(originals));
+  expect(group).toEqual(distinct);
+  expect(calls).toBe(3);
+});
+
+test.each([
+  "finding",
+  "source",
+  "scope",
+  "model",
+  "effort",
+  "prompt",
+  "contract",
+  "configuration",
+])("does not reuse a checkpoint for changed %s inputs", async (changed) => {
+  const { environment, repository, document } = await fixture();
+  const workflow = new FindingWorkflow(`changed-${changed}`, environment);
+  await workflow.bind({});
+  let calls = 0;
+  const runner = {
+    async run<T>(review: CodexReview<T>): Promise<T> {
+      calls++;
+      return review.validate(distinct);
+    },
+  };
+  const review: CodexReview<DuplicateDecision> = {
+    model: "gpt-5.6-sol",
+    effort: "ultra",
+    prompt: JSON.stringify(document.findings),
+    schema: { type: "object" },
+    validate: () => distinct,
+  };
+  const source = await workflow.sourceSnapshot(repository);
+  const scope = { repositoryId: "synthetic-repository" };
+  const initial = new CheckpointedReviewRunner(
+    workflow,
+    runner,
+    source,
+    scope,
+    await reviewSettingsDigest(environment),
+  );
+  await initial.run(review);
+  await initial.run(review);
+  expect(calls).toBe(1);
+  if (changed === "source")
+    await writeFile(join(repository, "source.txt"), "changed source");
+  if (changed === "configuration") {
+    await mkdir(environment.CODEX_HOME);
+    await writeFile(
+      join(environment.CODEX_HOME, "config.toml"),
+      'model_reasoning_summary = "none"\n',
+    );
+  }
+  const next = { ...review };
+  if (changed === "finding")
+    next.prompt = JSON.stringify([
+      { ...document.findings[0], title: "Changed original" },
+    ]);
+  if (changed === "model") next.model = "gpt-5.6-luna";
+  if (changed === "effort") next.effort = "high";
+  if (changed === "prompt") next.prompt += "Changed review contract";
+  if (changed === "contract")
+    next.schema = { type: "object", required: ["decision"] };
+  const resumed = new CheckpointedReviewRunner(
+    new FindingWorkflow(workflow.id, environment),
+    runner,
+    await workflow.sourceSnapshot(repository),
+    changed === "scope" ? { allRepositories: true } : scope,
+    await reviewSettingsDigest(environment),
+  );
+  await resumed.run(next);
+  expect(calls).toBe(2);
+});
+
+test("source snapshots include revisions and ignored content without following directory links", async () => {
+  const { environment, repository, root } = await fixture();
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: repository, stdio: "pipe" });
+  git("init", "--quiet");
+  await writeFile(join(repository, ".gitignore"), "ignored.txt\n");
+  await writeFile(join(repository, "tracked.txt"), "original");
+  git("add", ".");
+  git(
+    "-c",
+    "user.name=Example",
+    "-c",
+    "user.email=example@example.test",
+    "commit",
+    "--quiet",
+    "-m",
+    "Synthetic source",
+  );
+  const workflow = new FindingWorkflow("source-snapshots", environment);
+  const first = await workflow.sourceSnapshot(repository);
+  await writeFile(join(repository, "ignored.txt"), "ignored source");
+  const second = await workflow.sourceSnapshot(repository);
+  expect(second["revision"]).toBe(first["revision"]);
+  expect(second["content"]).not.toBe(first["content"]);
+  git(
+    "-c",
+    "user.name=Example",
+    "-c",
+    "user.email=example@example.test",
+    "commit",
+    "--quiet",
+    "--allow-empty",
+    "-m",
+    "Next synthetic revision",
+  );
+  expect((await workflow.sourceSnapshot(repository))["revision"]).not.toBe(
+    first["revision"],
+  );
+  const beforeRef = await workflow.sourceSnapshot(repository);
+  git("branch", "synthetic-source-reference");
+  const afterRef = await workflow.sourceSnapshot(repository);
+  expect(afterRef["revision"]).toBe(beforeRef["revision"]);
+  expect(afterRef["refsDigest"]).not.toBe(beforeRef["refsDigest"]);
+  const outside = join(root, "outside");
+  await mkdir(outside);
+  await writeFile(join(outside, "private.txt"), "synthetic outside content");
+  const { symlink } = await import("node:fs/promises");
+  await symlink(
+    outside,
+    join(repository, "linked"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const linked = await workflow.sourceSnapshot(repository);
+  await writeFile(join(outside, "private.txt"), "changed outside content");
+  expect(await workflow.sourceSnapshot(repository)).toEqual(linked);
+});
+
+test("does not checkpoint a review when source changes during its execution", async () => {
+  const { environment, repository, document } = await fixture();
+  const workflow = new FindingWorkflow("source-drift", environment);
+  await workflow.bind({});
+  const source = await workflow.sourceSnapshot(repository);
+  const runner = new CheckpointedReviewRunner(
+    workflow,
+    {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        await writeFile(
+          join(repository, "changed.txt"),
+          "changed during review",
+        );
+        return review.validate(distinct);
+      },
+    },
+    source,
+    { allRepositories: true },
+  );
+  const review: CodexReview<DuplicateDecision> = {
+    model: "gpt-5.6-sol",
+    effort: "ultra",
+    prompt: JSON.stringify(document.findings),
+    schema: {},
+    validate: () => distinct,
+  };
+  await expect(runner.run(review)).rejects.toThrow(
+    "Source changed during deduplication",
+  );
+  await rm(join(repository, "changed.txt"));
+  let calls = 0;
+  await new CheckpointedReviewRunner(
+    workflow,
+    {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        calls++;
+        return review.validate(distinct);
+      },
+    },
+    source,
+    { allRepositories: true },
+  ).run(review);
+  expect(calls).toBe(1);
 });

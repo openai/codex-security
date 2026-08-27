@@ -30,6 +30,7 @@ export interface WorkflowState extends WorkflowBinding {
       status: "pending" | "running" | "failed" | "completed";
       result?: unknown;
       error?: string;
+      pendingWrite?: { groups: string[][] };
     }
   >;
 }
@@ -130,12 +131,46 @@ export class FindingWorkflow {
     return context["scan"] as JsonObject;
   }
 
+  async sourceSnapshot(repository: string): Promise<JsonObject> {
+    return (await this.request({ action: "source", repository }))[
+      "source"
+    ] as JsonObject;
+  }
+
+  async getReview(key: string): Promise<unknown> {
+    return (await this.request({ action: "get-review", key }))["review"];
+  }
+
+  async saveReview(
+    key: string,
+    binding: object,
+    result: unknown,
+  ): Promise<void> {
+    await this.request({ action: "save-review", key, binding, result });
+  }
+
+  async prepareDedupe(
+    result: unknown,
+    pendingWrite: { groups: string[][] },
+  ): Promise<void> {
+    await this.command({
+      action: "prepare-dedupe",
+      stage: "dedupe",
+      result,
+      pendingWrite,
+    });
+  }
+
   private async command(payload: object): Promise<WorkflowState | null> {
-    const result = await this.call(
+    const result = await this.request(payload);
+    return result["workflow"] as unknown as WorkflowState | null;
+  }
+
+  private async request(payload: object): Promise<JsonObject> {
+    return await this.call(
       ["finding-workflow"],
       JSON.stringify({ id: this.id, ...payload }),
     );
-    return result["workflow"] as unknown as WorkflowState | null;
   }
 
   private async call(

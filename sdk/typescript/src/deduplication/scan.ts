@@ -26,6 +26,10 @@ import {
   workflowDigest,
 } from "../finding-workflow.js";
 import { publishScanToCustomInternal } from "../custom-publish.js";
+import {
+  CheckpointedReviewRunner,
+  reviewSettingsDigest,
+} from "./checkpointed-review.js";
 
 export interface DeduplicateScanOptions {
   /** Resume the named local findings workflow, including custom publication. */
@@ -56,6 +60,7 @@ export async function deduplicateScanInternal(
   dependencies: Partial<SavedScanDependencies> & {
     environment?: NodeJS.ProcessEnv;
     reviewer?: DeduplicationReviewer;
+    reviewRunner?: Pick<CodexReviewRunner, "run">;
     fetch?: FindingsRequest;
   } = {},
 ): Promise<DeduplicateScanResult> {
@@ -143,31 +148,46 @@ export async function deduplicateScanInternal(
     );
   }
   const dedupe = async (): Promise<DeduplicateScanResult> => {
+    const saved = (await workflow?.get())?.stages.dedupe;
+    if (saved?.pendingWrite) {
+      await client.storeDedupeGroups(saved.pendingWrite.groups);
+      return saved.result as DeduplicateScanResult;
+    }
+    const runner =
+      dependencies.reviewRunner ??
+      new CodexReviewRunner(
+        environment,
+        undefined,
+        options.signal,
+        scan["targetPath"] as string,
+      );
+    const checkpoints = workflow
+      ? new CheckpointedReviewRunner(
+          workflow,
+          runner,
+          await workflow.sourceSnapshot(scan["targetPath"] as string),
+          scope,
+          await reviewSettingsDigest(environment),
+        )
+      : undefined;
     const deduplicator = new FindingDeduplicator(
       {
         potentialDuplicates: (findingId) =>
           client.potentialDuplicates(findingId, scope),
       },
       dependencies.reviewer ??
-        new CodexDeduplicationReviewer(
-          new CodexReviewRunner(
-            environment,
-            undefined,
-            options.signal,
-            scan["targetPath"] as string,
-          ),
-        ),
+        new CodexDeduplicationReviewer(checkpoints ?? runner),
       options.signal,
     );
-    const result = await deduplicator.run(
+    const reviewed = await deduplicator.run(
       contract.findings.findings.map((finding) => finding.findingId),
     );
+    await checkpoints?.assertSourceUnchanged();
     options.signal?.throwIfAborted();
+    const result: DeduplicateScanResult = { scanId: scan.scanId, ...reviewed };
+    await workflow?.prepareDedupe(result, { groups: result.duplicateGroups });
     await client.storeDedupeGroups(result.duplicateGroups);
-    return {
-      scanId: scan.scanId,
-      ...result,
-    };
+    return result;
   };
   return workflow ? await workflow.run("dedupe", dedupe) : await dedupe();
 }

@@ -369,7 +369,7 @@ def clean_worktree_content_digest() -> str:
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
+def git_directory_snapshot_paths(target: Path, *, include_ignored: bool = False) -> list[Path] | None:
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None:
         return None
@@ -379,7 +379,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         "ls-files",
         "--cached",
         "--others",
-        "--exclude-standard",
+        *([] if include_ignored else ["--exclude-standard"]),
         "-z",
         "--",
         pathspec,
@@ -402,7 +402,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             nested_repository_root is not None
             and Path(nested_repository_root).resolve() == path.resolve()
         ):
-            nested_paths = git_directory_snapshot_paths(path)
+            nested_paths = git_directory_snapshot_paths(path, include_ignored=include_ignored)
             if nested_paths is not None:
                 paths.extend(nested_paths)
                 continue
@@ -414,14 +414,16 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     return sorted(set(paths))
 
 
-def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -> str:
+def directory_content_digest(
+    target: Path, *, excluded: tuple[Path, ...] = (), include_ignored: bool = False
+) -> str:
     excluded_relative = []
     for path in excluded:
         try:
             excluded_relative.append(path.relative_to(target))
         except ValueError:
             continue
-    paths = git_directory_snapshot_paths(target)
+    paths = git_directory_snapshot_paths(target, include_ignored=include_ignored)
     if paths is None:
         paths = sorted(target.rglob("*"))
     digest = hashlib.sha256()

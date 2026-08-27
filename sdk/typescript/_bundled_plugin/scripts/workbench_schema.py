@@ -770,6 +770,20 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        37,
+        "checkpoint validated dedupe reviews",
+        """
+        CREATE TABLE finding_workflow_reviews (
+            workflow_id TEXT NOT NULL REFERENCES finding_workflows(id) ON DELETE CASCADE,
+            review_key TEXT NOT NULL,
+            binding_json TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (workflow_id, review_key)
+        );
+        """,
+    ),
 )
 
 

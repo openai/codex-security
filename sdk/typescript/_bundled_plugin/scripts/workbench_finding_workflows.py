@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
+from pathlib import Path
 from typing import Any
+
+from workbench_target import directory_content_digest, git_output, git_revision
 
 
 def read_workflow(connection: sqlite3.Connection, workflow_id: str) -> dict[str, Any] | None:
@@ -65,6 +69,30 @@ def finding_workflow(
         raise SystemExit("workflowId must be a nonempty string.")
     if payload["action"] == "get":
         return {"workflow": read_workflow(connection, workflow_id)}
+    if payload["action"] == "source":
+        target = Path(payload["repository"]).resolve(strict=True)
+        return {"source": {
+            "repository": str(target),
+            "revision": git_revision(target),
+            "refsDigest": hashlib.sha256((git_output(target, "show-ref") or "").encode()).hexdigest(),
+            "content": directory_content_digest(target, include_ignored=True),
+        }}
+    if payload["action"] == "get-review":
+        row = connection.execute(
+            "SELECT result_json FROM finding_workflow_reviews WHERE workflow_id = ? AND review_key = ?",
+            (workflow_id, payload["key"]),
+        ).fetchone()
+        return {"review": json.loads(row["result_json"]) if row is not None else None}
+    if payload["action"] == "save-review":
+        with connection:
+            connection.execute(
+                """INSERT INTO finding_workflow_reviews
+                (workflow_id, review_key, binding_json, result_json, created_at)
+                VALUES (?, ?, ?, ?, ?) ON CONFLICT(workflow_id, review_key) DO NOTHING""",
+                (workflow_id, payload["key"], json.dumps(payload["binding"], allow_nan=False),
+                 json.dumps(payload["result"], allow_nan=False), timestamp),
+            )
+        return {}
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         state = read_workflow(connection, workflow_id)
@@ -87,6 +115,8 @@ def finding_workflow(
                     state["stages"][stage] = {"status": "completed", "result": payload["result"]}
                 elif action == "fail":
                     current.update(status="failed", error=payload["error"])
+                elif action == "prepare-dedupe":
+                    current.update(result=payload["result"], pendingWrite=payload["pendingWrite"])
                 else:
                     raise SystemExit("Unknown workflow action.")
         save_workflow(connection, state, timestamp)

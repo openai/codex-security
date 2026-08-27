@@ -1531,9 +1531,32 @@ results, not treated as missing work. An empty scan can complete workflow
 publication with an empty receipt. Dry-run never advances a workflow stage.
 
 A completed `dedupe --workflow-id` returns its saved result without repeating
-reviews or group writes. An interrupted dedupe stage currently runs its reviews
-again; per-review checkpoints are a separate follow-up. A publication whose
-acknowledgement was lost is retried using the service's existing idempotent upsert.
+reviews or group writes. A publication whose acknowledgement was lost is retried
+using the service's existing idempotent upsert.
+
+Each validated screening, pair review, and group review is checkpointed locally,
+including DISTINCT decisions. Every SAME checkpoint retains its required
+`canonicalFindingId` and generated `mergedFinding`. The merged record must satisfy
+the Finding schema and preserve the canonical finding ID. Validation still happens
+through `review_validator.submit_decisions`; invalid submissions are corrected in
+the same review conversation, and invalid or unfinished reviews are not cached.
+
+Checkpoints bind to the exact original records and ordering, approved source path,
+Git revision and current file contents (including ignored files), repository scope,
+model and reasoning settings, Codex configuration and version, and prompt/contract version. Changed
+inputs cause a new review rather than reusing a decision. Source changes during
+review stop that attempt before group writes; restart with the same ID to review
+the changed source. Original findings, never prior rationales or merged findings,
+are supplied to later independent reviews. Source snapshots do not follow directory
+links outside the approved checkout.
+
+Before posting groups, the workflow saves the exact final result and write payload.
+If posting fails or its acknowledgement is lost, rerunning dedupe replays that
+payload without looking up candidates or running models. Group persistence reuses
+the existing membership identity, so replay does not create another group. The
+dedupe stage completes only after acknowledgement. Empty results are also retained.
+A completed workflow or pending write represents its already reviewed snapshot;
+use another workflow ID for a fresh review rather than changing that saved result.
 
 ### Deduplication workflow
 
