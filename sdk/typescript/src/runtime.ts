@@ -1589,16 +1589,10 @@ export async function runWorkbench(
 }
 
 export function bundledPluginCandidates(moduleDirectory: string): string[] {
-  const packageCandidates = [
+  return [
     resolve(moduleDirectory, "_bundled_plugin"),
     resolve(moduleDirectory, "../_bundled_plugin"),
   ];
-  return basename(moduleDirectory) === "src"
-    ? [
-        resolve(moduleDirectory, "../../../plugins/codex-security"),
-        ...packageCandidates,
-      ]
-    : packageCandidates;
 }
 
 export async function bundledPluginRoot(): Promise<string> {
@@ -1684,6 +1678,7 @@ export async function prepareScanArtifactRestorer(
   let dev: string;
   let ino: string;
   try {
+    // Recovery uses the SDK-owned writer, even if the scan selected a custom plugin.
     helperPath = join(
       await bundledPluginRoot(),
       "scripts",

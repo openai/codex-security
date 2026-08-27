@@ -11,6 +11,7 @@ on:
       - compose.yaml
       - compose.apparmor.yaml
       - docker/**
+      - plugins/codex-security/**
       - sdk/typescript/**
   pull_request:
     paths:
@@ -21,6 +22,7 @@ on:
       - compose.yaml
       - compose.apparmor.yaml
       - docker/**
+      - plugins/codex-security/**
       - sdk/typescript/**
   workflow_dispatch:
 

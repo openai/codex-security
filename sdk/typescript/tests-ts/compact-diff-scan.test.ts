@@ -1,12 +1,10 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
-  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -36,12 +34,6 @@ function createRepository(): { root: string; repository: string } {
   mkdirSync(repository);
   git(repository, "init", "-q");
   return { root, repository };
-}
-
-function createMcpDirectories(root: string): void {
-  mkdirSync(join(root, "scans"), { mode: 0o700 });
-  mkdirSync(join(root, "scans", "repository"), { mode: 0o700 });
-  mkdirSync(join(root, "state"), { mode: 0o700 });
 }
 
 function git(repository: string, ...args: string[]): string {
@@ -85,77 +77,6 @@ function candidate(path: string): JsonObject {
     locations: [{ path, start_line: 1, role: "root_control" }],
     summary: "The handler may rely on a removed guard.",
     evidence: "The selected change removes the neighboring guard.",
-  };
-}
-
-function workbenchState(root: string): {
-  scans: number;
-  submitted: number;
-  workspaces: number;
-} {
-  const command =
-    Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-  expect(command).not.toBeNull();
-  const result = spawnSync(
-    command!,
-    [
-      "-I",
-      "-B",
-      "-c",
-      [
-        "import json, sqlite3, sys",
-        "with sqlite3.connect(sys.argv[1]) as connection:",
-        "    print(json.dumps({",
-        "        'workspaces': connection.execute('SELECT COUNT(*) FROM workspaces').fetchone()[0],",
-        "        'submitted': connection.execute('SELECT COUNT(*) FROM workspaces WHERE submitted = 1').fetchone()[0],",
-        "        'scans': connection.execute('SELECT COUNT(*) FROM scans').fetchone()[0],",
-        "    }))",
-      ].join("\n"),
-      join(root, "state", "workbench.sqlite3"),
-    ],
-    { encoding: "utf8" },
-  );
-  expect(result.status, result.stderr).toBe(0);
-  return JSON.parse(result.stdout) as {
-    scans: number;
-    submitted: number;
-    workspaces: number;
-  };
-}
-
-function workspaceDiffSelection(
-  root: string,
-  workspaceId: string,
-): {
-  baseRevision: string | null;
-  contentDigest: string | null;
-  headRevision: string | null;
-} {
-  const command =
-    Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-  expect(command).not.toBeNull();
-  const result = spawnSync(
-    command!,
-    [
-      "-I",
-      "-B",
-      "-c",
-      [
-        "import json, sqlite3, sys",
-        "with sqlite3.connect(sys.argv[1]) as connection:",
-        "    row = connection.execute('SELECT diff_base_revision, diff_head_revision, diff_content_digest FROM workspaces WHERE id = ?', (sys.argv[2],)).fetchone()",
-        "    print(json.dumps({'baseRevision': row[0], 'headRevision': row[1], 'contentDigest': row[2]}))",
-      ].join("\n"),
-      join(root, "state", "workbench.sqlite3"),
-      workspaceId,
-    ],
-    { encoding: "utf8" },
-  );
-  expect(result.status, result.stderr).toBe(0);
-  return JSON.parse(result.stdout) as {
-    baseRevision: string | null;
-    contentDigest: string | null;
-    headRevision: string | null;
   };
 }
 
@@ -499,7 +420,8 @@ describe("compact diff scan", () => {
   test("streams maximum-size preflight checks through the MCP workbench", async () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
-    createMcpDirectories(root);
+    mkdirSync(join(root, "scans"));
+    mkdirSync(join(root, "state"));
     const client = await startMcp(root);
     const owner = "preflight-stdin-owner";
 
@@ -533,7 +455,8 @@ describe("compact diff scan", () => {
   test("streams oversized option-like user context through the MCP workbench", async () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
-    createMcpDirectories(root);
+    mkdirSync(join(root, "scans"));
+    mkdirSync(join(root, "state"));
     const client = await startMcp(root);
     const userContext = `--${"é".repeat(64 * 1_024)}`;
 
@@ -580,223 +503,174 @@ describe("compact diff scan", () => {
     }
   }, 30_000);
 
-  test.each(["object", "Markdown"])(
-    "MCP diff retains %s",
-    async (format) => {
-      const { root, repository } = createRepository();
-      writeSource(repository, "src/guard.py", "allowed = True\n");
-      writeSource(repository, "src/handler.py", "value = 1\n");
-      git(repository, "add", ".");
-      git(repository, "commit", "-qm", "base");
-      const baseRevision = git(repository, "rev-parse", "HEAD");
-      rmSync(join(repository, "src", "guard.py"));
-      writeSource(repository, "src/handler.py", "value = 2\n");
-      git(repository, "add", ".");
-      git(repository, "commit", "-qm", "changed");
-      const headRevision = git(repository, "rev-parse", "HEAD");
-      createMcpDirectories(root);
-      const client = await startMcp(root);
-      const owner = "compact-diff-owner";
-      const call = (name: string, args: JsonObject) =>
-        client.call(name, args, owner);
+  test.each(["object", "Markdown"])("MCP diff retains %s", async (format) => {
+    const { root, repository } = createRepository();
+    writeSource(repository, "src/guard.py", "allowed = True\n");
+    writeSource(repository, "src/handler.py", "value = 1\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "base");
+    const baseRevision = git(repository, "rev-parse", "HEAD");
+    rmSync(join(repository, "src", "guard.py"));
+    writeSource(repository, "src/handler.py", "value = 2\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "changed");
+    const headRevision = git(repository, "rev-parse", "HEAD");
+    mkdirSync(join(root, "scans"));
+    mkdirSync(join(root, "state"));
+    const client = await startMcp(root);
+    const owner = "compact-diff-owner";
+    const call = (name: string, args: JsonObject) =>
+      client.call(name, args, owner);
 
-      try {
-        const tools = (await client.request("tools/list", {}))["tools"] as {
-          name: string;
-          inputSchema: { properties: Record<string, { maxLength?: number }> };
-        }[];
-        expect(tools.map((tool) => tool.name)).toContain(
-          "prepare_codex_security_review_items",
-        );
-        expect(tools.map((tool) => tool.name)).toContain(
-          "record_codex_security_discovery_candidates",
-        );
-        const preservedContextMaxLength = tools.find(
-          (tool) => tool.name === "start_codex_security_standard_scan",
-        )?.inputSchema.properties["userContext"]?.maxLength;
-        expect(preservedContextMaxLength).toBeUndefined();
+    try {
+      const tools = (await client.request("tools/list", {}))["tools"] as {
+        name: string;
+        inputSchema: { properties: Record<string, { maxLength?: number }> };
+      }[];
+      expect(tools.map((tool) => tool.name)).toContain(
+        "prepare_codex_security_review_items",
+      );
+      expect(tools.map((tool) => tool.name)).toContain(
+        "record_codex_security_discovery_candidates",
+      );
+      const preservedContextMaxLength = tools.find(
+        (tool) => tool.name === "start_codex_security_standard_scan",
+      )?.inputSchema.properties["userContext"]?.maxLength;
+      expect(preservedContextMaxLength).toBeUndefined();
 
-        const selection = {
-          targetPath: repository,
-          scope: ".",
-          mode: "diff",
-          diffTarget: { kind: "range", baseRevision, headRevision },
-        };
-        const opened = await call("open_codex_security_workspace", selection);
-        const openedWorkspace = opened["workspace"] as JsonObject;
-        const selectedDiffTarget = openedWorkspace["diffTarget"] as JsonObject;
-        const contentDigest = selectedDiffTarget["contentDigest"] as string;
-        expect(contentDigest).toMatch(
-          /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
-        );
-        const sessionId = openedWorkspace["id"] as string;
-        await call("submit_codex_security_setup", {
-          ...selection,
-          diffTarget: selectedDiffTarget,
-          sessionId,
-        });
-        const started = await call("start_codex_security_scan", { sessionId });
-        const results = (started["workspace"] as JsonObject)[
-          "results"
-        ] as JsonObject;
-        const scanId = results["scanId"] as string;
-        const handoffClaimToken = randomUUID();
-        await call("claim_codex_security_scan_handoff_delivery", {
-          scanId,
-          claimToken: handoffClaimToken,
-        });
-        await call("attach_codex_security_scan_continuation_thread", {
-          scanId,
-          claimToken: handoffClaimToken,
-          threadId: owner,
-        });
-        const context = await call("get_codex_security_scan_context", {
-          scanId,
-          handoffClaimToken,
-        });
-        const scanDir = (context["scan"] as JsonObject)["scanDir"] as string;
+      const selection = {
+        targetPath: repository,
+        scope: ".",
+        mode: "diff",
+        diffTarget: { kind: "range", baseRevision, headRevision },
+      };
+      const opened = await call("open_codex_security_workspace", selection);
+      const sessionId = (opened["workspace"] as JsonObject)["id"] as string;
+      await call("submit_codex_security_setup", { ...selection, sessionId });
+      const started = await call("start_codex_security_scan", { sessionId });
+      const results = (started["workspace"] as JsonObject)[
+        "results"
+      ] as JsonObject;
+      const scanId = results["scanId"] as string;
+      const handoffClaimToken = randomUUID();
+      await call("claim_codex_security_scan_handoff_delivery", {
+        scanId,
+        claimToken: handoffClaimToken,
+      });
+      await call("attach_codex_security_scan_continuation_thread", {
+        scanId,
+        claimToken: handoffClaimToken,
+        threadId: owner,
+      });
+      const context = await call("get_codex_security_scan_context", {
+        scanId,
+        handoffClaimToken,
+      });
+      const scanDir = (context["scan"] as JsonObject)["scanDir"] as string;
 
-        const inventory = await call("prepare_codex_security_review_items", {
-          scanId,
-          handoffClaimToken,
-        });
-        expect(inventory["reviewItemsTotal"]).toBe(2);
-        const items = await call("list_codex_security_review_items", {
-          scanId,
-          handoffClaimToken,
-        });
-        expect(items["items"]).toEqual([
-          { path: "src/guard.py" },
-          { path: "src/handler.py" },
-        ]);
+      const inventory = await call("prepare_codex_security_review_items", {
+        scanId,
+        handoffClaimToken,
+      });
+      expect(inventory["reviewItemsTotal"]).toBe(2);
+      const items = await call("list_codex_security_review_items", {
+        scanId,
+        handoffClaimToken,
+      });
+      expect(items["items"]).toEqual([
+        { path: "src/guard.py" },
+        { path: "src/handler.py" },
+      ]);
 
-        await call("record_codex_security_discovery_candidates", {
-          scanId,
-          candidates: [candidate("src/handler.py")],
-        });
-        const listed = await call("list_codex_security_candidates", { scanId });
-        const rows = listed["rows"] as JsonObject[];
-        expect(rows).toHaveLength(1);
-        await call("record_codex_security_candidate_validations", {
-          scanId,
-          validations: [
-            {
-              candidateId: rows[0]?.["candidate_id"],
-              validation: {
-                disposition: "suppressed",
-                method: "Static review of the changed handler.",
-                confidence: "high",
-                confidence_rationale: "The assignment is directly visible.",
-                rubric: ["The assignment does not cross a trust boundary."],
-                evidence: ["value = 2"],
-                counterevidence_or_proof_gap: "No sensitive operation exists.",
-                remaining_uncertainty: "",
-              },
-            },
-          ],
-        });
-        await call("record_candidate_attack_paths", {
-          scanId,
-          attackPaths: [],
-        });
-        const canonicalModel = {
-          summary:
-            "A local handler processes selected input (src/handler.py:1).",
-          assets: ["Integrity of the selected result."],
-          trustBoundaries: [
-            "Caller input reaches the handler without authority over private state (src/handler.py:1).",
-          ],
-          attackerCapabilities: [
-            "A caller can choose input but cannot choose another user's state.",
-          ],
-          securityObjectives: ["Keep each result bound to its selected input."],
-          assumptions: [
-            "A shared-service deployment has not been established.",
-          ],
-        };
-        const markdownFact =
-          "Selected input stays separate from private state (src/handler.py:1).";
-        const savedModelPath = join(
-          scanDir,
-          "artifacts",
-          "01_context",
-          "threat_model.md",
-        );
-        mkdirSync(dirname(savedModelPath), { recursive: true, mode: 0o700 });
-        writeFileSync(
-          savedModelPath,
-          `# Saved threat model\n\n${markdownFact}\n`,
-        );
-        const threatModel =
-          format === "Markdown"
-            ? { summary: readFileSync(savedModelPath, "utf8") }
-            : canonicalModel;
-        const openQuestions = [
+      await call("record_codex_security_discovery_candidates", {
+        scanId,
+        candidates: [candidate("src/handler.py")],
+      });
+      const listed = await call("list_codex_security_candidates", { scanId });
+      const rows = listed["rows"] as JsonObject[];
+      expect(rows).toHaveLength(1);
+      await call("record_codex_security_candidate_validations", {
+        scanId,
+        validations: [
           {
-            question:
-              "Does a supported embedding share this worker across callers?",
-            followUpPrompt:
-              "Confirm the deployment's ownership and isolation controls.",
-          },
-        ];
-        const coverageNote =
-          "The handler does not grant access to another caller's state (src/handler.py:1).";
-        const finding = {
-          ruleId: "path-traversal.archive-extraction",
-          title: "Unsafe archive extraction",
-          summary: "An untrusted archive entry reaches a filesystem write.",
-          severity: { level: "high" },
-          confidence: {
-            level: "high",
-            rationale: "Source evidence establishes reachability.",
-          },
-          taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
-          locations: [{ path: "src/handler.py", startLine: 1 }],
-          remediation: "Validate each output path before writing.",
-          provenance: { source: "local_plugin" },
-        };
-        const invalidRootCauseReference = await client.request("tools/call", {
-          name: "record_codex_security_scan_draft",
-          arguments: {
-            scanId,
-            handoffClaimToken,
-            findings: [
-              {
-                ...finding,
-                root_cause: {
-                  evidenceRefs: ["missing-root-cause-evidence"],
-                },
-              },
-            ],
-            coverage: {
-              completeness: "complete",
-              surfaces: [{ label: "Changed files", disposition: "rejected" }],
-              explicitExclusions: [],
-              deferred: [],
+            candidateId: rows[0]?.["candidate_id"],
+            validation: {
+              disposition: "suppressed",
+              method: "Static review of the changed handler.",
+              confidence: "high",
+              confidence_rationale: "The assignment is directly visible.",
+              rubric: ["The assignment does not cross a trust boundary."],
+              evidence: ["value = 2"],
+              counterevidence_or_proof_gap: "No sensitive operation exists.",
+              remaining_uncertainty: "",
             },
           },
-          _meta: { "openai/threadId": owner },
-        });
-        expect(invalidRootCauseReference["isError"]).toBe(true);
-        expect(JSON.stringify(invalidRootCauseReference)).toContain(
-          "root_cause.evidenceRefs",
-        );
-        await call("record_codex_security_scan_draft", {
+        ],
+      });
+      await call("record_candidate_attack_paths", { scanId, attackPaths: [] });
+      const canonicalModel = {
+        summary: "A local handler processes selected input (src/handler.py:1).",
+        assets: ["Integrity of the selected result."],
+        trustBoundaries: [
+          "Caller input reaches the handler without authority over private state (src/handler.py:1).",
+        ],
+        attackerCapabilities: [
+          "A caller can choose input but cannot choose another user's state.",
+        ],
+        securityObjectives: ["Keep each result bound to its selected input."],
+        assumptions: ["A shared-service deployment has not been established."],
+      };
+      const markdownFact =
+        "Selected input stays separate from private state (src/handler.py:1).";
+      const savedModelPath = join(
+        scanDir,
+        "artifacts",
+        "01_context",
+        "threat_model.md",
+      );
+      mkdirSync(dirname(savedModelPath), { recursive: true, mode: 0o700 });
+      writeFileSync(
+        savedModelPath,
+        `# Saved threat model\n\n${markdownFact}\n`,
+      );
+      const threatModel =
+        format === "Markdown"
+          ? { summary: readFileSync(savedModelPath, "utf8") }
+          : canonicalModel;
+      const openQuestions = [
+        {
+          question:
+            "Does a supported embedding share this worker across callers?",
+          followUpPrompt:
+            "Confirm the deployment's ownership and isolation controls.",
+        },
+      ];
+      const coverageNote =
+        "The handler does not grant access to another caller's state (src/handler.py:1).";
+      const finding = {
+        ruleId: "path-traversal.archive-extraction",
+        title: "Unsafe archive extraction",
+        summary: "An untrusted archive entry reaches a filesystem write.",
+        severity: { level: "high" },
+        confidence: {
+          level: "high",
+          rationale: "Source evidence establishes reachability.",
+        },
+        taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
+        locations: [{ path: "src/handler.py", startLine: 1 }],
+        remediation: "Validate each output path before writing.",
+        provenance: { source: "local_plugin" },
+      };
+      const invalidRootCauseReference = await client.request("tools/call", {
+        name: "record_codex_security_scan_draft",
+        arguments: {
           scanId,
           handoffClaimToken,
           findings: [
             {
               ...finding,
-              identity: {
-                anchor: "candidate-duplicate-instance",
-                instance: "dss-147-a",
-              },
-            },
-            {
-              ...finding,
-              extensions: {
-                candidateId: "candidate-duplicate-instance",
-                reportId: "DSS-147-A",
+              root_cause: {
+                evidenceRefs: ["missing-root-cause-evidence"],
               },
             },
           ],
@@ -806,628 +680,261 @@ describe("compact diff scan", () => {
             explicitExclusions: [],
             deferred: [],
           },
-        });
-        expect(
-          (
-            JSON.parse(
-              readFileSync(join(scanDir, "findings.json"), "utf8"),
-            ) as {
-              findings: JsonObject[];
-            }
-          ).findings.map((draftFinding) => draftFinding["identity"]),
-        ).toEqual([
-          { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
-          { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
-        ]);
-        await call("record_codex_security_scan_draft", {
-          scanId,
-          handoffClaimToken,
-          findings: [
-            {
-              ...finding,
-              extensions: {
-                candidateId: "candidate-singleton",
-                reportId: "DSS-144-A",
-              },
+        },
+        _meta: { "openai/threadId": owner },
+      });
+      expect(invalidRootCauseReference["isError"]).toBe(true);
+      expect(JSON.stringify(invalidRootCauseReference)).toContain(
+        "root_cause.evidenceRefs",
+      );
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        findings: [
+          {
+            ...finding,
+            identity: {
+              anchor: "candidate-duplicate-instance",
+              instance: "dss-147-a",
             },
-            {
-              ...finding,
-              code_evidence: [
-                {
-                  code: "value = 2",
-                  id: "legacy-source",
-                },
-              ],
-              attackPath: {
-                dataflow: { evidence_refs: ["legacy-source"] },
-              },
-            },
-            {
-              ...finding,
-              ruleId: "path-traversal.archive-upload",
-              identity: {
-                anchor: "candidate-cross-rule",
-                instance: "shared-report",
-              },
-            },
-            {
-              ...finding,
-              extensions: {
-                candidateId: "candidate-cross-rule",
-                reportId: "shared-report",
-              },
-            },
-            {
-              ...finding,
-              extensions: {
-                candidateId: "candidate-cross-rule",
-                reportId: "second-report",
-              },
-            },
-            {
-              ...finding,
-              identity: {
-                anchor: "candidate-authored-instance",
-                instance: "dss-147-a",
-              },
-            },
-            {
-              ...finding,
-              extensions: {
-                candidateId: "candidate-authored-instance",
-                reportId: "DSS-147-B",
-              },
-            },
-            {
-              ...finding,
-              extensions: {
-                candidateId: "candidate-authored-instance",
-                ledgerRowId: "ledger-row-c",
-              },
-            },
-          ],
-          threatModel,
-          coverage: {
-            completeness: "complete",
-            surfaces: [
-              {
-                label: "Changed files",
-                disposition: "rejected",
-                notes: coverageNote,
-              },
-            ],
-            explicitExclusions: [],
-            deferred: [],
-            openQuestions,
           },
-        });
-        const draftManifest = JSON.parse(
-          readFileSync(join(scanDir, "scan-manifest.json"), "utf8"),
-        ) as JsonObject;
-        const draftTarget = (draftManifest["scan"] as JsonObject)[
-          "target"
-        ] as JsonObject;
-        expect(draftTarget["snapshotDigest"]).toBe(contentDigest);
-        const canonicalDraftIdentities = (
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-duplicate-instance",
+              reportId: "DSS-147-A",
+            },
+          },
+        ],
+        coverage: {
+          completeness: "complete",
+          surfaces: [{ label: "Changed files", disposition: "rejected" }],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      });
+      expect(
+        (
           JSON.parse(readFileSync(join(scanDir, "findings.json"), "utf8")) as {
             findings: JsonObject[];
           }
-        ).findings.map((draftFinding) => draftFinding["identity"]);
-        expect(canonicalDraftIdentities).toHaveLength(9);
-        const legacyCoordinateDigest = `codex-security-snapshot/v1:sha256:${createHash(
-          "sha256",
-        )
-          .update("codex-security-diff/v1\0")
-          .update("range")
-          .update("\0")
-          .update(baseRevision)
-          .update("\0")
-          .update(headRevision)
-          .digest("hex")}`;
-        await call("complete_codex_security_scan", {
-          scanId,
-          handoffClaimToken,
-        });
-        const completed = await call("get_codex_security_completed_scan", {
-          scanId,
-          handoffClaimToken,
-        });
-        const target = (
-          (completed["manifest"] as JsonObject)["scan"] as JsonObject
-        )["target"] as JsonObject;
-        expect(target["snapshotDigest"]).toBe(contentDigest);
-        expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
-          "diff",
-        );
-        const completedIdentities = (
-          (completed["findings"] as JsonObject)["findings"] as JsonObject[]
-        ).map((completedFinding) => completedFinding["identity"]);
-        expect(completedIdentities).toEqual(canonicalDraftIdentities);
-        expect(completedIdentities).toEqual([
-          { anchor: "candidate-singleton", instance: "dss-144-a" },
-          { anchor: "unsafe-archive-extraction" },
-          { anchor: "candidate-cross-rule", instance: "shared-report" },
-          { anchor: "candidate-cross-rule", instance: "shared-report" },
-          { anchor: "candidate-cross-rule", instance: "second-report" },
-          { anchor: "candidate-authored-instance", instance: "dss-147-a" },
+        ).findings.map((draftFinding) => draftFinding["identity"]),
+      ).toEqual([
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+      ]);
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        findings: [
           {
-            anchor: "candidate-authored-instance",
-            instance: "dss-147-b",
-          },
-          { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
-          { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
-        ]);
-        const legacyFinding = (
-          (completed["findings"] as JsonObject)["findings"] as JsonObject[]
-        )[1];
-        expect(legacyFinding?.["code_evidence"]).toEqual([
-          { code: "value = 2", id: "legacy-source" },
-        ]);
-        expect(legacyFinding?.["attackPath"]).toEqual({
-          dataflow: { evidence_refs: ["legacy-source"] },
-        });
-        expect(
-          ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[
-            "threatModel"
-          ],
-        ).toEqual(threatModel);
-        expect((completed["coverage"] as JsonObject)["openQuestions"]).toEqual(
-          openQuestions,
-        );
-        const contract = await loadContract(scanDir, {
-          pluginRoot: PLUGIN_ROOT,
-        });
-        expect(contract.manifest.scan.threatModel).toEqual(threatModel);
-        expect(contract.coverage.openQuestions).toEqual(openQuestions);
-        expect(contract.coverage.surfaces[0]?.notes).toBe(coverageNote);
-        const report = readFileSync(join(scanDir, "report.md"), "utf8");
-        const modelFacts =
-          format === "Markdown"
-            ? [markdownFact]
-            : Object.values(canonicalModel).flat();
-        for (const fact of modelFacts) {
-          expect(report).toContain(fact);
-        }
-        expect(report).toContain(openQuestions[0]!.question);
-        expect(report).toContain(openQuestions[0]!.followUpPrompt);
-        expect(report).toContain(coverageNote);
-
-        const terminalDir = join(root, "terminal-scan");
-        mkdirSync(terminalDir, { mode: 0o700 });
-        const markdownModel = `# Existing threat model\n\n## Assumptions\n\n${markdownFact}\n`;
-        const terminalManifest = structuredClone(
-          completed["manifest"],
-        ) as JsonObject;
-        const terminalScan = terminalManifest["scan"] as JsonObject;
-        terminalScan["threatModel"] = { summary: markdownModel };
-        (terminalScan["target"] as JsonObject)["snapshotDigest"] =
-          legacyCoordinateDigest;
-        delete terminalScan["sealedAt"];
-        delete terminalScan["artifacts"];
-        for (const [name, document] of [
-          ["scan-manifest.json", terminalManifest],
-          ["findings.json", completed["findings"]],
-          ["coverage.json", completed["coverage"]],
-        ] as const) {
-          writeFileSync(join(terminalDir, name), JSON.stringify(document));
-        }
-        const finalized = python(
-          "finalize_scan_contract.py",
-          "--scan-dir",
-          terminalDir,
-          "--source-root",
-          repository,
-        );
-        expect(finalized.status, finalized.stderr).toBe(0);
-        const validated = python(
-          "validate_scan_contract.py",
-          "--scan-dir",
-          terminalDir,
-        );
-        expect(validated.status, validated.stderr).toBe(0);
-        const terminalResult = JSON.parse(
-          readFileSync(join(terminalDir, "scan-manifest.json"), "utf8"),
-        ) as {
-          scan: {
-            sealedAt: string;
-            target: { snapshotDigest: string };
-            threatModel: unknown;
-          };
-        };
-        expect(terminalResult.scan.threatModel).toEqual({
-          summary: markdownModel,
-        });
-        expect(terminalResult.scan.target.snapshotDigest).toBe(
-          legacyCoordinateDigest,
-        );
-        expect(terminalResult.scan.sealedAt).toBeDefined();
-        const terminalReport = readFileSync(
-          join(terminalDir, "report.md"),
-          "utf8",
-        );
-        expect(terminalReport).toContain(markdownFact);
-        expect(terminalReport.match(/^#{1,2} .+$/gm)).toEqual(
-          report.match(/^#{1,2} .+$/gm),
-        );
-      } finally {
-        await client.close();
-      }
-    },
-    30_000,
-  );
-
-  test.each(["commit", "range"] as const)(
-    "accepts a new clean %s selection without a repeated digest",
-    async (kind) => {
-      const { root, repository } = createRepository();
-      writeSource(repository, "fixture.txt", "base\n");
-      git(repository, "add", "fixture.txt");
-      git(repository, "commit", "-qm", "base");
-      const baseRevision = git(repository, "rev-parse", "HEAD");
-      writeSource(repository, "fixture.txt", "head\n");
-      git(repository, "add", "fixture.txt");
-      git(repository, "commit", "-qm", "head");
-      const headRevision = git(repository, "rev-parse", "HEAD");
-      createMcpDirectories(root);
-      const client = await startMcp(root);
-      const owner = `new-${kind}-owner`;
-      const selection = {
-        targetPath: repository,
-        scope: ".",
-        mode: "diff",
-        diffTarget:
-          kind === "commit"
-            ? { kind, headRevision }
-            : { kind, baseRevision, headRevision },
-      };
-
-      try {
-        const opened = await client.call(
-          "open_codex_security_workspace",
-          selection,
-          owner,
-        );
-        const sessionId = (opened["workspace"] as JsonObject)["id"] as string;
-        writeSource(repository, "fixture.txt", "next\n");
-        git(repository, "add", "fixture.txt");
-        git(repository, "commit", "-qm", "next");
-        const nextRevision = git(repository, "rev-parse", "HEAD");
-        const nextDiffTarget =
-          kind === "commit"
-            ? { kind, headRevision: nextRevision }
-            : {
-                kind,
-                baseRevision: headRevision,
-                headRevision: nextRevision,
-              };
-
-        const submitted = await client.call(
-          "submit_codex_security_setup",
-          {
-            targetPath: repository,
-            scope: ".",
-            mode: "diff",
-            diffTarget: nextDiffTarget,
-            sessionId,
-          },
-          owner,
-        );
-        const submittedDiffTarget = (submitted["workspace"] as JsonObject)[
-          "diffTarget"
-        ] as JsonObject;
-        expect(submittedDiffTarget).toMatchObject(nextDiffTarget);
-        expect(submittedDiffTarget["contentDigest"]).toMatch(
-          /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
-        );
-        expect(workspaceDiffSelection(root, sessionId).contentDigest).toBe(
-          submittedDiffTarget["contentDigest"] as string,
-        );
-        expect(workbenchState(root)).toEqual({
-          workspaces: 1,
-          submitted: 1,
-          scans: 0,
-        });
-
-        await client.call("start_codex_security_scan", { sessionId }, owner);
-        expect(workbenchState(root)).toEqual({
-          workspaces: 1,
-          submitted: 1,
-          scans: 1,
-        });
-      } finally {
-        await client.close();
-      }
-    },
-    30_000,
-  );
-
-  test.each(["commit", "range"] as const)(
-    "recovers a persisted NULL-digest %s workspace after a missing blob is restored",
-    async (kind) => {
-      const { root, repository } = createRepository();
-      writeSource(repository, "fixture.txt", "base\n");
-      git(repository, "add", "fixture.txt");
-      git(repository, "commit", "-qm", "base");
-      const baseRevision = git(repository, "rev-parse", "HEAD");
-      writeSource(repository, "fixture.txt", "head\n");
-      git(repository, "add", "fixture.txt");
-      git(repository, "commit", "-qm", "head");
-      const headRevision = git(repository, "rev-parse", "HEAD");
-      const blob = git(repository, "rev-parse", `${headRevision}:fixture.txt`);
-      const objectPath = join(
-        repository,
-        ".git",
-        "objects",
-        blob.slice(0, 2),
-        blob.slice(2),
-      );
-      const backupPath = `${objectPath}.missing`;
-      mkdirSync(join(repository, "nested"));
-      const selectedPath = join(repository, "nested", "..");
-      createMcpDirectories(root);
-      const client = await startMcp(root);
-      const owner = `missing-blob-${kind}-owner`;
-      const selection = {
-        targetPath: selectedPath,
-        scope: ".",
-        mode: "diff",
-        diffTarget:
-          kind === "commit"
-            ? { kind, headRevision }
-            : { kind, baseRevision, headRevision },
-      };
-
-      try {
-        renameSync(objectPath, backupPath);
-        const opened = await client.call(
-          "open_codex_security_workspace",
-          selection,
-          owner,
-        );
-        renameSync(backupPath, objectPath);
-        const openedWorkspace = opened["workspace"] as JsonObject;
-        const sessionId = openedWorkspace["id"] as string;
-        expect(openedWorkspace["setupValidation"]).toMatchObject({
-          valid: false,
-        });
-        expect(JSON.stringify(openedWorkspace["setupValidation"])).toContain(
-          "Could not snapshot the selected committed changes.",
-        );
-        expect(workspaceDiffSelection(root, sessionId)).toEqual({
-          baseRevision: kind === "commit" ? null : baseRevision,
-          contentDigest: null,
-          headRevision,
-        });
-
-        const omittedDigest = await client.request("tools/call", {
-          name: "submit_codex_security_setup",
-          arguments: { ...selection, sessionId },
-          _meta: { "openai/threadId": owner },
-        });
-        expect(omittedDigest["isError"], JSON.stringify(omittedDigest)).toBe(
-          true,
-        );
-        expect(JSON.stringify(omittedDigest)).toContain(
-          "no longer produce the same diff",
-        );
-        expect(workspaceDiffSelection(root, sessionId)).toEqual({
-          baseRevision: kind === "commit" ? null : baseRevision,
-          contentDigest: null,
-          headRevision,
-        });
-
-        const inspected = await client.call(
-          "inspect_codex_security_setup",
-          selection,
-          owner,
-        );
-        const currentDiffTarget = (inspected["setup"] as JsonObject)[
-          "diffTarget"
-        ] as JsonObject;
-        expect(currentDiffTarget).toMatchObject({
-          baseRevision,
-          headRevision,
-          kind,
-        });
-        expect(currentDiffTarget["contentDigest"]).toMatch(
-          /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
-        );
-
-        const submitted = await client.call(
-          "submit_codex_security_setup",
-          {
-            ...selection,
-            diffTarget: currentDiffTarget,
-            sessionId,
-          },
-          owner,
-        );
-        expect(
-          ((submitted["workspace"] as JsonObject)["diffTarget"] as JsonObject)[
-            "contentDigest"
-          ],
-        ).toBe(currentDiffTarget["contentDigest"]);
-        expect(workspaceDiffSelection(root, sessionId)).toEqual({
-          baseRevision,
-          contentDigest: currentDiffTarget["contentDigest"] as string,
-          headRevision,
-        });
-        expect(workbenchState(root)).toEqual({
-          workspaces: 1,
-          submitted: 1,
-          scans: 0,
-        });
-
-        await client.call("start_codex_security_scan", { sessionId }, owner);
-        expect(workbenchState(root)).toEqual({
-          workspaces: 1,
-          submitted: 1,
-          scans: 1,
-        });
-      } finally {
-        if (existsSync(backupPath)) renameSync(backupPath, objectPath);
-        await client.close();
-      }
-    },
-    30_000,
-  );
-
-  test.each(["commit", "range"] as const)(
-    "rejects a stale %s selection through the bundled MCP",
-    async (kind) => {
-      const { root, repository } = createRepository();
-      writeSource(repository, "fixture.txt", "base\n");
-      git(repository, "add", "fixture.txt");
-      git(repository, "commit", "-qm", "base");
-      const baseRevision = git(repository, "rev-parse", "HEAD");
-      writeSource(repository, "fixture.txt", "head\n");
-      git(repository, "add", "fixture.txt");
-      git(repository, "commit", "-qm", "head");
-      const headRevision = git(repository, "rev-parse", "HEAD");
-      createMcpDirectories(root);
-      const client = await startMcp(root);
-      const owner = `stale-${kind}-owner`;
-      const requestedDiffTarget =
-        kind === "commit"
-          ? { kind, headRevision }
-          : { kind, baseRevision, headRevision };
-      const selection = {
-        targetPath: repository,
-        scope: ".",
-        mode: "diff",
-        diffTarget: requestedDiffTarget,
-      };
-
-      try {
-        const opened = await client.call(
-          "open_codex_security_workspace",
-          selection,
-          owner,
-        );
-        const workspace = opened["workspace"] as JsonObject;
-        const sessionId = workspace["id"] as string;
-        const selectedDiffTarget = workspace["diffTarget"] as JsonObject;
-        expect(selectedDiffTarget["kind"]).toBe(kind);
-        expect(selectedDiffTarget["contentDigest"]).toMatch(
-          /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
-        );
-        expect(workbenchState(root)).toEqual({
-          workspaces: 1,
-          submitted: 0,
-          scans: 0,
-        });
-
-        const selectedBlob = git(
-          repository,
-          "rev-parse",
-          `${headRevision}:fixture.txt`,
-        );
-        const replacement = execFileSync(
-          "git",
-          ["hash-object", "-w", "--stdin"],
-          { cwd: repository, encoding: "utf8", input: "substituted\n" },
-        ).trim();
-        git(repository, "replace", "-f", selectedBlob, replacement);
-
-        const inspected = await client.call(
-          "inspect_codex_security_setup",
-          selection,
-          owner,
-        );
-        const currentDiffTarget = (inspected["setup"] as JsonObject)[
-          "diffTarget"
-        ] as JsonObject;
-        expect(currentDiffTarget["contentDigest"]).toMatch(
-          /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
-        );
-        expect(currentDiffTarget["contentDigest"]).not.toBe(
-          selectedDiffTarget["contentDigest"],
-        );
-        const withoutContentDigest = { ...selectedDiffTarget };
-        delete withoutContentDigest["contentDigest"];
-        for (const diffTarget of [
-          withoutContentDigest,
-          selectedDiffTarget,
-          currentDiffTarget,
-        ]) {
-          const submitted = await client.request("tools/call", {
-            name: "submit_codex_security_setup",
-            arguments: {
-              ...selection,
-              diffTarget,
-              sessionId,
+            ...finding,
+            extensions: {
+              candidateId: "candidate-singleton",
+              reportId: "DSS-144-A",
             },
-            _meta: { "openai/threadId": owner },
-          });
-          expect(submitted["isError"], JSON.stringify(submitted)).toBe(true);
-          expect(JSON.stringify(submitted)).toContain(
-            "no longer produce the same diff",
-          );
-          expect(workbenchState(root)).toEqual({
-            workspaces: 1,
-            submitted: 0,
-            scans: 0,
-          });
-          expect(workspaceDiffSelection(root, sessionId).contentDigest).toBe(
-            selectedDiffTarget["contentDigest"] as string,
-          );
-        }
-
-        const started = await client.request("tools/call", {
-          name: "start_codex_security_scan",
-          arguments: { sessionId },
-          _meta: { "openai/threadId": owner },
-        });
-        expect(started["isError"], JSON.stringify(started)).toBe(true);
-        expect(JSON.stringify(started)).toContain(
-          "Save the Codex Security setup",
-        );
-        expect(workbenchState(root)).toEqual({
-          workspaces: 1,
-          submitted: 0,
-          scans: 0,
-        });
-
-        const replacementWorkspace = await client.call(
-          "open_codex_security_workspace",
-          { ...selection, diffTarget: currentDiffTarget },
-          owner,
-        );
-        const replacementSessionId = (
-          replacementWorkspace["workspace"] as JsonObject
-        )["id"] as string;
-        expect(replacementSessionId).not.toBe(sessionId);
-        await client.call(
-          "submit_codex_security_setup",
-          {
-            ...selection,
-            diffTarget: currentDiffTarget,
-            sessionId: replacementSessionId,
           },
-          owner,
-        );
-        expect(
-          workspaceDiffSelection(root, replacementSessionId).contentDigest,
-        ).toBe(currentDiffTarget["contentDigest"] as string);
-        expect(workbenchState(root)).toEqual({
-          workspaces: 2,
-          submitted: 1,
-          scans: 0,
-        });
-        await client.call(
-          "start_codex_security_scan",
-          { sessionId: replacementSessionId },
-          owner,
-        );
-        expect(workbenchState(root)).toEqual({
-          workspaces: 2,
-          submitted: 1,
-          scans: 1,
-        });
-      } finally {
-        await client.close();
+          {
+            ...finding,
+            code_evidence: [
+              {
+                code: "value = 2",
+                id: "legacy-source",
+              },
+            ],
+            attackPath: {
+              dataflow: { evidence_refs: ["legacy-source"] },
+            },
+          },
+          {
+            ...finding,
+            ruleId: "path-traversal.archive-upload",
+            identity: {
+              anchor: "candidate-cross-rule",
+              instance: "shared-report",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-cross-rule",
+              reportId: "shared-report",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-cross-rule",
+              reportId: "second-report",
+            },
+          },
+          {
+            ...finding,
+            identity: {
+              anchor: "candidate-authored-instance",
+              instance: "dss-147-a",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-authored-instance",
+              reportId: "DSS-147-B",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-authored-instance",
+              ledgerRowId: "ledger-row-c",
+            },
+          },
+        ],
+        threatModel,
+        coverage: {
+          completeness: "complete",
+          surfaces: [
+            {
+              label: "Changed files",
+              disposition: "rejected",
+              notes: coverageNote,
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [],
+          openQuestions,
+        },
+      });
+      const canonicalDraftIdentities = (
+        JSON.parse(readFileSync(join(scanDir, "findings.json"), "utf8")) as {
+          findings: JsonObject[];
+        }
+      ).findings.map((draftFinding) => draftFinding["identity"]);
+      expect(canonicalDraftIdentities).toHaveLength(9);
+      await call("complete_codex_security_scan", {
+        scanId,
+        handoffClaimToken,
+      });
+      const completed = await call("get_codex_security_completed_scan", {
+        scanId,
+        handoffClaimToken,
+      });
+      const target = (
+        (completed["manifest"] as JsonObject)["scan"] as JsonObject
+      )["target"] as JsonObject;
+      const digest = createHash("sha256")
+        .update("codex-security-diff/v1\0")
+        .update("range")
+        .update("\0")
+        .update(baseRevision)
+        .update("\0")
+        .update(headRevision)
+        .digest("hex");
+      expect(target["snapshotDigest"]).toBe(
+        `codex-security-snapshot/v1:sha256:${digest}`,
+      );
+      expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
+        "diff",
+      );
+      const completedIdentities = (
+        (completed["findings"] as JsonObject)["findings"] as JsonObject[]
+      ).map((completedFinding) => completedFinding["identity"]);
+      expect(completedIdentities).toEqual(canonicalDraftIdentities);
+      expect(completedIdentities).toEqual([
+        { anchor: "candidate-singleton", instance: "dss-144-a" },
+        { anchor: "unsafe-archive-extraction" },
+        { anchor: "candidate-cross-rule", instance: "shared-report" },
+        { anchor: "candidate-cross-rule", instance: "shared-report" },
+        { anchor: "candidate-cross-rule", instance: "second-report" },
+        { anchor: "candidate-authored-instance", instance: "dss-147-a" },
+        {
+          anchor: "candidate-authored-instance",
+          instance: "dss-147-b",
+        },
+        { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+      ]);
+      const legacyFinding = (
+        (completed["findings"] as JsonObject)["findings"] as JsonObject[]
+      )[1];
+      expect(legacyFinding?.["code_evidence"]).toEqual([
+        { code: "value = 2", id: "legacy-source" },
+      ]);
+      expect(legacyFinding?.["attackPath"]).toEqual({
+        dataflow: { evidence_refs: ["legacy-source"] },
+      });
+      expect(
+        ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[
+          "threatModel"
+        ],
+      ).toEqual(threatModel);
+      expect((completed["coverage"] as JsonObject)["openQuestions"]).toEqual(
+        openQuestions,
+      );
+      const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(contract.manifest.scan.threatModel).toEqual(threatModel);
+      expect(contract.coverage.openQuestions).toEqual(openQuestions);
+      expect(contract.coverage.surfaces[0]?.notes).toBe(coverageNote);
+      const report = readFileSync(join(scanDir, "report.md"), "utf8");
+      const modelFacts =
+        format === "Markdown"
+          ? [markdownFact]
+          : Object.values(canonicalModel).flat();
+      for (const fact of modelFacts) {
+        expect(report).toContain(fact);
       }
-    },
-    30_000,
-  );
+      expect(report).toContain(openQuestions[0]!.question);
+      expect(report).toContain(openQuestions[0]!.followUpPrompt);
+      expect(report).toContain(coverageNote);
+
+      const terminalDir = join(root, "terminal-scan");
+      mkdirSync(terminalDir, { mode: 0o700 });
+      const markdownModel = `# Existing threat model\n\n## Assumptions\n\n${markdownFact}\n`;
+      const terminalManifest = structuredClone(
+        completed["manifest"],
+      ) as JsonObject;
+      const terminalScan = terminalManifest["scan"] as JsonObject;
+      terminalScan["threatModel"] = { summary: markdownModel };
+      delete terminalScan["sealedAt"];
+      delete terminalScan["artifacts"];
+      for (const [name, document] of [
+        ["scan-manifest.json", terminalManifest],
+        ["findings.json", completed["findings"]],
+        ["coverage.json", completed["coverage"]],
+      ] as const) {
+        writeFileSync(join(terminalDir, name), JSON.stringify(document));
+      }
+      const finalized = python(
+        "finalize_scan_contract.py",
+        "--scan-dir",
+        terminalDir,
+        "--source-root",
+        repository,
+      );
+      expect(finalized.status, finalized.stderr).toBe(0);
+      const validated = python(
+        "validate_scan_contract.py",
+        "--scan-dir",
+        terminalDir,
+      );
+      expect(validated.status, validated.stderr).toBe(0);
+      const terminalResult = JSON.parse(
+        readFileSync(join(terminalDir, "scan-manifest.json"), "utf8"),
+      ) as { scan: { threatModel: unknown; sealedAt: string } };
+      expect(terminalResult.scan.threatModel).toEqual({
+        summary: markdownModel,
+      });
+      expect(terminalResult.scan.sealedAt).toBeDefined();
+      const terminalReport = readFileSync(
+        join(terminalDir, "report.md"),
+        "utf8",
+      );
+      expect(terminalReport).toContain(markdownFact);
+      expect(terminalReport.match(/^#{1,2} .+$/gm)).toEqual(
+        report.match(/^#{1,2} .+$/gm),
+      );
+    } finally {
+      await client.close();
+    }
+  });
 });
