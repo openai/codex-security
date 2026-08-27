@@ -66,3 +66,5 @@ codex-security scan . --provider fireworks --model accounts/fireworks/models/qwe
 ## Documentation
 
 **👉👉 See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for full documentation.
+
+To use different tools with a workflow skill, ask Codex to adapt a local copy.

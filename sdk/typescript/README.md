@@ -26,6 +26,8 @@ When a newer version is available, the CLI shows the update command for your
 installation method. Set `CODEX_SECURITY_NO_UPDATE_NOTICE=1` to hide the
 notice. Notices are also disabled in CI and when stderr is not a terminal.
 
+> To use different tools with a workflow skill, ask Codex to adapt a local copy.
+
 ## Run a scan from TypeScript
 
 Sign in with `npx @openai/codex-security login` or set `OPENAI_API_KEY` or

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Reassess Finding Exposure"
+  short_description: "Separate revision, exposure, and escalation decisions"
+  default_prompt: "Use $reassess-finding-exposure to reassess this finding against committed HEAD, or an explicitly requested historical revision, using the supplied security and escalation policy."
+
+policy:
+  allow_implicit_invocation: true

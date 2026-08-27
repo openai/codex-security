@@ -1,0 +1,12 @@
+interface:
+  display_name: "Service and Team Ownership"
+  short_description: "Separate affected services from teams responsible for fixes"
+  default_prompt: >-
+    Use $service-and-ownership-attribution with current authoritative ownership
+    records and the service/deployment evidence needed for each claim. Identify the affected
+    deployed service, the component requiring change, its fixing team, and any
+    actual deployed service where the fix would belong. Preserve differing owners,
+    exact evidence and confidence limits. Resolve team and on-call contacts only
+    when requested or needed for the authorized handoff.
+    Do not guess missing mappings, choose labels or assignees, contact anyone,
+    or change tickets or deployments.

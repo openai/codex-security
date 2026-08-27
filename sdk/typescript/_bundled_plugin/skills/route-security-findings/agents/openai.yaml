@@ -1,0 +1,4 @@
+interface:
+  display_name: "Linear Security Finding Routing"
+  short_description: "Assign Linear findings with consistent ownership labels"
+  default_prompt: "Use $route-security-findings with the scope, owner registry and confirmed mapping in my request to route existing findings and explain verified changes."

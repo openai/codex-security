@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Remediation Pickup"
+  short_description: "Find evidence-backed remediation and ownership gaps"
+  default_prompt: "Use $review-remediation-pickup to review the selected finding queue for concrete pickup, routing gaps, stalled work and changes since the last complete review."
