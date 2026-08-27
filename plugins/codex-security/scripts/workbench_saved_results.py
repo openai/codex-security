@@ -140,6 +140,25 @@ def _finding_key(finding: dict[str, Any]) -> str:
     )
 
 
+def _worker_candidate_key(
+    worker_id: str, candidate_id: str, finding: dict[str, Any]
+) -> tuple[str, str, Any, Any, Any]:
+    """Identify one worker-local candidate without merging unrelated locations."""
+    provenance = finding.get("provenance")
+    identity = (
+        provenance.get("preservedIdentity", finding.get("identity"))
+        if isinstance(provenance, dict)
+        else finding.get("identity")
+    )
+    if not isinstance(identity, dict):
+        normalized = dict(finding)
+        _ensure_finding_identity(normalized)
+        identity = normalized.get("identity")
+    anchor = identity.get("anchor") if isinstance(identity, dict) else None
+    instance = identity.get("instance") if isinstance(identity, dict) else None
+    return worker_id, candidate_id, finding.get("ruleId"), anchor, instance
+
+
 def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
     """Return substantive finding content without generated identity or provenance."""
     return {
@@ -200,12 +219,13 @@ def merge_saved_results(
     stopped: bool,
     reason: str,
     frozen_source_digests: dict[str, str] | None = None,
+    allow_frozen_legacy_parent: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
     parent: dict[str, Any] | None = None
     parent_manifest: dict[str, Any] | None = None
-    if frozen_source_digests is None:
+    if frozen_source_digests is None or allow_frozen_legacy_parent:
         try:
             parent_manifest = _read_scan_local_json(
                 scan_dir, "scan-manifest.json", "Saved parent manifest"
@@ -460,9 +480,9 @@ def merge_saved_results(
     findings: list[dict[str, Any]] = []
     finding_positions: dict[str, int] = {}
     represented: dict[str, str | None] = {}
-    represented_candidates: dict[tuple[str, str], str | None] = {}
+    represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
     represented_history: dict[str, set[str]] = {}
-    represented_candidate_history: dict[tuple[str, str], set[str]] = {}
+    represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
     stopped_parent_seal = bool(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
@@ -529,7 +549,11 @@ def merge_saved_results(
                         source_id = original.get("id")
                         candidate_id = finding_candidate_id(original["finding"])
                         if isinstance(source_id, str) and ":" in source_id and candidate_id:
-                            candidate_key = (source_id.rsplit(":", 1)[0], candidate_id)
+                            candidate_key = _worker_candidate_key(
+                                source_id.rsplit(":", 1)[0],
+                                candidate_id,
+                                original["finding"],
+                            )
                             previous_key = represented_candidates.get(candidate_key)
                             if candidate_key not in represented_candidates:
                                 represented_candidates[candidate_key] = canonical_key
@@ -568,6 +592,10 @@ def merge_saved_results(
             and coverage.get("completeness") in {"complete", "unknown"}
         ):
             coverage["completeness"] = "partial"
+        if superseded and not stopped and all(
+            valid_finding(finding) for finding in (parent["findings"] if parent else [])
+        ):
+            continue
         if "threatModel" not in manifest["scan"] and isinstance(draft.get("threatModel"), dict):
             manifest["scan"]["threatModel"] = copy.deepcopy(draft["threatModel"])
         for value in draft["findings"]:
@@ -647,8 +675,10 @@ def merge_saved_results(
                     mapped_key = represented[key]
                     historical_contents = represented_history.get(key, set())
                 elif worker_id and candidate_id:
-                    candidate_key = (worker_id, candidate_id)
-                    mapped_key = represented_candidates.get(candidate_key)
+                    candidate_key = _worker_candidate_key(worker_id, candidate_id, finding)
+                    if candidate_key not in represented_candidates:
+                        represented_candidates[candidate_key] = key
+                    mapped_key = represented_candidates[candidate_key]
                     historical_contents = represented_candidate_history.get(candidate_key, set())
                 else:
                     mapped_key = None
@@ -977,6 +1007,12 @@ def preserve_scan_results_locked(db: Any, connection: Any, scan_id: str) -> bool
             f"{scan['failure_message'] or ''}"
         ).strip(),
         frozen_source_digests=frozen_source_digests,
+        allow_frozen_legacy_parent=(
+            frozen_source_digests == {}
+            and isinstance(existing_scan, dict)
+            and existing_scan.get("sealedAt") is not None
+            and "preservedSources" not in existing_scan
+        ),
     )
     if documents is None:
         unpublished_warnings = list(dict.fromkeys([*warnings, *publication_follow_up_warnings]))

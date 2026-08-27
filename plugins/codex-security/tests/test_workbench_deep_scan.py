@@ -1396,7 +1396,7 @@ def test_sdk_scan_begin_claims_its_existing_scan(tmp_path: Path) -> None:
     target.mkdir()
     (target / "source.py").write_text("print('fixture')\n")
     scan_dir = tmp_path / "scan"
-    scan_dir.mkdir()
+    scan_dir.mkdir(mode=0o700)
     user_context = "Treat intentionally planted vulnerabilities as reportable."
     registered = run_workbench(
         state_dir,
@@ -1469,7 +1469,7 @@ def test_sdk_scan_rejects_invalid_handoff_before_claiming_ownership(tmp_path: Pa
     target = tmp_path / "target"
     target.mkdir()
     scan_dir = tmp_path / "scan"
-    scan_dir.mkdir()
+    scan_dir.mkdir(mode=0o700)
     registered = run_workbench(
         state_dir,
         "register-cli-scan",

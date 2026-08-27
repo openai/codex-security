@@ -3937,7 +3937,12 @@ describe("GitHub release workflow safeguards", () => {
     ).toContain("github.event.changes.base == null");
 
     const fullCiCondition = "needs.validate-title.outputs.ci-mode == 'full'";
-    for (const job of ["test", "windows-test", "windows-verify"]) {
+    for (const job of [
+      "test",
+      "plugin-source",
+      "windows-test",
+      "windows-verify",
+    ]) {
       expect(workflow.jobs[job]?.if).toBe(fullCiCondition);
     }
     expect(workflow.jobs["markdown-checks"]).toBeUndefined();
@@ -3967,7 +3972,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.test.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
       "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
@@ -3981,6 +3986,7 @@ describe("GitHub release workflow safeguards", () => {
       ["unknown", "success", "skipped", true],
     ] as const) {
       const values = {
+        "needs.plugin-source.result": upstream,
         "needs.test.result": upstream,
         "needs.validate-title.outputs.ci-mode": ciMode,
         "needs.validate-title.result": validation,

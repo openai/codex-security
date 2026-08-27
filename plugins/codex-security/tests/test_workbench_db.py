@@ -91,7 +91,7 @@ def budget_scan_fixture(
     target.mkdir()
     (target / "app.py").write_text("value = request.args['value']\n")
     scan_dir = tmp_path / "scan"
-    scan_dir.mkdir()
+    scan_dir.mkdir(mode=0o700)
     registered = run_workbench(
         state_dir,
         "register-cli-scan",

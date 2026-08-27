@@ -119,6 +119,33 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 message = f"{message}: {detail}"
             raise InventoryError(message)
 
+        if (repository / ".git").exists():
+            try:
+                tracked = subprocess.run(
+                    [
+                        "git",
+                        "ls-files",
+                        "--cached",
+                        "--ignored",
+                        "--exclude-standard",
+                        "-z",
+                        "--",
+                        scope,
+                    ],
+                    cwd=repository,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except OSError:
+                tracked = None
+            if tracked is not None and tracked.returncode == 0:
+                prefix = b"./" if scope == "." or scope.startswith("./") else b""
+                for path in tracked.stdout.split(b"\0"):
+                    candidate = repository / os.fsdecode(path)
+                    if path and candidate.is_file() and not candidate.is_symlink():
+                        inventory.write(prefix + path + b"\n")
+
         inventory.seek(0)
         rows = sorted(inventory)
 

@@ -71,7 +71,7 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
 
 
 def register_cli_scan(state_dir: Path, target: Path, scan_dir: Path) -> dict[str, Any]:
-    scan_dir.mkdir()
+    scan_dir.mkdir(mode=0o700)
     return run_workbench(
         state_dir,
         "register-cli-scan",
@@ -408,7 +408,7 @@ def test_completion_populates_workbench_owned_unsealed_envelope(tmp_path: Path) 
     assert sealed_coverage["excludePaths"] == []
 
 
-def test_completion_keeps_scan_contract_validation_strict_without_rewriting_drafts(
+def test_completion_keeps_scan_contract_validation_strict_while_preserving_findings(
     tmp_path: Path,
 ) -> None:
     def wrong_target_kind(
@@ -436,11 +436,6 @@ def test_completion_keeps_scan_contract_validation_strict_without_rewriting_draf
         (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
         (scan_dir / "findings.json").write_text(json.dumps(findings))
         (scan_dir / "coverage.json").write_text(json.dumps(coverage))
-        before = {
-            name: (scan_dir / name).read_bytes()
-            for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-        }
-
         failed = run_workbench(
             state_dir,
             "complete-scan",
@@ -454,11 +449,18 @@ def test_completion_keeps_scan_contract_validation_strict_without_rewriting_draf
         recorded = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
         assert recorded["progress"]["status"] == "failed", case_name
         assert expected_error in recorded["failureMessage"], case_name
-        after = {
-            name: (scan_dir / name).read_bytes()
-            for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-        }
-        assert after == before, case_name
+        preserved_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+        preserved_findings = json.loads((scan_dir / "findings.json").read_text())
+        preserved_coverage = json.loads((scan_dir / "coverage.json").read_text())
+        assert preserved_manifest["scan"]["status"] == "failed", case_name
+        assert [
+            (finding["ruleId"], finding["locations"])
+            for finding in preserved_findings["findings"]
+        ] == [
+            (finding["ruleId"], finding["locations"])
+            for finding in findings["findings"]
+        ], case_name
+        assert preserved_coverage["completeness"] == "partial", case_name
 
 
 def test_deep_completion_recovers_malformed_inventory_without_dropping_findings(
@@ -510,7 +512,10 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     assert "target.kind" in str(failed["stderr"])
     recorded = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert recorded["progress"]["status"] == "failed"
-    assert json.loads(coverage_path.read_text())["inventoryStrategy"] == ""
+    preserved_coverage = json.loads(coverage_path.read_text())
+    assert preserved_coverage["inventoryStrategy"] == "repository"
+    assert preserved_coverage["completeness"] == "partial"
+    assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
 
 
 def test_deep_completion_preserves_running_scan_after_transient_report_failure(

@@ -1063,7 +1063,7 @@ describe("malformed scan artifact recovery", () => {
     );
     expect(sarif.runs[0]?.invocations).toEqual([
       {
-        executionSuccessful: false,
+        executionSuccessful: true,
         toolExecutionNotifications: [
           { level: "warning", message: { text: completed.warnings[0]! } },
         ],
@@ -1324,28 +1324,28 @@ describe("malformed scan artifact recovery", () => {
   });
 
   test.each(["complete-scan", "prepare-scan-completion"] as const)(
-    "keeps a repairable %s contract failure resumable",
+    "preserves findings after an invalid %s contract fails",
     async (command) => {
       const fixture = await startDraftScan();
       const path = join(fixture.scanDir, "coverage.json");
       const document = await readJson<CoverageDocument>(path);
-      const validInventoryStrategy = document.inventoryStrategy;
       document.inventoryStrategy = "";
       await writeJson(path, document);
 
       await expect(
         workbench(fixture, [command, "--scan-id", fixture.scanId]),
       ).rejects.toThrow("inventoryStrategy");
-      const pending = await workbench(fixture, [
+      const failed = await workbench(fixture, [
         "get-scan",
         "--scan-id",
         fixture.scanId,
       ]);
-      expect((pending["scan"] as ScanSummary).progress.status).toBe("running");
-
-      document.inventoryStrategy = validInventoryStrategy;
-      await writeJson(path, document);
-      expect((await completeScan(fixture)).findingCount).toBe(1);
+      expect((failed["scan"] as ScanSummary).progress.status).toBe("failed");
+      expect((failed["scan"] as ScanSummary).findingCount).toBe(1);
+      expect(await readJson<CoverageDocument>(path)).toMatchObject({
+        completeness: "partial",
+        inventoryStrategy: "repository",
+      });
     },
   );
 });

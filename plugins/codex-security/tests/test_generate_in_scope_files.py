@@ -131,6 +131,23 @@ def test_absolute_scope_still_produces_repository_relative_paths(tmp_path: Path)
     assert all(not Path(line).is_absolute() for line in output.read_text().splitlines())
 
 
+def test_inventory_keeps_ignored_tracked_files_without_ignored_untracked_files(
+    tmp_path: Path,
+) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "ignored/tracked.py")
+    git(repository, "add", "--force", "--", "ignored/tracked.py")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output)
+
+    assert result.returncode == 0, result.stderr
+    paths = set(output.read_text(encoding="utf-8").splitlines())
+    assert "./ignored/tracked.py" in paths
+    assert "./ignored/secret.py" not in paths
+    assert "./app/ignored.skip" not in paths
+
+
 def test_inventory_uses_forward_slashes_when_ripgrep_defaults_to_backslashes(
     tmp_path: Path,
 ) -> None:

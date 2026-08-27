@@ -107,7 +107,7 @@ def create_cli_scan(
     target_revision: str | None = None,
 ) -> dict[str, Any]:
     scan_dir = root / str(uuid.uuid4())
-    scan_dir.mkdir(parents=True)
+    scan_dir.mkdir(mode=0o700, parents=True)
     recipe = {
         "config": {"model": "gpt-5.6-sol", "model_reasoning_effort": "high"},
         "mode": mode,
@@ -1389,7 +1389,7 @@ def test_cli_scan_reruns_reject_other_repository_parents(tmp_path: Path) -> None
     other = tmp_path / "other"
     other.mkdir()
     scan_dir = tmp_path / "other-results"
-    scan_dir.mkdir()
+    scan_dir.mkdir(mode=0o700)
     rejected = run_workbench(
         state_dir,
         "register-cli-scan",

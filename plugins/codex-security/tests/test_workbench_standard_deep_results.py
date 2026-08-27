@@ -710,7 +710,7 @@ def deep_scan_fixture(
 
     if budget:
         scan_dir = tmp_path / "scan"
-        scan_dir.mkdir()
+        scan_dir.mkdir(mode=0o700)
         registered = run_workbench(
             state_dir,
             "register-cli-scan",

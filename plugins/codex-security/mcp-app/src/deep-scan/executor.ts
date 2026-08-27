@@ -89,6 +89,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       });
       const threadOptions = {
         ...(this.modelSettings.model ? { model: this.modelSettings.model } : {}),
+        threadSource: "security_scan",
         approvalPolicy: "never",
         skipGitRepoCheck: true,
         workingDirectory: request.workingDirectory
