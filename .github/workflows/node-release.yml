@@ -134,7 +134,9 @@ jobs:
             validate-release-notes "$RELEASE_VERSION" "$release_notes_file" >/dev/null
 
       - name: Install dependencies
-        run: sfw pnpm --dir sdk/typescript install --frozen-lockfile
+        run: |
+          sfw pnpm --dir sdk/typescript install --frozen-lockfile
+          sfw npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
 
       - name: Audit production dependencies
         continue-on-error: true
@@ -144,6 +146,7 @@ jobs:
         run: |
           pnpm --dir sdk/typescript run types
           pnpm --dir sdk/typescript run test
+          pnpm --dir sdk/typescript run test:mcp
           pnpm --dir sdk/typescript run format
 
       - name: Pack

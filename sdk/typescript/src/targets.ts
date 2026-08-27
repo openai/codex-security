@@ -434,6 +434,7 @@ async function gitOutput(
       encoding: "utf8",
       signal,
       env: command.environment,
+      maxBuffer: Infinity,
     },
   );
   return stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
