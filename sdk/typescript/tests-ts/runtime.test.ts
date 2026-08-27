@@ -616,7 +616,13 @@ describe("plugin runtime preparation", () => {
 
   test("keeps native scan tools without the obsolete setup widget", async () => {
     const contract = JSON.parse(
-      await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+      await readFile(
+        new URL(
+          "../../../plugins/codex-security/plugin-files.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
     ) as { shippedExact: string[] };
     expect(contract.shippedExact).not.toContain("mcp/mcp-app.html.br");
     expect(existsSync(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br"))).toBe(false);
@@ -700,7 +706,10 @@ describe("plugin runtime preparation", () => {
     const source = await resolvePluginPath(undefined, workspace);
     expect(source).toBe(await bundledPluginRoot());
 
-    const publicContractPath = new URL("../plugin-files.json", import.meta.url);
+    const publicContractPath = new URL(
+      "../../../plugins/codex-security/plugin-files.json",
+      import.meta.url,
+    );
     const contractPath = existsSync(publicContractPath)
       ? publicContractPath
       : join(

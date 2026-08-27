@@ -55,7 +55,12 @@ async function destinationFiles(root, prefix = "") {
 }
 
 export async function buildBundledPlugin({
-  contractPath = join(packageRoot, "plugin-files.json"),
+  contractPath = join(
+    repositoryRoot,
+    "plugins",
+    "codex-security",
+    "plugin-files.json",
+  ),
   destination = join(packageRoot, "_bundled_plugin"),
   source = join(repositoryRoot, "plugins", "codex-security"),
 } = {}) {

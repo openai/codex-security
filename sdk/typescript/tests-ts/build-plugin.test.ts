@@ -131,7 +131,7 @@ describe("bundled plugin build", () => {
       ),
     );
     await writeFixture(
-      packageRoot,
+      source,
       "plugin-files.json",
       `${JSON.stringify({
         externalOwnedExact: [".codex-plugin/plugin.json"],
@@ -157,7 +157,7 @@ describe("bundled plugin build", () => {
     const root = await temporaryDirectory();
     const source = join(root, "plugins", "codex-security");
     const destination = join(root, "sdk", "typescript", "_bundled_plugin");
-    const contractPath = join(root, "sdk", "typescript", "plugin-files.json");
+    const contractPath = join(source, "plugin-files.json");
 
     await writeFixture(
       source,
@@ -193,7 +193,7 @@ await writeFile(join(output, "server.mjs"), "generated mcp runtime\\n");
     await writeFixture(source, "sdk/typescript/owned-by-sdk.txt", "sdk\n");
     await writeFixture(destination, "stale.txt", "stale\n");
     await writeFixture(
-      join(root, "sdk", "typescript"),
+      source,
       "plugin-files.json",
       `${JSON.stringify(
         {
@@ -239,11 +239,11 @@ await writeFile(join(output, "server.mjs"), "generated mcp runtime\\n");
     const root = await temporaryDirectory();
     const source = join(root, "plugins", "codex-security");
     const destination = join(root, "sdk", "typescript", "_bundled_plugin");
-    const contractPath = join(root, "sdk", "typescript", "plugin-files.json");
+    const contractPath = join(source, "plugin-files.json");
 
     await writeFixture(source, ".codex-plugin/plugin.json", "{}\n");
     await writeFixture(
-      join(root, "sdk", "typescript"),
+      source,
       "plugin-files.json",
       `${JSON.stringify({
         externalOwnedExact: [".codex-plugin/plugin.json"],
