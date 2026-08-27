@@ -577,10 +577,6 @@ test("writes accepted groups only after all reviews and fails when write-back fa
               phases.push("pair");
               return same(values);
             },
-            async reviewGroup(values) {
-              phases.push("group");
-              return same(values);
-            },
           },
         },
       );
@@ -591,14 +587,7 @@ test("writes accepted groups only after all reviews and fails when write-back fa
           "POST /v1/dedupe-groups failed (HTTP 409)",
         );
       }
-      expect(phases).toEqual([
-        "lookup",
-        "screen",
-        "pair",
-        "pair",
-        "group",
-        "store",
-      ]);
+      expect(phases).toEqual(["lookup", "screen", "pair", "pair", "store"]);
     }
     expect(
       JSON.parse(await readFile(join(directory, "findings.json"), "utf8")),
