@@ -223,6 +223,13 @@ test("dashboard browses imported findings and overlapping groups without local r
       (item) => item.id,
     ),
   ).toEqual([first.findingId]);
+  for (const query of ["évaluation", "SYNTHÉTIQUE"]) {
+    expect(
+      (await dashboard(base, { view: "findings", query })).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual([first.findingId]);
+  }
   expect(
     (
       await dashboard(base, { view: "groups", repository: "repository-b" })
@@ -341,10 +348,17 @@ finding_workflow(db, {'id': 'failed-run', 'action': 'fail', 'stage': 'publish', 
 finding_workflow(db, {'id': 'pending-write', 'action': 'complete', 'stage': 'publish', 'result': {'findingIds': ['synthetic-a', 'synthetic-b'], 'findingCount': 2}}, '2026-01-03T00:00:00Z')
 finding_workflow(db, {'id': 'pending-write', 'action': 'prepare-dedupe', 'stage': 'dedupe', 'result': {'uniqueFindingIds': ['synthetic-a'], 'duplicateGroups': [['synthetic-a', 'synthetic-b']], 'deduplicationStatus': 'completed'}, 'pendingWrite': {'groups': [['synthetic-a', 'synthetic-b']]}}, '2026-01-03T00:00:00Z')
 finding_workflow(db, {'id': 'pending-write', 'action': 'fail', 'stage': 'dedupe', 'error': 'Synthetic write-back failure'}, '2026-01-03T00:00:00Z')
+finding_workflow(db, {'id': 'published-only', 'action': 'bind', 'binding': {'scanId': 'external-scan', 'destination': 'http://localhost:3000/'}}, '2026-01-03T00:00:00Z')
+finding_workflow(db, {'id': 'published-only', 'action': 'complete', 'stage': 'scan', 'result': None}, '2026-01-03T00:00:00Z')
+finding_workflow(db, {'id': 'published-only', 'action': 'complete', 'stage': 'publish', 'result': {'findingIds': [], 'findingCount': 0, 'repositoryId': 'receipt-repository'}}, '2026-01-03T00:00:00Z')
 print('null')`,
   );
   const result = await dashboard(base, { view: "workflows", id: "empty-run" });
-  expect(result.overview.workflows).toEqual({ completed: 1, failed: 2 });
+  expect(result.overview.workflows).toEqual({
+    completed: 1,
+    failed: 2,
+    pending: 1,
+  });
   expect(result.detail!.item).toMatchObject({
     stage: "dedupe",
     status: "completed",
@@ -384,6 +398,18 @@ print('null')`,
     pendingWrite: { groups: [["synthetic-a", "synthetic-b"]] },
   });
   expect(pending.overview.groups).toBe(0);
+  const publication = await dashboard(base, {
+    view: "workflows",
+    repository: "receipt-repository",
+    id: "published-only",
+  });
+  expect(publication.items.map((item) => item.id)).toEqual(["published-only"]);
+  expect(publication.repositories).toContainEqual({
+    id: "receipt-repository",
+    label: "receipt-repository",
+  });
+  expect(publication.detail!.scan).toBeUndefined();
+  expect(publication.detail!.workflow!.scope).toBeUndefined();
 });
 
 async function getGroups(

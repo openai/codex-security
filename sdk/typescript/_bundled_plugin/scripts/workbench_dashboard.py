@@ -27,9 +27,11 @@ FROM scans LEFT JOIN scan_progress AS progress ON progress.scan_id = scans.id
 WORKFLOW_RECORDS = """
 SELECT workflows.id, workflows.id AS title,
     CASE WHEN COALESCE(scans.target_id, workflows.scope_repository_id,
+                       json_extract(results_json, '$.publish.repositoryId'),
                        scans.target_path, workflows.repository_path) IS NULL
          THEN '[]' ELSE json_array(COALESCE(scans.target_id,
-             workflows.scope_repository_id, scans.target_path, workflows.repository_path)) END AS repositoryIds,
+             workflows.scope_repository_id, json_extract(results_json, '$.publish.repositoryId'),
+             scans.target_path, workflows.repository_path)) END AS repositoryIds,
     COALESCE(scans.target_path, workflows.repository_path) AS repositoryPath,
     workflows.scan_id AS scanId, scans.mode,
     CASE stage WHEN 'scan' THEN scan_status WHEN 'publish' THEN publish_status
@@ -156,10 +158,11 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
     clauses: list[str] = []
     values: list[Any] = []
     if query.get("query"):
+        connection.create_function("casefold", 1, str.casefold, deterministic=True)
         columns = ["id", "title", "repositoryIds"]
         if view in {"scans", "workflows"}:
             columns.extend(("scanId", "repositoryPath"))
-        clauses.append("(" + " OR ".join(f"instr(lower(COALESCE({c}, '')), lower(?)) > 0" for c in columns) + ")")
+        clauses.append("(" + " OR ".join(f"instr(casefold(COALESCE({c}, '')), casefold(?)) > 0" for c in columns) + ")")
         values.extend([query["query"]] * len(columns))
     if query.get("repository"):
         clauses.append("EXISTS (SELECT 1 FROM json_each(repositoryIds) WHERE value = ?)")
