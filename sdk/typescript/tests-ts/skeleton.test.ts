@@ -176,6 +176,21 @@ describe("TypeScript package skeleton", () => {
     expect(pluginGeneration).toBeLessThan(shard);
   });
 
+  test("installs ripgrep before the MCP app tests", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const steps = jobs.test!.steps;
+    const ripgrepInstallation = steps.findIndex(
+      (step) => step.name === "Install ripgrep",
+    );
+    const mcpTests = steps.findIndex((step) => step.name === "Test MCP app");
+
+    expect(steps[ripgrepInstallation]).toMatchObject({
+      if: "matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'",
+      run: expect.stringContaining("apt-get install --yes ripgrep"),
+    });
+    expect(ripgrepInstallation).toBeLessThan(mcpTests);
+  });
+
   test("runs shared static checks once and keeps report upload non-blocking", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const steps = Object.values(jobs).flatMap((job) => job.steps);
