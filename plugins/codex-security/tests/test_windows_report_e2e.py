@@ -53,7 +53,13 @@ def test_workbench_completion_and_exports_use_windows_file_backend(tmp_path: Pat
     def open_read_fd(root: Path, relative_path: str, _context: str) -> int:
         return os.open(root / relative_path, os.O_RDONLY)
 
-    def atomic_write(root: Path, relative_path: str, payload: bytes) -> None:
+    def atomic_write(
+        root: Path,
+        relative_path: str,
+        payload: bytes,
+        *,
+        expected_root_identity: tuple[int, int] | None = None,
+    ) -> None:
         path = root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
