@@ -9,10 +9,19 @@ test = [
     "packaging==26.3",
     "pytest==9.0.3",
     "PyYAML==6.0.3",
+    "ruff==0.16.1",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+required-version = "==0.16.1"
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["I"]
 
 [tool.setuptools.packages.find]
 include = []
