@@ -1,6 +1,4 @@
 import { execFile, spawnSync } from "node:child_process";
-import * as childProcess from "node:child_process";
-import { EventEmitter, once } from "node:events";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -28,8 +26,6 @@ import {
   relative,
   sep,
 } from "node:path";
-import { PassThrough } from "node:stream";
-import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
