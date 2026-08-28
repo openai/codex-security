@@ -435,6 +435,7 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
     assert paused["progress"]["independentReviews"] == {
         "completed": 1,
         "active": 0,
+        "maximum": 2,
         "consolidating": False,
     }
     assert (paused["reportAvailable"], paused["findingCount"], paused["artifacts"]) == (
@@ -1109,7 +1110,12 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         context = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
         return context["scan"]["progress"]["independentReviews"]
 
-    assert independent_reviews() == {"active": 0, "completed": 0, "consolidating": False}
+    assert independent_reviews() == {
+        "active": 0,
+        "completed": 0,
+        "maximum": 40,
+        "consolidating": False,
+    }
 
     first_prompt, first_artifacts, first_result = worker_paths(scan_dir, "discovery-1")
     second_prompt, second_artifacts, _ = worker_paths(scan_dir, "discovery-2")
@@ -1137,7 +1143,12 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         artifact_dir=second_artifacts,
         attempt=1,
     )
-    assert independent_reviews() == {"active": 2, "completed": 0, "consolidating": False}
+    assert independent_reviews() == {
+        "active": 2,
+        "completed": 0,
+        "maximum": 40,
+        "consolidating": False,
+    }
 
     first_result.write_text("{}\n")
     upsert_worker(
@@ -1152,7 +1163,12 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         result_path=first_result,
         attempt=1,
     )
-    assert independent_reviews() == {"active": 1, "completed": 1, "consolidating": False}
+    assert independent_reviews() == {
+        "active": 1,
+        "completed": 1,
+        "maximum": 40,
+        "consolidating": False,
+    }
 
     upsert_worker(
         state_dir,
@@ -1165,7 +1181,12 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         artifact_dir=second_artifacts,
         attempt=1,
     )
-    assert independent_reviews() == {"active": 0, "completed": 1, "consolidating": False}
+    assert independent_reviews() == {
+        "active": 0,
+        "completed": 1,
+        "maximum": 40,
+        "consolidating": False,
+    }
 
 
 def test_reducer_claim_updates_review_pass_once_and_projects_consolidation(
@@ -1217,6 +1238,7 @@ def test_reducer_claim_updates_review_pass_once_and_projects_consolidation(
         assert progress["independentReviews"] == {
             "active": 0,
             "completed": 2,
+            "maximum": 40,
             "consolidating": True,
         }
 
