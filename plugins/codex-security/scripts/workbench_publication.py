@@ -514,3 +514,7 @@ def finding_export_rows(connection: sqlite3.Connection, scan_id: str) -> sqlite3
         """,
         (scan_id,),
     )
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()

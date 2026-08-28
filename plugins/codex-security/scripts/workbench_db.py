@@ -2433,6 +2433,10 @@ def set_finding_remediation(
 _WORKBENCH_PUBLICATION_CONTEXT: publication.WorkbenchPublicationContext
 
 
+def inspect_linear_publication(args: argparse.Namespace) -> dict[str, Any]:
+    return publication.inspect_linear_publication(_WORKBENCH_PUBLICATION_CONTEXT, args)
+
+
 def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     return publication.export_findings(_WORKBENCH_PUBLICATION_CONTEXT, connection, args)
 
@@ -3408,7 +3412,7 @@ def main() -> None:
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     if args.command == "inspect-linear-publication":
-        result = publication.inspect_linear_publication(_WORKBENCH_PUBLICATION_CONTEXT, args)
+        result = inspect_linear_publication(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(connect()) as connection:
