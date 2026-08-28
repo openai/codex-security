@@ -1,0 +1,433 @@
+@import "tailwindcss";
+@import "@openai/apps-sdk-ui/css";
+@source "../node_modules/@openai/apps-sdk-ui";
+@source "./**/*.{ts,tsx}";
+
+body {
+  margin: 0;
+  background: var(--color-surface);
+  font-family: var(--font-sans);
+}
+.dashboard-shell {
+  min-height: 100vh;
+}
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 28px;
+  border-bottom: 1px solid var(--color-border);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 14px;
+}
+.brand-mark {
+  font-size: 24px;
+}
+.header-divider {
+  height: 18px;
+  width: 1px;
+  background: var(--color-border);
+}
+.workspace {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+}
+.sidebar {
+  padding: 30px 16px;
+  border-right: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.eyebrow {
+  padding: 0 12px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.sidebar nav {
+  display: grid;
+  gap: 4px;
+}
+.nav-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+main {
+  min-width: 0;
+  padding: 36px 32px 24px;
+}
+h1 {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.8px;
+  margin: 0 0 6px;
+}
+h2 {
+  font-size: 18px;
+  font-weight: 500;
+}
+h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 12px;
+}
+p {
+  font-size: 14px;
+  line-height: 1.6;
+}
+.page-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin-bottom: 28px;
+}
+.refresh-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  padding-top: 6px;
+}
+.refresh-state small {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+}
+.connection-dot {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-success);
+  margin-top: 5px;
+}
+.connection-dot.disconnected {
+  background: var(--color-text-danger);
+}
+.overview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-block: 1px solid var(--color-border);
+  padding: 22px 0;
+  gap: 18px;
+}
+.overview > div {
+  display: grid;
+  gap: 8px;
+}
+.overview span {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.overview strong {
+  font-size: 28px;
+  font-weight: 500;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  padding: 24px 0;
+}
+.filters > label {
+  display: grid;
+  gap: 6px;
+  min-width: 130px;
+  max-width: 320px;
+}
+.filters > label > span:not(.sr-only) {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.filters .search-field {
+  min-width: 190px;
+  flex: 1;
+  max-width: none;
+}
+.filters select {
+  appearance: auto;
+  min-width: 0;
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 14px;
+}
+.filters select:focus-visible {
+  outline: 2px solid var(--color-text);
+  outline-offset: 2px;
+}
+.content-layout {
+  min-width: 0;
+}
+.content-layout.with-inspector {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
+  gap: 24px;
+  align-items: start;
+}
+.results {
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+}
+.table-scroll {
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 13px;
+}
+thead {
+  background: var(--color-surface-secondary);
+}
+th,
+td {
+  padding: 15px 16px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--color-border);
+}
+thead th {
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+tbody th {
+  font-weight: 400;
+  min-width: 220px;
+  max-width: 360px;
+}
+tbody tr:last-child th,
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+tbody tr[data-selected] {
+  background: var(--color-background-primary-soft);
+}
+tbody tr:hover {
+  background: var(--color-surface-secondary);
+}
+.record-link {
+  color: var(--color-text);
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--color-border);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.record-link:hover {
+  text-decoration-color: currentColor;
+}
+.record-link:focus-visible {
+  outline: 2px solid var(--color-text);
+  outline-offset: 3px;
+}
+.row-title {
+  font-weight: 500;
+  text-decoration: none;
+}
+.row-subtitle {
+  display: block;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+.repository-cell {
+  min-width: 140px;
+  max-width: 240px;
+  overflow-wrap: anywhere;
+}
+.numeric {
+  font-variant-numeric: tabular-nums;
+}
+time {
+  font-size: 12px;
+}
+.pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-top: 1px solid var(--color-border);
+  padding: 14px 16px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.inline-values {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.empty-state {
+  text-align: center;
+  padding: 64px 28px;
+}
+.empty-state p {
+  max-width: 470px;
+  margin: 12px auto 0;
+  color: var(--color-text-secondary);
+}
+.state-note {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin-top: 20px;
+}
+.inspector {
+  min-width: 0;
+  border-left: 1px solid var(--color-border);
+  padding-left: 24px;
+  overflow-wrap: anywhere;
+}
+.inspector-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.detail-section {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.detail-section:last-child {
+  border-bottom: 0;
+}
+.detail-section p {
+  font-size: 13px;
+}
+.detail-section dl {
+  margin-top: 12px;
+}
+.detail-field {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 12px;
+  margin: 10px 0;
+  font-size: 12px;
+}
+.detail-field dt {
+  color: var(--color-text-secondary);
+}
+.detail-field dd {
+  margin: 0;
+}
+code,
+pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.record-links {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  display: grid;
+  gap: 10px;
+  font-size: 12px;
+}
+.record-links li {
+  overflow-wrap: anywhere;
+}
+.error-message {
+  background: var(--color-background-danger-soft);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  margin: 12px 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.error-message strong {
+  color: var(--color-text-danger);
+}
+.error-message p {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  font-size: 13px;
+}
+.finding-copy {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-top: 14px;
+}
+@media (max-width: 1200px) {
+  .content-layout.with-inspector {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .inspector {
+    border-left: 0;
+    padding: 0;
+    border-top: 1px solid var(--color-border);
+  }
+}
+@media (max-width: 800px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sidebar {
+    padding: 12px 16px;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .sidebar nav {
+    display: flex;
+    flex-wrap: wrap;
+  }
+  .sidebar nav > * {
+    width: auto;
+    flex: 1;
+  }
+  .eyebrow {
+    display: none;
+  }
+  main {
+    padding: 24px 16px;
+  }
+  .app-header {
+    padding: 16px;
+  }
+}
+@media (max-width: 480px) {
+  .brand {
+    gap: 8px;
+  }
+  .brand > span:last-child,
+  .header-divider {
+    display: none;
+  }
+  .filters > label {
+    flex: 1;
+    min-width: 125px;
+    max-width: 100%;
+  }
+  .filters .search-field {
+    flex-basis: 100%;
+  }
+  .sidebar nav > * {
+    flex-basis: 40%;
+  }
+  .detail-field {
+    grid-template-columns: 96px minmax(0, 1fr);
+  }
+}

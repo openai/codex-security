@@ -3937,7 +3937,12 @@ describe("GitHub release workflow safeguards", () => {
     ).toContain("github.event.changes.base == null");
 
     const fullCiCondition = "needs.validate-title.outputs.ci-mode == 'full'";
-    for (const job of ["test", "windows-test", "windows-verify"]) {
+    for (const job of [
+      "test",
+      "plugin-source",
+      "windows-test",
+      "windows-verify",
+    ]) {
       expect(workflow.jobs[job]?.if).toBe(fullCiCondition);
     }
     expect(workflow.jobs["markdown-checks"]).toBeUndefined();
@@ -3947,6 +3952,7 @@ describe("GitHub release workflow safeguards", () => {
       "Set up Node.js",
       "Install dependencies",
       "Check Markdown formatting",
+      "Check plugin source compatibility",
     ]) {
       expect(validationSteps.find(({ name }) => name === stepName)?.if).toBe(
         "steps.scope.outputs.ci-mode == 'markdown'",
@@ -3967,7 +3973,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.test.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
       "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
@@ -3981,6 +3987,7 @@ describe("GitHub release workflow safeguards", () => {
       ["unknown", "success", "skipped", true],
     ] as const) {
       const values = {
+        "needs.plugin-source.result": upstream,
         "needs.test.result": upstream,
         "needs.validate-title.outputs.ci-mode": ciMode,
         "needs.validate-title.result": validation,
@@ -4037,6 +4044,13 @@ describe("GitHub release workflow safeguards", () => {
       ["README.md", "docs/guide.md"],
       "markdown",
     ],
+    [
+      "generated-plugin Markdown-only PR",
+      "pull_request",
+      false,
+      ["sdk/typescript/_bundled_plugin/skills/example/SKILL.md"],
+      "full",
+    ],
     ["base retarget", "pull_request", true, ["README.md"], "full"],
     ["mixed PR", "pull_request", false, ["README.md", "src/index.ts"], "full"],
     [
@@ -4072,6 +4086,57 @@ describe("GitHub release workflow safeguards", () => {
         });
         expect(result.status).toBe(0);
         expect(readFileSync(output, "utf8")).toBe(`ci-mode=${ciMode}\n`);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects oversized plugin Markdown in reduced CI",
+    () => {
+      const workspace = mkdtempSync(
+        join(tmpdir(), "release-ci-plugin-source-"),
+      );
+      const pluginRoot = join(workspace, "plugins", "codex-security");
+      const scripts = join(workspace, ".github", "scripts");
+      mkdirSync(scripts, { recursive: true });
+      mkdirSync(pluginRoot, { recursive: true });
+      writeFileSync(
+        join(scripts, "check_plugin_source_compatibility.py"),
+        readFileSync(
+          new URL(
+            "../../../.github/scripts/check_plugin_source_compatibility.py",
+            import.meta.url,
+          ),
+        ),
+      );
+      writeFileSync(join(pluginRoot, "README.md"), "x".repeat(150_001));
+      spawnSync("git", ["init", "--quiet", workspace]);
+      spawnSync("git", [
+        "-C",
+        workspace,
+        "add",
+        "--",
+        ".github/scripts/check_plugin_source_compatibility.py",
+        "plugins/codex-security/README.md",
+      ]);
+      try {
+        const result = spawnSync(
+          bash,
+          [
+            "-c",
+            workflowStepShell(
+              nodeCiWorkflow,
+              "Check plugin source compatibility",
+            ),
+          ],
+          { cwd: workspace, encoding: "utf8" },
+        );
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          "README.md: file is 150001 bytes; maximum is 150000 bytes",
+        );
       } finally {
         rmSync(workspace, { recursive: true, force: true });
       }

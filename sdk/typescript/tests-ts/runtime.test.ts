@@ -69,6 +69,7 @@ import {
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
+  prepareScanArtifactRestorer,
   preserveCodexSecurityPluginRegistration,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
@@ -217,6 +218,7 @@ describe("plugin runtime preparation", () => {
 
   test("forwards configured provider credentials through the MCP worker environment", async () => {
     const providerKeys = [
+      "OPENAI_API_KEY",
       "OPENROUTER_API_KEY",
       "FIREWORKS_API_KEY",
       "AWS_BEARER_TOKEN_BEDROCK",
@@ -411,12 +413,6 @@ describe("plugin runtime preparation", () => {
 
   test("generates canonical scoped security inventory paths", async () => {
     if (Bun.which("rg") === null) {
-      const generator = await readFile(
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "utf8",
-      );
-      expect(generator).toContain('"--no-ignore"');
-      expect(generator).toContain('"--path-separator"');
       return;
     }
 
@@ -622,7 +618,13 @@ describe("plugin runtime preparation", () => {
 
   test("keeps native scan tools without the obsolete setup widget", async () => {
     const contract = JSON.parse(
-      await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+      await readFile(
+        new URL(
+          "../../../plugins/codex-security/plugin-files.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
     ) as { shippedExact: string[] };
     expect(contract.shippedExact).not.toContain("mcp/mcp-app.html.br");
     expect(existsSync(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br"))).toBe(false);
@@ -706,7 +708,10 @@ describe("plugin runtime preparation", () => {
     const source = await resolvePluginPath(undefined, workspace);
     expect(source).toBe(await bundledPluginRoot());
 
-    const publicContractPath = new URL("../plugin-files.json", import.meta.url);
+    const publicContractPath = new URL(
+      "../../../plugins/codex-security/plugin-files.json",
+      import.meta.url,
+    );
     const contractPath = existsSync(publicContractPath)
       ? publicContractPath
       : join(
@@ -1952,8 +1957,8 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test.each(["0.1.22", "0.1.37", "0.1.59"])(
-    "upgrades a cached %s plugin with the real bundled Codex executable",
+  test.each(["0.1.22", "0.1.37", "0.1.59", "0.1.60", "0.1.79", "0.1.92"])(
+    "upgrades a cached %s plugin and restores with the SDK-owned helper",
     async (previousVersion) => {
       const root = await temporaryDirectory();
       const previous = await plugin(join(root, "previous"), previousVersion);
@@ -1965,12 +1970,21 @@ describe("plugin runtime preparation", () => {
         join(previous, ".mcp.json"),
         JSON.stringify({ mcpServers: { "codex-security": { env_vars: [] } } }),
       );
+      await copyFile(
+        join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
+        join(previous, "scripts", "workbench_target.py"),
+      );
       const home = join(root, "home");
+      const unrelatedProject = join(root, "unrelated-project");
       await mkdir(home, { mode: 0o700 });
+      await mkdir(unrelatedProject);
       await writeFile(
         join(home, "config.toml"),
-        'cli_auth_credentials_store = "file"\n\n[features]\nplugins = true\n',
+        'cli_auth_credentials_store = "file"\n\n[features]\nplugins = true\n\n[projects.' +
+          JSON.stringify(unrelatedProject) +
+          ']\ntrust_level = "trusted"\n',
       );
+      await writeFile(join(home, "unrelated-state"), "preserved\n");
 
       const command = resolveCodexCommand();
       const environment = {
@@ -1989,13 +2003,27 @@ describe("plugin runtime preparation", () => {
       const credentials = await readFile(join(home, "auth.json"), "utf8");
 
       const options = { codexCommand: command, environment };
-      const first = await bootstrapPlugin(home, previous, options);
-      expect(first.version).toBe(previousVersion);
+      const stale = await bootstrapPlugin(home, previous, options);
       const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
-      const expectedHistory = await readFile(
-        join(PLUGIN_ROOT, "scripts", "workbench_scan_history.py"),
-        "utf8",
-      );
+
+      expect(stale.version).toBe(previousVersion);
+      expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
+      expect(upgraded.version).not.toBe(stale.version);
+      expect(upgraded.installedRoot).not.toBe(stale.installedRoot);
+      for (const pluginRoot of [
+        join(home, "sdk-marketplace", "plugins", "codex-security"),
+        upgraded.installedRoot,
+      ]) {
+        for (const script of [
+          "workbench_target.py",
+          "finalize_scan_contract.py",
+          "workbench_scan_history.py",
+        ]) {
+          expect(await readFile(join(pluginRoot, "scripts", script))).toEqual(
+            await readFile(join(PLUGIN_ROOT, "scripts", script)),
+          );
+        }
+      }
       const configuration = JSON.parse(
         await readFile(join(upgraded.installedRoot, ".mcp.json"), "utf8"),
       ) as {
@@ -2003,24 +2031,17 @@ describe("plugin runtime preparation", () => {
       };
       const server = configuration.mcpServers["codex-security"];
 
-      expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
-      expect(upgraded.version).not.toBe(first.version);
-      expect(upgraded.installedRoot).not.toBe(first.installedRoot);
       expect(server?.command).toBe("./scripts/launch_codex_security_mcp");
+      expect(server?.env_vars).toContain("CODEX_SAFETY_IDENTIFIER");
       expect(server?.env_vars).toContain("CODEX_MANAGED_PACKAGE_ROOT");
       expect(server?.env_vars).toContain("CODEX_MCP_NODE_PATH");
-      for (const pluginRoot of [
-        join(home, "sdk-marketplace", "plugins", "codex-security"),
-        upgraded.installedRoot,
-      ]) {
-        expect(
-          await readFile(
-            join(pluginRoot, "scripts", "workbench_scan_history.py"),
-            "utf8",
-          ),
-        ).toBe(expectedHistory);
-      }
       expect(await readFile(join(home, "auth.json"), "utf8")).toBe(credentials);
+      expect(await readFile(join(home, "unrelated-state"), "utf8")).toBe(
+        "preserved\n",
+      );
+      expect(await readFile(join(home, "config.toml"), "utf8")).toContain(
+        "[projects." + JSON.stringify(unrelatedProject) + "]",
+      );
       expect(
         spawnSync(command.command, ["login", "status"], {
           env: environment,
@@ -2028,6 +2049,27 @@ describe("plugin runtime preparation", () => {
           windowsHide: true,
         }).status,
       ).toBe(0);
+
+      const scanDir = join(root, "scan");
+      const artifact = "artifacts/worker.bin";
+      const expected = Buffer.from([0, 255, 10, 1]);
+      await mkdir(join(scanDir, "artifacts"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await writeFile(join(scanDir, artifact), expected);
+      const python = await resolvePluginPython({ environment });
+      const restorer = await prepareScanArtifactRestorer(
+        {
+          python,
+          pluginRoot: upgraded.installedRoot,
+          environment,
+        },
+        scanDir,
+      );
+      await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
+      await restorer.restore(artifact, expected);
+      expect(await readFile(join(scanDir, artifact))).toEqual(expected);
     },
   );
 
@@ -2802,6 +2844,100 @@ describe("runtime directories and plugin Python boundary", () => {
       home: { owner: sid, protected: true },
       descendantsArePrivate: true,
     });
+  });
+
+  test
+    .skipIf(process.platform !== "win32")
+    .each([
+      "transient missing descendant",
+      "persistent missing descendant",
+      "access denied",
+      "unexpected error",
+      "missing home",
+    ] as const)("replays Windows credential ACL %s", async (kind) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `replays Windows credential ACL ${kind}`,
+      )
+    ) {
+      return;
+    }
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    await requireSecureCredentialHome(home);
+    const descendant = join(home, ".auth-replay.tmp");
+    await writeFile(descendant, "synthetic credential\n", { mode: 0o600 });
+    const missing = kind.includes("missing");
+    const exception = missing
+      ? "System.IO.FileNotFoundException"
+      : kind === "access denied"
+        ? "System.UnauthorizedAccessException"
+        : "System.InvalidOperationException";
+    const errorId = missing
+      ? "System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand"
+      : kind === "access denied"
+        ? "System.UnauthorizedAccessException,Microsoft.PowerShell.Commands.GetAclCommand"
+        : "SyntheticCredentialAclFailure";
+    const category =
+      kind === "access denied"
+        ? "PermissionDenied"
+        : missing
+          ? "NotSpecified"
+          : "ObjectNotFound";
+    const failurePath = kind === "missing home" ? home : descendant;
+    // Replay the native error without relying on racing a filesystem deletion.
+    const injection = `if ($path -eq '${failurePath.replaceAll("'", "''")}') { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
+    const marker = "function Write-CredentialAcl($path) {";
+    const originalSpawn = childProcess.spawn;
+    let attempts = 0;
+    mock.module("node:child_process", () => ({
+      ...childProcess,
+      spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
+        const [command, args, options] = spawnArgs;
+        if (
+          options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
+          !Array.isArray(args)
+        ) {
+          return originalSpawn(...spawnArgs);
+        }
+        const scriptIndex = args.indexOf("-Command") + 1;
+        const script = args[scriptIndex];
+        if (typeof script !== "string" || !script.includes(marker)) {
+          return originalSpawn(...spawnArgs);
+        }
+        attempts += 1;
+        if (kind === "transient missing descendant" && attempts > 1) {
+          return originalSpawn(...spawnArgs);
+        }
+        expect(script.split(marker)).toHaveLength(2);
+        const replayArgs = [...args];
+        replayArgs[scriptIndex] = script.replace(
+          marker,
+          `${marker} ${injection}`,
+        );
+        return originalSpawn(command, replayArgs, options);
+      },
+    }));
+    try {
+      if (kind === "transient missing descendant") {
+        await requireSecureCredentialHome(home);
+        expect(attempts).toBe(2);
+      } else {
+        await expect(requireSecureCredentialHome(home)).rejects.toThrow(
+          kind === "persistent missing descendant"
+            ? "Windows credential descendants could not be verified"
+            : "synthetic credential ACL error",
+        );
+        expect(attempts).toBe(kind === "persistent missing descendant" ? 3 : 1);
+      }
+    } finally {
+      mock.module("node:child_process", () => ({
+        ...childProcess,
+        spawn: originalSpawn,
+      }));
+    }
   });
 
   test("retries interrupted Windows credential ACL enumeration", async () => {

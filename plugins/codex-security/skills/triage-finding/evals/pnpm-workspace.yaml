@@ -1,0 +1,26 @@
+packages:
+  - .
+minimumReleaseAge: 10080
+trustLockfile: true
+
+overrides:
+  "@opencode-ai/sdk": 1.14.33
+
+onlyBuiltDependencies:
+  - better-sqlite3
+
+ignoredBuiltDependencies:
+  - "@playwright/browser-chromium"
+  - "@swc/core"
+  - esbuild
+  - onnxruntime-node
+  - protobufjs
+  - sharp
+allowBuilds:
+  '@playwright/browser-chromium': false
+  '@swc/core': false
+  better-sqlite3: true
+  esbuild: false
+  onnxruntime-node: false
+  protobufjs: false
+  sharp: false

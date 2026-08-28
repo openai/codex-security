@@ -1,0 +1,559 @@
+- description: "calibration vulnerable: oss-mantisbt-ghsa-73vx-49mv-v8w5"
+  metadata:
+    case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5-vulnerable
+    suite: calibration-oss
+    calibration_case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5
+    calibration_variant: vulnerable
+    repo: "mantisbt/mantisbt"
+    expected_binary_label: positive
+  vars:
+    case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5-vulnerable
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-mantisbt-ghsa-73vx-49mv-v8w5/vulnerable
+    source_type_under_test: cve
+    expected_ids: GHSA-73vx-49mv-v8w5-000-vulnerable
+    expected_source_types: cve
+    expected_verdicts: confirmed
+    expected_binary_label: positive
+    expected_evidence_terms: "core/classes/IssueTagTimelineEvent.class.php"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-73vx-49mv-v8w5-000-vulnerable
+         title: GHSA-73vx-49mv-v8w5 / CVE-2026-33548
+         advisory ids: GHSA-73vx-49mv-v8w5, CVE-2026-33548
+         weakness: xss
+         severity: high
+         affected language: PHP
+         anchor locations: core/classes/IssueTagTimelineEvent.class.php:61
+         fix evidence: https://github.com/mantisbt/mantisbt/commit/f32787c14d4518476fe7f05f992dbfe6eaccd815
+         repository state: checked out at 80990f43153167c73f11eb4b2bc7108d0c3d6b46. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration fixed: oss-mantisbt-ghsa-73vx-49mv-v8w5"
+  metadata:
+    case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5-fixed
+    suite: calibration-oss
+    calibration_case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5
+    calibration_variant: fixed
+    repo: "mantisbt/mantisbt"
+    expected_binary_label: negative
+  vars:
+    case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5-fixed
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-mantisbt-ghsa-73vx-49mv-v8w5/fixed
+    source_type_under_test: cve
+    expected_ids: GHSA-73vx-49mv-v8w5-000-fixed
+    expected_source_types: cve
+    expected_verdicts: not_actionable
+    expected_binary_label: negative
+    expected_evidence_terms: "core/classes/IssueTagTimelineEvent.class.php, f32787c14d4518476fe7f05f992dbfe6eaccd815"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-73vx-49mv-v8w5-000-fixed
+         title: GHSA-73vx-49mv-v8w5 / CVE-2026-33548
+         advisory ids: GHSA-73vx-49mv-v8w5, CVE-2026-33548
+         weakness: xss
+         severity: high
+         affected language: PHP
+         anchor locations: core/classes/IssueTagTimelineEvent.class.php:61
+         fix evidence: https://github.com/mantisbt/mantisbt/commit/f32787c14d4518476fe7f05f992dbfe6eaccd815
+         repository state: checked out at f32787c14d4518476fe7f05f992dbfe6eaccd815. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration vulnerable: oss-imagemagick-ghsa-qpgx-jfcq-r59f"
+  metadata:
+    case_id: oss-imagemagick-ghsa-qpgx-jfcq-r59f-vulnerable
+    suite: calibration-oss
+    calibration_case_id: oss-imagemagick-ghsa-qpgx-jfcq-r59f
+    calibration_variant: vulnerable
+    repo: "ImageMagick/ImageMagick"
+    expected_binary_label: positive
+  vars:
+    case_id: oss-imagemagick-ghsa-qpgx-jfcq-r59f-vulnerable
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-imagemagick-ghsa-qpgx-jfcq-r59f/vulnerable
+    source_type_under_test: cve
+    expected_ids: GHSA-qpgx-jfcq-r59f-000-vulnerable
+    expected_source_types: cve
+    expected_verdicts: confirmed
+    expected_binary_label: positive
+    expected_evidence_terms: "MagickCore/visual-effects.c"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-qpgx-jfcq-r59f-000-vulnerable
+         title: GHSA-qpgx-jfcq-r59f / CVE-2026-27798
+         advisory ids: GHSA-qpgx-jfcq-r59f, CVE-2026-27798
+         weakness: memory-corruption
+         severity: medium
+         affected language: C/C++
+         anchor locations: MagickCore/visual-effects.c:3566
+         fix evidence: https://github.com/ImageMagick/ImageMagick/commit/0377e60b3c0d766bd7271221c95d9ee54f6a3738
+         repository state: checked out at 83847c348aafccbbea89ec8ed44382598aea3f98. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration fixed: oss-imagemagick-ghsa-qpgx-jfcq-r59f"
+  metadata:
+    case_id: oss-imagemagick-ghsa-qpgx-jfcq-r59f-fixed
+    suite: calibration-oss
+    calibration_case_id: oss-imagemagick-ghsa-qpgx-jfcq-r59f
+    calibration_variant: fixed
+    repo: "ImageMagick/ImageMagick"
+    expected_binary_label: negative
+  vars:
+    case_id: oss-imagemagick-ghsa-qpgx-jfcq-r59f-fixed
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-imagemagick-ghsa-qpgx-jfcq-r59f/fixed
+    source_type_under_test: cve
+    expected_ids: GHSA-qpgx-jfcq-r59f-000-fixed
+    expected_source_types: cve
+    expected_verdicts: not_actionable
+    expected_binary_label: negative
+    expected_evidence_terms: "MagickCore/visual-effects.c, 0377e60b3c0d766bd7271221c95d9ee54f6a3738"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-qpgx-jfcq-r59f-000-fixed
+         title: GHSA-qpgx-jfcq-r59f / CVE-2026-27798
+         advisory ids: GHSA-qpgx-jfcq-r59f, CVE-2026-27798
+         weakness: memory-corruption
+         severity: medium
+         affected language: C/C++
+         anchor locations: MagickCore/visual-effects.c:3566
+         fix evidence: https://github.com/ImageMagick/ImageMagick/commit/0377e60b3c0d766bd7271221c95d9ee54f6a3738
+         repository state: checked out at 0377e60b3c0d766bd7271221c95d9ee54f6a3738. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration vulnerable: oss-scitokens-ghsa-rh5m-2482-966c"
+  metadata:
+    case_id: oss-scitokens-ghsa-rh5m-2482-966c-vulnerable
+    suite: calibration-oss
+    calibration_case_id: oss-scitokens-ghsa-rh5m-2482-966c
+    calibration_variant: vulnerable
+    repo: "scitokens/scitokens"
+    expected_binary_label: positive
+  vars:
+    case_id: oss-scitokens-ghsa-rh5m-2482-966c-vulnerable
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-scitokens-ghsa-rh5m-2482-966c/vulnerable
+    source_type_under_test: cve
+    expected_ids: GHSA-rh5m-2482-966c-000-vulnerable
+    expected_source_types: cve
+    expected_verdicts: confirmed
+    expected_binary_label: positive
+    expected_evidence_terms: "src/scitokens/utils/keycache.py"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-rh5m-2482-966c-000-vulnerable
+         title: GHSA-rh5m-2482-966c / CVE-2026-32714
+         advisory ids: GHSA-rh5m-2482-966c, CVE-2026-32714
+         weakness: sql-injection
+         severity: critical
+         affected language: Python
+         anchor locations: src/scitokens/utils/keycache.py:80
+         fix evidence: https://github.com/scitokens/scitokens/commit/3dba108853f2f4a6c0f2325c03779bf083c41cf2
+         repository state: checked out at 66b075c35da18f8364276553513a53c596b4b8e3. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration fixed: oss-scitokens-ghsa-rh5m-2482-966c"
+  metadata:
+    case_id: oss-scitokens-ghsa-rh5m-2482-966c-fixed
+    suite: calibration-oss
+    calibration_case_id: oss-scitokens-ghsa-rh5m-2482-966c
+    calibration_variant: fixed
+    repo: "scitokens/scitokens"
+    expected_binary_label: negative
+  vars:
+    case_id: oss-scitokens-ghsa-rh5m-2482-966c-fixed
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-scitokens-ghsa-rh5m-2482-966c/fixed
+    source_type_under_test: cve
+    expected_ids: GHSA-rh5m-2482-966c-000-fixed
+    expected_source_types: cve
+    expected_verdicts: not_actionable
+    expected_binary_label: negative
+    expected_evidence_terms: "src/scitokens/utils/keycache.py, 3dba108853f2f4a6c0f2325c03779bf083c41cf2"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-rh5m-2482-966c-000-fixed
+         title: GHSA-rh5m-2482-966c / CVE-2026-32714
+         advisory ids: GHSA-rh5m-2482-966c, CVE-2026-32714
+         weakness: sql-injection
+         severity: critical
+         affected language: Python
+         anchor locations: src/scitokens/utils/keycache.py:80
+         fix evidence: https://github.com/scitokens/scitokens/commit/3dba108853f2f4a6c0f2325c03779bf083c41cf2
+         repository state: checked out at 3dba108853f2f4a6c0f2325c03779bf083c41cf2. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration vulnerable: oss-emissary-ghsa-3p24-9x7v-7789"
+  metadata:
+    case_id: oss-emissary-ghsa-3p24-9x7v-7789-vulnerable
+    suite: calibration-oss
+    calibration_case_id: oss-emissary-ghsa-3p24-9x7v-7789
+    calibration_variant: vulnerable
+    repo: "NationalSecurityAgency/emissary"
+    expected_binary_label: positive
+  vars:
+    case_id: oss-emissary-ghsa-3p24-9x7v-7789-vulnerable
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-emissary-ghsa-3p24-9x7v-7789/vulnerable
+    source_type_under_test: cve
+    expected_ids: GHSA-3p24-9x7v-7789-000-vulnerable
+    expected_source_types: cve
+    expected_verdicts: confirmed
+    expected_binary_label: positive
+    expected_evidence_terms: "src/main/java/emissary/util/shell/Executrix.java"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-3p24-9x7v-7789-000-vulnerable
+         title: GHSA-3p24-9x7v-7789 / CVE-2026-35582
+         advisory ids: GHSA-3p24-9x7v-7789, CVE-2026-35582
+         weakness: command-injection
+         severity: high
+         affected language: Java
+         anchor locations: src/main/java/emissary/util/shell/Executrix.java:77
+         fix evidence: https://github.com/NationalSecurityAgency/emissary/commit/1faf33f2494c0128f250d7d2e8f2da99bbd32ae8
+         repository state: checked out at 082b263a19532454b24dfbed1605311854ea778f. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration fixed: oss-emissary-ghsa-3p24-9x7v-7789"
+  metadata:
+    case_id: oss-emissary-ghsa-3p24-9x7v-7789-fixed
+    suite: calibration-oss
+    calibration_case_id: oss-emissary-ghsa-3p24-9x7v-7789
+    calibration_variant: fixed
+    repo: "NationalSecurityAgency/emissary"
+    expected_binary_label: negative
+  vars:
+    case_id: oss-emissary-ghsa-3p24-9x7v-7789-fixed
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-emissary-ghsa-3p24-9x7v-7789/fixed
+    source_type_under_test: cve
+    expected_ids: GHSA-3p24-9x7v-7789-000-fixed
+    expected_source_types: cve
+    expected_verdicts: not_actionable
+    expected_binary_label: negative
+    expected_evidence_terms: "src/main/java/emissary/util/shell/Executrix.java, 1faf33f2494c0128f250d7d2e8f2da99bbd32ae8"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-3p24-9x7v-7789-000-fixed
+         title: GHSA-3p24-9x7v-7789 / CVE-2026-35582
+         advisory ids: GHSA-3p24-9x7v-7789, CVE-2026-35582
+         weakness: command-injection
+         severity: high
+         affected language: Java
+         anchor locations: src/main/java/emissary/util/shell/Executrix.java:77
+         fix evidence: https://github.com/NationalSecurityAgency/emissary/commit/1faf33f2494c0128f250d7d2e8f2da99bbd32ae8
+         repository state: checked out at 1faf33f2494c0128f250d7d2e8f2da99bbd32ae8. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration vulnerable: oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5"
+  metadata:
+    case_id: oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5-vulnerable
+    suite: calibration-oss
+    calibration_case_id: oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5
+    calibration_variant: vulnerable
+    repo: "free5gc/pcf"
+    expected_binary_label: positive
+  vars:
+    case_id: oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5-vulnerable
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5/vulnerable
+    source_type_under_test: cve
+    expected_ids: GHSA-6RGM-GR97-X3J5-vulnerable
+    expected_source_types: cve
+    expected_verdicts: confirmed
+    expected_binary_label: positive
+    expected_evidence_terms: "internal/sbi/server.go"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-6RGM-GR97-X3J5-vulnerable
+         title: GHSA-6RGM-GR97-X3J5 / CVE-2026-42083
+         advisory ids: GHSA-6RGM-GR97-X3J5, CVE-2026-42083
+         weakness: authz
+         severity: high
+         affected language: Go
+         anchor locations: internal/sbi/server.go:72
+         fix evidence: https://github.com/free5gc/pcf/commit/8c4d457cdf58bb239ee30e88c56b370b22073964
+         repository state: checked out at 508d70b8527a6c8c923179dad450ea01e16b6aeb. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration fixed: oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5"
+  metadata:
+    case_id: oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5-fixed
+    suite: calibration-oss
+    calibration_case_id: oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5
+    calibration_variant: fixed
+    repo: "free5gc/pcf"
+    expected_binary_label: negative
+  vars:
+    case_id: oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5-fixed
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5/fixed
+    source_type_under_test: cve
+    expected_ids: GHSA-6RGM-GR97-X3J5-fixed
+    expected_source_types: cve
+    expected_verdicts: not_actionable
+    expected_binary_label: negative
+    expected_evidence_terms: "internal/sbi/server.go, 8c4d457cdf58bb239ee30e88c56b370b22073964"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-6RGM-GR97-X3J5-fixed
+         title: GHSA-6RGM-GR97-X3J5 / CVE-2026-42083
+         advisory ids: GHSA-6RGM-GR97-X3J5, CVE-2026-42083
+         weakness: authz
+         severity: high
+         affected language: Go
+         anchor locations: internal/sbi/server.go:72
+         fix evidence: https://github.com/free5gc/pcf/commit/8c4d457cdf58bb239ee30e88c56b370b22073964
+         repository state: checked out at 8c4d457cdf58bb239ee30e88c56b370b22073964. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration vulnerable: oss-actualbudget-ghsa-27vg-33gh-4hwg"
+  metadata:
+    case_id: oss-actualbudget-ghsa-27vg-33gh-4hwg-vulnerable
+    suite: calibration-oss
+    calibration_case_id: oss-actualbudget-ghsa-27vg-33gh-4hwg
+    calibration_variant: vulnerable
+    repo: "actualbudget/actual"
+    expected_binary_label: positive
+  vars:
+    case_id: oss-actualbudget-ghsa-27vg-33gh-4hwg-vulnerable
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-actualbudget-ghsa-27vg-33gh-4hwg/vulnerable
+    source_type_under_test: cve
+    expected_ids: GHSA-27vg-33gh-4hwg-000-vulnerable
+    expected_source_types: cve
+    expected_verdicts: confirmed
+    expected_binary_label: positive
+    expected_evidence_terms: "packages/sync-server/src/app-sync.ts, packages/sync-server/src/app-sync.test.ts"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-27vg-33gh-4hwg-000-vulnerable
+         title: GHSA-27vg-33gh-4hwg / CVE-2026-3089
+         advisory ids: GHSA-27vg-33gh-4hwg, CVE-2026-3089
+         weakness: path-traversal
+         severity: medium
+         affected language: TypeScript
+         anchor locations: packages/sync-server/src/app-sync.ts:49, packages/sync-server/src/app-sync.test.ts:366
+         fix evidence: https://github.com/actualbudget/actual/commit/18072e1d8b5281db43ded8b21433ee177bae9dfa
+         repository state: checked out at a1e0b3f45d36232a0f4319a60cf264912edac48f. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration fixed: oss-actualbudget-ghsa-27vg-33gh-4hwg"
+  metadata:
+    case_id: oss-actualbudget-ghsa-27vg-33gh-4hwg-fixed
+    suite: calibration-oss
+    calibration_case_id: oss-actualbudget-ghsa-27vg-33gh-4hwg
+    calibration_variant: fixed
+    repo: "actualbudget/actual"
+    expected_binary_label: negative
+  vars:
+    case_id: oss-actualbudget-ghsa-27vg-33gh-4hwg-fixed
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-actualbudget-ghsa-27vg-33gh-4hwg/fixed
+    source_type_under_test: cve
+    expected_ids: GHSA-27vg-33gh-4hwg-000-fixed
+    expected_source_types: cve
+    expected_verdicts: not_actionable
+    expected_binary_label: negative
+    expected_evidence_terms: "packages/sync-server/src/app-sync.ts, packages/sync-server/src/app-sync.test.ts, 18072e1d8b5281db43ded8b21433ee177bae9dfa"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-27vg-33gh-4hwg-000-fixed
+         title: GHSA-27vg-33gh-4hwg / CVE-2026-3089
+         advisory ids: GHSA-27vg-33gh-4hwg, CVE-2026-3089
+         weakness: path-traversal
+         severity: medium
+         affected language: TypeScript
+         anchor locations: packages/sync-server/src/app-sync.ts:49, packages/sync-server/src/app-sync.test.ts:366
+         fix evidence: https://github.com/actualbudget/actual/commit/18072e1d8b5281db43ded8b21433ee177bae9dfa
+         repository state: checked out at 18072e1d8b5281db43ded8b21433ee177bae9dfa. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration vulnerable: oss-dompurify-ghsa-v8jm-5vwx-cfxm"
+  metadata:
+    case_id: oss-dompurify-ghsa-v8jm-5vwx-cfxm-vulnerable
+    suite: calibration-oss
+    calibration_case_id: oss-dompurify-ghsa-v8jm-5vwx-cfxm
+    calibration_variant: vulnerable
+    repo: "cure53/DOMPurify"
+    expected_binary_label: positive
+  vars:
+    case_id: oss-dompurify-ghsa-v8jm-5vwx-cfxm-vulnerable
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-dompurify-ghsa-v8jm-5vwx-cfxm/vulnerable
+    source_type_under_test: cve
+    expected_ids: GHSA-v8jm-5vwx-cfxm-gap-fill-000-vulnerable
+    expected_source_types: cve
+    expected_verdicts: confirmed
+    expected_binary_label: positive
+    expected_evidence_terms: "src/purify.ts, dist/purify.js"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-v8jm-5vwx-cfxm-gap-fill-000-vulnerable
+         title: GHSA-v8jm-5vwx-cfxm / CVE-2025-15599
+         advisory ids: GHSA-v8jm-5vwx-cfxm, CVE-2025-15599
+         weakness: xss
+         severity: moderate
+         affected language: JavaScript
+         anchor locations: src/purify.ts:1385, dist/purify.js:1130
+         fix evidence: https://github.com/cure53/DOMPurify/commit/c861f5a83fb8d90800f1680f855fee551161ac2b
+         repository state: checked out at c361baa18dbdcb3344a41110f4c48ad85bf48f80. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration fixed: oss-dompurify-ghsa-v8jm-5vwx-cfxm"
+  metadata:
+    case_id: oss-dompurify-ghsa-v8jm-5vwx-cfxm-fixed
+    suite: calibration-oss
+    calibration_case_id: oss-dompurify-ghsa-v8jm-5vwx-cfxm
+    calibration_variant: fixed
+    repo: "cure53/DOMPurify"
+    expected_binary_label: negative
+  vars:
+    case_id: oss-dompurify-ghsa-v8jm-5vwx-cfxm-fixed
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-dompurify-ghsa-v8jm-5vwx-cfxm/fixed
+    source_type_under_test: cve
+    expected_ids: GHSA-v8jm-5vwx-cfxm-gap-fill-000-fixed
+    expected_source_types: cve
+    expected_verdicts: not_actionable
+    expected_binary_label: negative
+    expected_evidence_terms: "src/purify.ts, dist/purify.js, c861f5a83fb8d90800f1680f855fee551161ac2b"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-v8jm-5vwx-cfxm-gap-fill-000-fixed
+         title: GHSA-v8jm-5vwx-cfxm / CVE-2025-15599
+         advisory ids: GHSA-v8jm-5vwx-cfxm, CVE-2025-15599
+         weakness: xss
+         severity: moderate
+         affected language: JavaScript
+         anchor locations: src/purify.ts:1385, dist/purify.js:1130
+         fix evidence: https://github.com/cure53/DOMPurify/commit/c861f5a83fb8d90800f1680f855fee551161ac2b
+         repository state: checked out at c861f5a83fb8d90800f1680f855fee551161ac2b. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration vulnerable: oss-monetr-ghsa-29v9-frvh-c426"
+  metadata:
+    case_id: oss-monetr-ghsa-29v9-frvh-c426-vulnerable
+    suite: calibration-oss
+    calibration_case_id: oss-monetr-ghsa-29v9-frvh-c426
+    calibration_variant: vulnerable
+    repo: "monetr/monetr"
+    expected_binary_label: positive
+  vars:
+    case_id: oss-monetr-ghsa-29v9-frvh-c426-vulnerable
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-monetr-ghsa-29v9-frvh-c426/vulnerable
+    source_type_under_test: cve
+    expected_ids: GHSA-29v9-frvh-c426-000-vulnerable
+    expected_source_types: cve
+    expected_verdicts: confirmed
+    expected_binary_label: positive
+    expected_evidence_terms: "compose/monetr.yaml, server/controller/lunch_flow.go, server/datasources/lunch_flow/lunch_flow_jobs/sync_lunch_flow.go"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-29v9-frvh-c426-000-vulnerable
+         title: GHSA-29v9-frvh-c426 / CVE-2026-41644
+         advisory ids: GHSA-29v9-frvh-c426, CVE-2026-41644
+         weakness: ssrf
+         severity: high
+         affected language: YAML/Go/TypeScript
+         anchor locations: compose/monetr.yaml:34, server/controller/lunch_flow.go:100, server/datasources/lunch_flow/lunch_flow_jobs/sync_lunch_flow.go:213
+         fix evidence: https://github.com/monetr/monetr/commit/c260caa3c573a4a396ec2d264c7641a5d958385b
+         repository state: checked out at 195a0c94cad26105dc1e9ee9d5ed902af41ed46c. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
+
+- description: "calibration fixed: oss-monetr-ghsa-29v9-frvh-c426"
+  metadata:
+    case_id: oss-monetr-ghsa-29v9-frvh-c426-fixed
+    suite: calibration-oss
+    calibration_case_id: oss-monetr-ghsa-29v9-frvh-c426
+    calibration_variant: fixed
+    repo: "monetr/monetr"
+    expected_binary_label: negative
+  vars:
+    case_id: oss-monetr-ghsa-29v9-frvh-c426-fixed
+    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-monetr-ghsa-29v9-frvh-c426/fixed
+    source_type_under_test: cve
+    expected_ids: GHSA-29v9-frvh-c426-000-fixed
+    expected_source_types: cve
+    expected_verdicts: not_actionable
+    expected_binary_label: negative
+    expected_evidence_terms: "compose/monetr.yaml, server/controller/lunch_flow.go, server/datasources/lunch_flow/lunch_flow_jobs/sync_lunch_flow.go, c260caa3c573a4a396ec2d264c7641a5d958385b"
+    finding_input: |-
+      Source type: cve
+      1. input_id: GHSA-29v9-frvh-c426-000-fixed
+         title: GHSA-29v9-frvh-c426 / CVE-2026-41644
+         advisory ids: GHSA-29v9-frvh-c426, CVE-2026-41644
+         weakness: ssrf
+         severity: high
+         affected language: YAML/Go/TypeScript
+         anchor locations: compose/monetr.yaml:34, server/controller/lunch_flow.go:100, server/datasources/lunch_flow/lunch_flow_jobs/sync_lunch_flow.go:213
+         fix evidence: https://github.com/monetr/monetr/commit/c260caa3c573a4a396ec2d264c7641a5d958385b
+         repository state: checked out at c260caa3c573a4a396ec2d264c7641a5d958385b. Triage whether the original finding affects this exact state.
+    eval_instructions: |-
+      This is an automated OSS calibration eval. Do not ask follow-up questions.
+      Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+      Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.
