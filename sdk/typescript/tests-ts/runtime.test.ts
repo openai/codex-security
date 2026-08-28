@@ -218,6 +218,7 @@ describe("plugin runtime preparation", () => {
 
   test("forwards configured provider credentials through the MCP worker environment", async () => {
     const providerKeys = [
+      "OPENAI_API_KEY",
       "OPENROUTER_API_KEY",
       "FIREWORKS_API_KEY",
       "AWS_BEARER_TOKEN_BEDROCK",
