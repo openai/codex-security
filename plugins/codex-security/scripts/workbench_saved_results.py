@@ -279,16 +279,21 @@ def _recovery_source_digests(
             manifest_scan.get("sealedAt") is not None
             or manifest_scan.get("artifacts") is not None
         ):
-            include_parent = "preservedSources" not in manifest_scan
-            if not include_parent:
+            if "preservedSources" in manifest_scan:
                 published_sources = _source_digests(
                     manifest_scan["preservedSources"], "Published scan"
                 )
-                if frozen_sources is not None and frozen_sources != published_sources:
-                    raise ContractError(
-                        "Stopped scan sources changed after terminal publication."
-                    )
-                frozen_sources = published_sources
+                include_parent = not published_sources
+                if published_sources:
+                    if frozen_sources is not None and frozen_sources != published_sources:
+                        raise ContractError(
+                            "Stopped scan sources changed after terminal publication."
+                        )
+                    frozen_sources = published_sources
+                elif frozen_sources is None:
+                    frozen_sources = {}
+            else:
+                include_parent = True
 
     recovery_sources = dict(frozen_sources or {})
     for relative, expected_digest in recovery_sources.items():
@@ -466,14 +471,6 @@ def merge_saved_results(
     if frozen_source_digests is None or allow_frozen_legacy_parent:
         try:
             parent_manifest, parent = _read_saved_parent_result(scan_dir, scan_id)
-            parent_scan = parent_manifest["scan"]
-            if not parent_scan.get("sealedAt"):
-                payload = _encoded(parent)
-                write_scan_local_bytes(
-                    scan_dir,
-                    f"checkpoints/{hashlib.sha256(payload).hexdigest()}.json",
-                    payload,
-                )
         except (ContractError, OSError, ValueError) as exc:
             if not stopped:
                 raise
@@ -481,6 +478,18 @@ def merge_saved_results(
                 warnings.append(f"Could not read the saved parent draft: {exc}")
             parent_manifest = None
             parent = None
+        if parent_manifest is not None and parent is not None:
+            parent_scan = parent_manifest["scan"]
+            if not parent_scan.get("sealedAt") or allow_frozen_legacy_parent:
+                payload = _encoded(parent)
+                parent_digest = hashlib.sha256(payload).hexdigest()
+                parent_checkpoint = f"checkpoints/{parent_digest}.json"
+                write_scan_local_bytes(scan_dir, parent_checkpoint, payload)
+                if frozen_source_digests is not None:
+                    frozen_source_digests = {
+                        **frozen_source_digests,
+                        parent_checkpoint: parent_digest,
+                    }
 
     sources: list[tuple[str, dict[str, Any], str | None]] = []
     parent_preserved_sources: dict[str, str] = {}
