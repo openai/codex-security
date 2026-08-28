@@ -31,6 +31,17 @@ Before the first release, an administrator must prepare each package:
    if required; never commit it or pass it into the build. For the scanner, use
    target `scanner` and image `ghcr.io/openai/codex-security:bootstrap`.
 
+   To bootstrap a missing findings package through GitHub Actions instead, run:
+
+   ```bash
+   gh workflow run container-bootstrap-findings.yml --repo openai/codex-security --ref main
+   ```
+
+   This manual workflow uses `GITHUB_TOKEN`, retains the `container` environment's
+   approval rules, and pushes only `codex-security-findings:bootstrap` for Linux
+   `amd64`. Complete the package settings below before running the release
+   workflow; the bootstrap image is not a consumer release.
+
 2. In each package's settings, link `openai/codex-security`, set visibility to
    **Public**, and grant the repository **Write** under **Manage Actions access**.
    The workflow uses `GITHUB_TOKEN` and refuses missing, private, or unreadable

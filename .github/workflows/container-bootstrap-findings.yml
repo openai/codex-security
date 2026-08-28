@@ -1,0 +1,42 @@
+name: container-bootstrap-findings
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  bootstrap:
+    if: github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: container
+
+    steps:
+      - name: Checkout bootstrap source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish findings bootstrap image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: findings-service
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/openai/codex-security-findings:bootstrap
+          labels: |
+            org.opencontainers.image.source=https://github.com/openai/codex-security
+            org.opencontainers.image.revision=${{ github.sha }}
