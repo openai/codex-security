@@ -487,6 +487,14 @@ def merge_saved_results(
     stopped_parent_seal = bool(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
     )
+    # A successful reducer commit atomically marks its discovery inputs as
+    # merged. Other worker artifacts remain evidence, but cannot expand a
+    # successfully completed parent's canonical finding or coverage sets.
+    merged_discovery_workers = {
+        worker["id"]
+        for worker in workers
+        if worker["kind"] == "discovery" and worker["merge_state"] == "merged"
+    }
 
     def valid_finding(value: Any) -> bool:
         # Use the finalizer's own per-record recovery before a draft can suppress
@@ -567,6 +575,9 @@ def merge_saved_results(
                             )
                             resolved.setdefault(candidate_key, "reported")
     for relative, draft, worker_id in all_sources:
+        may_expand_canonical_result = (
+            stopped or worker_id is None or worker_id in merged_discovery_workers
+        )
         superseded = (
             worker_id is None
             and parent is not None
@@ -585,6 +596,7 @@ def merge_saved_results(
         if (
             (relative != "parent" or not parent_manifest)
             and not superseded
+            and may_expand_canonical_result
             and (
                 draft.get("complete") is False
                 or draft["coverage"].get("completeness") != "complete"
@@ -620,7 +632,8 @@ def merge_saved_results(
             if relative != "parent" and parent and value in parent["findings"]:
                 continue
             if not isinstance(value, dict):
-                warnings.append(f"Retained malformed finding evidence in {relative}.")
+                if may_expand_canonical_result:
+                    warnings.append(f"Retained malformed finding evidence in {relative}.")
                 continue
             source_value = copy.deepcopy(value)
             finding = copy.deepcopy(value)
@@ -655,18 +668,21 @@ def merge_saved_results(
                 )
                 for location in locations
             ):
-                warnings.append(f"Skipped out-of-scope finding from {relative}.")
-                coverage["completeness"] = "partial"
+                if may_expand_canonical_result:
+                    warnings.append(f"Skipped out-of-scope finding from {relative}.")
+                    coverage["completeness"] = "partial"
                 continue
             provenance = finding.setdefault("provenance", {"source": "local_plugin"})
             if not isinstance(provenance, dict):
-                findings.append(finding)
+                if may_expand_canonical_result:
+                    findings.append(finding)
                 continue
             if worker_id:
                 provenance.setdefault("workerId", worker_id)
             _ensure_finding_identity(finding)
             if not valid_finding(finding):
-                findings.append(finding)
+                if may_expand_canonical_result:
+                    findings.append(finding)
                 continue
             key = _finding_key(finding)
             represented_by_parent = False
@@ -734,9 +750,11 @@ def merge_saved_results(
                         ):
                             history.append(original)
                 continue
+            if not may_expand_canonical_result:
+                continue
             finding_positions[key] = len(findings)
             findings.append(finding)
-        if superseded:
+        if superseded or not may_expand_canonical_result:
             continue
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
             items = draft["coverage"].get(field, [])
