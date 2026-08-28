@@ -4099,13 +4099,14 @@ describe("GitHub release workflow safeguards", () => {
         join(tmpdir(), "release-ci-plugin-source-"),
       );
       const pluginRoot = join(workspace, "plugins", "codex-security");
-      const tools = join(pluginRoot, "tools");
-      mkdirSync(tools, { recursive: true });
+      const scripts = join(workspace, ".github", "scripts");
+      mkdirSync(scripts, { recursive: true });
+      mkdirSync(pluginRoot, { recursive: true });
       writeFileSync(
-        join(tools, "check_source_compatibility.py"),
+        join(scripts, "check_plugin_source_compatibility.py"),
         readFileSync(
           new URL(
-            "../../../plugins/codex-security/tools/check_source_compatibility.py",
+            "../../../.github/scripts/check_plugin_source_compatibility.py",
             import.meta.url,
           ),
         ),
@@ -4117,8 +4118,8 @@ describe("GitHub release workflow safeguards", () => {
         workspace,
         "add",
         "--",
+        ".github/scripts/check_plugin_source_compatibility.py",
         "plugins/codex-security/README.md",
-        "plugins/codex-security/tools/check_source_compatibility.py",
       ]);
       try {
         const result = spawnSync(

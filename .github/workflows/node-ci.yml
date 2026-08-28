@@ -76,7 +76,7 @@ jobs:
       - name: Check plugin source compatibility
         if: steps.scope.outputs.ci-mode == 'markdown'
         run: |
-          python plugins/codex-security/tools/check_source_compatibility.py
+          python .github/scripts/check_plugin_source_compatibility.py
 
       - name: Set up pnpm
         if: steps.scope.outputs.ci-mode == 'markdown'
@@ -252,12 +252,12 @@ jobs:
 
       - name: Check plugin source compatibility
         run: |
-          python -m ruff check plugins/codex-security
-          python -m ruff format --check plugins/codex-security
-          python plugins/codex-security/tools/check_source_compatibility.py
+          python -m ruff check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
+          python -m ruff format --check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
+          python .github/scripts/check_plugin_source_compatibility.py
 
       - name: Test Python source contracts
-        run: python -m pytest plugins/codex-security/tests -q
+        run: python -m pytest .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security/tests -q
 
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6

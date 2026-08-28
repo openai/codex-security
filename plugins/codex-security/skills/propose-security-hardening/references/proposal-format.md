@@ -42,14 +42,18 @@ Write for security engineers and software engineers who are technically strong b
 
 Use first person as an integral part of the design-review voice:
 
-- use first-person plural throughout the substantive walkthrough to guide shared reasoning: "we can see why the current ownership boundary drifts", "if we keep the fast path", or "we would pay this memory cost only while old generations drain";
-- use first-person singular truthfully and sparingly to establish work the author actually performed and the recommendation being offered: "I inspected these callers", "I measured", "I could not validate the device exposure", or "I recommend Option 2 under the current constraints";
+- use first-person plural throughout the substantive walkthrough to guide shared reasoning: "we can see why the current ownership boundary drifts",
+  "if we keep the fast path", or "we would pay this memory cost only while old generations drain";
+- use first-person singular truthfully and sparingly to establish work the author actually performed and the recommendation being offered: "I inspected these callers", "I measured", "I could not validate the device exposure",
+  or "I recommend Option 2 under the current constraints";
 - never imply that code was run, performance was measured, or behavior was observed when the basis is source review, supplied evidence, analogy, or a hypothesis. Say which basis applies in plain language.
 
-This is not a pronoun quota. Do not decorate mechanical prose with isolated "we" or "I" statements. First person should expose the reasoning, invite the reader into the design choice, and make the author's evidentiary basis clear.
+This is not a pronoun quota. Do not decorate mechanical prose with isolated
+"we" or "I" statements. First person should expose the reasoning, invite the reader into the design choice, and make the author's evidentiary basis clear.
 A proposal with only a token opening and closing in first person still fails this standard.
 
-Let professional judgment show through. Explain what is attractive about an option, what gives the author pause, which tradeoff seems proportionate, and which uncertainty prevents a firmer conclusion. Phrases such as "what gives me pause is...", "the attractive part of this option is...", "we should be honest about...", or "I would be comfortable with this if..." illustrate the tone, but are not a script. Use the language that fits the actual design and avoid repeating stock sentences across the portfolio.
+Let professional judgment show through. Explain what is attractive about an option, what gives the author pause, which tradeoff seems proportionate, and which uncertainty prevents a firmer conclusion. Phrases such as "what gives me pause is...", "the attractive part of this option is...", "we should be honest about...", or "I would be comfortable with this if..." illustrate the tone,
+but are not a script. Use the language that fits the actual design and avoid repeating stock sentences across the portfolio.
 
 Build a coherent technical argument rather than filling a template. Patiently connect the relevant actor and boundary, the observed failure, the structural condition that allowed it, the desired invariants, and the available design choices. Preserve the required tables and use them generously where exact deltas, coverage mappings, or cross-option comparisons benefit from a compact view. Treat them as a second layer for scanning and reference, not a replacement for the prose that teaches the reader why the comparison matters. Introduce diagrams and source references, then explain the important edges in words.
 
@@ -62,8 +66,10 @@ The portfolio should be concise, but the proposals should not read like terse tr
 Before accepting a proposal, make sure the narrative itself, without relying on tables, does all of the following:
 
 - connects observed evidence to the inferred structural condition and explains why that inference is reasonable;
-- gives every serious option its strongest case, including what it preserves, what changes, how the control works, and where risk remains;
-- explains the mechanism behind material security, performance, memory, reliability, operational, and migration effects;
+- gives every serious option its strongest case, including what it preserves,
+  what changes, how the control works, and where risk remains;
+- explains the mechanism behind material security, performance, memory,
+  reliability, operational, and migration effects;
 - makes the author's considered view visible, including the appealing part of each option, the principal concern, and what evidence would resolve it;
 - introduces each diagram and table, then explains the decision-relevant edges or comparisons that the reader should take from it;
 - offers a conditional recommendation and names the facts, constraints, or priorities that would make another option preferable.
@@ -98,7 +104,9 @@ The first example is scan-backed. For ordinary documents, use the `sourceEvidenc
     "profile": "balanced",
     "changeHorizons": ["incremental", "medium_term", "foundational"],
     "nonNegotiables": [],
-    "assumptions": ["No measured latency or memory budget was supplied."]
+    "assumptions": [
+      "No measured latency or memory budget was supplied."
+    ]
   },
   "opportunities": [
     {
@@ -193,15 +201,13 @@ The first example is scan-backed. For ordinary documents, use the `sourceEvidenc
               "validationPlan": "Run compatibility coverage for valid relative archive entries."
             }
           ],
-          "residualRisks": ["Containment policy can drift between call sites."],
+          "residualRisks": [
+            "Containment policy can drift between call sites."
+          ],
           "implementationReadiness": {
             "affectedComponents": ["src/extract.py"],
-            "workPackages": [
-              "Add containment enforcement and regression coverage."
-            ],
-            "acceptanceCriteria": [
-              "The original traversal PoC cannot write outside the output root."
-            ],
+            "workPackages": ["Add containment enforcement and regression coverage."],
+            "acceptanceCriteria": ["The original traversal PoC cannot write outside the output root."],
             "migrationNotes": [],
             "rollback": "Revert the focused guard and test change."
           }
@@ -257,15 +263,19 @@ When an option maps to disclosure documents rather than canonical scan findings,
 - `opportunities_identified` requires at least one complete opportunity.
   `local_remediation_preferred` requires an empty opportunity list and a portfolio that explains why tactical fixes are proportionate.
 - `claimType` is `observed` or `inferred`. Proposed behavior belongs in option text, not in the evidence array.
-- `sourceKind` is `finding`, `disclosure`, `document`, `source`, `coverage`, `threat_model`, `poc`, or `experiment`. Use `evidenceId` for disclosure, document, PoC, or experiment evidence and `findingId` for a canonical finding.
+- `sourceKind` is `finding`, `disclosure`, `document`, `source`, `coverage`,
+  `threat_model`, `poc`, or `experiment`. Use `evidenceId` for disclosure,
+  document, PoC, or experiment evidence and `findingId` for a canonical finding.
 - `kind` is `baseline`, `incremental`, `structural`, `isolation`, or `foundational`.
-- Each option must contain at least one `findingCoverage` or `evidenceCoverage` mapping. Their `effect` is `addresses`, `mitigates`, `unaffected`, or `unknown`.
+- Each option must contain at least one `findingCoverage` or `evidenceCoverage` mapping. Their `effect` is `addresses`, `mitigates`,
+  `unaffected`, or `unknown`.
 - `direction` is `improves`, `regresses`, `neutral`, or `unknown`.
 - `confidence` is `high`, `medium`, or `low`.
 - `basis` is `measured`, `source-derived`, `analogous`, or `hypothetical`.
 - `recommendedOptionId` may be `null` when constraints do not support a clear recommendation. Otherwise it must name an option in the same opportunity.
 - Every opportunity and option ID must be unique within the analysis and use lowercase letters, digits, dots, underscores, or hyphens.
-- Every option must assess `security`, `performance`, `memory`, `reliability`, `operability`, and `migration`. Use an honest `neutral` or `unknown` entry rather than omitting an inconvenient dimension.
+- Every option must assess `security`, `performance`, `memory`, `reliability`,
+  `operability`, and `migration`. Use an honest `neutral` or `unknown` entry rather than omitting an inconvenient dimension.
 
 ## Portfolio Format
 
@@ -275,20 +285,16 @@ Write `hardening.md` with these headings in order. Use `Evidence Basis` for an o
 # Security Hardening Review: <target>
 
 ## Evidence Basis
-
 ## Constraints
-
 ## Opportunity Portfolio
-
 ## Recommendation Summary
-
 ## Next Decisions
 ```
 
 Under `Opportunity Portfolio`, use a compact table:
 
 | Opportunity | Evidence | Options | Recommendation | Proposal |
-| ----------- | -------- | ------- | -------------- | -------- |
+| --- | --- | --- | --- | --- |
 
 Link every proposal using its exact `proposalPath`. Make the recommendation conditional on the recorded constraints. Keep this document easy to skim; put the complete technical argument in the proposal file. Open with enough prose to orient a reader who did not participate in the scan, and use the recommendation summary to explain the reasoning in a warm design-review voice rather than merely repeating the table.
 
@@ -304,37 +310,21 @@ Name each proposal `proposals/<opportunity-id>.md` and use these headings in ord
 # Security Hardening Proposal: <title>
 
 ## Decision
-
 ## Executive Recommendation
-
 ## Evidence
-
 ## Current Design And Failure Mode
-
 ## Desired Invariants
-
 ## Constraints And Non-Goals
-
 ## Before Architecture
-
 ## Options
-
 ### Option 1: <baseline, when useful>
-
 ### Option 2: <first alternative>
-
 ## Comparison
-
 ## Recommendation
-
 ## Evidence Coverage And Residual Risk
-
 ## Migration And Rollout
-
 ## Validation Plan
-
 ## Implementation Work Packages
-
 ## Open Questions
 ```
 
@@ -346,13 +336,15 @@ Requirements:
 - make the complete option set visible before recommending a subset, and avoid numbered step lists that could be mistaken for the numbered options;
 - identify observed and inferred claims explicitly in `Evidence`;
 - define every opaque finding or evidence ID in the proposal where it is used;
-  pair it with a concise title and a one-line statement of what it establishes, using a compact evidence map when several items contribute;
+  pair it with a concise title and a one-line statement of what it establishes,
+  using a compact evidence map when several items contribute;
 - when source or artifacts were actually inspected, state that basis truthfully in first-person and explain which evidence most influenced the structural diagnosis;
 - cite finding IDs or evidence IDs and repository-relative source locations when source is available;
 - explain the structural condition, not merely the vulnerable line;
 - state desired invariants before proposing components;
 - include the before diagram and one after diagram for every option;
-- follow each diagram pair with a delta table using `Change`, `Before`, `After`, `Security consequence`, and `Cost`;
+- follow each diagram pair with a delta table using `Change`, `Before`,
+  `After`, `Security consequence`, and `Cost`;
 - include a tradeoff comparison table without a fabricated composite score;
 - explain every option in connected prose before relying on its diagram or delta table, including the control mechanism, strongest case, material costs, residual risk, rollout, and rollback;
 - explain the recommendation under current assumptions, state it in first-person when a recommendation is supported, and say when another option should win;
@@ -361,9 +353,9 @@ Requirements:
 
 Use this shape under `Evidence` when several findings or documents contribute:
 
-| Evidence | Finding or document                  | What it establishes                                                     |
-| -------- | ------------------------------------ | ----------------------------------------------------------------------- |
-| `E021`   | Netlink multipath scratch exhaustion | Attacker-controlled nesting can exhaust unchecked parser scratch space. |
+| Evidence | Finding or document | What it establishes |
+| --- | --- | --- |
+| `E021` | Netlink multipath scratch exhaustion | Attacker-controlled nesting can exhaust unchecked parser scratch space. |
 
 Link the finding or document title to its writeup when a distributable relative path is available. The title may be shortened for readability, but it must be specific enough that a new reader understands the reference. After defining an ID once in the proposal, later prose may use the ID alone where repetition would be awkward. In `Evidence Coverage And Residual Risk`, label every row with both the ID and short title, for example `E021 — Netlink scratch exhaustion`. Apply the same rule to canonical scan finding IDs. A complete registry in `context.md` supports auditability but does not make a bare ID self-explanatory in another document.
 
@@ -371,8 +363,10 @@ The proposal should read as one connected discussion. In particular:
 
 - establish the component, relevant actor, trust or lifetime boundary, and evidence basis before asking the reader to choose an option;
 - keep evidence references locally understandable; do not make the reader shuttle to `context.md` to decode an identifier;
-- move naturally from observed facts to the inferred structural condition, making the change in epistemic status explicit without reducing the section to labels;
-- introduce each option in prose, explain what it preserves and what it asks the project to change, how the changed boundary creates the security effect, and then use diagrams or tables to sharpen the point;
+- move naturally from observed facts to the inferred structural condition,
+  making the change in epistemic status explicit without reducing the section to labels;
+- introduce each option in prose, explain what it preserves and what it asks the project to change, how the changed boundary creates the security effect,
+  and then use diagrams or tables to sharpen the point;
 - return to prose after each diagram and comparison table to interpret the important edges, cost mechanisms, and remaining uncertainty;
 - avoid repeating the same opening, transition, and verdict formula for every option or proposal; let the actual engineering concern shape the discussion;
 - compare alternatives fairly, including useful rejected or deferred designs when they teach an important constraint;
@@ -384,7 +378,8 @@ The proposal should read as one connected discussion. In particular:
 Use Mermaid `flowchart` source in `.mmd` files. Keep diagrams compact and security-relevant:
 
 - reuse component names and abstraction level across before and after views;
-- show trust boundaries, attacker-controlled entry points, control ownership, dangerous capabilities or sinks, and failure containment;
+- show trust boundaries, attacker-controlled entry points, control ownership,
+  dangerous capabilities or sinks, and failure containment;
 - label changed control or authority edges clearly;
 - avoid code-level call graphs unless the proposed change is itself a call boundary;
 - do not imply that a process, service, queue, or sandbox exists unless source or deployment evidence supports the before view;
@@ -394,14 +389,14 @@ Use Mermaid `flowchart` source in `.mmd` files. Keep diagrams compact and securi
 
 Assess these dimensions for every option:
 
-| Dimension   | Questions                                                                            |
-| ----------- | ------------------------------------------------------------------------------------ |
-| Security    | Which attack paths disappear, narrow, or remain? What new trusted component appears? |
-| Performance | Does the critical path gain hops, copies, serialization, locks, or cache misses?     |
-| Memory      | Are there new processes, buffers, indexes, queues, caches, or retained objects?      |
-| Reliability | How do failure isolation, retries, backpressure, recovery, and availability change?  |
-| Operability | What new deployment, observability, alerting, or incident response burden appears?   |
-| Migration   | What compatibility, data, protocol, rollout, and rollback work is required?          |
+| Dimension | Questions |
+| --- | --- |
+| Security | Which attack paths disappear, narrow, or remain? What new trusted component appears? |
+| Performance | Does the critical path gain hops, copies, serialization, locks, or cache misses? |
+| Memory | Are there new processes, buffers, indexes, queues, caches, or retained objects? |
+| Reliability | How do failure isolation, retries, backpressure, recovery, and availability change? |
+| Operability | What new deployment, observability, alerting, or incident response burden appears? |
+| Migration | What compatibility, data, protocol, rollout, and rollback work is required? |
 
 For unmeasured effects, name the likely mechanism and a measurement plan. A useful plan identifies the workload, metric, baseline, candidate design, and decision threshold. Do not present analogy or intuition as benchmark data.
 
@@ -413,26 +408,17 @@ After selection, write `implementation/<option-id>.md` with:
 # Implementation Plan: <option title>
 
 ## Selected Design And Constraints
-
 ## Source Revision And Drift Check
-
 ## Affected Components
-
 ## Ordered Work Packages
-
 ## Compatibility And Migration
-
 ## Tactical Protections During Migration
-
 ## Tests And Security Validation
-
 ## Performance And Resource Benchmarks
-
 ## Rollout And Rollback
-
 ## Acceptance Criteria
-
 ## Open Decisions
 ```
 
-Anchor the plan to the scan manifest digest or evidence collection digest and, when available, the refreshed implementation revision. If source drift changes a relevant boundary, return to design review instead of quietly adapting the proposal while coding.
+Anchor the plan to the scan manifest digest or evidence collection digest and,
+when available, the refreshed implementation revision. If source drift changes a relevant boundary, return to design review instead of quietly adapting the proposal while coding.
