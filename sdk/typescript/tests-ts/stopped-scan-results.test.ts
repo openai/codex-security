@@ -251,14 +251,19 @@ test("retries a legacy stopped seal after transient publication failure", () => 
     { encoding: "utf8" },
   );
   expect(result.status, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({
+  const recovered = JSON.parse(result.stdout);
+  expect(recovered).toMatchObject({
     firstFailed: true,
     frozenAfterFailure: "{}",
     retryPublished: true,
-    frozenAfterSuccess: {},
     status: "failed",
     findingCount: 1,
   });
+  const frozenSources = Object.entries(recovered.frozenAfterSuccess);
+  expect(frozenSources).toHaveLength(1);
+  const [checkpointPath, checkpointDigest] = frozenSources[0]!;
+  expect(checkpointDigest).toMatch(/^[0-9a-f]{64}$/);
+  expect(checkpointPath).toBe(`checkpoints/${checkpointDigest}.json`);
 }, 30_000);
 
 test("preserves distinct instances from one worker candidate", () => {
