@@ -83,6 +83,42 @@ onto another source line
     assert result.returncode == 0, result.stderr
 
 
+def test_accepts_hard_wrapped_lines_inside_html_comments(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text(
+        """<!--
+This comment continues
+onto another source line
+-->
+""",
+        encoding="utf-8",
+    )
+    initialize_repository(tmp_path)
+    track(tmp_path, "README.md")
+
+    result = run_checker(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_checks_prose_after_an_opening_thematic_break(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text(
+        """---
+This prose continues
+onto another source line.
+""",
+        encoding="utf-8",
+    )
+    initialize_repository(tmp_path)
+    track(tmp_path, "README.md")
+
+    result = run_checker(tmp_path)
+
+    assert result.returncode == 1
+    assert result.stderr == (
+        "README.md:2: prose is hard-wrapped mid-sentence; use a natural Markdown line\n"
+    )
+
+
 def test_rejects_dependency_lock_files_above_two_megabytes(tmp_path: Path) -> None:
     (tmp_path / "pnpm-lock.yaml").write_bytes(b"x" * 2_000_001)
     initialize_repository(tmp_path)

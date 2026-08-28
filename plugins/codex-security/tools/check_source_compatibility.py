@@ -62,26 +62,38 @@ def hard_wrapped_lines(content: str) -> list[int]:
     lines = content.splitlines()
     offenders: list[int] = []
     fence_delimiter: str | None = None
-    in_frontmatter = content.startswith("---\n")
+    in_html_comment = False
+    in_frontmatter = bool(
+        lines and lines[0].strip() == "---" and any(line.strip() == "---" for line in lines[1:])
+    )
 
     for line_number, line in enumerate(lines[:-1], start=1):
         stripped = line.strip()
+        if in_html_comment:
+            if "-->" in line:
+                in_html_comment = False
+            continue
+
         fence = CODE_FENCE.match(line)
+        if fence_delimiter is not None:
+            if fence is not None:
+                delimiter, trailing = fence.groups()
+                if (
+                    delimiter[0] == fence_delimiter[0]
+                    and len(delimiter) >= len(fence_delimiter)
+                    and not trailing.strip()
+                ):
+                    fence_delimiter = None
+            continue
         if fence is not None:
-            delimiter, trailing = fence.groups()
-            if fence_delimiter is None:
-                fence_delimiter = delimiter
-            elif (
-                delimiter[0] == fence_delimiter[0]
-                and len(delimiter) >= len(fence_delimiter)
-                and not trailing.strip()
-            ):
-                fence_delimiter = None
+            fence_delimiter = fence.group(1)
             continue
-        if line_number > 1 and in_frontmatter and stripped == "---":
-            in_frontmatter = False
+        if in_frontmatter:
+            if line_number > 1 and stripped == "---":
+                in_frontmatter = False
             continue
-        if fence_delimiter is not None or in_frontmatter:
+        if stripped.startswith("<!--"):
+            in_html_comment = "-->" not in stripped[4:]
             continue
 
         following_line = lines[line_number]
