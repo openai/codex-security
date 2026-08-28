@@ -14,7 +14,6 @@ tasks:
       python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
     triggeredBy:
       - manual
-      - postDevcontainerStart
       - prebuild
 
   build:
