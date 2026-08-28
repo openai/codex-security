@@ -86,8 +86,6 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "22.13.0"
-          cache: npm
-          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
 
       - name: Install dependencies
         if: steps.scope.outputs.ci-mode == 'markdown'
@@ -140,14 +138,14 @@ jobs:
         with:
           package_json_file: sdk/typescript/package.json
           cache: true
-          cache_dependency_path: sdk/typescript/pnpm-lock.yaml
+          cache_dependency_path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
 
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
-          cache-dependency-path: plugins/codex-security/mcp-app/package-lock.json
 
       - name: Check plugin source boundary
         if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
@@ -161,7 +159,7 @@ jobs:
       - name: Install dependencies
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
-          npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
+          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 
       - name: Install ripgrep
         if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
@@ -254,7 +252,8 @@ jobs:
           node-version: "22.13.0"
 
       - name: Test deterministic triage eval contracts
-        run: npm --prefix plugins/codex-security/skills/triage-finding/evals run test:deterministic
+        working-directory: plugins/codex-security/skills/triage-finding/evals
+        run: node --run test:deterministic
 
   required-test:
     name: ${{ matrix.os }} / node-22
@@ -305,7 +304,7 @@ jobs:
       - name: Install dependencies
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
-          npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
+          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 
       - name: Generate bundled plugin
         run: pnpm --dir sdk/typescript run build:plugin
@@ -356,8 +355,6 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
-          cache-dependency-path: plugins/codex-security/mcp-app/package-lock.json
 
       - name: Set up pnpm
         run: npm install --global pnpm@11.9.0 --no-audit --no-fund
@@ -365,7 +362,7 @@ jobs:
       - name: Install dependencies
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
-          npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
+          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 
       - name: Pack
         working-directory: sdk/typescript
