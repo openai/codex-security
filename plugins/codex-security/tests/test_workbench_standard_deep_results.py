@@ -210,6 +210,86 @@ def test_scan_reads_require_explicit_late_result_recovery(tmp_path: Path) -> Non
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 2
 
 
+def test_explicit_recovery_rejects_changed_frozen_source(tmp_path: Path) -> None:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    contract_dir = tmp_path / "contract"
+    contract_dir.mkdir()
+    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    checkpoint = {
+        "scanId": scan_id,
+        "complete": False,
+        "findings": [finding],
+        "coverage": {
+            "completeness": "partial",
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+        },
+    }
+    write_checkpoint(result_path.parent / "checkpoints", checkpoint)
+    run_workbench(
+        state_dir,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Worker stopped.",
+        "--deep-status",
+        "failed",
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    manifest_path = scan_dir / "scan-manifest.json"
+    original_manifest = manifest_path.read_bytes()
+    original_findings = (scan_dir / "findings.json").read_bytes()
+    preserved_sources = json.loads(original_manifest)["scan"]["preservedSources"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        original_record = connection.execute(
+            "SELECT seal_manifest_digest, retained_source_digests_json "
+            "FROM scans WHERE id = ?",
+            (scan_id,),
+        ).fetchone()
+    frozen_path = scan_dir / next(iter(preserved_sources))
+    frozen_path.write_text("{truncated")
+
+    late = copy.deepcopy(checkpoint)
+    late["findings"][0]["locations"][0]["startLine"] = 91
+    late["findings"][0]["locations"][0]["endLine"] = 92
+    write_checkpoint(
+        result_path.parent / "attempts" / "attempt-01" / "checkpoints", late
+    )
+    assert (
+        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"][
+            "resultsRecoveryNeeded"
+        ]
+        is True
+    )
+
+    rejected = run_workbench(
+        state_dir,
+        "recover-scan-results",
+        "--scan-id",
+        scan_id,
+        environment={"CODEX_HOME": str(codex_home)},
+        check=False,
+    )
+
+    assert rejected["returncode"] != 0
+    assert "Frozen stopped-scan checkpoint set is incomplete" in str(rejected["stderr"])
+    assert (scan_dir / "scan-manifest.json").read_bytes() == original_manifest
+    assert (scan_dir / "findings.json").read_bytes() == original_findings
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT seal_manifest_digest, retained_source_digests_json "
+                "FROM scans WHERE id = ?",
+                (scan_id,),
+            ).fetchone()
+            == original_record
+        )
+
+
 def test_unsealed_manifest_without_saved_results_does_not_offer_recovery(
     tmp_path: Path,
 ) -> None:

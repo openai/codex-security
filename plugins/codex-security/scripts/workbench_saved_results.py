@@ -252,6 +252,66 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
         return False
 
 
+def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> dict[str, str]:
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    frozen_sources: dict[str, str] | None = None
+    raw_frozen_sources = scan["retained_source_digests_json"]
+    if raw_frozen_sources is not None:
+        frozen_sources = _source_digests(
+            json.loads(raw_frozen_sources), "Saved stopped-scan"
+        )
+
+    manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
+    if manifest_path is not None:
+        manifest = _read_scan_local_json(
+            scan_dir,
+            manifest_path.relative_to(scan_dir).as_posix(),
+            "Saved scan manifest",
+        )
+        manifest_scan = manifest.get("scan")
+        if not isinstance(manifest_scan, dict):
+            raise ContractError("Saved scan manifest has no scan object")
+        if scan["seal_manifest_digest"] is not None or (
+            manifest_scan.get("sealedAt") is not None
+            or manifest_scan.get("artifacts") is not None
+        ):
+            published_sources = _source_digests(
+                manifest_scan.get("preservedSources", {}), "Published scan"
+            )
+            if frozen_sources is not None and frozen_sources != published_sources:
+                raise ContractError(
+                    "Stopped scan sources changed after terminal publication."
+                )
+            frozen_sources = published_sources
+
+    recovery_sources = dict(frozen_sources or {})
+    for relative, expected_digest in recovery_sources.items():
+        try:
+            _, digest = _read_saved_result(scan_dir, relative, scan["id"])
+        except (ContractError, OSError, ValueError) as exc:
+            raise ContractError(
+                "Frozen stopped-scan checkpoint set is incomplete."
+            ) from exc
+        if digest != expected_digest:
+            raise ContractError("checkpoint changed after the scan stopped")
+
+    workers = connection.execute(
+        "SELECT id, kind, status, completed_at, artifact_dir, result_manifest_path "
+        "FROM deep_scan_workers WHERE scan_id = ?",
+        (scan["id"],),
+    ).fetchall()
+    for relative in (
+        set(_saved_result_paths(scan_dir, workers)) - recovery_sources.keys()
+    ):
+        try:
+            _, recovery_sources[relative] = _read_saved_result(
+                scan_dir, relative, scan["id"]
+            )
+        except (ContractError, OSError, ValueError):
+            continue
+    return recovery_sources
+
+
 def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
     if scan["status"] != "failed" or scan["canceled_at"] is not None:
         return False
@@ -1004,7 +1064,11 @@ def _restore_published_outputs(scan_dir: Path, snapshots: dict[str, bytes | None
 
 
 def preserve_scan_results_locked(
-    db: Any, connection: Any, scan_id: str, *, allow_source_changes: bool = False
+    db: Any,
+    connection: Any,
+    scan_id: str,
+    *,
+    recovery_source_digests: dict[str, str] | None = None,
 ) -> bool:
     """Publish or verify retained terminal results through the workbench host."""
     scan = db.require_scan(connection, scan_id)
@@ -1012,7 +1076,9 @@ def preserve_scan_results_locked(
         return False
     frozen_source_digests: dict[str, str] | None = None
     raw_frozen_sources = scan["retained_source_digests_json"]
-    if raw_frozen_sources is not None and not allow_source_changes:
+    if recovery_source_digests is not None:
+        frozen_source_digests = recovery_source_digests
+    elif raw_frozen_sources is not None:
         frozen_source_digests = _source_digests(
             json.loads(raw_frozen_sources), "Saved stopped-scan"
         )
@@ -1098,7 +1164,7 @@ def preserve_scan_results_locked(
             scan_dir, expected_coverage_mode=db.expected_coverage_mode(scan)
         )
         db.verify_manifest_binding(scan, existing)
-        if existing_scan.get("status") == outcome and not allow_source_changes:
+        if existing_scan.get("status") == outcome:
             existing_sources = existing_scan.get("preservedSources")
             if frozen_source_digests is None:
                 if not isinstance(existing_sources, dict) or not all(
@@ -1116,7 +1182,8 @@ def preserve_scan_results_locked(
                     return True
                 record_publication(existing, existing_findings)
                 return True
-            raise ContractError("Stopped scan sources changed after terminal publication.")
+            if recovery_source_digests is None:
+                raise ContractError("Stopped scan sources changed after terminal publication.")
     binding = {**db.workbench_completion_binding(scan, scan["completed_at"]), "status": outcome}
     documents = merge_saved_results(
         scan_dir,
@@ -1158,13 +1225,12 @@ def preserve_scan_results_locked(
         ):
             raise ContractError("Stopped scan source digests could not be frozen.")
         frozen_source_digests = retained_sources
-        if not allow_source_changes:
-            with connection:
-                connection.execute(
-                    "UPDATE scans SET retained_source_digests_json = ? "
-                    "WHERE id = ? AND retained_source_digests_json IS NULL",
-                    (json.dumps(retained_sources, sort_keys=True), scan_id),
-                )
+        with connection:
+            connection.execute(
+                "UPDATE scans SET retained_source_digests_json = ? "
+                "WHERE id = ? AND retained_source_digests_json IS NULL",
+                (json.dumps(retained_sources, sort_keys=True), scan_id),
+            )
     prepared = _prepare_scan_finalization(
         scan_dir,
         expected_coverage_mode=db.expected_coverage_mode(scan),
@@ -1195,7 +1261,7 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             db,
             connection,
             scan_id,
-            allow_source_changes=_saved_results_changed(db, connection, scan),
+            recovery_source_digests=_recovery_source_digests(db, connection, scan),
         ):
             raise SystemExit("No saved stopped-scan results were available to recover.")
         db.deep_scan.clear_deep_scan_publication_failure(connection, scan_id)
