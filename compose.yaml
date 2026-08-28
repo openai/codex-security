@@ -1,9 +1,12 @@
 services:
   codex-security:
     image: ${CODEX_SECURITY_IMAGE:-codex-security:local}
+    profiles:
+      - scan
     build:
       context: .
     init: true
+    network_mode: host
     user: ${CODEX_SECURITY_USER:-10001:10001}
     cap_drop:
       - ALL
@@ -38,3 +41,19 @@ services:
       - /input/repositories.csv
       - --output-dir
       - /output
+
+  findings:
+    image: ${CODEX_SECURITY_FINDINGS_IMAGE:-codex-security-findings:local}
+    build:
+      context: .
+      target: findings-service
+    init: true
+    network_mode: host
+    environment:
+      OPENAI_API_KEY:
+      CODEX_API_KEY:
+    volumes:
+      - findings-state:/state
+
+volumes:
+  findings-state:

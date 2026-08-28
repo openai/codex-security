@@ -1,4 +1,5 @@
 node_modules/
+.pnpm-store/
 dist/
 __pycache__/
 .pytest_cache/
