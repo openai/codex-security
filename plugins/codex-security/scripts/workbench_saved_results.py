@@ -252,14 +252,18 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
         return False
 
 
-def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> dict[str, str]:
+def _recovery_source_digests(
+    db: Any, connection: Any, scan: Any
+) -> tuple[dict[str, str], bool]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     frozen_sources: dict[str, str] | None = None
+    include_parent = True
     raw_frozen_sources = scan["retained_source_digests_json"]
     if raw_frozen_sources is not None:
         frozen_sources = _source_digests(
             json.loads(raw_frozen_sources), "Saved stopped-scan"
         )
+        include_parent = False
 
     manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
     if manifest_path is not None:
@@ -275,6 +279,7 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> dict[str, s
             manifest_scan.get("sealedAt") is not None
             or manifest_scan.get("artifacts") is not None
         ):
+            include_parent = "preservedSources" not in manifest_scan
             published_sources = _source_digests(
                 manifest_scan.get("preservedSources", {}), "Published scan"
             )
@@ -309,7 +314,7 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> dict[str, s
             )
         except (ContractError, OSError, ValueError):
             continue
-    return recovery_sources
+    return recovery_sources, include_parent
 
 
 def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
@@ -1069,6 +1074,7 @@ def preserve_scan_results_locked(
     scan_id: str,
     *,
     recovery_source_digests: dict[str, str] | None = None,
+    include_parent_with_recovery: bool = False,
 ) -> bool:
     """Publish or verify retained terminal results through the workbench host."""
     scan = db.require_scan(connection, scan_id)
@@ -1201,10 +1207,14 @@ def preserve_scan_results_locked(
         ).strip(),
         frozen_source_digests=frozen_source_digests,
         allow_frozen_legacy_parent=(
-            frozen_source_digests == {}
-            and isinstance(existing_scan, dict)
-            and existing_scan.get("sealedAt") is not None
-            and "preservedSources" not in existing_scan
+            include_parent_with_recovery
+            or (
+                recovery_source_digests is None
+                and frozen_source_digests == {}
+                and isinstance(existing_scan, dict)
+                and existing_scan.get("sealedAt") is not None
+                and "preservedSources" not in existing_scan
+            )
         ),
     )
     if documents is None:
@@ -1257,11 +1267,15 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Only a stopped scan can recover terminal results.")
         if scan["canceled_at"] is not None:
             raise SystemExit("Canceled scans cannot recover terminal results.")
+        recovery_source_digests, include_parent = _recovery_source_digests(
+            db, connection, scan
+        )
         if not preserve_scan_results_locked(
             db,
             connection,
             scan_id,
-            recovery_source_digests=_recovery_source_digests(db, connection, scan),
+            recovery_source_digests=recovery_source_digests,
+            include_parent_with_recovery=include_parent,
         ):
             raise SystemExit("No saved stopped-scan results were available to recover.")
         db.deep_scan.clear_deep_scan_publication_failure(connection, scan_id)

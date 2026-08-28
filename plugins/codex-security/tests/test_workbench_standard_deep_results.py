@@ -290,6 +290,82 @@ def test_explicit_recovery_rejects_changed_frozen_source(tmp_path: Path) -> None
         )
 
 
+def test_explicit_recovery_preserves_unfrozen_parent_with_late_checkpoint(
+    tmp_path: Path,
+) -> None:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    contract_dir = tmp_path / "contract"
+    contract_dir.mkdir()
+    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    for filename in ("findings.json", "coverage.json", "scan-manifest.json"):
+        (scan_dir / filename).write_bytes((contract_dir / filename).read_bytes())
+    parent_finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    wrapper = tmp_path / "fail_before_sources_are_frozen.py"
+    wrapper.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(scripts_dir)!r})\n"
+        "import workbench_db\n"
+        "import workbench_saved_results\n"
+        "def fail_before_sources_are_frozen(*args, **kwargs):\n"
+        "    raise OSError('injected early publication failure')\n"
+        "workbench_saved_results.merge_saved_results = fail_before_sources_are_frozen\n"
+        "raise SystemExit(workbench_db.main())\n"
+    )
+    failed = subprocess.run(
+        [
+            sys.executable,
+            str(wrapper),
+            "fail-deep-scan",
+            "--scan-id",
+            scan_id,
+            "--message",
+            "Worker stopped.",
+        ],
+        capture_output=True,
+        env={
+            **os.environ,
+            "CODEX_HOME": str(codex_home),
+            "CODEX_SECURITY_STATE_DIR": str(state_dir),
+        },
+        text=True,
+        check=False,
+    )
+    assert failed.returncode == 0, failed.stderr
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+            ).fetchone()[0]
+            is None
+        )
+
+    late_finding = copy.deepcopy(parent_finding)
+    late_finding["occurrenceId"] = "occ_111111111111111111111111"
+    late_finding["ruleId"] = "late.checkpoint"
+    late_finding["title"] = "Late checkpoint finding"
+    late = json.loads(result_path.read_text())
+    late["complete"] = False
+    late["findings"] = [late_finding]
+    write_checkpoint(result_path.parent / "checkpoints", late)
+
+    recovered = run_workbench(
+        state_dir,
+        "recover-scan-results",
+        "--scan-id",
+        scan_id,
+        environment={"CODEX_HOME": str(codex_home)},
+    )["scan"]
+
+    assert recovered["findingCount"] == 2
+    assert {finding["title"] for finding in recovered["findings"]} == {
+        parent_finding["title"],
+        late_finding["title"],
+    }
+
+
 def test_unsealed_manifest_without_saved_results_does_not_offer_recovery(
     tmp_path: Path,
 ) -> None:
