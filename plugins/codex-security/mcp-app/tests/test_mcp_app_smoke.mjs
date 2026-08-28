@@ -18,10 +18,9 @@ const sourcePluginRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
-const pluginRoot = path.resolve(
-  sourcePluginRoot,
-  "../../sdk/typescript/_bundled_plugin",
-);
+const pluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
+  ? path.resolve(process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT)
+  : path.resolve(sourcePluginRoot, "../../sdk/typescript/_bundled_plugin");
 const mcpAppRoot = path.join(sourcePluginRoot, "mcp-app");
 const pluginManifest = JSON.parse(
   await readFile(path.join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),

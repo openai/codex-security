@@ -148,6 +148,39 @@ def test_inventory_keeps_ignored_tracked_files_without_ignored_untracked_files(
     assert "./app/ignored.skip" not in paths
 
 
+def test_diff_inventory_includes_power_shell_files(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(
+        ["git", "init", "-q"],
+        cwd=repository,
+        capture_output=True,
+        check=True,
+    )
+    git(repository, "commit", "--allow-empty", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+
+    write_file(repository, "config.json", b'{"enabled": true}\n')
+    write_file(repository, "build.ps1", b'Write-Output "build"\n')
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "add diff files")
+    head = git(repository, "rev-parse", "HEAD")
+
+    output = tmp_path / "in_scope_files.txt"
+    result = run_inventory(
+        repository,
+        ".",
+        output,
+        arguments=["--diff-base", base, "--diff-head", head],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "build.ps1",
+        "config.json",
+    ]
+
+
 def test_inventory_uses_forward_slashes_when_ripgrep_defaults_to_backslashes(
     tmp_path: Path,
 ) -> None:

@@ -42,6 +42,7 @@ TEXT_CODE_EXTENSIONS = {
     ".mm",
     ".php",
     ".proto",
+    ".ps1",
     ".py",
     ".rb",
     ".rs",
