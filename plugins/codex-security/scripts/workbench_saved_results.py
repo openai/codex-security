@@ -280,14 +280,15 @@ def _recovery_source_digests(
             or manifest_scan.get("artifacts") is not None
         ):
             include_parent = "preservedSources" not in manifest_scan
-            published_sources = _source_digests(
-                manifest_scan.get("preservedSources", {}), "Published scan"
-            )
-            if frozen_sources is not None and frozen_sources != published_sources:
-                raise ContractError(
-                    "Stopped scan sources changed after terminal publication."
+            if not include_parent:
+                published_sources = _source_digests(
+                    manifest_scan["preservedSources"], "Published scan"
                 )
-            frozen_sources = published_sources
+                if frozen_sources is not None and frozen_sources != published_sources:
+                    raise ContractError(
+                        "Stopped scan sources changed after terminal publication."
+                    )
+                frozen_sources = published_sources
 
     recovery_sources = dict(frozen_sources or {})
     for relative, expected_digest in recovery_sources.items():
