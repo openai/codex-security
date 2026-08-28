@@ -7,8 +7,7 @@ The dataset is intentionally small and reviewable. It is not a raw dump of every
 - the repository and pinned commit or commit pair to inspect
 - the supplied finding text shape
 - the expected triage verdict
-- evidence obligations the agent must satisfy, such as reading `SECURITY.md`,
-  checking a lockfile version, or comparing vulnerable and fixed commits
+- evidence obligations the agent must satisfy, such as reading `SECURITY.md`, checking a lockfile version, or comparing vulnerable and fixed commits
 - provenance for the gold label
 
 The important distinction is that GitHub advisory state is source material, not the answer key. The expected verdict asks whether the pinned repository state is `confirmed`, `not_actionable`, or `needs_review` under the `triage-finding/v0` contract.

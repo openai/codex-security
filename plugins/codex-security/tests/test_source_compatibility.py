@@ -119,6 +119,43 @@ onto another source line.
     )
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "First clause,\ncontinues here.\n",
+        "First clause\n**continues** here.\n",
+    ],
+)
+def test_rejects_wraps_adjacent_to_inline_markup(tmp_path: Path, content: str) -> None:
+    (tmp_path / "README.md").write_text(content, encoding="utf-8")
+    initialize_repository(tmp_path)
+    track(tmp_path, "README.md")
+
+    result = run_checker(tmp_path)
+
+    assert result.returncode == 1
+    assert result.stderr == (
+        "README.md:1: prose is hard-wrapped mid-sentence; use a natural Markdown line\n"
+    )
+
+
+def test_accepts_hard_wrapped_lines_inside_raw_html_blocks(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text(
+        """<pre>
+This preformatted content continues
+onto another source line
+</pre>
+""",
+        encoding="utf-8",
+    )
+    initialize_repository(tmp_path)
+    track(tmp_path, "README.md")
+
+    result = run_checker(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_rejects_dependency_lock_files_above_two_megabytes(tmp_path: Path) -> None:
     (tmp_path / "pnpm-lock.yaml").write_bytes(b"x" * 2_000_001)
     initialize_repository(tmp_path)

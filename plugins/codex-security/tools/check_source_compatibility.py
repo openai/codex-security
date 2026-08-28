@@ -23,6 +23,8 @@ DEPENDENCY_LOCK_NAMES = {
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 HTML_BLOCK = re.compile(r"^\s*</?[A-Za-z][^>]*>\s*$")
 CODE_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+RAW_HTML_BLOCK_START = re.compile(r"^\s{0,3}<(pre|script|style|textarea)(?:\s|>|$)", re.IGNORECASE)
+RAW_HTML_BLOCK_END = re.compile(r"</(pre|script|style|textarea)\s*>", re.IGNORECASE)
 NATURAL_LINE_ENDINGS = tuple(".?!:;。！？：；)]}'\"`>")
 
 
@@ -62,6 +64,7 @@ def hard_wrapped_lines(content: str) -> list[int]:
     lines = content.splitlines()
     offenders: list[int] = []
     fence_delimiter: str | None = None
+    html_block_tag: str | None = None
     in_html_comment = False
     in_frontmatter = bool(
         lines and lines[0].strip() == "---" and any(line.strip() == "---" for line in lines[1:])
@@ -72,6 +75,11 @@ def hard_wrapped_lines(content: str) -> list[int]:
         if in_html_comment:
             if "-->" in line:
                 in_html_comment = False
+            continue
+        if html_block_tag is not None:
+            closing_tag = RAW_HTML_BLOCK_END.search(line)
+            if closing_tag is not None and closing_tag.group(1).lower() == html_block_tag:
+                html_block_tag = None
             continue
 
         fence = CODE_FENCE.match(line)
@@ -95,16 +103,18 @@ def hard_wrapped_lines(content: str) -> list[int]:
         if stripped.startswith("<!--"):
             in_html_comment = "-->" not in stripped[4:]
             continue
+        raw_html_block = RAW_HTML_BLOCK_START.match(line)
+        if raw_html_block is not None:
+            tag = raw_html_block.group(1).lower()
+            closing_tag = RAW_HTML_BLOCK_END.search(line, raw_html_block.end())
+            if closing_tag is None or closing_tag.group(1).lower() != tag:
+                html_block_tag = tag
+            continue
 
         following_line = lines[line_number]
-        following_stripped = following_line.strip()
         if is_markdown_structure(line) or is_markdown_structure(following_line):
             continue
         if LIST_ITEM.match(following_line) or line_ends_naturally(line):
-            continue
-        if re.search(r"[A-Za-z0-9`]$", stripped) is None:
-            continue
-        if re.match(r"[A-Za-z0-9`(]", following_stripped) is None:
             continue
         offenders.append(line_number)
 

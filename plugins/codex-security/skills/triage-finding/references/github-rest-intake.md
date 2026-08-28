@@ -37,8 +37,7 @@ If the repository cannot be resolved to `owner` and `repo`, ask for the GitHub r
 Resolve and record the current local target repository revision in the triage result when available. Treat that revision as the code state being analyzed;
 do not change it.
 
-Preserve commit or ref provenance supplied by GitHub, especially the `commit_sha` and `ref` fields on code-scanning instances, and compare it with the local target revision. Regardless of whether GitHub supplies a SHA,
-statically inspect the current local repository to determine whether the reported vulnerable condition still exists.
+Preserve commit or ref provenance supplied by GitHub, especially the `commit_sha` and `ref` fields on code-scanning instances, and compare it with the local target revision. Regardless of whether GitHub supplies a SHA, statically inspect the current local repository to determine whether the reported vulnerable condition still exists.
 
 A source/local commit or ref mismatch, missing reported path, or absent vulnerable dependency is counterevidence or a proof gap, not automatic proof that the finding is fixed. If the imported source cannot be mapped reliably to current local code, preserve the mismatch in `proof_gaps` and prefer `needs_review` when it prevents a stronger evidence-backed verdict.
 
@@ -112,9 +111,7 @@ GET /repos/{owner}/{repo}/dependabot/alerts?classification=general&state=open&pe
 ```
 
 Normalize as `source_type: "cve"` when the alert includes a CVE identifier.
-Otherwise normalize as `source_type: "advisory"`. Preserve GHSA ids, CVEs,
-dependency package name, vulnerable manifest path, vulnerable requirements,
-fixed version, alert URL, and GitHub provenance.
+Otherwise normalize as `source_type: "advisory"`. Preserve GHSA ids, CVEs, dependency package name, vulnerable manifest path, vulnerable requirements, fixed version, alert URL, and GitHub provenance.
 
 ### Dependabot Malware
 
@@ -139,9 +136,7 @@ GET /repos/{owner}/{repo}/security-advisories?state=closed&per_page=100
 
 The `triage` state represents private vulnerability reports. Include `state=triage` whenever the user asks for private reports, security advisories plus private reports, or all advisory-like sources.
 
-Normalize these as `source_type: "advisory"`. Preserve GHSA id, CVE ids,
-advisory URL, state, affected products/packages, vulnerable version ranges,
-patched versions, summary, description, and GitHub provenance.
+Normalize these as `source_type: "advisory"`. Preserve GHSA id, CVE ids, advisory URL, state, affected products/packages, vulnerable version ranges, patched versions, summary, description, and GitHub provenance.
 
 ### Explicit GitHub Issues
 
@@ -151,8 +146,7 @@ Only when explicitly requested, fetch the specific issue:
 GET /repos/{owner}/{repo}/issues/{issue_number}
 ```
 
-Normalize as `source_type: "freeform"` because issues are arbitrary reports, not a dedicated security finding schema. Preserve the issue URL, number, labels,
-title, body, author, and GitHub provenance.
+Normalize as `source_type: "freeform"` because issues are arbitrary reports, not a dedicated security finding schema. Preserve the issue URL, number, labels, title, body, author, and GitHub provenance.
 
 ## Pagination
 

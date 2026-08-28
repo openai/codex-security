@@ -28,23 +28,19 @@ For now, run the workflow inline in the current thread, but structure the work l
 
 Do not use `../../schemas/findings.schema.json` as the canonical data shape for input normalization.
 
-That schema describes completed Codex Security scan output. It requires generated fields such as `scanId`, `findingId`, `occurrenceId`, fingerprints,
-severity, remediation, provenance, and at least one location. Most triage inputs are incomplete external claims, and forcing them into that schema before investigation would require inventing stable IDs, severity, remediation, or locations.
+That schema describes completed Codex Security scan output. It requires generated fields such as `scanId`, `findingId`, `occurrenceId`, fingerprints, severity, remediation, provenance, and at least one location. Most triage inputs are incomplete external claims, and forcing them into that schema before investigation would require inventing stable IDs, severity, remediation, or locations.
 
 Use the schema only as an optional compatibility source when the user supplies an existing `codex-security.findings` JSON artifact. In that case, extract the available fields into the triage normalization record and preserve the original IDs as source identifiers. The triage result contract is defined in `references/triage-result-contract.md`.
 
 ## Static Assessment Guidance
 
-Use the shared static finding assessment reference in `../../references/static-finding-assessment.md` for the reusable evidence work: source/control/sink tracing, smallest useful evidence search,
-reachability, boundary inputs, counterevidence, proof gaps, and static confidence.
+Use the shared static finding assessment reference in `../../references/static-finding-assessment.md` for the reusable evidence work: source/control/sink tracing, smallest useful evidence search, reachability, boundary inputs, counterevidence, proof gaps, and static confidence.
 
-This skill still owns external finding intake, the backlog triage verdicts,
-the first-pass no-runtime constraint, and the output contract.
+This skill still owns external finding intake, the backlog triage verdicts, the first-pass no-runtime constraint, and the output contract.
 
 ## Routing and Connector Use
 
-Use this skill for security or vulnerability Jira/Linear tickets, even when the user mentions `@atlassian-rovo`, `@linear`, Jira, Linear, JQL, project keys,
-ticket URLs, or ticket search phrases. Treat Atlassian Rovo and Linear mentions as connector hints for importing ticket content, not as a reason to switch to Atlassian Rovo's `triage-issue` skill or another generic ticket workflow.
+Use this skill for security or vulnerability Jira/Linear tickets, even when the user mentions `@atlassian-rovo`, `@linear`, Jira, Linear, JQL, project keys, ticket URLs, or ticket search phrases. Treat Atlassian Rovo and Linear mentions as connector hints for importing ticket content, not as a reason to switch to Atlassian Rovo's `triage-issue` skill or another generic ticket workflow.
 
 Do not run duplicate-bug triage instead of security-impact triage. Generic Jira duplicate triage answers "is this already filed?" This skill answers "does this existing security claim affect this repository, and how should it rank for backlog burn-down?"
 
@@ -56,17 +52,14 @@ Do not inspect the repository, assign a verdict, or emit `triage-finding/v0` unl
 
 ## GitHub Repository Intake
 
-When the user supplies a GitHub repository instead of pasted finding content,
-use `references/github-rest-intake.md` before normalizing findings.
+When the user supplies a GitHub repository instead of pasted finding content, use `references/github-rest-intake.md` before normalizing findings.
 
-Detect GitHub repositories from `owner/repo`, GitHub URLs, GitHub SSH remotes,
-the current Codex project's attached GitHub repository, or the current local repository's GitHub remote.
+Detect GitHub repositories from `owner/repo`, GitHub URLs, GitHub SSH remotes, the current Codex project's attached GitHub repository, or the current local repository's GitHub remote.
 
 If the user asks to pull from GitHub without typing an `owner/repo` or URL, first infer the GitHub repository from the current Codex project attachment when that metadata is available. Prefer that attached repository over a local path or local git remote. If no Codex project attachment is visible, fall back to the current repository's GitHub remote. Only ask for a repository URL or `owner/repo`
 when neither source resolves to a GitHub repository.
 
-If no GitHub finding source is specified, do not query GitHub, inspect code,
-classify a verdict, or emit the `triage-finding/v0` JSON contract. Ask the user to choose one of:
+If no GitHub finding source is specified, do not query GitHub, inspect code, classify a verdict, or emit the `triage-finding/v0` JSON contract. Ask the user to choose one of:
 
 - code scanning
 - Dependabot vulnerabilities and malware
@@ -92,20 +85,17 @@ Start by extracting:
 
 - repository path or current working repository
 - GitHub repository owner/name, selected finding source, and authorized transport, when the input is a GitHub repository intake request
-- Jira/Linear source query, issue key or identifier, URL, project, status,
-  labels, components, priority, assignee, reporter, timestamps, and issue type when the input is imported from a ticketing system
+- Jira/Linear source query, issue key or identifier, URL, project, status, labels, components, priority, assignee, reporter, timestamps, and issue type when the input is imported from a ticketing system
 - input id, scanner id, SARIF rule/result id, CVE/GHSA id, ticket id, or Codex Security `findingId`/`occurrenceId` when present
 - title or short claim
-- source type: `sarif`, `cve`, `advisory`, `scanner_ticket`,
-  `bug_bounty`, `codex_security_finding`, `freeform`, or `unknown`
+- source type: `sarif`, `cve`, `advisory`, `scanner_ticket`, `bug_bounty`, `codex_security_finding`, `freeform`, or `unknown`
 - vulnerable component, package, API, file, route, class, function, or service
 - claimed attacker-controlled source
 - claimed sink or broken security control
 - affected version, path, configuration, or deployment surface
 - required preconditions and claimed impact
 - existing code references, evidence, and counterevidence supplied by the user
-- GitHub provenance such as alert URL, advisory URL, issue URL, alert number,
-  advisory state, package name, manifest path, rule id, and instance locations
+- GitHub provenance such as alert URL, advisory URL, issue URL, alert number, advisory state, package name, manifest path, rule id, and instance locations
 
 Ask a follow-up question only when the repository path or finding claim is too vague to inspect. Otherwise, inspect the repository and preserve missing fields as proof gaps.
 
@@ -260,8 +250,7 @@ After verdicting, assign discrete exploitability stack ranks separately for `con
 - Ranks must be unique and contiguous from `1` inside each queue. The same rank may appear once in each queue because `rank_queue` distinguishes confirmed priorities from needs-review priorities.
 - `not_actionable` findings are not stack-ranked; set their rank queue and rank to `null`.
 
-Rank by exploitability, not by scanner severity alone. Prioritize findings with clearer attacker reachability, lower required privileges, fewer preconditions,
-more direct source-to-sink control, weaker or absent guards, and more reliable static evidence that the exploit path can be exercised. Use claimed impact or scanner severity only as a final tiebreaker when exploitability is otherwise equal.
+Rank by exploitability, not by scanner severity alone. Prioritize findings with clearer attacker reachability, lower required privileges, fewer preconditions, more direct source-to-sink control, weaker or absent guards, and more reliable static evidence that the exploit path can be exercised. Use claimed impact or scanner severity only as a final tiebreaker when exploitability is otherwise equal.
 
 Keep findings in input order in the JSON result. Use the stack-rank fields to show review/remediation priority instead of reordering the results.
 
@@ -269,8 +258,7 @@ Keep findings in input order in the JSON result. Use the stack-rank fields to sh
 
 For `confirmed` findings only, add a concise owner hint after assigning the verdict and exploitability stack rank when local ownership evidence is easy to derive.
 
-Prefer CODEOWNERS or OWNERS evidence when available. If ownership is not clear,
-omit the owner hint rather than guessing. Owner hints are routing metadata only:
+Prefer CODEOWNERS or OWNERS evidence when available. If ownership is not clear, omit the owner hint rather than guessing. Owner hints are routing metadata only:
 do not use ownership to influence verdict, confidence, boundary assessment, or exploitability rank.
 
 The `triage-finding/v0` contract does not define a dedicated owner field. Do not add undocumented fields to the structured result. Put owner-hint text in existing Markdown output, evidence, or recommended-next-step text when it is useful.
