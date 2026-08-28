@@ -513,6 +513,27 @@ discovery has finished, the scan returns a sealed partial report without more
 model calls and lists unvalidated candidates as follow-up work. Bulk scans
 apply the limit per repository attempt.
 
+For a single scan in the interactive dashboard, reaching 80% of the limit
+offers a higher **total** USD limit. Enter a larger amount to approve it, or
+press Enter with an empty input or Escape to keep the current limit. The scan
+continues running while you decide, and the existing limit remains enforced
+until the increase is saved. Increases keep the same scan and accumulated cost;
+they do not restart work or extend time or discovery limits. CI, JSON/JSONL,
+`--headless`, and `--verbose` scans do not offer budget increases. If usage crosses the limit
+before an increase is approved, the scan still stops.
+
+SDK callers can supply `onBudgetApproaching({ maxCostUsd, cost, signal })` and
+return a higher total limit, or `undefined` to keep the current limit. The
+callback runs once per limit at 80% usage without blocking tracking or
+execution. Its signal aborts when the scan stops or finishes model work; late
+answers are ignored. Invalid increases or failures to save them leave the
+existing limit in place and report a warning. `onCost(cost, maxCostUsd)` reports
+the current limit, including after an approved increase.
+
+These amounts estimate API-equivalent model usage, not ChatGPT subscription
+allowance. Post-scan prompts run after scan cost tracking ends and are outside
+this limit.
+
 ### Bulk scans
 
 Run `gh auth login`, then `npx @openai/codex-security bulk-scan` to select
