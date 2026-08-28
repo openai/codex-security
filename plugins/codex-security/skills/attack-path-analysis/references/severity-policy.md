@@ -106,7 +106,6 @@ Final policy-adjustment guidance:
   - `none` does not increase likelihood based on exposure
 - Then decide reportability using the existing facts:
   - if repository evidence does not establish a realistic lower-privileged in-scope attacker path, set `ignore`
-  - if the path is internal-only, developer-only, operator-only, localhost-only, privileged-local, or otherwise not meaningfully reportable in context, set `ignore`
 
 Do not suppress solely because the surface is private or internal when repository evidence still shows a meaningful authorization, trust-boundary, identity, or security-control regression in a real product or production-service workflow. In those cases, internal exposure should usually reduce likelihood or confidence rather than force `ignore`.
 
