@@ -828,7 +828,6 @@ def build_report_markdown(
         f"- Inventory strategy: {coverage['inventoryStrategy']}",
         f"- Included paths: {', '.join(include_paths) or 'none'}",
         f"- Excluded paths: {', '.join(exclude_paths) or 'none'}",
-        f"- Runtime or test status: {_text(scope.get('runtimeStatus'), 'not recorded')}",
     ]
     artifacts_reviewed = _strings(scope.get("artifactsReviewed"))
     if artifacts_reviewed:

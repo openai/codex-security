@@ -12,7 +12,6 @@ The scan reviewed the canonical include paths and exclusions listed below.
 - Inventory strategy: repository
 - Included paths: .
 - Excluded paths: none
-- Runtime or test status: not recorded
 
 ### Scan Summary
 

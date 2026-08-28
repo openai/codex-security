@@ -1874,6 +1874,20 @@ The extraction root is not enforced.
             self.assertIn(expected, report)
         self.assertFalse((self.scan_dir / "report.html").exists())
 
+    def test_finalize_does_not_project_model_authored_runtime_status(self) -> None:
+        stale_status = "SDK finalization and sealing intentionally pending."
+        self.manifest["scan"]["scope"]["runtimeStatus"] = stale_status
+        self.write_scan()
+
+        FINALIZER.finalize_scan(self.scan_dir)
+
+        manifest = self.read_json("scan-manifest.json")
+        report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
+        self.assertEqual(manifest["scan"]["status"], "completed")
+        self.assertEqual(manifest["scan"]["sealedAt"], "2026-05-31T18:09:00Z")
+        self.assertNotIn(stale_status, report)
+        self.assertNotIn("Runtime or test status", report)
+
     def test_finalize_accepts_legacy_unstructured_report_semantics(self) -> None:
         finding = self.findings["findings"][0]
         finding["validation"] = {"evidence": "legacy validation evidence"}
