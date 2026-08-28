@@ -64,6 +64,25 @@ def test_accepts_valid_source_and_ignores_untracked_files(tmp_path: Path) -> Non
     assert result.stderr == ""
 
 
+def test_accepts_shorter_fences_nested_inside_a_code_block(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text(
+        """````markdown
+```text
+This example continues
+onto another source line
+```
+````
+""",
+        encoding="utf-8",
+    )
+    initialize_repository(tmp_path)
+    track(tmp_path, "README.md")
+
+    result = run_checker(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_rejects_dependency_lock_files_above_two_megabytes(tmp_path: Path) -> None:
     (tmp_path / "pnpm-lock.yaml").write_bytes(b"x" * 2_000_001)
     initialize_repository(tmp_path)

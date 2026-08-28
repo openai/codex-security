@@ -22,6 +22,7 @@ DEPENDENCY_LOCK_NAMES = {
 }
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 HTML_BLOCK = re.compile(r"^\s*</?[A-Za-z][^>]*>\s*$")
+CODE_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
 NATURAL_LINE_ENDINGS = tuple(".?!:;。！？：；)]}'\"`>")
 
 
@@ -60,18 +61,27 @@ def line_ends_naturally(line: str) -> bool:
 def hard_wrapped_lines(content: str) -> list[int]:
     lines = content.splitlines()
     offenders: list[int] = []
-    in_fence = False
+    fence_delimiter: str | None = None
     in_frontmatter = content.startswith("---\n")
 
     for line_number, line in enumerate(lines[:-1], start=1):
         stripped = line.strip()
-        if stripped.startswith(("```", "~~~")):
-            in_fence = not in_fence
+        fence = CODE_FENCE.match(line)
+        if fence is not None:
+            delimiter, trailing = fence.groups()
+            if fence_delimiter is None:
+                fence_delimiter = delimiter
+            elif (
+                delimiter[0] == fence_delimiter[0]
+                and len(delimiter) >= len(fence_delimiter)
+                and not trailing.strip()
+            ):
+                fence_delimiter = None
             continue
         if line_number > 1 and in_frontmatter and stripped == "---":
             in_frontmatter = False
             continue
-        if in_fence or in_frontmatter:
+        if fence_delimiter is not None or in_frontmatter:
             continue
 
         following_line = lines[line_number]
