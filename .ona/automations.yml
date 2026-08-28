@@ -24,6 +24,7 @@ tasks:
       - install
     triggeredBy:
       - manual
+      - prebuild
 
   test:
     name: Run tests
