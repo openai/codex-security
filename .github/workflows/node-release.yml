@@ -138,6 +138,11 @@ jobs:
           sfw pnpm --dir sdk/typescript install --frozen-lockfile
           sfw npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
 
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+
       - name: Audit production dependencies
         continue-on-error: true
         run: sfw pnpm --dir sdk/typescript run audit:prod
