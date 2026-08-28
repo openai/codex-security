@@ -184,9 +184,7 @@ def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
     tmp_path: Path,
 ) -> None:
     state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path)
-    original = run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)[
-        "recipe"
-    ]
+    original = run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]
     for limit in (0.0055, 0.006):
         run_workbench(
             state_dir,
@@ -198,10 +196,7 @@ def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
         )
     saved = run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]
     assert saved == {**original, "maxCostUsd": 0.006}
-    assert (
-        complete_budget_scan(state_dir, scan_id)["scan"]["progress"]["status"]
-        == "complete"
-    )
+    assert complete_budget_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "complete"
     stopped = run_workbench(
         state_dir,
         "set-scan-cost-limit",
@@ -215,9 +210,7 @@ def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
 
 
 @pytest.mark.parametrize("limit", ["0", "-1", "nan", "inf", "0.004", "0.005"])
-def test_cost_limit_rejects_invalid_or_nonincreasing_totals(
-    tmp_path: Path, limit: str
-) -> None:
+def test_cost_limit_rejects_invalid_or_nonincreasing_totals(tmp_path: Path, limit: str) -> None:
     state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path, mode="standard")
     result = run_workbench(
         state_dir,
@@ -230,9 +223,7 @@ def test_cost_limit_rejects_invalid_or_nonincreasing_totals(
     )
     assert result["returncode"] != 0
     assert (
-        run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"][
-            "maxCostUsd"
-        ]
+        run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]["maxCostUsd"]
         == 0.005
     )
 

@@ -91,6 +91,8 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
     const environment = {
       PATH: process.env["PATH"],
       SystemRoot: process.env["SystemRoot"],
+      TEMP: process.env["TEMP"],
+      TMP: process.env["TMP"],
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     };
     const workflowId = "durable-scan";

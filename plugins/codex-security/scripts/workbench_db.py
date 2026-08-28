@@ -1790,9 +1790,7 @@ def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) ->
     return {"scanId": scan["id"], "threadId": args.thread_id}
 
 
-def set_scan_cost_limit(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
+def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     limit = args.max_cost_usd
     if not math.isfinite(limit) or limit <= 0:
