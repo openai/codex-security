@@ -111,9 +111,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Verify findings service and persistent SQLite storage
-        env:
-          CODEX_SECURITY_IMAGE: codex-security:ci
-        run: bun sdk/typescript/scripts/smoke-findings-service.ts
+        run: bun sdk/typescript/scripts/smoke-findings-service.ts codex-security:ci
 
       - name: Validate hardened customer Compose configuration
         env:

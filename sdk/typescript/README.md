@@ -912,8 +912,9 @@ cancel active scans.
 
 ## Findings service (preview)
 
-The findings API is distributed separately from the scanner as
-`ghcr.io/openai/codex-security-findings`, for Linux `amd64` and `arm64`.
+The findings API uses the same `ghcr.io/openai/codex-security` image as the
+scanner, for Linux `amd64` and `arm64`. `compose.findings.yaml` starts the API
+in a separate container with its own state volume and server configuration.
 Once a release is published, it can be pulled without a GitHub login. See
 [container release setup](../../docker/README.md) for the required maintainer
 setup and publication process.
@@ -934,16 +935,19 @@ curl -i http://127.0.0.1:3000/v1/findings
 
 You can deploy with just `compose.findings.yaml` and a private `.env`; no source
 checkout or Node.js installation is required. `CODEX_SECURITY_FINDINGS_IMAGE`
-defaults to `ghcr.io/openai/codex-security-findings:latest`. Set it to a published
+defaults to `ghcr.io/openai/codex-security:latest`. Set it to a published
 version, `sha-<commit>` tag, or digest for repeatable deployments.
 
 To build from a source checkout instead:
 
 ```bash
-docker build --target findings-service -t codex-security-findings:local .
-export CODEX_SECURITY_FINDINGS_IMAGE=codex-security-findings:local
+docker build --target scanner -t codex-security:local .
+export CODEX_SECURITY_FINDINGS_IMAGE=codex-security:local
 docker compose -f compose.findings.yaml up --no-build -d
 ```
+
+For an existing deployment using the separate findings image or
+`--target findings-service`, follow the [single-image migration guide](../../docker/README.md#migrating-the-findings-service).
 
 ### Read-only dashboard
 
@@ -1368,7 +1372,7 @@ Stop the service with
 `docker compose -f compose.findings.yaml down`; add `--volumes` only when you
 intend to delete the stored data.
 
-The image defaults to `HOST=0.0.0.0`, `PORT=3000`, and
+The findings Compose configuration sets `HOST=0.0.0.0`, `PORT=3000`, and
 `CODEX_SECURITY_STATE_DIR=/state`. Keep port and volume mappings aligned if
 changing these settings. Compose binds only to host loopback; the API has no
 authentication. Use an authenticated TLS proxy before sharing access. Finding

@@ -1,48 +1,36 @@
 # Container releases
 
-`container-release` uses one release pipeline for both images:
+`container-release` publishes `ghcr.io/openai/codex-security` from the default
+`scanner` Docker target. The scanner and findings service use this same image
+in separate containers with separate state. `compose.findings.yaml` supplies
+the Node server command, working directory, and service environment; the image's
+default command remains the scanner CLI.
 
-| Docker target       | GHCR image                               |
-| ------------------- | ---------------------------------------- |
-| `scanner` (default) | `ghcr.io/openai/codex-security`          |
-| `findings-service`  | `ghcr.io/openai/codex-security-findings` |
-
-Both use the SDK package version, native Linux `amd64`/`arm64` builds, BuildKit
-SBOMs and maximum-mode provenance, and a GitHub provenance attestation. Native
-images are tested before publishing the multiarchitecture manifest. Anonymous
+Releases use the SDK package version, native Linux `amd64`/`arm64` builds,
+BuildKit SBOMs and maximum-mode provenance, and a GitHub provenance attestation.
+Each native image passes scanner and findings API/persistence checks before
+publishing the multiarchitecture manifest. Anonymous
 pulls and attestation must succeed before promoting version, `sha-<commit>`, and
 `latest` tags. Stable version tags cannot be overwritten.
 
 ## GHCR administrator setup
 
-Before the first release, an administrator must prepare each package:
+Before the first release, an administrator must prepare the package:
 
-1. Allow organization package creation and bootstrap missing packages with a
-   reviewed image and a non-release tag. For the findings image:
+1. Allow organization package creation and, if the package is missing, bootstrap
+   it with a reviewed image and a non-release tag:
 
    ```bash
-   docker build --target findings-service -t ghcr.io/openai/codex-security-findings:bootstrap .
+   docker build --target scanner -t ghcr.io/openai/codex-security:bootstrap .
    printf '%s' "$CR_PAT" | docker login ghcr.io --username YOUR_GITHUB_USER --password-stdin
-   docker push ghcr.io/openai/codex-security-findings:bootstrap
+   docker push ghcr.io/openai/codex-security:bootstrap
    docker logout ghcr.io
    ```
 
    Use a personal access token (classic) with `write:packages`, authorized for SSO
-   if required; never commit it or pass it into the build. For the scanner, use
-   target `scanner` and image `ghcr.io/openai/codex-security:bootstrap`.
+   if required; never commit it or pass it into the build.
 
-   To bootstrap a missing findings package through GitHub Actions instead, run:
-
-   ```bash
-   gh workflow run container-bootstrap-findings.yml --repo openai/codex-security --ref main
-   ```
-
-   This manual workflow uses `GITHUB_TOKEN`, retains the `container` environment's
-   approval rules, and pushes only `codex-security-findings:bootstrap` for Linux
-   `amd64`. Complete the package settings below before running the release
-   workflow; the bootstrap image is not a consumer release.
-
-2. In each package's settings, link `openai/codex-security`, set visibility to
+2. In the package's settings, link `openai/codex-security`, set visibility to
    **Public**, and grant the repository **Write** under **Manage Actions access**.
    The workflow uses `GITHUB_TOKEN` and refuses missing, private, or unreadable
    packages. Verify `docker pull` works after logging out of GHCR.
@@ -60,19 +48,35 @@ After merging to `main`, push `container-v<version>` matching the SDK package
 version or run `container-release` manually on `main`. Releases require a commit
 on protected `main`; pull requests only build and test.
 
-The images release independently. If one fails, fix the cause and rerun only
-failed jobs; do not overwrite an existing stable version. `bootstrap` and
+If a release fails, fix the cause and rerun only failed jobs; do not overwrite
+an existing stable version. `bootstrap` and
 `release-candidate-<commit>` tags are not consumer releases.
 
 See the [findings service guide](../sdk/typescript/README.md#findings-service-preview)
 for image selection, source builds, storage, backups, and upgrades.
+
+## Migrating the findings service
+
+The `findings-service` build target and separate
+`ghcr.io/openai/codex-security-findings` release are replaced by the shared
+image. For source builds, use `--target scanner` (or omit `--target`). Update
+`compose.findings.yaml` and set `CODEX_SECURITY_FINDINGS_IMAGE` to a published
+`ghcr.io/openai/codex-security` version or digest before pulling and starting
+the service. Custom deployments must also carry over the Compose file's Node
+entrypoint, server command, package working directory, and service environment.
+
+Back up the service as described in the [upgrade guide](../sdk/typescript/README.md#upgrades-and-backups).
+Keep the same Compose project name and `findings-state` volume mounted at
+`/state`; do not run `down --volumes`. This packaging change does not migrate or
+move the database, and the runner must keep its own state. Existing published
+images and tags are unchanged.
 
 ## Workflow runner
 
 `compose.runner.yaml` runs the packaged CLI from the **scanner** image. It does
 not start a findings service or implement another workflow engine. It passes
 commands, output, and exit codes through the existing scanner entrypoint.
-The shared Dockerfile and the two image releases above are unchanged.
+The findings service uses the same image with the configuration described above.
 
 Run these commands from the repository root. After the selected scanner release
 is available, prepare private directories and choose the host user's UID/GID so
