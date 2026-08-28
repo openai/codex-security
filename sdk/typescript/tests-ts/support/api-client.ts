@@ -68,6 +68,9 @@ export class TestClient extends CodexSecurity {
           throw new Error("Unexpected Codex invocation in test");
         },
         environment: {},
+        prepareScanArtifactRestorer: async () => ({
+          restore: async () => {},
+        }),
         runWorkbench: async (_options, args, input) =>
           mockWorkbench(args, input),
         ...dependencies,
