@@ -245,6 +245,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes ripgrep
 
+      - name: Check plugin source compatibility
+        run: |
+          python -m ruff check plugins/codex-security
+          python -m ruff format --check plugins/codex-security
+          python plugins/codex-security/tools/check_source_compatibility.py
+
       - name: Test Python source contracts
         run: python -m pytest plugins/codex-security/tests -q
 

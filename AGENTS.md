@@ -14,6 +14,15 @@ Codex Security is a thin wrapper around Codex and its security plugin.
   only after checking that it is public. If you cannot confirm its visibility,
   leave it out.
 
+When changing `plugins/codex-security`, run its portable source checks before
+submitting the change:
+
+```bash
+python -m ruff check plugins/codex-security
+python -m ruff format --check plugins/codex-security
+python plugins/codex-security/tools/check_source_compatibility.py
+```
+
 ## Avoid speculative defenses
 
 - Do not add sanitization, redaction, validation, or fallback logic for
