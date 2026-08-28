@@ -179,6 +179,7 @@ const distFiles = new Set(
     "custom-validation",
     "custom-validation-prompt",
     "custom-publish",
+    "deep-progress",
     "errors",
     "github",
     "index",
