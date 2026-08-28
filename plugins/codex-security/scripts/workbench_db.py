@@ -1861,20 +1861,10 @@ def preserve_scan_results_locked(connection: sqlite3.Connection, scan_id: str) -
     return saved_results.preserve_scan_results_locked(_WORKBENCH_DB_CONTEXT, connection, scan_id)
 
 
-def refresh_stopped_scan_results(
-    connection: sqlite3.Connection, scan_id: str, *, strict: bool = False
-) -> None:
-    saved_results.refresh_stopped_scan_results(
-        _WORKBENCH_DB_CONTEXT, connection, scan_id, strict=strict
-    )
-
-
-def refresh_all_stopped_scan_results(connection: sqlite3.Connection) -> None:
-    scan_ids = [
-        row["id"] for row in connection.execute("SELECT id FROM scans WHERE status = 'failed'")
-    ]
-    for scan_id in scan_ids:
-        refresh_stopped_scan_results(connection, scan_id)
+def recover_scan_results(
+    connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, Any]:
+    return saved_results.recover_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
 
 
 def preserve_scan_results(
@@ -2733,7 +2723,6 @@ def record_linear_publications(
 
 
 def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    refresh_stopped_scan_results(connection, args.scan_id, strict=True)
     scan = require_scan(connection, args.scan_id)
     if scan["status"] != "complete" and not (
         scan["status"] == "failed" and scan["seal_manifest_digest"]
@@ -3090,8 +3079,8 @@ def workspace_state(
     workspace_id: str,
     *,
     result_scan_id: str | None = None,
+    result_scan: dict[str, Any] | None = None,
     thread_id: str | None = None,
-    refresh_stopped: bool = False,
 ) -> dict[str, Any]:
     workspace = require_workspace(connection, workspace_id)
     if thread_id is not None and workspace["thread_id"] != optional_text(thread_id, maximum=512):
@@ -3112,11 +3101,11 @@ def workspace_state(
     }
     selected_scan_id = result_scan_id or workspace["active_scan_id"]
     if selected_scan_id:
-        if refresh_stopped:
-            refresh_stopped_scan_results(connection, selected_scan_id)
         selected_scan = require_scan(connection, selected_scan_id)
         result["userContext"] = selected_scan["user_context"]
-        result["results"] = scan_result(connection, selected_scan)
+        result["results"] = (
+            result_scan if result_scan is not None else scan_result(connection, selected_scan)
+        )
         return result
 
     target_metadata = None
@@ -3158,14 +3147,16 @@ def scan_context(
     occurrence_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
-    workspace = workspace_state(connection, scan["workspace_id"], result_scan_id=scan["id"])
+    result = scan_result(connection, scan, occurrence_id=occurrence_id)
+    workspace = workspace_state(
+        connection,
+        scan["workspace_id"],
+        result_scan_id=scan["id"],
+        result_scan=result,
+    )
     context = {
         "otherRunningDeepScans": deep_scan.other_running_deep_scans(connection, scan["id"]),
-        "scan": (
-            workspace["results"]
-            if occurrence_id is None
-            else scan_result(connection, scan, occurrence_id=occurrence_id)
-        ),
+        "scan": result,
         "workspace": workspace,
     }
     if scan["recipe_json"] is not None:
@@ -3175,7 +3166,6 @@ def scan_context(
 
 
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    refresh_stopped_scan_results(connection, args.scan_id)
     scan = require_scan(connection, args.scan_id)
     backfill_legacy_finding_details(connection, scan)
     limit = min(args.limit, FINDINGS_PAGE_MAX)
@@ -3317,6 +3307,9 @@ def scan_result(
         "remediationAvailable": remediation_available,
         "remediationUnavailableReason": remediation_unavailable_reason,
         "reportAvailable": "markdownReport" in artifacts,
+        "resultsRecoveryNeeded": saved_results.scan_results_recovery_needed(
+            _WORKBENCH_DB_CONTEXT, connection, scan
+        ),
         "scanDir": scan["scan_dir"],
         "scanId": scan["id"],
         "scope": scan["scope"],
@@ -3884,7 +3877,6 @@ def main() -> None:
                 connection,
                 args.workspace_id,
                 thread_id=args.thread_id,
-                refresh_stopped=True,
             )
         elif args.command == "save-workspace":
             result = save_workspace(connection, args)
@@ -3913,12 +3905,10 @@ def main() -> None:
         elif args.command == "record-deep-scan-publication-failure":
             result = deep_scan.record_deep_scan_publication_failure(connection, args)
         elif args.command == "get-scan":
-            refresh_stopped_scan_results(connection, args.scan_id)
             result = scan_context(connection, args.scan_id, args.occurrence_id)
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":
-            refresh_all_stopped_scan_results(connection)
             result = scan_history.list_scans(connection, args)
         elif args.command == "list-unmatched-scan-pairs":
             result = scan_history.list_unmatched_scan_pairs(
@@ -3952,10 +3942,8 @@ def main() -> None:
                 read_coverage=coverage_for_comparison,
             )
         elif args.command == "list-global-findings":
-            refresh_all_stopped_scan_results(connection)
             result = native_indexes.list_global_findings(connection, args)
         elif args.command == "list-repositories":
-            refresh_all_stopped_scan_results(connection)
             result = native_indexes.list_repositories(connection, args)
         elif args.command == "list-findings":
             result = list_findings(connection, args)
@@ -3975,6 +3963,8 @@ def main() -> None:
             result = fail_scan(connection, args)
         elif args.command == "preserve-scan-results":
             result = preserve_scan_results(connection, args)
+        elif args.command == "recover-scan-results":
+            result = recover_scan_results(connection, args)
         elif args.command == "write-scan-draft":
             result = write_scan_draft(connection, args)
         elif args.command == "mark-handoff-delivered":

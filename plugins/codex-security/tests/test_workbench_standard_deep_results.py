@@ -90,6 +90,18 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     late["findings"][0]["locations"][0]["endLine"] = 92
     archived = result_path.parent / "attempts" / "attempt-01" / "checkpoints"
     write_checkpoint(archived, late)
+    recovery_needed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert recovery_needed["resultsRecoveryNeeded"] is (termination != "canceled")
+    if termination == "canceled":
+        rejected = run_workbench(
+            state_dir,
+            "recover-scan-results",
+            "--scan-id",
+            scan_id,
+            check=False,
+        )
+        assert rejected["returncode"] != 0
+        assert "Canceled scans cannot recover" in str(rejected["stderr"])
     wrong_owner = run_workbench(
         state_dir,
         "preserve-scan-results",
@@ -123,7 +135,7 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     assert (scan_dir / "scan-manifest.json").read_bytes() == seal
 
 
-def test_reopened_workspace_ignores_late_stopped_scan_checkpoints(tmp_path: Path) -> None:
+def test_scan_reads_require_explicit_late_result_recovery(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     contract_dir = tmp_path / "contract"
@@ -153,10 +165,17 @@ def test_reopened_workspace_ignores_late_stopped_scan_checkpoints(tmp_path: Path
         "failed",
         environment={"CODEX_HOME": str(codex_home)},
     )
+    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert stopped["resultsRecoveryNeeded"] is False
     late = copy.deepcopy(checkpoint)
     late["findings"][0]["locations"][0]["startLine"] = 91
     late["findings"][0]["locations"][0]["endLine"] = 92
-    write_checkpoint(result_path.parent / "attempts" / "attempt-01" / "checkpoints", late)
+    late_path = write_checkpoint(
+        result_path.parent / "attempts" / "attempt-01" / "checkpoints", late
+    )
+    manifest_path = scan_dir / "scan-manifest.json"
+    published_after_checkpoint = late_path.stat().st_mtime_ns + 1_000_000
+    os.utime(manifest_path, ns=(published_after_checkpoint, published_after_checkpoint))
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         workspace_id = connection.execute(
             "SELECT workspace_id FROM scans WHERE id = ?", (scan_id,)
@@ -170,7 +189,41 @@ def test_reopened_workspace_ignores_late_stopped_scan_checkpoints(tmp_path: Path
         environment={"CODEX_HOME": str(codex_home)},
     )
     assert reopened["results"]["findingCount"] == 1
-    assert json.loads((scan_dir / "findings.json").read_text())["findings"]
+    stale = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert stale["findingCount"] == 1
+    assert stale["resultsRecoveryNeeded"] is True
+    assert (
+        run_workbench(state_dir, "list-findings", "--scan-id", scan_id)["findingsPage"]["total"]
+        == 1
+    )
+
+    recovered = run_workbench(
+        state_dir,
+        "recover-scan-results",
+        "--scan-id",
+        scan_id,
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+
+    assert recovered["scan"]["findingCount"] == 2
+    assert recovered["scan"]["resultsRecoveryNeeded"] is False
+    assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 2
+
+
+def test_unsealed_manifest_without_saved_results_does_not_offer_recovery(
+    tmp_path: Path,
+) -> None:
+    state_dir, _, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    (scan_dir / "scan-manifest.json").write_text(json.dumps({"scan": {"status": "failed"}}))
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET status = 'failed', failure_message = 'Worker stopped.' WHERE id = ?",
+            (scan_id,),
+        )
+
+    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+
+    assert failed["resultsRecoveryNeeded"] is False
 
 
 @pytest.mark.parametrize(
@@ -492,7 +545,7 @@ def test_existing_non_canceled_output_recovers_structured_publication_failure(
 
     run_workbench(
         state_dir,
-        "get-scan",
+        "recover-scan-results",
         "--scan-id",
         scan_id,
         environment=environment,

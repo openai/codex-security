@@ -247,6 +247,9 @@ def parse_args(description: str) -> argparse.Namespace:
     preserve_scan.add_argument("--claim-token")
     preserve_scan.add_argument("--coordinator-generation", type=positive_int)
 
+    recover_scan = subparsers.add_parser("recover-scan-results")
+    recover_scan.add_argument("--scan-id", required=True)
+
     write_scan_draft = subparsers.add_parser("write-scan-draft")
     write_scan_draft.add_argument("--scan-id", required=True)
     write_scan_draft.add_argument("--draft-path", required=True)

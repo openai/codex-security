@@ -3298,7 +3298,7 @@ def test_failure_capped_completion_preserves_partial_results_and_exact_omissions
     assert replayed == finished
 
 
-def test_late_worker_rejection_does_not_mutate_frozen_stopped_results(tmp_path: Path) -> None:
+def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
     target = tmp_path / "target"
@@ -3381,14 +3381,21 @@ def test_late_worker_rejection_does_not_mutate_frozen_stopped_results(tmp_path: 
         )
     )
 
-    refreshed = run_workbench(
+    recovery_needed = run_workbench(
         state_dir, "get-scan", "--scan-id", scan_id, environment=deep_environment(codex_home)
+    )["scan"]
+    assert recovery_needed["resultsRecoveryNeeded"] is True
+    recovered = run_workbench(
+        state_dir,
+        "recover-scan-results",
+        "--scan-id",
+        scan_id,
+        environment=deep_environment(codex_home),
     )["scan"]
     final_findings = json.loads(findings_path.read_text())["findings"]
     final_coverage = json.loads(coverage_path.read_text())
-    assert refreshed["findingCount"] == len(final_findings) == 1
-    assert final_findings[0]["summary"] == provisional["summary"]
-    assert not any(
+    assert recovered["findingCount"] == len(final_findings) == 0
+    assert any(
         item.get("candidateId") == "candidate-late-rejection"
         and item.get("disposition") == "rejected"
         for item in final_coverage["surfaces"]

@@ -1130,6 +1130,9 @@ try {
   const getScan = toolList.result.tools.find(
     (tool) => tool.name === "get_codex_security_scan",
   );
+  const recoverScanResults = toolList.result.tools.find(
+    (tool) => tool.name === "recover_codex_security_scan_results",
+  );
   const listScans = toolList.result.tools.find(
     (tool) => tool.name === "list_codex_security_scans",
   );
@@ -1552,6 +1555,10 @@ try {
   ]);
   assert.equal(getScan.annotations.readOnlyHint, false);
   assert.deepEqual(getScan._meta.ui.visibility, ["app"]);
+  assert.equal(recoverScanResults.annotations.readOnlyHint, false);
+  assert.equal(recoverScanResults.annotations.destructiveHint, true);
+  assert.equal(recoverScanResults.annotations.idempotentHint, true);
+  assert.deepEqual(recoverScanResults._meta.ui.visibility, ["app"]);
   assert.equal(listScans.annotations.readOnlyHint, true);
   assert.deepEqual(listScans._meta.ui.visibility, ["app"]);
   assert.equal(listGlobalFindings.annotations.readOnlyHint, true);
@@ -3231,6 +3238,15 @@ try {
   assert.equal(
     rotatedFailure.result.structuredContent.scan.progress.status,
     "failed",
+  );
+  const unavailableRecovery = await requestAndWait(2040, "tools/call", {
+    name: "recover_codex_security_scan_results",
+    arguments: { scanId: fallbackScanId },
+  });
+  assert.equal(unavailableRecovery.result.isError, true);
+  assert.match(
+    unavailableRecovery.result.content[0].text,
+    /No saved stopped-scan results were available to recover/,
   );
 
   const silentRefresh = await requestAndWait(11, "tools/call", {
