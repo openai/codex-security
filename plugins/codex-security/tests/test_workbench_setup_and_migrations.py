@@ -865,6 +865,7 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
             (37, "checkpoint validated dedupe reviews"),
             (38, "store findings workflow metadata in columns"),
             (39, "store dedupe checkpoint bindings in columns"),
+            (40, "index finding identity and comparison history"),
         ]
         assert {row[1] for row in connection.execute("PRAGMA table_info(workspaces)")} >= {
             "diff_target_kind",
@@ -1993,6 +1994,7 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
             (37, "checkpoint validated dedupe reviews"),
             (38, "store findings workflow metadata in columns"),
             (39, "store dedupe checkpoint bindings in columns"),
+            (40, "index finding identity and comparison history"),
         ]
         assert "capability_preflight_json" in {
             row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
@@ -2074,6 +2076,7 @@ def test_workbench_upgrades_pre_release_phase_progress_migration(tmp_path: Path)
             (37, "checkpoint validated dedupe reviews"),
             (38, "store findings workflow metadata in columns"),
             (39, "store dedupe checkpoint bindings in columns"),
+            (40, "index finding identity and comparison history"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
@@ -2163,6 +2166,7 @@ def test_workbench_upgrades_pre_release_preflight_progress_migration(tmp_path: P
             (37, "checkpoint validated dedupe reviews"),
             (38, "store findings workflow metadata in columns"),
             (39, "store dedupe checkpoint bindings in columns"),
+            (40, "index finding identity and comparison history"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")

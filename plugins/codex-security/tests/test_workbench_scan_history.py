@@ -839,7 +839,8 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
     )
 
     compared = compare_scan_pair(state_dir, before, after, "--require-matches")
-    assert compared["summary"]["new"] == compared["summary"]["resolved"] == 1
+    assert compared["summary"]["persisting"] == 1
+    assert compared["summary"]["new"] == compared["summary"]["resolved"] == 0
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT * FROM scan_comparisons").fetchall() == comparisons
         assert connection.execute("SELECT * FROM finding_occurrences").fetchall() == occurrences
@@ -1126,13 +1127,15 @@ def test_uncertain_semantic_scan_matches_stay_separate(tmp_path: Path) -> None:
     repository.mkdir()
     root = tmp_path / "results"
     before = create_cli_scan(state_dir, root, repository)
-    after = create_cli_scan(state_dir, root, repository)
+    after = create_cli_scan(
+        state_dir, root, repository, identity_anchor="independent-archive-entry-write"
+    )
     inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
         "matchingInputs"
     ]
     previous = inputs["before"][0]
     current = inputs["after"][0]
-    assert previous["findingId"] == current["findingId"]
+    assert previous["findingId"] != current["findingId"]
 
     compared = save_scan_matches(
         state_dir,
