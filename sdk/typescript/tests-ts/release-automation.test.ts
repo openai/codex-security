@@ -3952,6 +3952,7 @@ describe("GitHub release workflow safeguards", () => {
       "Set up Node.js",
       "Install dependencies",
       "Check Markdown formatting",
+      "Check plugin source compatibility",
     ]) {
       expect(validationSteps.find(({ name }) => name === stepName)?.if).toBe(
         "steps.scope.outputs.ci-mode == 'markdown'",
@@ -4085,6 +4086,57 @@ describe("GitHub release workflow safeguards", () => {
         });
         expect(result.status).toBe(0);
         expect(readFileSync(output, "utf8")).toBe(`ci-mode=${ciMode}\n`);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects oversized plugin Markdown in reduced CI",
+    () => {
+      const workspace = mkdtempSync(
+        join(tmpdir(), "release-ci-plugin-source-"),
+      );
+      const pluginRoot = join(workspace, "plugins", "codex-security");
+      const scripts = join(workspace, ".github", "scripts");
+      mkdirSync(scripts, { recursive: true });
+      mkdirSync(pluginRoot, { recursive: true });
+      writeFileSync(
+        join(scripts, "check_plugin_source_compatibility.py"),
+        readFileSync(
+          new URL(
+            "../../../.github/scripts/check_plugin_source_compatibility.py",
+            import.meta.url,
+          ),
+        ),
+      );
+      writeFileSync(join(pluginRoot, "README.md"), "x".repeat(150_001));
+      spawnSync("git", ["init", "--quiet", workspace]);
+      spawnSync("git", [
+        "-C",
+        workspace,
+        "add",
+        "--",
+        ".github/scripts/check_plugin_source_compatibility.py",
+        "plugins/codex-security/README.md",
+      ]);
+      try {
+        const result = spawnSync(
+          bash,
+          [
+            "-c",
+            workflowStepShell(
+              nodeCiWorkflow,
+              "Check plugin source compatibility",
+            ),
+          ],
+          { cwd: workspace, encoding: "utf8" },
+        );
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          "README.md: file is 150001 bytes; maximum is 150000 bytes",
+        );
       } finally {
         rmSync(workspace, { recursive: true, force: true });
       }

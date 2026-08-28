@@ -73,6 +73,11 @@ jobs:
             exit 1
           fi
 
+      - name: Check plugin source compatibility
+        if: steps.scope.outputs.ci-mode == 'markdown'
+        run: |
+          python .github/scripts/check_plugin_source_compatibility.py
+
       - name: Set up pnpm
         if: steps.scope.outputs.ci-mode == 'markdown'
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -245,8 +250,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes ripgrep
 
+      - name: Check plugin source compatibility
+        run: |
+          python -m ruff check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
+          python -m ruff format --check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
+          python .github/scripts/check_plugin_source_compatibility.py
+
       - name: Test Python source contracts
-        run: python -m pytest plugins/codex-security/tests -q
+        run: python -m pytest .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security/tests -q
 
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
