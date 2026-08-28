@@ -5,7 +5,7 @@ export interface DeepScanProgress {
 }
 
 interface DeepScanProgressTrackerOptions {
-  read: () => Promise<unknown>;
+  read: (signal: AbortSignal) => Promise<unknown>;
   onProgress: (progress: DeepScanProgress) => void;
   onError?: (error: unknown) => void;
   pollIntervalMs?: number;
@@ -16,7 +16,8 @@ const DEEP_PROGRESS_POLL_INTERVAL_MS = 5_000;
 export class DeepScanProgressTracker {
   readonly #options: DeepScanProgressTrackerOptions;
   #timer: NodeJS.Timeout | null = null;
-  #pending: Promise<void> = Promise.resolve();
+  #pending: Promise<void> | null = null;
+  #abortController: AbortController | null = null;
   #lastProgress: DeepScanProgress | null = null;
   #stopped = false;
 
@@ -41,33 +42,48 @@ export class DeepScanProgressTracker {
 
   public async refresh(): Promise<void> {
     if (this.#stopped) return;
-    const update = this.#pending.then(async () => {
-      if (this.#stopped) return;
-      const progress = deepScanProgressFromWorkbench(
-        await this.#options.read(),
-      );
-      if (progress === null || sameProgress(progress, this.#lastProgress))
-        return;
-      this.#lastProgress = progress;
-      this.#options.onProgress(progress);
-    });
-    this.#pending = update.catch(() => {});
+    if (this.#pending !== null) return await this.#pending;
+    const abortController = new AbortController();
+    this.#abortController = abortController;
+    let update: Promise<void> | null = null;
+    update = (async () => {
+      try {
+        const progress = deepScanProgressFromWorkbench(
+          await this.#options.read(abortController.signal),
+        );
+        if (
+          this.#stopped ||
+          abortController.signal.aborted ||
+          progress === null ||
+          sameProgress(progress, this.#lastProgress)
+        ) {
+          return;
+        }
+        this.#lastProgress = progress;
+        this.#options.onProgress(progress);
+      } catch (error) {
+        if (this.#stopped || abortController.signal.aborted) return;
+        throw error;
+      } finally {
+        if (this.#pending === update) this.#pending = null;
+        if (this.#abortController === abortController) {
+          this.#abortController = null;
+        }
+      }
+    })();
+    this.#pending = update;
     await update;
   }
 
-  public async stop(): Promise<void> {
+  public stop(): void {
     if (this.#stopped) return;
+    this.#stopped = true;
     if (this.#timer !== null) {
       clearInterval(this.#timer);
       this.#timer = null;
     }
-    try {
-      await this.refresh();
-    } catch (error) {
-      this.#options.onError?.(error);
-    }
-    this.#stopped = true;
-    await this.#pending;
+    this.#abortController?.abort();
+    this.#abortController = null;
   }
 }
 

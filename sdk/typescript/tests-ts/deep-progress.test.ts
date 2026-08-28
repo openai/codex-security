@@ -45,7 +45,7 @@ describe("Deep Scan progress", () => {
     ).toThrow("invalid Deep Scan progress");
   });
 
-  test("reports only changed progress and stops polling cleanly", async () => {
+  test("reports only changed progress and ignores refresh after stop", async () => {
     const reads = [
       workbenchResult(),
       workbenchResult({ completed: 0, active: 2, maximum: 40 }),
@@ -73,6 +73,40 @@ describe("Deep Scan progress", () => {
       { completed: 0, active: 2, maximum: 40 },
       { completed: 1, active: 1, maximum: 40 },
     ]);
-    expect(readCount).toBe(5);
+    expect(readCount).toBe(4);
+  });
+
+  test("does not queue or await stalled polls during stop", async () => {
+    const progress: DeepScanProgress[] = [];
+    let readCount = 0;
+    let aborted = false;
+    const tracker = new DeepScanProgressTracker({
+      read: async (signal) => {
+        readCount += 1;
+        return await new Promise((resolve) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              resolve(
+                workbenchResult({ completed: 1, active: 0, maximum: 40 }),
+              );
+            },
+            { once: true },
+          );
+        });
+      },
+      onProgress: (update) => progress.push(update),
+    });
+
+    const first = tracker.refresh();
+    await Bun.sleep(0);
+    const second = tracker.refresh();
+    tracker.stop();
+    await Promise.all([first, second]);
+
+    expect(readCount).toBe(1);
+    expect(aborted).toBe(true);
+    expect(progress).toEqual([]);
   });
 });

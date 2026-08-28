@@ -1152,8 +1152,14 @@ export class CodexSecurity {
       if (mode === "deep" && options.onDeepProgress !== undefined) {
         let progressWarningReported = false;
         deepProgressTracker = new DeepScanProgressTracker({
-          read: () =>
-            workbench(workbenchOptions, ["get-scan", "--scan-id", scanId]),
+          read: (progressSignal) =>
+            workbench(
+              {
+                ...workbenchOptions,
+                signal: AbortSignal.any([signal, progressSignal]),
+              },
+              ["get-scan", "--scan-id", scanId],
+            ),
           onProgress: (progress) =>
             notifyObserver(
               "onDeepProgress",
@@ -1753,7 +1759,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
-      await deepProgressTracker?.stop();
+      deepProgressTracker?.stop();
       // Removing the temporary scan inputs is best effort. A throw here would replace the
       // outcome the try and catch blocks already produced, so these failures are reported
       // as warnings: a scan that failed has to say why it failed, not why its temporary
