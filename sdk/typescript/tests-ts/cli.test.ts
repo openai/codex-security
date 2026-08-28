@@ -411,29 +411,33 @@ describe("CLI", () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-deep-defaults-"));
 
     try {
-      const result = spawnSync(
-        python!,
-        [
+      const child = Bun.spawn({
+        cmd: [
+          python!,
           join(PLUGIN_ROOT, "scripts", "deep_scan_config.py"),
           "--available-parallelism",
           "12",
         ],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            CODEX_HOME: join(root, "codex-home"),
-            PYTHONDONTWRITEBYTECODE: "1",
-          },
-          timeout: 30_000,
+        env: {
+          ...process.env,
+          CODEX_HOME: join(root, "codex-home"),
+          PYTHONDONTWRITEBYTECODE: "1",
         },
-      );
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 30_000,
+      });
+      const [status, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
 
-      expect(result.error).toBeUndefined();
-      expect(result.status).toBe(0);
-      expect(result.stderr).toBe("");
+      expect(status, stderr).toBe(0);
+      expect(stderr).toBe("");
 
-      const defaults = JSON.parse(result.stdout) as {
+      const defaults = JSON.parse(stdout) as {
         workers: number;
         subagents: number;
         stopAfterNoNew: number;

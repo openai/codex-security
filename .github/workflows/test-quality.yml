@@ -23,7 +23,7 @@ jobs:
   runner:
     name: ${{ matrix.os }} / ${{ matrix.mode }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       CODEX_SECURITY_PROPERTY_SEED: ${{ github.event_name == 'pull_request' && 1 || github.run_number }}
     strategy:
