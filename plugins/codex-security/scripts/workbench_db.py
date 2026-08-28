@@ -3148,11 +3148,12 @@ def scan_context(
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     result = scan_result(connection, scan, occurrence_id=occurrence_id)
+    workspace_result = result if occurrence_id is None else scan_result(connection, scan)
     workspace = workspace_state(
         connection,
         scan["workspace_id"],
         result_scan_id=scan["id"],
-        result_scan=result,
+        result_scan=workspace_result,
     )
     context = {
         "otherRunningDeepScans": deep_scan.other_running_deep_scans(connection, scan["id"]),
