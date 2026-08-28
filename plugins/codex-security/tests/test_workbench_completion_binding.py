@@ -517,9 +517,7 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     assert recorded["resultsRecoveryNeeded"] is True
     assert json.loads(coverage_path.read_text())["inventoryStrategy"] == ""
 
-    recovered = run_workbench(
-        state_dir, "recover-scan-results", "--scan-id", scan_id
-    )["scan"]
+    recovered = run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)["scan"]
 
     assert recovered["resultsRecoveryNeeded"] is False
     preserved_coverage = json.loads(coverage_path.read_text())

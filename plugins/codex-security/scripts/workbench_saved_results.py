@@ -252,17 +252,13 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
         return False
 
 
-def _recovery_source_digests(
-    db: Any, connection: Any, scan: Any
-) -> tuple[dict[str, str], bool]:
+def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[str, str], bool]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     frozen_sources: dict[str, str] | None = None
     include_parent = True
     raw_frozen_sources = scan["retained_source_digests_json"]
     if raw_frozen_sources is not None:
-        frozen_sources = _source_digests(
-            json.loads(raw_frozen_sources), "Saved stopped-scan"
-        )
+        frozen_sources = _source_digests(json.loads(raw_frozen_sources), "Saved stopped-scan")
         include_parent = False
 
     manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
@@ -276,8 +272,7 @@ def _recovery_source_digests(
         if not isinstance(manifest_scan, dict):
             raise ContractError("Saved scan manifest has no scan object")
         if scan["seal_manifest_digest"] is not None or (
-            manifest_scan.get("sealedAt") is not None
-            or manifest_scan.get("artifacts") is not None
+            manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") is not None
         ):
             if "preservedSources" in manifest_scan:
                 published_sources = _source_digests(
@@ -300,9 +295,7 @@ def _recovery_source_digests(
         try:
             _, digest = _read_saved_result(scan_dir, relative, scan["id"])
         except (ContractError, OSError, ValueError) as exc:
-            raise ContractError(
-                "Frozen stopped-scan checkpoint set is incomplete."
-            ) from exc
+            raise ContractError("Frozen stopped-scan checkpoint set is incomplete.") from exc
         if digest != expected_digest:
             raise ContractError("checkpoint changed after the scan stopped")
 
@@ -311,13 +304,9 @@ def _recovery_source_digests(
         "FROM deep_scan_workers WHERE scan_id = ?",
         (scan["id"],),
     ).fetchall()
-    for relative in (
-        set(_saved_result_paths(scan_dir, workers)) - recovery_sources.keys()
-    ):
+    for relative in set(_saved_result_paths(scan_dir, workers)) - recovery_sources.keys():
         try:
-            _, recovery_sources[relative] = _read_saved_result(
-                scan_dir, relative, scan["id"]
-            )
+            _, recovery_sources[relative] = _read_saved_result(scan_dir, relative, scan["id"])
         except (ContractError, OSError, ValueError):
             continue
     return recovery_sources, include_parent
@@ -795,8 +784,10 @@ def merge_saved_results(
             and coverage.get("completeness") in {"complete", "unknown"}
         ):
             coverage["completeness"] = "partial"
-        if superseded and not stopped and all(
-            valid_finding(finding) for finding in (parent["findings"] if parent else [])
+        if (
+            superseded
+            and not stopped
+            and all(valid_finding(finding) for finding in (parent["findings"] if parent else []))
         ):
             continue
         if "threatModel" not in manifest["scan"] and isinstance(draft.get("threatModel"), dict):
@@ -1277,9 +1268,7 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Only a stopped scan can recover terminal results.")
         if scan["canceled_at"] is not None:
             raise SystemExit("Canceled scans cannot recover terminal results.")
-        recovery_source_digests, include_parent = _recovery_source_digests(
-            db, connection, scan
-        )
+        recovery_source_digests, include_parent = _recovery_source_digests(db, connection, scan)
         if not preserve_scan_results_locked(
             db,
             connection,
@@ -1512,9 +1501,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return db.workspace_state(connection, scan["workspace_id"])
 
 
-def preserve_stopped_results_after_transition(
-    db: Any, connection: Any, scan_id: str
-) -> None:
+def preserve_stopped_results_after_transition(db: Any, connection: Any, scan_id: str) -> None:
     try:
         published = preserve_scan_results_locked(db, connection, scan_id)
     except (ContractError, OSError, SystemExit, ValueError) as exc:

@@ -12,7 +12,6 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_findings import list_dedupe_groups
 
-
 FINDING_RECORDS = """
 SELECT findings.id, json_extract(details_json, '$.title') AS title,
     COALESCE(repositories.ids, '[]') AS repositoryIds,
@@ -52,17 +51,24 @@ def detail(connection: sqlite3.Connection, view: str, selected: dict[str, Any]) 
     result: dict[str, Any] = {"item": selected}
     selected_id = selected["id"]
     if view == "findings":
-        result["finding"] = json.loads(connection.execute(
-            "SELECT details_json FROM findings WHERE id = ?", (selected_id,),
-        ).fetchone()[0])
+        result["finding"] = json.loads(
+            connection.execute(
+                "SELECT details_json FROM findings WHERE id = ?",
+                (selected_id,),
+            ).fetchone()[0]
+        )
         result["groups"] = list_dedupe_groups(connection, selected_id)["groups"]
     else:
         result["group"] = {
-            "groupId": selected_id, "createdAt": selected["createdAt"],
-            "findingIds": [r[0] for r in connection.execute(
-                "SELECT finding_id FROM finding_dedupe_group_members WHERE group_id = ? ORDER BY finding_id",
-                (selected_id,),
-            )],
+            "groupId": selected_id,
+            "createdAt": selected["createdAt"],
+            "findingIds": [
+                r[0]
+                for r in connection.execute(
+                    "SELECT finding_id FROM finding_dedupe_group_members WHERE group_id = ? ORDER BY finding_id",
+                    (selected_id,),
+                )
+            ],
         }
     return result
 
@@ -76,7 +82,11 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
     if query.get("query"):
         connection.create_function("casefold", 1, str.casefold, deterministic=True)
         columns = ["id", "title", "repositoryIds"]
-        clauses.append("(" + " OR ".join(f"instr(casefold(COALESCE({c}, '')), casefold(?)) > 0" for c in columns) + ")")
+        clauses.append(
+            "("
+            + " OR ".join(f"instr(casefold(COALESCE({c}, '')), casefold(?)) > 0" for c in columns)
+            + ")"
+        )
         values.extend([query["query"]] * len(columns))
     if query.get("repository"):
         clauses.append("EXISTS (SELECT 1 FROM json_each(repositoryIds) WHERE value = ?)")
@@ -89,23 +99,36 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
             SELECT DISTINCT repository_id AS id, repository_id AS label
             FROM finding_repositories ORDER BY repository_id
         """).fetchall()
-        total = connection.execute(f"SELECT COUNT(*) FROM ({records}) {where}", values).fetchone()[0]
+        total = connection.execute(f"SELECT COUNT(*) FROM ({records}) {where}", values).fetchone()[
+            0
+        ]
         rows = connection.execute(
             f"SELECT * FROM ({records}) {where} ORDER BY {order} LIMIT ? OFFSET ?",
             (*values, query["limit"], query["offset"]),
         ).fetchall()
-        selected = connection.execute(
-            f"SELECT * FROM ({records}) WHERE id = ?", (query["id"],),
-        ).fetchone() if query.get("id") else None
+        selected = (
+            connection.execute(
+                f"SELECT * FROM ({records}) WHERE id = ?",
+                (query["id"],),
+            ).fetchone()
+            if query.get("id")
+            else None
+        )
         next_offset = query["offset"] + len(rows)
         return {
             "overview": {
-                "findings": connection.execute("SELECT COUNT(*) FROM findings WHERE details_json IS NOT NULL").fetchone()[0],
-                "groups": connection.execute("SELECT COUNT(*) FROM finding_dedupe_groups").fetchone()[0],
+                "findings": connection.execute(
+                    "SELECT COUNT(*) FROM findings WHERE details_json IS NOT NULL"
+                ).fetchone()[0],
+                "groups": connection.execute(
+                    "SELECT COUNT(*) FROM finding_dedupe_groups"
+                ).fetchone()[0],
             },
             "repositories": [dict(row) for row in repositories],
-            "items": [item(row) for row in rows], "total": total,
-            "limit": query["limit"], "offset": query["offset"],
+            "items": [item(row) for row in rows],
+            "total": total,
+            "limit": query["limit"],
+            "offset": query["offset"],
             "nextOffset": next_offset if next_offset < total else None,
             "detail": detail(connection, view, item(selected)) if selected is not None else None,
         }

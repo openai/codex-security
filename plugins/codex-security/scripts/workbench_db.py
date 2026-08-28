@@ -4,10 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import errno
 import hashlib
-import io
 import json
 import os
 import re
@@ -21,7 +19,6 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import quote
 
 try:
     import fcntl as posix_file_lock
@@ -37,11 +34,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
 import workbench_native_indexes as native_indexes
 import workbench_progress as progress
+import workbench_publication as publication
 import workbench_remediation as remediation
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
-from filesystem_identity import serialize_filesystem_identity as serialize_filesystem_identity
+from filesystem_identity import (
+    serialize_filesystem_identity as serialize_filesystem_identity,
+)
 from filesystem_identity import (
     stored_filesystem_identity_matches as stored_filesystem_identity_matches,
 )
@@ -51,11 +51,9 @@ from finalize_scan_contract import (
     RecoverableContractError,
     _prepare_scan_finalization,
     _write_prepared_scan_finalization,
-    csv_cell,
     finalize_scan,
     finding_candidate_id,
     open_scan_local_file_descriptor,
-    write_sarif_projection,
     write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
@@ -80,8 +78,8 @@ from workbench_constants import (
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
-from workbench_feedback import get_scan_feedback
 from workbench_dashboard import dashboard
+from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_findings import (
@@ -1023,7 +1021,10 @@ def _start_prompt_driven_scan(
         ).fetchone()
         if existing is not None:
             connection.commit()
-            return {**scan_context(connection, existing["id"]), "startDisposition": "joined"}
+            return {
+                **scan_context(connection, existing["id"]),
+                "startDisposition": "joined",
+            }
         target_root.mkdir(parents=True, exist_ok=True)
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
@@ -1134,7 +1135,10 @@ def pin_legacy_manifest_digest(
 
 
 def complete_scan(
-    connection: sqlite3.Connection, args: argparse.Namespace, *, prepare_only: bool = False
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    *,
+    prepare_only: bool = False,
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     cost_json = None if prepare_only else parse_scan_cost(args.cost_json)
@@ -1347,8 +1351,7 @@ def budget_exhausted_draft(
     existing_deferred = {
         item.get("candidateId", item.get("id"))
         for item in coverage["deferred"]
-        if isinstance(item, dict)
-        and isinstance(item.get("candidateId", item.get("id")), str)
+        if isinstance(item, dict) and isinstance(item.get("candidateId", item.get("id")), str)
     }
     existing_surfaces = {
         item.get("id")
@@ -1551,9 +1554,7 @@ def complete_scan_locked(
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
-        if wrote or (
-            scan["mode"] == "deep" and not isinstance(exc, RecoverableContractError)
-        ):
+        if wrote or (scan["mode"] == "deep" and not isinstance(exc, RecoverableContractError)):
             args = argparse.Namespace(claim_token=claim_token, cost_json=cost_json)
             args.message, args.scan_id = str(exc), scan_id
             fail_scan_locked(connection, args)
@@ -1959,7 +1960,14 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                     id, occurrence_id, status, close_reason, note, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (str(uuid.uuid4()), occurrence["id"], args.status, close_reason, note, timestamp),
+                (
+                    str(uuid.uuid4()),
+                    occurrence["id"],
+                    args.status,
+                    close_reason,
+                    note,
+                    timestamp,
+                ),
             )
         connection.execute(
             """
@@ -2320,8 +2328,8 @@ def set_finding_remediation(
             )
         if current["pending_action_claim_token"] != action_token:
             raise SystemExit("This remediation host request is owned by a different action token.")
-        require_remediation_transition(current["state"], args.state)
-        require_pending_remediation_action(current, args.state)
+        remediation.require_transition(current["state"], args.state)
+        remediation.require_pending_action(current, args.state)
         patch_path = current["patch_path"]
         if args.patch_path is not None:
             requested_patch_path = require_scan_relative_file(scan, args.patch_path)
@@ -2422,493 +2430,11 @@ def set_finding_remediation(
     return scan_context(connection, occurrence["scan_id"])
 
 
-def linear_publication_input(
-    args: argparse.Namespace, *, recording: bool
-) -> tuple[dict[str, Any], dict[str, str], list[dict[str, str]]]:
-    payload = read_json_object(Path(args.input_file))
-    required = {"scanId", "scanDirectory", "destination", "findings"}
-    if recording:
-        required.add("publications")
-    if set(payload) != required:
-        raise SystemExit("Linear publication input contains unexpected or missing fields.")
-
-    scan_id = payload["scanId"]
-    scan_directory = payload["scanDirectory"]
-    destination = payload["destination"]
-    findings = payload["findings"]
-    if not isinstance(scan_id, str) or not isinstance(scan_directory, str):
-        raise SystemExit("Linear publication input must identify the exact completed scan.")
-    if (
-        not isinstance(destination, dict)
-        or not {"type", "teamId"}.issubset(destination)
-        or not set(destination).issubset({"type", "teamId", "projectId"})
-        or destination.get("type") != "linear"
-        or not isinstance(destination.get("teamId"), str)
-        or not destination["teamId"].strip()
-        or (
-            "projectId" in destination
-            and (
-                not isinstance(destination["projectId"], str)
-                or not destination["projectId"].strip()
-            )
-        )
-    ):
-        raise SystemExit("Linear publication input must identify the exact team and optional project.")
-    if not isinstance(findings, list):
-        raise SystemExit("Linear publication input must include the planned scan findings.")
-
-    seen_finding_ids: set[str] = set()
-    seen_occurrence_ids: set[str] = set()
-    for finding in findings:
-        if (
-            not isinstance(finding, dict)
-            or set(finding) != {"findingId", "occurrenceId"}
-            or not isinstance(finding.get("findingId"), str)
-            or not finding["findingId"].strip()
-            or not isinstance(finding.get("occurrenceId"), str)
-            or not finding["occurrenceId"].strip()
-        ):
-            raise SystemExit("Linear publication input contains an invalid finding identity.")
-        if (
-            finding["findingId"] in seen_finding_ids
-            or finding["occurrenceId"] in seen_occurrence_ids
-        ):
-            raise SystemExit("Linear publication input repeats a finding or occurrence.")
-        seen_finding_ids.add(finding["findingId"])
-        seen_occurrence_ids.add(finding["occurrenceId"])
-
-    return payload, destination, findings
-
-
-def verify_linear_publication_scan(
-    connection: sqlite3.Connection,
-    payload: dict[str, Any],
-    findings: list[dict[str, str]],
-) -> sqlite3.Row:
-    try:
-        scan = require_scan(connection, payload["scanId"])
-    except SystemExit as exc:
-        raise SystemExit(
-            "The completed scan is not present in the local Codex Security scan-history database. "
-            "Use the state directory where the scan was completed."
-        ) from exc
-    if scan["id"] != payload["scanId"]:
-        raise SystemExit("Linear publication must use the exact completed scan identifier.")
-    if scan["status"] != "complete":
-        raise SystemExit("Only completed scans can publish findings to Linear.")
-
-    requested_directory = require_canonical_scan_directory(Path(payload["scanDirectory"]))
-    recorded_directory = require_canonical_scan_directory(Path(scan["scan_dir"]))
-    if os.path.normcase(requested_directory) != os.path.normcase(recorded_directory):
-        raise SystemExit(
-            "The selected scan directory does not match its local Codex Security scan history."
-        )
-    if "seal_manifest_digest" in scan.keys():
-        require_recorded_manifest_digest(scan, recorded_directory)
-
-    stored_findings = {
-        row["id"]: row["finding_id"]
-        for row in connection.execute(
-            "SELECT id, finding_id FROM finding_occurrences WHERE scan_id = ?",
-            (scan["id"],),
-        )
-    }
-    for finding in findings:
-        if stored_findings.get(finding["occurrenceId"]) != finding["findingId"]:
-            raise SystemExit(
-                "A selected finding or occurrence does not belong to the completed scan "
-                "in local Codex Security scan history."
-            )
-    if len(stored_findings) != len(findings):
-        raise SystemExit(
-            "The completed scan findings do not exactly match local Codex Security scan history."
-        )
-    return scan
-
-
-def inspect_linear_publication(args: argparse.Namespace) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(args, recording=False)
-    database_uri = f"file:{quote(str(database_path()), safe='')}?mode=ro"
-    with closing(sqlite3.connect(database_uri, uri=True, timeout=5)) as connection:
-        connection.row_factory = sqlite3.Row
-        connection.execute("BEGIN")
-        scan = verify_linear_publication_scan(connection, payload, findings)
-        recorded: dict[str, dict[str, str]] = {}
-        if connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'finding_publications'"
-        ).fetchone():
-            for row in connection.execute(
-                """
-                SELECT finding_id, occurrence_id, external_id, external_url
-                FROM finding_publications
-                WHERE scan_id = ? AND destination_type = ? AND team_id = ? AND project_id IS ?
-                ORDER BY created_at, external_id
-                """,
-                (
-                    scan["id"],
-                    destination["type"],
-                    destination["teamId"],
-                    destination.get("projectId"),
-                ),
-            ):
-                recorded.setdefault(
-                    row["occurrence_id"],
-                    {
-                        "findingId": row["finding_id"],
-                        "occurrenceId": row["occurrence_id"],
-                        "issueIdentifier": row["external_id"],
-                        **({"url": row["external_url"]} if row["external_url"] is not None else {}),
-                    },
-                )
-        return {
-            "scanId": scan["id"],
-            "destination": destination,
-            "findingCount": len(findings),
-            "recorded": [
-                recorded[finding["occurrenceId"]]
-                for finding in findings
-                if finding["occurrenceId"] in recorded
-            ],
-        }
-
-
-def prepare_linear_publication(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(args, recording=False)
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        scan = verify_linear_publication_scan(connection, payload, findings)
-        result = {
-            "scanId": scan["id"],
-            "destination": destination,
-            "findingCount": len(findings),
-        }
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
-    return result
-
-
-def record_linear_publications(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(args, recording=True)
-    publications = payload["publications"]
-    if not isinstance(publications, list):
-        raise SystemExit("Linear publication results must be an array.")
-    planned = {finding["findingId"]: finding["occurrenceId"] for finding in findings}
-    current: dict[str, dict[str, str]] = {}
-    external_ids: set[str] = set()
-    for publication in publications:
-        if (
-            not isinstance(publication, dict)
-            or not {"findingId", "occurrenceId", "issueIdentifier"}.issubset(publication)
-            or not set(publication).issubset(
-                {"findingId", "occurrenceId", "issueIdentifier", "url"}
-            )
-            or not isinstance(publication.get("findingId"), str)
-            or not isinstance(publication.get("occurrenceId"), str)
-            or not isinstance(publication.get("issueIdentifier"), str)
-            or not publication["issueIdentifier"].strip()
-            or (
-                "url" in publication
-                and (
-                    not isinstance(publication["url"], str)
-                    or not publication["url"].strip()
-                )
-            )
-        ):
-            raise SystemExit("Linear publication results contain an invalid issue association.")
-        finding_id = publication["findingId"]
-        issue_identifier = publication["issueIdentifier"]
-        if planned.get(finding_id) != publication["occurrenceId"]:
-            raise SystemExit(
-                "A created Linear issue does not match its planned finding and occurrence."
-            )
-        if finding_id in current or issue_identifier in external_ids:
-            raise SystemExit("Linear publication results repeat a finding or issue identifier.")
-        current[finding_id] = publication
-        external_ids.add(issue_identifier)
-
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        scan = verify_linear_publication_scan(connection, payload, findings)
-        timestamp = now()
-        for publication in publications:
-            conflicting = connection.execute(
-                """
-                SELECT occurrence_id, external_url
-                FROM finding_publications
-                WHERE destination_type = ? AND team_id = ? AND project_id IS ?
-                    AND external_id = ?
-                """,
-                (
-                    destination["type"],
-                    destination["teamId"],
-                    destination.get("projectId"),
-                    publication["issueIdentifier"],
-                ),
-            ).fetchone()
-            if conflicting is not None and conflicting["occurrence_id"] != publication[
-                "occurrenceId"
-            ]:
-                raise SystemExit("This Linear issue is already associated with a different finding.")
-            if (
-                conflicting is not None
-                and "url" in publication
-                and conflicting["external_url"] != publication["url"]
-            ):
-                raise SystemExit("This Linear issue is already associated with a different URL.")
-
-            connection.execute(
-                """
-                INSERT INTO finding_publications (
-                    scan_id, finding_id, occurrence_id, destination_type,
-                    team_id, project_id, external_id, external_url, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT DO NOTHING
-                """,
-                (
-                    scan["id"],
-                    publication["findingId"],
-                    publication["occurrenceId"],
-                    destination["type"],
-                    destination["teamId"],
-                    destination.get("projectId"),
-                    publication["issueIdentifier"],
-                    publication.get("url"),
-                    timestamp,
-                ),
-            )
-
-        created = []
-        for finding in findings:
-            publication = current.get(finding["findingId"])
-            if publication is None:
-                continue
-            row = connection.execute(
-                """
-                SELECT finding_id, occurrence_id, external_id, external_url
-                FROM finding_publications
-                WHERE scan_id = ? AND occurrence_id = ? AND destination_type = ?
-                    AND team_id = ? AND project_id IS ? AND external_id = ?
-                """,
-                (
-                    scan["id"],
-                    publication["occurrenceId"],
-                    destination["type"],
-                    destination["teamId"],
-                    destination.get("projectId"),
-                    publication["issueIdentifier"],
-                ),
-            ).fetchone()
-            if row is None:
-                raise SystemExit("A created Linear issue could not be read from scan history.")
-            created.append(
-                {
-                    "findingId": row["finding_id"],
-                    "occurrenceId": row["occurrence_id"],
-                    "issueIdentifier": row["external_id"],
-                    **({"url": row["external_url"]} if row["external_url"] is not None else {}),
-                }
-            )
-        result = {"scanId": scan["id"], "destination": destination, "created": created}
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
-    return result
+_WORKBENCH_PUBLICATION_CONTEXT: publication.WorkbenchPublicationContext
 
 
 def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    scan = require_scan(connection, args.scan_id)
-    if scan["status"] != "complete" and not (
-        scan["status"] == "failed" and scan["seal_manifest_digest"]
-    ):
-        raise SystemExit(
-            "Findings can be exported after the scan completes or preserves stopped results."
-        )
-    scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
-    require_recorded_manifest_digest(scan, scan_dir)
-    verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
-    try:
-        manifest, _, _ = finalize_scan(
-            scan_dir,
-            expected_coverage_mode=expected_coverage_mode(scan),
-        )
-    except ContractError as exc:
-        raise SystemExit(str(exc)) from exc
-    verify_manifest_binding(scan, manifest)
-    manifest_digest = published_manifest_digest(scan_dir, manifest)
-    pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
-    if args.format == "json":
-        path = artifact_path(scan_dir, ARTIFACTS["findings"], required=True)
-    elif args.format == "sarif":
-        try:
-            write_sarif_projection(scan_dir)
-        except ContractError as exc:
-            raise SystemExit(str(exc)) from exc
-        path = artifact_path(scan_dir, "exports/results.sarif", required=True)
-    else:
-        path = write_csv_export(connection, scan)
-    if path is None:
-        raise SystemExit(f"Could not export Codex Security findings as {args.format.upper()}.")
-    return {
-        "export": {"format": args.format, "path": str(path)},
-        "scan": scan_result(connection, scan),
-        "workspace": workspace_state(connection, scan["workspace_id"]),
-    }
-
-
-def write_csv_export(connection: sqlite3.Connection, scan: sqlite3.Row) -> Path:
-    scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
-    output = io.StringIO(newline="")
-    writer = csv.writer(output)
-    deep_scan = scan["mode"] == "deep"
-    candidate_ids_by_occurrence: dict[str, str] = {}
-    if deep_scan:
-        findings_document = read_json_object(scan_dir / ARTIFACTS["findings"])
-        findings = findings_document.get("findings")
-        if not isinstance(findings, list):
-            raise SystemExit("findings.json must contain a findings array.")
-        for finding in findings:
-            if not isinstance(finding, dict):
-                raise SystemExit("findings.json entries must be objects.")
-            occurrence_id = finding.get("occurrenceId")
-            candidate_id = finding_candidate_id(finding)
-            if isinstance(occurrence_id, str) and isinstance(candidate_id, str):
-                candidate_ids_by_occurrence[occurrence_id] = candidate_id
-    columns = (
-        "occurrence_id",
-        "finding_id",
-        *(("candidate_id",) if deep_scan else ()),
-        "title",
-        "summary",
-        "severity",
-        "confidence",
-        "status",
-        "close_reason",
-        "note",
-        "remediation",
-        "path",
-        "start_line",
-        "end_line",
-    )
-    writer.writerow(columns)
-    for row in finding_export_rows(connection, scan["id"]):
-        writer.writerow(
-            (
-                csv_cell(row["occurrence_id"]),
-                csv_cell(row["finding_id"]),
-                *(
-                    (csv_cell(candidate_ids_by_occurrence.get(row["occurrence_id"])),)
-                    if deep_scan
-                    else ()
-                ),
-                csv_cell(row["title"]),
-                csv_cell(row["summary"]),
-                csv_cell(row["severity"]),
-                csv_cell(row["confidence"]),
-                csv_cell(row["status"]),
-                csv_cell(row["close_reason"]),
-                csv_cell(row["note"]),
-                csv_cell(row["remediation"]),
-                csv_cell(row["relative_path"]),
-                row["start_line"],
-                row["end_line"],
-            )
-        )
-    try:
-        write_scan_local_bytes(
-            scan_dir,
-            "exports/findings.csv",
-            output.getvalue().encode("utf-8"),
-        )
-    except ContractError as exc:
-        raise SystemExit(
-            "exports: expected a regular directory inside the scan directory."
-        ) from exc
-    destination = scan_dir / "exports" / "findings.csv"
-    path = available_artifact_path(scan_dir, destination)
-    if path is None:
-        raise SystemExit("findings.csv: expected a regular file inside the scan directory.")
-    return path
-
-
-def finding_export_rows(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Cursor:
-    return connection.execute(
-        """
-        SELECT
-            occurrences.id AS occurrence_id,
-            occurrences.finding_id,
-            occurrences.title,
-            occurrences.summary,
-            occurrences.severity,
-            occurrences.confidence,
-            occurrences.remediation,
-            COALESCE(triage.status, 'open') AS status,
-            triage.close_reason,
-            triage.note,
-            locations.relative_path,
-            locations.start_line,
-            locations.end_line
-        FROM finding_occurrences AS occurrences
-        LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
-        LEFT JOIN finding_locations AS locations
-            ON locations.occurrence_id = occurrences.id
-            AND locations.sort_order = (
-                SELECT primary_location.sort_order
-                FROM finding_locations AS primary_location
-                WHERE primary_location.occurrence_id = occurrences.id
-                ORDER BY
-                    CASE WHEN primary_location.role = 'root_control' THEN 0 ELSE 1 END,
-                    primary_location.sort_order
-                LIMIT 1
-            )
-        WHERE occurrences.scan_id = ?
-        ORDER BY occurrences.created_at, occurrences.id
-        """,
-        (scan_id,),
-    )
-
-
-def require_remediation_transition(current: str, requested: str) -> None:
-    allowed = {
-        "requested": {"requested", "generated", "failed"},
-        "generated": {"generated", "applied", "failed"},
-        "applied": {"applied", "verifying", "failed"},
-        "verifying": {"verifying", "verified", "failed"},
-        "verified": {"verifying", "verified"},
-        "failed": {"generated", "applied", "verifying", "verified", "failed"},
-    }
-    if requested not in allowed.get(current, set()):
-        raise SystemExit(f"Finding remediation cannot move from {current} to {requested}.")
-
-
-def require_pending_remediation_action(current: sqlite3.Row, requested: str) -> None:
-    pending_action = current["pending_action"]
-    if pending_action is not None:
-        allowed = {
-            "generate": {"generated", "failed"},
-            "apply": {"applied", "failed"},
-            "verify": {"verifying", "verified", "failed"},
-        }
-        if requested not in allowed[pending_action]:
-            raise SystemExit(
-                f"Pending remediation action {pending_action} cannot record state {requested}."
-            )
-        return
-    required_action = {
-        ("requested", "generated"): "generate",
-        ("generated", "applied"): "apply",
-        ("applied", "verifying"): "verify",
-    }.get((current["state"], requested))
-    if required_action is not None:
-        raise SystemExit(
-            f"Request {required_action} before recording remediation state {requested}."
-        )
+    return publication.export_findings(_WORKBENCH_PUBLICATION_CONTEXT, connection, args)
 
 
 def require_reviewed_patch_applied(
@@ -3763,9 +3289,7 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
     # Re-check privacy so a shared parent cannot be used to substitute forged artifacts.
     if os.name != "nt":
         if stat.S_IMODE(metadata.st_mode) & 0o077:
-            raise SystemExit(
-                "Scan directory must not be accessible to other users (chmod 700)."
-            )
+            raise SystemExit("Scan directory must not be accessible to other users (chmod 700).")
         geteuid = getattr(os, "geteuid", None)
         effective_uid = geteuid() if geteuid is not None else None
         if effective_uid is not None and metadata.st_uid != effective_uid:
@@ -3775,9 +3299,7 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
                 parent_metadata = parent.lstat()
             except OSError as exc:
                 raise SystemExit("Scan output parent could not be inspected.") from exc
-            if not stat.S_ISDIR(parent_metadata.st_mode) or stat.S_ISLNK(
-                parent_metadata.st_mode
-            ):
+            if not stat.S_ISDIR(parent_metadata.st_mode) or stat.S_ISLNK(parent_metadata.st_mode):
                 raise SystemExit("Scan output parent must be a non-symlink directory.")
             if effective_uid is not None and parent_metadata.st_uid not in {
                 0,
@@ -3809,6 +3331,25 @@ def read_json_object(path: Path) -> dict[str, Any]:
 
 def reject_non_finite_json(value: str) -> None:
     raise ValueError(f"non-finite JSON number {value!r} is not supported")
+
+
+_WORKBENCH_PUBLICATION_CONTEXT = publication.WorkbenchPublicationContext(
+    ARTIFACTS=ARTIFACTS,
+    artifact_path=artifact_path,
+    available_artifact_path=available_artifact_path,
+    database_path=database_path,
+    expected_coverage_mode=expected_coverage_mode,
+    now=now,
+    pin_legacy_manifest_digest=pin_legacy_manifest_digest,
+    published_manifest_digest=published_manifest_digest,
+    read_json_object=read_json_object,
+    require_canonical_scan_directory=require_canonical_scan_directory,
+    require_recorded_manifest_digest=require_recorded_manifest_digest,
+    require_scan=require_scan,
+    scan_result=scan_result,
+    verify_manifest_binding=verify_manifest_binding,
+    workspace_state=workspace_state,
+)
 
 
 _WORKBENCH_DB_CONTEXT = saved_results.WorkbenchDbContext(
@@ -3867,7 +3408,7 @@ def main() -> None:
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     if args.command == "inspect-linear-publication":
-        result = inspect_linear_publication(args)
+        result = publication.inspect_linear_publication(_WORKBENCH_PUBLICATION_CONTEXT, args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(connect()) as connection:
@@ -4017,14 +3558,19 @@ def main() -> None:
             result = release_finding_remediation_claim(connection, args)
         elif args.command == "cancel-finding-remediation-request":
             result = scan_context(
-                connection, remediation.cancel_finding_remediation_request(connection, args)
+                connection,
+                remediation.cancel_finding_remediation_request(connection, args),
             )
         elif args.command == "set-finding-remediation":
             result = set_finding_remediation(connection, args)
         elif args.command == "prepare-linear-publication":
-            result = prepare_linear_publication(connection, args)
+            result = publication.prepare_linear_publication(
+                _WORKBENCH_PUBLICATION_CONTEXT, connection, args
+            )
         elif args.command == "record-linear-publications":
-            result = record_linear_publications(connection, args)
+            result = publication.record_linear_publications(
+                _WORKBENCH_PUBLICATION_CONTEXT, connection, args
+            )
         elif args.command == "export-findings":
             result = export_findings(connection, args)
         elif args.command == "database-info":
@@ -4035,7 +3581,9 @@ def main() -> None:
             result = dashboard(connection, json.load(sys.stdin))
         elif args.command == "store-findings":
             payload = json.load(sys.stdin)
-            result = store_findings(connection, payload["entries"], now(), payload.get("repositoryId"))
+            result = store_findings(
+                connection, payload["entries"], now(), payload.get("repositoryId")
+            )
         elif args.command == "find-potential-duplicates":
             result = find_potential_duplicates(connection, args.finding_id, args.repository_id)
         elif args.command == "store-dedupe-groups":

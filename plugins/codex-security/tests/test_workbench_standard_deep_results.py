@@ -246,8 +246,7 @@ def test_explicit_recovery_rejects_changed_frozen_source(tmp_path: Path) -> None
     preserved_sources = json.loads(original_manifest)["scan"]["preservedSources"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         original_record = connection.execute(
-            "SELECT seal_manifest_digest, retained_source_digests_json "
-            "FROM scans WHERE id = ?",
+            "SELECT seal_manifest_digest, retained_source_digests_json FROM scans WHERE id = ?",
             (scan_id,),
         ).fetchone()
     frozen_path = scan_dir / next(iter(preserved_sources))
@@ -256,13 +255,9 @@ def test_explicit_recovery_rejects_changed_frozen_source(tmp_path: Path) -> None
     late = copy.deepcopy(checkpoint)
     late["findings"][0]["locations"][0]["startLine"] = 91
     late["findings"][0]["locations"][0]["endLine"] = 92
-    write_checkpoint(
-        result_path.parent / "attempts" / "attempt-01" / "checkpoints", late
-    )
+    write_checkpoint(result_path.parent / "attempts" / "attempt-01" / "checkpoints", late)
     assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"][
-            "resultsRecoveryNeeded"
-        ]
+        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["resultsRecoveryNeeded"]
         is True
     )
 
@@ -282,8 +277,7 @@ def test_explicit_recovery_rejects_changed_frozen_source(tmp_path: Path) -> None
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert (
             connection.execute(
-                "SELECT seal_manifest_digest, retained_source_digests_json "
-                "FROM scans WHERE id = ?",
+                "SELECT seal_manifest_digest, retained_source_digests_json FROM scans WHERE id = ?",
                 (scan_id,),
             ).fetchone()
             == original_record
@@ -396,9 +390,7 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     for filename in ("findings.json", "coverage.json", "scan-manifest.json"):
         (scan_dir / filename).write_bytes((contract_dir / filename).read_bytes())
     sealed_manifest = (scan_dir / "scan-manifest.json").read_bytes()
-    parent_finding = json.loads((contract_dir / "findings.json").read_text())[
-        "findings"
-    ][0]
+    parent_finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE scans SET seal_manifest_digest = ? WHERE id = ?",
@@ -415,10 +407,7 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
         environment={"CODEX_HOME": str(codex_home)},
     )
     assert (
-        json.loads((scan_dir / "scan-manifest.json").read_text())["scan"][
-            "preservedSources"
-        ]
-        == {}
+        json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"] == {}
     )
 
     late_finding = copy.deepcopy(parent_finding)
@@ -498,9 +487,7 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     later_finding["title"] = "Later checkpoint finding"
     later = copy.deepcopy(late)
     later["findings"] = [later_finding]
-    write_checkpoint(
-        result_path.parent / "attempts" / "attempt-02" / "checkpoints", later
-    )
+    write_checkpoint(result_path.parent / "attempts" / "attempt-02" / "checkpoints", later)
 
     recovered_again = run_workbench(
         state_dir,
@@ -558,9 +545,7 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
     for filename in ("findings.json", "coverage.json", "scan-manifest.json"):
         (scan_dir / filename).write_bytes((contract_dir / filename).read_bytes())
     parent_manifest = (scan_dir / "scan-manifest.json").read_bytes()
-    parent_finding = json.loads((contract_dir / "findings.json").read_text())[
-        "findings"
-    ][0]
+    parent_finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
     parent_scan = json.loads(parent_manifest)["scan"]
     if published_sources is None:
         assert "preservedSources" not in parent_scan
@@ -617,16 +602,13 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
     assert (scan_dir / "scan-manifest.json").read_bytes() == parent_manifest
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         seal_digest, frozen_before = connection.execute(
-            "SELECT seal_manifest_digest, retained_source_digests_json "
-            "FROM scans WHERE id = ?",
+            "SELECT seal_manifest_digest, retained_source_digests_json FROM scans WHERE id = ?",
             (scan_id,),
         ).fetchone()
     assert seal_digest is not None
     assert json.loads(frozen_before)
     assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"][
-            "resultsRecoveryNeeded"
-        ]
+        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["resultsRecoveryNeeded"]
         is True
     )
 
@@ -644,9 +626,9 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
         parent_finding["title"],
         late_finding["title"],
     }
-    published_sources = json.loads((scan_dir / "scan-manifest.json").read_text())[
-        "scan"
-    ]["preservedSources"]
+    published_sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"][
+        "preservedSources"
+    ]
     frozen_sources = json.loads(frozen_before)
     assert published_sources.items() >= frozen_sources.items()
     parent_sources = published_sources.keys() - frozen_sources.keys()
@@ -655,12 +637,15 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
     assert parent_source.startswith("checkpoints/")
     assert Path(parent_source).stem == published_sources[parent_source]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert json.loads(
-            connection.execute(
-                "SELECT retained_source_digests_json FROM scans WHERE id = ?",
-                (scan_id,),
-            ).fetchone()[0]
-        ) == published_sources
+        assert (
+            json.loads(
+                connection.execute(
+                    "SELECT retained_source_digests_json FROM scans WHERE id = ?",
+                    (scan_id,),
+                ).fetchone()[0]
+            )
+            == published_sources
+        )
 
 
 def test_unsealed_manifest_without_saved_results_does_not_offer_recovery(

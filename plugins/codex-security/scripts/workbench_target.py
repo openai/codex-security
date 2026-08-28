@@ -424,7 +424,10 @@ def source_directory_snapshot_paths(target: Path) -> list[Path]:
             paths.append(path)
             metadata = path.lstat()
             # Name-surrogate reparse points include Windows directory junctions.
-            if stat.S_ISDIR(metadata.st_mode) and not getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+            if (
+                stat.S_ISDIR(metadata.st_mode)
+                and not getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+            ):
                 pending.append(path)
     return sorted(paths)
 
@@ -438,7 +441,11 @@ def directory_content_digest(
             excluded_relative.append(path.relative_to(target))
         except ValueError:
             continue
-    paths = source_directory_snapshot_paths(target) if include_ignored else git_directory_snapshot_paths(target)
+    paths = (
+        source_directory_snapshot_paths(target)
+        if include_ignored
+        else git_directory_snapshot_paths(target)
+    )
     if paths is None:
         paths = sorted(target.rglob("*"))
     digest = hashlib.sha256()
@@ -560,9 +567,7 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
             if nested_git_dir is None:
                 raise SystemExit(f"Could not inspect nested Git working tree: {relative}")
             copy_git_worktree_files(source_path, destination_path, excluded)
-            (destination_path / ".git").write_text(
-                f"gitdir: {nested_git_dir}\n", encoding="utf-8"
-            )
+            (destination_path / ".git").write_text(f"gitdir: {nested_git_dir}\n", encoding="utf-8")
         else:
             raise SystemExit(f"Unsupported Git working-tree file type: {relative}")
     copied_target = destination if pathspec == "." else destination / pathspec

@@ -299,11 +299,7 @@ def windows_stream_component(path: Path) -> str | None:
     if os.name != "nt":
         return None
     return next(
-        (
-            component
-            for component in path.parts
-            if component != path.anchor and ":" in component
-        ),
+        (component for component in path.parts if component != path.anchor and ":" in component),
         None,
     )
 

@@ -157,9 +157,14 @@ def store_dedupe_groups(
             for group in groups:
                 members = sorted(set(group))
                 # Membership, not input order, identifies a group on retries.
-                group_id = "fdg_" + hashlib.sha256(
-                    json.dumps(members, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-                ).hexdigest()
+                group_id = (
+                    "fdg_"
+                    + hashlib.sha256(
+                        json.dumps(members, ensure_ascii=True, separators=(",", ":")).encode(
+                            "utf-8"
+                        )
+                    ).hexdigest()
+                )
                 connection.execute(
                     "INSERT INTO finding_dedupe_groups (id, created_at) VALUES (?, ?) "
                     "ON CONFLICT(id) DO NOTHING",
