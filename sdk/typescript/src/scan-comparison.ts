@@ -229,7 +229,7 @@ export async function runReadOnlyCodex(
   return turn.finalResponse;
 }
 
-async function disabledMcpServers(
+export async function disabledMcpServers(
   command: CodexCommand,
   config: JsonObject | undefined,
   environment: Record<string, string>,

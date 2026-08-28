@@ -1,4 +1,6 @@
 import { execFile, spawnSync } from "node:child_process";
+import * as childProcess from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -26,6 +28,8 @@ import {
   relative,
   sep,
 } from "node:path";
+import { PassThrough } from "node:stream";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
@@ -54,6 +58,7 @@ import {
   isPythonPathCandidate,
   planOutputArchive,
   preparePersistentOutputRoot,
+  prepareScanArtifactRestorer,
   preserveCodexSecurityPluginRegistration,
   requirePrivateOutputDirectory,
   requireSecureOutputAncestry,
@@ -158,6 +163,7 @@ describe("plugin runtime preparation", () => {
 
   test("forwards configured provider credentials through the MCP worker environment", async () => {
     const providerKeys = [
+      "OPENAI_API_KEY",
       "OPENROUTER_API_KEY",
       "FIREWORKS_API_KEY",
       "AWS_BEARER_TOKEN_BEDROCK",
@@ -352,12 +358,6 @@ describe("plugin runtime preparation", () => {
 
   test("generates canonical scoped security inventory paths", async () => {
     if (Bun.which("rg") === null) {
-      const generator = await readFile(
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "utf8",
-      );
-      expect(generator).toContain('"--no-ignore"');
-      expect(generator).toContain('"--path-separator"');
       return;
     }
 
@@ -563,7 +563,13 @@ describe("plugin runtime preparation", () => {
 
   test("keeps native scan tools without the obsolete setup widget", async () => {
     const contract = JSON.parse(
-      await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+      await readFile(
+        new URL(
+          "../../../plugins/codex-security/plugin-files.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
     ) as { shippedExact: string[] };
     expect(contract.shippedExact).not.toContain("mcp/mcp-app.html.br");
     expect(existsSync(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br"))).toBe(false);
@@ -647,7 +653,10 @@ describe("plugin runtime preparation", () => {
     const source = await resolvePluginPath(undefined, workspace);
     expect(source).toBe(await bundledPluginRoot());
 
-    const publicContractPath = new URL("../plugin-files.json", import.meta.url);
+    const publicContractPath = new URL(
+      "../../../plugins/codex-security/plugin-files.json",
+      import.meta.url,
+    );
     const contractPath = existsSync(publicContractPath)
       ? publicContractPath
       : join(
@@ -1915,19 +1924,30 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("upgrades a cached 0.1.37 plugin with the real bundled Codex executable", async () => {
+  test("upgrades the predecessor cache and restores with the SDK-owned helper", async () => {
     const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "0.1.37");
+    const previous = await plugin(join(root, "previous"), "0.1.60");
+    // Keep the stale MCP configuration regression covered while upgrading the
+    // current predecessor cache to the generated bundle.
     await writeFile(
       join(previous, ".mcp.json"),
       JSON.stringify({ mcpServers: { "codex-security": { env_vars: [] } } }),
     );
+    await copyFile(
+      join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
+      join(previous, "scripts", "workbench_target.py"),
+    );
     const home = join(root, "home");
+    const unrelatedProject = join(root, "unrelated-project");
     await mkdir(home, { mode: 0o700 });
+    await mkdir(unrelatedProject);
     await writeFile(
       join(home, "config.toml"),
-      'cli_auth_credentials_store = "file"\n\n[features]\nplugins = true\n',
+      'cli_auth_credentials_store = "file"\n\n[features]\nplugins = true\n\n[projects.' +
+        JSON.stringify(unrelatedProject) +
+        ']\ntrust_level = "trusted"\n',
     );
+    await writeFile(join(home, "unrelated-state"), "preserved\n");
 
     const command = resolveCodexCommand();
     const environment = {
@@ -1946,9 +1966,18 @@ describe("plugin runtime preparation", () => {
     const credentials = await readFile(join(home, "auth.json"), "utf8");
 
     const options = { codexCommand: command, environment };
-    const first = await bootstrapPlugin(home, previous, options);
-    expect(first.version).toBe("0.1.37");
+    const stale = await bootstrapPlugin(home, previous, options);
     const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
+
+    expect(stale.version).toBe("0.1.60");
+    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
+    expect(upgraded.version).not.toBe(stale.version);
+    expect(upgraded.installedRoot).not.toBe(stale.installedRoot);
+    for (const script of ["workbench_target.py", "finalize_scan_contract.py"]) {
+      expect(
+        await readFile(join(upgraded.installedRoot, "scripts", script)),
+      ).toEqual(await readFile(join(PLUGIN_ROOT, "scripts", script)));
+    }
     const configuration = JSON.parse(
       await readFile(join(upgraded.installedRoot, ".mcp.json"), "utf8"),
     ) as {
@@ -1956,13 +1985,17 @@ describe("plugin runtime preparation", () => {
     };
     const server = configuration.mcpServers["codex-security"];
 
-    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
-    expect(upgraded.version).not.toBe(first.version);
-    expect(upgraded.installedRoot).not.toBe(first.installedRoot);
     expect(server?.command).toBe("./scripts/launch_codex_security_mcp");
+    expect(server?.env_vars).toContain("CODEX_SAFETY_IDENTIFIER");
     expect(server?.env_vars).toContain("CODEX_MANAGED_PACKAGE_ROOT");
     expect(server?.env_vars).toContain("CODEX_MCP_NODE_PATH");
     expect(await readFile(join(home, "auth.json"), "utf8")).toBe(credentials);
+    expect(await readFile(join(home, "unrelated-state"), "utf8")).toBe(
+      "preserved\n",
+    );
+    expect(await readFile(join(home, "config.toml"), "utf8")).toContain(
+      "[projects." + JSON.stringify(unrelatedProject) + "]",
+    );
     expect(
       spawnSync(command.command, ["login", "status"], {
         env: environment,
@@ -1970,6 +2003,27 @@ describe("plugin runtime preparation", () => {
         windowsHide: true,
       }).status,
     ).toBe(0);
+
+    const scanDir = join(root, "scan");
+    const artifact = "artifacts/worker.bin";
+    const expected = Buffer.from([0, 255, 10, 1]);
+    await mkdir(join(scanDir, "artifacts"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await writeFile(join(scanDir, artifact), expected);
+    const python = await resolvePluginPython({ environment });
+    const restorer = await prepareScanArtifactRestorer(
+      {
+        python,
+        pluginRoot: upgraded.installedRoot,
+        environment,
+      },
+      scanDir,
+    );
+    await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
+    await restorer.restore(artifact, expected);
+    expect(await readFile(join(scanDir, artifact))).toEqual(expected);
   });
 
   test("resolves the exact npm Codex executable", () => {

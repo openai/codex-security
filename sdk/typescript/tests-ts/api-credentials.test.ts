@@ -90,8 +90,6 @@ describe("CodexSecurity orchestration", () => {
                     filesystem: {
                       ":root": "read",
                       ":workspace_roots": "write",
-                      [join(ambientHome, "state", "plugins", "codex-security")]:
-                        "write",
                       [join(
                         ambientHome,
                         "state",

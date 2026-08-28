@@ -684,6 +684,56 @@ describe("Cloud publication", () => {
     expect(requests).toBe(1);
   });
 
+  test("preserves caller cancellation during the publication request", async () => {
+    const { scan, environment } = await fixture();
+    const controller = new AbortController();
+    const cancellation = new Error("publication cancelled");
+
+    await expect(
+      publishScanToCloud(scan, {
+        environment,
+        signal: controller.signal,
+        fetch: async (_url, options) => {
+          const signal = options.signal as AbortSignal;
+          return await new Promise<Response>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            });
+            controller.abort(cancellation);
+          });
+        },
+      }),
+    ).rejects.toBe(cancellation);
+  });
+
+  test("preserves caller cancellation while parsing the acceptance receipt", async () => {
+    const { scan, environment } = await fixture();
+    const controller = new AbortController();
+    const cancellation = new Error("receipt parsing cancelled");
+    const response = {
+      ok: true,
+      status: 201,
+      body: null,
+      json: async () =>
+        await new Promise<never>((_resolve, reject) => {
+          controller.signal.addEventListener(
+            "abort",
+            () => reject(controller.signal.reason),
+            { once: true },
+          );
+          controller.abort(cancellation);
+        }),
+    } as unknown as Response;
+
+    await expect(
+      publishScanToCloud(scan, {
+        environment,
+        signal: controller.signal,
+        fetch: async () => response,
+      }),
+    ).rejects.toBe(cancellation);
+  });
+
   test("requires a complete acceptance receipt instead of treating any 2xx as success", async () => {
     const { scan, environment } = await fixture();
     for (const body of [

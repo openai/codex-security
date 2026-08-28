@@ -5,14 +5,26 @@ Run these commands from `sdk/typescript`:
 
 ```sh
 pnpm install --frozen-lockfile
+npm ci --prefix ../../plugins/codex-security/mcp-app --no-audit --no-fund
+pnpm run check:plugin-source
 bun test --timeout 30000 ./tests-ts/worker-progress.test.ts
 pnpm run types
+pnpm run test:mcp
 pnpm run format
 pnpm run test
 pnpm run test:ci
 pnpm pack --pack-destination ../../dist
 pnpm run test:package
 ```
+
+The authored plugin lives in `plugins/codex-security`. `pnpm pack` generates
+the ignored `_bundled_plugin` runtime payload from `plugins/codex-security/plugin-files.json` during
+`prepack`, including the MCP runtime built from `mcp-app`; do not edit generated
+files there. Run `pnpm run build:plugin` when you need to inspect the staged
+payload locally. `plugins/codex-security` contains authored source and assets,
+not the generated `mcp/server.mjs` or compressed runtime chunks.
+`pnpm run check:plugin-source` fails if any file beneath `_bundled_plugin` is
+tracked by Git. Required CI runs the same check before installing dependencies.
 
 For CI's full archive inspection, pass the exact `.tgz` path printed by
 `pnpm pack` to `pnpm run check:package`.
@@ -73,9 +85,10 @@ lanes still inspect an installed package. Package inspection includes
 a strict NodeNext TypeScript consumer and the actual installed CLI. Failed
 tests block CI; a failed diagnostic upload does not. Unix package verification
 runs in six separate jobs alongside the six test lanes, with the same OS and
-Node versions. Required checks depend on both matrices. This raises full CI
-from 27 to 33 jobs and duplicates checkout and dependency setup, trading more
-runner resources for less sequential work; it does not duplicate the test suite.
+Node versions. Required checks depend on both matrices. Together with the
+plugin-source contract job, this raises full CI from 28 to 34 jobs and
+duplicates checkout and dependency setup, trading more runner resources for
+less sequential work; it does not duplicate the test suite.
 
 Pull-request validation classifies changes before starting test and package
 jobs. Markdown-only diffs run changed-file formatting instead; pushes, base
@@ -98,8 +111,8 @@ The machine-wide Windows policy test still runs separately and serially.
 Windows caches the exact pnpm version from `packageManager` in a dedicated
 runner-temp prefix. A cache miss or cache error installs it with npm; only an
 exact hit skips installation. The resolved pnpm store is cached separately.
-In full CI, only package-verification jobs restore the npm download cache for
-the fresh consumer; test jobs on either platform do not restore it. Cache failures do not suppress
+In full CI, Unix jobs and Windows package-verification jobs restore the npm
+download cache; Windows test jobs do not. Cache failures do not suppress
 installation failures. Unix keeps its pinned pnpm
 setup action. Windows package inspection enables npm's native phase timings to
 diagnose installation delays without changing its failure or timeout behavior.

@@ -3976,7 +3976,7 @@ describe("GitHub release workflow safeguards", () => {
     );
     expect(nodeCiWorkflow).toContain("needs: validate-title");
     expect(nodeCiWorkflow).toContain(
-      "needs: [validate-title, test, unix-verify]",
+      "needs: [validate-title, test, unix-verify, plugin-source]",
     );
     expect(nodeCiWorkflow).toContain(
       "needs: [validate-title, windows-test, windows-verify]",
@@ -4024,12 +4024,29 @@ describe("GitHub release workflow safeguards", () => {
     for (const job of [
       "test",
       "unix-verify",
+      "plugin-source",
       "windows-test",
       "windows-verify",
     ]) {
       expect(workflow.jobs[job]?.if).toBe(fullCiCondition);
       expect(workflow.jobs[job]?.needs).toBe("validate-title");
     }
+    expect(
+      workflow.jobs["test"]?.steps.find(({ name }) => name === "Test")?.run,
+    ).toContain("pnpm run build:plugin");
+    expect(
+      workflow.jobs["unix-verify"]?.steps.find(
+        ({ name }) => name === "Install dependencies",
+      )?.run,
+    ).toContain(
+      "npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund",
+    );
+    const packageManifest = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { scripts?: Record<string, string> };
+    expect(packageManifest.scripts?.["test:ci"]).toStartWith(
+      "node --run build:plugin && ",
+    );
     expect(workflow.jobs["markdown-checks"]).toBeUndefined();
     const validationSteps = workflow.jobs["validate-title"]?.steps ?? [];
     for (const stepName of [
@@ -4037,6 +4054,7 @@ describe("GitHub release workflow safeguards", () => {
       "Set up Node.js",
       "Install dependencies",
       "Check Markdown formatting",
+      "Check plugin source compatibility",
     ]) {
       expect(validationSteps.find(({ name }) => name === stepName)?.if).toBe(
         "steps.scope.outputs.ci-mode == 'markdown'",
@@ -4057,7 +4075,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.test.result != 'success' || needs.unix-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.test.result != 'success' || needs.unix-verify.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
       "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
@@ -4072,6 +4090,7 @@ describe("GitHub release workflow safeguards", () => {
       ["unknown", "success", "skipped", true],
     ] as const) {
       const values = {
+        "needs.plugin-source.result": upstream,
         "needs.test.result": upstream,
         "needs.unix-verify.result": upstream,
         "needs.validate-title.outputs.ci-mode": ciMode,
@@ -4132,6 +4151,7 @@ describe("GitHub release workflow safeguards", () => {
         "needs.validate-title.result": "success",
         "needs.test.result": "success",
         "needs.unix-verify.result": verification,
+        "needs.plugin-source.result": "success",
         "needs.windows-test.result": "success",
         "needs.windows-verify.result": verification,
       };
@@ -4153,6 +4173,13 @@ describe("GitHub release workflow safeguards", () => {
       false,
       ["README.md", "docs/guide.md"],
       "markdown",
+    ],
+    [
+      "generated-plugin Markdown-only PR",
+      "pull_request",
+      false,
+      ["sdk/typescript/_bundled_plugin/skills/example/SKILL.md"],
+      "full",
     ],
     ["base retarget", "pull_request", true, ["README.md"], "full"],
     ["mixed PR", "pull_request", false, ["README.md", "src/index.ts"], "full"],
@@ -4189,6 +4216,57 @@ describe("GitHub release workflow safeguards", () => {
         });
         expect(result.status).toBe(0);
         expect(readFileSync(output, "utf8")).toBe(`ci-mode=${ciMode}\n`);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects oversized plugin Markdown in reduced CI",
+    () => {
+      const workspace = mkdtempSync(
+        join(tmpdir(), "release-ci-plugin-source-"),
+      );
+      const pluginRoot = join(workspace, "plugins", "codex-security");
+      const scripts = join(workspace, ".github", "scripts");
+      mkdirSync(scripts, { recursive: true });
+      mkdirSync(pluginRoot, { recursive: true });
+      writeFileSync(
+        join(scripts, "check_plugin_source_compatibility.py"),
+        readFileSync(
+          new URL(
+            "../../../.github/scripts/check_plugin_source_compatibility.py",
+            import.meta.url,
+          ),
+        ),
+      );
+      writeFileSync(join(pluginRoot, "README.md"), "x".repeat(150_001));
+      spawnSync("git", ["init", "--quiet", workspace]);
+      spawnSync("git", [
+        "-C",
+        workspace,
+        "add",
+        "--",
+        ".github/scripts/check_plugin_source_compatibility.py",
+        "plugins/codex-security/README.md",
+      ]);
+      try {
+        const result = spawnSync(
+          bash,
+          [
+            "-c",
+            workflowStepShell(
+              nodeCiWorkflow,
+              "Check plugin source compatibility",
+            ),
+          ],
+          { cwd: workspace, encoding: "utf8" },
+        );
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          "README.md: file is 150001 bytes; maximum is 150000 bytes",
+        );
       } finally {
         rmSync(workspace, { recursive: true, force: true });
       }

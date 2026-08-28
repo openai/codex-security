@@ -997,6 +997,46 @@ describe("CLI skill commands", () => {
     expect(stderr.text()).toBe("");
   });
 
+  test("preserves the selected Codex home from copied Windows environments", async () => {
+    const configuredHome = "./synthetic home with spaces";
+    const source = `
+process.stdout.write(JSON.stringify({
+  type: "item.completed",
+  item: {
+    type: "agent_message",
+    text: JSON.stringify({
+      home: process.env.CODEX_HOME ?? null,
+      homeKeys: Object.keys(process.env).filter((name) => name.toUpperCase() === "CODEX_HOME"),
+      other: process.env.SYNTHETIC_OTHER,
+    }),
+  },
+}) + "\\n");
+`;
+    for (const name of ["CODEX_HOME", "codex_home", "Codex_Home"]) {
+      const environment = Object.freeze({
+        [name]: configuredHome,
+        SYNTHETIC_OTHER: "preserved",
+      });
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+          environment,
+        ),
+      ).toBe(0);
+      const selected = process.platform === "win32" || name === "CODEX_HOME";
+      expect(JSON.parse(stdout.text())).toEqual({
+        home: selected ? resolve(configuredHome) : null,
+        homeKeys: selected ? ["CODEX_HOME"] : [],
+        other: "preserved",
+      });
+      expect(stderr.text()).toBe("");
+    }
+  });
+
   test("extracts the final skill response without exposing intermediate events", async () => {
     async function* events(): AsyncGenerator<Buffer> {
       yield Buffer.from(
