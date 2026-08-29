@@ -972,7 +972,7 @@ describe("direct Linear API publication", () => {
   });
 
   test.each([false, true])(
-    "lets active direct mutations settle after external cancellation with skipExisting=%s",
+    "lets active direct mutations settle after external cancellation with skipExisting=%p",
     async (skipExisting) => {
       const publication = preparedPublication(23);
       const recorded = {

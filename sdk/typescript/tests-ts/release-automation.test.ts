@@ -3938,7 +3938,10 @@ describe("GitHub release workflow safeguards", () => {
 
     const fullCiCondition = "needs.validate-title.outputs.ci-mode == 'full'";
     for (const job of [
+      "package",
       "test",
+      "compatibility",
+      "mcp",
       "plugin-source",
       "windows-test",
       "windows-verify",
@@ -3973,7 +3976,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.test.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
       "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
@@ -3988,6 +3991,9 @@ describe("GitHub release workflow safeguards", () => {
     ] as const) {
       const values = {
         "needs.plugin-source.result": upstream,
+        "needs.package.result": upstream,
+        "needs.compatibility.result": upstream,
+        "needs.mcp.result": upstream,
         "needs.test.result": upstream,
         "needs.validate-title.outputs.ci-mode": ciMode,
         "needs.validate-title.result": validation,
@@ -4004,6 +4010,40 @@ describe("GitHub release workflow safeguards", () => {
         ).toBe(gateFailure);
       }
     }
+
+    for (const dependency of [
+      "package",
+      "test",
+      "compatibility",
+      "mcp",
+      "plugin-source",
+    ]) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        expect(
+          evaluateWorkflowCondition(
+            workflow.jobs["required-test"]?.steps[0]?.if ?? "",
+            {
+              "needs.validate-title.result": "success",
+              "needs.validate-title.outputs.ci-mode": "full",
+              ...Object.fromEntries(
+                [
+                  "package",
+                  "test",
+                  "compatibility",
+                  "mcp",
+                  "plugin-source",
+                ].map((job) => [
+                  `needs.${job}.result`,
+                  job === dependency ? result : "success",
+                ]),
+              ),
+            },
+          ),
+          `${dependency}: ${result}`,
+        ).toBe(true);
+      }
+    }
+    expect(workflow.jobs["required-test"]?.steps[0]?.run).toBe("exit 1");
 
     const renderName = (template: string, values: Record<string, string>) => {
       let name = template;
