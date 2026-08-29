@@ -1423,7 +1423,7 @@ From a source checkout's `sdk/typescript` directory:
 
 ```bash
 pnpm install --frozen-lockfile
-npm ci --prefix ../../plugins/codex-security/mcp-app
+pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile
 pnpm run build:plugin
 pnpm run build
 node bin/codex-security.mjs serve --port 3000

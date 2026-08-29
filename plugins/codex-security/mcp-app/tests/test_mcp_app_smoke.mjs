@@ -43,15 +43,6 @@ const parentSandboxState = {
   },
   sandboxCwd: pathToFileURL(pluginRoot).href,
 };
-const packageManifest = JSON.parse(
-  await readFile(path.join(mcpAppRoot, "package.json"), "utf8"),
-);
-const packageLock = JSON.parse(
-  await readFile(path.join(mcpAppRoot, "package-lock.json"), "utf8"),
-);
-const MCP_APP_VERSION = packageManifest.version;
-assert.equal(packageLock.version, MCP_APP_VERSION);
-assert.equal(packageLock.packages[""].version, MCP_APP_VERSION);
 const installedPluginRoot = pluginRoot;
 const serverPath = path.join(installedPluginRoot, "mcp", "server.mjs");
 const mcpConfig = JSON.parse(
