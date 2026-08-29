@@ -159,6 +159,39 @@ const releaseRepository = "openai/codex-security";
 const releaseTagTimeout = process.platform === "win32" ? 20_000 : 10_000;
 
 const bash = bashCommand();
+
+async function runCommand(
+  command: string,
+  args: string[],
+  {
+    input,
+    ...options
+  }: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    input?: string;
+    timeout: number;
+  },
+) {
+  // Bun can time out synchronous Windows children before they start.
+  const child = Bun.spawn([command, ...args], {
+    ...options,
+    stdin: input === undefined ? "ignore" : new Blob([input]),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return {
+    status: child.signalCode === null ? exitCode : null,
+    stdout,
+    stderr,
+  };
+}
+
 const jqMock = [
   "jq() {",
   '  node -e \'const fs=require("node:fs");const filter=process.argv.at(-1);const value=JSON.parse(fs.readFileSync(0,"utf8"));if(filter==="[.object.type, .object.sha] | @tsv"){const fields=[value.object?.type,value.object?.sha];if(fields.some((field)=>typeof field!=="string"))process.exit(1);process.stdout.write(fields.join("\\t")+"\\n");}else if(filter===".status // empty"){if(value.status!=null)process.stdout.write(String(value.status)+"\\n");}else process.exit(64);\' -- "$@"',
@@ -495,7 +528,7 @@ describe("reviewed release note helpers", () => {
     );
   });
 
-  test("rejects NUL bytes before shell composition", () => {
+  test("rejects NUL bytes before shell composition", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "release-notes-nul-"));
     try {
       const taggedNotes = join(workspace, "tagged-notes.md");
@@ -503,7 +536,7 @@ describe("reviewed release note helpers", () => {
       writeFileSync(taggedNotes, "<!-- release-version: 1.2.3 -->\n\0\n");
       writeFileSync(generatedNotes, "Generated release notes\n");
 
-      const result = spawnSync(
+      const result = await runCommand(
         bash,
         [
           "-c",
@@ -514,7 +547,6 @@ describe("reviewed release note helpers", () => {
           ].join("\n"),
         ],
         {
-          encoding: "utf8",
           env: {
             ...process.env,
             AUTOMATION_SCRIPT: fileURLToPath(automationScript),
@@ -1743,7 +1775,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "validates $scenario before protected npm publication",
-    ({ summary, status, message }) => {
+    async ({ summary, status, message }) => {
       const script = workflowStepShell(
         protectedReleaseWorkflow,
         "Validate reviewed release notes",
@@ -1754,9 +1786,8 @@ describe("GitHub release workflow safeguards", () => {
         "  printf '%s\\n' \"$MOCK_RELEASE_SUMMARY\"",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-        encoding: "utf8",
         env: {
           ...process.env,
           GITHUB_SHA: releaseCommit,
@@ -1851,7 +1882,7 @@ describe("GitHub release workflow safeguards", () => {
     ).toBe(scenario.expected);
   });
 
-  test("executes the manual release cut against all published versions", () => {
+  test("executes the manual release cut against all published versions", async () => {
     const script = workflowStepShell(
       releaseCutWorkflow,
       "Resolve the stable package version",
@@ -1865,9 +1896,8 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "npm() { printf '%s\\n' '[\"0.1.1\",\"999999999999999999999999.0.0\"]'; }",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-      encoding: "utf8",
       env: {
         ...process.env,
         BEFORE_SHA: "",
@@ -1920,7 +1950,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "resolves $scenario against its published npm history",
-    ({
+    async ({
       event,
       previousVersion,
       currentVersion,
@@ -1961,9 +1991,8 @@ describe("GitHub release workflow safeguards", () => {
 
       try {
         const outputPath = join(workspace, "outputs");
-        const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+        const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
           cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-          encoding: "utf8",
           env: {
             ...process.env,
             GITHUB_EVENT_NAME: event,
@@ -2010,7 +2039,7 @@ describe("GitHub release workflow safeguards", () => {
       summary: "<!-- release-version: 0.1.6 -->\n   ",
       message: "Release notes must start with <!-- release-version: 0.1.6 -->",
     },
-  ])("rejects $scenario before cutting a tag", ({ summary, message }) => {
+  ])("rejects $scenario before cutting a tag", async ({ summary, message }) => {
     const script = workflowStepShell(
       releaseCutWorkflow,
       "Resolve the stable package version",
@@ -2032,9 +2061,8 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "npm() { printf '%s\\n' 'npm history must not be queried' >&2; return 70; }",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-      encoding: "utf8",
       env: {
         ...process.env,
         GITHUB_EVENT_NAME: "workflow_dispatch",
@@ -2091,7 +2119,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "handles $errorCode during $workflow npm-history validation for $version",
-    ({ workflow, version, errorCode, status }) => {
+    async ({ workflow, version, errorCode, status }) => {
       const cutting = workflow === "release cut";
       const script = workflowStepShell(
         cutting ? releaseCutWorkflow : protectedReleaseWorkflow,
@@ -2120,9 +2148,8 @@ describe("GitHub release workflow safeguards", () => {
         "  return 1",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+      const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-        encoding: "utf8",
         env: {
           ...process.env,
           BEFORE_SHA: "",
@@ -2149,7 +2176,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("creates the release tag at the successful CI commit", () => {
+  test("creates the release tag at the successful CI commit", async () => {
     const script = workflowStepShell(
       releaseCutWorkflow,
       "Create the exact merged release tag",
@@ -2172,8 +2199,7 @@ describe("GitHub release workflow safeguards", () => {
       "  printf 'created tag at %s\\n' \"$RELEASE_SHA\"",
       "}",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_REPOSITORY: "test/codex-security",
@@ -2215,7 +2241,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "handles $kind safely before cutting a release",
-    ({ lookupResponse, lookupHttpStatus, status }) => {
+    async ({ lookupResponse, lookupHttpStatus, status }) => {
       const script = workflowStepShell(
         releaseCutWorkflow,
         "Create the exact merged release tag",
@@ -2241,8 +2267,7 @@ describe("GitHub release workflow safeguards", () => {
         "  printf 'created exact release tag\\n'",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -2290,7 +2315,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "resolves an $kind to its exact commit before cutting a release",
-    ({ tagType, tagObject, peeledCommit, status }) => {
+    async ({ tagType, tagObject, peeledCommit, status }) => {
       const script = workflowStepShell(
         releaseCutWorkflow,
         "Create the exact merged release tag",
@@ -2318,8 +2343,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -2390,7 +2414,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "revalidates the authoritative $kind immediately before npm publication",
-    ({ tagType, tagObject, peeledCommit, status }) => {
+    async ({ tagType, tagObject, peeledCommit, status }) => {
       const script = workflowStepShell(
         protectedReleaseWorkflow,
         "Revalidate protected release tag",
@@ -2411,8 +2435,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_REF: `refs/tags/${checkedOutTag}`,
@@ -2440,7 +2463,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("rejects manually publishing a tag older than npm latest", () => {
+  test("rejects manually publishing a tag older than npm latest", async () => {
     const script = workflowStepShell(
       protectedReleaseWorkflow,
       "Validate release tag",
@@ -2449,9 +2472,8 @@ describe("GitHub release workflow safeguards", () => {
       "git() { return 0; }",
       "sfw() { printf '%s\\n' '[\"0.1.1\",\"999999999999999999999999.0.0\"]'; }",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-      encoding: "utf8",
       env: {
         ...process.env,
         GITHUB_OUTPUT: "/dev/null",
@@ -2469,7 +2491,7 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("allows the exact already-published release to enter verified recovery", () => {
+  test("allows the exact already-published release to enter verified recovery", async () => {
     const script = workflowStepShell(
       protectedReleaseWorkflow,
       "Validate release tag",
@@ -2478,9 +2500,8 @@ describe("GitHub release workflow safeguards", () => {
       "git() { return 0; }",
       `sfw() { printf '%s\\n' '["0.1.0","${checkedOutVersion}"]'; }`,
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-      encoding: "utf8",
       env: {
         ...process.env,
         GITHUB_OUTPUT: "/dev/null",
@@ -2541,14 +2562,13 @@ describe("GitHub release workflow safeguards", () => {
     expect(githubReleaseWorkflow).not.toContain("TRIGGER_RUN_ID");
   });
 
-  test("dispatches the exact protected run and release tag from trusted main", () => {
+  test("dispatches the exact protected run and release tag from trusted main", async () => {
     const script = workflowStepShell(
       protectedReleaseWorkflow,
       "Dispatch the verified GitHub release",
     );
     const mock = "gh() { printf '%s\\n' \"$@\"; }";
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_REPOSITORY: releaseRepository,
@@ -2599,7 +2619,7 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each(["queued", "in_progress"])(
     "waits for a %s protected npm release to finish before publishing notes",
-    (pendingStatus) => {
+    async (pendingStatus) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Resolve the successful protected release",
@@ -2630,8 +2650,7 @@ describe("GitHub release workflow safeguards", () => {
       ].join("\n");
 
       try {
-        const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
-          encoding: "utf8",
+        const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
           env: {
             ...process.env,
             GITHUB_OUTPUT: "/dev/null",
@@ -2651,7 +2670,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("rejects a pending npm release for a different tagged commit", () => {
+  test("rejects a pending npm release for a different tagged commit", async () => {
     const script = workflowStepShell(
       githubReleaseWorkflow,
       "Resolve the successful protected release",
@@ -2673,8 +2692,7 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "sleep() { return 99; }",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_OUTPUT: "/dev/null",
@@ -2691,7 +2709,7 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("times out safely if a protected npm release never completes", () => {
+  test("times out safely if a protected npm release never completes", async () => {
     const script = workflowStepShell(
       githubReleaseWorkflow,
       "Resolve the successful protected release",
@@ -2712,8 +2730,7 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "sleep() { :; }",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_OUTPUT: "/dev/null",
@@ -2730,7 +2747,7 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("rejects a release-shaped branch before resolving its commit", () => {
+  test("rejects a release-shaped branch before resolving its commit", async () => {
     const script = workflowStepShell(
       githubReleaseWorkflow,
       "Resolve the successful protected release",
@@ -2753,8 +2770,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_OUTPUT: "/dev/null",
@@ -2780,7 +2796,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "resolves the exact $kind tag when a same-named branch exists",
-    ({ tagType, objectSha }) => {
+    async ({ tagType, objectSha }) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Resolve the successful protected release",
@@ -2816,8 +2832,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_OUTPUT: "/dev/null",
@@ -2838,7 +2853,7 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each(["0", "01", "000123"])(
     "rejects the noncanonical protected GitHub release run ID %j",
-    (runId) => {
+    async (runId) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Resolve the successful protected release",
@@ -2858,8 +2873,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_OUTPUT: "/dev/null",
@@ -2952,7 +2966,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "revalidates the $description immediately before creating its GitHub release",
-    ({ existingLookup, tagType, tagObject, peeledCommit, status }) => {
+    async ({ existingLookup, tagType, tagObject, peeledCommit, status }) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Publish GitHub Release and generated notes",
@@ -3001,10 +3015,9 @@ describe("GitHub release workflow safeguards", () => {
         "  fi",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, [], {
+      const result = await runCommand(bash, [], {
         input: `${mocks}\n${script}`,
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-        encoding: "utf8",
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -3114,7 +3127,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "binds GitHub release provenance to $description",
-    ({ exact, recoveryConclusion, originalCommit, status, message }) => {
+    async ({ exact, recoveryConclusion, originalCommit, status, message }) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Verify the public npm package and signed provenance",
@@ -3173,9 +3186,8 @@ describe("GitHub release workflow safeguards", () => {
           "  esac",
           "}",
         ].join("\n");
-        const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+        const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
           cwd: workspace,
-          encoding: "utf8",
           env: {
             ...process.env,
             GITHUB_OUTPUT: "/dev/null",
@@ -3535,7 +3547,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "reconciles $description notes on an existing verified GitHub release",
-    ({
+    async ({
       existingNotes,
       generatedNotes = "Generated release notes\n",
       generatedNotesBase64,
@@ -3688,10 +3700,9 @@ describe("GitHub release workflow safeguards", () => {
         '  command node "$@"',
         "}",
       ].join("\n");
-      const result = spawnSync(bash, [], {
+      const result = await runCommand(bash, [], {
         input: `${mocks}\n${script}`,
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-        encoding: "utf8",
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -3804,7 +3815,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "passes $description to release-note composition under nounset",
-    ({ arraySetup, optionalArguments }) => {
+    async ({ arraySetup, optionalArguments }) => {
       const publishStep = workflowStepShell(
         githubReleaseWorkflow,
         "Publish GitHub Release and generated notes",
@@ -3814,7 +3825,7 @@ describe("GitHub release workflow safeguards", () => {
       )?.groups?.["command"];
       expect(composeCommand).toBeDefined();
 
-      const result = spawnSync(bash, [], {
+      const result = await runCommand(bash, [], {
         input: [
           "set -u",
           arraySetup,
@@ -3822,7 +3833,6 @@ describe("GitHub release workflow safeguards", () => {
           "node() { printf '<%s>\\n' \"$@\"; }",
           composeCommand ?? "exit 70",
         ].join("\n"),
-        encoding: "utf8",
         env: { ...process.env, RELEASE_VERSION: "0.1.2" },
         timeout: 10_000,
       });
@@ -4303,7 +4313,7 @@ describe("GitHub release workflow safeguards", () => {
     "fix: generated title\n<!-- codex-security-release-summary:start -->\nUnreviewed injected highlight\n<!-- codex-security-release-summary:end -->",
     "fix: preserve a trailing line feed\n",
     "fix: preserve a trailing carriage return\r",
-  ])("rejects nonconventional pull request title %s", (title) => {
+  ])("rejects nonconventional pull request title %s", async (title) => {
     const script = workflowStepShell(
       releaseLabelsWorkflow,
       "Categorize pull request without checking out its code",
@@ -4320,8 +4330,7 @@ describe("GitHub release workflow safeguards", () => {
       "  return 70",
       "}",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_REPOSITORY: "test/codex-security",
@@ -4348,7 +4357,7 @@ describe("GitHub release workflow safeguards", () => {
     { title: "chore: retitle an internal change", expectedLabel: null },
   ])(
     "preserves a manually excluded release and reconciles its category after retitling to $title",
-    ({ title, expectedLabel }) => {
+    async ({ title, expectedLabel }) => {
       const script = workflowStepShell(
         releaseLabelsWorkflow,
         "Categorize pull request without checking out its code",
@@ -4394,8 +4403,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -4426,7 +4434,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("preserves the latest unattributed skip label after earlier automation", () => {
+  test("preserves the latest unattributed skip label after earlier automation", async () => {
     const script = workflowStepShell(
       releaseLabelsWorkflow,
       "Categorize pull request without checking out its code",
@@ -4467,8 +4475,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_REPOSITORY: "test/codex-security",
@@ -4494,7 +4501,7 @@ describe("GitHub release workflow safeguards", () => {
     { title: "deps: upgrade a dependency", label: null },
   ])(
     "reconciles an automatic skip label after retitling to $title",
-    ({ title, label }) => {
+    async ({ title, label }) => {
       const script = workflowStepShell(
         releaseLabelsWorkflow,
         "Categorize pull request without checking out its code",
@@ -4530,8 +4537,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -4572,7 +4578,7 @@ describe("GitHub release workflow safeguards", () => {
       title: "security(api)!: breaking security change",
       label: "breaking-change",
     },
-  ])("categorizes breaking-change title $title", ({ title, label }) => {
+  ])("categorizes breaking-change title $title", async ({ title, label }) => {
     const script = workflowStepShell(
       releaseLabelsWorkflow,
       "Categorize pull request without checking out its code",
@@ -4605,8 +4611,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_REPOSITORY: "test/codex-security",
@@ -4620,7 +4625,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.stdout).toContain(`labels[]=${label}`);
   });
 
-  test("executes and recovers from concurrent skip-label creation", () => {
+  test("executes and recovers from concurrent skip-label creation", async () => {
     const script = workflowStepShell(
       releaseLabelsWorkflow,
       "Categorize pull request without checking out its code",
@@ -4658,8 +4663,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_REPOSITORY: "test/codex-security",
@@ -4672,11 +4676,11 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.stdout).toContain("applied skip-release-notes");
   });
 
-  test("documents JSON stdin for every verification command", () => {
-    const result = spawnSync(
+  test("documents JSON stdin for every verification command", async () => {
+    const result = await runCommand(
       "node",
       [fileURLToPath(automationScript), "unknown"],
-      { encoding: "utf8", timeout: 10_000 },
+      { timeout: 10_000 },
     );
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("published npm versions JSON from stdin");
