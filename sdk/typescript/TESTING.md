@@ -1,11 +1,12 @@
 # Testing the SDK and CLI
 
 Use the pnpm version in `package.json` and Bun 1.3.14, matching required CI.
+Install both the SDK and MCP app dependencies before building or testing.
 Run these commands from `sdk/typescript`:
 
 ```sh
 pnpm install --frozen-lockfile
-npm ci --prefix ../../plugins/codex-security/mcp-app --no-audit --no-fund
+pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile
 pnpm run check:plugin-source
 bun test --timeout 30000 ./tests-ts/worker-progress.test.ts
 pnpm run types

@@ -136,7 +136,7 @@ jobs:
       - name: Install dependencies
         run: |
           sfw pnpm --dir sdk/typescript install --frozen-lockfile
-          sfw npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
+          sfw pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 
       - name: Install ripgrep
         run: |
