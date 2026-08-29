@@ -291,14 +291,26 @@ async function runCampaign(
             warning = `Scan coverage is ${coverage}; results may be incomplete.`;
           }
         } catch (error) {
-          if (options.signal?.aborted === true) options.signal.throwIfAborted();
+          if (options.signal?.aborted === true) {
+            await rm(checkout, { recursive: true, force: true }).catch(
+              () => undefined,
+            );
+            options.signal.throwIfAborted();
+          }
           if (error instanceof ScanCostLimitExceededError) {
             cost = error.cost;
             exhaustedBudget = true;
           }
           failure = safeErrorMessage(error);
-        } finally {
+        }
+        try {
           await rm(checkout, { recursive: true, force: true });
+        } catch (error) {
+          notifyProgress(options, {
+            ...progress,
+            status: "started",
+            warning: `Failed to remove checkout directory: ${safeErrorMessage(error)}`,
+          });
         }
         const status =
           failure !== undefined
