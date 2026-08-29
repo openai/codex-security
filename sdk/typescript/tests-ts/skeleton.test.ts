@@ -121,6 +121,7 @@ describe("TypeScript package skeleton", () => {
       "validate-title",
       "test",
       "unix-verify",
+      "plugin-source",
     ]);
     expect(jobs["required-test"]?.name).toContain("${{ matrix.os }} / node-22");
     expect(jobs["required-test"]?.strategy?.matrix).toEqual({
