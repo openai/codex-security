@@ -16,6 +16,7 @@
         "CODEX_MCP_NODE_PATH",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
+        "ORCAROUTER_API_KEY",
         "FIREWORKS_API_KEY",
         "AWS_BEARER_TOKEN_BEDROCK",
         "AWS_ACCESS_KEY_ID",

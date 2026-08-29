@@ -45,6 +45,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
+  ORCAROUTER_CODEX_PROVIDER,
   scanModelConfiguration,
 } from "../src/config.js";
 import {
@@ -149,7 +150,13 @@ describe("CLI", () => {
             enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
           },
           provider: {
-            enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
+            enum: [
+              "openai",
+              "openrouter",
+              "orcarouter",
+              "fireworks",
+              "amazon-bedrock",
+            ],
           },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
           patch: { type: "boolean" },
@@ -870,6 +877,12 @@ describe("CLI", () => {
       "openrouter",
       "anthropic/claude-sonnet-4.5",
       OPENROUTER_CODEX_PROVIDER,
+    ],
+    [
+      "OrcaRouter",
+      "orcarouter",
+      "orcarouter/fusion",
+      ORCAROUTER_CODEX_PROVIDER,
     ],
     [
       "Fireworks AI",
@@ -2357,7 +2370,7 @@ describe("CLI", () => {
     );
     expect(help.text()).toContain("--model <string>");
     expect(help.text()).toContain(
-      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
+      "--provider <openai|openrouter|orcarouter|fireworks|amazon-bedrock>",
     );
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
@@ -2429,7 +2442,7 @@ describe("CLI", () => {
     expect(help.text()).not.toContain("--outputDir");
     expect(help.text()).not.toContain("--maxAttempts");
     expect(help.text()).toContain(
-      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
+      "--provider <openai|openrouter|orcarouter|fireworks|amazon-bedrock>",
     );
     expect(stderr.text()).toBe("");
   });
@@ -2484,6 +2497,13 @@ describe("CLI", () => {
       "anthropic/claude-sonnet-4.5",
       "google/gemini-2.5-pro",
       OPENROUTER_CODEX_PROVIDER,
+    ],
+    [
+      "OrcaRouter",
+      "orcarouter",
+      "orcarouter/fusion",
+      "orcarouter/fusion-mini",
+      ORCAROUTER_CODEX_PROVIDER,
     ],
     [
       "Fireworks AI",
@@ -2665,6 +2685,7 @@ describe("CLI", () => {
     ).toThrow("--effort conflicts with --codex model_reasoning_effort");
     for (const provider of [
       "openrouter",
+      "orcarouter",
       "fireworks",
       "amazon-bedrock",
     ] as const) {
@@ -2771,6 +2792,10 @@ describe("CLI", () => {
       [
         ["scan", ".", "--provider", "openrouter"],
         "--model is required when using --provider openrouter",
+      ],
+      [
+        ["scan", ".", "--provider", "orcarouter"],
+        "--model is required when using --provider orcarouter",
       ],
       [
         ["scan", ".", "--provider", "fireworks"],
@@ -3282,6 +3307,13 @@ describe("CLI", () => {
       "anthropic/claude-sonnet-4.5",
       OPENROUTER_CODEX_PROVIDER,
       { OPENROUTER_API_KEY: "synthetic-openrouter-key" },
+    ],
+    [
+      "OrcaRouter",
+      "orcarouter",
+      "orcarouter/fusion",
+      ORCAROUTER_CODEX_PROVIDER,
+      { ORCAROUTER_API_KEY: "synthetic-orcarouter-key" },
     ],
     [
       "Fireworks AI",

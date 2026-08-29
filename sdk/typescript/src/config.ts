@@ -35,8 +35,16 @@ export const FIREWORKS_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+export const ORCAROUTER_CODEX_PROVIDER = {
+  name: "OrcaRouter",
+  base_url: "https://api.orcarouter.ai/v1",
+  env_key: "ORCAROUTER_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
+  orcarouter: ORCAROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
 } as const;
 

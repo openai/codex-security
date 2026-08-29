@@ -192,6 +192,9 @@ For other inference providers:
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
 npx @openai/codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 
+export ORCAROUTER_API_KEY="<your-orcarouter-api-key>"
+npx @openai/codex-security scan . --provider orcarouter --model orcarouter/fusion
+
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
 

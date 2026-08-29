@@ -299,7 +299,7 @@ const VALUE_OPTIONS = new Set([
   "--linear-assignee",
 ]);
 const PROVIDER_OPTION = z
-  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
+  .enum(["openai", "openrouter", "orcarouter", "fireworks", "amazon-bedrock"])
   .default("openai")
   .describe("Inference provider for scans.");
 const CREATE_PR_OPTION = z
