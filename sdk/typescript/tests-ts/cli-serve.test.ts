@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -79,15 +79,22 @@ test("serve reports startup failures with a nonzero exit", async () => {
   try {
     const state = join(root, "not-a-directory");
     await writeFile(state, "synthetic file");
-    const child = spawnSync(process.execPath, [cli, "serve"], {
+    const child = Bun.spawn({
+      cmd: [process.execPath, cli, "serve"],
       env: { ...process.env, CODEX_SECURITY_STATE_DIR: state },
-      encoding: "utf8",
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
       timeout: 20_000,
     });
-    expect(child.error).toBeUndefined();
-    expect(child.status).toBe(1);
-    expect(child.stdout).toBe("");
-    expect(child.stderr).toContain("Could not access the findings database");
+    const [status, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(status, stderr).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("Could not access the findings database");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -167,7 +167,7 @@ describe("TypeScript package skeleton", () => {
     );
 
     expect(steps[dependencyInstallation]?.run).toContain(
-      "npm ci --prefix plugins/codex-security/mcp-app",
+      "pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile",
     );
     expect(steps[pluginGeneration]?.run).toBe(
       "pnpm --dir sdk/typescript run build:plugin",

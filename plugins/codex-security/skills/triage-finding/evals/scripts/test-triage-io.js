@@ -5,6 +5,12 @@ const assert = require("assert");
 const triageIo = require("../assertions/triage-io.js");
 
 function outputFor({ inputId, sourceType, verdict }) {
+  const stackRank = {
+    rank_queue: verdict === "not_actionable" ? null : verdict,
+    rank: verdict === "not_actionable" ? null : 1,
+    rationale: verdict === "not_actionable" ? "not actionable" : "Example ranking",
+    drivers: [],
+  };
   return `\`\`\`json
 {
   "schema_version": "triage-finding/v0",
@@ -21,6 +27,7 @@ function outputFor({ inputId, sourceType, verdict }) {
       "normalized_input": {},
       "verdict": "${verdict}",
       "confidence": "high",
+      "exploitability_stack_rank": ${JSON.stringify(stackRank)},
       "affected_locations": [],
       "reachable_path": [],
       "evidence": [],

@@ -250,6 +250,8 @@ jobs:
     outputs:
       image: ${{ steps.release.outputs.image }}
       version: ${{ steps.release.outputs.version }}
+      labels: ${{ steps.metadata.outputs.labels }}
+      metadata: ${{ steps.metadata.outputs.json }}
 
     steps:
       - name: Checkout release source
@@ -314,6 +316,21 @@ jobs:
 
           sh docker/verify-container-release-version.sh "$endpoint" "$VERSION"
 
+      - name: Generate release image metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.release.outputs.image }}
+          # Use the release version for metadata; only promote publishes stable tags.
+          tags: type=raw,value=${{ steps.release.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=Codex Security
+            org.opencontainers.image.description=Codex Security scanner with a preview findings API and dashboard.
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=OpenAI
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}/releases/tag/npm-v${{ steps.release.outputs.version }}
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}/blob/${{ github.sha }}/docker/README.md
+
   publish-platform:
     name: publish-linux-${{ matrix.architecture }}
     needs: authorize
@@ -358,16 +375,14 @@ jobs:
           sbom: true
           cache-from: type=gha,scope=codex-security-${{ matrix.architecture }}
           cache-to: type=gha,mode=max,scope=codex-security-${{ matrix.architecture }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ needs.authorize.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
+          labels: ${{ needs.authorize.outputs.labels }}
 
       - name: Verify the exact published native image
         env:
           EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
           IMAGE: ${{ needs.authorize.outputs.image }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_METADATA: ${{ needs.authorize.outputs.metadata }}
         shell: bash
         run: |
           set -euo pipefail
@@ -385,6 +400,12 @@ jobs:
             echo "Expected a native $EXPECTED_ARCHITECTURE image; found $actual_architecture." >&2
             exit 1
           fi
+
+          docker image inspect --format '{{json .Config.Labels}}' "$reference" |
+            jq --exit-status --argjson metadata "$IMAGE_METADATA" '
+              . as $labels
+              | all($metadata.labels | to_entries[]; $labels[.key] == .value)
+            ' > /dev/null
 
           docker run --rm "$reference" --version
           docker run --rm "$reference" bulk-scan --help
@@ -464,6 +485,8 @@ jobs:
         id: manifest
         env:
           IMAGE: ${{ needs.authorize.outputs.image }}
+          IMAGE_LABELS: ${{ needs.authorize.outputs.labels }}
+          IMAGE_METADATA: ${{ needs.authorize.outputs.metadata }}
         shell: bash
         run: |
           set -euo pipefail
@@ -486,8 +509,14 @@ jobs:
             references+=("$IMAGE@sha256:$digest")
           done
 
+          annotations=()
+          while IFS= read -r label; do
+            annotations+=(--annotation "index:$label")
+          done <<< "$IMAGE_LABELS"
+
           candidate="$IMAGE:release-candidate-$GITHUB_SHA"
           docker buildx imagetools create \
+            "${annotations[@]}" \
             --tag "$candidate" \
             "${references[@]}"
 
@@ -500,9 +529,13 @@ jobs:
           printf 'candidate=%s\n' "$candidate" >> "$GITHUB_OUTPUT"
 
           docker buildx imagetools inspect "$candidate" --raw |
-            jq --exit-status '
-              [.manifests[] | select(.platform.os == "linux") | .platform.architecture]
-              | (index("amd64") != null and index("arm64") != null)
+            jq --exit-status --argjson metadata "$IMAGE_METADATA" '
+              . as $index
+              | all($metadata.labels | to_entries[]; $index.annotations[.key] == .value)
+                and (
+                  [.manifests[] | select(.platform.os == "linux") | .platform.architecture]
+                  | (index("amd64") != null and index("arm64") != null)
+                )
             ' > /dev/null
 
       - name: Verify customers can pull the candidate without GitHub credentials
@@ -640,3 +673,27 @@ jobs:
           docker logout ghcr.io
           docker pull "$IMAGE:$VERSION"
           docker run --rm --entrypoint codex-security "$IMAGE:$VERSION" --version
+
+      - name: Summarize published container release
+        continue-on-error: true
+        env:
+          IMAGE: ${{ needs.authorize.outputs.image }}
+          VERSION: ${{ needs.authorize.outputs.version }}
+          MANIFEST_DIGEST: ${{ needs.manifest.outputs.digest }}
+          RELEASE_URL: ${{ fromJSON(needs.authorize.outputs.metadata).labels['org.opencontainers.image.url'] }}
+          DOCUMENTATION_URL: ${{ fromJSON(needs.authorize.outputs.metadata).labels['org.opencontainers.image.documentation'] }}
+        shell: bash
+        run: |
+          {
+            printf '## Codex Security container %s\n\n' "$VERSION"
+            printf 'Platforms: linux/amd64, linux/arm64.\n\n'
+            printf 'Source: [%s](%s/%s/commit/%s)\n\n' \
+              "$GITHUB_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+            printf '[Container guide](%s) | [Release notes](%s)\n\n' \
+              "$DOCUMENTATION_URL" "$RELEASE_URL"
+            printf '```bash\n'
+            printf 'docker pull %s:%s@%s\n' "$IMAGE" "$VERSION" "$MANIFEST_DIGEST"
+            printf 'gh attestation verify oci://%s@%s --repo %s\n' \
+              "$IMAGE" "$MANIFEST_DIGEST" "$GITHUB_REPOSITORY"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"

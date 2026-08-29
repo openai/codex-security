@@ -62,7 +62,7 @@ test("dedupe resolves a workflow's pinned scan and passes the workflow ID to the
 });
 
 test.each([false, true])(
-  "dedupe passes the scan selector, URL, and all-repository scope %s to the SDK",
+  "dedupe passes the scan selector, URL, and all-repository scope %j to the SDK",
   async (allRepositories) => {
     const stdout = capture();
     const stderr = capture();

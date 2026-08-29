@@ -5,12 +5,12 @@ FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca440
 WORKDIR /build/sdk/typescript
 
 COPY sdk/typescript/package.json sdk/typescript/pnpm-lock.yaml sdk/typescript/pnpm-workspace.yaml ./
-COPY plugins/codex-security/mcp-app/package.json plugins/codex-security/mcp-app/package-lock.json /build/plugins/codex-security/mcp-app/
+COPY plugins/codex-security/mcp-app/package.json plugins/codex-security/mcp-app/pnpm-lock.yaml plugins/codex-security/mcp-app/pnpm-workspace.yaml /build/plugins/codex-security/mcp-app/
 
 RUN corepack enable \
     && corepack prepare "$(node --print 'require("./package.json").packageManager')" --activate \
     && pnpm install --frozen-lockfile \
-    && npm ci --prefix /build/plugins/codex-security/mcp-app --no-audit --no-fund
+    && pnpm --dir /build/plugins/codex-security/mcp-app install --frozen-lockfile
 
 COPY sdk/typescript/ ./
 COPY plugins/codex-security/ /build/plugins/codex-security/
