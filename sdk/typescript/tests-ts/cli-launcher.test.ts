@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
   copyFile,
   mkdir,
@@ -14,6 +13,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { VERSION } from "../src/index.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
+import { runCommand } from "./support/shell.js";
 
 const packageRoot = join(import.meta.dir, "..");
 
@@ -27,8 +27,7 @@ describe("CLI launcher", () => {
       if (process.platform !== "win32") {
         await symlink(launcher, bin);
       }
-      const child = spawnSync(process.execPath, [bin, "--version"], {
-        encoding: "utf8",
+      const child = await runCommand(process.execPath, [bin, "--version"], {
         timeout: 30_000,
       });
 
@@ -48,10 +47,10 @@ describe("CLI launcher", () => {
         preload,
         `Object.defineProperty(process, "cwd", { value() { throw new Error(${JSON.stringify(`working directory is unavailable: ${SYNTHETIC_CREDENTIALS}`)}); } });\n`,
       );
-      const child = spawnSync(
+      const child = await runCommand(
         process.execPath,
         ["--preload", preload, join(packageRoot, "src", "cli.ts"), "scan"],
-        { encoding: "utf8", timeout: 30_000 },
+        { timeout: 30_000 },
       );
 
       expect(child.status).toBe(2);
@@ -77,8 +76,7 @@ describe("CLI launcher", () => {
         join(root, "dist", "cli.js"),
         `throw new Error(${JSON.stringify(`failed ${SYNTHETIC_CREDENTIALS}`)});\n`,
       );
-      const child = spawnSync("node", [launcher], {
-        encoding: "utf8",
+      const child = await runCommand("node", [launcher], {
         env: { ...process.env, NODE_NO_WARNINGS: "1" },
         timeout: 30_000,
       });
@@ -98,7 +96,7 @@ describe("CLI launcher", () => {
     try {
       const installed = join(root, "node_modules", "@openai", "codex-security");
       const dist = join(installed, "dist");
-      const build = spawnSync(
+      const build = await runCommand(
         "node",
         [
           join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
@@ -107,9 +105,8 @@ describe("CLI launcher", () => {
           "--outDir",
           dist,
         ],
-        { cwd: packageRoot, encoding: "utf8", timeout: 30_000 },
+        { cwd: packageRoot, timeout: 30_000 },
       );
-      expect(build.error).toBeUndefined();
       expect(build.status).toBe(0);
       expect(build.stderr).toBe("");
 
@@ -146,8 +143,7 @@ describe("CLI launcher", () => {
           "--preserve-symlinks-main --no-experimental-detect-module",
         NODE_USE_ENV_PROXY: undefined,
       };
-      const child = spawnSync("node", [bin, "--version"], {
-        encoding: "utf8",
+      const child = await runCommand("node", [bin, "--version"], {
         env: launchEnvironment,
         timeout: 30_000,
       });
@@ -171,11 +167,10 @@ describe("CLI launcher", () => {
           "});\n",
         ].join("\n"),
       );
-      const failed = spawnSync(
+      const failed = await runCommand(
         "node",
         ["--import", pathToFileURL(preload).href, bin, "scan"],
         {
-          encoding: "utf8",
           env: launchEnvironment,
           timeout: 30_000,
         },
