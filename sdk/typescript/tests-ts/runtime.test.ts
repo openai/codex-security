@@ -2840,6 +2840,9 @@ describe("runtime directories and plugin Python boundary", () => {
       "access denied",
       "unexpected error",
       "missing home",
+      "transient path-not-found descendant",
+      "persistent path-not-found descendant",
+      "path-not-found home",
     ] as const)("replays Windows credential ACL %s", async (kind) => {
     if (
       runTestInSubprocess(
@@ -2855,24 +2858,31 @@ describe("runtime directories and plugin Python boundary", () => {
     await requireSecureCredentialHome(home);
     const descendant = join(home, ".auth-replay.tmp");
     await writeFile(descendant, "synthetic credential\n", { mode: 0o600 });
-    const missing = kind.includes("missing");
-    const exception = missing
-      ? "System.IO.FileNotFoundException"
-      : kind === "access denied"
-        ? "System.UnauthorizedAccessException"
-        : "System.InvalidOperationException";
-    const errorId = missing
-      ? "System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand"
-      : kind === "access denied"
-        ? "System.UnauthorizedAccessException,Microsoft.PowerShell.Commands.GetAclCommand"
-        : "SyntheticCredentialAclFailure";
+    const pathNotFound = kind.includes("path-not-found");
+    const missing = pathNotFound || kind.includes("missing");
+    const transient = kind.startsWith("transient ");
+    const persistent = kind.startsWith("persistent ");
+    const exception = pathNotFound
+      ? "System.Management.Automation.ItemNotFoundException"
+      : missing
+        ? "System.IO.FileNotFoundException"
+        : kind === "access denied"
+          ? "System.UnauthorizedAccessException"
+          : "System.InvalidOperationException";
+    const errorId = pathNotFound
+      ? "GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand"
+      : missing
+        ? "System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand"
+        : kind === "access denied"
+          ? "System.UnauthorizedAccessException,Microsoft.PowerShell.Commands.GetAclCommand"
+          : "SyntheticCredentialAclFailure";
     const category =
       kind === "access denied"
         ? "PermissionDenied"
-        : missing
+        : missing && !pathNotFound
           ? "NotSpecified"
           : "ObjectNotFound";
-    const failurePath = kind === "missing home" ? home : descendant;
+    const failurePath = kind.endsWith("home") ? home : descendant;
     // Replay the native error without relying on racing a filesystem deletion.
     const injection = `if ($path -eq '${failurePath.replaceAll("'", "''")}') { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
     const marker = "function Write-CredentialAcl($path) {";
@@ -2894,7 +2904,7 @@ describe("runtime directories and plugin Python boundary", () => {
           return originalSpawn(...spawnArgs);
         }
         attempts += 1;
-        if (kind === "transient missing descendant" && attempts > 1) {
+        if (transient && attempts > 1) {
           return originalSpawn(...spawnArgs);
         }
         expect(script.split(marker)).toHaveLength(2);
@@ -2907,16 +2917,16 @@ describe("runtime directories and plugin Python boundary", () => {
       },
     }));
     try {
-      if (kind === "transient missing descendant") {
+      if (transient) {
         await requireSecureCredentialHome(home);
         expect(attempts).toBe(2);
       } else {
         await expect(requireSecureCredentialHome(home)).rejects.toThrow(
-          kind === "persistent missing descendant"
+          persistent
             ? "Windows credential descendants could not be verified"
             : "synthetic credential ACL error",
         );
-        expect(attempts).toBe(kind === "persistent missing descendant" ? 3 : 1);
+        expect(attempts).toBe(persistent ? 3 : 1);
       }
     } finally {
       mock.module("node:child_process", () => ({

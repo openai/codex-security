@@ -51,6 +51,16 @@ before proposing a coverage floor.
   boundaries are the behavior under test. Do not use live model credentials.
 - Use the typed `TestClient` and `createApiTestFixtures` helpers for API tests.
   Do not add a production abstraction solely to support a mock.
+- Test workflow retry, resume, and checkpoint permutations with the existing
+  injected workbench dependency. `scriptedWorkbench` rejects unexpected
+  requests; `checkpointWorkbench` stores review results without reproducing the
+  Python workflow engine. Keep real workbench calls in the focused workflow
+  integration file for process termination, migration, and source snapshots.
+- Test Python database behavior by calling the production functions in pytest.
+  The `workbench_db` fixture copies a migrated, empty schema into a fresh
+  in-memory SQLite database for each test, with foreign keys enabled. Use
+  file-backed databases for migrations, reopening, locking, and crash recovery;
+  an in-memory database cannot exercise those boundaries.
 - Restore spies, timers, and environment changes. Tests that change the process
   cwd or install persistent ESM module mocks use `runTestInSubprocess`.
   Per-file Bun isolation does not isolate process-wide state inside one file.
