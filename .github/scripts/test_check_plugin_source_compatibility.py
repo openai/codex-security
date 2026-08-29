@@ -63,6 +63,30 @@ def test_accepts_valid_source_and_ignores_untracked_files(tmp_path: Path) -> Non
     assert result.stderr == ""
 
 
+def test_python_checkout_preserves_source_size_with_autocrlf(tmp_path: Path) -> None:
+    attributes = CHECKER.parents[2] / ".gitattributes"
+    (tmp_path / ".gitattributes").write_bytes(attributes.read_bytes())
+    source = tmp_path / "module.py"
+    content = b"pass\n" * 30_000
+    source.write_bytes(content)
+    initialize_repository(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "--local", "core.autocrlf", "true"],
+        check=True,
+    )
+    track(tmp_path, ".gitattributes", "module.py")
+    source.unlink()
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "checkout-index", "--", "module.py"],
+        check=True,
+    )
+
+    result = run_checker(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert source.read_bytes() == content
+
+
 def test_accepts_prose_after_an_opening_thematic_break(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text(
         """---
