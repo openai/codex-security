@@ -3950,17 +3950,11 @@ describe("GitHub release workflow safeguards", () => {
     }
     expect(workflow.jobs["markdown-checks"]).toBeUndefined();
     const validationSteps = workflow.jobs["validate-title"]?.steps ?? [];
-    for (const stepName of [
-      "Set up pnpm",
-      "Set up Node.js",
-      "Install dependencies",
-      "Check Markdown formatting",
-      "Check plugin source compatibility",
-    ]) {
-      expect(validationSteps.find(({ name }) => name === stepName)?.if).toBe(
-        "steps.scope.outputs.ci-mode == 'markdown'",
-      );
-    }
+    expect(
+      validationSteps.find(
+        ({ name }) => name === "Check plugin source compatibility",
+      )?.if,
+    ).toBe("steps.scope.outputs.ci-mode == 'markdown'");
     const markdownCommand =
       validationSteps.find(({ name }) => name === "Check Markdown formatting")
         ?.run ?? "";
@@ -4083,6 +4077,7 @@ describe("GitHub release workflow safeguards", () => {
       false,
       ["README.md", "docs/guide.md"],
       "markdown",
+      true,
     ],
     [
       "generated-plugin Markdown-only PR",
@@ -4090,24 +4085,53 @@ describe("GitHub release workflow safeguards", () => {
       false,
       ["sdk/typescript/_bundled_plugin/skills/example/SKILL.md"],
       "full",
+      true,
     ],
-    ["base retarget", "pull_request", true, ["README.md"], "full"],
-    ["mixed PR", "pull_request", false, ["README.md", "src/index.ts"], "full"],
+    [
+      "authored-plugin skill Markdown-only PR",
+      "pull_request",
+      false,
+      ["plugins/codex-security/skills/example/SKILL.md"],
+      "full",
+      true,
+    ],
+    [
+      "authored-plugin reference Markdown-only PR",
+      "pull_request",
+      false,
+      ["plugins/codex-security/skills/example/references/contract.md"],
+      "full",
+      true,
+    ],
+    ["base retarget", "pull_request", true, ["README.md"], "full", false],
+    [
+      "mixed PR",
+      "pull_request",
+      false,
+      ["README.md", "src/index.ts"],
+      "full",
+      false,
+    ],
     [
       "source-to-Markdown rename",
       "pull_request",
       false,
       ["src/index.ts", "docs/index.md"],
       "full",
+      false,
     ],
-    ["empty merge diff", "pull_request", false, [], "full"],
-    ["push", "push", false, ["README.md"], "full"],
+    ["empty merge diff", "pull_request", false, [], "full", false],
+    ["push", "push", false, ["README.md"], "full", false],
   ] as const)(
-    "selects the conservative CI mode for %s",
-    (_name, eventName, baseChanged, changedPaths, ciMode) => {
+    "selects CI and formatting checks for %s",
+    (_name, eventName, baseChanged, changedPaths, ciMode, checkMarkdown) => {
       const workspace = mkdtempSync(join(tmpdir(), "release-ci-scope-"));
       const output = join(workspace, "output");
       const script = workflowStepShell(nodeCiWorkflow, "Decide CI mode");
+      const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
+        jobs: Record<string, { steps: Array<{ name?: string; if?: string }> }>;
+      };
+      const validationSteps = workflow.jobs["validate-title"]!.steps;
       const gitMock = `git() {
       [[ "$*" == "diff --no-renames --name-only -z HEAD^1 HEAD" ]] || return 64
       while IFS= read -r path; do
@@ -4125,7 +4149,31 @@ describe("GitHub release workflow safeguards", () => {
           },
         });
         expect(result.status).toBe(0);
-        expect(readFileSync(output, "utf8")).toBe(`ci-mode=${ciMode}\n`);
+        const outputs: Record<string, string> = Object.fromEntries(
+          readFileSync(output, "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => line.split("=")),
+        );
+        expect(outputs["ci-mode"]).toBe(ciMode);
+        const values = Object.fromEntries(
+          Object.entries(outputs).map(([key, value]) => [
+            `steps.scope.outputs.${key}`,
+            value,
+          ]),
+        );
+        for (const stepName of [
+          "Set up pnpm",
+          "Set up Node.js",
+          "Install dependencies",
+          "Check Markdown formatting",
+        ]) {
+          const condition =
+            validationSteps.find(({ name }) => name === stepName)?.if ?? "";
+          expect(evaluateWorkflowCondition(condition, values), stepName).toBe(
+            checkMarkdown,
+          );
+        }
       } finally {
         rmSync(workspace, { recursive: true, force: true });
       }

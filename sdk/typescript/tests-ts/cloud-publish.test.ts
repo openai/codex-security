@@ -343,7 +343,7 @@ describe("Cloud publication", () => {
   });
 
   test.each([false, true])(
-    "rejects artifacts from another scan before upload or preview (dryRun=%p)",
+    "rejects artifacts from another scan before upload or preview (dryRun=%j)",
     async (dryRun) => {
       const { scan, environment } = await fixture();
       let requests = 0;
