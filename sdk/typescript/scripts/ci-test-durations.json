@@ -1,7 +1,8 @@
 {
   "sources": [
     "https://github.com/openai/codex-security/actions/runs/33215429477",
-    "https://github.com/openai/codex-security/actions/runs/33227512538"
+    "https://github.com/openai/codex-security/actions/runs/33227512538",
+    "https://github.com/openai/codex-security/actions/runs/33233690024"
   ],
   "unix": {
     "api-attribution-concurrency.test.ts": 0.372,
@@ -59,9 +60,9 @@
     "finding-deduplication.test.ts": 0.389,
     "finding-embeddings.test.ts": 1.297,
     "finding-preview.test.ts": 0.234,
-    "finding-workflow-integration.test.ts": 50.231,
-    "finding-workflow-publication.test.ts": 1.426,
-    "finding-workflow.test.ts": 100.067,
+    "finding-workflow-integration.test.ts": 51.852,
+    "finding-workflow-publication.test.ts": 1.44,
+    "finding-workflow.test.ts": 0.455,
     "findings-dashboard.test.ts": 0.001,
     "findings-server.test.ts": 20.208,
     "github.test.ts": 0.064,
@@ -170,9 +171,9 @@
     "finding-deduplication.test.ts": 0.608,
     "finding-embeddings.test.ts": 1.515,
     "finding-preview.test.ts": 0.368,
-    "finding-workflow-integration.test.ts": 87.016,
-    "finding-workflow-publication.test.ts": 3.709,
-    "finding-workflow.test.ts": 233.729,
+    "finding-workflow-integration.test.ts": 58.802,
+    "finding-workflow-publication.test.ts": 3.961,
+    "finding-workflow.test.ts": 1.472,
     "findings-dashboard.test.ts": 0.001,
     "findings-server.test.ts": 36.179,
     "github.test.ts": 0.094,

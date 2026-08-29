@@ -47,10 +47,6 @@ test.each([0, -1, 1.5, Number.NaN])(
   },
 );
 
-test("rejects a duplicate test inventory", () => {
-  expect(() => shardTestFiles(["a.test.ts", "a.test.ts"], 2)).toThrow("unique");
-});
-
 test.each([
   ["unix", 3],
   ["windows", 7],

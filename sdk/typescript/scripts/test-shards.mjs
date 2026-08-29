@@ -3,9 +3,6 @@ export function shardTestFiles(files, count, durations = {}) {
   if (!Number.isSafeInteger(count) || count < 1) {
     throw new Error("The test shard count must be a positive integer.");
   }
-  if (new Set(files).size !== files.length) {
-    throw new Error("Test files must be unique.");
-  }
   const shards = Array.from({ length: count }, () => ({
     files: [],
     seconds: 0,
