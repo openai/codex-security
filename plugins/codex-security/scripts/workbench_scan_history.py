@@ -717,34 +717,39 @@ def _rows_for_ids(
         )
 
 
+# Stable finding IDs already include the target identity. Follow their indexed
+# occurrences instead of resolving repository paths or scanning every saved link.
+_FINDING_NEIGHBORS_SQL = """
+    FROM linked
+    CROSS JOIN finding_occurrences AS source
+        ON source.finding_id = linked.finding_id
+    CROSS JOIN scan_comparison_matches AS matches
+        ON matches.before_occurrence_id = source.id OR matches.after_occurrence_id = source.id
+    CROSS JOIN finding_occurrences AS neighbor ON neighbor.id = CASE
+        WHEN matches.before_occurrence_id = source.id THEN matches.after_occurrence_id
+        ELSE matches.before_occurrence_id END
+"""
+# Traverse only the selected findings' components, including recurring stable IDs.
+_LINKED_FINDINGS_SQL = f"""
+    WITH RECURSIVE linked(finding_id) AS (
+        SELECT occurrences.finding_id
+        FROM finding_occurrences AS occurrences
+        WHERE occurrences.id IN ({{placeholders}})
+        UNION
+        SELECT neighbor.finding_id
+        {_FINDING_NEIGHBORS_SQL}
+    )
+"""
+
+
 def _confirmed_finding_aliases(
     connection: sqlite3.Connection, occurrence_ids: Iterable[str]
 ) -> dict[str, str]:
-    # Stable finding IDs already include the target identity. Follow their indexed
-    # occurrences instead of resolving repository paths or scanning every saved link.
-    neighbors = """
-        FROM linked
-        CROSS JOIN finding_occurrences AS source
-            ON source.finding_id = linked.finding_id
-        CROSS JOIN scan_comparison_matches AS matches
-            ON matches.before_occurrence_id = source.id OR matches.after_occurrence_id = source.id
-        CROSS JOIN finding_occurrences AS neighbor ON neighbor.id = CASE
-            WHEN matches.before_occurrence_id = source.id THEN matches.after_occurrence_id
-            ELSE matches.before_occurrence_id END
-    """
-    # Traverse only the selected findings' components, including recurring stable IDs.
     query = f"""
-        WITH RECURSIVE linked(finding_id) AS (
-            SELECT occurrences.finding_id
-            FROM finding_occurrences AS occurrences
-            WHERE occurrences.id IN ({{placeholders}})
-            UNION
-            SELECT neighbor.finding_id
-            {neighbors}
-        )
+        {_LINKED_FINDINGS_SQL}
         SELECT DISTINCT linked.finding_id AS before_finding_id,
             neighbor.finding_id AS after_finding_id
-        {neighbors}
+        {_FINDING_NEIGHBORS_SQL}
     """
     return _finding_aliases(
         (row["before_finding_id"], row["after_finding_id"])
@@ -846,39 +851,34 @@ def finding_matches(
         """,
         (occurrence_id, occurrence_id),
     ).fetchall()
-    known_scans = [(started_at, scan_id)]
-    if rows:
-        linked_rows = connection.execute(
-            """
-            WITH RECURSIVE linked_occurrences(occurrence_id) AS (
-                SELECT ?
-                UNION
-                SELECT CASE
-                    WHEN matches.before_occurrence_id = linked.occurrence_id
-                        THEN matches.after_occurrence_id
-                    ELSE matches.before_occurrence_id
-                END
-                FROM scan_comparison_matches AS matches
-                JOIN linked_occurrences AS linked
-                    ON matches.before_occurrence_id = linked.occurrence_id
-                    OR matches.after_occurrence_id = linked.occurrence_id
-            )
+    linked_rows = list(
+        _rows_for_ids(
+            connection,
+            f"""
+            {_LINKED_FINDINGS_SQL}
             SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
                 scans.started_at, scans.id AS scan_id
-            FROM linked_occurrences AS linked
-            JOIN finding_occurrences AS occurrences ON occurrences.id = linked.occurrence_id
-            JOIN scans ON scans.id = occurrences.scan_id
+            FROM linked
+            CROSS JOIN finding_occurrences AS occurrences
+                ON occurrences.finding_id = linked.finding_id
+            CROSS JOIN scans ON scans.id = occurrences.scan_id
             """,
             (occurrence_id,),
-        ).fetchall()
-        known_scans = sorted({(row["started_at"], row["scan_id"]) for row in linked_rows})
-        included = {occurrence_id, *(row["occurrence_id"] for row in rows)}
-        rows.extend(
-            {**row, "reason": "The findings share a previously confirmed link."}
-            for row in linked_rows
-            if row["occurrence_id"] not in included
         )
-        rows.sort(key=lambda row: (row["scan_id"], row["occurrence_id"]))
+    )
+    known_scans = sorted(
+        {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows}
+    )
+    included = {occurrence_id, *(row["occurrence_id"] for row in rows)}
+    rows.extend(
+        {
+            **row,
+            "reason": "The findings share a stable identity or a previously confirmed link.",
+        }
+        for row in linked_rows
+        if row["occurrence_id"] not in included
+    )
+    rows.sort(key=lambda row: (row["scan_id"], row["occurrence_id"]))
     known_scan_ids = [known_scans[0][1]]
     if len(known_scans) > 1:
         known_scan_ids.append(known_scans[-1][1])

@@ -822,6 +822,18 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
     assert "Run 'codex-security scans match BEFORE AFTER' first" in rejected["stderr"]
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM scan_comparison_matches").fetchone() == (0,)
+        known_since = connection.execute("SELECT MIN(started_at) FROM scans").fetchone()[0]
+
+    before_finding, after_finding = (
+        run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0]
+        for scan in (before, after)
+    )
+    assert before_finding["findingId"] == after_finding["findingId"]
+    for finding, other in ((before_finding, after_finding), (after_finding, before_finding)):
+        assert [match["occurrenceId"] for match in finding["matches"]] == [other["occurrenceId"]]
+        assert finding["knownSince"] == known_since
+        assert finding["knownScanIds"] == [before["scanId"], after["scanId"]]
 
     save_scan_matches(state_dir, before, after)
     with sqlite3.connect(database) as connection:

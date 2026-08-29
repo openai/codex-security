@@ -1957,7 +1957,15 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test.each(["0.1.22", "0.1.37", "0.1.59", "0.1.60", "0.1.79", "0.1.92"])(
+  test.each([
+    "0.1.22",
+    "0.1.37",
+    "0.1.59",
+    "0.1.60",
+    "0.1.79",
+    "0.1.92",
+    "0.1.93",
+  ])(
     "upgrades a cached %s plugin and restores with the SDK-owned helper",
     async (previousVersion) => {
       const root = await temporaryDirectory();
