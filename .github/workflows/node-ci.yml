@@ -213,6 +213,7 @@ jobs:
           path: |
             sdk/typescript/reports/junit.xml
             sdk/typescript/coverage/lcov.info
+            plugins/codex-security/mcp-app/reports/junit.xml
           if-no-files-found: warn
           retention-days: 14
 

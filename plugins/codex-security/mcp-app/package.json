@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "build:mcp": "node scripts/build_mcp_app.mjs --output .preview/mcp",
-    "test:mcp": "node -e \"require('node:fs').mkdirSync('reports',{recursive:true})\" && node --test --test-concurrency=2 --test-reporter=tap --test-reporter=junit --test-reporter-destination=stdout --test-reporter-destination=reports/junit.xml \"tests/test_*.mjs\"",
+    "test:mcp": "node --test --test-concurrency=2 --test-reporter=./scripts/test_reporter.mjs \"tests/test_*.mjs\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
