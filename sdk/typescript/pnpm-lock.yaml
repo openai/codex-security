@@ -59,6 +59,12 @@ importers:
       smol-toml:
         specifier: 1.6.1
         version: 1.6.1
+      yaml:
+        specifier: 2.9.0
+        version: 2.9.0
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
       '@openai/apps-sdk-ui':
         specifier: 0.2.2

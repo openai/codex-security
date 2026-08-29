@@ -338,6 +338,15 @@ function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
   }
 }
 
+export function mergeCodexOverrides(
+  base: JsonObject,
+  overrides: JsonObject,
+): JsonObject {
+  validateOverrideKeys(base);
+  validateOverrideKeys(overrides);
+  return deepMerge(cloneJson(base), overrides);
+}
+
 function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
   for (const [key, value] of Object.entries(overrides)) {
     const existing = Object.hasOwn(base, key) ? base[key] : undefined;

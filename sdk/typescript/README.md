@@ -135,21 +135,22 @@ Constructor options:
 Options for `security.run(repository, options)` and
 `security.preflight(repository, options)`:
 
-| Option                  | Description                                                                    |
-| ----------------------- | ------------------------------------------------------------------------------ |
-| `auth`                  | Credential source: `"auto"`, `"chatgpt"`, or `"api-key"`.                      |
-| `safetyIdentifier`      | Stable hashed end-user ID for model requests; requires API-key authentication. |
-| `target`                | Repository, repository-relative paths, committed diff, or working-tree diff.   |
-| `mode`                  | `"standard"` or `"deep"`; deep mode supports repositories and paths.           |
-| `knowledgeBasePaths`    | Architecture documents, security policies, threat models, or directories.      |
-| `outputDir`             | Artifact directory outside the enclosing Git worktree.                         |
-| `archiveExisting`       | Archive existing results in `outputDir` before scanning.                       |
-| `maxCostUsd`            | Stop when estimated model cost exceeds this positive USD amount.               |
-| `maxTimeHours`          | Deep-scan discovery limit in hours: greater than zero, up to 96.               |
-| `failureSeverity`       | Finding-severity policy to record in the saved scan recipe.                    |
-| `parentScanId`          | Parent scan ID for a rerun.                                                    |
-| `expectedPluginVersion` | Required original plugin version when replaying a scan.                        |
-| `signal`                | `AbortSignal` to cancel a scan.                                                |
+| Option                       | Description                                                                    |
+| ---------------------------- | ------------------------------------------------------------------------------ |
+| `auth`                       | Credential source: `"auto"`, `"chatgpt"`, or `"api-key"`.                      |
+| `safetyIdentifier`           | Stable hashed end-user ID for model requests; requires API-key authentication. |
+| `target`                     | Repository, repository-relative paths, committed diff, or working-tree diff.   |
+| `mode`                       | `"standard"` or `"deep"`; deep mode supports repositories and paths.           |
+| `knowledgeBasePaths`         | Architecture documents, security policies, threat models, or directories.      |
+| `outputDir`                  | Artifact directory outside the enclosing Git worktree.                         |
+| `archiveExisting`            | Archive existing results in `outputDir` before scanning.                       |
+| `maxCostUsd`                 | Stop when estimated model cost exceeds this positive USD amount.               |
+| `stopAfterConsecutiveErrors` | Stop deep discovery after this many consecutive errors (default: 3).           |
+| `maxTimeHours`               | Deep-scan discovery limit in hours: greater than zero, up to 96.               |
+| `failureSeverity`            | Finding-severity policy to record in the saved scan recipe.                    |
+| `parentScanId`               | Parent scan ID for a rerun.                                                    |
+| `expectedPluginVersion`      | Required original plugin version when replaying a scan.                        |
+| `signal`                     | `AbortSignal` to cancel a scan.                                                |
 
 Follow scans with `onWorkerStatus` and `onReconnect`. `onSessionEvent` receives
 saved events with thread IDs and worker numbers. Deep scans can additionally use
@@ -160,6 +161,9 @@ and `maximum`. The maximum is a configured cap, not a percentage denominator.
 `preflight` and CLI `--dry-run` check local inputs without starting Codex or
 using the network. They don't authenticate, verify model access, resolve Python,
 inspect the plugin, or run scan-lifecycle callbacks. Dry runs print effective settings.
+Deep preflight includes all six resolved deep settings and their origins in
+`deepScanSources`. Applicable legacy deep configuration is validated during
+preflight rather than after runtime startup.
 
 ## Authentication
 
@@ -264,6 +268,62 @@ npx @openai/codex-security scan /path/to/repository --dry-run
 Use `scan --help` for options, `--version` for the installed version, and
 `info --json` for package, plugin, runtime, and model details. `--dry-run`
 runs local preflight checks.
+
+### Project files (local prototype)
+
+This working tree supports `scan -c FILE` / `scan --config FILE`. The feature is
+not yet released. In a locally built or installed package:
+
+```bash
+codex-security scan . -c codex-security.yaml --dry-run --json
+codex-security scan . -c codex-security.json --model gpt-5.6-terra
+```
+
+Select one `.yaml`, `.yml`, or `.json` file. Omitting `-c` preserves existing scan
+defaults without discovering files. The repository still comes from the positional
+argument or invocation directory. Other commands and SDK `run()` calls do not
+load project files automatically.
+
+```yaml
+# yaml-language-server: $schema=./node_modules/@openai/codex-security/schemas/project-config.schema.json
+scan:
+  mode: standard
+  scope:
+    paths: [src]
+codex:
+  model: gpt-5.6-sol
+  model_reasoning_effort: xhigh
+policy:
+  failOnSeverity: high
+```
+
+All settings are optional; `{}` uses the existing defaults. The schema is included at
+`@openai/codex-security/schemas/project-config.schema.json` and generated from
+one Zod input definition. The loader validates it with the existing Ajv engine,
+without coercion, default insertion, or key stripping. JSON files may use a root
+`$schema` string with the same relative path. The hint is editor metadata; the CLI
+uses its bundled schema and does not fetch schema URLs. Wrapper keys
+and types are strict. Native keys under `codex` retain existing validation and
+profile semantics; editor completion there covers common model/provider fields.
+CLI `scan --schema --json` still describes command arguments, not project files.
+
+Settings use built-in defaults, applicable legacy deep defaults, the file, then
+explicit CLI values. Lists and scope variants are replaced. `--head` can refine
+a file diff and `--base` a file working-tree scope. A selected native profile can
+still override root model/effort values. Existing native alias-conflict checks
+and the behavior of `--provider openai` are unchanged.
+
+File context, instruction, validation, and output paths resolve from the file's
+directory. CLI file paths resolve from the invocation directory; scope paths
+resolve from the repository. The file cannot select a different repository or
+enable automatic patching/publication. It does not support executable configs,
+environment interpolation, remote includes, or multiple-file merging.
+
+Dry-run output adds `projectConfig.path` and `projectConfig.sources`, selected
+prompt paths, and the finding policy without dumping raw native configuration.
+Missing or invalid selected files exit `2`. Help, version, and command schema
+output do not load project files. Existing scan and finding-policy exit codes
+remain unchanged.
 
 ### Scan options and output
 
@@ -383,6 +443,7 @@ await security.run("/path/to/repository", {
   workers: 2,
   subagents: 0,
   stopAfterNoNew: 3,
+  stopAfterConsecutiveErrors: 2,
   maxDiscoveryRuns: 10,
   maxTimeHours: 1.5,
 });
@@ -400,8 +461,10 @@ max_discovery_runs = 40
 max_time_hours = 96
 ```
 
-CLI and SDK options override these defaults. Set `stop_after_consecutive_errors`
-in the file; `--codex` cannot configure this section. Worker and run counts must
+CLI and SDK options override these defaults. Project files can use
+`scan.deep.stopAfterConsecutiveErrors`, and SDK calls can use
+`stopAfterConsecutiveErrors`; there is no new CLI flag for it. `--codex` cannot
+configure this section. Worker and run counts must
 be positive integers; `subagents` can be zero. Legacy `workers = "auto"` means
 four workers. Unknown keys are rejected.
 
@@ -410,6 +473,12 @@ At the deadline, discovery stops; the scan combines and returns completed findin
 
 `scan --workers` controls discovery workers within one deep scan;
 `bulk-scan --workers` controls how many repositories are scanned concurrently.
+
+The project-file deep block uses `subagentsPerWorker` for the existing SDK/CLI
+`subagents` setting. A valid deep block can remain inactive in standard mode;
+explicit deep CLI options require deep mode. All six active values are resolved
+before runtime preparation and saved in new recipes. Complete saved values are
+independent of later changes to the legacy TOML file.
 
 ### Runtime configuration and worker limits
 
@@ -754,6 +823,17 @@ the same destination options for a read-only check.
 
 Commands default to the current repository. Select scans by full ID or a
 unique prefix of at least eight characters.
+
+New recipes retain resolved settings and the authentication choice, not
+credentials. Reruns do not reload project files; complete saved deep settings do
+not use current legacy defaults. Older partial recipes retain their previous
+fallback behavior. Context paths and the current checkout are not immutable input
+snapshots.
+
+Additional scan instructions are not saved. New recipes mark this requirement,
+and `scans rerun` refuses to omit them silently; use a new `scan --scan-prompt-file`
+or `scan -c` invocation to supply them again. Custom validation keeps its existing
+`scans rerun --validation-prompt-file` requirement.
 
 | Command                                               | Purpose                                                                                                     |
 | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |

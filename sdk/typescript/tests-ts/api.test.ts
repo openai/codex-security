@@ -743,7 +743,10 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       { pythonPath: "/definitely/missing/python" },
       {
-        environment: { OPENAI_API_KEY: "must-not-be-used" },
+        environment: {
+          OPENAI_API_KEY: "must-not-be-used",
+          CODEX_HOME: join(root, "ambient"),
+        },
         prepareRuntime: async () => {
           runtimeStarted = true;
           throw new Error("runtime should not initialize");
@@ -761,6 +764,20 @@ describe("CodexSecurity orchestration", () => {
       repository,
       target: { kind: "paths", paths: ["src"] },
       mode: "deep",
+      workers: 4,
+      subagents: 3,
+      stopAfterNoNew: 4,
+      stopAfterConsecutiveErrors: 3,
+      maxDiscoveryRuns: 40,
+      maxTimeHours: 96,
+      deepScanSources: {
+        workers: "default",
+        subagents: "default",
+        stopAfterNoNew: "default",
+        stopAfterConsecutiveErrors: "default",
+        maxDiscoveryRuns: "default",
+        maxTimeHours: "default",
+      },
       outputDir: output,
       authentication: {
         method: "api_key",
@@ -2552,7 +2569,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("applies deep scan overrides over the user's existing settings", async () => {
+  test("resolves deep settings before runtime preparation and records the snapshot", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const ambientHome = join(root, "ambient-home");
@@ -2581,7 +2598,13 @@ describe("CodexSecurity orchestration", () => {
       {},
       {
         environment: { CODEX_HOME: ambientHome },
-        prepareRuntime: async () => preparedRuntime(codexHome),
+        prepareRuntime: async () => {
+          await writeFile(
+            join(ambientHome, "codex-security", "config.toml"),
+            "[deep_scan]\nstop_after_no_new = 99\n",
+          );
+          return preparedRuntime(codexHome);
+        },
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
@@ -2615,8 +2638,10 @@ describe("CodexSecurity orchestration", () => {
     await expect(
       client.run(repository, {
         mode: "deep",
+        auth: "auto",
         workers: 2,
         subagents: 0,
+        stopAfterConsecutiveErrors: 2,
         maxDiscoveryRuns: 10,
         maxTimeHours: 1.5,
       }),
@@ -2628,15 +2653,20 @@ describe("CodexSecurity orchestration", () => {
     expect(configuration).toContain("workers = 2");
     expect(configuration).toContain("subagents = 0");
     expect(configuration).toContain("stop_after_no_new = 7");
+    expect(configuration).toContain("stop_after_consecutive_errors = 2");
     expect(configuration).toContain("max_discovery_runs = 10");
     expect(configuration).toContain("max_time_hours = 1.5");
     expect(configuration).toContain("[other]");
     expect(configuration).toContain("enabled = true");
     expect(recipe).toMatchObject({
       mode: "deep",
+      auth: "auto",
+      deepScanResolved: true,
       deepScan: {
         workers: 2,
         subagents: 0,
+        stopAfterNoNew: 7,
+        stopAfterConsecutiveErrors: 2,
         maxDiscoveryRuns: 10,
         maxTimeHours: 1.5,
       },
@@ -2833,8 +2863,15 @@ describe("CodexSecurity orchestration", () => {
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "deep scan settings captured",
       );
-      await expect(fsPromises.lstat(runtimeConfig)).rejects.toMatchObject({
-        code: "ENOENT",
+      expect(
+        parseToml(await readFile(runtimeConfig, "utf8"))["deep_scan"],
+      ).toEqual({
+        workers: 4,
+        subagents: 3,
+        stop_after_no_new: 4,
+        stop_after_consecutive_errors: 3,
+        max_discovery_runs: 40,
+        max_time_hours: 96,
       });
 
       await writeFile(ambientConfig, "[deep_scan]\nworkers = 7\n");

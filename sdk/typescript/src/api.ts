@@ -26,11 +26,6 @@ import {
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
-import {
-  parse as parseToml,
-  stringify as stringifyToml,
-  type TomlTable,
-} from "smol-toml";
 import { z } from "incur";
 import {
   accountStatus,
@@ -66,6 +61,20 @@ import {
   DeepScanProgressTracker,
   type DeepScanProgress,
 } from "./deep-progress.js";
+import {
+  deepScanOptions,
+  resolveDeepScanConfig,
+  writeDeepScanConfig,
+  type DeepScanSources,
+  type ResolvedDeepScanConfig,
+} from "./deep-config.js";
+import {
+  SCAN_AUTH_MODES,
+  type DeepScanOptions,
+  type ScanAuthMode,
+} from "./scan-settings.js";
+export { SCAN_AUTH_MODES } from "./scan-settings.js";
+export type { DeepScanOptions, ScanAuthMode } from "./scan-settings.js";
 import {
   loadContract,
   readScanFile,
@@ -215,14 +224,6 @@ interface PreparedSession {
 const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
-export interface DeepScanOptions {
-  workers?: number;
-  subagents?: number;
-  stopAfterNoNew?: number;
-  maxDiscoveryRuns?: number;
-  maxTimeHours?: number;
-}
-
 export interface ScanOptions extends DeepScanOptions {
   /** Opt into a durable scan -> custom publication -> dedupe workflow. */
   workflowId?: string;
@@ -290,9 +291,6 @@ export interface ValidationResult {
   threadId: string | null;
 }
 
-export const SCAN_AUTH_MODES = ["auto", "chatgpt", "api-key"] as const;
-export type ScanAuthMode = (typeof SCAN_AUTH_MODES)[number];
-
 export type ScanAuthentication =
   | {
       method: "api_key";
@@ -359,12 +357,14 @@ export interface ScanPreflight extends DeepScanOptions {
   modelProvider?: string;
   reasoningEffort: string;
   maxCostUsd?: number;
+  deepScanSources?: DeepScanSources;
 }
 
 interface LocalScanInputs
   extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
   protectedRoot: string;
   stateDirectory: string;
+  deepScanConfiguration?: ResolvedDeepScanConfig;
 }
 
 export interface CodexSecurityMetadata {
@@ -406,13 +406,6 @@ const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
   "https://openai.com/form/enterprise-trusted-access-for-cyber/";
-const DEEP_SCAN_SETTINGS = [
-  ["workers", "workers", 1],
-  ["subagents", "subagents", 0],
-  ["stopAfterNoNew", "stop_after_no_new", 1],
-  ["maxDiscoveryRuns", "max_discovery_runs", 1],
-  ["maxTimeHours", "max_time_hours", 0],
-] as const;
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
   public readonly metadata: CodexSecurityMetadata = {
@@ -476,6 +469,7 @@ export class CodexSecurity {
       { ...options, outputDir: undefined, archiveExisting: false },
       signal,
     );
+    options = { ...options, ...local.deepScanConfiguration?.settings };
     const workflow = new FindingWorkflow(
       workflowId,
       this.#dependencies.environment,
@@ -720,7 +714,10 @@ export class CodexSecurity {
       repository: inputs.repository,
       target: inputs.target,
       mode: inputs.mode,
-      ...deepScanOptions(options),
+      ...inputs.deepScanConfiguration?.settings,
+      ...(inputs.deepScanConfiguration === undefined
+        ? {}
+        : { deepScanSources: inputs.deepScanConfiguration.sources }),
       ...(options.knowledgeBasePaths?.length
         ? { knowledgeBasePaths: options.knowledgeBasePaths }
         : {}),
@@ -788,6 +785,7 @@ export class CodexSecurity {
         outputDir: requestedOutput,
         protectedRoot,
         stateDirectory,
+        deepScanConfiguration,
       } = await this.#validateLocalInputs(repository, options, signal);
       checkOpen();
       let temporaryRoot: string | undefined;
@@ -834,13 +832,11 @@ export class CodexSecurity {
           ? runtime.deepScanConfigPath ??
             join(runtimeHome, "codex-security", "config.toml")
           : undefined;
-      if (deepScanConfigPath !== undefined) {
-        await prepareDeepScanConfig(
-          deepScanConfigPath,
-          this.#dependencies.environment,
-          options,
-          signal,
-        );
+      if (
+        deepScanConfigPath !== undefined &&
+        deepScanConfiguration !== undefined
+      ) {
+        await writeDeepScanConfig(deepScanConfigPath, deepScanConfiguration);
       }
       checkOpen();
       const scanOutputRoot =
@@ -1039,8 +1035,10 @@ export class CodexSecurity {
         options.failureSeverity,
         knowledgeBase?.sources,
         options.maxCostUsd,
-        deepScanOptions(options),
+        deepScanConfiguration?.settings,
+        options.auth,
       );
+      if (options.scanPrompt !== undefined) recipe["requiresScanPrompt"] = true;
       if (options.validationPrompt !== undefined)
         recipe["validationMode"] = "custom";
       const workbenchOptions: WorkbenchCommandOptions = {
@@ -2406,6 +2404,25 @@ export class CodexSecurity {
       outputDir: requestedOutput,
       protectedRoot,
       stateDirectory,
+      ...(mode === "deep"
+        ? {
+            deepScanConfiguration: await resolveDeepScanConfig(
+              options,
+              join(
+                expandHome(
+                  environmentValue(
+                    this.#dependencies.environment,
+                    "CODEX_HOME",
+                  ) ?? join(homedir(), ".codex"),
+                  this.#dependencies.environment,
+                ),
+                "codex-security",
+                "config.toml",
+              ),
+              signal,
+            ),
+          }
+        : {}),
     };
   }
 
@@ -2536,94 +2553,6 @@ export async function listRepositoryFindings(
       typeof page["nextOffset"] === "number" ? page["nextOffset"] : undefined;
   } while (offset !== undefined);
   return findings;
-}
-
-function deepScanOptions(options: ScanOptions): DeepScanOptions {
-  const selected: DeepScanOptions = {};
-  for (const [name, , minimum] of DEEP_SCAN_SETTINGS) {
-    const value = options[name];
-    if (value === undefined) continue;
-    if ((options.mode ?? "standard") !== "deep") {
-      throw new CodexSecurityError("Deep scan settings require deep mode.");
-    }
-    if (name === "maxTimeHours") {
-      if (!Number.isFinite(value) || value <= 0 || value > 96) {
-        throw new CodexSecurityError(
-          "Deep scan maxTimeHours must be a positive number no greater than 96.",
-        );
-      }
-    } else if (!Number.isSafeInteger(value) || value < minimum) {
-      throw new CodexSecurityError(
-        `Deep scan ${name} must be ${minimum === 0 ? "a non-negative" : "a positive"} integer.`,
-      );
-    }
-    selected[name] = value;
-  }
-  return selected;
-}
-
-async function prepareDeepScanConfig(
-  destination: string,
-  environment: ProcessEnvironment,
-  options: DeepScanOptions,
-  signal: AbortSignal,
-): Promise<void> {
-  const ambientHome = expandHome(
-    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex"),
-    environment,
-  );
-  const source = join(ambientHome, "codex-security", "config.toml");
-  let configured: TomlTable = {};
-  try {
-    configured = parseToml(
-      await readFile(source, { encoding: "utf8", signal }),
-    );
-  } catch (error) {
-    if (!isRecord(error) || error["code"] !== "ENOENT") {
-      throw new CodexSecurityError(
-        `Cannot read Codex Security configuration at ${source}.`,
-        { cause: error },
-      );
-    }
-  }
-  const existing = configured["deep_scan"];
-  if (existing !== undefined && !isRecord(existing)) {
-    throw new CodexSecurityError(
-      `Codex Security configuration [deep_scan] at ${source} must be a TOML table.`,
-    );
-  }
-  const overrides: TomlTable = {};
-  for (const [name, key] of DEEP_SCAN_SETTINGS) {
-    const value = options[name];
-    if (value !== undefined) overrides[key] = value;
-  }
-  const sharedConfig = await sameExistingPath(source, destination);
-  const hasOverrides = Object.keys(overrides).length > 0;
-  if (existing === undefined && !hasOverrides) {
-    if (!sharedConfig) {
-      await rm(destination, { force: true });
-    }
-    return;
-  }
-  if (sharedConfig && !hasOverrides) return;
-  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-  await writeFile(
-    destination,
-    stringifyToml({
-      ...configured,
-      deep_scan: { ...existing, ...overrides },
-    }),
-    { mode: 0o600, signal },
-  );
-}
-
-async function sameExistingPath(left: string, right: string): Promise<boolean> {
-  if (left === right) return true;
-  const [canonicalLeft, canonicalRight] = await Promise.all([
-    realpath(left).catch(() => null),
-    realpath(right).catch(() => null),
-  ]);
-  return canonicalLeft !== null && canonicalLeft === canonicalRight;
 }
 
 export function createSecurity(
@@ -3141,6 +3070,7 @@ function scanRecipe(
   knowledgeBasePaths?: string[],
   maxCostUsd?: number,
   deepScan?: DeepScanOptions,
+  auth?: ScanAuthMode,
 ): JsonObject {
   return {
     repository,
@@ -3156,12 +3086,13 @@ function scanRecipe(
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
     config: preflightConfig,
+    ...(auth === undefined ? {} : { auth }),
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
     ...(deepScan === undefined || Object.keys(deepScan).length === 0
       ? {}
-      : { deepScan: { ...deepScan } }),
+      : { deepScan: { ...deepScan }, deepScanResolved: true }),
   };
 }
 

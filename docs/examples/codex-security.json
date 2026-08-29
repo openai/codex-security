@@ -1,0 +1,12 @@
+{
+  "$schema": "../../sdk/typescript/schemas/project-config.schema.json",
+  "scan": {
+    "mode": "standard",
+    "scope": { "paths": ["sdk/typescript/src"] }
+  },
+  "codex": {
+    "model": "gpt-5.6-sol",
+    "model_reasoning_effort": "xhigh"
+  },
+  "policy": { "failOnSeverity": "high" }
+}

@@ -108,6 +108,7 @@ const required = [
   "package/dist/index.js",
   "package/dist/index.d.ts",
   "package/dist/cli.js",
+  "package/schemas/project-config.schema.json",
   "package/_bundled_plugin/.codex-plugin/plugin.json",
 ];
 
@@ -161,6 +162,7 @@ const allowedRoot = new Set([
   "package/README.md",
   "package/LICENSE",
   "package/bin/codex-security.mjs",
+  "package/schemas/project-config.schema.json",
 ]);
 const distFiles = new Set(
   [
@@ -180,6 +182,11 @@ const distFiles = new Set(
     "custom-validation-prompt",
     "custom-publish",
     "deep-progress",
+    "deep-config",
+    "deep-scan-defaults",
+    "project-config",
+    "project-config-schema",
+    "scan-settings",
     "errors",
     "github",
     "index",
@@ -253,6 +260,7 @@ for (const file of files) {
   const allowed = file.endsWith("/")
     ? normalized === "package" ||
       normalized === "package/bin" ||
+      normalized === "package/schemas" ||
       normalized === "package/dist" ||
       normalized === "package/dist/server" ||
       normalized === "package/dist/server/dashboard" ||

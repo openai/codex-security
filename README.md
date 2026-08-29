@@ -89,3 +89,10 @@ codex-security scan . --provider fireworks --model accounts/fireworks/models/qwe
 ## Documentation
 
 **👉👉 See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for full documentation.
+
+The [project configuration prototype](docs/project-configuration.md) supports explicit
+YAML/JSON files in this working tree; it is not yet a released CLI feature.
+
+For the design and remaining proposals, see the [project configuration and CLI proposal](docs/proposals/cli-and-project-configuration.md),
+its [Promptfoo implementation review](docs/proposals/cli-and-project-configuration-review.md),
+and the [JSON Schema design](docs/proposals/configuration-schema.md).

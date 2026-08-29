@@ -165,12 +165,7 @@ import {
   type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
-import {
-  abortable,
-  DiffTarget,
-  type ScanMode,
-  type ScanTarget,
-} from "./targets.js";
+import { abortable, DiffTarget, type ScanTarget } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import {
   BUNDLED_PLUGIN_VERSION,
@@ -182,6 +177,18 @@ import {
   type UpdateNotice,
   VERSION,
 } from "./version.js";
+
+import {
+  loadProjectConfig,
+  resolveProjectConfig,
+  type ProjectConfigProvenance,
+  type ScanSettings,
+} from "./project-config.js";
+import {
+  DEEP_SCAN_SETTINGS,
+  DeepScanSettingsSchema,
+  REPORTABLE_SEVERITIES,
+} from "./scan-settings.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
 const execFile = promisify(execFileCallback);
@@ -207,12 +214,6 @@ type Writable = Pick<NodeJS.WriteStream, "write"> & {
 type SignalName = "SIGINT" | "SIGTERM";
 type FailureSeverity = Exclude<SeverityLevel, "informational">;
 
-const REPORTABLE_SEVERITIES: readonly FailureSeverity[] = [
-  "critical",
-  "high",
-  "medium",
-  "low",
-];
 const DISPLAY_SEVERITIES: readonly SeverityLevel[] = [
   ...REPORTABLE_SEVERITIES,
   "informational",
@@ -240,6 +241,8 @@ const EXPORT_DEFAULT_OUTPUTS = {
   sarif: "results.sarif",
 } as const;
 const VALUE_OPTIONS = new Set([
+  "--config",
+  "-c",
   "--port",
   "--workflow-id",
   "--auth",
@@ -850,36 +853,11 @@ function effortOption() {
 }
 
 const DEEP_SCAN_OPTION_SCHEMAS = {
-  workers: z
-    .number()
-    .int()
-    .positive()
-    .optional()
-    .describe("Maximum concurrent deep-scan discovery workers."),
-  subagents: z
-    .number()
-    .int()
-    .nonnegative()
-    .optional()
-    .describe("Subagents available to each deep-scan worker."),
-  stopAfterNoNew: z
-    .number()
-    .int()
-    .positive()
-    .optional()
-    .describe("Stop after this many runs find no new issues."),
-  maxDiscoveryRuns: z
-    .number()
-    .int()
-    .positive()
-    .optional()
-    .describe("Maximum deep-scan discovery runs."),
-  maxTimeHours: z
-    .number()
-    .positive()
-    .max(96)
-    .optional()
-    .describe("Maximum deep-scan discovery hours (default: 96; maximum: 96)."),
+  workers: DeepScanSettingsSchema.shape.workers,
+  subagents: DeepScanSettingsSchema.shape.subagents,
+  stopAfterNoNew: DeepScanSettingsSchema.shape.stopAfterNoNew,
+  maxDiscoveryRuns: DeepScanSettingsSchema.shape.maxDiscoveryRuns,
+  maxTimeHours: DeepScanSettingsSchema.shape.maxTimeHours,
 };
 
 async function readPromptFiles(
@@ -971,36 +949,23 @@ export function resolveCliPath(directory: string, value: string): string {
   return resolve(directory, expandHome(value));
 }
 
-interface ScanArguments extends DeepScanOptions {
+interface ScanArguments extends ScanSettings {
+  projectConfig?: ProjectConfigProvenance;
   workflowId?: string;
-  auth?: ScanAuthMode;
   safetyIdentifier?: string;
   verbose?: boolean;
   repository?: string;
-  paths: string[];
-  knowledgeBasePaths: string[];
-  scanPromptFile?: string;
-  validationPromptFile?: string;
   postScanPromptFile?: string;
-  diff?: string;
-  workingTree: boolean;
-  head?: string;
-  base?: string;
-  mode: ScanMode;
   model?: string;
   effort?: ScanReasoningEffort;
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
-  outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
   pythonPath?: string;
   codex: string[];
-  codexOverrides?: JsonObject;
-  failOnSeverity?: FailureSeverity;
   patch?: boolean;
   patchSeverity?: FailureSeverity;
   createPr?: boolean;
-  maxCostUsd?: number;
   headless?: boolean;
   dryRun: boolean;
   parentScanId?: string;
@@ -2794,6 +2759,7 @@ export async function main(
       description: "Run a Codex Security scan.",
       destructive: true,
       mcp: false,
+      alias: { config: "c" },
       args: z.object({
         repository: z
           .string()
@@ -2802,6 +2768,11 @@ export async function main(
       }),
       options: z
         .object({
+          config: optionValue("--config")
+            .optional()
+            .describe(
+              "Load one YAML or JSON project file. No file is loaded by default.",
+            ),
           workflowId: optionValue("--workflow-id")
             .optional()
             .describe(
@@ -2809,9 +2780,10 @@ export async function main(
             ),
           auth: z
             .enum(SCAN_AUTH_MODES)
-            .default("auto")
+            .optional()
+            .meta({ default: "auto" })
             .describe(
-              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
             ),
           verbose: z
             .boolean()
@@ -2824,13 +2796,15 @@ export async function main(
             ),
           path: z
             .array(optionValue("--path"))
-            .default([])
+            .optional()
+            .meta({ default: [] })
             .describe(
               "Scan only PATH; repeat for multiple repository-relative paths.",
             ),
           knowledgeBase: z
             .array(optionValue("--knowledge-base"))
-            .default([])
+            .optional()
+            .meta({ default: [] })
             .describe(
               "Add security-context files or directories; repeat for multiple paths.",
             ),
@@ -2850,7 +2824,8 @@ export async function main(
             .describe("Scan committed Git changes from BASE to --head."),
           workingTree: z
             .boolean()
-            .default(false)
+            .optional()
+            .meta({ default: false })
             .describe("Scan staged and unstaged changes against --base."),
           head: optionValue("--head")
             .optional()
@@ -2860,8 +2835,11 @@ export async function main(
             .describe("Git base ref for --working-tree (default: HEAD)."),
           mode: z
             .enum(["standard", "deep"])
-            .default("standard")
-            .describe("Scan mode; deep supports repository and path targets."),
+            .optional()
+            .meta({ default: "standard" })
+            .describe(
+              "Scan mode (default: standard); deep supports repository and path targets.",
+            ),
           ...DEEP_SCAN_OPTION_SCHEMAS,
           model: optionValue("--model")
             .optional()
@@ -2920,29 +2898,14 @@ export async function main(
         })
         .refine(
           (options) =>
-            Number(options.path.length > 0) +
+            Number((options.path?.length ?? 0) > 0) +
               Number(options.diff !== undefined) +
-              Number(options.workingTree) <=
+              Number(options.workingTree === true) <=
             1,
           {
             message:
               "--path, --diff, and --working-tree are mutually exclusive.",
           },
-        )
-        .refine(
-          (options) => options.head === undefined || options.diff !== undefined,
-          { message: "--head requires --diff." },
-        )
-        .refine(
-          (options) => options.base === undefined || options.workingTree,
-          {
-            message: "--base requires --working-tree.",
-          },
-        )
-        .refine(
-          (options) =>
-            !options.archiveExisting || options.outputDir !== undefined,
-          { message: "--archive-existing requires --output-dir." },
         )
         .refine(
           (options) => options.patchSeverity === undefined || options.patch,
@@ -2955,19 +2918,13 @@ export async function main(
         })
         .refine((options) => !options.patch || !options.dryRun, {
           message: "--patch cannot be combined with --dry-run.",
-        })
-        .refine(
-          (options) =>
-            options.mode === "deep" ||
-            (options.workers === undefined &&
-              options.subagents === undefined &&
-              options.stopAfterNoNew === undefined &&
-              options.maxDiscoveryRuns === undefined &&
-              options.maxTimeHours === undefined),
-          { message: "Deep scan settings require --mode deep." },
-        ),
+        }),
       examples: [
         { args: { repository: "." } },
+        {
+          args: { repository: "." },
+          options: { config: "codex-security.yaml" },
+        },
         { args: { repository: "." }, options: { model: "gpt-5.6-terra" } },
         {
           args: { repository: "." },
@@ -2993,48 +2950,80 @@ export async function main(
           exitCode = 2;
           return;
         }
-        const outcome = await runScan(
-          {
-            auth: options.auth,
-            workflowId: options.workflowId,
-            safetyIdentifier: options.safetyIdentifier,
-            verbose: options.verbose,
-            repository: args.repository,
-            paths: options.path,
-            knowledgeBasePaths: options.knowledgeBase,
-            scanPromptFile: options.scanPromptFile,
-            validationPromptFile: options.validationPromptFile,
-            postScanPromptFile: options.postScanPromptFile,
-            diff: options.diff,
-            workingTree: options.workingTree,
-            head: options.head,
-            base: options.base,
-            mode: options.mode,
-            workers: options.workers,
-            subagents: options.subagents,
-            stopAfterNoNew: options.stopAfterNoNew,
-            maxDiscoveryRuns: options.maxDiscoveryRuns,
-            maxTimeHours: options.maxTimeHours,
-            model: options.model,
-            effort: options.effort,
-            provider: options.provider,
-            outputDir: options.outputDir,
-            archiveExisting: options.archiveExisting,
-            pluginPath: options.pluginPath,
-            pythonPath: options.python,
-            codex: options.codex,
-            failOnSeverity: options.failOnSeverity,
-            patch: options.patch,
-            patchSeverity: options.patchSeverity,
-            createPr: options.createPr,
-            maxCostUsd: options.maxCost,
-            headless: options.headless,
-            dryRun: options.dryRun,
-          },
-          errorOutput,
-          dependencies,
-          format !== "json" && format !== "jsonl",
-        );
+        let outcome: ScanOutcome;
+        try {
+          const directory = dependencies.currentDirectory();
+          const project =
+            options.config === undefined
+              ? undefined
+              : await loadProjectConfig(options.config, directory);
+          const { settings, provenance } = resolveProjectConfig(
+            project,
+            {
+              auth: options.auth,
+              paths: options.path,
+              knowledgeBasePaths: options.knowledgeBase,
+              scanPromptFile: options.scanPromptFile,
+              validationPromptFile: options.validationPromptFile,
+              diff: options.diff,
+              workingTree: options.workingTree,
+              head: options.head,
+              base: options.base,
+              mode: options.mode,
+              workers: options.workers,
+              subagents: options.subagents,
+              stopAfterNoNew: options.stopAfterNoNew,
+              maxDiscoveryRuns: options.maxDiscoveryRuns,
+              maxTimeHours: options.maxTimeHours,
+              outputDir: options.outputDir,
+              failOnSeverity: options.failOnSeverity,
+              maxCostUsd: options.maxCost,
+              codexOverrides: parseCodexOverrides(
+                options.codex,
+                options.model,
+                options.effort,
+                options.provider,
+                project?.input.codex,
+              ),
+            },
+            directory,
+          );
+          if (options.archiveExisting && settings.outputDir === undefined) {
+            throw new CodexSecurityError(
+              "--archive-existing requires --output-dir.",
+            );
+          }
+          outcome = await runScan(
+            {
+              ...settings,
+              projectConfig: provenance,
+              workflowId: options.workflowId,
+              safetyIdentifier: options.safetyIdentifier,
+              verbose: options.verbose,
+              repository: args.repository,
+              postScanPromptFile: options.postScanPromptFile,
+              model: options.model,
+              effort: options.effort,
+              provider: options.provider,
+              archiveExisting: options.archiveExisting,
+              pluginPath: options.pluginPath,
+              pythonPath: options.python,
+              codex: options.codex,
+              patch: options.patch,
+              patchSeverity: options.patchSeverity,
+              createPr: options.createPr,
+              headless: options.headless,
+              dryRun: options.dryRun,
+            },
+            errorOutput,
+            dependencies,
+            format !== "json" && format !== "jsonl",
+          );
+        } catch (error) {
+          const message = errorMessage(error);
+          errorOutput.write(`${message}\n`);
+          outcome = { exitCode: 2, error: message };
+        }
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           return incurError({
@@ -4505,6 +4494,11 @@ function scanArgumentsFromRecipe(
       "This scan does not have a saved launch recipe.",
     );
   }
+  if (recipe["requiresScanPrompt"] === true) {
+    throw new CodexSecurityError(
+      "This scan used additional instructions that are not retained. Start a new scan with --scan-prompt-file or --config to supply them again.",
+    );
+  }
   if (
     recipe["validationMode"] === "custom" &&
     validationPromptFile === undefined
@@ -4604,15 +4598,27 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains an invalid cost limit.",
     );
   }
-  const deepScan = z
-    .object(DEEP_SCAN_OPTION_SCHEMAS)
-    .optional()
-    .safeParse(recipe["deepScan"]);
+  const deepScan = DeepScanSettingsSchema.optional().safeParse(
+    recipe["deepScan"],
+  );
   if (!deepScan.success) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid deep scan settings.",
     );
   }
+  if (
+    recipe["deepScanResolved"] === true &&
+    DEEP_SCAN_SETTINGS.some(([name]) => deepScan.data?.[name] === undefined)
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe is missing resolved deep scan settings.",
+    );
+  }
+  const auth = z.enum(SCAN_AUTH_MODES).optional().safeParse(recipe["auth"]);
+  if (!auth.success)
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid authentication choice.",
+    );
   if (
     mode !== "deep" &&
     deepScan.data !== undefined &&
@@ -4624,6 +4630,7 @@ function scanArgumentsFromRecipe(
   }
   return {
     repository,
+    auth: auth.data,
     paths,
     knowledgeBasePaths,
     validationPromptFile,
@@ -6556,6 +6563,7 @@ async function executeScan(
       workers: arguments_.workers,
       subagents: arguments_.subagents,
       stopAfterNoNew: arguments_.stopAfterNoNew,
+      stopAfterConsecutiveErrors: arguments_.stopAfterConsecutiveErrors,
       maxDiscoveryRuns: arguments_.maxDiscoveryRuns,
       maxTimeHours: arguments_.maxTimeHours,
       outputDir: arguments_.outputDir,
@@ -6882,7 +6890,29 @@ async function executeScan(
       verified: effectivePreflight.authentication.verified,
     });
     progress?.stopTimer();
-    return { exitCode: 0, data: { dryRun: true, ...effectivePreflight } };
+    if (arguments_.projectConfig !== undefined) {
+      for (const [name] of DEEP_SCAN_SETTINGS) {
+        const source = preflight.deepScanSources?.[name];
+        if (source === undefined || source === "override") continue;
+        const field = name === "subagents" ? "subagentsPerWorker" : name;
+        arguments_.projectConfig.sources[`scan.deep.${field}`] = source;
+      }
+    }
+    return {
+      exitCode: 0,
+      data: {
+        dryRun: true,
+        ...effectivePreflight,
+        ...(arguments_.projectConfig === undefined
+          ? {}
+          : {
+              projectConfig: arguments_.projectConfig,
+              scanPromptFile: arguments_.scanPromptFile,
+              validationPromptFile: arguments_.validationPromptFile,
+              failOnSeverity: arguments_.failOnSeverity,
+            }),
+      },
+    };
   }
   if (result === null) {
     diagnostic("scan.failed", {
@@ -7447,6 +7477,7 @@ export function parseCodexOverrides(
   model?: string,
   effort?: ScanReasoningEffort,
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
+  defaults?: JsonObject,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
@@ -7521,7 +7552,8 @@ export function parseCodexOverrides(
   }
   if (
     (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
-    !("model" in result)
+    !("model" in result) &&
+    defaults?.["model"] === undefined
   ) {
     throw new CodexSecurityError(
       `--model is required when using --provider ${provider}`,
