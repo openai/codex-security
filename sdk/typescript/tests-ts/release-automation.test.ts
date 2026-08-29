@@ -4005,13 +4005,14 @@ describe("GitHub release workflow safeguards", () => {
       }
     }
 
-    for (const dependency of [
+    const dependencies = [
       "package",
       "test",
       "compatibility",
       "mcp",
       "plugin-source",
-    ]) {
+    ];
+    for (const dependency of dependencies) {
       for (const result of ["failure", "cancelled", "skipped"]) {
         expect(
           evaluateWorkflowCondition(
@@ -4020,13 +4021,7 @@ describe("GitHub release workflow safeguards", () => {
               "needs.validate-title.result": "success",
               "needs.validate-title.outputs.ci-mode": "full",
               ...Object.fromEntries(
-                [
-                  "package",
-                  "test",
-                  "compatibility",
-                  "mcp",
-                  "plugin-source",
-                ].map((job) => [
+                dependencies.map((job) => [
                   `needs.${job}.result`,
                   job === dependency ? result : "success",
                 ]),

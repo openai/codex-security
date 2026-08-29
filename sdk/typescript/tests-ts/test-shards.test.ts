@@ -1,4 +1,14 @@
-import { readdir, readFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
 import { expect, test } from "bun:test";
 import { shardTestFiles } from "../scripts/test-shards.mjs";
 
@@ -61,3 +71,72 @@ test.each([
   expect(shards.every(({ files }) => files.length > 0)).toBe(true);
   expect(shards.flatMap(({ files }) => files).sort()).toEqual(tests);
 });
+
+test.each([
+  ["available", false],
+  ["available", true],
+  ["blocked directory", false],
+  ["blocked directory", true],
+] as const)(
+  "preserves the test result with %s reports and failure=%p",
+  async (report, fail) => {
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const root = await mkdtemp(join(tmpdir(), "codex-security-shard-report-"));
+    try {
+      await mkdir(join(root, "scripts"));
+      await mkdir(join(root, "tests-ts"));
+      for (const file of [
+        "run-ci-tests.mjs",
+        "test-shards.mjs",
+        "ci-test-durations.json",
+      ]) {
+        await copyFile(
+          new URL(`../scripts/${file}`, import.meta.url),
+          join(root, "scripts", file),
+        );
+      }
+      await writeFile(
+        join(root, "tests-ts", "probe.test.ts"),
+        `import { expect, test } from "bun:test"; test("synthetic report probe", () => expect(true).toBe(${!fail}));\n`,
+      );
+      if (report === "blocked directory") {
+        await writeFile(join(root, "reports"), "synthetic blocker");
+      }
+      const child = Bun.spawn({
+        cmd: [node!, join(root, "scripts", "run-ci-tests.mjs"), "1/1"],
+        env: {
+          ...process.env,
+          PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 30_000,
+      });
+      const [status, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(status, stderr).toBe(fail ? 1 : 0);
+      expect(stdout).toContain("probe.test.ts");
+      expect(stderr).toContain("synthetic report probe");
+      if (report === "available") {
+        const xml = await readFile(
+          join(root, "reports", "junit-1.xml"),
+          "utf8",
+        );
+        expect(xml).toContain("<testcase ");
+        expect(xml.includes("<failure ")).toBe(fail);
+      } else {
+        expect(stderr).toContain("JUnitReportFailed");
+        expect(await readFile(join(root, "reports"), "utf8")).toBe(
+          "synthetic blocker",
+        );
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
