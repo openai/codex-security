@@ -226,6 +226,18 @@ test("checks failure-recording requests even when the caller handles persistence
   expect(() => workbench.assertDone()).toThrow("Synthetic expected failure");
 });
 
+test("rejects unexpected workbench commands after their errors are caught", async () => {
+  const workbench = scriptedWorkbench([]);
+  await expect(
+    workbench.run(
+      { environment: {}, pluginRoot: "unused", python: "unused" },
+      ["unexpected-command"],
+      "{}",
+    ),
+  ).rejects.toThrow();
+  expect(() => workbench.assertDone()).toThrow();
+});
+
 test("normalizes a workflow destination without storing URL credentials", () => {
   expect(workflowDestination("http://synthetic:password@synthetic.test")).toBe(
     "http://synthetic.test/",

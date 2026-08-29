@@ -18,19 +18,21 @@ export function scriptedWorkbench(
     error?: Error;
   }[],
 ) {
-  const requests: JsonObject[] = [];
+  const requests: {
+    args: readonly string[];
+    input: string | undefined;
+  }[] = [];
   const run: typeof runWorkbench = async (_options, args, input) => {
-    const payload = request(args, input);
     const step = steps[requests.length];
-    requests.push(payload);
+    requests.push({ args, input });
     if (!step)
       throw new Error(
-        `Unexpected workbench request: ${JSON.stringify(payload)}`,
+        `Unexpected workbench request: ${JSON.stringify({ args, input })}`,
       );
     if (step.error) throw step.error;
     const response =
       typeof step.response === "function"
-        ? step.response(payload)
+        ? step.response(request(args, input))
         : step.response;
     return structuredClone(response ?? {}) as JsonObject;
   };
@@ -38,7 +40,9 @@ export function scriptedWorkbench(
     run,
     assertDone() {
       // The caller may intentionally catch workbench errors.
-      expect(requests).toMatchObject(steps.map((step) => step.request));
+      expect(
+        requests.map(({ args, input }) => request(args, input)),
+      ).toMatchObject(steps.map((step) => step.request));
     },
   };
 }
