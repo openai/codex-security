@@ -1,6 +1,6 @@
 # MCP tests
 
-From `sdk/typescript`, install both packages' dependencies and run `pnpm run test:mcp`. That command builds the bundled plugin before testing it. To rerun only the tests after a build, run `npm run test:mcp` from this directory.
+From `sdk/typescript`, install both packages' dependencies and run `pnpm run test:mcp`. That command builds the bundled plugin before testing it. To rerun only the tests after a build, run `pnpm run test:mcp` from this directory.
 
 Node's test runner discovers `tests/test_*.mjs` and runs at most two files at once, each in a separate process. Assertions within a file remain sequential. Keep shared helpers outside that filename pattern. A failing script fails the command; the runner also writes per-file timings to `reports/junit.xml`.
 
