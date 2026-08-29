@@ -3069,7 +3069,7 @@ function scanRecipe(
   failOnSeverity?: SeverityLevel,
   knowledgeBasePaths?: string[],
   maxCostUsd?: number,
-  deepScan?: DeepScanOptions,
+  deepScan?: Required<DeepScanOptions>,
   auth?: ScanAuthMode,
 ): JsonObject {
   return {
@@ -3090,7 +3090,7 @@ function scanRecipe(
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
-    ...(deepScan === undefined || Object.keys(deepScan).length === 0
+    ...(deepScan === undefined
       ? {}
       : { deepScan: { ...deepScan }, deepScanResolved: true }),
   };

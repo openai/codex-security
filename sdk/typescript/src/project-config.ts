@@ -45,7 +45,7 @@ export interface ScanSettings extends DeepScanOptions {
   outputDir?: string;
   failOnSeverity?: Exclude<SeverityLevel, "informational">;
   maxCostUsd?: number;
-  codexOverrides?: JsonObject;
+  codexOverrides: JsonObject;
 }
 
 export type ConfigurationSource = "default" | "legacy" | "project" | "cli";

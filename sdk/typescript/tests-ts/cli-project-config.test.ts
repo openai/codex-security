@@ -193,7 +193,7 @@ test.each([
   ],
   [{ workingTree: {} }, ["--no-working-tree"], "repository"],
 ] as const)(
-  "resolves scope selectors and dependent refs after merging (%j)",
+  "resolves scope %j with overrides %j",
   async (scope, flags, target) => {
     const input = await fixture({
       scan: { scope: structuredClone(scope) },

@@ -956,13 +956,9 @@ interface ScanArguments extends ScanSettings {
   verbose?: boolean;
   repository?: string;
   postScanPromptFile?: string;
-  model?: string;
-  effort?: ScanReasoningEffort;
-  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
   archiveExisting: boolean;
   pluginPath?: string;
   pythonPath?: string;
-  codex: string[];
   patch?: boolean;
   patchSeverity?: FailureSeverity;
   createPr?: boolean;
@@ -3002,13 +2998,9 @@ export async function main(
               verbose: options.verbose,
               repository: args.repository,
               postScanPromptFile: options.postScanPromptFile,
-              model: options.model,
-              effort: options.effort,
-              provider: options.provider,
               archiveExisting: options.archiveExisting,
               pluginPath: options.pluginPath,
               pythonPath: options.python,
-              codex: options.codex,
               patch: options.patch,
               patchSeverity: options.patchSeverity,
               createPr: options.createPr,
@@ -4641,7 +4633,6 @@ function scanArgumentsFromRecipe(
     mode,
     ...deepScan.data,
     archiveExisting: false,
-    codex: [],
     codexOverrides: Object.hasOwn(config, "approval_policy")
       ? config
       : { ...config, approval_policy: "never" },
@@ -6414,14 +6405,7 @@ async function executeScan(
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
-      codexOverrides:
-        arguments_.codexOverrides ??
-        parseCodexOverrides(
-          arguments_.codex,
-          arguments_.model,
-          arguments_.effort,
-          arguments_.provider,
-        ),
+      codexOverrides: arguments_.codexOverrides,
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
     const effectiveConfiguration = {

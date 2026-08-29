@@ -269,10 +269,9 @@ Use `scan --help` for options, `--version` for the installed version, and
 `info --json` for package, plugin, runtime, and model details. `--dry-run`
 runs local preflight checks.
 
-### Project files (local prototype)
+### Project files
 
-This working tree supports `scan -c FILE` / `scan --config FILE`. The feature is
-not yet released. In a locally built or installed package:
+Use `scan -c FILE` / `scan --config FILE` to load reusable scan settings:
 
 ```bash
 codex-security scan . -c codex-security.yaml --dry-run --json
@@ -297,15 +296,11 @@ policy:
   failOnSeverity: high
 ```
 
-All settings are optional; `{}` uses the existing defaults. The schema is included at
-`@openai/codex-security/schemas/project-config.schema.json` and generated from
-one Zod input definition. The loader validates it with the existing Ajv engine,
-without coercion, default insertion, or key stripping. JSON files may use a root
-`$schema` string with the same relative path. The hint is editor metadata; the CLI
-uses its bundled schema and does not fetch schema URLs. Wrapper keys
-and types are strict. Native keys under `codex` retain existing validation and
-profile semantics; editor completion there covers common model/provider fields.
-CLI `scan --schema --json` still describes command arguments, not project files.
+All settings are optional; `{}` uses the existing defaults. JSON files can use a
+root `$schema` string pointing to the same packaged schema. Schema hints are for
+editors; the CLI uses its bundled validator without fetching URLs, coercing values,
+or dropping unknown keys. Native `codex` settings retain their existing checks and
+profile semantics. CLI `scan --schema --json` describes command arguments.
 
 Settings use built-in defaults, applicable legacy deep defaults, the file, then
 explicit CLI values. Lists and scope variants are replaced. `--head` can refine
