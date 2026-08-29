@@ -49,6 +49,7 @@ jobs:
             while IFS= read -r -d '' path; do
               changed=true
               if [[ "$path" != *.md ||
+                    "$path" == plugins/codex-security/* ||
                     "$path" == sdk/typescript/_bundled_plugin/* ]]; then
                 markdown_only=false
               fi

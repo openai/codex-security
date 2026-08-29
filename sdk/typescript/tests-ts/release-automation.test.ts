@@ -4051,6 +4051,20 @@ describe("GitHub release workflow safeguards", () => {
       ["sdk/typescript/_bundled_plugin/skills/example/SKILL.md"],
       "full",
     ],
+    [
+      "authored-plugin skill Markdown-only PR",
+      "pull_request",
+      false,
+      ["plugins/codex-security/skills/example/SKILL.md"],
+      "full",
+    ],
+    [
+      "authored-plugin reference Markdown-only PR",
+      "pull_request",
+      false,
+      ["plugins/codex-security/skills/example/references/contract.md"],
+      "full",
+    ],
     ["base retarget", "pull_request", true, ["README.md"], "full"],
     ["mixed PR", "pull_request", false, ["README.md", "src/index.ts"], "full"],
     [
