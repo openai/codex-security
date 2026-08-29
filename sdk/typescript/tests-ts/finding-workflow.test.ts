@@ -205,6 +205,27 @@ test("preserves the operation error when recording a failed stage also fails", a
   workbench.assertDone();
 });
 
+test("checks failure-recording requests even when the caller handles persistence errors", async () => {
+  await using fixture = await workflowFixture();
+  const workbench = scriptedWorkbench([
+    {
+      request: {
+        id: "handled-failure",
+        action: "fail",
+        stage: "publish",
+        error: "Synthetic expected failure",
+      },
+    },
+  ]);
+  const workflow = new FindingWorkflow(
+    "handled-failure",
+    fixture.environment,
+    workbench.run,
+  );
+  await workflow.fail("publish", new Error("Synthetic different failure"));
+  expect(() => workbench.assertDone()).toThrow("Synthetic expected failure");
+});
+
 test("normalizes a workflow destination without storing URL credentials", () => {
   expect(workflowDestination("http://synthetic:password@synthetic.test")).toBe(
     "http://synthetic.test/",

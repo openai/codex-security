@@ -18,15 +18,15 @@ export function scriptedWorkbench(
     error?: Error;
   }[],
 ) {
-  let next = 0;
+  const requests: JsonObject[] = [];
   const run: typeof runWorkbench = async (_options, args, input) => {
     const payload = request(args, input);
-    const step = steps[next++];
+    const step = steps[requests.length];
+    requests.push(payload);
     if (!step)
       throw new Error(
         `Unexpected workbench request: ${JSON.stringify(payload)}`,
       );
-    expect(payload).toMatchObject(step.request);
     if (step.error) throw step.error;
     const response =
       typeof step.response === "function"
@@ -37,7 +37,8 @@ export function scriptedWorkbench(
   return {
     run,
     assertDone() {
-      expect(next).toBe(steps.length);
+      // The caller may intentionally catch workbench errors.
+      expect(requests).toMatchObject(steps.map((step) => step.request));
     },
   };
 }
