@@ -86,7 +86,7 @@ run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
 
 `scripts/run-ci-tests.mjs` assigns the longest measured files first. Its
-`ci-test-durations.json` records per-file seconds from a successful CI run.
+`ci-test-durations.json` records per-file seconds from CI reports.
 Every new test file is included automatically with a one-second estimate.
 Refresh those estimates from the uploaded reports when adding or splitting
 expensive files; estimates affect scheduling, never whether a test runs.
