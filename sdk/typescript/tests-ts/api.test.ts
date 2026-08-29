@@ -6673,9 +6673,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const codexHome = join(root, "codex-home");
     const fakeCodex = join(root, "codex.mjs");
     await mkdir(codexHome, { mode: 0o700 });
+    // Keep --import pending so Node cannot exit while resolving the login argument.
     await writeFile(
       fakeCodex,
-      'console.error("Open https://auth.example.test/device");\nconsole.error("User code: ABCD-EFGH");\nprocess.on("SIGTERM", () => {});\nsetInterval(() => {}, 1000);\n',
+      'process.on("SIGTERM", () => {});\nconsole.error("Open https://auth.example.test/device");\nconsole.error("User code: ABCD-EFGH");\nsetInterval(() => {}, 1000);\nawait new Promise(() => {});\n',
     );
     const fakeCommand = nodeCodex(fakeCodex);
     const client = new TestClient(
