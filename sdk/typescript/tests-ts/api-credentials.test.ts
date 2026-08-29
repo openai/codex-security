@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
@@ -29,7 +30,10 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(scanDir, { mode: 0o700 });
     await writeFile(join(ambientHome, "auth.json"), "{}\n");
     const interpreter =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+      process.env["PYTHON"] ??
+      Bun.which("python") ??
+      Bun.which("py") ??
+      Bun.which("python3");
     expect(interpreter).not.toBeNull();
     let capturedConfigPath: string | undefined;
     let capturedCodexHome: string | undefined;
@@ -472,5 +476,62 @@ describe("CodexSecurity orchestration", () => {
         async () => true,
       ),
     ).resolves.toBe(true);
+  });
+
+  test("recognizes ambient credentials during account() on a fresh instance", async () => {
+    const root = await temporaryDirectory();
+    const ambientHome = join(root, "ambient-home");
+    const stateDir = join(root, "state");
+    const script = join(root, "codex.mjs");
+    await mkdir(ambientHome);
+    await mkdir(stateDir, { mode: 0o700 });
+    await writeFile(
+      join(ambientHome, "auth.json"),
+      '{"auth_mode":"chatgpt"}\n',
+    );
+    await writeFile(
+      script,
+      `
+import { existsSync } from "node:fs";
+import { basename, join } from "node:path";
+
+const args = [basename(process.argv[1]), ...process.argv.slice(2)];
+if (args.join(" ") === "login status") {
+  const codexHome = process.env.CODEX_HOME;
+  if (codexHome && existsSync(join(codexHome, "auth.json"))) {
+    console.log("Logged in using ChatGPT");
+    process.exitCode = 0;
+  } else {
+    console.log("Not logged in");
+    process.exitCode = 1;
+  }
+}
+process.exit(process.exitCode ?? 0);
+`,
+    );
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          ...process.env,
+          NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
+          CODEX_HOME: ambientHome,
+          CODEX_SECURITY_STATE_DIR: stateDir,
+        },
+        resolveCodexCommand: () => ({
+          command: execFileSync("node", ["-p", "process.execPath"], {
+            encoding: "utf8",
+          }).trim(),
+        }),
+      },
+    );
+    try {
+      const status = await client.account();
+      expect(status.authenticated).toBe(true);
+      expect(status.details).toContain("Logged in using ChatGPT");
+      expect(existsSync(join(stateDir, "codex-home", "auth.json"))).toBe(true);
+    } finally {
+      await client.close();
+    }
   });
 });

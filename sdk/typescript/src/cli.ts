@@ -27,7 +27,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -53,6 +53,7 @@ import {
   createSecurityInternal,
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
+  initialCredentialsAvailable,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
@@ -4267,6 +4268,16 @@ export async function main(
             : await prepareCodexSecurityCredentialHome(
                 dependencies.environment,
               );
+        if (args.action === "status" && existsSync(credentialHome)) {
+          const ambientHome =
+            environmentValue(dependencies.environment, "CODEX_HOME") ??
+            join(homedir(), ".codex");
+          await initialCredentialsAvailable(
+            dependencies.environment,
+            ambientHome,
+            credentialHome,
+          );
+        }
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
