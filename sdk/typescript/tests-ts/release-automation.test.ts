@@ -1,4 +1,4 @@
-import { execFile, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdirSync,
@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
-import { bashCommand } from "./support/shell.js";
+import { bashCommand, runCommand } from "./support/shell.js";
 
 type ReleaseMetadata = Record<string, unknown>;
 
@@ -159,34 +159,6 @@ const releaseRepository = "openai/codex-security";
 const releaseTagTimeout = process.platform === "win32" ? 20_000 : 10_000;
 
 const bash = bashCommand();
-
-function runCommand(
-  command: string,
-  args: string[],
-  {
-    input,
-    ...options
-  }: {
-    cwd?: string;
-    env?: NodeJS.ProcessEnv;
-    input?: string;
-    timeout: number;
-  },
-): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  // Avoid Bun's premature synchronous timeouts while keeping pipe reads bounded.
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      command,
-      args,
-      { ...options, encoding: "utf8" },
-      (_error, stdout, stderr) => {
-        resolve({ status: child.exitCode, stdout, stderr });
-      },
-    );
-    child.stdin?.on("error", reject);
-    child.stdin?.end(input);
-  });
-}
 
 const jqMock = [
   "jq() {",

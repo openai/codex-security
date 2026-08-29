@@ -56,6 +56,7 @@ import {
   fakeResult,
 } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runCommand } from "./support/shell.js";
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
@@ -411,28 +412,22 @@ describe("CLI", () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-deep-defaults-"));
 
     try {
-      const child = Bun.spawn({
-        cmd: [
-          python!,
+      const { status, stdout, stderr } = await runCommand(
+        python!,
+        [
           join(PLUGIN_ROOT, "scripts", "deep_scan_config.py"),
           "--available-parallelism",
           "12",
         ],
-        env: {
-          ...process.env,
-          CODEX_HOME: join(root, "codex-home"),
-          PYTHONDONTWRITEBYTECODE: "1",
+        {
+          env: {
+            ...process.env,
+            CODEX_HOME: join(root, "codex-home"),
+            PYTHONDONTWRITEBYTECODE: "1",
+          },
+          timeout: 30_000,
         },
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-        timeout: 30_000,
-      });
-      const [status, stdout, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-      ]);
+      );
 
       expect(status, stderr).toBe(0);
       expect(stderr).toBe("");
