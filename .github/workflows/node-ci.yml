@@ -38,6 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           ci_mode=full
+          check_markdown=false
           if [[ "$EVENT_NAME" == "pull_request" &&
                 "$BASE_CHANGED" != "true" ]]; then
             changed_files="$(mktemp)"
@@ -46,19 +47,26 @@ jobs:
 
             changed=false
             markdown_only=true
+            plugin_changed=false
             while IFS= read -r -d '' path; do
               changed=true
-              if [[ "$path" != *.md ||
-                    "$path" == plugins/codex-security/* ||
-                    "$path" == sdk/typescript/_bundled_plugin/* ]]; then
+              if [[ "$path" != *.md ]]; then
                 markdown_only=false
+              fi
+              if [[ "$path" == plugins/codex-security/* ||
+                    "$path" == sdk/typescript/_bundled_plugin/* ]]; then
+                plugin_changed=true
               fi
             done < "$changed_files"
             if [[ "$changed" == "true" && "$markdown_only" == "true" ]]; then
-              ci_mode=markdown
+              check_markdown=true
+              if [[ "$plugin_changed" == "false" ]]; then
+                ci_mode=markdown
+              fi
             fi
           fi
           printf 'ci-mode=%s\n' "$ci_mode" >> "$GITHUB_OUTPUT"
+          printf 'check-markdown=%s\n' "$check_markdown" >> "$GITHUB_OUTPUT"
 
       - name: Require a Conventional Commit pull request title
         if: github.event_name == 'pull_request'
@@ -80,7 +88,7 @@ jobs:
           python .github/scripts/check_plugin_source_compatibility.py
 
       - name: Set up pnpm
-        if: steps.scope.outputs.ci-mode == 'markdown'
+        if: steps.scope.outputs.check-markdown == 'true'
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           package_json_file: sdk/typescript/package.json
@@ -88,7 +96,7 @@ jobs:
           cache_dependency_path: sdk/typescript/pnpm-lock.yaml
 
       - name: Set up Node.js
-        if: steps.scope.outputs.ci-mode == 'markdown'
+        if: steps.scope.outputs.check-markdown == 'true'
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "22.13.0"
@@ -96,11 +104,11 @@ jobs:
           cache-dependency-path: sdk/typescript/pnpm-lock.yaml
 
       - name: Install dependencies
-        if: steps.scope.outputs.ci-mode == 'markdown'
+        if: steps.scope.outputs.check-markdown == 'true'
         run: pnpm --dir sdk/typescript install --frozen-lockfile
 
       - name: Check Markdown formatting
-        if: steps.scope.outputs.ci-mode == 'markdown'
+        if: steps.scope.outputs.check-markdown == 'true'
         shell: bash
         run: |
           files=()
