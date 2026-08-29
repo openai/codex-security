@@ -27,13 +27,15 @@ describe("CLI launcher", () => {
       if (process.platform !== "win32") {
         await symlink(launcher, bin);
       }
-      const child = await runCommand(process.execPath, [bin, "--version"], {
-        timeout: 30_000,
-      });
+      const { status, stdout, stderr } = await runCommand(
+        process.execPath,
+        [bin, "--version"],
+        { timeout: 30_000 },
+      );
 
-      expect(child.status).toBe(0);
-      expect(child.stderr).toBe("");
-      expect(child.stdout).toBe(`${VERSION}\n`);
+      expect(status, stderr).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).toBe(`${VERSION}\n`);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -47,15 +49,15 @@ describe("CLI launcher", () => {
         preload,
         `Object.defineProperty(process, "cwd", { value() { throw new Error(${JSON.stringify(`working directory is unavailable: ${SYNTHETIC_CREDENTIALS}`)}); } });\n`,
       );
-      const child = await runCommand(
+      const { status, stdout, stderr } = await runCommand(
         process.execPath,
         ["--preload", preload, join(packageRoot, "src", "cli.ts"), "scan"],
         { timeout: 30_000 },
       );
 
-      expect(child.status).toBe(2);
-      expect(child.stdout).toBe("");
-      expect(child.stderr).toBe(
+      expect(status, stderr).toBe(2);
+      expect(stdout).toBe("");
+      expect(stderr).toBe(
         `working directory is unavailable: ${SYNTHETIC_CREDENTIALS}\n`,
       );
     } finally {

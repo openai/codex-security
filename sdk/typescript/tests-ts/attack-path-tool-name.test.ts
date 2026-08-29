@@ -11,7 +11,7 @@ test("keeps model-visible attack-path tool names within the Codex limit", async 
   const state = mkdtempSync(join(tmpdir(), "codex-security-mcp-tools-"));
 
   try {
-    const server = await runCommand(
+    const { status, stdout, stderr } = await runCommand(
       node!,
       [join(PLUGIN_ROOT, "mcp", "server.mjs")],
       {
@@ -25,9 +25,9 @@ test("keeps model-visible attack-path tool names within the Codex limit", async 
         timeout: 30_000,
       },
     );
-    expect(server.status, server.stderr).toBe(0);
+    expect(status, stderr).toBe(0);
 
-    const tools = server.stdout
+    const tools = stdout
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line))

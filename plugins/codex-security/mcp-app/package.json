@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "build:mcp": "node scripts/build_mcp_app.mjs --output .preview/mcp",
-    "test:mcp": "node tests/test_artifact_foundation.mjs && node tests/test_artifact_inventory.mjs && node tests/test_artifact_discovery.mjs && node tests/test_artifact_worker_threat_model.mjs && node tests/test_artifact_validation_phase.mjs && node tests/test_artifact_attack_path.mjs && node tests/test_artifact_deep_reducer.mjs && node tests/test_artifact_scan_draft.mjs && node tests/test_compact_artifact_server.mjs && node tests/test_scan_handoff.mjs && node tests/test_deep_scan_templates.mjs && node tests/test_deep_scan_parent_sandbox.mjs && node tests/test_deep_scan_permission_profile_preflight.mjs && node tests/test_deep_scan_artifact_validation.mjs && node tests/test_deep_scan_store.mjs && node tests/test_deep_scan_store_integration.mjs && node tests/test_deep_scan_executor.mjs && node tests/test_deep_scan_coordinator.mjs && node tests/test_deep_scan_stdio_lifecycle.mjs && node tests/test_workbench_state_fallback.mjs && node tests/test_python_command.mjs && node tests/test_mcp_app_smoke.mjs",
+    "test:mcp": "node --test --test-concurrency=2 --test-reporter=./scripts/test_reporter.mjs \"tests/test_*.mjs\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
