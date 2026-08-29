@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdirSync,
@@ -160,7 +160,7 @@ const releaseTagTimeout = process.platform === "win32" ? 20_000 : 10_000;
 
 const bash = bashCommand();
 
-async function runCommand(
+function runCommand(
   command: string,
   args: string[],
   {
@@ -172,24 +172,20 @@ async function runCommand(
     input?: string;
     timeout: number;
   },
-) {
-  // Bun can time out synchronous Windows children before they start.
-  const child = Bun.spawn([command, ...args], {
-    ...options,
-    stdin: input === undefined ? "ignore" : new Blob([input]),
-    stdout: "pipe",
-    stderr: "pipe",
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  // Avoid Bun's premature synchronous timeouts while keeping pipe reads bounded.
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      command,
+      args,
+      { ...options, encoding: "utf8" },
+      (_error, stdout, stderr) => {
+        resolve({ status: child.exitCode, stdout, stderr });
+      },
+    );
+    child.stdin?.on("error", reject);
+    child.stdin?.end(input);
   });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  return {
-    status: child.signalCode === null ? exitCode : null,
-    stdout,
-    stderr,
-  };
 }
 
 const jqMock = [
@@ -1695,6 +1691,20 @@ describe("GitHub release workflow safeguards", () => {
     ) as ReleaseMetadata,
   );
   const checkedOutTag = `npm-v${checkedOutVersion}`;
+
+  test("stops reading inherited pipes when a command times out", async () => {
+    const result = await runCommand(
+      bash,
+      [
+        "-c",
+        "(sleep 1; printf 'late stdout'; printf 'late stderr' >&2) & wait",
+      ],
+      { timeout: 100 },
+    );
+    expect(result.status).toBeNull();
+    expect(result.stdout).not.toContain("late stdout");
+    expect(result.stderr).not.toContain("late stderr");
+  });
 
   test("rejects unsupported jq mock filters", () => {
     const result = spawnSync(
