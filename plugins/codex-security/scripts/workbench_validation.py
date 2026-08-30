@@ -58,11 +58,7 @@ def user_text(value: str | None) -> str | None:
 
 
 def user_context_argument(args: argparse.Namespace) -> str | None:
-    value = (
-        sys.stdin.read()
-        if getattr(args, "user_context_stdin", False)
-        else args.user_context
-    )
+    value = sys.stdin.read() if getattr(args, "user_context_stdin", False) else args.user_context
     return user_text(value)
 
 

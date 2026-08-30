@@ -152,7 +152,10 @@ Options for `security.run(repository, options)` and
 | `signal`                | `AbortSignal` to cancel a scan.                                                |
 
 Follow scans with `onWorkerStatus` and `onReconnect`. `onSessionEvent` receives
-saved events with thread IDs and worker numbers; `ScanOptions` lists all callbacks.
+saved events with thread IDs and worker numbers. Deep scans can additionally use
+`onDeepProgress` for durable independent-review counts: `completed`, `active`,
+and `maximum`. The maximum is a configured cap, not a percentage denominator.
+`ScanOptions` lists all callbacks.
 
 `preflight` and CLI `--dry-run` check local inputs without starting Codex or
 using the network. They don't authenticate, verify model access, resolve Python,
@@ -912,8 +915,9 @@ cancel active scans.
 
 ## Findings service (preview)
 
-The findings API is distributed separately from the scanner as
-`ghcr.io/openai/codex-security-findings`, for Linux `amd64` and `arm64`.
+The findings API uses the same `ghcr.io/openai/codex-security` image as the
+scanner, for Linux `amd64` and `arm64`. `compose.findings.yaml` starts the API
+in a separate container with its own state volume and server configuration.
 Once a release is published, it can be pulled without a GitHub login. See
 [container release setup](../../docker/README.md) for the required maintainer
 setup and publication process.
@@ -934,16 +938,19 @@ curl -i http://127.0.0.1:3000/v1/findings
 
 You can deploy with just `compose.findings.yaml` and a private `.env`; no source
 checkout or Node.js installation is required. `CODEX_SECURITY_FINDINGS_IMAGE`
-defaults to `ghcr.io/openai/codex-security-findings:latest`. Set it to a published
+defaults to `ghcr.io/openai/codex-security:latest`. Set it to a published
 version, `sha-<commit>` tag, or digest for repeatable deployments.
 
 To build from a source checkout instead:
 
 ```bash
-docker build --target findings-service -t codex-security-findings:local .
-export CODEX_SECURITY_FINDINGS_IMAGE=codex-security-findings:local
+docker build --target scanner -t codex-security:local .
+export CODEX_SECURITY_FINDINGS_IMAGE=codex-security:local
 docker compose -f compose.findings.yaml up --no-build -d
 ```
+
+For an existing deployment using the separate findings image or
+`--target findings-service`, follow the [single-image migration guide](../../docker/README.md#migrating-the-findings-service).
 
 ### Read-only dashboard
 
@@ -1368,7 +1375,7 @@ Stop the service with
 `docker compose -f compose.findings.yaml down`; add `--volumes` only when you
 intend to delete the stored data.
 
-The image defaults to `HOST=0.0.0.0`, `PORT=3000`, and
+The findings Compose configuration sets `HOST=0.0.0.0`, `PORT=3000`, and
 `CODEX_SECURITY_STATE_DIR=/state`. Keep port and volume mappings aligned if
 changing these settings. Compose binds only to host loopback; the API has no
 authentication. Use an authenticated TLS proxy before sharing access. Finding
@@ -1398,15 +1405,31 @@ migrated database.
 
 ### Running without Docker
 
-To run locally, use Node.js and Python 3 as described in the prerequisites.
-Export the API key in your shell; the server does not load `.env` automatically.
-From `sdk/typescript`, install dependencies, build, and start:
+With Node.js and Python 3 installed:
+
+```bash
+npm install -g @openai/codex-security
+CODEX_SECURITY_STATE_DIR="$HOME/.codex-security-findings" codex-security serve --port 3000
+```
+
+`--port` overrides `PORT` (default: `3000`). Open
+`http://127.0.0.1:3000/dashboard`. Stop with Ctrl+C or SIGTERM.
+
+Export `OPENAI_API_KEY` or `CODEX_API_KEY` to import findings with embeddings.
+Startup and listing need no key. The service does not load `.env` or authenticate
+requests; keep it on loopback or behind an authenticated TLS proxy.
+
+From a source checkout's `sdk/typescript` directory:
 
 ```bash
 pnpm install --frozen-lockfile
+pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile
+pnpm run build:plugin
 pnpm run build
-pnpm run start:server
+node bin/codex-security.mjs serve --port 3000
 ```
+
+`pnpm run start:server` and `node dist/server/index.js` still work.
 
 Local defaults are `HOST=127.0.0.1` and `PORT=3000`. The existing
 `CODEX_SECURITY_STATE_DIR` and `PYTHON` settings select storage and Python;

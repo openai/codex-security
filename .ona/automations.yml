@@ -10,7 +10,7 @@ tasks:
         sudo apt-get install --yes ripgrep
       fi
       pnpm --dir sdk/typescript install --frozen-lockfile
-      npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
+      pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
     triggeredBy:
       - manual

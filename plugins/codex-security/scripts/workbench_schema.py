@@ -842,11 +842,21 @@ def migrate_finding_workflow_review_columns(connection: sqlite3.Connection) -> N
             model = ?, effort = ?, settings_digest = ?, prompt_digest = ?, contract_digest = ?
             WHERE workflow_id = ? AND review_key = ?""",
             (
-                binding["version"], binding["codexVersion"], source["repository"],
-                source["revision"], source["refsDigest"], source["content"],
-                scope.get("repositoryId"), scope.get("allRepositories"), binding["model"],
-                binding["effort"], binding.get("settingsDigest"), binding["promptDigest"],
-                binding["contractDigest"], row["workflow_id"], row["review_key"],
+                binding["version"],
+                binding["codexVersion"],
+                source["repository"],
+                source["revision"],
+                source["refsDigest"],
+                source["content"],
+                scope.get("repositoryId"),
+                scope.get("allRepositories"),
+                binding["model"],
+                binding["effort"],
+                binding.get("settingsDigest"),
+                binding["promptDigest"],
+                binding["contractDigest"],
+                row["workflow_id"],
+                row["review_key"],
             ),
         )
 
@@ -867,13 +877,22 @@ def migrate_finding_workflow_columns(connection: sqlite3.Connection) -> None:
             scan_status = ?, scan_error = ?, publish_status = ?, publish_error = ?,
             dedupe_status = ?, dedupe_error = ?, results_json = ? WHERE id = ?""",
             (
-                state.get("repositoryPath"), state.get("scanRequestDigest"),
-                state.get("scanId"), state.get("scanDir"), state.get("artifactDigest"),
-                state.get("destination"), scope.get("repositoryId"), scope.get("allRepositories"),
-                stages["scan"]["status"], stages["scan"].get("error"),
-                stages["publish"]["status"], stages["publish"].get("error"),
-                stages["dedupe"]["status"], stages["dedupe"].get("error"),
-                json.dumps(results, allow_nan=False), row["id"],
+                state.get("repositoryPath"),
+                state.get("scanRequestDigest"),
+                state.get("scanId"),
+                state.get("scanDir"),
+                state.get("artifactDigest"),
+                state.get("destination"),
+                scope.get("repositoryId"),
+                scope.get("allRepositories"),
+                stages["scan"]["status"],
+                stages["scan"].get("error"),
+                stages["publish"]["status"],
+                stages["publish"].get("error"),
+                stages["dedupe"]["status"],
+                stages["dedupe"].get("error"),
+                json.dumps(results, allow_nan=False),
+                row["id"],
             ),
         )
 
@@ -979,12 +998,8 @@ def apply_migrations(
 def normalize_pre_release_execution_profile_migrations(
     connection: sqlite3.Connection, timestamp: str
 ) -> None:
-    scan_columns = {
-        row["name"] for row in connection.execute("PRAGMA table_info(scans)")
-    }
-    workspace_columns = {
-        row["name"] for row in connection.execute("PRAGMA table_info(workspaces)")
-    }
+    scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
+    workspace_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workspaces)")}
     legacy_columns = {"execution_model", "reasoning_effort"}
     renamed_columns = {
         "legacy_execution_model",
@@ -1332,9 +1347,7 @@ def normalize_mirror_lineage_migrations(connection: sqlite3.Connection) -> None:
     if not any(migrations.get(version) == name for version, name in mirror_names.items()):
         return
     if migrations != mirror_names:
-        raise SystemExit(
-            "The Codex Security database has an unsupported mirror migration history."
-        )
+        raise SystemExit("The Codex Security database has an unsupported mirror migration history.")
     for old_version, new_version in ((30, 32), (29, 31)):
         connection.execute(
             "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",

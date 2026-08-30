@@ -60,11 +60,7 @@ Return both a concise Markdown report and a JSON object conforming to [`../../sc
 7. top risk drivers, protective factors, and status-quo risk; and
 8. unknowns plus the bounded evidence plan when held.
 
-This skill lives at `<plugin-root>/skills/assess-patch-risk/SKILL.md`, so
-`<plugin-root>` is two directories up. Resolve `<python_command>` to the
-configured Python interpreter (`"$PYTHON"` in POSIX shells or
-`& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and
-`python3` on Unix-like hosts.
+This skill lives at `<plugin-root>/skills/assess-patch-risk/SKILL.md`, so `<plugin-root>` is two directories up. Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts.
 
 Before returning the result, validate the JSON from any working directory with:
 

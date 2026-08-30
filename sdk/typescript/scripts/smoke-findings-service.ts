@@ -13,9 +13,7 @@ import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const container = `findings-ci-${process.pid}`;
-const image = process.argv[2] ?? "codex-security-findings:local";
-const runnerImage =
-  process.env["CODEX_SECURITY_IMAGE"] ?? "codex-security:runner-smoke";
+const image = process.argv[2] ?? "codex-security:local";
 const compose = ["compose", "-p", container, "-f", "compose.findings.yaml"];
 const runnerRoot = await mkdtemp(join(tmpdir(), "codex-security-runner-"));
 const runnerCompose = [
@@ -80,7 +78,7 @@ function docker(args: string[], { check = true, status = 0 } = {}): string {
     env: {
       ...process.env,
       CODEX_SECURITY_FINDINGS_IMAGE: image,
-      CODEX_SECURITY_IMAGE: runnerImage,
+      CODEX_SECURITY_IMAGE: image,
       CODEX_SECURITY_USER: `${process.getuid!()}:${process.getgid!()}`,
       CODEX_SECURITY_RESULTS: join(runnerRoot, "results"),
       CODEX_SECURITY_STATE: join(runnerRoot, "state"),
@@ -358,9 +356,7 @@ try {
     }),
   );
   if (!process.argv[2])
-    docker(["build", "--target", "findings-service", "--tag", image, "."]);
-  if (!process.env["CODEX_SECURITY_IMAGE"])
-    docker(["build", "--target", "scanner", "--tag", runnerImage, "."]);
+    docker(["build", "--target", "scanner", "--tag", image, "."]);
   await startService();
   docker([...runnerCompose, "config", "--quiet"]);
   docker([

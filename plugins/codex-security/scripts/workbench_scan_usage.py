@@ -215,18 +215,10 @@ def _codex_state_database() -> Path | None:
         return path.resolve() if path.is_file() and os.access(path, os.R_OK) else None
 
     configured_home = os.environ.get("CODEX_HOME", "").strip()
-    codex_home = (
-        Path(configured_home).expanduser()
-        if configured_home
-        else Path.home() / ".codex"
-    )
+    codex_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".codex"
     configured_sqlite_home = os.environ.get("CODEX_SQLITE_HOME", "").strip()
     search_roots = [
-        *(
-            [Path(configured_sqlite_home).expanduser()]
-            if configured_sqlite_home
-            else []
-        ),
+        *([Path(configured_sqlite_home).expanduser()] if configured_sqlite_home else []),
         codex_home,
         codex_home / "sqlite",
     ]
@@ -363,9 +355,7 @@ def _require_state_columns(
     }
     columns = {str(row["name"]) for row in connection.execute(statements[table])}
     if not required.issubset(columns):
-        raise ValueError(
-            "Codex state graph does not expose the required thread columns."
-        )
+        raise ValueError("Codex state graph does not expose the required thread columns.")
 
 
 def _rollout_path(value: object) -> Path | None:
@@ -411,9 +401,7 @@ def _read_rollout_usage(
                 event = json.loads(raw_line)
             except (UnicodeError, ValueError):
                 if line_number == 1:
-                    raise ValueError(
-                        "The rollout session metadata is unreadable."
-                    ) from None
+                    raise ValueError("The rollout session metadata is unreadable.") from None
                 if boundary_reached:
                     warnings.add("rollout_record_invalid")
                 continue
@@ -456,10 +444,7 @@ def _read_rollout_usage(
                         warnings.add("thread_outside_scan_window")
                         return total, warnings
                     boundary_reached = True
-                elif (
-                    event.get("type") == "event_msg"
-                    and payload.get("type") == "token_count"
-                ):
+                elif event.get("type") == "event_msg" and payload.get("type") == "token_count":
                     inherited_usage = _token_snapshot(payload)
                     if inherited_usage is not None:
                         previous = inherited_usage
@@ -538,9 +523,7 @@ def _token_snapshot(payload: Mapping[str, Any]) -> dict[str, int] | None:
     usage = info.get("total_token_usage")
     if not isinstance(usage, dict):
         return None
-    cache_write = usage.get(
-        "cache_write_input_tokens", usage.get("cache_write_tokens", 0)
-    )
+    cache_write = usage.get("cache_write_input_tokens", usage.get("cache_write_tokens", 0))
     legacy_cache_write = usage.get("cache_write_tokens")
     input_tokens = usage.get("input_tokens")
     cached_input_tokens = usage.get("cached_input_tokens", 0)
@@ -556,9 +539,7 @@ def _token_snapshot(payload: Mapping[str, Any]) -> dict[str, int] | None:
     result: dict[str, int] = {}
     for source_key, result_key in TOKEN_FIELDS.items():
         value = (
-            cache_write
-            if source_key == "cache_write_input_tokens"
-            else usage.get(source_key, 0)
+            cache_write if source_key == "cache_write_input_tokens" else usage.get(source_key, 0)
         )
         if type(value) is not int or value < 0:
             return None
@@ -567,10 +548,7 @@ def _token_snapshot(payload: Mapping[str, Any]) -> dict[str, int] | None:
         ):
             return None
         result[result_key] = value
-    if (
-        result["cachedInputTokens"] + result["cacheWriteInputTokens"]
-        > result["inputTokens"]
-    ):
+    if result["cachedInputTokens"] + result["cacheWriteInputTokens"] > result["inputTokens"]:
         return None
     result["totalTokens"] = result["inputTokens"] + result["outputTokens"]
     return result
@@ -599,9 +577,7 @@ def _timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
 
 
-def _unavailable_usage(
-    reason: str, *, warnings: set[str] | None = None
-) -> dict[str, Any]:
+def _unavailable_usage(reason: str, *, warnings: set[str] | None = None) -> dict[str, Any]:
     return {
         "coverage": "unavailable",
         "source": "codex_rollout",

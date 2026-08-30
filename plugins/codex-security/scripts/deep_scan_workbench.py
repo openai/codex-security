@@ -496,7 +496,11 @@ def independent_review_progress(
     connection: sqlite3.Connection, scan_id: str
 ) -> dict[str, int | str] | None:
     run = connection.execute(
-        "SELECT completion_sequence, phase, updated_at FROM deep_scan_runs WHERE scan_id = ?",
+        """
+        SELECT completion_sequence, phase, updated_at, max_discovery_runs
+        FROM deep_scan_runs
+        WHERE scan_id = ?
+        """,
         (scan_id,),
     ).fetchone()
     if run is None:
@@ -514,6 +518,7 @@ def independent_review_progress(
     return {
         "active": int(active),
         "completed": int(run["completion_sequence"]),
+        "maximum": int(run["max_discovery_runs"]),
         "consolidating": run["phase"] == "reducing",
         "updatedAt": str(run["updated_at"]),
     }

@@ -34,6 +34,7 @@ import {
   OutputInsideProtectedRootError,
   type ScanAuthentication,
   ScanCostLimitExceededError,
+  type DeepScanProgress,
   type ScanOptions,
   type ScanProgress,
   type ScanSessionEvent,
@@ -2640,6 +2641,71 @@ describe("CodexSecurity orchestration", () => {
         maxTimeHours: 1.5,
       },
     });
+    await client.close();
+  });
+
+  test("forwards durable Deep Scan independent-review progress", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const updates: DeepScanProgress[] = [];
+    const environment = { CODEX_CLI_PATH: process.execPath };
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        resolveCodexCommand: () => ({ command: process.execPath }),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          if (args[0] === "get-scan") {
+            return {
+              scan: {
+                progress: {
+                  independentReviews: {
+                    completed: 3,
+                    active: 2,
+                    maximum: 40,
+                  },
+                },
+              },
+            };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await Bun.sleep(0);
+              throw new Error("deep progress captured");
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        mode: "deep",
+        onDeepProgress: (progress) => updates.push(progress),
+      }),
+    ).rejects.toThrow("deep progress captured");
+    await Bun.sleep(0);
+    expect(updates).toEqual([{ completed: 3, active: 2, maximum: 40 }]);
     await client.close();
   });
 
@@ -6752,9 +6818,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const codexHome = join(root, "codex-home");
     const fakeCodex = join(root, "codex.mjs");
     await mkdir(codexHome, { mode: 0o700 });
+    // Keep --import pending so Node cannot exit while resolving the login argument.
     await writeFile(
       fakeCodex,
-      'console.error("Open https://auth.example.test/device");\nconsole.error("User code: ABCD-EFGH");\nprocess.on("SIGTERM", () => {});\nsetInterval(() => {}, 1000);\n',
+      'process.on("SIGTERM", () => {});\nconsole.error("Open https://auth.example.test/device");\nconsole.error("User code: ABCD-EFGH");\nsetInterval(() => {}, 1000);\nawait new Promise(() => {});\n',
     );
     const fakeCommand = nodeCodex(fakeCodex);
     const client = new TestClient(

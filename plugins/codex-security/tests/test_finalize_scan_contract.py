@@ -1202,7 +1202,7 @@ The extraction root is not enforced.
             parent_alias.symlink_to(self.scan_dir.parent, target_is_directory=True)
 
             for alias in (direct_alias, parent_alias / self.scan_dir.name):
-                with self.subTest(alias=alias):
+                with self.subTest(alias=str(alias)):
                     output.write_bytes(protected_contents)
                     result = subprocess.run(
                         [
@@ -2559,7 +2559,7 @@ The extraction root is not enforced.
 
     def test_recovery_rejects_malformed_severity_change_condition_lists(self) -> None:
         for change_conditions in ([], ["  "], ["Valid condition.", 1], ["\ud800"]):
-            with self.subTest(change_conditions=change_conditions):
+            with self.subTest(change_conditions=repr(change_conditions)):
                 self.findings["findings"][0]["severity"]["changeConditions"] = change_conditions
                 self.write_scan()
                 warnings: list[str] = []

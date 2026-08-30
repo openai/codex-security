@@ -52,9 +52,14 @@ findings service, use the same scanner image with the
 
 ## Findings service (preview)
 
+Run `codex-security serve` to start the service without Docker. See
+[running without Docker](sdk/typescript/README.md#running-without-docker)
+for prerequisites, credentials, and storage configuration.
+
 The [findings service](sdk/typescript/README.md#findings-service-preview) runs
-from the separate `ghcr.io/openai/codex-security-findings` image (or a local
-source build), stores findings and embeddings in SQLite, and lists
+from the same `ghcr.io/openai/codex-security` image as the scanner (or a local
+source build), with a separate container and state volume configured by
+`compose.findings.yaml`. It stores findings and embeddings in SQLite and lists
 findings with pagination. Its read-only dashboard at `/dashboard` refreshes every
 five seconds and shows stored findings and duplicate groups from the service's
 database. It also returns potential duplicates by embedding similarity within a

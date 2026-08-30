@@ -31,9 +31,22 @@ const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
+    temporaryDirectories.splice(0).map(async (path) => {
+      // Bun 1.3.13 ignores fs.rm's retry options.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await rm(path, { recursive: true, force: true });
+          return;
+        } catch (error) {
+          if (
+            (error as NodeJS.ErrnoException).code !== "EBUSY" ||
+            attempt === 10
+          )
+            throw error;
+          await Bun.sleep(100 * (attempt + 1));
+        }
+      }
+    }),
   );
 });
 

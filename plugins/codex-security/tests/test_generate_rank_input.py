@@ -227,6 +227,7 @@ def test_make_repo_rank_input_preserves_legacy_tilde_scope(
     (repo / "src").mkdir(parents=True)
     (repo / "src" / "runtime.py").write_text("runtime = True", encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     output = tmp_path / "rank_input.jsonl"
 
     run_cli(

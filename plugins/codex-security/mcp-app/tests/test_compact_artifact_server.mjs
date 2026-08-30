@@ -14,10 +14,9 @@ const applicationRoot = path.resolve(
   ".."
 );
 const pluginRoot = path.resolve(applicationRoot, "..");
-const bundledPluginRoot = path.resolve(
-  applicationRoot,
-  "../../../sdk/typescript/_bundled_plugin"
-);
+const bundledPluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
+  ? path.resolve(process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT)
+  : path.resolve(applicationRoot, "../../../sdk/typescript/_bundled_plugin");
 const temporaryRoot = await mkdtemp(path.join(tmpdir(), "codex-security-artifact-mcp-"));
 
 try {
