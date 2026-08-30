@@ -276,7 +276,17 @@ describe("TypeScript candidate normalizer prototype", () => {
       ).toBe(true);
     }
 
-    for (const args of [["--in"], ["--allow-missing-in-scope=true"]]) {
+    for (const args of [
+      ["--in"],
+      ["--allow-missing-in-scope=true"],
+      [
+        `--input=${input}`,
+        input,
+        `--out=${join(root, "unbound-input.jsonl")}`,
+        `--repo-root=${repository}`,
+        `--in-scope-files=${inventory}`,
+      ],
+    ]) {
       expect(runPython(args).status).toBe(2);
       expect(runTypeScript(args).status).toBe(2);
     }

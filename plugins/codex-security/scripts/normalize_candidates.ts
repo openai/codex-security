@@ -695,6 +695,7 @@ function parseArguments(argv: string[]): CliArguments | undefined {
       const values: string[] =
         attachedValue === undefined ? [] : [attachedValue];
       while (
+        attachedValue === undefined &&
         argv[index + 1] !== undefined &&
         isArgumentValue(argv[index + 1]!)
       ) {
