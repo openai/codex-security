@@ -180,25 +180,25 @@ describe("CLI authentication", () => {
         `Effective scan authentication: API key from ${expectedSource}.`,
       );
       expect(stderr.text()).toContain(
-        "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.",
+        "To use a ChatGPT sign-in, remove OPENAI_API_KEY and CODEX_API_KEY from the environment.",
       );
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
   });
 
   test("explains interactive choice and how to unset every shadowing key after ChatGPT login", async () => {
-    for (const [argv, environment, source, unsetCommand] of [
+    for (const [argv, environment, source, removalGuidance] of [
       [
         ["login"],
         { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY",
+        "remove OPENAI_API_KEY from the environment",
       ],
       [
         ["login", "--device-auth"],
         { Codex_Api_Key: "sk-proj-SYNTHETIC_SECRET_456" },
         "CODEX_API_KEY",
-        "unset Codex_Api_Key",
+        "remove Codex_Api_Key from the environment",
       ],
       [
         ["login"],
@@ -207,7 +207,7 @@ describe("CLI authentication", () => {
           CODEX_API_KEY: "sk-proj-SYNTHETIC_SECRET_456",
         },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY CODEX_API_KEY",
+        "remove OPENAI_API_KEY and CODEX_API_KEY from the environment",
       ],
     ] as const) {
       const stdout = capture();
@@ -229,22 +229,23 @@ describe("CLI authentication", () => {
         `noninteractive scans will use ${source}.`,
       );
       expect(stderr.text()).toContain("--auth chatgpt");
-      expect(stderr.text()).toContain(`'${unsetCommand}'`);
+      expect(stderr.text()).toContain(removalGuidance);
+      expect(stderr.text()).not.toContain("unset ");
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
   });
 
   test("warns when an environment API key overrides a successful access-token login", async () => {
-    for (const [environment, source, unsetCommand] of [
+    for (const [environment, source, removalGuidance] of [
       [
         { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY",
+        "remove OPENAI_API_KEY from the environment",
       ],
       [
         { Codex_Api_Key: "sk-proj-SYNTHETIC_SECRET_456" },
         "CODEX_API_KEY",
-        "unset Codex_Api_Key",
+        "remove Codex_Api_Key from the environment",
       ],
       [
         {
@@ -252,7 +253,7 @@ describe("CLI authentication", () => {
           CODEX_API_KEY: "sk-proj-SYNTHETIC_SECRET_456",
         },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY CODEX_API_KEY",
+        "remove OPENAI_API_KEY and CODEX_API_KEY from the environment",
       ],
     ] as const) {
       const stdout = capture();
@@ -271,9 +272,9 @@ describe("CLI authentication", () => {
         `Access-token login succeeded, but noninteractive scans will use ${source}.`,
       );
       expect(stderr.text()).toContain(
-        "To use your stored credentials, pass '--auth chatgpt' or run ",
+        `To use your stored credentials, pass '--auth chatgpt' or ${removalGuidance}.`,
       );
-      expect(stderr.text()).toContain(`'${unsetCommand}'`);
+      expect(stderr.text()).not.toContain("unset ");
       expect(stderr.text()).not.toContain("ChatGPT login succeeded");
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
