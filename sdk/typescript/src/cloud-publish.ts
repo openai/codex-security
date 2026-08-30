@@ -455,6 +455,7 @@ async function publishCloudPayload(
       signal,
     });
   } catch {
+    dependencies.signal?.throwIfAborted();
     // A lost response does not establish whether the server accepted the POST.
     throw new CodexSecurityError(
       "Cloud publication was not confirmed. The request was not retried; check whether it was accepted before submitting again.",
@@ -475,7 +476,10 @@ async function publishCloudPayload(
     );
   }
   const receipt = receiptSchema.safeParse(
-    await response.json().catch(() => undefined),
+    await response.json().catch(() => {
+      dependencies.signal?.throwIfAborted();
+      return undefined;
+    }),
   );
   // Cloud assigns opaque IDs in request order, so they cannot be compared to
   // local finding IDs. The authenticated response must still preserve the

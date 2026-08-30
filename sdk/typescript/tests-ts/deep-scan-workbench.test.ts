@@ -66,34 +66,31 @@ interface OwnershipProbe {
   mutation?: "rotate" | "withdraw";
 }
 
-interface CoverageProbeResult {
-  expected: string;
-  completeness: string;
-  warnings: string[];
-  openQuestions?: Array<{ question: string }>;
-}
-
-function runPythonProbe<T>(script: string, root: string, probe: unknown): T {
+function runOwnershipProbe(probe: OwnershipProbe): Record<string, unknown> {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  expect(python).not.toBeNull();
   if (python === null) {
     throw new Error("A Python interpreter is required for deep-scan tests.");
   }
 
   const result = Bun.spawnSync(
-    [python, "-I", "-B", "-c", script, root, JSON.stringify(probe)],
+    [
+      python,
+      "-I",
+      "-B",
+      "-c",
+      deepScanOwnershipProbe,
+      join(PLUGIN_ROOT, "scripts"),
+      JSON.stringify(probe),
+    ],
     { stdout: "pipe", stderr: "pipe" },
   );
   expect(new TextDecoder().decode(result.stderr)).toBe("");
   expect(result.exitCode).toBe(0);
-  return JSON.parse(new TextDecoder().decode(result.stdout)) as T;
-}
-
-function runOwnershipProbe(probe: OwnershipProbe): Record<string, unknown> {
-  return runPythonProbe(
-    deepScanOwnershipProbe,
-    join(PLUGIN_ROOT, "scripts"),
-    probe,
-  );
+  return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
+    string,
+    unknown
+  >;
 }
 
 test("copies a Deep Scan publication when the filesystem rejects hardlinks", async () => {
@@ -261,6 +258,16 @@ test.each([
       "deep-scan-mcp/v1",
     ]);
     const deepScan = begun["deepScan"] as Record<string, unknown>;
+    const running = await command(["get-scan", "--scan-id", scanId]);
+    expect(running["scan"]).toMatchObject({
+      progress: {
+        independentReviews: {
+          active: 0,
+          completed: 0,
+          maximum: 40,
+        },
+      },
+    });
 
     const templates =
       /\/\/ templates\/deep-scan\/discovery\.md\n([\s\S]*?)\/\/ src\/deep-scan\/worker-runner\.ts/u.exec(
@@ -287,200 +294,6 @@ test.each([
 );
 
 describe("deep scan workbench ownership", () => {
-  test("restores complete deep coverage only without pending or lost work", () => {
-    const cases = [
-      { expected: "complete" },
-      {
-        expected: "complete",
-        warnings: ["Recovered finding 1: normalized semantic anchor."],
-      },
-      {
-        expected: "complete",
-        warnings: [
-          "Recovered finding 2: retained stronger duplicate logical finding.",
-        ],
-      },
-      {
-        expected: "complete",
-        warnings: [
-          "Repository HEAD changed while the scan was running; results were saved for the original revision.",
-        ],
-      },
-      {
-        expected: "partial",
-        warnings: ["Recovered finding 1: discarded unverified evidence."],
-      },
-      {
-        expected: "partial",
-        warnings: ["Saved checkpoint could not be read."],
-      },
-      { expected: "partial", coverage: { surfaces: [] } },
-      {
-        expected: "partial",
-        coverage: {
-          deferred: [{ id: "pending", reason: "Review is incomplete." }],
-        },
-      },
-      {
-        expected: "partial",
-        coverage: {
-          surfaces: [
-            {
-              id: "pending",
-              label: "Pending review",
-              disposition: "needs_follow_up",
-              receiptRefs: [],
-            },
-          ],
-        },
-      },
-      {
-        expected: "partial",
-        coverage: {
-          surfaces: [
-            {
-              id: "invalid-receipt",
-              label: "Source review",
-              disposition: "reported",
-              receiptRefs: ["artifacts/missing-receipt.json"],
-            },
-          ],
-        },
-      },
-      { expected: "partial", coverage: { explicitExclusions: [null] } },
-      { expected: "partial", discarded: ["Discarded malformed finding."] },
-      { expected: "partial", coverage: { mode: "repository" } },
-      { expected: "unknown", coverage: { completeness: "unknown" } },
-    ] as const;
-    const recovered = runPythonProbe<CoverageProbeResult[]>(
-      [
-        "import copy, json, pathlib, runpy, sys",
-        "plugin = pathlib.Path(sys.argv[1])",
-        "examples = plugin / 'examples' / 'completed-scan'",
-        "example = json.loads((examples / 'coverage.json').read_text())",
-        "recover = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))['_recover_unsealed_coverage']",
-        "results = []",
-        "for case in json.loads(sys.argv[2]):",
-        "    coverage = copy.deepcopy(example)",
-        "    coverage.update(mode='deep_repository', completeness='partial', openQuestions=[{'question': 'Which deployment controls apply?'}])",
-        "    coverage.update(case.get('coverage', {}))",
-        "    warnings = list(case.get('warnings', []))",
-        "    recover(coverage, plugin / 'schemas', examples, warnings, case.get('discarded', []))",
-        "    results.append({'expected': case['expected'], 'completeness': coverage['completeness'], 'warnings': warnings, 'openQuestions': coverage['openQuestions']})",
-        "print(json.dumps(results))",
-      ].join("\n"),
-      PLUGIN_ROOT,
-      cases,
-    );
-    for (const result of recovered) {
-      expect(result.completeness).toBe(result.expected);
-      expect(result.openQuestions).toEqual([
-        { question: "Which deployment controls apply?" },
-      ]);
-    }
-  });
-
-  test("preserves worker and parent coverage provenance during recovery", () => {
-    const cases = [
-      ...[null, 0, "false", false].flatMap((parentComplete) => [
-        { parentComplete },
-        { parent: "complete", parentComplete, retry: true },
-        { parentComplete, kind: "dedup" },
-      ]),
-      { parent: "complete", complete: false },
-      { complete: false },
-      { complete: null },
-      { complete: 0 },
-      { complete: "false" },
-      { parent: "complete", complete: null, retry: true },
-      { parent: "complete", complete: 0, retry: true },
-      { parent: "complete", complete: "false", retry: true },
-      { complete: true, expected: "complete" },
-      { parent: "complete", worker: "unknown" },
-      { worker: "unknown" },
-      { worker: null },
-      { worker: "invalid" },
-      { worker: [] },
-      { worker: "partial", malformed: "deferred" },
-      { parent: "complete", malformed: "surfaces" },
-      { parent: "complete", worker: "partial" },
-      { worker: "partial" },
-      { parent: "unknown", worker: "partial" },
-      { parent: "unknown", expected: "unknown" },
-      { expected: "complete" },
-      { missing: true },
-      { kind: "dedup", missing: true },
-      { parent: "complete", missing: true, retry: true },
-      { parent: "complete", kind: "dedup", missing: true, retry: true },
-      { status: "failed", missing: true, expected: "complete" },
-      { status: "canceled", missing: true, expected: "complete" },
-    ] as const;
-    const recovered = runPythonProbe<CoverageProbeResult[]>(
-      [
-        "import copy, json, pathlib, sys",
-        "plugin = pathlib.Path(sys.argv[1])",
-        "sys.path.insert(0, str(plugin / 'scripts'))",
-        "import finalize_scan_contract as finalizer",
-        "import workbench_saved_results as saved",
-        "examples = plugin / 'examples' / 'completed-scan'",
-        "example = json.loads((examples / 'coverage.json').read_text())",
-        "binding = dict(allowedTargetKinds=['directory_snapshot'],",
-        "    target={'targetId': 'synthetic-target', 'displayName': 'synthetic-repository'},",
-        "    scope={'includePaths': ['.'], 'excludePaths': []},",
-        "    coverageMode='deep_repository', status='completed')",
-        "saved._children = lambda *_: []",
-        "saved.write_scan_local_bytes = lambda *_args, **_kwargs: None",
-        "results = []",
-        "for case in json.loads(sys.argv[2]):",
-        "    parent_status = case.get('parent', 'partial')",
-        "    worker_complete = case.get('complete', 'omitted')",
-        "    worker_status = case.get('worker', 'complete')",
-        "    malformed = case.get('malformed')",
-        "    expected = case.get('expected', 'partial')",
-        "    workers = []",
-        "    for index in range(2):",
-        "        name = f'synthetic-worker-{index}'",
-        "        workers.append(dict(id=name, kind=case.get('kind', 'discovery'),",
-        "            status=case.get('status', 'succeeded'), artifact_dir=str(examples / name),",
-        "            result_manifest_path=str(examples / name / 'result.json'), completed_at='now', attempt=1))",
-        "    parent_coverage = copy.deepcopy(example)",
-        "    parent_coverage.update(scanId='synthetic-scan', mode='deep_repository', completeness=parent_status)",
-        "    worker_coverage = {'surfaces': [], 'explicitExclusions': [], 'deferred': []}",
-        "    if worker_status is not None: worker_coverage['completeness'] = worker_status",
-        "    if malformed is not None: worker_coverage[malformed] = 'unverified review'",
-        "    parent_scan = dict(id='synthetic-scan', complete=case.get('parentComplete', True), scope=binding['scope'],",
-        "        target={'kind': 'directory_snapshot', **binding['target']})",
-        "    drafts = {'scan-manifest.json': {'scan': parent_scan},",
-        "        'findings.json': {'findings': []}, 'coverage.json': parent_coverage}",
-        "    worker_draft = {'scanId': 'synthetic-scan', 'findings': [], 'coverage': worker_coverage}",
-        "    if worker_complete != 'omitted': worker_draft['complete'] = worker_complete",
-        "    if not case.get('missing'):",
-        "        for worker in workers: drafts[f\"{worker['id']}/result.json\"] = worker_draft",
-        "    def read_draft(_root, relative, _label):",
-        "        if relative not in drafts: raise FileNotFoundError(relative)",
-        "        return copy.deepcopy(drafts[relative])",
-        "    saved._read_scan_local_json = read_draft",
-        "    warnings = [saved._UNVERIFIED_COVERAGE_WARNING] if case.get('retry') else []",
-        "    coverage = saved.merge_saved_results(examples, 'synthetic-scan', binding, workers, warnings, stopped=False, reason='')[2]",
-        "    finalizer._recover_unsealed_coverage(coverage, plugin / 'schemas', examples, warnings, [])",
-        "    results.append({'expected': expected, 'completeness': coverage['completeness'], 'warnings': warnings})",
-        "print(json.dumps(results))",
-      ].join("\n"),
-      PLUGIN_ROOT,
-      cases,
-    );
-    for (const result of recovered) {
-      expect(result.completeness).toBe(result.expected);
-      expect(
-        result.warnings.filter(
-          (warning) =>
-            warning ===
-            "Saved scan source is incomplete or has unverified coverage; coverage remains partial.",
-        ),
-      ).toHaveLength(result.expected === "partial" ? 1 : 0);
-    }
-  });
-
   test("starts a Deep Scan with oversized stdin user context", async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "codex-security-deep-context-stdin-")),

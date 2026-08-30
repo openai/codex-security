@@ -601,7 +601,7 @@ test("retains earlier confirmed matches if later matching fails", async () => {
 });
 
 test.each([0, 1])(
-  "skips matching with %s populated components",
+  "skips matching with %i populated components",
   async (populated) => {
     const paths = await fixture();
     let calls = 0;
@@ -909,7 +909,7 @@ test("CLI forwards scan settings and returns incomplete coverage", async () => {
 });
 
 test.each([false, true])(
-  "CLI reports matching completion (failure: %s)",
+  "CLI reports matching completion (failure: %j)",
   async (failMatching) => {
     const paths = await fixture();
     let calls = 0;
