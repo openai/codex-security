@@ -929,6 +929,8 @@ def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -
     )
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan_id,))
     write_completed_contract(scan_dir, scan_id, target)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     occurrence_id = completed["findings"][0]["occurrenceId"]
