@@ -195,11 +195,11 @@ try {
   );
   assert.ok(closing);
   await closing;
+  await assert.rejects(stat(codexHome), { code: "ENOENT" });
   assert.equal((await savedScan(2)).progress.status, "failed");
   assert.equal(finished.has(2), true);
   assert.equal(turns.length, 3);
   await assert.rejects(client.run(repository), /CodexSecurity is closed/u);
-  await assert.rejects(stat(codexHome), { code: "ENOENT" });
   assert.equal(
     (await stat(join(completed.scanDir, "report.md"))).isFile(),
     true,
