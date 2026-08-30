@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import type { ComponentReceipt } from "../src/component-scan.js";
 import { ScanDashboard } from "../src/scan-dashboard.js";
@@ -1106,7 +1107,7 @@ describe("live scan dashboard", () => {
   test("renders compact clickable local Markdown links without repeating timestamps", () => {
     const stderr = capture(true);
     const target =
-      "/private/tmp/codex security/scans/promptfoo-cloud/artifacts/02_discovery/raw_candidates_02.jsonl";
+      "/synthetic/codex security/scans/example/artifacts/02_discovery/raw_candidates_02.jsonl";
     const dashboard = new ScanDashboard(
       { ...stderr.stream, columns: 55, rows: 18 },
       { repository: "/code/juice-shop", clock: fakeClock() },
@@ -1124,10 +1125,10 @@ describe("live scan dashboard", () => {
 
     const frame = lastFrame(stderr);
     expect(frame).toContain("raw_candidates_02.jsonl");
-    expect(frame).not.toContain("/private/tmp/");
+    expect(frame).not.toContain("/synthetic/");
     expect(frame.match(/\[09:41:00\]/gu)).toHaveLength(1);
     expect(stderr.text()).toContain(
-      `\u001B]8;;file:///private/tmp/codex%20security/scans/promptfoo-cloud/artifacts/02_discovery/raw_candidates_02.jsonl\u0007raw_candidates_02.jsonl\u001B]8;;\u0007`,
+      `\u001B]8;;${pathToFileURL(target).href}\u0007raw_candidates_02.jsonl\u001B]8;;\u0007`,
     );
     dashboard.stop();
   });
@@ -1195,9 +1196,11 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("`db.raw(  input  )`");
     expect(stderr.text()).toContain("\u001B[2mdb.raw(  input  )\u001B[22m");
     expect(stderr.text()).toContain(
-      "\u001B]8;;file:///tmp/report.md\u0007report\u001B]8;;\u0007",
+      `\u001B]8;;${pathToFileURL("/tmp/report.md").href}\u0007report\u001B]8;;\u0007`,
     );
-    expect(stderr.text()).not.toContain("\u001B]8;;file:///tmp/example.md");
+    expect(stderr.text()).not.toContain(
+      `\u001B]8;;${pathToFileURL("/tmp/example.md").href}`,
+    );
 
     dashboard.record({
       id: "command-inline-code",

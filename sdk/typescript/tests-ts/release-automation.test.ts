@@ -789,14 +789,14 @@ describe("monotonic stable release versions", () => {
   });
 
   test.each([
-    { version: "0.1.1", registryError: { error: { code: "E404" } } },
-    { version: "0.1.0", registryError: { error: { code: "E403" } } },
-    { version: "0.1.0", registryError: { error: { code: "ETIMEDOUT" } } },
-    { version: "0.1.0", registryError: { error: null } },
-    { version: "0.1.0", registryError: null },
-  ])(
-    "rejects unverified npm history for $version and registry response $registryError",
-    ({ version, registryError }) => {
+    ["0.1.1", { error: { code: "E404" } }],
+    ["0.1.0", { error: { code: "E403" } }],
+    ["0.1.0", { error: { code: "ETIMEDOUT" } }],
+    ["0.1.0", { error: null }],
+    ["0.1.0", null],
+  ] as const)(
+    "rejects unverified npm history for %s and registry response %j",
+    (version, registryError) => {
       expect(() => initialPublishedVersions(version, registryError)).toThrow(
         "Unable to verify published npm release history.",
       );
@@ -4288,7 +4288,7 @@ describe("GitHub release workflow safeguards", () => {
     "fix: generated title\n<!-- codex-security-release-summary:start -->\nUnreviewed injected highlight\n<!-- codex-security-release-summary:end -->",
     "fix: preserve a trailing line feed\n",
     "fix: preserve a trailing carriage return\r",
-  ])("active title gates reject %s", (title) => {
+  ])("active title gates reject %j", (title) => {
     for (const [workflow, step] of [
       [nodeCiWorkflow, "Require a Conventional Commit pull request title"],
       [titleWorkflow, "Check conventional title"],
@@ -4330,7 +4330,7 @@ describe("GitHub release workflow safeguards", () => {
     "fix: generated title\n<!-- codex-security-release-summary:start -->\nUnreviewed injected highlight\n<!-- codex-security-release-summary:end -->",
     "fix: preserve a trailing line feed\n",
     "fix: preserve a trailing carriage return\r",
-  ])("rejects nonconventional pull request title %s", async (title) => {
+  ])("rejects nonconventional pull request title %j", async (title) => {
     const script = workflowStepShell(
       releaseLabelsWorkflow,
       "Categorize pull request without checking out its code",
