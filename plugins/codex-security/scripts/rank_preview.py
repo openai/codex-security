@@ -11,6 +11,7 @@ from pathlib import Path
 DEFAULT_PREVIEW_BYTES = 1024
 PREVIEW_HEAD_LINES = 12
 PREVIEW_SAMPLE_LINES = 10
+_UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 
 TEXT_CODE_EXTENSIONS = {
     ".c",
@@ -81,7 +82,14 @@ RUST_LIFETIME_RE = re.compile(r"'[A-Za-z_][A-Za-z0-9_]*")
 PHP_HEREDOC_RE = re.compile(r"<<<\s*['\"]?([A-Za-z_]\w*)['\"]?")
 
 
+def _decode_source(data: bytes) -> str:
+    encoding = "utf-16" if data.startswith(_UTF16_BOMS) else "utf-8"
+    return data.decode(encoding, errors="ignore")
+
+
 def is_binary_sample(data: bytes) -> bool:
+    if data.startswith(_UTF16_BOMS):
+        return "\0" in _decode_source(data)
     return b"\0" in data
 
 
@@ -958,7 +966,7 @@ def preview_for(
 def preview_for_bytes(path: Path, data: bytes, preview_bytes: int) -> tuple[str, bool]:
     if is_binary_sample(data):
         return "", True
-    text = data.decode("utf-8", errors="ignore")
+    text = _decode_source(data)
     outline = structural_outline(path, text)
     preview_lines = select_preview_lines(outline or text.splitlines())
     return fit_preview_lines(preview_lines, preview_bytes), False

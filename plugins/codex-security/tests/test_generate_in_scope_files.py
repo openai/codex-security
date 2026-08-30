@@ -439,6 +439,41 @@ def test_revision_inventory_checks_the_selected_revision_not_the_worktree(tmp_pa
     assert output.read_text(encoding="utf-8").splitlines() == ["app/routes.py"]
 
 
+@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
+def test_diff_inventory_includes_bom_marked_utf16_text(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    source = "Write-Output 'café'\n"
+    write_file(repository, "app/utf16-le.ps1", b"\xff\xfe" + source.encode("utf-16-le"))
+    write_file(repository, "app/utf16-be.ps1", b"\xfe\xff" + source.encode("utf-16-be"))
+    write_file(repository, "app/utf8.ps1", source.encode("utf-8"))
+    write_file(repository, "app/binary.ps1", b"text\0binary")
+    write_file(
+        repository,
+        "app/decoded-nul.ps1",
+        b"\xff\xfe" + "text\0binary".encode("utf-16-le"),
+    )
+    write_file(repository, "tests/excluded.ps1", b"\xff\xfe" + source.encode("utf-16-le"))
+
+    arguments = ["--diff-base", base, "--diff-mode", mode]
+    if mode == "revisions":
+        git(repository, "add", ".")
+        git(repository, "commit", "-qm", "add encoded source")
+        arguments.extend(["--diff-head", git(repository, "rev-parse", "HEAD")])
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output, arguments=arguments)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "app/utf16-be.ps1",
+        "app/utf16-le.ps1",
+        "app/utf8.ps1",
+    ]
+
+
 def test_invalid_diff_revision_preserves_previous_inventory(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     output = tmp_path / "in_scope_files.txt"

@@ -817,6 +817,49 @@ def test_make_diff_rank_input_combines_staged_and_unstaged_patch(tmp_path: Path)
     assert [row["path"] for row in read_jsonl(output)] == ["src/alpha.py", "src/beta.py"]
 
 
+@pytest.mark.parametrize("mode", ["repo", "explicit-file", "revisions", "local-patch"])
+def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    source_dir = repo / "src"
+    source_dir.mkdir(parents=True)
+    initialize_repo(repo)
+    git(repo, "commit", "--allow-empty", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    source = "Write-Output 'café 😀'\n"
+    (source_dir / "utf16-le.ps1").write_bytes(b"\xff\xfe" + source.encode("utf-16-le"))
+    (source_dir / "utf16-be.ps1").write_bytes(b"\xfe\xff" + source.encode("utf-16-be"))
+    (source_dir / "utf8.ps1").write_bytes(source.encode("utf-8"))
+    (source_dir / "binary.ps1").write_bytes(b"text\0binary")
+    (source_dir / "decoded-nul.ps1").write_bytes(b"\xff\xfe" + "text\0binary".encode("utf-16-le"))
+    output = tmp_path / "rank_input.jsonl"
+    expected = {
+        "src/utf16-be.ps1": source.strip(),
+        "src/utf16-le.ps1": source.strip(),
+        "src/utf8.ps1": source.strip(),
+    }
+
+    if mode in {"repo", "explicit-file"}:
+        arguments = ["make-repo-rank-input", "--repo", str(repo)]
+        if mode == "explicit-file":
+            expected.update({"src/binary.ps1": "", "src/decoded-nul.ps1": ""})
+            scopes = tmp_path / "target-paths.json"
+            scopes.write_text(json.dumps(list(expected)), encoding="utf-8")
+            arguments.extend(["--scopes-file", str(scopes)])
+        else:
+            arguments.extend(["--scope", "src"])
+    else:
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
+        if mode == "revisions":
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "add encoded source")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    assert {row["path"]: row["preview"] for row in read_jsonl(output)} == expected
+
+
 def test_copy_and_select_deep_review_inputs(tmp_path: Path) -> None:
     rank_input = tmp_path / "rank_input.jsonl"
     write_jsonl(

@@ -8,7 +8,85 @@ import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
-from rank_preview import DEFAULT_PREVIEW_BYTES, preview_for
+from rank_preview import DEFAULT_PREVIEW_BYTES, preview_for, preview_for_bytes
+
+
+@pytest.fixture(
+    params=[("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")],
+    ids=["utf16-le", "utf16-be"],
+)
+def utf16_encoding(request: pytest.FixtureRequest) -> tuple[str, bytes]:
+    return request.param
+
+
+def test_preview_for_decodes_bom_marked_utf16(
+    tmp_path: Path, utf16_encoding: tuple[str, bytes]
+) -> None:
+    encoding, bom = utf16_encoding
+    source = "Write-Output 'café 😀'\n"
+    path = tmp_path / "source.ps1"
+    data = bom + source.encode(encoding)
+    path.write_bytes(data)
+    expected = (source.strip(), False)
+
+    assert preview_for(path, DEFAULT_PREVIEW_BYTES) == expected
+    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == expected
+    assert preview_for_bytes(path, source.encode("utf-8"), DEFAULT_PREVIEW_BYTES) == expected
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"header\0payload",
+        b"\xff\xfe" + "text\0binary".encode("utf-16-le"),
+        b"\xfe\xff" + "text\0binary".encode("utf-16-be"),
+        "unmarked utf16".encode("utf-16-le"),
+    ],
+    ids=["generic-binary", "utf16-le-nul", "utf16-be-nul", "no-bom"],
+)
+def test_preview_for_rejects_binary_source_bytes(tmp_path: Path, data: bytes) -> None:
+    path = tmp_path / "source.ps1"
+    path.write_bytes(data)
+
+    assert preview_for(path, DEFAULT_PREVIEW_BYTES) == ("", True)
+    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == ("", True)
+
+
+def test_preview_for_handles_utf16_surrogate_at_sample_boundary(
+    tmp_path: Path, utf16_encoding: tuple[str, bytes]
+) -> None:
+    encoding, bom = utf16_encoding
+    source = "a" * 2046 + "😀\nWrite-Output 'done'\n"
+    path = tmp_path / "source.ps1"
+    data = bom + source.encode(encoding)
+    path.write_bytes(data)
+
+    assert preview_for(path, 8192) == (source.strip(), False)
+    assert preview_for_bytes(path, data, 8192) == (source.strip(), False)
+
+
+def test_preview_for_bounds_utf16_source_at_incomplete_character(
+    tmp_path: Path, utf16_encoding: tuple[str, bytes]
+) -> None:
+    encoding, bom = utf16_encoding
+    source = "a" * 32766 + "😀\nWrite-Output 'outside preview'\n"
+    path = tmp_path / "source.ps1"
+    path.write_bytes(bom + source.encode(encoding))
+
+    assert preview_for(path, 128, max_read_bytes=64 * 1024) == ("a" * 128, False)
+
+
+def test_preview_for_ignores_incomplete_utf16_tail(
+    tmp_path: Path, utf16_encoding: tuple[str, bytes]
+) -> None:
+    encoding, bom = utf16_encoding
+    source = "Write-Output 'café'"
+    path = tmp_path / "source.ps1"
+    data = bom + source.encode(encoding) + b"\0"
+    path.write_bytes(data)
+
+    assert preview_for(path, DEFAULT_PREVIEW_BYTES) == (source, False)
+    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == (source, False)
 
 
 def test_preview_for_does_not_fully_read_a_large_binary(tmp_path: Path) -> None:
