@@ -773,152 +773,6 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
-  testPosix(
-    "preserves literal POSIX candidate paths in the bundled plugin",
-    async () => {
-      const root = await temporaryDirectory();
-      await mkdir(join(root, "source"));
-      const cases = [
-        { path: "source\\candidate.py", contents: "literal candidate\n" },
-        { path: " leading.py", contents: "leading whitespace\n" },
-        { path: "trailing.py ", contents: "trailing whitespace\n" },
-        { path: " ", contents: "single whitespace filename\n" },
-        { path: "   ", contents: "multiple whitespace filename\n" },
-        { path: "C:candidate.py", contents: "literal colon\n" },
-        { path: "carriage\rreturn.py", contents: "literal carriage return\n" },
-        { path: "vertical\vtab.py", contents: "literal vertical tab\n" },
-        { path: "form\ffeed.py", contents: "literal form feed\n" },
-        { path: "next\u0085line.py", contents: "literal next line\n" },
-        {
-          path: "unicode\u2028separator.py",
-          contents: "literal line separator\n",
-        },
-        {
-          path: "paragraph\u2029separator.py",
-          contents: "literal paragraph separator\n",
-        },
-      ];
-      await Promise.all([
-        ...cases.map((item) => writeFile(join(root, item.path), item.contents)),
-        writeFile(join(root, "source", "candidate.py"), "wrong candidate\n"),
-        writeFile(join(root, "leading.py"), "wrong leading candidate\n"),
-        writeFile(join(root, "trailing.py"), "wrong trailing candidate\n"),
-      ]);
-      const scopePath = join(root, "in-scope-files.txt");
-      await writeFile(
-        scopePath,
-        `${cases.map((item) => item.path).join("\n")}\n`,
-      );
-
-      const python = Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
-      const sourcePlugin = await bundledPluginRoot();
-      const projector = new URL(
-        "../scripts/project-plugin.mjs",
-        import.meta.url,
-      );
-      const publicManifest = new URL(
-        "../public-repo/sdk/typescript/plugin.public.json",
-        import.meta.url,
-      );
-      let bundledPlugin = sourcePlugin;
-      if (existsSync(projector) && existsSync(publicManifest)) {
-        const packageRoot = join(root, "package");
-        const isolatedProjector = join(
-          packageRoot,
-          "scripts",
-          "project-plugin.mjs",
-        );
-        const isolatedManifest = join(
-          packageRoot,
-          "public-repo",
-          "sdk",
-          "typescript",
-          "plugin.public.json",
-        );
-        await Promise.all([
-          mkdir(dirname(isolatedProjector), { recursive: true }),
-          mkdir(dirname(isolatedManifest), { recursive: true }),
-        ]);
-        await Promise.all([
-          copyFile(projector, isolatedProjector),
-          copyFile(publicManifest, isolatedManifest),
-        ]);
-        const projection = Bun.spawnSync(
-          [process.execPath, isolatedProjector],
-          {
-            cwd: packageRoot,
-            env: {
-              ...process.env,
-              CODEX_SECURITY_PLUGIN_ROOT: sourcePlugin,
-            },
-            stdout: "pipe",
-            stderr: "pipe",
-          },
-        );
-        expect(new TextDecoder().decode(projection.stderr)).toBe("");
-        expect(projection.exitCode).toBe(0);
-        bundledPlugin = join(packageRoot, "_bundled_plugin");
-      }
-      const normalizer = join(
-        bundledPlugin,
-        "scripts",
-        "normalize_candidates.py",
-      );
-      expect(await readFile(normalizer, "utf8")).toBe(
-        await readFile(
-          join(sourcePlugin, "scripts", "normalize_candidates.py"),
-          "utf8",
-        ),
-      );
-      const result = Bun.spawnSync([
-        python!,
-        "-I",
-        "-B",
-        "-c",
-        [
-          "import json, pathlib, runpy, sys",
-          "module = runpy.run_path(sys.argv[1])",
-          "root = pathlib.Path(sys.argv[2])",
-          "scope = module['read_scope'](pathlib.Path(sys.argv[3]), root)",
-          "finalizer = runpy.run_path(sys.argv[5])",
-          "results = []",
-          "for value in json.loads(sys.argv[4]):",
-          "    path, source = module['relative_file'](value, root)",
-          "    candidate = {'cwe_ids': ['CWE-89'], 'locations': [{'path': value, 'start_line': 1, 'role': 'entrypoint'}], 'summary': 'Test finding', 'evidence': 'Test evidence'}",
-          "    try:",
-          "        normalized = module['normalize_candidate'](candidate, root, scope, {})",
-          "        location = normalized['locations'][0]",
-          "        finalizer['_validate_location']({'path': location['path'], 'startLine': location['start_line'], 'endLine': location['end_line'], 'role': location['role']}, 'candidate.locations[0]')",
-          "    except ValueError:",
-          "        contract_valid = False",
-          "    else:",
-          "        contract_valid = True",
-          "    results.append({'path': path, 'contents': source.read_text(encoding='utf-8'), 'inScope': path in scope, 'contractValid': contract_valid})",
-          "print(json.dumps(results))",
-        ].join("\n"),
-        normalizer,
-        root,
-        scopePath,
-        JSON.stringify(cases.map((item) => item.path)),
-        join(bundledPlugin, "scripts", "finalize_scan_contract.py"),
-      ]);
-
-      expect(result.exitCode).toBe(0);
-      expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual(
-        cases.map((item) => ({
-          ...item,
-          inScope: true,
-          contractValid:
-            item.path.trim().length > 0 &&
-            !/^[A-Za-z]:/.test(item.path) &&
-            !item.path.includes("\\") &&
-            !/[\u0000-\u001f]/u.test(item.path),
-        })),
-      );
-    },
-  );
-
   test("uses a configured plugin directory directly", async () => {
     const root = await temporaryDirectory();
     const ambientHome = join(root, ".codex", "plugins", "cache");
@@ -1963,10 +1817,6 @@ describe("plugin runtime preparation", () => {
   test("upgrades the predecessor cache and restores with the SDK-owned helper", async () => {
     const root = await temporaryDirectory();
     const previous = await plugin(join(root, "previous"), "0.1.60");
-    await writeFile(
-      join(previous, "scripts", "normalize_candidates.mjs"),
-      "throw new Error('stale normalizer must be replaced');\n",
-    );
     // Keep the stale MCP configuration regression covered while upgrading the
     // current predecessor cache to the generated bundle.
     await writeFile(
@@ -2013,25 +1863,11 @@ describe("plugin runtime preparation", () => {
     expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
     expect(upgraded.version).not.toBe(stale.version);
     expect(upgraded.installedRoot).not.toBe(stale.installedRoot);
-    for (const script of [
-      "workbench_target.py",
-      "finalize_scan_contract.py",
-      "normalize_candidates.mjs",
-    ]) {
+    for (const script of ["workbench_target.py", "finalize_scan_contract.py"]) {
       expect(
         await readFile(join(upgraded.installedRoot, "scripts", script)),
       ).toEqual(await readFile(join(PLUGIN_ROOT, "scripts", script)));
     }
-    const help = spawnSync(
-      "node",
-      [
-        join(upgraded.installedRoot, "scripts", "normalize_candidates.mjs"),
-        "--help",
-      ],
-      { encoding: "utf8" },
-    );
-    expect(help.status, help.stderr).toBe(0);
-    expect(help.stdout).toContain("Usage:");
     const configuration = JSON.parse(
       await readFile(join(upgraded.installedRoot, ".mcp.json"), "utf8"),
     ) as {

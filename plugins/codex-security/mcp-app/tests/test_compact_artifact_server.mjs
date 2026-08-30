@@ -13,8 +13,7 @@ const applicationRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   ".."
 );
-const pluginRoot = path.resolve(applicationRoot, "..");
-const bundledPluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
+const pluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
   ? path.resolve(process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT)
   : path.resolve(applicationRoot, "../../../sdk/typescript/_bundled_plugin");
 const temporaryRoot = await mkdtemp(path.join(tmpdir(), "codex-security-artifact-mcp-"));
@@ -30,7 +29,7 @@ try {
   await testDiscoveryWorkerToolList(runtimeBundle);
   await testReducerWorkerToolList(runtimeBundle);
 
-  const shippedRuntime = path.join(bundledPluginRoot, "mcp", "server.mjs");
+  const shippedRuntime = path.join(pluginRoot, "mcp", "server.mjs");
   await testParentToolList(shippedRuntime);
   await testClaimedParentArtifactOperations(shippedRuntime, "shipped");
   await testSemanticScanDraftCompletion(shippedRuntime, "shipped");
@@ -1179,7 +1178,7 @@ async function bundleEntrypoint(entrypoint, outfile) {
   await build({
     bundle: true,
     define: {
-      __dirname: JSON.stringify(applicationRoot),
+      __dirname: JSON.stringify(path.join(pluginRoot, "mcp")),
       "import.meta.url": "__filename"
     },
     entryPoints: [path.join(applicationRoot, entrypoint)],

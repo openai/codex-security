@@ -51,7 +51,6 @@
     "scripts/launch_codex_security_mcp",
     "scripts/launch_codex_security_mcp.cmd",
     "scripts/normalize_candidates.mjs",
-    "scripts/normalize_candidates.py",
     "scripts/rank_preview.py",
     "scripts/report_projection.py",
     "scripts/resolve_security_md.py",

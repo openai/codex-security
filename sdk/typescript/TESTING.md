@@ -84,9 +84,9 @@ default to 100 cases; filesystem contract properties default to 20.
 
 ### TypeScript candidate normalizer
 
-The prototype lives in `plugins/codex-security/scripts/normalize_candidates.ts`.
+The normalizer lives in `plugins/codex-security/scripts/normalize_candidates.ts`.
 `build:plugin` compiles it into the ignored `_bundled_plugin` payload.
-Production callers still use the unchanged Python helper.
+The discovery tool and diff-scan workflow use the generated Node helper.
 
 ```sh
 pnpm run build:plugin
@@ -100,10 +100,9 @@ normal resolution rules. JSONL and scope files use LF or CRLF lines;
 and LF line endings, and atomic replacement replaces an output symlink rather
 than modifying its target.
 
-Candidate IDs use a fixed TypeScript object shape and may differ from the
-production helper. The tests cover normalization, deterministic output, scan
-boundaries, and atomic writes. Run them on Linux, macOS, and Windows before
-changing the production entrypoint.
+Candidate IDs use a fixed object shape. The tests cover normalization,
+deterministic output, scan boundaries, and atomic writes across Linux, macOS,
+and Windows.
 
 ## GitHub Actions
 
