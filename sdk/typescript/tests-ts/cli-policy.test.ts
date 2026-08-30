@@ -1569,11 +1569,11 @@ describe("policy CLI", () => {
       expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
       forced.push(signal);
     };
-    const originalCopyFile = fsPromises.copyFile;
+    const originalLink = fsPromises.link;
     mock.module("node:fs/promises", () => ({
       ...fsPromises,
-      copyFile: async (source: string, destination: string, mode?: number) => {
-        await originalCopyFile(source, destination, mode);
+      link: async (source: string, destination: string) => {
+        await originalLink(source, destination);
         if (destination !== draft.targetPath) return;
         signals.emit("SIGINT");
         signals.emit("SIGINT");
@@ -1598,7 +1598,7 @@ describe("policy CLI", () => {
     } finally {
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
-        copyFile: originalCopyFile,
+        link: originalLink,
       }));
     }
   });

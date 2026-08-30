@@ -2809,7 +2809,8 @@ export async function main(
     },
   })
     .command("policy", {
-      description: "Generate or review a source-backed SECURITY.md policy.",
+      description:
+        "Draft or review SECURITY.md guidance; write only after approval.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -2825,7 +2826,7 @@ export async function main(
           path: optionValue("--path")
             .optional()
             .describe(
-              "Generate SECURITY.md for this repository-relative component directory.",
+              "Select this repository-relative component for generation or saved-draft review.",
             ),
           knowledgeBase: z
             .array(optionValue("--knowledge-base"))
@@ -2841,7 +2842,7 @@ export async function main(
           apply: optionValue("--apply")
             .optional()
             .describe(
-              "Review a saved policy artifact directory without calling the model.",
+              "Load a saved draft without Codex; offer to write in a terminal.",
             ),
           write: z
             .boolean()
@@ -2917,8 +2918,11 @@ export async function main(
         },
       ],
       hint:
-        "Noninteractive review:\n" +
+        "Generate a draft with Codex:\n" +
         "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json\n" +
+        "Review a saved draft without writing:\n" +
+        "  codex-security policy . --apply /path/outside/repository/policy --headless\n" +
+        "Apply a reviewed saved draft:\n" +
         "  codex-security policy . --apply /path/outside/repository/policy --write",
       output: z
         .union([z.record(z.string(), z.unknown()), z.string()])

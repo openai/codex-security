@@ -740,35 +740,45 @@ describe("security policy review and application", () => {
     expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
   });
 
-  test("creates new policies as a distinct destination inode", async () => {
-    const name = "creates new policies as a distinct destination inode";
+  test("keeps an incomplete new policy private when publication fails", async () => {
+    const name =
+      "keeps an incomplete new policy private when publication fails";
     if (runTestInSubprocess(import.meta.path, name)) return;
     const f = await fixture();
     const draft = await f.generate();
-    const originalOpen = fsPromises.open;
-    let stagedIdentity: string | undefined;
+    const originalCopy = fsPromises.copyFile;
+    const originalLink = fsPromises.link;
+    const failure = Object.assign(new Error("synthetic publication failure"), {
+      code: "EIO",
+    });
     mock.module("node:fs/promises", () => ({
       ...fsPromises,
-      open: async (...args: Parameters<typeof originalOpen>) => {
-        const handle = await originalOpen(...args);
-        if (String(args[0]).startsWith(join(f.repository, ".SECURITY.md."))) {
-          const metadata = await handle.stat({ bigint: true });
-          stagedIdentity = `${metadata.dev}:${metadata.ino}`;
+      copyFile: async (...args: Parameters<typeof originalCopy>) => {
+        if (args[1] === draft.targetPath) {
+          await writeFile(draft.targetPath, "# Partial policy\n", {
+            flag: "wx",
+          });
+          throw failure;
         }
-        return handle;
+        return originalCopy(...args);
+      },
+      link: async (...args: Parameters<typeof originalLink>) => {
+        if (args[1] === draft.targetPath) throw failure;
+        return originalLink(...args);
       },
     }));
     try {
-      await applySecurityPolicy(draft);
-      const installed = await stat(draft.targetPath, { bigint: true });
-      expect(stagedIdentity).toBeDefined();
-      expect(`${installed.dev}:${installed.ino}`).not.toBe(stagedIdentity);
-      expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
-      expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
+      await expect(applySecurityPolicy(draft)).rejects.toThrow();
+      await expect(lstat(draft.targetPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(await readdir(f.repository)).toEqual([]);
+      expect(await readFile(draft.draftPath, "utf8")).toBe(POLICY);
     } finally {
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
-        open: originalOpen,
+        copyFile: originalCopy,
+        link: originalLink,
       }));
     }
   });
@@ -1162,53 +1172,117 @@ describe("security policy review and application", () => {
     }
   });
 
-  test("rechecks policy links after final permission verification", async () => {
-    const name = "rechecks policy links after final permission verification";
+  for (const change of ["alias", "inherited policy"] as const) {
+    const name = `rechecks ${change} changes after final permission verification`;
+    test(name, async () => {
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const f = await fixture();
+      const component = join(f.repository, "component");
+      const sibling = join(f.repository, "sibling");
+      await mkdir(component);
+      await mkdir(sibling);
+      const original = "# Existing component policy\n";
+      const target = join(component, "SECURITY.md");
+      const ancestor = join(f.repository, "SECURITY.md");
+      const alias = join(sibling, "SECURITY.md");
+      await writeFile(target, original);
+      await writeFile(ancestor, "# Existing inherited policy\n");
+      const draft = await f.generate({ path: "component" });
+      const applied = await applySecurityPolicy(draft);
+      const recovery = applied.recoveryPath!;
+      const originalStat = fsPromises.stat;
+      let changed = false;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        stat: async (...args: Parameters<typeof originalStat>) => {
+          const metadata = await originalStat(...args);
+          if (!changed && args[0] === recovery) {
+            changed = true;
+            if (change === "alias") await symlink(target, alias, "file");
+            else await writeFile(ancestor, "# Changed inherited policy\n");
+          }
+          return metadata;
+        },
+      }));
+      try {
+        const error = await applySecurityPolicy(draft).catch(
+          (value: unknown) => value,
+        );
+        expect(changed).toBe(true);
+        expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
+        expect((error as SecurityPolicyVerificationError).recoveryPath).toBe(
+          recovery,
+        );
+        expect(String((error as Error).cause)).toContain(
+          change === "alias"
+            ? "outside the selected component"
+            : "inherited SECURITY.md changed",
+        );
+        expect(await readFile(target, "utf8")).toBe(draft.content);
+        expect(await readFile(recovery, "utf8")).toBe(original);
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          stat: originalStat,
+        }));
+      }
+    });
+  }
+
+  test("reports an installed staging link and retains the original recovery path", async () => {
+    const name =
+      "reports an installed staging link and retains the original recovery path";
     if (runTestInSubprocess(import.meta.path, name)) return;
     const f = await fixture();
-    const component = join(f.repository, "component");
-    const sibling = join(f.repository, "sibling");
-    await mkdir(component);
-    await mkdir(sibling);
-    const original = "# Existing component policy\n";
-    const target = join(component, "SECURITY.md");
-    const alias = join(sibling, "SECURITY.md");
+    const original = "# Existing policy\n";
+    const target = join(f.repository, "SECURITY.md");
     await writeFile(target, original);
-    const draft = await f.generate({ path: "component" });
-    const applied = await applySecurityPolicy(draft);
-    const recovery = applied.recoveryPath!;
-    const originalStat = fsPromises.stat;
-    let createdAlias = false;
+    const draft = await f.generate();
+    const originalUnlink = fsPromises.unlink;
+    const originalRm = fsPromises.rm;
+    const isStaging = (path: unknown) =>
+      String(path).startsWith(join(f.repository, ".SECURITY.md.")) &&
+      String(path).endsWith(".tmp");
     mock.module("node:fs/promises", () => ({
       ...fsPromises,
-      stat: async (...args: Parameters<typeof originalStat>) => {
-        const metadata = await originalStat(...args);
-        if (!createdAlias && args[0] === recovery) {
-          createdAlias = true;
-          await symlink(target, alias, "file");
-        }
-        return metadata;
+      unlink: async (...args: Parameters<typeof originalUnlink>) => {
+        if (isStaging(args[0]))
+          throw Object.assign(
+            new Error("Cannot remove the installed staging link"),
+            { code: "EACCES" },
+          );
+        return originalUnlink(...args);
+      },
+      rm: async (...args: Parameters<typeof originalRm>) => {
+        if (isStaging(args[0]))
+          throw Object.assign(
+            new Error("Cannot remove the installed staging link"),
+            { code: "EACCES" },
+          );
+        return originalRm(...args);
       },
     }));
     try {
       const error = await applySecurityPolicy(draft).catch(
         (value: unknown) => value,
       );
-      expect(createdAlias).toBe(true);
       expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
-      expect((error as SecurityPolicyVerificationError).recoveryPath).toBe(
-        recovery,
-      );
-      expect(String((error as Error).cause)).toContain(
-        "outside the selected component",
-      );
+      const recovery = (error as SecurityPolicyVerificationError).recoveryPath;
+      expect(recovery).toBeDefined();
+      expect(await readFile(recovery!, "utf8")).toBe(original);
       expect(await readFile(target, "utf8")).toBe(draft.content);
-      expect(await readFile(recovery, "utf8")).toBe(original);
-      expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+      const staging = (await readdir(f.repository)).find((name) =>
+        name.endsWith(".tmp"),
+      )!;
+      expect(staging).toBeDefined();
+      const staged = await stat(join(f.repository, staging));
+      const installed = await stat(target);
+      expect([staged.dev, staged.ino]).toEqual([installed.dev, installed.ino]);
     } finally {
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
-        stat: originalStat,
+        unlink: originalUnlink,
+        rm: originalRm,
       }));
     }
   });
@@ -1252,43 +1326,36 @@ describe("security policy review and application", () => {
     }
   });
 
-  test("preserves policies across hard-link and copy failures", async () => {
-    const name = "preserves policies across hard-link and copy failures";
+  test("publishes complete policies without overwriting concurrent saves when hard links are unsupported", async () => {
+    const name =
+      "publishes complete policies without overwriting concurrent saves when hard links are unsupported";
     if (runTestInSubprocess(import.meta.path, name)) return;
     const originalLink = fsPromises.link;
-    const originalCopyFile = fsPromises.copyFile;
     let linkErrorCode = "ENOTSUP";
     let collision = false;
-    let copyFailure = false;
     mock.module("node:fs/promises", () => ({
       ...fsPromises,
-      link: async () => {
+      link: async (_source: string, destination: string) => {
+        if (collision) await writeFile(destination, "# Concurrent policy\n");
         throw Object.assign(new Error("hard links are unsupported"), {
           code: linkErrorCode,
         });
       },
-      copyFile: async (source: string, destination: string, mode?: number) => {
-        if (collision) await writeFile(destination, "# Concurrent policy\n");
-        if (copyFailure) {
-          await writeFile(destination, "# Partial policy\n", { flag: "wx" });
-          throw Object.assign(new Error("synthetic copy failure"), {
-            code: "EIO",
-          });
-        }
-        await originalCopyFile(source, destination, mode);
-      },
     }));
     try {
       for (linkErrorCode of ["ENOTSUP", "EISDIR"]) {
-        const existing = await fixture();
-        await writeFile(
-          join(existing.repository, "SECURITY.md"),
-          "# Existing policy\n",
-        );
-        const replacement = await existing.generate();
-        await applySecurityPolicy(replacement);
-        expect(await readFile(replacement.targetPath, "utf8")).toBe(POLICY);
-        expect(await readdir(existing.repository)).toEqual(["SECURITY.md"]);
+        for (const existing of [false, true]) {
+          const f = await fixture();
+          if (existing)
+            await writeFile(
+              join(f.repository, "SECURITY.md"),
+              "# Existing policy\n",
+            );
+          const draft = await f.generate();
+          await applySecurityPolicy(draft);
+          expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+          expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
+        }
       }
       linkErrorCode = "ENOTSUP";
       const other = await fixture();
@@ -1300,27 +1367,10 @@ describe("security policy review and application", () => {
       expect(await readFile(racing.targetPath, "utf8")).toBe(
         "# Concurrent policy\n",
       );
-      collision = false;
-      copyFailure = true;
-      const failed = await fixture();
-      const partial = await failed.generate();
-      const error = await applySecurityPolicy(partial).catch(
-        (value: unknown) => value,
-      );
-      expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
-      expect(error).toMatchObject({
-        targetPath: partial.targetPath,
-        cause: { code: "EIO" },
-      });
-      expect(await readFile(partial.targetPath, "utf8")).toBe(
-        "# Partial policy\n",
-      );
-      expect(await readdir(failed.repository)).toEqual(["SECURITY.md"]);
     } finally {
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
         link: originalLink,
-        copyFile: originalCopyFile,
       }));
     }
   });
@@ -2220,6 +2270,81 @@ describe("security policy review and application", () => {
   );
 
   test.skipIf(process.platform !== "linux")(
+    "prepares the final filename's SELinux label before publishing a new policy",
+    async () => {
+      for (const rejectLabel of [false, true]) {
+        const f = await fixture();
+        const draft = await f.generate();
+        const python = join(f.root, "synthetic-python");
+        const marker = join(f.root, "label-prepared");
+        await writeFile(
+          python,
+          [
+            `#!${PYTHON}`,
+            "import ctypes, errno, os, sys, types",
+            `python = ${JSON.stringify(PYTHON)}`,
+            "if len(sys.argv) > 4 and sys.argv[1:3] == ['-I', '-c'] and 'security_compute_create_name_raw' in sys.argv[3]:",
+            "    script = sys.argv[3]",
+            "    sys.argv = ['-c', *sys.argv[4:]]",
+            "    temporary, target, creator = sys.argv[1:]",
+            "    assert int(creator) == os.getppid()",
+            "    assert not os.path.exists(target)",
+            `    assert open(temporary).read() == ${JSON.stringify(POLICY)}`,
+            "    caller = b'synthetic_u:synthetic_r:caller_t:s0'",
+            "    parent = b'synthetic_u:object_r:repository_t:s0'",
+            "    expected = b'synthetic_u:object_r:policy_t:s0'",
+            "    labels = {temporary: b'synthetic_u:object_r:temporary_t:s0', os.path.dirname(target): parent}",
+            "    def getpidcon(pid, output):",
+            "        assert pid == int(creator)",
+            "        output._obj.value = caller",
+            "        return 0",
+            "    def file_class(name):",
+            "        assert name == b'file'",
+            "        return 7",
+            "    def compute(source, directory, kind, name, output):",
+            "        assert (source.value, directory, kind, name) == (caller, parent, 7, b'SECURITY.md')",
+            "        output._obj.value = expected",
+            "        return 0",
+            "    def set_label(path, name, value):",
+            "        assert not os.path.exists(target)",
+            "        assert (path, name, value) == (temporary, 'security.selinux', expected + b'\\0')",
+            ...(rejectLabel
+              ? [
+                  "        raise PermissionError(errno.EACCES, 'synthetic relabel denial')",
+                ]
+              : ["        labels[path] = value"]),
+            "    library = types.SimpleNamespace(is_selinux_enabled=lambda: 1, getpidcon_raw=getpidcon, string_to_security_class=file_class, security_compute_create_name_raw=compute, freecon=lambda context: None)",
+            "    ctypes.CDLL = lambda *args, **kwargs: library",
+            "    os.getxattr = lambda path, name: labels[path]",
+            "    os.setxattr = set_label",
+            "    exec(script)",
+            "    assert labels[temporary].rstrip(b'\\0') == expected",
+            `    open(${JSON.stringify(marker)}, 'w').write('prepared before publication')`,
+            "    raise SystemExit(0)",
+            "os.execv(python, [python, *sys.argv[1:]])",
+            "",
+          ].join("\n"),
+          { mode: 0o755 },
+        );
+        if (rejectLabel) {
+          await expect(
+            applySecurityPolicy(draft, { pythonPath: python }),
+          ).rejects.toThrow("Cannot prepare the SELinux label");
+          expect(await readdir(f.repository)).toEqual([]);
+        } else {
+          await applySecurityPolicy(draft, { pythonPath: python });
+          expect(await readFile(marker, "utf8")).toBe(
+            "prepared before publication",
+          );
+          expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+          expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
+        }
+        expect(await readFile(draft.draftPath, "utf8")).toBe(POLICY);
+      }
+    },
+  );
+
+  test.skipIf(process.platform !== "linux")(
     "rejects an existing Linux policy when its security context cannot be preserved",
     async () => {
       const f = await fixture();
@@ -3028,7 +3153,7 @@ describe("security policy review and application", () => {
       "preserves read-only mode when temporary cleanup changes permissions";
     if (runTestInSubprocess(import.meta.path, name)) return;
     const originalRm = fsPromises.rm;
-    const originalCopyFile = fsPromises.copyFile;
+    const originalOpen = fsPromises.open;
     for (const existing of [false, true]) {
       const f = await fixture();
       const target = join(f.repository, "SECURITY.md");
@@ -3039,9 +3164,16 @@ describe("security policy review and application", () => {
       const draft = await f.generate();
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
-        copyFile: async (...args: Parameters<typeof originalCopyFile>) => {
-          if (!existing) await chmod(args[0], 0o444);
-          return originalCopyFile(...args);
+        open: async (...args: Parameters<typeof originalOpen>) => {
+          const handle = await originalOpen(...args);
+          if (!existing && String(args[0]).endsWith(".tmp")) {
+            const close = handle.close.bind(handle);
+            handle.close = async () => {
+              await close();
+              await chmod(args[0], 0o444);
+            };
+          }
+          return handle;
         },
         rm: async (path: string, options: Parameters<typeof originalRm>[1]) => {
           if (path.endsWith(".tmp")) await chmod(path, 0o666);
@@ -3057,7 +3189,7 @@ describe("security policy review and application", () => {
         mock.module("node:fs/promises", () => ({
           ...fsPromises,
           rm: originalRm,
-          copyFile: originalCopyFile,
+          open: originalOpen,
         }));
         await chmod(target, 0o644).catch(() => undefined);
       }
@@ -3070,7 +3202,6 @@ describe("security policy review and application", () => {
     if (runTestInSubprocess(import.meta.path, name)) return;
     const originalLink = fsPromises.link;
     const originalRename = fsPromises.rename;
-    const originalCopyFile = fsPromises.copyFile;
     for (const existing of [false, true]) {
       const f = await fixture();
       if (existing)
@@ -3082,11 +3213,6 @@ describe("security policy review and application", () => {
       const controller = new AbortController();
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
-        copyFile: async (...args: Parameters<typeof originalCopyFile>) => {
-          await originalCopyFile(...args);
-          if (args[1] === draft.targetPath)
-            controller.abort(new Error("cancel after commit"));
-        },
         link: async (source: string, destination: string) => {
           await originalLink(source, destination);
           if (destination === draft.targetPath)
@@ -3112,7 +3238,6 @@ describe("security policy review and application", () => {
           ...fsPromises,
           link: originalLink,
           rename: originalRename,
-          copyFile: originalCopyFile,
         }));
       }
     }

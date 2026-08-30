@@ -1265,6 +1265,14 @@ export async function applySecurityPolicy(
             options.signal,
           );
         }
+        if (draft.previousContent === null && process.platform === "linux") {
+          await prepareNewPolicySecurityContext(
+            temporary,
+            target.targetPath,
+            python,
+            options.signal,
+          );
+        }
         if (
           (await realpath(dirname(target.targetPath))) !==
           dirname(target.targetPath)
@@ -1278,25 +1286,7 @@ export async function applySecurityPolicy(
         await requireUnchangedSecurityPolicy(target, draft, options.signal);
         options.signal?.throwIfAborted();
         if (draft.previousContent === null) {
-          try {
-            await installPolicyFile(temporary, target.targetPath);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-              // A failed copy can leave a partial destination.
-              written =
-                (await lstat(target.targetPath).catch(
-                  (inspectError: NodeJS.ErrnoException) => {
-                    if (
-                      inspectError.code === "ENOENT" ||
-                      inspectError.code === "ENOTDIR"
-                    )
-                      return null;
-                    throw inspectError;
-                  },
-                )) !== null;
-            }
-            throw error;
-          }
+          await installPolicyFile(temporary, target.targetPath, python);
         } else
           recoveryPath = await replaceExistingPolicy(
             temporary,
@@ -1341,10 +1331,6 @@ export async function applySecurityPolicy(
     );
     await resolveDraftTarget(draft);
     await validatePolicyLinks(target);
-    await requireUnchangedSecurityPolicy(target, {
-      previousContent: draft.content,
-      inheritedPolicySha256: draft.inheritedPolicySha256,
-    });
     if (permissionsReference !== null) {
       if (process.platform === "win32") {
         if (
@@ -1377,6 +1363,10 @@ export async function applySecurityPolicy(
         );
       }
     }
+    await requireUnchangedSecurityPolicy(target, {
+      previousContent: draft.content,
+      inheritedPolicySha256: draft.inheritedPolicySha256,
+    });
     await validatePolicyLinks(target);
     if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
       throw new CodexSecurityError(
@@ -1397,7 +1387,12 @@ export async function applySecurityPolicy(
     )
       written = true;
     if (written) {
-      const retainedRecovery = recoveryPath ?? verificationRecoveryPath;
+      const retainedRecovery =
+        recoveryPath ??
+        verificationRecoveryPath ??
+        (error instanceof SecurityPolicyRecoveryError
+          ? error.recoveryPath
+          : null);
       throw new SecurityPolicyVerificationError(target.targetPath, {
         cause: error,
         ...(retainedRecovery === null
@@ -1415,41 +1410,90 @@ export async function applySecurityPolicy(
 async function installPolicyFile(
   temporary: string,
   targetPath: string,
-  preserveExistingSecurity = false,
-  python?: string,
+  python: string,
 ): Promise<void> {
-  if (preserveExistingSecurity) {
-    const windows = process.platform === "win32";
-    let linked = false;
-    if (!windows || ((await stat(temporary)).mode & 0o200) !== 0) {
-      try {
-        await link(temporary, targetPath);
-        linked = true;
-      } catch (error) {
-        if (
-          ![
-            "EPERM",
-            "ENOTSUP",
-            "EOPNOTSUPP",
-            "EXDEV",
-            "EMLINK",
-            "EISDIR",
-          ].includes((error as NodeJS.ErrnoException).code ?? "")
-        ) {
-          throw error;
-        }
+  const windows = process.platform === "win32";
+  let linked = false;
+  if (!windows || ((await stat(temporary)).mode & 0o200) !== 0) {
+    try {
+      await link(temporary, targetPath);
+      linked = true;
+    } catch (error) {
+      if (
+        ![
+          "EPERM",
+          "ENOTSUP",
+          "EOPNOTSUPP",
+          "EXDEV",
+          "EMLINK",
+          "EISDIR",
+        ].includes((error as NodeJS.ErrnoException).code ?? "")
+      ) {
+        throw error;
       }
     }
-    if (linked) {
-      if (!windows) await unlink(temporary);
-    } else if (windows)
-      await moveWindowsPolicyFileNoClobber(temporary, targetPath);
-    else await moveUnixPolicyFileNoClobber(temporary, targetPath, python!);
-    return;
   }
-  // Create the inode under its final name for filename-based SELinux labels.
-  // A separate inode also keeps Windows temp cleanup from changing its mode.
-  await copyFile(temporary, targetPath, constants.COPYFILE_EXCL);
+  if (linked) await unlink(temporary);
+  else if (windows) await moveWindowsPolicyFileNoClobber(temporary, targetPath);
+  else await moveUnixPolicyFileNoClobber(temporary, targetPath, python);
+}
+
+async function prepareNewPolicySecurityContext(
+  temporary: string,
+  targetPath: string,
+  python: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  // An atomic rename or hard link keeps the temporary inode's SELinux label.
+  // Compute the final filename's creation label before publishing that inode.
+  const script = [
+    "import ctypes, errno, os, sys",
+    "temporary, target, creator = sys.argv[1:]",
+    "try:",
+    "    parent = os.getxattr(os.path.dirname(target), 'security.selinux')",
+    "except OSError as error:",
+    "    if error.errno in {errno.ENODATA, errno.ENOTSUP}:",
+    "        raise SystemExit(0)",
+    "    raise",
+    "selinux = ctypes.CDLL('libselinux.so.1', use_errno=True)",
+    "if selinux.is_selinux_enabled() == 0:",
+    "    raise SystemExit(0)",
+    "context_pointer = ctypes.POINTER(ctypes.c_char_p)",
+    "selinux.getpidcon_raw.argtypes = [ctypes.c_int, context_pointer]",
+    "selinux.string_to_security_class.argtypes = [ctypes.c_char_p]",
+    "selinux.string_to_security_class.restype = ctypes.c_ushort",
+    "selinux.security_compute_create_name_raw.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ushort, ctypes.c_char_p, context_pointer]",
+    "selinux.freecon.argtypes = [ctypes.c_void_p]",
+    "selinux.freecon.restype = None",
+    "source, context = ctypes.c_char_p(), ctypes.c_char_p()",
+    "def check(result):",
+    "    if result < 0:",
+    "        code = ctypes.get_errno()",
+    "        raise OSError(code, os.strerror(code))",
+    "try:",
+    "    check(selinux.getpidcon_raw(int(creator), ctypes.byref(source)))",
+    "    check(selinux.security_compute_create_name_raw(source, parent, selinux.string_to_security_class(b'file'), os.fsencode(os.path.basename(target)), ctypes.byref(context)))",
+    "    if os.getxattr(temporary, 'security.selinux').rstrip(b'\\0') != context.value:",
+    "        os.setxattr(temporary, 'security.selinux', context.value + b'\\0')",
+    "    if os.getxattr(temporary, 'security.selinux').rstrip(b'\\0') != context.value:",
+    "        raise OSError('The staged policy has a different SELinux label.')",
+    "finally:",
+    "    selinux.freecon(source)",
+    "    selinux.freecon(context)",
+  ].join("\n");
+  try {
+    await execFileAsync(
+      python,
+      ["-I", "-c", script, temporary, targetPath, String(process.pid)],
+      { encoding: "utf8", signal },
+    );
+  } catch (error) {
+    signal?.throwIfAborted();
+    throw new CodexSecurityError(
+      "Cannot prepare the SELinux label for SECURITY.md before installation.",
+      { cause: error },
+    );
+  }
 }
 
 async function moveUnixPolicyFileNoClobber(
@@ -1919,7 +1963,7 @@ async function replaceExistingPolicy(
         true,
       );
     signal?.throwIfAborted();
-    await installPolicyFile(temporary, targetPath, true, python);
+    await installPolicyFile(temporary, targetPath, python);
   } catch (error) {
     let cause = error;
     try {

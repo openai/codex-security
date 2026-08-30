@@ -272,7 +272,7 @@ export async function runPolicyCommand(
       write(`Threat model: ${display(draft.threatModelPath)}`);
       if (changed)
         write(
-          "No repository files changed. Review the draft, then run policy with --apply <artifact-directory> --write.",
+          "No repository files changed. To write this draft, use the same repository and --path with --apply <artifact-directory> --write.",
         );
     }
     if (options.apply === undefined) {
@@ -308,11 +308,17 @@ export async function runPolicyCommand(
         ? "SIGINT"
         : undefined);
     const exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+    const operation =
+      applyingTarget !== undefined
+        ? "application"
+        : options.apply === undefined
+          ? "generation"
+          : "review";
     const message =
       signal === "SIGINT"
-        ? "Policy generation canceled by Ctrl-C."
+        ? `Policy ${operation} canceled by Ctrl-C.`
         : signal === "SIGTERM"
-          ? "Policy generation terminated by SIGTERM."
+          ? `Policy ${operation} terminated by SIGTERM.`
           : display(safeErrorMessage(error));
     write(`codex-security: ${message}`);
     if (outputDir !== undefined)
