@@ -88,6 +88,9 @@ workflow run, using the commit SHA in the artifact name. Every supported Node
 runtime still installs and inspects the package, including a strict NodeNext
 TypeScript consumer, the actual CLI, credential locking, dashboard assets, and
 a nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
+Typechecking and formatting run once in an independent required job, so package
+consumers do not wait for those checks. Package compilation and archive
+validation still finish before the test jobs start.
 
 The full Bun suite runs once per OS under Node 22: three file shards on Linux
 and macOS, and seven on Windows. The other Node versions run the installed
