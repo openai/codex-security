@@ -1266,11 +1266,12 @@ export async function applySecurityPolicy(
           );
         }
         if (draft.previousContent === null && process.platform === "linux") {
-          await prepareNewPolicySecurityContext(
+          await checkNewPolicySecurityContext(
             temporary,
             target.targetPath,
             python,
             options.signal,
+            true,
           );
         }
         if (
@@ -1362,6 +1363,12 @@ export async function applySecurityPolicy(
           "The previous SECURITY.md changed while the replacement was being installed.",
         );
       }
+    } else if (draft.previousContent === null && process.platform === "linux") {
+      await checkNewPolicySecurityContext(
+        target.targetPath,
+        target.targetPath,
+        python,
+      );
     }
     await requireUnchangedSecurityPolicy(target, {
       previousContent: draft.content,
@@ -1438,17 +1445,18 @@ async function installPolicyFile(
   else await moveUnixPolicyFileNoClobber(temporary, targetPath, python);
 }
 
-async function prepareNewPolicySecurityContext(
+async function checkNewPolicySecurityContext(
   temporary: string,
   targetPath: string,
   python: string,
   signal?: AbortSignal,
+  prepare = false,
 ): Promise<void> {
   // An atomic rename or hard link keeps the temporary inode's SELinux label.
   // Compute the final filename's creation label before publishing that inode.
   const script = [
     "import ctypes, errno, os, sys",
-    "temporary, target, creator = sys.argv[1:]",
+    "temporary, target, creator, prepare = sys.argv[1:]",
     "try:",
     "    parent = os.getxattr(os.path.dirname(target), 'security.selinux')",
     "except OSError as error:",
@@ -1473,7 +1481,7 @@ async function prepareNewPolicySecurityContext(
     "try:",
     "    check(selinux.getpidcon_raw(int(creator), ctypes.byref(source)))",
     "    check(selinux.security_compute_create_name_raw(source, parent, selinux.string_to_security_class(b'file'), os.fsencode(os.path.basename(target)), ctypes.byref(context)))",
-    "    if os.getxattr(temporary, 'security.selinux').rstrip(b'\\0') != context.value:",
+    "    if prepare == 'true' and os.getxattr(temporary, 'security.selinux').rstrip(b'\\0') != context.value:",
     "        os.setxattr(temporary, 'security.selinux', context.value + b'\\0')",
     "    if os.getxattr(temporary, 'security.selinux').rstrip(b'\\0') != context.value:",
     "        raise OSError('The staged policy has a different SELinux label.')",
@@ -1484,13 +1492,21 @@ async function prepareNewPolicySecurityContext(
   try {
     await execFileAsync(
       python,
-      ["-I", "-c", script, temporary, targetPath, String(process.pid)],
+      [
+        "-I",
+        "-c",
+        script,
+        temporary,
+        targetPath,
+        String(process.pid),
+        String(prepare),
+      ],
       { encoding: "utf8", signal },
     );
   } catch (error) {
     signal?.throwIfAborted();
     throw new CodexSecurityError(
-      "Cannot prepare the SELinux label for SECURITY.md before installation.",
+      `Cannot ${prepare ? "prepare" : "verify"} the SELinux label for SECURITY.md.`,
       { cause: error },
     );
   }

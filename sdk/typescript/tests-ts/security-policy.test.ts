@@ -2270,9 +2270,9 @@ describe("security policy review and application", () => {
   );
 
   test.skipIf(process.platform !== "linux")(
-    "prepares the final filename's SELinux label before publishing a new policy",
+    "prepares and verifies the final filename's SELinux label, including retries",
     async () => {
-      for (const rejectLabel of [false, true]) {
+      for (const failure of ["installed", "none", "prepare"] as const) {
         const f = await fixture();
         const draft = await f.generate();
         const python = join(f.root, "synthetic-python");
@@ -2286,14 +2286,20 @@ describe("security policy review and application", () => {
             "if len(sys.argv) > 4 and sys.argv[1:3] == ['-I', '-c'] and 'security_compute_create_name_raw' in sys.argv[3]:",
             "    script = sys.argv[3]",
             "    sys.argv = ['-c', *sys.argv[4:]]",
-            "    temporary, target, creator = sys.argv[1:]",
+            "    temporary, target, creator = sys.argv[1:4]",
+            "    installed = temporary == target",
             "    assert int(creator) == os.getppid()",
-            "    assert not os.path.exists(target)",
+            "    assert os.path.exists(target) == installed",
             `    assert open(temporary).read() == ${JSON.stringify(POLICY)}`,
             "    caller = b'synthetic_u:synthetic_r:caller_t:s0'",
             "    parent = b'synthetic_u:object_r:repository_t:s0'",
             "    expected = b'synthetic_u:object_r:policy_t:s0'",
-            "    labels = {temporary: b'synthetic_u:object_r:temporary_t:s0', os.path.dirname(target): parent}",
+            "    labels = {temporary: expected if installed else b'synthetic_u:object_r:temporary_t:s0', os.path.dirname(target): parent}",
+            ...(failure === "installed"
+              ? [
+                  "    if installed: labels[temporary] = b'synthetic_u:object_r:changed_t:s0'",
+                ]
+              : []),
             "    def getpidcon(pid, output):",
             "        assert pid == int(creator)",
             "        output._obj.value = caller",
@@ -2308,7 +2314,7 @@ describe("security policy review and application", () => {
             "    def set_label(path, name, value):",
             "        assert not os.path.exists(target)",
             "        assert (path, name, value) == (temporary, 'security.selinux', expected + b'\\0')",
-            ...(rejectLabel
+            ...(failure === "prepare"
               ? [
                   "        raise PermissionError(errno.EACCES, 'synthetic relabel denial')",
                 ]
@@ -2319,23 +2325,28 @@ describe("security policy review and application", () => {
             "    os.setxattr = set_label",
             "    exec(script)",
             "    assert labels[temporary].rstrip(b'\\0') == expected",
-            `    open(${JSON.stringify(marker)}, 'w').write('prepared before publication')`,
+            `    open(${JSON.stringify(marker)}, 'a').write('verified\\n' if installed else 'prepared\\n')`,
             "    raise SystemExit(0)",
             "os.execv(python, [python, *sys.argv[1:]])",
             "",
           ].join("\n"),
           { mode: 0o755 },
         );
-        if (rejectLabel) {
+        if (failure === "prepare") {
           await expect(
             applySecurityPolicy(draft, { pythonPath: python }),
           ).rejects.toThrow("Cannot prepare the SELinux label");
           expect(await readdir(f.repository)).toEqual([]);
+        } else if (failure === "installed") {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            await expect(
+              applySecurityPolicy(draft, { pythonPath: python }),
+            ).rejects.toBeInstanceOf(SecurityPolicyVerificationError);
+            expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+          }
         } else {
           await applySecurityPolicy(draft, { pythonPath: python });
-          expect(await readFile(marker, "utf8")).toBe(
-            "prepared before publication",
-          );
+          expect(await readFile(marker, "utf8")).toContain("prepared\n");
           expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
           expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
         }
