@@ -20,6 +20,7 @@ import {
 import { CodexSecurityError } from "./errors.js";
 import {
   codexSecurityCredentialHome,
+  executablePathForSpawn,
   expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
@@ -179,7 +180,7 @@ export async function runReadOnlyCodex(
   const codex =
     options.codex ??
     new Codex({
-      codexPathOverride: command!.command,
+      codexPathOverride: executablePathForSpawn(command!.command),
       env: environment,
       config: {
         ...config,
@@ -459,7 +460,7 @@ export async function comparisonEnvironment(
   return environment;
 }
 
-function environmentEntry(
+export function environmentEntry(
   environment: Record<string, string>,
   requested: string,
 ): string | undefined {

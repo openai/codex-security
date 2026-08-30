@@ -49,6 +49,7 @@ import {
   CodexSecurity,
   createSecurityInternal,
   environmentValue,
+  formatEnvironmentVariableRemovalGuidance,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
@@ -138,6 +139,7 @@ import {
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
+  executablePathForSpawn,
   expandHome,
   prepareCodexSecurityCredentialHome,
   pythonUtf8Environment,
@@ -1242,7 +1244,7 @@ export async function runCodexSkillCommand(
       expandHome(configuredHome, processEnvironment),
     );
   }
-  const invocation = spawn(command.command, [...args], {
+  const invocation = spawn(executablePathForSpawn(command.command), [...args], {
     env: environment,
     cwd: output?.appServer?.directory ?? parse(process.execPath).root,
     stdio:
@@ -4206,7 +4208,7 @@ export async function main(
               `Effective scan authentication: API key from ${authentication.source}.\n`,
             );
             errorOutput.write(
-              "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.\n",
+              `To use a ChatGPT sign-in, ${formatEnvironmentVariableRemovalGuidance(["OPENAI_API_KEY", "CODEX_API_KEY"])}.\n`,
             );
           }
         } else if (exitCode === 0 && !options.withApiKey) {
@@ -4231,8 +4233,8 @@ export async function main(
               : "your ChatGPT sign-in";
             errorOutput.write(
               loginWarning +
-                `To use ${storedCredentials}, pass '--auth chatgpt' or run ` +
-                `'unset ${configuredApiKeyVariables.join(" ")}'.\n`,
+                `To use ${storedCredentials}, pass '--auth chatgpt' or ` +
+                `${formatEnvironmentVariableRemovalGuidance(configuredApiKeyVariables)}.\n`,
             );
           }
         }

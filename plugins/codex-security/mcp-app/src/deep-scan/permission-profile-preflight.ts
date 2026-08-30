@@ -3,6 +3,7 @@ import { createInterface, type Interface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import { MCP_APP_VERSION } from "../version.js";
 import { classifyCodexWorkerError, DeepScanNonRetryableError } from "./errors.js";
+import { executablePathForSpawn } from "./executable-path.js";
 
 export const DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID =
   "codex_security_deep_scan_worker";
@@ -91,7 +92,7 @@ class AppServerPreflightClient {
     }
     args.push("app-server", "--stdio");
 
-    this.child = spawn(options.codexPath, args, {
+    this.child = spawn(executablePathForSpawn(options.codexPath), args, {
       cwd: options.cwd,
       ...(options.env === undefined ? {} : { env: options.env }),
       stdio: ["pipe", "pipe", "pipe"]

@@ -10,10 +10,12 @@ import { createInterface } from "node:readline";
 import {
   comparisonEnvironment,
   disabledMcpServers,
+  environmentEntry,
 } from "../scan-comparison.js";
 import {
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
+  executablePathForSpawn,
   expandHome,
   resolveCodexCommand,
 } from "../runtime.js";
@@ -81,8 +83,10 @@ export class CodexReviewRunner {
         environment,
         { workingDirectory: this.workingDirectory, signal: this.signal },
       );
-      const apiKey =
-        environment["OPENAI_API_KEY"] ?? environment["CODEX_API_KEY"];
+      const apiKey = [
+        environmentEntry(environment, "OPENAI_API_KEY"),
+        environmentEntry(environment, "CODEX_API_KEY"),
+      ].find((value) => value?.trim());
       const args = ["app-server", "--stdio", "--disable", "plugins"];
       const stateDatabase = join(
         codexSecurityStateDirectory(environment),
@@ -90,10 +94,12 @@ export class CodexReviewRunner {
       );
       const privatePaths = new Set(
         [
-          environment["CODEX_HOME"] ?? join(homedir(), ".codex"),
+          environmentEntry(environment, "CODEX_HOME") ||
+            join(homedir(), ".codex"),
           codexSecurityCredentialHome(environment),
           join(homedir(), ".ssh"),
-          environment["GH_CONFIG_DIR"] ?? join(homedir(), ".config", "gh"),
+          environmentEntry(environment, "GH_CONFIG_DIR") ||
+            join(homedir(), ".config", "gh"),
           stateDatabase,
           `${stateDatabase}-wal`,
           `${stateDatabase}-shm`,
@@ -113,13 +119,17 @@ export class CodexReviewRunner {
       if (apiKey)
         args.push("--config", 'cli_auth_credentials_store="ephemeral"');
       this.signal?.throwIfAborted();
-      const child = this.startCodex(command.command, args, {
-        cwd: this.workingDirectory,
-        env: { ...environment, CODEX_SQLITE_HOME: directory },
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-        signal: this.signal,
-      });
+      const child = this.startCodex(
+        executablePathForSpawn(command.command),
+        args,
+        {
+          cwd: this.workingDirectory,
+          env: { ...environment, CODEX_SQLITE_HOME: directory },
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+          signal: this.signal,
+        },
+      );
       const closed = new Promise<void>((resolve) =>
         child.once("close", () => resolve()),
       );
