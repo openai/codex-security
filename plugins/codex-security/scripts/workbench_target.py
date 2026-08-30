@@ -374,21 +374,55 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     if repository_root is None:
         return None
     repository, pathspec = git_worktree_context(target)
+    scope = repository / pathspec
+    scope_depth = len(Path(pathspec).parts)
+    matching_prefixes: dict[str, bool] = {}
+    listing_args: list[str] = []
+    inventory_pathspec = pathspec
+    if scope_depth:
+        if any(
+            not character.isascii() and character.lower() != character.upper()
+            for character in pathspec
+        ):
+            # Git's icase pathspecs do not cover Unicode case aliases.
+            inventory_pathspec = "."
+        else:
+            listing_args.append("--no-literal-pathspecs")
+            inventory_pathspec = f":(icase,literal){pathspec}"
     listed = git_bytes(
         repository,
+        *listing_args,
         "ls-files",
         "--cached",
         "--others",
         "--exclude-standard",
         "-z",
         "--",
-        pathspec,
+        inventory_pathspec,
     )
     if listed is None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
     paths: list[Path] = []
     for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
-        path = repository / os.fsdecode(raw_path)
+        relative = Path(os.fsdecode(raw_path))
+        path = repository / relative
+        if scope_depth:
+            if len(relative.parts) <= scope_depth:
+                continue
+            # Git's index spelling can differ after a case-only directory rename.
+            # Compare each scope-depth prefix once, without following symlink leaves.
+            prefix = repository.joinpath(*relative.parts[:scope_depth])
+            key = str(prefix)
+            if key not in matching_prefixes:
+                try:
+                    matching_prefixes[key] = prefix.samefile(scope)
+                except (FileNotFoundError, NotADirectoryError):
+                    matching_prefixes[key] = False
+            # realpath spelling is not a filesystem identity on case-insensitive
+            # POSIX volumes; WindowsPath equality also folds distinct names.
+            if not matching_prefixes[key]:
+                continue
+            path = scope.joinpath(*relative.parts[scope_depth:])
         try:
             metadata = path.lstat()
         except FileNotFoundError:
@@ -411,7 +445,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             for nested_path in path.rglob("*")
             if ".git" not in nested_path.relative_to(path).parts
         )
-    return sorted(set(paths))
+    return sorted({str(path): path for path in paths}.values(), key=str)
 
 
 def source_directory_snapshot_paths(target: Path) -> list[Path]:
