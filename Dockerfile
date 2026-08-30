@@ -2,6 +2,10 @@
 
 FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS package
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes python3 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /build/sdk/typescript
 
 COPY sdk/typescript/package.json sdk/typescript/pnpm-lock.yaml sdk/typescript/pnpm-workspace.yaml ./

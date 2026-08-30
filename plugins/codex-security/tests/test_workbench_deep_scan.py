@@ -18,6 +18,7 @@ from workbench_test_support import (
     mark_deep_coordinator_succeeded,
     run_workbench,
     stable_target_id,
+    start_delivered_scan,
     write_completed_contract,
 )
 
@@ -2163,9 +2164,8 @@ def test_target_continuation_does_not_reuse_another_threads_app_scan(
         "deep",
         environment=deep_environment(codex_home),
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",

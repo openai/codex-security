@@ -16,6 +16,7 @@ from workbench_test_support import (
     run_workbench,
     source_plugin_version,
     stable_target_id,
+    start_delivered_scan,
     write_completed_contract,
 )
 
@@ -25,9 +26,8 @@ def _start_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Path]:
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -46,9 +46,8 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
     saved = create_saved_workspace(
         state_dir, target, thread_id="thread-completion-binding", mode="deep"
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -263,9 +262,8 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
             "--mode",
             mode,
         )
-        started = run_workbench(
+        started = start_delivered_scan(
             state_dir,
-            "start-scan",
             "--workspace-id",
             workspace_id,
             "--scan-root",
@@ -314,9 +312,8 @@ def test_completion_populates_workbench_owned_unsealed_envelope(tmp_path: Path) 
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
