@@ -30,6 +30,7 @@ import {
   parse,
   relative,
   sep,
+  win32,
 } from "node:path";
 import { PassThrough } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
@@ -38,6 +39,7 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
+import { build } from "esbuild";
 import {
   BUNDLED_PLUGIN_VERSION,
   bootstrapPlugin,
@@ -63,6 +65,7 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
@@ -2095,6 +2098,108 @@ describe("plugin runtime preparation", () => {
       command: configured,
     });
   });
+
+  test.each([
+    [
+      "drive",
+      String.raw`C:\Program Files\codex.exe`,
+      String.raw`\\?\C:\Program Files\codex.exe`,
+    ],
+    [
+      "drive with forward slashes",
+      "C:/tools/codex.exe",
+      String.raw`\\?\C:\tools\codex.exe`,
+    ],
+    [
+      "UNC",
+      String.raw`\\server\share\codex.exe`,
+      String.raw`\\?\UNC\server\share\codex.exe`,
+    ],
+    [
+      "namespaced",
+      String.raw`\\?\C:\tools\codex.exe`,
+      String.raw`\\?\C:\tools\codex.exe`,
+    ],
+    ["bare", "codex.exe", "codex.exe"],
+    ["relative", String.raw`.\tools\codex.exe`, String.raw`.\tools\codex.exe`],
+    ["drive-relative", "C:codex.exe", "C:codex.exe"],
+    [
+      "root-relative",
+      String.raw`\tools\codex.exe`,
+      String.raw`\tools\codex.exe`,
+    ],
+    ["slash-root-relative", "/tools/codex.exe", "/tools/codex.exe"],
+    ["tilde", "~/tools/codex", "~/tools/codex"],
+  ])(
+    "preserves executable lookup semantics for %s paths",
+    (_name, command, windowsCommand) => {
+      expect(executablePathForSpawn(command!)).toBe(
+        process.platform === "win32" ? windowsCommand : command,
+      );
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "launches long Windows executable paths through the Node runtime",
+    async () => {
+      const root = await temporaryDirectory();
+      const { stdout } = await promisify(execFile)(
+        "node",
+        ["-p", "process.execPath"],
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          windowsHide: true,
+        },
+      );
+      const node = stdout.trim();
+      const executable = join(
+        root,
+        ...Array<string>(10).fill("nested executable directory"),
+        "node.exe",
+      );
+      await mkdir(dirname(executable), { recursive: true });
+      await copyFile(node, executable);
+      expect(executable.length).toBeGreaterThan(260);
+
+      const runtimeSource = new URL("../src/runtime.ts", import.meta.url);
+      const runtimeModule = join(root, "runtime.cjs");
+      await build({
+        entryPoints: [fileURLToPath(runtimeSource)],
+        outfile: runtimeModule,
+        bundle: true,
+        platform: "node",
+        format: "cjs",
+        define: { "import.meta.url": JSON.stringify(runtimeSource.href) },
+      });
+      const script = [
+        "const { runCodexCommand } = require(process.argv[1]);",
+        "runCodexCommand({ command: process.argv[2] }, ['--eval', \"process.stdout.write('synthetic launch')\"], process.env)",
+        "  .then((result) => process.stdout.write(JSON.stringify(result)), (error) => { console.error(error); process.exitCode = 1; });",
+      ].join("\n");
+      for (const command of [
+        node,
+        executable,
+        win32.toNamespacedPath(executable),
+      ]) {
+        const result = await promisify(execFile)(
+          node,
+          ["--eval", script, runtimeModule, command],
+          {
+            encoding: "utf8",
+            timeout: 10_000,
+            windowsHide: true,
+          },
+        );
+        expect(JSON.parse(result.stdout)).toEqual({
+          success: true,
+          exitCode: 0,
+          stdout: "synthetic launch",
+          stderr: "",
+        });
+      }
+    },
+  );
 
   test("replaces unspawnable Windows Codex shims with the bundled executable", () => {
     const fallback = resolveCodexCommand({});

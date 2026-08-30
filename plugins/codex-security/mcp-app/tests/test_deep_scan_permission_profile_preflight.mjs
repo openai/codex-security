@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import childProcess from "node:child_process";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -97,7 +99,7 @@ async function testAllowedProfileAndRawArgv() {
     assert.deepEqual(calls[0].params.capabilities, { experimentalApi: true });
     assert.deepEqual(calls[2].params, { cwd, includeLayers: false });
     assert.deepEqual(calls[3].params, { cwd });
-  });
+  }, { longExecutable: true });
 }
 
 async function testProvidedEnvForwardedWithoutMutation() {
@@ -126,7 +128,7 @@ async function testPreflightStartsInWorkerCwd() {
   await withFakeCodex({
     configResult: configReadResult(expectedProfile),
     catalogResults: [catalogResult(true)]
-  }, async ({ codexPath, cwd, cwdPath, callsPath, terminatedPath }) => {
+  }, async ({ codexPath, cwd, cwdPath, callsPath, terminatedPath, children }) => {
     assert.notEqual(cwd, process.cwd());
     await preflight(codexPath, cwd);
 
@@ -140,7 +142,7 @@ async function testPreflightStartsInWorkerCwd() {
     assert.deepEqual(calls.find((call) => call.method === "permissionProfile/list").params, {
       cwd
     });
-    assert.ok(["SIGTERM", "stdin-end"].includes(await readFile(terminatedPath, "utf8")));
+    await assertPreflightStopped(children, terminatedPath);
   });
 }
 
@@ -176,13 +178,13 @@ async function testMalformedStreamFailsClosed() {
   ]) {
     await withFakeCodex({
       rawOutputByMethod: { initialize: output }
-    }, async ({ codexPath, cwd, terminatedPath }) => {
+    }, async ({ codexPath, cwd, terminatedPath, children }) => {
       await assert.rejects(
         preflight(codexPath, cwd),
         (error) => error?.name === "DeepScanNonRetryableError"
           && error.message.includes("with this Codex configuration")
       );
-      assert.ok(["SIGTERM", "stdin-end"].includes(await readFile(terminatedPath, "utf8")));
+      await assertPreflightStopped(children, terminatedPath);
     });
   }
 }
@@ -316,7 +318,7 @@ async function testMalformedAndUnsupportedResponsesFailClosed() {
     await assert.rejects(
       preflight(codexPath, cwd),
       (error) => error?.name === "DeepScanNonRetryableError"
-        && error.message.includes(codexPath)
+        && error.message.includes(JSON.stringify(codexPath))
         && error.message.includes("permissionProfile/list.allowed")
         && error.message.includes("does not support")
         && error.message.includes("Update the Codex installation at that path")
@@ -333,7 +335,7 @@ async function testMalformedAndUnsupportedResponsesFailClosed() {
     await assert.rejects(
       preflight(codexPath, cwd),
       (error) => error?.name === "DeepScanNonRetryableError"
-        && error.message.includes(codexPath)
+        && error.message.includes(JSON.stringify(codexPath))
         && error.message.includes("permissionProfile/list")
         && error.message.includes("does not support")
         && error.message.includes("Update the Codex installation at that path")
@@ -352,7 +354,7 @@ async function testEarlyExecutableExitIsNotVersionError() {
     await assert.rejects(
       preflight(codexPath, cwd),
       (error) => error?.name === "DeepScanNonRetryableError"
-        && error.message.includes(codexPath)
+        && error.message.includes(JSON.stringify(codexPath))
         && error.message.includes("exited before permission-profile verification completed")
         && error.message.includes("code 17")
         && error.message.includes("with --version")
@@ -372,7 +374,7 @@ async function testNonVersionJsonRpcFailureIsSafe() {
     await assert.rejects(
       preflight(codexPath, cwd),
       (error) => error?.name === "DeepScanNonRetryableError"
-        && error.message.includes(codexPath)
+        && error.message.includes(JSON.stringify(codexPath))
         && error.message.includes("config/read")
         && error.message.includes("JSON-RPC code -32603")
         && !error.message.includes("SECRET_REPOSITORY_PATH")
@@ -386,7 +388,7 @@ async function testSpawnErrorFailsClosed() {
   await assert.rejects(
     preflight(missingCodex, tmpdir()),
     (error) => error?.name === "DeepScanNonRetryableError"
-      && error.message.includes(missingCodex)
+      && error.message.includes(JSON.stringify(missingCodex))
       && error.message.includes("could not start")
       && error.message.includes("with --version")
       && error.message.includes("CODEX_CLI_PATH/PATH")
@@ -422,7 +424,7 @@ async function testRuntimeFallbackWarningClassification() {
 async function testAbortKillsPreflightChild() {
   await withFakeCodex({
     hangAt: "config/read"
-  }, async ({ codexPath, cwd, readyPath, terminatedPath }) => {
+  }, async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
     const controller = new AbortController();
     const running = preflightDeepScanWorkerPermissionProfile({
       codexPath,
@@ -435,9 +437,19 @@ async function testAbortKillsPreflightChild() {
     await waitForFile(readyPath);
     controller.abort(new DOMException("fixture aborted", "AbortError"));
     await assert.rejects(running, (error) => error?.name === "AbortError");
+    await assertPreflightStopped(children, terminatedPath);
+  });
+}
+
+async function assertPreflightStopped(children, terminatedPath) {
+  if (process.platform === "win32") {
+    // Windows termination need not run the fixture's signal or stdin handlers.
+    assert.equal(children.length, 1);
+    assert.ok(children[0].exitCode !== null || children[0].signalCode !== null);
+  } else {
     await waitForFile(terminatedPath);
     assert.ok(["SIGTERM", "stdin-end"].includes(await readFile(terminatedPath, "utf8")));
-  });
+  }
 }
 
 function preflight(codexPath, cwd, env) {
@@ -476,9 +488,10 @@ function catalogResult(allowed) {
   };
 }
 
-async function withFakeCodex(scenario, callback) {
+async function withFakeCodex(scenario, callback, { longExecutable = false } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "deep-scan-profile-preflight-"));
-  const codexPath = path.join(root, "fake-codex.mjs");
+  const scriptPath = path.join(root, "fake-codex.mjs");
+  let codexPath = scriptPath;
   const argvPath = path.join(root, "argv.json");
   const callsPath = path.join(root, "calls.jsonl");
   const cwdPath = path.join(root, "cwd.json");
@@ -486,11 +499,34 @@ async function withFakeCodex(scenario, callback) {
   const readyPath = path.join(root, "ready");
   const terminatedPath = path.join(root, "terminated");
   const fixture = { ...scenario, argvPath, callsPath, cwdPath, envPath, readyPath, terminatedPath };
-  await writeFile(codexPath, fakeCodexSource(fixture), "utf8");
-  await chmod(codexPath, 0o755);
+  await writeFile(scriptPath, fakeCodexSource(fixture), "utf8");
+  await chmod(scriptPath, 0o755);
+  const originalSpawn = childProcess.spawn;
+  const children = [];
   try {
-    await callback({ codexPath, cwd: root, argvPath, callsPath, cwdPath, envPath, readyPath, terminatedPath });
+    if (process.platform === "win32") {
+      codexPath = process.execPath;
+      if (longExecutable) {
+        codexPath = path.join(root, ...Array(10).fill("nested executable directory"), "node.exe");
+        await mkdir(path.dirname(codexPath), { recursive: true });
+        await copyFile(process.execPath, codexPath);
+        assert.ok(codexPath.length > 260);
+      }
+      childProcess.spawn = (command, args, options) => {
+        if (command !== codexPath && command !== path.toNamespacedPath(codexPath)) {
+          return originalSpawn(command, args, options);
+        }
+        // Reuse the protocol script without replacing or normalizing the executable.
+        const child = originalSpawn(command, [scriptPath, ...args], options);
+        children.push(child);
+        return child;
+      };
+      syncBuiltinESMExports();
+    }
+    await callback({ codexPath, cwd: root, argvPath, callsPath, cwdPath, envPath, readyPath, terminatedPath, children });
   } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
     await rm(root, { recursive: true, force: true });
   }
 }

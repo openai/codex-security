@@ -15,7 +15,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, delimiter, dirname, join, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   Codex,
@@ -5385,8 +5385,10 @@ describe("CodexSecurity orchestration", () => {
     const scopedSourceInput = join(scanDir, "scoped-source-input.jsonl");
     const runScopedHelper = (command: string, args: string[]): void => {
       if (process.platform === "win32") {
+        const powershell = Bun.which("powershell.exe");
+        expect(powershell).not.toBeNull();
         execFileSync(
-          "powershell.exe",
+          powershell!,
           ["-NoProfile", "-NonInteractive", "-Command", command],
           {
             cwd: root,
@@ -5808,36 +5810,147 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("uses one spawnable Codex executable for scans and nested workers", async () => {
+  test.each(["native", "shim"])(
+    "uses one spawnable Codex executable for scans and nested workers (%s)",
+    async (kind) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      const executable = join(
+        root,
+        process.platform === "win32"
+          ? kind === "shim"
+            ? "custom codex.cmd"
+            : "custom codex.exe"
+          : "custom codex",
+      );
+      const selectedExecutable =
+        process.platform === "win32" && kind === "shim"
+          ? resolveCodexCommand({}).command
+          : executable;
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      let codexOptions: CodexOptions | null = null;
+      const client = new TestClient(
+        {},
+        {
+          environment: {
+            OPENAI_API_KEY: "ambient-key",
+            CODEX_CLI_PATH: ` ${executable} `,
+            PATH: "custom search path",
+          },
+          prepareRuntime: async () => ({
+            ...preparedRuntime(codexHome),
+            environment: {
+              CODEX_HOME: codexHome,
+              CODEX_CLI_PATH: ` ${executable} `,
+              PATH: "custom search path",
+            },
+          }),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: (options: CodexOptions) => {
+            codexOptions = options;
+            return {
+              startThread: () => ({
+                id: null,
+                async runStreamed() {
+                  await copyCompletedScan(root);
+                  return { events: completedEvents() };
+                },
+              }),
+            };
+          },
+        },
+      );
+
+      await client.run(repository);
+      expect((codexOptions as CodexOptions | null)?.codexPathOverride).toBe(
+        process.platform === "win32"
+          ? win32.toNamespacedPath(selectedExecutable)
+          : selectedExecutable,
+      );
+      expect(
+        (codexOptions as CodexOptions | null)?.env?.["CODEX_CLI_PATH"],
+      ).toBe(selectedExecutable);
+      expect((codexOptions as CodexOptions | null)?.env?.["PATH"]).toBe(
+        "custom search path",
+      );
+      await client.close();
+    },
+  );
+
+  test.each([
+    "Path alias",
+    "last alias",
+    "no PATH",
+    "missing tools",
+    "non-directory tools",
+    "blank override",
+  ])("preserves default SDK bundled tools for %s", async (scenario) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
     const scanDir = join(root, "scan");
     const executable = join(
       root,
-      process.platform === "win32" ? "custom codex.cmd" : "custom codex",
+      "vendor",
+      "synthetic-target",
+      "bin",
+      process.platform === "win32" ? "codex.exe" : "codex",
     );
-    const selectedExecutable =
-      process.platform === "win32"
-        ? resolveCodexCommand({}).command
-        : executable;
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(scanDir, { mode: 0o700 });
+    const toolsDirectory = join(dirname(dirname(executable)), "codex-path");
+    const otherTools = join(root, "other tools");
+    const pathEnvironment: Record<string, string> =
+      scenario === "no PATH"
+        ? {}
+        : scenario === "last alias"
+          ? { PATH: "discarded", pAtH: otherTools }
+          : {
+              PATH: "discarded",
+              Path: [
+                "",
+                toolsDirectory,
+                otherTools,
+                toolsDirectory,
+                otherTools.toUpperCase(),
+                "",
+              ].join(delimiter),
+              pAtH: "discarded-last",
+            };
+    await Promise.all([
+      mkdir(repository),
+      mkdir(codexHome),
+      mkdir(scanDir, { mode: 0o700 }),
+      mkdir(dirname(executable), { recursive: true }),
+    ]);
+    await writeFile(executable, "synthetic executable; never launched\n");
+    const hasTools =
+      scenario !== "missing tools" && scenario !== "non-directory tools";
+    if (hasTools) await mkdir(toolsDirectory);
+    else if (scenario === "non-directory tools")
+      await writeFile(toolsDirectory, "not a directory\n");
+    const callerEnvironment = {
+      OPENAI_API_KEY: "ambient-key",
+      ...(scenario === "blank override" ? { CODEX_CLI_PATH: "   " } : {}),
+    };
+    const runtimeEnvironment = {
+      CODEX_HOME: codexHome,
+      CODEX_CLI_PATH: executable,
+      ...pathEnvironment,
+    };
+    const originalEnvironment = { ...runtimeEnvironment };
     let codexOptions: CodexOptions | null = null;
     const client = new TestClient(
       {},
       {
-        environment: {
-          OPENAI_API_KEY: "ambient-key",
-          CODEX_CLI_PATH: ` ${executable} `,
-        },
+        environment: callerEnvironment,
         prepareRuntime: async () => ({
           ...preparedRuntime(codexHome),
-          environment: {
-            CODEX_HOME: codexHome,
-            CODEX_CLI_PATH: ` ${executable} `,
-          },
+          environment: runtimeEnvironment,
         }),
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
@@ -5856,15 +5969,45 @@ describe("CodexSecurity orchestration", () => {
         },
       },
     );
-
-    await client.run(repository);
-    expect((codexOptions as CodexOptions | null)?.codexPathOverride).toBe(
-      selectedExecutable,
-    );
-    expect((codexOptions as CodexOptions | null)?.env?.["CODEX_CLI_PATH"]).toBe(
-      selectedExecutable,
-    );
-    await client.close();
+    try {
+      await client.run(repository);
+      const options = codexOptions as CodexOptions | null;
+      expect(options?.codexPathOverride).toBe(
+        process.platform === "win32"
+          ? win32.toNamespacedPath(executable)
+          : undefined,
+      );
+      expect(options?.env?.["CODEX_CLI_PATH"]).toBe(executable);
+      const pathValues = Object.fromEntries(
+        Object.entries(options?.env ?? {}).filter(
+          ([key]) => key.toLowerCase() === "path",
+        ),
+      );
+      const pathKey =
+        scenario === "last alias"
+          ? "pAtH"
+          : scenario === "no PATH"
+            ? "PATH"
+            : "Path";
+      const expectedEntries =
+        scenario === "no PATH"
+          ? []
+          : scenario === "last alias"
+            ? [otherTools]
+            : [otherTools, otherTools.toUpperCase()];
+      expect(pathValues).toEqual(
+        process.platform === "win32" && hasTools
+          ? { [pathKey]: [toolsDirectory, ...expectedEntries].join(delimiter) }
+          : pathEnvironment,
+      );
+      expect(runtimeEnvironment).toEqual(originalEnvironment);
+      expect(callerEnvironment).toEqual({
+        OPENAI_API_KEY: "ambient-key",
+        ...(scenario === "blank override" ? { CODEX_CLI_PATH: "   " } : {}),
+      });
+    } finally {
+      await client.close();
+    }
   });
 
   test("authenticates without initializing the plugin runtime", async () => {
@@ -5984,9 +6127,11 @@ process.exit(2);
       verified: false,
     });
     expect((codexOptions as CodexOptions | null)?.apiKey).toBe("ambient-key");
-    expect(
-      (codexOptions as CodexOptions | null)?.codexPathOverride,
-    ).toBeUndefined();
+    expect((codexOptions as CodexOptions | null)?.codexPathOverride).toBe(
+      process.platform === "win32"
+        ? win32.toNamespacedPath(resolveCodexCommand({}).command)
+        : undefined,
+    );
     expect(
       Object.keys((codexOptions as CodexOptions | null)?.env ?? {}).some(
         (name) =>
