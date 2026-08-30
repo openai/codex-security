@@ -24,7 +24,18 @@ const timings = JSON.parse(
   await readFile(new URL("./ci-test-durations.json", import.meta.url), "utf8"),
 );
 const windows = process.platform === "win32";
-const testTimeoutMs = windows ? "120000" : "30000";
+const defaultTestTimeoutMs = windows ? "120000" : "30000";
+const testOptions = process.argv.slice(3);
+let testTimeoutMs = defaultTestTimeoutMs;
+for (let index = 0; index < testOptions.length; index += 1) {
+  const option = testOptions[index];
+  if (option === "--") break;
+  if (option === "--timeout") {
+    testTimeoutMs = testOptions[++index] ?? testTimeoutMs;
+  } else if (option.startsWith("--timeout=")) {
+    testTimeoutMs = option.slice("--timeout=".length);
+  }
+}
 const assignments = shardTestFiles(
   tests,
   count,
@@ -47,10 +58,10 @@ const child = spawn(
   [
     "test",
     "--timeout",
-    testTimeoutMs,
+    defaultTestTimeoutMs,
     "--reporter=junit",
     `--reporter-outfile=reports/junit-${shard}.xml`,
-    ...process.argv.slice(3),
+    ...testOptions,
     ...selected.files.map((file) => `./tests-ts/${file}`),
   ],
   {

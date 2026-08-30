@@ -70,14 +70,21 @@ test.each([
   expect(shards.flatMap(({ files }) => files).sort()).toEqual(tests);
 });
 
+const defaultTimeoutMs = process.platform === "win32" ? "120000" : "30000";
+
 test.each([
-  ["available", false],
-  ["available", true],
-  ["blocked directory", false],
-  ["blocked directory", true],
+  [defaultTimeoutMs, [], "available", false],
+  [defaultTimeoutMs, [], "available", true],
+  [defaultTimeoutMs, [], "blocked directory", false],
+  [defaultTimeoutMs, [], "blocked directory", true],
+  ["5000", ["--timeout", "5000"], "available", false],
+  ["5000", ["--timeout=5000"], "available", false],
+  ["5000", ["--timeout", "9000", "--timeout=5000"], "available", false],
+  ["5000", ["--timeout=9000", "--timeout", "5000"], "available", false],
+  [defaultTimeoutMs, ["--", "--timeout", "5000"], "available", false],
 ] as const)(
-  "passes the CI timeout and preserves the test result with %s reports and failure=%p",
-  async (report, fail) => {
+  "uses timeout %s with %p, %s reports and failure=%p",
+  async (timeout, options, report, fail) => {
     const node = Bun.which("node");
     expect(node).not.toBeNull();
     const root = await mkdtemp(join(tmpdir(), "codex-security-shard-report-"));
@@ -98,7 +105,7 @@ test.each([
         join(root, "tests-ts", "probe.test.ts"),
         `import { expect, test } from "bun:test";
 test("synthetic report probe", () => {
-  expect(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"]).toBe(process.platform === "win32" ? "120000" : "30000");
+  expect(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"]).toBe(${JSON.stringify(timeout)});
   expect(true).toBe(${!fail});
 });\n`,
       );
@@ -106,7 +113,12 @@ test("synthetic report probe", () => {
         await writeFile(join(root, "reports"), "synthetic blocker");
       }
       const child = Bun.spawn({
-        cmd: [node!, join(root, "scripts", "run-ci-tests.mjs"), "1/1"],
+        cmd: [
+          node!,
+          join(root, "scripts", "run-ci-tests.mjs"),
+          "1/1",
+          ...options,
+        ],
         env: {
           ...process.env,
           CODEX_SECURITY_TEST_TIMEOUT_MS: "1",
