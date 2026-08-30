@@ -44,8 +44,9 @@ That manual label takes precedence over the title category.
 ## Dependency updates
 
 Dependabot checks npm packages, Python test dependencies, and GitHub Actions
-hourly. OpenAI dependencies have no release cooldown; other releases must be at
-least seven days old. Security updates do not wait for the version-update cooldown.
+daily, including weekends. OpenAI dependencies have no release cooldown; other
+releases must be at least seven days old. Security updates do not wait for the
+version-update cooldown.
 Updates still require review and passing CI; nothing is merged automatically.
 
 Keep `@openai/codex` and `@openai/codex-sdk` on the same exact version across the

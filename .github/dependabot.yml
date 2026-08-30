@@ -7,7 +7,7 @@ updates:
       - /plugins/codex-security/skills/triage-finding/evals
     schedule:
       interval: cron
-      cronjob: "0 * * * *"
+      cronjob: "0 9 * * *"
     cooldown:
       default-days: 7
       exclude:
@@ -41,7 +41,7 @@ updates:
     directory: /plugins/codex-security
     schedule:
       interval: cron
-      cronjob: "0 * * * *"
+      cronjob: "0 9 * * *"
     cooldown:
       default-days: 7
       exclude:
@@ -54,7 +54,7 @@ updates:
     directory: /
     schedule:
       interval: cron
-      cronjob: "0 * * * *"
+      cronjob: "0 9 * * *"
     cooldown:
       default-days: 7
       exclude:
