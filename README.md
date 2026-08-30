@@ -22,21 +22,24 @@ For CI, set `OPENAI_API_KEY` instead of signing in.
 
 ## Generate SECURITY.md
 
-Draft a repository-wide or component-scoped security policy without changing the checkout:
+Draft repository-wide or component-scoped `SECURITY.md` guidance for future scans:
 
 ```bash
 codex-security policy .
 codex-security policy . --path services/api --knowledge-base architecture.md
 ```
 
-Review the proposed diff before copying the policy. Supporting architecture,
-threat-model, and review documents stay outside the repository and may contain
-sensitive details. See the [SDK policy guide](sdk/typescript/README.md#generate-a-security-policy)
+In a terminal, the command shows the proposed diff and asks whether to install it;
+the write confirmation defaults to No. Add `--headless` to save a draft without
+write prompts. Generation does not run a vulnerability scan. Supporting
+architecture, threat-model, and review documents stay outside the repository and
+may contain sensitive details. See the [SDK policy guide](sdk/typescript/README.md#generate-a-security-policy)
 for headless generation, saved artifacts, and SDK usage.
 
 Use `codex-security policy . --apply /path/to/draft` to review and confirm a
 saved draft interactively. Add `--write` to apply the reviewed draft without
-another confirmation. The command revalidates the draft and selected checkout
+another confirmation. Use the same repository and `--path` as generation.
+The command revalidates the draft and selected checkout
 before writing; see the SDK guide for recovery after an interrupted apply.
 
 ## TypeScript SDK

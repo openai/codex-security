@@ -2853,7 +2853,9 @@ export async function main(
           headless: z
             .boolean()
             .default(false)
-            .describe("Do not ask questions or offer to write the policy."),
+            .describe(
+              "Skip owner questions, authentication prompts, and write prompts.",
+            ),
           dryRun: z
             .boolean()
             .default(false)
@@ -2877,7 +2879,9 @@ export async function main(
             .number()
             .positive()
             .optional()
-            .describe("Stop if estimated USD cost exceeds AMOUNT."),
+            .describe(
+              "Stop when estimated total USD cost across all three stages exceeds AMOUNT.",
+            ),
           pluginPath: optionValue("--plugin-path")
             .optional()
             .describe(PLUGIN_PATH_DESCRIPTION),

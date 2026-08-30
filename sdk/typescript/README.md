@@ -253,11 +253,17 @@ Cyber approval. Apply or check your access at
 
 ## Generate a security policy
 
-`policy` drafts a source-backed `SECURITY.md` for review before writing it.
-It uses the scan runtime and authentication without creating a scan record, with
-read-only access to the selected repository and required tools. Network access,
+`policy` drafts `SECURITY.md` guidance for future scans and can install it after
+review. It does not run a vulnerability scan or change application settings.
+Generation uses the scan runtime and authentication, requesting read-only access
+to the selected repository and required tools. Network access,
 web search, apps, and MCP servers are disabled. Drafts stay outside the checkout.
 Git metadata outside the selected checkout is inspected only by the host.
+
+On macOS, the pinned Codex runtime does not fully enforce write restrictions
+under `/tmp` (including `/private/tmp`). Keep the repository and artifacts outside
+that tree when read-only enforcement is required. See the
+[upstream sandbox limitation](https://github.com/openai/codex/issues/32395).
 
 ```bash
 npx @openai/codex-security policy .
@@ -275,10 +281,25 @@ metadata; ancestor links cannot widen a component policy's scope.
 For an intentional separate Git directory, set `core.worktree` to the checkout's
 absolute path. Use `git worktree repair` for moved linked worktrees.
 
-Generation describes the system, builds a threat model, then drafts the policy.
+Generation uses three Codex stages: describe the system, build a threat model,
+then draft the policy. The first two documents support review; they are not
+additional approval steps or policies to install.
 In a terminal, it asks about facts the source cannot establish, shows the exact
-diff, and asks before writing. If both ChatGPT and API-key credentials are available, it asks which
-to use; `--auth chatgpt` or `--auth api-key` selects one explicitly.
+diff, and asks whether to install the policy. The write confirmation defaults to
+No. If both ChatGPT and API-key credentials are available, it asks which to use; `--auth chatgpt` or `--auth api-key` selects one explicitly.
+
+| Invocation                                 | Calls Codex? | Result                                                                           |
+| ------------------------------------------ | ------------ | -------------------------------------------------------------------------------- |
+| `policy .`                                 | Yes          | Ask owner questions, save documents, preview the draft, and offer to install it. |
+| `policy . --headless --json`               | Yes          | Save documents without prompts and return their paths and review notes.          |
+| `policy . --format md`                     | Yes          | Generate a draft and write its Markdown to stdout without installing it.         |
+| `policy . --dry-run --json`                | No           | Check local inputs and show the resolved target and settings.                    |
+| `policy . --apply DRAFT`                   | No           | Preview a saved draft and offer to install it.                                   |
+| `policy . --apply DRAFT --headless --json` | No           | Preview a saved draft without writing or prompting.                              |
+| `policy . --apply DRAFT --write --json`    | No           | Install the reviewed draft without another confirmation.                         |
+
+`DRAFT` is the saved artifact directory. Output formats change presentation;
+`policy . --json` still generates a new draft. Use `--apply` to load one instead.
 
 ### Review and apply a saved draft
 
@@ -327,6 +348,10 @@ before retrying. Once a write commits, SDK cancellation does not skip the
 remaining checks. A terminal interrupt or process failure can still leave a
 `written_unverified` result. A later Ctrl-C or SIGTERM forces the CLI to stop.
 
+New policies are published atomically, without overwriting a concurrent save. On
+Linux, the filename-based SELinux label is prepared before publication; if the
+current account cannot set that label, the target is left absent.
+
 On Windows, updates preserve the existing policy's complete security descriptor,
 including audit rules and integrity labels. If the current account cannot read or
 copy that descriptor, the existing policy is left unchanged.
@@ -361,7 +386,11 @@ documents. Fix the reported problem and use a new output directory to retry.
 ### Generate a policy from TypeScript
 
 ```ts
-import { CodexSecurity, applySecurityPolicy } from "@openai/codex-security";
+import {
+  CodexSecurity,
+  applySecurityPolicy,
+  loadSecurityPolicyDraft,
+} from "@openai/codex-security";
 
 const security = new CodexSecurity();
 try {
@@ -372,17 +401,25 @@ try {
   });
 
   console.log(await security.previewPolicy(draft));
-  // Open draft.draftPath in an editor to review the saved policy.
-  // Obtain approval for this exact draft before calling:
-  // await applySecurityPolicy(draft, { pythonPath: security.config.pythonPath });
+  console.log(draft.draftPath);
+  // Review or edit that saved file, then reload it before previewing or applying.
+  const reviewed = await loadSecurityPolicyDraft(
+    draft.repository,
+    draft.outputDir,
+    { path: draft.scope },
+  );
+  console.log(await security.previewPolicy(reviewed));
+  // Obtain approval for these exact bytes before calling:
+  // await applySecurityPolicy(reviewed, { pythonPath: security.config.pythonPath });
 } finally {
   await security.close();
 }
 ```
 
 `preflightPolicy()` checks local inputs without starting Codex.
-`previewPolicy()` uses the client's Python setting and makes terminal control
-characters visible. The standalone `securityPolicyDiff()` returns a raw diff
+`previewPolicy()` previews the supplied in-memory draft, uses the client's Python
+setting, and makes terminal control characters visible. Editing the saved file
+does not change that object. The standalone `securityPolicyDiff()` returns a raw diff
 for files or other non-terminal uses; pass an interpreter explicitly if needed.
 `generatePolicy()` never edits the repository. It accepts `auth`, `path`,
 `knowledgeBasePaths`, `outputDir`, `maxCostUsd`, `signal`, and progress and cost

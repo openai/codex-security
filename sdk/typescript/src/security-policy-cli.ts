@@ -269,6 +269,7 @@ export async function runPolicyCommand(
         write(`Previous policy kept at ${display(recoveryPath)}`);
     } else if (humanOutput) {
       write(`\nDraft: ${display(draft.draftPath)}`);
+      write(`Architecture: ${display(draft.specificationPath)}`);
       write(`Threat model: ${display(draft.threatModelPath)}`);
       if (changed)
         write(
