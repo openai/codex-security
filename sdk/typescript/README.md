@@ -132,6 +132,10 @@ Constructor options:
 | `pythonPath`     | Python interpreter; overrides `PYTHON`.                                 |
 | `codexOverrides` | Supported settings to deep-merge into the isolated Codex configuration. |
 
+The SDK refreshes its `sdk-marketplace` directory before installing. Custom
+sources inside it are rejected to avoid deleting the source, except for the
+staged `plugins/codex-security` directory itself.
+
 Options for `security.run(repository, options)` and
 `security.preflight(repository, options)`:
 
@@ -773,7 +777,8 @@ Use `findings list --scan SCAN_ID` for one saved scan, or `--all-repositories`
 for every repository. These options cannot be combined with a repository
 argument. Filter with `--query TEXT`, `--severity LEVEL`, or `--status open|closed`.
 Repository and all-repository lists default to open findings; scan-specific
-lists include both statuses unless filtered.
+lists include both statuses unless filtered. `--status closed` also includes
+closed findings that no longer appear in the latest completed scan.
 
 An unfiltered repository list in an interactive terminal shows all open findings.
 Filtered, scan-specific, all-repository, and machine-readable lists return one

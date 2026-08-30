@@ -237,6 +237,40 @@ describe("CLI findings history", () => {
     }
   });
 
+  test.each([
+    { scope: [], includeResolved: true },
+    { scope: ["--all-repositories"], includeResolved: true },
+    { scope: ["--scan", "saved-scan"], includeResolved: false },
+  ])(
+    "includes resolved findings in closed history for scope %j",
+    async ({ scope, includeResolved }) => {
+      const calls: Array<readonly string[]> = [];
+      const stdout = capture();
+      const finding = { occurrenceId: "resolved-finding", status: "closed" };
+      expect(
+        await main(
+          ["findings", "list", ...scope, "--status", "closed", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args) => {
+              calls.push(args);
+              const findings =
+                args[0] === "list-findings" ||
+                args.includes("--include-resolved")
+                  ? [finding]
+                  : [];
+              return { findings };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual({ findings: [finding] });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.includes("--include-resolved")).toBe(includeResolved);
+    },
+  );
+
   test("preserves the current checkout when opening a relocated finding", async () => {
     const stdout = capture();
     const deps = dependencies({

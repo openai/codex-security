@@ -2428,6 +2428,16 @@ export async function bootstrapPlugin(
 
   if (!(await sameFile(root, join(marketplace, "plugins", PLUGIN_NAME)))) {
     if (existing !== null) {
+      const sourceRelative = relative(await realpath(marketplace), root);
+      if (
+        sourceRelative !== ".." &&
+        !sourceRelative.startsWith(`..${sep}`) &&
+        !isAbsolute(sourceRelative)
+      ) {
+        throw new PluginBootstrapError(
+          `Cannot refresh the SDK plugin marketplace because it contains the selected plugin source: ${marketplace}. Copy the selected plugin outside this directory and retry.`,
+        );
+      }
       await rm(marketplace, { recursive: true, force: true });
     }
     await createMarketplace(codexHome, root, options.signal);

@@ -1684,6 +1684,44 @@ describe("plugin runtime preparation", () => {
     );
   });
 
+  test.each([{ parent: [] }, { parent: ["plugins", "codex-security"] }])(
+    "rejects a nested plugin source before replacing the marketplace: %j",
+    async ({ parent }) => {
+      const root = await temporaryDirectory();
+      const source = await plugin(root);
+      const home = join(root, "home");
+      const marketplace = await createMarketplace(home, source);
+      const nested = await plugin(join(marketplace, ...parent, "selected"));
+      const helper = join(nested, "scripts", "helper.py");
+      const original = await readFile(helper);
+      const calls: Array<readonly string[]> = [];
+
+      await expect(
+        bootstrapPlugin(home, nested, {
+          codexCommand: { command: "/codex" },
+          runCodex: async (_command, args) => {
+            calls.push(args);
+            return "";
+          },
+        }),
+      ).rejects.toThrow("Copy the selected plugin outside this directory");
+
+      expect(await readFile(helper)).toEqual(original);
+      expect(
+        await readFile(
+          join(
+            marketplace,
+            "plugins",
+            "codex-security",
+            "scripts",
+            "helper.py",
+          ),
+        ),
+      ).toEqual(await readFile(join(source, "scripts", "helper.py")));
+      expect(calls).toEqual([]);
+    },
+  );
+
   test("does not preserve a different marketplace when numeric identities collide", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");

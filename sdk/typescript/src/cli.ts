@@ -1794,6 +1794,9 @@ export async function main(
           ...(options.scan === undefined
             ? ["list-global-findings"]
             : ["list-findings", "--scan-id", options.scan]),
+          ...(options.scan === undefined && status === "closed"
+            ? ["--include-resolved"]
+            : []),
           ...(repository === undefined ? [] : ["--repository", repository]),
           ...(options.query === undefined ? [] : ["--query", options.query]),
           ...(options.severity === undefined
