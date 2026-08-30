@@ -86,28 +86,7 @@ def run_workbench(
     check: bool = True,
     environment: dict[str, str] | None = None,
     input_text: str | None = None,
-    deliver_unclaimed_scan_before_mutation: bool = True,
 ) -> dict[str, object]:
-    state_database = state_dir / "workbench.sqlite3"
-    # Lifecycle tests that omit a capability model a delivered, non-handoff scan.
-    if (
-        deliver_unclaimed_scan_before_mutation
-        and args[0] in {"begin-deep-scan", "update-progress", "complete-scan", "fail-scan"}
-        and "--scan-id" in args
-        and "--claim-token" not in args
-        and state_database.exists()
-    ):
-        scan_id = args[args.index("--scan-id") + 1]
-        with sqlite3.connect(state_database) as connection:
-            connection.execute(
-                """
-                UPDATE scans
-                SET handoff_status = 'delivered'
-                WHERE id = ? AND status = 'running' AND handoff_status = 'pending'
-                    AND handoff_claim_token IS NULL AND continuation_thread_id IS NULL
-                """,
-                (scan_id,),
-            )
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         check=check,
@@ -123,6 +102,22 @@ def run_workbench(
     if not check:
         return {"returncode": completed.returncode, "stderr": completed.stderr}
     return json.loads(completed.stdout)
+
+
+def start_delivered_scan(
+    state_dir: Path,
+    *args: str,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """Prepare an unclaimed, delivered scan for tests outside handoff ownership."""
+    started = run_workbench(state_dir, "start-scan", *args, environment=environment)
+    scan = started["results"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan["scanId"],)
+        )
+    scan["handoffStatus"] = "delivered"
+    return started
 
 
 def initialize_git_repository(target: Path) -> str:
