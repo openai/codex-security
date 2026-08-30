@@ -374,9 +374,20 @@ function assertReleasePull(pull, plan) {
   }
 }
 
-function releaseHoldReason(openPulls, pullNumber) {
+function releaseHoldReason(openPulls, pullNumber, branch, repository) {
+  const retargeted = openPulls.find(
+    (candidate) =>
+      candidate.head.ref === branch &&
+      candidate.head.repo?.full_name === repository &&
+      candidate.base.ref !== "main",
+  );
+  if (retargeted)
+    return `Release PR #${retargeted.number} was retargeted. Restore its main base before resuming updates.`;
   const other = openPulls.find(
-    (candidate) => candidate.number !== pullNumber && isReleasePull(candidate),
+    (candidate) =>
+      candidate.number !== pullNumber &&
+      candidate.base.ref === "main" &&
+      isReleasePull(candidate),
   );
   if (other)
     return `Another release PR is open: #${other.number}. It has not been changed.`;
@@ -390,8 +401,10 @@ function releaseHoldReason(openPulls, pullNumber) {
 
 async function ensurePullRequest(github, plan, pull, template, headSha) {
   const holdReason = releaseHoldReason(
-    await github.list("pulls?state=open&base=main&per_page=100"),
+    await github.list("pulls?state=open&per_page=100"),
     pull?.number,
+    plan.branch,
+    github.repository,
   );
   if (holdReason) throw new Error(holdReason);
   if (pull) {
@@ -439,15 +452,18 @@ export async function reconcileReleasePullRequest({
     const mainSha = await branchHead(github, "main");
     const history = await readReleaseHistory(repo, mainSha, github);
     let plan = createReleasePlan(history);
-    const openPulls = await github.list(
-      "pulls?state=open&base=main&per_page=100",
-    );
+    const openPulls = await github.list("pulls?state=open&per_page=100");
     const pull = openPulls.find(
       (candidate) =>
         candidate.head.ref === plan.branch &&
         candidate.head.repo?.full_name === github.repository,
     );
-    const holdReason = releaseHoldReason(openPulls, pull?.number);
+    const holdReason = releaseHoldReason(
+      openPulls,
+      pull?.number,
+      plan.branch,
+      github.repository,
+    );
     if (holdReason)
       return {
         action: "held",
@@ -457,7 +473,7 @@ export async function reconcileReleasePullRequest({
       };
     if (!pull) {
       const previousPulls = await github.list(
-        `pulls?state=closed&head=${encodeURIComponent(`${github.owner}:${plan.branch}`)}&base=main&per_page=100`,
+        `pulls?state=closed&head=${encodeURIComponent(`${github.owner}:${plan.branch}`)}&per_page=100`,
       );
       if (previousPulls.length > 0)
         return {
@@ -506,10 +522,13 @@ export async function reconcileReleasePullRequest({
         parents: [...new Set([headSha, mainSha].filter(Boolean))],
       });
       if ((await branchHead(github, "main")) !== mainSha) continue;
-      const currentPulls = await github.list(
-        "pulls?state=open&base=main&per_page=100",
+      const currentPulls = await github.list("pulls?state=open&per_page=100");
+      const holdReason = releaseHoldReason(
+        currentPulls,
+        pull?.number,
+        plan.branch,
+        github.repository,
       );
-      const holdReason = releaseHoldReason(currentPulls, pull?.number);
       if (holdReason)
         return { action: "held", reason: holdReason, dryRun, plan };
       if (pull)

@@ -77,14 +77,16 @@ that draft leaves the package version unchanged. Do not mark an empty draft
 ready or merge it. Publication of the previous version still has to complete
 and pass the verification steps below.
 
-The updater leaves another open `release:` PR, including a manually prepared
-release, untouched and does not open a duplicate. Finish or close that PR
-before enabling the new flow. Closing an automated proposal pauses its
-cycle; reopen it to resume. Marking the proposal ready also pauses updates,
-preserving the reviewed version and notes. To resume, convert it back to a
-draft and rerun the updater. The updater rechecks these conditions before
-advancing the branch. Changes to other files on the release branch,
-or changes to package fields other than the version, also pause the updater
+The updater leaves another open `release:` PR targeting `main`, including a
+manually prepared release, untouched and does not open a duplicate. Finish
+or close that PR before enabling the new flow. Closing an automated proposal
+pauses its cycle; reopen it to resume. Retargeting it away from `main` also
+pauses updates; restore its `main` base before resuming. Marking the proposal
+ready pauses updates, preserving the reviewed version and notes. To resume,
+convert it back to a draft and rerun the updater. Do this before merging if
+`main` has advanced, then review the updated proposal. The updater rechecks
+these conditions before advancing the branch. Changes to other files on the
+release branch, or to package fields other than the version, also pause the updater
 so those edits cannot be lost.
 
 ### Editing the draft notes

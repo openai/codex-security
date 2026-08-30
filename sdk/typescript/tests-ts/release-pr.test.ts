@@ -316,10 +316,12 @@ class FakeGitHub {
     if (path.startsWith("pulls?")) {
       const query = new URLSearchParams(path.split("?")[1]);
       const head = query.get("head")?.slice(`${this.owner}:`.length);
+      const base = query.get("base");
       return this.pulls.filter(
         (pull) =>
           pull.state === query.get("state") &&
-          (!head || pull.head.ref === head),
+          (!head || pull.head.ref === head) &&
+          (!base || pull.base.ref === base),
       );
     }
     if (path.startsWith("issues/"))
@@ -1074,6 +1076,78 @@ describe("rolling release reconciliation", () => {
 });
 
 describe("release proposal pauses", () => {
+  test.each(["open", "closed"] as const)(
+    "keeps a retargeted %s proposal paused across workflow runs",
+    async (state) => {
+      const fixture = new Fixture();
+      fixture.merge("feat: initial feature");
+      const first = await fixture.run();
+      const pull = fixture.github.pulls.find(
+        (candidate) => candidate.number === first.pull,
+      )!;
+      pull.base.ref = "maintenance";
+      pull.state = state;
+      fixture.merge("fix: later fix");
+      const writes = fixture.github.writes.length;
+      const held = await fixture.run();
+      expect(held.action).toBe("held");
+      expect(held.reason).toContain(state === "open" ? "retargeted" : "closed");
+      expect(fixture.head(first.plan.branch)).toBe(first.headSha!);
+      expect(fixture.github.writes).toHaveLength(writes);
+      expect(
+        fixture.github.pulls.filter(
+          (candidate) => candidate.head.ref === first.plan.branch,
+        ),
+      ).toHaveLength(1);
+      pull.base.ref = "main";
+      pull.state = "open";
+      const resumed = await fixture.run();
+      expect(resumed.action).toBe("updated");
+      expect(resumed.pull).toBe(first.pull);
+    },
+  );
+
+  test("does not pause for an unrelated release targeting another base", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    const maintenance = fixture.github.addPull(
+      "maintenance-release",
+      "release: prepare a maintenance release",
+      fixture.head()!,
+    );
+    maintenance.base.ref = "maintenance";
+    const result = await fixture.run();
+    expect(result.action).toBe("created");
+    expect(result.pull).not.toBe(maintenance.number);
+    expect(maintenance.base.ref).toBe("maintenance");
+  });
+
+  test("pauses recovery when the orphan branch gains a PR targeting another base", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    fixture.github.failPullCreation = true;
+    await expect(fixture.run()).rejects.toThrow("HTTP 500");
+    fixture.github.failPullCreation = false;
+    const branch = "release/next-0.1.23";
+    const previousHead = fixture.head(branch)!;
+    fixture.merge("fix: later fix");
+    fixture.github.afterCommit = () => {
+      const pull = fixture.github.addPull(
+        branch,
+        "release: review the existing proposal",
+        previousHead,
+      );
+      pull.base.ref = "maintenance";
+    };
+    const held = await fixture.run();
+    expect(held.action).toBe("held");
+    expect(held.reason).toContain("retargeted");
+    expect(fixture.head(branch)).toBe(previousHead);
+    expect(
+      fixture.github.pulls.filter((candidate) => candidate.head.ref === branch),
+    ).toHaveLength(1);
+  });
+
   test("keeps a ready release proposal frozen until it returns to draft", async () => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
