@@ -82,28 +82,6 @@ and test name, then set `CODEX_SECURITY_PROPERTY_SEED` and
 `CODEX_SECURITY_PROPERTY_RUNS` to increase the case count. Pure properties
 default to 100 cases; filesystem contract properties default to 20.
 
-### TypeScript candidate normalizer
-
-The normalizer lives in `plugins/codex-security/scripts/normalize_candidates.ts`.
-`build:plugin` compiles it into the ignored `_bundled_plugin` payload.
-The discovery tool and diff-scan workflow use the generated Node helper.
-
-```sh
-pnpm run build:plugin
-bun test --timeout 30000 tests-ts/normalize-candidates.test.ts tests-ts/normalize-candidates-filesystem.test.ts tests-ts/normalize-candidates.property.test.ts
-```
-
-The CLI uses Node's argument parser. Repeat `--input FILE` for each input, use
-full option names, and let the shell expand home paths. Paths follow Node's
-normal resolution rules. JSONL and scope files use LF or CRLF lines;
-`--allow-missing-in-scope` skips missing entries. Output uses `JSON.stringify`
-and LF line endings, and atomic replacement replaces an output symlink rather
-than modifying its target.
-
-Candidate IDs use a fixed object shape. The tests cover normalization,
-deterministic output, scan boundaries, and atomic writes across Linux, macOS,
-and Windows.
-
 ## GitHub Actions
 
 `node-ci` retains the required `ubuntu-latest / node-22`,
