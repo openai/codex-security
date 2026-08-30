@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import { expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { runCommand } from "./support/shell.js";
 
 const packageRoot = join(import.meta.dir, "..");
 const cli = join(packageRoot, "src", "cli.ts");
@@ -79,19 +80,14 @@ test("serve reports startup failures with a nonzero exit", async () => {
   try {
     const state = join(root, "not-a-directory");
     await writeFile(state, "synthetic file");
-    const child = Bun.spawn({
-      cmd: [process.execPath, cli, "serve"],
-      env: { ...process.env, CODEX_SECURITY_STATE_DIR: state },
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      timeout: 20_000,
-    });
-    const [status, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ]);
+    const { status, stdout, stderr } = await runCommand(
+      process.execPath,
+      [cli, "serve"],
+      {
+        env: { ...process.env, CODEX_SECURITY_STATE_DIR: state },
+        timeout: 20_000,
+      },
+    );
     expect(status, stderr).toBe(1);
     expect(stdout).toBe("");
     expect(stderr).toContain("Could not access the findings database");

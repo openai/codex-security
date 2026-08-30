@@ -82,11 +82,32 @@ default to 100 cases; filesystem contract properties default to 20.
 ## GitHub Actions
 
 `node-ci` retains the required `ubuntu-latest / node-22`,
-`macos-latest / node-22`, and `windows-latest / node-22` checks. Its Ubuntu
-Node 22 job runs static checks and uploads JUnit and LCOV. All supported runtime
-lanes still test and inspect an installed package. Package inspection includes
-a strict NodeNext TypeScript consumer and the actual installed CLI. Failed
-tests block CI; a failed diagnostic upload does not.
+`macos-latest / node-22`, and `windows-latest / node-22` checks. It builds and
+inspects one package archive, then passes that archive to jobs in the same
+workflow run, using the commit SHA in the artifact name. Every supported Node
+runtime still installs and inspects the package, including a strict NodeNext
+TypeScript consumer, the actual CLI, credential locking, dashboard assets, and
+a nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
+
+The full Bun suite runs once per OS under Node 22: three file shards on Linux
+and macOS, and seven on Windows. The other Node versions run the installed
+package checks instead of repeating the same Bun suite. MCP and Python tests
+run in separate required jobs. Python uses four isolated pytest-xdist workers
+with work stealing; worker crashes fail the run without automatic restarts.
+
+`scripts/run-ci-tests.mjs` assigns the longest measured files first. Its
+`ci-test-durations.json` records per-file seconds from CI reports.
+Every new test file is included automatically with a one-second estimate.
+Refresh those estimates from the uploaded reports when adding or splitting
+expensive files; estimates affect scheduling, never whether a test runs.
+To reproduce one Windows shard locally after building the plugin, run
+`node scripts/run-ci-tests.mjs 3/7 --seed=12345`.
+
+Every Bun lane uploads JUnit; Linux lanes also upload LCOV per shard. Python
+reports include case durations, and the MCP runner can upload its JUnit report.
+Coverage is diagnostic and split across shards, not a combined percentage.
+Failed tests and missing package artifacts block CI; failed diagnostic uploads
+do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
 
 The separate `test-quality` workflow runs weekly, can be dispatched manually,
 and runs on pull requests that change its workflow file. It compares Bun's
@@ -103,7 +124,7 @@ that breaks the Ink UI tests under isolation. Keep the trial pin until a newer
 release passes the full SDK suite in every mode. Required CI and the mutation
 trial remain on Bun 1.3.14.
 
-Keep the current file-balanced Windows runner until the native runner has
+Keep the measured file-balanced runner until the native runner has
 matching inventories and acceptable Windows timings. Before promotion, compare
 native and file-balanced shards using the same commit and Bun version.
 Keep the machine-policy test serial. Do not replace the full required suite

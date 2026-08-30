@@ -1,4 +1,4 @@
-import { execFile, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdirSync,
@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
-import { bashCommand } from "./support/shell.js";
+import { bashCommand, runCommand } from "./support/shell.js";
 
 type ReleaseMetadata = Record<string, unknown>;
 
@@ -159,34 +159,6 @@ const releaseRepository = "openai/codex-security";
 const releaseTagTimeout = process.platform === "win32" ? 20_000 : 10_000;
 
 const bash = bashCommand();
-
-function runCommand(
-  command: string,
-  args: string[],
-  {
-    input,
-    ...options
-  }: {
-    cwd?: string;
-    env?: NodeJS.ProcessEnv;
-    input?: string;
-    timeout: number;
-  },
-): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  // Avoid Bun's premature synchronous timeouts while keeping pipe reads bounded.
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      command,
-      args,
-      { ...options, encoding: "utf8" },
-      (_error, stdout, stderr) => {
-        resolve({ status: child.exitCode, stdout, stderr });
-      },
-    );
-    child.stdin?.on("error", reject);
-    child.stdin?.end(input);
-  });
-}
 
 const jqMock = [
   "jq() {",
@@ -3958,7 +3930,10 @@ describe("GitHub release workflow safeguards", () => {
 
     const fullCiCondition = "needs.validate-title.outputs.ci-mode == 'full'";
     for (const job of [
+      "package",
       "test",
+      "compatibility",
+      "mcp",
       "plugin-source",
       "windows-test",
       "windows-verify",
@@ -3987,7 +3962,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.test.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
       "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
@@ -4002,6 +3977,9 @@ describe("GitHub release workflow safeguards", () => {
     ] as const) {
       const values = {
         "needs.plugin-source.result": upstream,
+        "needs.package.result": upstream,
+        "needs.compatibility.result": upstream,
+        "needs.mcp.result": upstream,
         "needs.test.result": upstream,
         "needs.validate-title.outputs.ci-mode": ciMode,
         "needs.validate-title.result": validation,
@@ -4018,6 +3996,35 @@ describe("GitHub release workflow safeguards", () => {
         ).toBe(gateFailure);
       }
     }
+
+    const dependencies = [
+      "package",
+      "test",
+      "compatibility",
+      "mcp",
+      "plugin-source",
+    ];
+    for (const dependency of dependencies) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        expect(
+          evaluateWorkflowCondition(
+            workflow.jobs["required-test"]?.steps[0]?.if ?? "",
+            {
+              "needs.validate-title.result": "success",
+              "needs.validate-title.outputs.ci-mode": "full",
+              ...Object.fromEntries(
+                dependencies.map((job) => [
+                  `needs.${job}.result`,
+                  job === dependency ? result : "success",
+                ]),
+              ),
+            },
+          ),
+          `${dependency}: ${result}`,
+        ).toBe(true);
+      }
+    }
+    expect(workflow.jobs["required-test"]?.steps[0]?.run).toBe("exit 1");
 
     const renderName = (template: string, values: Record<string, string>) => {
       let name = template;
