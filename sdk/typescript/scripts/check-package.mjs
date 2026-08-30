@@ -296,6 +296,14 @@ if (
 ) {
   throw new Error("npm package does not contain the expected public metadata.");
 }
+const pluginManifest = JSON.parse(
+  archiveFile("package/_bundled_plugin/.codex-plugin/plugin.json").toString(
+    "utf8",
+  ),
+);
+if (pluginManifest.version !== packageJson.version) {
+  throw new Error("Bundled plugin version must match the npm package version.");
+}
 assertExpectedGitHead(
   packageJson,
   process.env.CODEX_SECURITY_EXPECTED_GIT_HEAD,

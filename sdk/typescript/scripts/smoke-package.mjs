@@ -247,10 +247,16 @@ async function smokeNestedDeepScanWorker(installedRoot, consumer) {
     });
   }
   assert.equal(initialized.status, 0, initialized.stderr);
+  const serverInfo = JSON.parse(initialized.stdout.trim()).result.serverInfo;
   assert.equal(
-    JSON.parse(initialized.stdout.trim()).result.serverInfo.name,
+    serverInfo.name,
     "codex-security",
     "The installed MCP launcher must initialize the bundled security server.",
+  );
+  assert.equal(
+    serverInfo.version,
+    packageManifest.version,
+    "The installed MCP server must report the package release version.",
   );
 
   const globalCodex = spawnSync("codex", ["--version"], {
@@ -399,7 +405,15 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
+      `
+        import assert from "node:assert/strict";
+        const sdk = await import(${JSON.stringify(packageManifest.name)});
+        for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan"]) {
+          assert.equal(typeof sdk[name], "function", "The installed package must export " + name + ".");
+        }
+        assert.equal(sdk.VERSION, ${JSON.stringify(packageManifest.version)});
+        assert.equal(sdk.BUNDLED_PLUGIN_VERSION, sdk.VERSION);
+      `,
     ],
     { cwd: consumer },
   );
