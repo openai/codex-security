@@ -18,6 +18,11 @@ updates:
         patterns:
           - "@openai/codex"
           - "@openai/codex-sdk"
+      codex-security:
+        applies-to: security-updates
+        patterns:
+          - "@openai/codex"
+          - "@openai/codex-sdk"
       openai:
         patterns:
           - openai
