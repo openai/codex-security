@@ -52,6 +52,10 @@ findings service, use the same scanner image with the
 
 ## Findings service (preview)
 
+Run `codex-security serve` to start the service without Docker. See
+[running without Docker](sdk/typescript/README.md#running-without-docker)
+for prerequisites, credentials, and storage configuration.
+
 The [findings service](sdk/typescript/README.md#findings-service-preview) runs
 from the same `ghcr.io/openai/codex-security` image as the scanner (or a local
 source build), with a separate container and state volume configured by

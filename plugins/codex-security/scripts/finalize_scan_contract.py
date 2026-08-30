@@ -250,9 +250,7 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
     return normalized
 
 
-def _require_portable_relative_path(
-    value: str, context: str, *, allow_dot: bool = False
-) -> str:
+def _require_portable_relative_path(value: str, context: str, *, allow_dot: bool = False) -> str:
     normalized = _require_safe_relative_path(value, context, allow_dot=allow_dot)
     if any(_windows_unsafe_path_component(part) for part in value.split("/")):
         raise ContractError(f"{context}: expected a safe scan-relative POSIX path")
@@ -288,10 +286,7 @@ def _validate_scan_local_output_path(scan_dir: Path, path: Path, relative_path: 
         resolved_parent.relative_to(scan_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         raise ContractError(f"{relative_path}: expected a path inside the scan directory") from exc
-    if (
-        os.path.normcase(resolved_parent) != os.path.normcase(path.parent)
-        or path.is_symlink()
-    ):
+    if os.path.normcase(resolved_parent) != os.path.normcase(path.parent) or path.is_symlink():
         raise ContractError(
             f"{relative_path}: expected a non-symlink path inside the scan directory"
         )
@@ -341,10 +336,7 @@ def _open_verified_scan_directory(
     try:
         expected = scan_dir.lstat()
         observed_identity = (expected.st_dev, expected.st_ino)
-        if (
-            expected_root_identity is not None
-            and observed_identity != expected_root_identity
-        ):
+        if expected_root_identity is not None and observed_identity != expected_root_identity:
             raise ContractError("scan directory: changed after artifact restoration setup")
         canonical = _require_scan_directory(scan_dir)
         descriptor = os.open(
@@ -352,14 +344,11 @@ def _open_verified_scan_directory(
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
         )
     except OSError as exc:
-        raise ContractError(
-            "scan directory: expected an existing non-symlink directory"
-        ) from exc
+        raise ContractError("scan directory: expected an existing non-symlink directory") from exc
     opened = os.fstat(descriptor)
     opened_identity = (opened.st_dev, opened.st_ino)
     if opened_identity != observed_identity or (
-        expected_root_identity is not None
-        and opened_identity != expected_root_identity
+        expected_root_identity is not None and opened_identity != expected_root_identity
     ):
         os.close(descriptor)
         raise ContractError("scan directory: changed while it was being opened")
@@ -372,9 +361,7 @@ def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
     scan_dir = _require_scan_directory(scan_dir)
     if not _descriptor_relative_writes_available():
         if not _is_windows():
-            raise ContractError(
-                "scan-local output requires descriptor-relative file operations"
-            )
+            raise ContractError("scan-local output requires descriptor-relative file operations")
         return _windows_scan_local_files().scan_root_identity(scan_dir)
     descriptor = _open_verified_scan_directory(scan_dir)
     try:
@@ -584,9 +571,7 @@ def write_scan_local_bytes(
             try:
                 existing_fd = os.open(
                     parts[-1],
-                    os.O_RDONLY
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_NONBLOCK", 0),
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
                     dir_fd=parent_fd,
                 )
             except OSError as exc:
@@ -596,20 +581,13 @@ def write_scan_local_bytes(
                 try:
                     opened = os.fstat(existing_fd)
                     if not stat.S_ISREG(opened.st_mode):
-                        raise ContractError(
-                            f"{relative_path}: expected a regular non-symlink file"
-                        )
+                        raise ContractError(f"{relative_path}: expected a regular non-symlink file")
                     if (opened.st_dev, opened.st_ino) != (
                         metadata.st_dev,
                         metadata.st_ino,
                     ):
-                        raise ContractError(
-                            f"{relative_path}: changed while it was being opened"
-                        )
-                    if (
-                        expected_root_identity is not None
-                        and opened.st_size == len(payload)
-                    ):
+                        raise ContractError(f"{relative_path}: changed while it was being opened")
+                    if expected_root_identity is not None and opened.st_size == len(payload):
                         try:
                             with os.fdopen(existing_fd, "rb") as handle:
                                 existing_fd = -1
@@ -857,9 +835,9 @@ def _recover_unsealed_findings(
         try:
             if not isinstance(finding, dict):
                 raise ContractError(f"{context}: expected an object")
-            compatible_findings = _legacy_sealed_findings_for_validation(
-                {"findings": [finding]}
-            )["findings"]
+            compatible_findings = _legacy_sealed_findings_for_validation({"findings": [finding]})[
+                "findings"
+            ]
             compatible_finding = compatible_findings[0]
             normalized_legacy_details = compatible_finding != finding
             finding = compatible_finding
@@ -870,9 +848,7 @@ def _recover_unsealed_findings(
             ]
             if "instance" in identity:
                 fields.append((identity, "instance", f"{context}.identity", "instance"))
-            normalized_fields = (
-                ["legacy finding details"] if normalized_legacy_details else []
-            )
+            normalized_fields = ["legacy finding details"] if normalized_legacy_details else []
             for parent, field, field_context, label in fields:
                 value = _require_str(parent, field, field_context)
                 if SLUG_RE.fullmatch(value):
@@ -1649,10 +1625,7 @@ def _validate_schema_node(
             raise ContractError(f"{context}: array has too many items")
         if schema.get("uniqueItems") is True:
             for index, item in enumerate(value):
-                if any(
-                    _schema_values_equal(item, candidate)
-                    for candidate in value[:index]
-                ):
+                if any(_schema_values_equal(item, candidate) for candidate in value[:index]):
                     raise ContractError(f"{context}: array items must be unique")
         contains = schema.get("contains")
         if isinstance(contains, dict):
@@ -1671,9 +1644,7 @@ def _validate_schema_node(
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):
-                _validate_schema_node(
-                    item, item_schema, f"{context}[{index}]", root_schema
-                )
+                _validate_schema_node(item, item_schema, f"{context}[{index}]", root_schema)
     if isinstance(value, dict):
         for item_schema in schema.get("allOf", []):
             _validate_schema_node(value, item_schema, context, root_schema)
@@ -1697,9 +1668,7 @@ def _validate_schema_node(
         for key, item in value.items():
             item_schema = properties.get(key)
             if isinstance(item_schema, dict):
-                _validate_schema_node(
-                    item, item_schema, f"{context}.{key}", root_schema
-                )
+                _validate_schema_node(item, item_schema, f"{context}.{key}", root_schema)
             elif additional_properties is False:
                 raise ContractError(f"{context}.{key}: unexpected schema property")
             elif isinstance(additional_properties, dict):
@@ -1716,22 +1685,16 @@ def validate_against_schema(payload: dict[str, Any], schema_path: Path) -> None:
     _validate_schema_node(payload, schema, schema_path.stem, schema)
 
 
-def _filter_unknown_legacy_evidence_refs(
-    section: dict[str, Any], evidence_ids: set[str]
-) -> None:
+def _filter_unknown_legacy_evidence_refs(section: dict[str, Any], evidence_ids: set[str]) -> None:
     for refs_field in ("evidenceRefs", "evidence_refs"):
         refs = section.get(refs_field)
         if isinstance(refs, list):
             section[refs_field] = [
-                ref
-                for ref in refs
-                if isinstance(ref, str) and ref.strip() and ref in evidence_ids
+                ref for ref in refs if isinstance(ref, str) and ref.strip() and ref in evidence_ids
             ]
 
 
-def _normalize_legacy_string_list_fields(
-    section: dict[str, Any], fields: tuple[str, ...]
-) -> None:
+def _normalize_legacy_string_list_fields(section: dict[str, Any], fields: tuple[str, ...]) -> None:
     for field in fields:
         if field not in section:
             continue
@@ -1739,9 +1702,7 @@ def _normalize_legacy_string_list_fields(
         if isinstance(value, str):
             normalized = [value] if value.strip() else []
         elif isinstance(value, list):
-            normalized = [
-                item for item in value if isinstance(item, str) and item.strip()
-            ]
+            normalized = [item for item in value if isinstance(item, str) and item.strip()]
         else:
             normalized = []
         if normalized:
@@ -1754,9 +1715,7 @@ def _remove_unsupported_legacy_scalar_fields(
     section: dict[str, Any], fields: tuple[str, ...]
 ) -> None:
     for field in fields:
-        if field in section and (
-            not isinstance(section[field], str) or section[field] == ""
-        ):
+        if field in section and (not isinstance(section[field], str) or section[field] == ""):
             section.pop(field)
 
 
@@ -1773,9 +1732,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         canonical_evidence_ids = {
             evidence["id"]
             for evidence in canonical_evidence
-            if isinstance(evidence, dict)
-            and isinstance(evidence.get("id"), str)
-            and evidence["id"]
+            if isinstance(evidence, dict) and isinstance(evidence.get("id"), str) and evidence["id"]
         }
         legacy_evidence = finding.get("code_evidence")
         if isinstance(legacy_evidence, list):
@@ -1807,9 +1764,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         evidence_ids = canonical_evidence_ids | {
             evidence["id"]
             for evidence in compatible_legacy_evidence
-            if isinstance(evidence, dict)
-            and isinstance(evidence.get("id"), str)
-            and evidence["id"]
+            if isinstance(evidence, dict) and isinstance(evidence.get("id"), str) and evidence["id"]
         }
         for section_name, list_fields in (
             ("rootCause", ("evidenceRefs", "evidence_refs")),
@@ -1891,12 +1846,8 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         for field in ("impact", "likelihood"):
             detail = attack_path.get(field)
             if isinstance(detail, dict):
-                _remove_unsupported_legacy_scalar_fields(
-                    detail, ("level", "rationale", "why")
-                )
-            elif detail is not None and (
-                not isinstance(detail, str) or detail == ""
-            ):
+                _remove_unsupported_legacy_scalar_fields(detail, ("level", "rationale", "why"))
+            elif detail is not None and (not isinstance(detail, str) or detail == ""):
                 attack_path.pop(field)
     return compatible
 
@@ -2805,9 +2756,7 @@ def _prepare_scan_finalization(
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-        validate_against_schema(
-            findings_for_validation, schema_dir / "findings.schema.json"
-        )
+        validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
         validate_against_schema(coverage, schema_dir / "coverage.schema.json")
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_report_output_paths(scan_dir)

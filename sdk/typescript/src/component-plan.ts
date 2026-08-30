@@ -193,9 +193,11 @@ async function inventoryFiles(
           throw error;
         },
       );
-      if (metadata?.isFile()) files.push(path);
+      if (metadata?.isFile()) files.push(join(repository, path));
     }
-    return files.sort();
+    return files.length === 0
+      ? []
+      : [...(await normalizeTarget(repository, files, signal)).paths].sort();
   }
   const files: string[] = [];
   const pending = [""];

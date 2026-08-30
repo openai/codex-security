@@ -459,7 +459,7 @@ export async function comparisonEnvironment(
   return environment;
 }
 
-function environmentEntry(
+export function environmentEntry(
   environment: Record<string, string>,
   requested: string,
 ): string | undefined {

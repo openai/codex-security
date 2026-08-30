@@ -63,6 +63,10 @@ import {
   type ScanSessionEvent,
 } from "./cost.js";
 import {
+  DeepScanProgressTracker,
+  type DeepScanProgress,
+} from "./deep-progress.js";
+import {
   loadContract,
   readScanFile,
   requireScanFile,
@@ -251,6 +255,7 @@ export interface ScanOptions extends DeepScanOptions {
   onActivity?: (activity: ScanActivity) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onProgress?: (progress: ScanProgress) => void;
+  onDeepProgress?: (progress: DeepScanProgress) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string, details?: ScanWarningDetails) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
@@ -338,6 +343,7 @@ type ScanObserverName =
   | "onActivity"
   | "onSessionEvent"
   | "onProgress"
+  | "onDeepProgress"
   | "onWorkerStatus"
   | "onWarning";
 
@@ -746,6 +752,7 @@ export class CodexSecurity {
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
+    let deepProgressTracker: DeepScanProgressTracker | null = null;
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
     let customValidationComplete = false;
@@ -1142,6 +1149,37 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      if (mode === "deep" && options.onDeepProgress !== undefined) {
+        let progressWarningReported = false;
+        deepProgressTracker = new DeepScanProgressTracker({
+          read: (progressSignal) =>
+            workbench(
+              {
+                ...workbenchOptions,
+                signal: AbortSignal.any([signal, progressSignal]),
+              },
+              ["get-scan", "--scan-id", scanId],
+            ),
+          onProgress: (progress) =>
+            notifyObserver(
+              "onDeepProgress",
+              options.onDeepProgress,
+              options.onObserverError,
+              progress,
+            ),
+          onError: (error) => {
+            if (progressWarningReported) return;
+            progressWarningReported = true;
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              `Could not track Deep Scan progress: ${errorMessage(error)}`,
+            );
+          },
+        });
+        deepProgressTracker.start();
+      }
       if (options.validationPrompt !== undefined) {
         await writeCustomValidationStatus(
           scanDir,
@@ -1721,6 +1759,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      deepProgressTracker?.stop();
       // Removing the temporary scan inputs is best effort. A throw here would replace the
       // outcome the try and catch blocks already produced, so these failures are reported
       // as warnings: a scan that failed has to say why it failed, not why its temporary

@@ -142,20 +142,20 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
     assert "saved checkpoint" in str(rejected["stderr"])
     assert (scan_dir / "scan-manifest.json").read_bytes() == seal
     assert checkpoint_path.read_bytes() == json.dumps(payload).encode()
-    refreshed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert refreshed["findingCount"] == 1
+    recovered = run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)["scan"]
+    assert recovered["findingCount"] == 2
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert not any(item.get("id") == "late-review" for item in coverage["deferred"])
-    assert refreshed["progress"]["status"] == "failed"
-    assert refreshed["progress"]["updatedAt"] == stopped["progress"]["updatedAt"]
-    assert refreshed["updatedAt"] == stopped["updatedAt"]
+    assert any(item.get("id") == "late-review" for item in coverage["deferred"])
+    assert recovered["progress"]["status"] == "failed"
+    assert recovered["progress"]["updatedAt"] > stopped["progress"]["updatedAt"]
+    assert recovered["updatedAt"] > stopped["updatedAt"]
     assert (
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["completedAt"]
         == json.loads(seal)["scan"]["completedAt"]
     )
     unchanged = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert unchanged["progress"]["updatedAt"] == refreshed["progress"]["updatedAt"]
-    assert unchanged["updatedAt"] == refreshed["updatedAt"]
+    assert unchanged["progress"]["updatedAt"] == recovered["progress"]["updatedAt"]
+    assert unchanged["updatedAt"] == recovered["updatedAt"]
 
 
 def test_canceled_scan_does_not_accept_checkpoints_written_after_cancellation(

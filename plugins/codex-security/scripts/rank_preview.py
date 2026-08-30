@@ -44,6 +44,8 @@ TEXT_CODE_EXTENSIONS = {
     ".php",
     ".proto",
     ".ps1",
+    ".psd1",
+    ".psm1",
     ".py",
     ".rb",
     ".rs",

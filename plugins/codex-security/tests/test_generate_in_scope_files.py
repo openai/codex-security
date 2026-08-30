@@ -162,6 +162,12 @@ def test_diff_inventory_includes_power_shell_files(tmp_path: Path) -> None:
 
     write_file(repository, "config.json", b'{"enabled": true}\n')
     write_file(repository, "build.ps1", b'Write-Output "build"\n')
+    write_file(repository, "module.psm1", b"function Get-Example { 'example' }\n")
+    write_file(
+        repository,
+        "module.psd1",
+        b"@{ RootModule = 'module.psm1'; ModuleVersion = '1.0.0' }\n",
+    )
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "add diff files")
     head = git(repository, "rev-parse", "HEAD")
@@ -178,6 +184,8 @@ def test_diff_inventory_includes_power_shell_files(tmp_path: Path) -> None:
     assert output.read_text(encoding="utf-8").splitlines() == [
         "build.ps1",
         "config.json",
+        "module.psd1",
+        "module.psm1",
     ]
 
 

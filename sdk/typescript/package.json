@@ -1,6 +1,6 @@
 {
   "name": "@openai/codex-security",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "description": "TypeScript SDK and CLI for Codex Security",
   "license": "Apache-2.0",
   "author": "OpenAI",
@@ -56,10 +56,10 @@
     "start:server": "node dist/server/index.js",
     "test": "node --run build:plugin && bun test --timeout 30000 ./tests-ts",
     "test:ci": "node -e \"require('node:fs').mkdirSync('reports',{recursive:true})\" && pnpm run test --coverage --coverage-reporter=text --coverage-reporter=lcov --reporter=junit --reporter-outfile=reports/junit.xml",
-    "test:mcp": "node --run build:plugin && npm --prefix ../../plugins/codex-security/mcp-app run test:mcp",
+    "test:mcp": "node --run build:plugin && pnpm --dir ../../plugins/codex-security/mcp-app run test:mcp",
     "test:mutation": "stryker run",
     "test:package": "node scripts/smoke-package.mjs",
-    "types": "pnpm run generate:models:check && npm --prefix ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
+    "types": "pnpm run generate:models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
   },
   "dependencies": {
     "@inquirer/prompts": "8.3.0",

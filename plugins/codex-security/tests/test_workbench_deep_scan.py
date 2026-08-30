@@ -435,6 +435,7 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
     assert paused["progress"]["independentReviews"] == {
         "completed": 1,
         "active": 0,
+        "maximum": 2,
         "consolidating": False,
     }
     assert (paused["reportAvailable"], paused["findingCount"], paused["artifacts"]) == (
@@ -1109,7 +1110,12 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         context = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
         return context["scan"]["progress"]["independentReviews"]
 
-    assert independent_reviews() == {"active": 0, "completed": 0, "consolidating": False}
+    assert independent_reviews() == {
+        "active": 0,
+        "completed": 0,
+        "maximum": 40,
+        "consolidating": False,
+    }
 
     first_prompt, first_artifacts, first_result = worker_paths(scan_dir, "discovery-1")
     second_prompt, second_artifacts, _ = worker_paths(scan_dir, "discovery-2")
@@ -1137,7 +1143,12 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         artifact_dir=second_artifacts,
         attempt=1,
     )
-    assert independent_reviews() == {"active": 2, "completed": 0, "consolidating": False}
+    assert independent_reviews() == {
+        "active": 2,
+        "completed": 0,
+        "maximum": 40,
+        "consolidating": False,
+    }
 
     first_result.write_text("{}\n")
     upsert_worker(
@@ -1152,7 +1163,12 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         result_path=first_result,
         attempt=1,
     )
-    assert independent_reviews() == {"active": 1, "completed": 1, "consolidating": False}
+    assert independent_reviews() == {
+        "active": 1,
+        "completed": 1,
+        "maximum": 40,
+        "consolidating": False,
+    }
 
     upsert_worker(
         state_dir,
@@ -1165,7 +1181,12 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         artifact_dir=second_artifacts,
         attempt=1,
     )
-    assert independent_reviews() == {"active": 0, "completed": 1, "consolidating": False}
+    assert independent_reviews() == {
+        "active": 0,
+        "completed": 1,
+        "maximum": 40,
+        "consolidating": False,
+    }
 
 
 def test_reducer_claim_updates_review_pass_once_and_projects_consolidation(
@@ -1217,6 +1238,7 @@ def test_reducer_claim_updates_review_pass_once_and_projects_consolidation(
         assert progress["independentReviews"] == {
             "active": 0,
             "completed": 2,
+            "maximum": 40,
             "consolidating": True,
         }
 
@@ -3298,7 +3320,7 @@ def test_failure_capped_completion_preserves_partial_results_and_exact_omissions
     assert replayed == finished
 
 
-def test_late_worker_rejection_does_not_mutate_frozen_stopped_results(tmp_path: Path) -> None:
+def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
     target = tmp_path / "target"
@@ -3381,14 +3403,21 @@ def test_late_worker_rejection_does_not_mutate_frozen_stopped_results(tmp_path: 
         )
     )
 
-    refreshed = run_workbench(
+    recovery_needed = run_workbench(
         state_dir, "get-scan", "--scan-id", scan_id, environment=deep_environment(codex_home)
+    )["scan"]
+    assert recovery_needed["resultsRecoveryNeeded"] is True
+    recovered = run_workbench(
+        state_dir,
+        "recover-scan-results",
+        "--scan-id",
+        scan_id,
+        environment=deep_environment(codex_home),
     )["scan"]
     final_findings = json.loads(findings_path.read_text())["findings"]
     final_coverage = json.loads(coverage_path.read_text())
-    assert refreshed["findingCount"] == len(final_findings) == 1
-    assert final_findings[0]["summary"] == provisional["summary"]
-    assert not any(
+    assert recovered["findingCount"] == len(final_findings) == 0
+    assert any(
         item.get("candidateId") == "candidate-late-rejection"
         and item.get("disposition") == "rejected"
         for item in final_coverage["surfaces"]

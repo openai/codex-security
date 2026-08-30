@@ -123,7 +123,7 @@ describe("publish scan to custom", () => {
     expect(JSON.parse(stdout.text())).toEqual(receipt);
   });
   test.each([false, true])(
-    "publishes a selected saved scan with dry-run=%s",
+    "publishes a selected saved scan with dry-run=%j",
     async (dryRun) => {
       const [scanDir] = await publicationScanDirectories(1);
       const stdout = capture();
@@ -481,7 +481,7 @@ describe("publish scan", () => {
   });
 
   test.each([false, true])(
-    "resolves a saved scan ID for Linear publication with skipExisting=%s",
+    "resolves a saved scan ID for Linear publication with skipExisting=%j",
     async (skipExisting) => {
       const scanDir = await publicationDirectory();
       const deps = dependencies({

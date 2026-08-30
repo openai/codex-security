@@ -830,9 +830,7 @@ def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: s
     (source_dir / "utf16-be.ps1").write_bytes(b"\xfe\xff" + source.encode("utf-16-be"))
     (source_dir / "utf8.ps1").write_bytes(source.encode("utf-8"))
     (source_dir / "binary.ps1").write_bytes(b"text\0binary")
-    (source_dir / "decoded-nul.ps1").write_bytes(
-        b"\xff\xfe" + "text\0binary".encode("utf-16-le")
-    )
+    (source_dir / "decoded-nul.ps1").write_bytes(b"\xff\xfe" + "text\0binary".encode("utf-16-le"))
     output = tmp_path / "rank_input.jsonl"
     expected = {
         "src/utf16-be.ps1": source.strip(),
@@ -850,9 +848,7 @@ def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: s
         else:
             arguments.extend(["--scope", "src"])
     else:
-        arguments = [
-            "make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode
-        ]
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
         if mode == "revisions":
             git(repo, "add", ".")
             git(repo, "commit", "-qm", "add encoded source")

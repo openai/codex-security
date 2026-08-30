@@ -728,9 +728,12 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
         (31, "freeze stopped scan source digests", retained_digest_applied_at),
         (32, "separate deep scan publication failures", publication_error_applied_at),
     ]
-    assert connection.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_publications'"
-    ).fetchone() is not None
+    assert (
+        connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_publications'"
+        ).fetchone()
+        is not None
+    )
     assert {
         row[0]
         for row in connection.execute(

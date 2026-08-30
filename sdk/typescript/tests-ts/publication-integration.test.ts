@@ -908,7 +908,7 @@ describe("database-backed Linear publication integration", () => {
   });
 
   test.each([false, true])(
-    "keeps conflicting connector identities out of CLI history and retains recovery evidence with skipExisting=%s",
+    "keeps conflicting connector identities out of CLI history and retains recovery evidence with skipExisting=%j",
     async (skipExisting) => {
       const completed = await fixture(1 + Number(skipExisting));
       const sealed = await artifactDigests(completed.scanDirectory);

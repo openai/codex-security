@@ -766,6 +766,17 @@ export function createCodexSecurityServer(): McpServer {
     _meta: appMeta
   }, async ({ scanId }) => cancelSecurityScan(scanId));
 
+  server.registerTool("recover_codex_security_scan_results", {
+    title: "Recover Codex Security Scan Results",
+    description: "App-only. Explicitly validate and republish retained checkpoints for one stopped scan, updating its artifacts, finding index, and counts.",
+    inputSchema: scanSchema,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    _meta: appMeta
+  }, async ({ scanId }) => scanActionResult(
+    await runWorkbench(["recover-scan-results", "--scan-id", scanId]),
+    "Recovered retained Codex Security scan results."
+  ));
+
   registerScanHandoffTools(server, { appMeta, runWorkbench, workspaceResult });
 
   server.registerTool("get_codex_security_scan", {
@@ -786,7 +797,7 @@ export function createCodexSecurityServer(): McpServer {
 
   server.registerTool("list_codex_security_scans", {
     title: "List Codex Security Scans",
-    description: "App-only. Read plugin-owned scan summaries for native Security navigation and route recovery.",
+    description: "App-only. Read persisted plugin-owned scan summaries for native Security navigation.",
     inputSchema: scanListSchema,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: appMeta
@@ -1633,6 +1644,8 @@ async function executeWorkbench(
       "get-workspace",
       "inspect-setup",
       "list-findings",
+      "preserve-scan-results",
+      "recover-scan-results",
       "request-finding-remediation",
       "request-finding-remediation-action",
       "save-workspace",

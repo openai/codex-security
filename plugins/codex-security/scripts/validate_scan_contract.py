@@ -64,9 +64,7 @@ def validate_contract(scan_dir: Path) -> dict[str, Any]:
     FINALIZER._validate_derived_finding_identities(manifest, findings)
     FINALIZER._validate_coverage(manifest, coverage, scan_dir)
     FINALIZER._validate_sealed_coverage_receipts(scan, coverage)
-    FINALIZER.validate_against_schema(
-        findings_for_validation, schema_dir / "findings.schema.json"
-    )
+    FINALIZER.validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
     FINALIZER.validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     FINALIZER._require_scan_local_file(scan_dir, "report.md", "report.md")
     return {

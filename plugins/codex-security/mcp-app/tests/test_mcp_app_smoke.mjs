@@ -18,10 +18,9 @@ const sourcePluginRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
-const pluginRoot = path.resolve(
-  sourcePluginRoot,
-  "../../sdk/typescript/_bundled_plugin",
-);
+const pluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
+  ? path.resolve(process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT)
+  : path.resolve(sourcePluginRoot, "../../sdk/typescript/_bundled_plugin");
 const mcpAppRoot = path.join(sourcePluginRoot, "mcp-app");
 const pluginManifest = JSON.parse(
   await readFile(path.join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
@@ -44,15 +43,6 @@ const parentSandboxState = {
   },
   sandboxCwd: pathToFileURL(pluginRoot).href,
 };
-const packageManifest = JSON.parse(
-  await readFile(path.join(mcpAppRoot, "package.json"), "utf8"),
-);
-const packageLock = JSON.parse(
-  await readFile(path.join(mcpAppRoot, "package-lock.json"), "utf8"),
-);
-const MCP_APP_VERSION = packageManifest.version;
-assert.equal(packageLock.version, MCP_APP_VERSION);
-assert.equal(packageLock.packages[""].version, MCP_APP_VERSION);
 const installedPluginRoot = pluginRoot;
 const serverPath = path.join(installedPluginRoot, "mcp", "server.mjs");
 const mcpConfig = JSON.parse(
@@ -76,6 +66,7 @@ assert.deepEqual(
     "CODEX_ELECTRON_RESOURCES_PATH",
     "CODEX_MANAGED_PACKAGE_ROOT",
     "CODEX_MCP_NODE_PATH",
+    "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "FIREWORKS_API_KEY",
     "AWS_BEARER_TOKEN_BEDROCK",
@@ -1129,6 +1120,9 @@ try {
   const getScan = toolList.result.tools.find(
     (tool) => tool.name === "get_codex_security_scan",
   );
+  const recoverScanResults = toolList.result.tools.find(
+    (tool) => tool.name === "recover_codex_security_scan_results",
+  );
   const listScans = toolList.result.tools.find(
     (tool) => tool.name === "list_codex_security_scans",
   );
@@ -1551,6 +1545,10 @@ try {
   ]);
   assert.equal(getScan.annotations.readOnlyHint, false);
   assert.deepEqual(getScan._meta.ui.visibility, ["app"]);
+  assert.equal(recoverScanResults.annotations.readOnlyHint, false);
+  assert.equal(recoverScanResults.annotations.destructiveHint, true);
+  assert.equal(recoverScanResults.annotations.idempotentHint, true);
+  assert.deepEqual(recoverScanResults._meta.ui.visibility, ["app"]);
   assert.equal(listScans.annotations.readOnlyHint, true);
   assert.deepEqual(listScans._meta.ui.visibility, ["app"]);
   assert.equal(listGlobalFindings.annotations.readOnlyHint, true);
@@ -3230,6 +3228,15 @@ try {
   assert.equal(
     rotatedFailure.result.structuredContent.scan.progress.status,
     "failed",
+  );
+  const unavailableRecovery = await requestAndWait(2040, "tools/call", {
+    name: "recover_codex_security_scan_results",
+    arguments: { scanId: fallbackScanId },
+  });
+  assert.equal(unavailableRecovery.result.isError, true);
+  assert.match(
+    unavailableRecovery.result.content[0].text,
+    /No saved stopped-scan results were available to recover/,
   );
 
   const silentRefresh = await requestAndWait(11, "tools/call", {

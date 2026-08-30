@@ -333,13 +333,13 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
                 "language",
             ):
                 continue
-            if field in text_fields and (
-                not isinstance(item, str) or not item.strip()
-            ):
+            if field in text_fields and (not isinstance(item, str) or not item.strip()):
                 continue
             current = merged.get(field)
-            if field not in merged or current in (None, "", [], {}) or (
-                isinstance(current, str) and not current.strip()
+            if (
+                field not in merged
+                or current in (None, "", [], {})
+                or (isinstance(current, str) and not current.strip())
             ):
                 merged[field] = item
 
@@ -363,9 +363,7 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
         item
         for detail in details
         for field in ("codeEvidence", "code_evidence")
-        for item in (
-            detail.get(field, []) if isinstance(detail.get(field), list) else []
-        )
+        for item in (detail.get(field, []) if isinstance(detail.get(field), list) else [])
     ]
     if embedded_evidence:
         merged["codeEvidence"] = embedded_evidence
@@ -541,9 +539,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
             (
                 section[key]
                 for section in dataflow_sections
-                if key in section
-                and isinstance(section[key], str)
-                and section[key].strip()
+                if key in section and isinstance(section[key], str) and section[key].strip()
             ),
             None,
         )
@@ -652,9 +648,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     if validation.get("method"):
         lines.extend(["", f"Validation method: {_text(validation['method'], 'not recorded')}"])
     if validation_outcomes:
-        lines.extend(
-            ["", *(f"- **{label}:** {value}" for label, value in validation_outcomes)]
-        )
+        lines.extend(["", *(f"- **{label}:** {value}" for label, value in validation_outcomes)])
     lines.extend(_code_evidence_lines(validation_code_evidence))
     if validation_assertions:
         lines.extend(["", "Assertions:", *_bullets(validation_assertions, "None recorded.")])
