@@ -8,7 +8,7 @@ The suite uses the Promptfoo Codex SDK provider because it only needs final assi
 
 Run these commands from the repository root.
 
-The eval directory has its own `package.json`, `bun.lock`, and `bunfig.toml` so it remains a standalone workspace when imported into another repository. Use Bun 1.3.14 and a supported Node.js version. Installs preserve the seven-day minimum release age and allow only `better-sqlite3` to run dependency lifecycle scripts, including its native build.
+The eval directory has its own `package.json`, `bun.lock`, and `bunfig.toml` so it remains a standalone workspace when imported into another repository. Use Bun 1.3.14 and Node.js 24.x when working on both the SDK and evals. The pinned Promptfoo package requires `^20.20.0 || >=22.22.0`; the SDK's Node.js 22.13.0 minimum is below its supported 22.x range. Installs preserve the seven-day minimum release age and allow only `better-sqlite3` to run dependency lifecycle scripts, including its native build.
 
 Install the local eval runner:
 

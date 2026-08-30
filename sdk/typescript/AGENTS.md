@@ -38,17 +38,20 @@ accepted and rejected inputs, and each real bug or security boundary.
 - Use native path helpers and argument arrays. Cover Windows drives, spaces, directory links, `HOME` and `USERPROFILE`, `PATHEXT`, and file URLs when relevant.
 - Keep shared tests enabled on Linux, macOS, and Windows. Test built or installed entrypoints when packaging behavior matters.
 
-From the SDK directory, run a focused test while iterating, then run the package checks:
+Complete the [source setup](../../CONTRIBUTING.md#local-development) first,
+including both SDK and MCP dependencies. From the SDK directory, refresh the
+bundled plugin before a focused test, then run the package checks:
 
 ```bash
+bun run build:plugin
 bun test --timeout 30000 tests-ts/<module>.test.ts
-bun run test --seed 12345
 bun run types
 bun run format
+bun run test:mcp
 bun run test
 ```
 
-Tests run in random order by default. To reproduce a failure, use the seed printed in Bun's test summary.
+Tests run in random order by default. To reproduce a failure, use the seed printed in Bun's test summary, for example `bun run test --seed 12345`. Use `bun run test:ci` instead of `bun run test` when coverage and JUnit output are needed. See [TESTING.md](TESTING.md) for packaging checks and the intentionally separate Bun version used by optional runner experiments.
 
 After the implementation is verified, keep the test in the final change only
 when it provides meaningful, durable regression coverage. If it is merely

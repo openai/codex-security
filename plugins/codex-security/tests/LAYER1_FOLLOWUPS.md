@@ -11,6 +11,7 @@ This file is the source of truth for portable deterministic, no-model Codex Secu
 - **CLI and harness dry runs:** every Python script supports `--help`; major command paths run against temporary repositories and scan bundles without a model call.
 - **Static checks:** Ruff and Python bytecode compilation/import smoke checks cover the plugin scripts and tests.
 - **Golden files:** deterministic repository ranking JSONL output is compared against a checked-in golden file.
+- **MCP dependency lockfile:** required CI installs the MCP app with `bun install --frozen-lockfile`, checking its package metadata against the committed `bun.lock`.
 
 ## Deferred
 
@@ -19,7 +20,7 @@ This file is the source of truth for portable deterministic, no-model Codex Secu
 - **Expanded report and SARIF snapshots:** add larger artifact snapshots and platform-specific path portability fixtures. Completion means representative Windows, macOS, and Linux path cases are covered without platform-dependent golden churn.
 - **Automated runtime budget enforcement:** the suite does not track its own historical runtime. Completion means CI records the Layer 1 duration and fails a stable regression threshold before its hard timeout.
 - **Canonical plugin manifest schema:** replace the local manifest contract assertions when a centrally maintained Codex plugin manifest schema becomes available. Completion means this project validates against that schema and only keeps local assertions for Codex Security-specific invariants.
-- **Plugin lockfile consistency:** the plugin has no dedicated dependency lockfile today. Add a consistency check if one is introduced; completion means CI detects metadata/lockfile drift.
+- **Eval lockfile consistency in CI:** the eval directory has its own `bun.lock`, but required CI runs its dependency-free deterministic checks without installing Promptfoo. The eval `setup` command checks that lockfile with a frozen install; adding that install to CI remains deferred.
 
 ## Not Applicable
 

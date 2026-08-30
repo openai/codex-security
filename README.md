@@ -10,10 +10,11 @@ Trusted Access for Cyber. To join the program, visit
 
 ## Quick start
 
-Requires Node.js 22.13.0 or later and Python 3.10 or later.
+Requires Node.js 22.13.0+ on the 22.x line, 24.x, or 26.x, and Python 3.10+
+(plus `tomli` on Python 3.10).
 
 ```bash
-npm install @openai/codex-security
+npm install -g @openai/codex-security
 codex-security login
 codex-security scan /path/to/directory
 ```
@@ -89,3 +90,7 @@ codex-security scan . --provider fireworks --model accounts/fireworks/models/qwe
 ## Documentation
 
 **👉👉 See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for full documentation.
+
+For source development, see [CONTRIBUTING.md](CONTRIBUTING.md#local-development)
+and the [SDK testing guide](sdk/typescript/TESTING.md). Bun is needed for
+maintainer workflows, not for running the published CLI or SDK.

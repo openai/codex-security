@@ -1419,7 +1419,8 @@ Export `OPENAI_API_KEY` or `CODEX_API_KEY` to import findings with embeddings.
 Startup and listing need no key. The service does not load `.env` or authenticate
 requests; keep it on loopback or behind an authenticated TLS proxy.
 
-From a source checkout's `sdk/typescript` directory:
+Building from source also requires Bun 1.3.14, as pinned by `packageManager` in
+`package.json`. From a source checkout's `sdk/typescript` directory:
 
 ```bash
 bun install --frozen-lockfile

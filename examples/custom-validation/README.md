@@ -2,13 +2,17 @@
 
 This deliberately vulnerable invoice API contains only synthetic data. Do not
 deploy it. The validation script starts a real loopback HTTP server, tests
-cross-account access, saves the evidence, and stops the server. It needs Python
-3.10 or later and no extra packages or Docker.
+cross-account access, saves the evidence, and stops the server. The fixture uses
+only Python's standard library and needs no Docker. Running the scan also needs
+the [CLI prerequisites](../../sdk/typescript/README.md#install) and Bun 1.3.14
+for the source build.
 
 From the repository root, build the CLI and run the demo:
 
 ```bash
 bun install --cwd sdk/typescript --frozen-lockfile
+bun install --cwd plugins/codex-security/mcp-app --frozen-lockfile
+bun run --cwd sdk/typescript build:plugin
 bun run --cwd sdk/typescript build
 node examples/custom-validation/run.mjs
 ```

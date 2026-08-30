@@ -1,6 +1,7 @@
 # Testing the SDK and CLI
 
 Use Bun 1.3.14, pinned in `package.json` and required CI, with a supported Node.js version. Bun manages dependencies, scripts, and packing; the CLI, SDK, and build tools continue to run on Node.js.
+Repository tests also need Python 3.12+, the pinned `plugins/codex-security[test]` dependencies, and ripgrep (`rg`). Follow the [local development setup](../../CONTRIBUTING.md#local-development) first. The published CLI's Python 3.10+ runtime support does not lower the test environment's Python requirement.
 Install both the SDK and MCP app dependencies before building or testing.
 Run these commands from `sdk/typescript`:
 
@@ -13,7 +14,13 @@ bun run types
 bun run test:mcp
 bun run format
 bun run test
-bun run test:ci
+```
+
+Use `bun run test:ci` in place of `bun run test` when you need coverage and JUnit output. It runs the same suite, so there is no need to run both for the same change.
+
+To build and check an npm archive:
+
+```sh
 bun pm pack --destination ../../dist
 bun run test:package
 ```

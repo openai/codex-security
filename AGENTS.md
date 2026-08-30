@@ -23,6 +23,22 @@ python -m ruff format --check --config plugins/codex-security/pyproject.toml .gi
 python .github/scripts/check_plugin_source_compatibility.py
 ```
 
+## Development tools
+
+- Use Bun for JavaScript dependency installs, maintainer scripts, and packing.
+  The required version is in `sdk/typescript/package.json` under `packageManager`.
+- The SDK, MCP app, and triage evals are separate install roots with their own
+  `bun.lock` and `bunfig.toml`. Use frozen installs; there is no root JavaScript workspace.
+- Keep Node.js as the CLI, SDK, and build runtime. Keep npm for publication,
+  provenance, and consumer-install checks; consumer npm/pnpm/Yarn instructions
+  and scanned-repository lockfile support are separate from maintainer tooling.
+- Repository Python tests require Python 3.12+ and the pinned test dependencies
+  in `plugins/codex-security/pyproject.toml`.
+
+Follow [CONTRIBUTING.md](CONTRIBUTING.md#local-development) for setup and
+[the SDK testing guide](sdk/typescript/TESTING.md) for checks and the separate
+Bun pin used by optional runner experiments.
+
 ## Avoid speculative defenses
 
 - Do not add sanitization, redaction, validation, or fallback logic for

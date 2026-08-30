@@ -67,8 +67,10 @@ for that exact commit:
 
 1. `node-release-cut` verifies that the version increased, checks the reviewed
    summary, and creates the exact `npm-vX.Y.Z` tag.
-2. `node-release` installs the committed dependency graph, tests and packs the
-   package, publishes it to npm, and records npm provenance.
+2. `node-release` installs the SDK and MCP app's committed Bun lockfiles through
+   Socket Firewall with `--frozen-lockfile`, tests the package, and packs it with
+   `bun pm pack` on Linux. It publishes the verified archive with npm and records
+   npm provenance.
 3. `node-github-release` verifies the public package, provenance, tag, and
    archive before publishing the GitHub release. It prepends the reviewed
    summary to GitHub's categorized notes.
@@ -76,7 +78,10 @@ for that exact commit:
 `node-release` generates the npm plugin payload from the canonical source under
 `plugins/codex-security/` during `prepack`. The generated
 `sdk/typescript/_bundled_plugin/` directory is not a committed release input;
-do not prepare a release by editing or committing files there.
+do not prepare a release by editing or committing files there. The `prepack`
+build uses Node.js, and archive checks verify the bundled files and executable
+launchers before publication. Use the [SDK testing guide](sdk/typescript/TESTING.md)
+to build and inspect a local archive.
 
 Monitor all three workflows. A version bump is not a completed release until
 the npm package and GitHub release both exist and match the tag.
