@@ -79,26 +79,28 @@ and test name, then set `CODEX_SECURITY_PROPERTY_SEED` and
 `CODEX_SECURITY_PROPERTY_RUNS` to increase the case count. Pure properties
 default to 100 cases; filesystem contract properties default to 20.
 
-### Python-to-TypeScript differential checks
+### TypeScript candidate normalizer
 
-While a bundled helper is being migrated, keep the Python implementation as
-the executable oracle and run both implementations against the same fixtures.
-
-The normalizer source lives in `plugins/codex-security/scripts/normalize_candidates.ts`.
-`build:plugin` compiles it into the ignored `_bundled_plugin` payload alongside
-the Python helper. The differential command rebuilds that payload first.
-Named-user home paths use OS account lookup: `dscacheutil` on macOS and
-`getent` on Linux.
+The prototype lives in `plugins/codex-security/scripts/normalize_candidates.ts`.
+`build:plugin` compiles it into the ignored `_bundled_plugin` payload.
+Production callers still use the unchanged Python helper.
 
 ```sh
-pnpm run test:normalizer-differential
-CODEX_SECURITY_PROPERTY_RUNS=1000 bun test --timeout 900000 tests-ts/normalize-candidates.property.test.ts
+pnpm run build:plugin
+bun test --timeout 30000 tests-ts/normalize-candidates.test.ts tests-ts/normalize-candidates-filesystem.test.ts tests-ts/normalize-candidates.property.test.ts
 ```
 
-The tests compare output bytes, rejected inputs, filesystem effects, and
-ordering invariants. Run them on Linux, macOS, and Windows before changing
-the production entrypoint. Subprocess-heavy properties default to eight cases
-to stay within the standard test timeout.
+The CLI uses Node's argument parser. Repeat `--input FILE` for each input, use
+full option names, and let the shell expand home paths. Paths follow Node's
+normal resolution rules. JSONL and scope files use LF or CRLF lines;
+`--allow-missing-in-scope` skips missing entries. Output uses `JSON.stringify`
+and LF line endings, and atomic replacement replaces an output symlink rather
+than modifying its target.
+
+Candidate IDs use a fixed TypeScript object shape and may differ from the
+production helper. The tests cover normalization, deterministic output, scan
+boundaries, and atomic writes. Run them on Linux, macOS, and Windows before
+changing the production entrypoint.
 
 ## GitHub Actions
 

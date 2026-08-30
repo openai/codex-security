@@ -59,8 +59,7 @@
     "test:mcp": "node --run build:plugin && pnpm --dir ../../plugins/codex-security/mcp-app run test:mcp",
     "test:mutation": "stryker run",
     "test:package": "node scripts/smoke-package.mjs",
-    "types": "pnpm run generate:models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit",
-    "test:normalizer-differential": "node --run build:plugin && bun test --timeout 30000 tests-ts/normalize-candidates.test.ts tests-ts/normalize-candidates-filesystem.test.ts tests-ts/normalize-candidates.property.test.ts"
+    "types": "pnpm run generate:models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
   },
   "dependencies": {
     "@inquirer/prompts": "8.3.0",

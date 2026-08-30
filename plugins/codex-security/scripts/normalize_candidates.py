@@ -329,7 +329,7 @@ def main() -> None:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
         print(f"Combined {len(rows)} candidate rows into {len(combined)} rows in {output}")
-    except (OSError, RuntimeError, ValueError) as error:
+    except (OSError, ValueError) as error:
         print(f"normalize_candidates: {error}", file=sys.stderr)
         raise SystemExit(2) from error
 

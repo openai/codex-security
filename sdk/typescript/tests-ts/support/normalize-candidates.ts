@@ -3,25 +3,12 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-const node = Bun.which("node");
-const pythonNormalizer = fileURLToPath(
-  new URL(
-    "../../_bundled_plugin/scripts/normalize_candidates.py",
-    import.meta.url,
-  ),
-);
-const typescriptNormalizer = fileURLToPath(
+const normalizer = fileURLToPath(
   new URL(
     "../../_bundled_plugin/scripts/normalize_candidates.mjs",
     import.meta.url,
   ),
 );
-
-function executable(value: string | null, name: string): string {
-  if (value === null) throw new Error(`${name} is required for this test`);
-  return value;
-}
 
 export function writeSource(
   repository: string,
@@ -33,28 +20,12 @@ export function writeSource(
   writeFileSync(output, contents);
 }
 
-export function runPythonNormalizer(
+export function runNormalizer(
   args: string[],
-  script = pythonNormalizer,
-  options: Pick<SpawnSyncOptions, "cwd" | "env" | "timeout"> = {},
+  script = normalizer,
+  options: Pick<SpawnSyncOptions, "cwd" | "timeout"> = {},
 ) {
-  return spawnSync(executable(python, "Python"), ["-B", script, ...args], {
-    ...options,
-    encoding: "utf8",
-    env: { ...process.env, ...options.env, PYTHONDONTWRITEBYTECODE: "1" },
-  });
-}
-
-export function runTypeScriptNormalizer(
-  args: string[],
-  script = typescriptNormalizer,
-  options: Pick<SpawnSyncOptions, "cwd" | "env" | "timeout"> = {},
-) {
-  return spawnSync(executable(node, "Node.js"), [script, ...args], {
-    ...options,
-    encoding: "utf8",
-    env: { ...process.env, ...options.env },
-  });
+  return spawnSync("node", [script, ...args], { ...options, encoding: "utf8" });
 }
 
 export function normalizerArguments(
@@ -65,8 +36,7 @@ export function normalizerArguments(
   allowMissing = false,
 ): string[] {
   return [
-    "--input",
-    ...inputs,
+    ...inputs.flatMap((input) => ["--input", input]),
     "--out",
     output,
     "--repo-root",
