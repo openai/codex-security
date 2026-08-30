@@ -2911,7 +2911,7 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each(["defaults", "complete overrides"])(
+  test.each(["defaults", "complete overrides", "missing configuration"])(
     "preserves ambient configuration when the deep-scan runtime uses the same home with %s",
     async (settings) => {
       const root = await temporaryDirectory();
@@ -2922,10 +2922,11 @@ describe("CodexSecurity orchestration", () => {
       const originalConfiguration = "[other]\nenabled = true\n";
       await mkdir(repository);
       await mkdir(join(codexHome, "codex-security"), { recursive: true });
-      await writeFile(configPath, originalConfiguration);
+      if (settings !== "missing configuration")
+        await writeFile(configPath, originalConfiguration);
       await mkdir(scanDir, { mode: 0o700 });
 
-      const client = new TestClient(
+      await using client = new TestClient(
         {},
         {
           environment: { CODEX_HOME: codexHome },
@@ -2959,23 +2960,28 @@ describe("CodexSecurity orchestration", () => {
             : {}),
         }),
       ).rejects.toThrow("deep scan settings captured");
-      const written = await readFile(configPath, "utf8");
-      if (settings === "defaults") {
-        expect(written).toBe(originalConfiguration);
-      } else {
-        expect(parseToml(written)).toEqual({
-          other: { enabled: true },
-          deep_scan: {
-            workers: 2,
-            subagents: 0,
-            stop_after_no_new: 7,
-            stop_after_consecutive_errors: 2,
-            max_discovery_runs: 12,
-            max_time_hours: 1.5,
-          },
+      if (settings === "missing configuration") {
+        await expect(readFile(configPath)).rejects.toMatchObject({
+          code: "ENOENT",
         });
+      } else {
+        const written = await readFile(configPath, "utf8");
+        if (settings === "defaults") {
+          expect(written).toBe(originalConfiguration);
+        } else {
+          expect(parseToml(written)).toEqual({
+            other: { enabled: true },
+            deep_scan: {
+              workers: 2,
+              subagents: 0,
+              stop_after_no_new: 7,
+              stop_after_consecutive_errors: 2,
+              max_discovery_runs: 12,
+              max_time_hours: 1.5,
+            },
+          });
+        }
       }
-      await client.close();
     },
   );
 

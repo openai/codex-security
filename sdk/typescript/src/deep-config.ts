@@ -110,6 +110,7 @@ export async function writeDeepScanConfig(
   destination: string,
   resolved: ResolvedDeepScanConfig,
 ): Promise<void> {
+  if (destination === resolved.source && !resolved.hasOverrides) return;
   const [source, target] = await Promise.all([
     realpath(resolved.source).catch(() => null),
     realpath(destination).catch(() => null),
