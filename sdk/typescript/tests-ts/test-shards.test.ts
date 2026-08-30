@@ -82,6 +82,20 @@ test.each([
   ["5000", ["--timeout", "9000", "--timeout=5000"], "available", false],
   ["5000", ["--timeout=9000", "--timeout", "5000"], "available", false],
   [defaultTimeoutMs, ["--", "--timeout", "5000"], "available", false],
+  [defaultTimeoutMs, ["-t", "--timeout=5000"], "available", false],
+  [defaultTimeoutMs, ["--grep", "--timeout=5000"], "available", false],
+  [
+    defaultTimeoutMs,
+    ["--test-name-pattern", "--timeout=5000"],
+    "available",
+    false,
+  ],
+  ["7000", ["--timeout", "7000", "-t", "--timeout=5000"], "available", false],
+  [defaultTimeoutMs, ["--coverage-dir", "--timeout=5000"], "available", false],
+  [defaultTimeoutMs, ["--title", "--timeout=5000"], "available", false],
+  ["7000", ["--config", "--timeout=7000"], "available", false],
+  ["7000", ["-c", "--timeout=7000"], "available", false],
+  ["7000", ["--bail", "--timeout=7000"], "available", false],
 ] as const)(
   "uses timeout %s with %p, %s reports and failure=%p",
   async (timeout, options, report, fail) => {
@@ -104,7 +118,7 @@ test.each([
       await writeFile(
         join(root, "tests-ts", "probe.test.ts"),
         `import { expect, test } from "bun:test";
-test("synthetic report probe", () => {
+test("synthetic report probe --timeout=5000", () => {
   expect(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"]).toBe(${JSON.stringify(timeout)});
   expect(true).toBe(${!fail});
 });\n`,
