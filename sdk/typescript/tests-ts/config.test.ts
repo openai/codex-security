@@ -2,6 +2,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rename,
   rm,
   stat,
@@ -549,7 +550,7 @@ describe("Codex configuration", () => {
             "-B",
             ...arguments_,
           ],
-          environment,
+          { ...environment, ...policyPython.environment },
         );
       const evidence = join(workspace, "previous-SECURITY.md");
       await writeFile(evidence, "original");
@@ -638,7 +639,7 @@ describe("Codex configuration", () => {
           managedRuntimeRoots: [],
         });
       }
-      const inspectPrefix = "import os,sys;print(os.path.realpath(sys.prefix))";
+      const inspectPrefix = "import sys;print(sys.prefix)";
       const original = Bun.spawnSync(
         [python, "-I", "-B", "-c", inspectPrefix],
         {
@@ -685,15 +686,16 @@ describe("Codex configuration", () => {
             script,
             ...args,
           ],
-          environment,
+          { ...environment, ...policyPython.environment },
         );
       const allowed = sandbox(inspectPrefix);
       expect(allowed.exitCode, new TextDecoder().decode(allowed.stderr)).toBe(
         0,
       );
-      expect(new TextDecoder().decode(allowed.stdout).trim()).toBe(
-        new TextDecoder().decode(original.stdout).trim(),
-      );
+      // The sandbox need not expose the parents of a framework's directory aliases.
+      expect(
+        await realpath(new TextDecoder().decode(allowed.stdout).trim()),
+      ).toBe(await realpath(new TextDecoder().decode(original.stdout).trim()));
       const denied = sandbox(
         "import sys;from pathlib import Path;print(Path(sys.argv[1]).read_text())",
         unrelated,

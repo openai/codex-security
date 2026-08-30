@@ -2643,7 +2643,11 @@ export async function resolvePluginPython(
 export async function pluginPythonRuntime(
   python: string,
   options: PluginPythonRuntimeOptions,
-): Promise<{ executable: string; readRoots: string[] }> {
+): Promise<{
+  executable: string;
+  readRoots: string[];
+  environment?: ProcessEnvironment;
+}> {
   throwIfSignalAborted(options.signal);
   if (!isAbsolute(python)) {
     throw new PluginPythonUnavailableError(
@@ -2776,13 +2780,39 @@ export async function pluginPythonRuntime(
   }
   throwIfSignalAborted(options.signal);
   const prefix = runtimeDirectories[1];
-  const relativeExecutable =
-    prefix === undefined ? null : relative(prefix, python);
   // Resolve directory aliases without changing the selected virtual environment.
-  const executable =
-    relativeExecutable !== null && !relativePathIsOutside(relativeExecutable)
-      ? join(await realpath(prefix!), relativeExecutable)
-      : await realpath(python);
+  let executable = await realpath(python);
+  if (prefix !== undefined) {
+    const canonicalPrefix = await realpath(prefix);
+    for (
+      let directory = dirname(python);
+      dirname(directory) !== directory;
+      directory = dirname(directory)
+    ) {
+      if ((await realpath(directory)) === canonicalPrefix) {
+        executable = join(canonicalPrefix, relative(directory, python));
+        break;
+      }
+    }
+  }
+  if (process.platform === "darwin" && runtimeDirectories[4] !== undefined) {
+    const frameworkPython = join(
+      await realpath(runtimeDirectories[4]),
+      "Resources",
+      "Python.app",
+      "Contents",
+      "MacOS",
+      "Python",
+    );
+    if (await isRegularFile(frameworkPython)) {
+      // Framework stubs re-exec through their install alias. Use CPython's launcher protocol.
+      return {
+        executable: frameworkPython,
+        readRoots: roots,
+        environment: { __PYVENV_LAUNCHER__: executable },
+      };
+    }
+  }
   return { executable, readRoots: roots };
 }
 

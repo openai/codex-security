@@ -980,6 +980,7 @@ export class CodexSecurity {
       const { codex } = this.#createSessionCodex(
         session,
         {
+          ...policyPython.environment,
           PYTHON: policyPython.executable,
           CODEX_SECURITY_REPOSITORY: target.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
