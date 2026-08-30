@@ -35,9 +35,27 @@ export const FIREWORKS_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+// Azure resources each have their own endpoint, so base_url is resolved from
+// the environment instead of being a fixed address. The v1 surface accepts the
+// resource key or a Microsoft Entra token as a bearer token, so env_key covers
+// both without extra header configuration.
+export const AZURE_CODEX_PROVIDER = {
+  name: "Azure OpenAI",
+  env_key: "AZURE_OPENAI_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
+export const AZURE_ENDPOINT_ENVIRONMENT_VARIABLES = [
+  "AZURE_OPENAI_BASE_URL",
+  "AZURE_OPENAI_ENDPOINT",
+] as const;
+
+const AZURE_V1_PATH = "/openai/v1";
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
+  azure: AZURE_CODEX_PROVIDER,
 } as const;
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
@@ -49,6 +67,51 @@ export function isExternalModelProvider(
     typeof provider === "string" &&
     Object.hasOwn(EXTERNAL_CODEX_PROVIDERS, provider)
   );
+}
+
+/** Providers whose endpoint is per-account rather than a fixed address. */
+export function hasResolvedBaseUrl(provider: ExternalModelProvider): boolean {
+  return provider === "azure";
+}
+
+export function azureBaseUrl(
+  environment: Readonly<Record<string, string | undefined>>,
+): string {
+  const configured = AZURE_ENDPOINT_ENVIRONMENT_VARIABLES.map((name) =>
+    environment[name]?.trim(),
+  ).find((value) => value !== undefined && value.length > 0);
+  if (configured === undefined) {
+    throw new ConfigurationError(
+      "Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_ENDPOINT to the Azure OpenAI " +
+        "resource endpoint, such as https://<resource>.openai.azure.com.",
+    );
+  }
+  let endpoint: URL;
+  try {
+    endpoint = new URL(configured);
+  } catch {
+    throw new ConfigurationError(
+      `The Azure OpenAI endpoint must be an absolute URL: ${configured}`,
+    );
+  }
+  if (endpoint.protocol !== "https:" && endpoint.protocol !== "http:") {
+    throw new ConfigurationError(
+      `The Azure OpenAI endpoint must use http or https: ${configured}`,
+    );
+  }
+  // Accept the resource endpoint Azure prints as well as a full v1 base URL.
+  const path = endpoint.pathname.replace(/\/+$/u, "");
+  return `${endpoint.origin}${path.endsWith(AZURE_V1_PATH) ? path : `${path}${AZURE_V1_PATH}`}`;
+}
+
+/** The complete `model_providers.<id>` table Codex needs for a scan. */
+export function externalProviderTable(
+  provider: ExternalModelProvider,
+  environment: Readonly<Record<string, string | undefined>>,
+): JsonObject {
+  const table: JsonObject = { ...EXTERNAL_CODEX_PROVIDERS[provider] };
+  if (provider === "azure") table["base_url"] = azureBaseUrl(environment);
+  return table;
 }
 
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {

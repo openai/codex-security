@@ -83,6 +83,7 @@ import {
 import {
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
+  externalProviderTable,
   isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
@@ -299,7 +300,7 @@ const VALUE_OPTIONS = new Set([
   "--linear-assignee",
 ]);
 const PROVIDER_OPTION = z
-  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
+  .enum(["openai", "openrouter", "fireworks", "azure", "amazon-bedrock"])
   .default("openai")
   .describe("Inference provider for scans.");
 const CREATE_PR_OPTION = z
@@ -6645,9 +6646,12 @@ async function executeScan(
           progress?.stage(
             `Authentication: API key from ${authentication.source}.`,
           );
-          progress?.stage(
-            "To use your ChatGPT sign-in, retry with --auth chatgpt.",
-          );
+          // A ChatGPT sign-in cannot reach a third-party provider endpoint.
+          if (externalProviderSource(authentication) === null) {
+            progress?.stage(
+              "To use your ChatGPT sign-in, retry with --auth chatgpt.",
+            );
+          }
         } else if (authentication.method === "aws_credentials") {
           progress?.stage(
             `Authentication: AWS credentials from ${authentication.source}.`,
@@ -7142,6 +7146,13 @@ function scanFailureMessage(
           "Check your Amazon Bedrock bearer token or AWS credential chain."
         );
       }
+      const unauthorizedProvider = externalProviderSource(authentication);
+      if (unauthorizedProvider !== null) {
+        return (
+          `Authentication failed using ${unauthorizedProvider}. ` +
+          "Check the credential and endpoint for the configured provider."
+        );
+      }
       return authentication?.method === "api_key"
         ? `Authentication failed using ${authentication.source}. ` +
             "Retry with '--auth chatgpt' or provide a valid API key."
@@ -7152,6 +7163,13 @@ function scanFailureMessage(
         return (
           `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
           "Check your AWS identity and Bedrock model permissions."
+        );
+      }
+      const forbiddenProvider = externalProviderSource(authentication);
+      if (forbiddenProvider !== null) {
+        return (
+          `The credential from ${forbiddenProvider} cannot access the configured model. ` +
+          "Confirm the deployment or model name and the credential's permissions."
         );
       }
       return authentication?.method === "api_key"
@@ -7166,6 +7184,21 @@ function scanFailureMessage(
     case "unknown":
       return diagnosticValue(error);
   }
+}
+
+const EXTERNAL_PROVIDER_SOURCES: ReadonlySet<string> = new Set(
+  Object.values(EXTERNAL_CODEX_PROVIDERS).map((provider) => provider.env_key),
+);
+
+// ChatGPT sign-in is not an alternative when the scan runs through a
+// third-party provider, so those failures need different guidance.
+function externalProviderSource(
+  authentication: ScanAuthentication | null | undefined,
+): string | null {
+  return authentication?.method === "api_key" &&
+    EXTERNAL_PROVIDER_SOURCES.has(authentication.source)
+    ? authentication.source
+    : null;
 }
 
 function scanScope(arguments_: ScanArguments): string | null {
@@ -7447,6 +7480,7 @@ export function parseCodexOverrides(
   model?: string,
   effort?: ScanReasoningEffort,
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
@@ -7454,7 +7488,7 @@ export function parseCodexOverrides(
   if (isExternalModelProvider(provider)) {
     result["model_provider"] = provider;
     result["model_providers"] = {
-      [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+      [provider]: externalProviderTable(provider, environment),
     };
   } else if (provider === "amazon-bedrock") {
     result["model_provider"] = provider;
