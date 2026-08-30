@@ -2451,9 +2451,11 @@ describe("security policy review and application", () => {
     },
   );
 
-  test.skipIf(process.platform !== "linux")(
-    "rejects an existing Linux policy when its security context cannot be preserved",
-    async () => {
+  test
+    .skipIf(process.platform !== "linux")
+    .each(["security.selinux", "security.SMACK64"])(
+    "rejects an existing Linux policy when %s cannot be preserved",
+    async (attribute) => {
       const f = await fixture();
       const target = join(f.repository, "SECURITY.md");
       const previous = "# Existing policy\n";
@@ -2464,10 +2466,16 @@ describe("security policy review and application", () => {
         python,
         [
           `#!${PYTHON}`,
-          "import os, sys",
+          "import errno, os, sys",
           `python = ${JSON.stringify(PYTHON)}`,
-          "if len(sys.argv) > 4 and sys.argv[1:3] == ['-I', '-c'] and \"'security.selinux'\" in sys.argv[3]:",
-          "    print('[null,\"c3ludGhldGljX3Q6czA=\"]' if sys.argv[4].endswith('/SECURITY.md') else '[null,null]')",
+          "if len(sys.argv) > 4 and sys.argv[1:3] == ['-I', '-c'] and \"'system.posix_acl_access'\" in sys.argv[3]:",
+          "    script = sys.argv[3]",
+          "    sys.argv = ['-c', *sys.argv[4:]]",
+          "    def getxattr(path, name, **kwargs):",
+          `        if name != ${JSON.stringify(attribute)}: raise OSError(errno.ENODATA, 'No attribute')`,
+          "        return b'private_policy' if path.endswith('/SECURITY.md') else b'temporary_policy'",
+          "    os.getxattr = getxattr",
+          "    exec(script)",
           "    raise SystemExit(0)",
           "os.execv(python, [python, *sys.argv[1:]])",
           "",
@@ -2481,6 +2489,50 @@ describe("security policy review and application", () => {
       expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
     },
   );
+
+  // Creating an EFS fixture can add a certificate to the current user's store.
+  test.skipIf(
+    process.platform !== "win32" ||
+      process.env["GITHUB_ACTIONS"] !== "true" ||
+      process.env["RUNNER_ENVIRONMENT"] !== "github-hosted",
+  )("leaves an EFS-encrypted Windows policy unchanged", async () => {
+    const f = await fixture();
+    const target = join(f.repository, "SECURITY.md");
+    const previous = "# Existing encrypted policy\n";
+    await writeFile(target, previous);
+    const powershell = join(
+      process.env["SystemRoot"] ?? "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    );
+    const run = (script: string) =>
+      execFileSync(
+        powershell,
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_SECURITY_TEST_EFS_PATH: target },
+          windowsHide: true,
+        },
+      ).trim();
+    run(
+      "$ErrorActionPreference = 'Stop'; [System.IO.File]::Encrypt($env:CODEX_SECURITY_TEST_EFS_PATH)",
+    );
+    const encrypted = () =>
+      run(
+        "([System.IO.File]::GetAttributes($env:CODEX_SECURITY_TEST_EFS_PATH) -band [System.IO.FileAttributes]::Encrypted) -ne 0",
+      );
+    expect(encrypted()).toBe("True");
+    const draft = await f.generate();
+    await expect(applySecurityPolicy(draft)).rejects.toThrow(
+      "Automatic replacement of an EFS-encrypted SECURITY.md is not supported",
+    );
+    expect(await readFile(target, "utf8")).toBe(previous);
+    expect(encrypted()).toBe("True");
+    expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
+  });
 
   test.skipIf(process.platform !== "win32")(
     "never drops an existing Windows resource-attribute access-control entry",

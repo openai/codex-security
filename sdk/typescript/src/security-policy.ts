@@ -1703,6 +1703,7 @@ async function copyWindowsSecurityDescriptor(
         "-Command",
         [
           "$ErrorActionPreference = 'Stop'",
+          `if (([System.IO.File]::GetAttributes($env:${sourceVariable}) -band [System.IO.FileAttributes]::Encrypted) -ne 0) { exit 78 }`,
           `$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:${sourceVariable} -Audit`,
           "$identityType = [System.Security.Principal.SecurityIdentifier]",
           [
@@ -1841,6 +1842,12 @@ async function copyWindowsSecurityDescriptor(
     );
   } catch (error) {
     signal?.throwIfAborted();
+    if ((error as { code?: number }).code === 78) {
+      throw new CodexSecurityError(
+        "Automatic replacement of an EFS-encrypted SECURITY.md is not supported. Apply the reviewed draft with a tool that preserves its encryption settings.",
+        { cause: error },
+      );
+    }
     throw new CodexSecurityError(
       "Cannot preserve the existing SECURITY.md security descriptor and audit settings. Use a Windows account permitted to read and write those settings.",
       { cause: error },
@@ -1864,7 +1871,7 @@ async function unixSecurityAccess(
     const script = [
       "import base64, errno, json, os, sys",
       "values = []",
-      "for name in ('system.posix_acl_access', 'security.selinux'):",
+      "for name in ('system.posix_acl_access', 'security.selinux', 'security.SMACK64'):",
       "    try:",
       "        value = os.getxattr(sys.argv[1], name, follow_symlinks=False)",
       "    except OSError as error:",
@@ -1895,15 +1902,17 @@ async function copyUnixPolicyFile(
       unixSecurityAccess(source, python, signal),
       unixSecurityAccess(destination, python, signal),
     ]);
-    const [, sourceContext] = JSON.parse(sourceAccess) as [
-      string | null,
-      string | null,
-    ];
-    const [, destinationContext] = JSON.parse(destinationAccess) as [
-      string | null,
-      string | null,
-    ];
-    if (sourceContext !== null && sourceContext !== destinationContext)
+    const [, ...sourceContexts] = JSON.parse(sourceAccess) as (string | null)[];
+    const [, ...destinationContexts] = JSON.parse(destinationAccess) as (
+      | string
+      | null
+    )[];
+    if (
+      sourceContexts.some(
+        (context, index) =>
+          context !== null && context !== destinationContexts[index],
+      )
+    )
       arguments_.push("--preserve=context");
   }
   await execFileAsync("/bin/cp", [...arguments_, source, destination], {

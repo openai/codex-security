@@ -350,13 +350,21 @@ before retrying. Once a write commits, SDK cancellation does not skip the
 remaining checks. A terminal interrupt or process failure can still leave a
 `written_unverified` result. A later Ctrl-C or SIGTERM forces the CLI to stop.
 
+Replacing an existing policy briefly removes it from its final path while the
+previous file is checked. Another process can observe that gap, and interruption
+can leave only the recovery file. Avoid concurrent scans during application;
+inspect and restore the retained file if the final path is missing.
+
 New policies are published atomically, without overwriting a concurrent save. On
 Linux, the filename-based SELinux label is prepared before publication; if the
 current account cannot set that label, the target is left absent.
+Updates check both SELinux and Smack labels and stop if they cannot preserve them.
 
 On Windows, updates preserve the existing policy's complete security descriptor,
 including audit rules and integrity labels. If the current account cannot read or
 copy that descriptor, the existing policy is left unchanged.
+Automatic replacement of EFS-encrypted policies is not supported; use a tool that
+preserves the existing encryption settings to apply the reviewed draft.
 
 Save edited drafts as UTF-8. If generation used a custom `--plugin-path`, select
 it again when applying a saved draft. Saved metadata cannot choose executable
