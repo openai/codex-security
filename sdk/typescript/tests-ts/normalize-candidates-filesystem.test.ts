@@ -140,9 +140,22 @@ describe("candidate normalizer filesystem parity", () => {
     const input = writeCandidate(root);
     const user = userInfo();
     const userName =
-      process.platform === "win32" ? process.env["USERNAME"]! : user.username;
+      process.platform === "win32" ? "named-user" : user.username;
     const userDirectory =
-      process.platform === "win32" ? process.env["USERPROFILE"]! : user.homedir;
+      process.platform === "win32"
+        ? join(root, "profiles", userName)
+        : user.homedir;
+    const environment =
+      process.platform === "win32"
+        ? {
+            USERNAME: "current-user",
+            USERPROFILE: join(root, "profiles", "current-user"),
+          }
+        : undefined;
+    if (environment !== undefined) {
+      mkdirSync(userDirectory, { recursive: true });
+      mkdirSync(environment.USERPROFILE, { recursive: true });
+    }
     const namedPath = (path: string) =>
       `~${userName}${sep}${relative(userDirectory, path)}`;
     const outputs: Buffer[] = [];
@@ -158,6 +171,8 @@ describe("candidate normalizer filesystem parity", () => {
           namedPath(repository),
           namedPath(inventory),
         ),
+        undefined,
+        { env: environment },
       );
       expect(result.status, result.stderr).toBe(0);
       outputs.push(readFileSync(output));

@@ -36,23 +36,24 @@ export function writeSource(
 export function runPythonNormalizer(
   args: string[],
   script = pythonNormalizer,
-  options: Pick<SpawnSyncOptions, "cwd" | "timeout"> = {},
+  options: Pick<SpawnSyncOptions, "cwd" | "env" | "timeout"> = {},
 ) {
   return spawnSync(executable(python, "Python"), ["-B", script, ...args], {
     ...options,
     encoding: "utf8",
-    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+    env: { ...process.env, ...options.env, PYTHONDONTWRITEBYTECODE: "1" },
   });
 }
 
 export function runTypeScriptNormalizer(
   args: string[],
   script = typescriptNormalizer,
-  options: Pick<SpawnSyncOptions, "cwd" | "timeout"> = {},
+  options: Pick<SpawnSyncOptions, "cwd" | "env" | "timeout"> = {},
 ) {
   return spawnSync(executable(node, "Node.js"), [script, ...args], {
     ...options,
     encoding: "utf8",
+    env: { ...process.env, ...options.env },
   });
 }
 
