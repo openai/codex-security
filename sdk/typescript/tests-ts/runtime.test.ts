@@ -70,7 +70,7 @@ import {
   inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
   planOutputArchive,
-  pluginPythonReadRoots,
+  pluginPythonRuntime,
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
@@ -5657,7 +5657,7 @@ describe("runtime directories and plugin Python boundary", () => {
     );
     expect(inspected.status, inspected.stderr).toBe(0);
     expect(
-      await pluginPythonReadRoots(python!, { protectedPaths: [] }),
+      (await pluginPythonRuntime(python!, { protectedPaths: [] })).readRoots,
     ).toContain(await realpath(inspected.stdout.trim()));
   });
 
@@ -5680,7 +5680,7 @@ describe("runtime directories and plugin Python boundary", () => {
       process.platform === "win32" ? "python.exe" : "python",
     );
     const protectedPath = join(root, "protected", "state");
-    const roots = await pluginPythonReadRoots(python, {
+    const { readRoots: roots } = await pluginPythonRuntime(python, {
       protectedPaths: [protectedPath],
     });
     const inspected = spawnSync(
@@ -5734,7 +5734,7 @@ describe("runtime directories and plugin Python boundary", () => {
       await chmod(executable, 0o700);
 
       expect(
-        await pluginPythonReadRoots(python, { protectedPaths: [] }),
+        (await pluginPythonRuntime(python, { protectedPaths: [] })).readRoots,
       ).toEqual([
         await realpath(launcher),
         await realpath(binaries),
@@ -5752,7 +5752,7 @@ describe("runtime directories and plugin Python boundary", () => {
         await writeFile(python, `#!/bin/sh\nprintf '%s\\n' '${output}'\n`);
         await chmod(python, 0o700);
         await expect(
-          pluginPythonReadRoots(python, { protectedPaths: [] }),
+          pluginPythonRuntime(python, { protectedPaths: [] }),
         ).rejects.toThrow(PluginBootstrapError);
       }
 
@@ -5763,7 +5763,7 @@ describe("runtime directories and plugin Python boundary", () => {
       );
       await chmod(python, 0o700);
       await expect(
-        pluginPythonReadRoots(python, { protectedPaths: [] }),
+        pluginPythonRuntime(python, { protectedPaths: [] }),
       ).rejects.toThrow("runtime directory that does not exist");
     },
   );
@@ -5789,13 +5789,13 @@ describe("runtime directories and plugin Python boundary", () => {
 
       await writeMetadata(parse(root).root);
       await expect(
-        pluginPythonReadRoots(python, { protectedPaths: [] }),
+        pluginPythonRuntime(python, { protectedPaths: [] }),
       ).rejects.toThrow("must not include a filesystem root");
 
       await writeMetadata(runtime);
       for (const path of [runtime, protectedPath]) {
         await expect(
-          pluginPythonReadRoots(python, { protectedPaths: [path] }),
+          pluginPythonRuntime(python, { protectedPaths: [path] }),
         ).rejects.toThrow("contains a protected path");
       }
     },
@@ -5807,7 +5807,7 @@ describe("runtime directories and plugin Python boundary", () => {
     await writeFile(python, "#!/bin/sh\nwhile :; do :; done\n");
     await chmod(python, 0o700);
     const controller = new AbortController();
-    const discovery = pluginPythonReadRoots(python, {
+    const discovery = pluginPythonRuntime(python, {
       protectedPaths: [],
       signal: controller.signal,
     });
