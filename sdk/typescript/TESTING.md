@@ -29,6 +29,9 @@ tracked by Git. Required CI runs the same check before installing dependencies.
 
 For CI's full archive inspection, pass the exact `.tgz` path printed by
 `pnpm pack` to `pnpm run check:package`.
+These checks include native Node contracts for SDK completion, cancellation,
+close cleanup, and CLI terminal sanitization. They use the installed package,
+controlled model output, and the real workbench without live model credentials.
 
 Tests run in random order by default. To replay a failure, pass the seed from
 Bun's summary to `pnpm run test --seed 12345`.
