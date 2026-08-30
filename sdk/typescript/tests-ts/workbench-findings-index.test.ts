@@ -12,16 +12,17 @@ const findingsIndexProbe = [
   "connection.row_factory = sqlite3.Row",
   "connection.executescript('''",
   "CREATE TABLE security_targets (id TEXT PRIMARY KEY, current_path TEXT NOT NULL, display_name TEXT NOT NULL);",
-  "CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_path TEXT, status TEXT, seal_manifest_digest TEXT, started_at TEXT, updated_at TEXT, scope TEXT, scan_dir TEXT);",
+  "CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_path TEXT, status TEXT, seal_manifest_digest TEXT, started_at TEXT, updated_at TEXT, scope TEXT, scan_dir TEXT, target_device INTEGER, target_inode INTEGER, target_revision TEXT);",
   "CREATE TABLE finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, severity TEXT, created_at TEXT, title TEXT, summary TEXT);",
   "CREATE TABLE finding_triage (occurrence_id TEXT PRIMARY KEY, status TEXT, updated_at TEXT, close_reason TEXT);",
   "CREATE TABLE finding_decisions (id TEXT, occurrence_id TEXT, status TEXT, close_reason TEXT, note TEXT, created_at TEXT);",
   "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
   "CREATE TABLE scan_comparison_matches (before_occurrence_id TEXT, after_occurrence_id TEXT);",
+  "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT);",
   "''')",
   "connection.executemany('INSERT INTO security_targets VALUES (?, ?, ?)', [('current-target', '/current/repository', 'current'), ('stale-target', '/stale/repository', 'stale')])",
   "stale_directory = sys.argv[1] if settings.get('coverageFailure') in ('noncanonical', 'pruned') else '/private/tmp/codex-security-findings-index-missing-stale'",
-  "connection.executemany('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [",
+  "connection.executemany('INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old', 'current-target', '/current/repository', 'complete', 'sealed', '2026-01-01', '2026-01-01', '.', '/private/tmp/current-old'),",
   "    ('current-new', 'current-target', '/current/repository', 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/current-new'),",
   "    ('reused-legacy', None, '/current/repository', 'complete', 'sealed', '2026-03-01', '2026-03-01', '.', '/private/tmp/reused-legacy'),",
@@ -33,23 +34,15 @@ const findingsIndexProbe = [
   "if settings.get('unsealedScans'):",
   "    connection.execute(\"UPDATE scans SET seal_manifest_digest = NULL WHERE target_id = 'stale-target' OR target_id IS NULL\")",
   "if settings.get('inactiveRepresentative'):",
-  "    connection.execute(\"INSERT INTO scans VALUES ('current-followup', 'current-target', '/current/repository', 'complete', 'sealed', '2026-03-01', '2026-03-01', '.', '/private/tmp/current-followup')\")",
+  "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir) VALUES ('current-followup', 'current-target', '/current/repository', 'complete', 'sealed', '2026-03-01', '2026-03-01', '.', '/private/tmp/current-followup')\")",
   "if settings.get('clockRollback'):",
   "    connection.execute(\"UPDATE scans SET started_at = '2025-12-01' WHERE id = 'current-new'\")",
   "if settings.get('mixedLegacyOwnership'):",
-  "    connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
-  "    connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
   "    connection.execute(\"UPDATE scans SET target_device = 7, target_inode = 9 WHERE id = 'current-new'\")",
   "if settings.get('replacedCheckout'):",
-  "    connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
-  "    connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
-  "    connection.execute('ALTER TABLE scans ADD COLUMN target_revision TEXT')",
   "    connection.execute(\"UPDATE scans SET target_device = -1, target_inode = -1 WHERE target_id = 'current-target'\")",
   "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
   "if settings.get('ownershipTransition') or settings.get('ownershipReuse'):",
-  "    connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
-  "    connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
-  "    connection.execute('ALTER TABLE scans ADD COLUMN target_revision TEXT')",
   "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
   "    connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (sys.argv[1],))",
   "    metadata = os.stat(sys.argv[1])",
@@ -80,19 +73,20 @@ const findingsIndexProbe = [
   "if settings.get('repeatedStableFinding'):",
   "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-new-finding' WHERE id = 'current-old-occurrence'\")",
   "if settings.get('targetlessHistory'):",
-  "    connection.execute(\"INSERT INTO finding_triage VALUES ('orphan-old-occurrence', 'closed', '2026-01-02', 'false_positive')\")",
-  "    connection.execute(\"INSERT INTO finding_decisions (occurrence_id) VALUES ('orphan-old-occurrence')\")",
+  "    connection.execute(\"INSERT INTO finding_triage VALUES ('orphan-new-occurrence', 'closed', '2026-01-02', 'false_positive')\")",
+  "    connection.execute(\"INSERT INTO finding_decisions (occurrence_id) VALUES ('orphan-new-occurrence')\")",
   "    if settings['targetlessHistory'] == 'stable':",
   "        connection.execute(\"UPDATE finding_occurrences SET finding_id = 'orphan-old-finding' WHERE id = 'orphan-new-occurrence'\")",
   "    else:",
   "        connection.execute(\"INSERT INTO scan_comparison_matches VALUES ('orphan-old-occurrence', 'orphan-new-occurrence')\")",
   "if settings.get('closedBeforeRollback'):",
   "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-old-finding', created_at = '2025-12-02' WHERE id = 'current-new-occurrence'\")",
-  "    connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', 'already_fixed')\")",
+  "    connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', ?)\", (settings['closedBeforeRollback'],))",
   "    connection.execute(\"INSERT INTO finding_decisions (occurrence_id) VALUES ('current-old-occurrence')\")",
   "if settings.get('matchedTriage') and not settings.get('closeAfterRediscovery') and not settings.get('pendingMatchedRemediation'):",
-  "    connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', ?)\", (settings['matchedTriage'],))",
-  "    connection.execute(\"INSERT INTO finding_decisions (occurrence_id) VALUES ('current-old-occurrence')\")",
+  "    decision_occurrence = 'current-new-occurrence' if settings['matchedTriage'] == 'false_positive' and not settings.get('ownershipReuse') and not settings.get('triageClockRollback') else 'current-old-occurrence'",
+  "    connection.execute(\"INSERT INTO finding_triage VALUES (?, 'closed', '2026-01-02', ?)\", (decision_occurrence, settings['matchedTriage']))",
+  "    connection.execute('INSERT INTO finding_decisions (occurrence_id) VALUES (?)', (decision_occurrence,))",
   "    if settings.get('triageClockRollback'):",
   "        connection.execute(\"INSERT INTO finding_triage VALUES ('current-new-occurrence', 'open', '2025-12-01', NULL)\")",
   "        connection.execute(\"INSERT INTO finding_decisions (occurrence_id) VALUES ('current-new-occurrence')\")",
@@ -116,8 +110,9 @@ const findingsIndexProbe = [
   "    connection.execute(\"INSERT INTO security_targets VALUES ('linked-target', '/linked/repository', 'linked')\")",
   "    connection.execute(\"UPDATE scans SET target_id = 'linked-target', target_path = '/linked/repository' WHERE id = 'current-old'\")",
   "    if not settings.get('matchedTriage'):",
-  "        connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', 'false_positive')\")",
-  "        connection.execute(\"INSERT INTO finding_decisions (occurrence_id) VALUES ('current-old-occurrence')\")",
+  "        linked_decision = 'current-old-occurrence' if settings.get('incompatibleSibling') else 'current-new-occurrence'",
+  "        connection.execute(\"INSERT INTO finding_triage VALUES (?, 'closed', '2026-01-02', 'false_positive')\", (linked_decision,))",
+  "        connection.execute('INSERT INTO finding_decisions (occurrence_id) VALUES (?)', (linked_decision,))",
   "    connection.execute(\"INSERT INTO scan_comparison_matches VALUES ('current-new-occurrence', 'stale-old-occurrence')\")",
   "    indexes.scan_history.repository_scan_scope = lambda _connection, _repository: (['scans.target_id IN (?, ?)'], ['current-target', 'linked-target'], ['current-target', 'linked-target'], ['/current/repository', '/linked/repository'])",
   "    indexes.scan_history._same_registered_repository = lambda _connection, _before, _after: not settings.get('incompatibleSibling', False)",
@@ -150,12 +145,10 @@ const findingsIndexProbe = [
   "pending_remediation_error, pending_triage_rows, remediation_guard_error = None, None, None",
   "if settings.get('matchedTriage') or settings.get('targetlessHistory'):",
   "    import workbench_db as workbench",
+  "    import workbench_finding_results as finding_results",
   "    if not settings.get('ownershipReuse'):",
   "        connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
   "        connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (sys.argv[1],))",
-  "        connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
-  "        connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
-  "        connection.execute('ALTER TABLE scans ADD COLUMN target_revision TEXT')",
   "    if settings.get('missingCheckout'):",
   "        metadata = os.stat(sys.argv[1])",
   "        missing_checkout = os.path.join(sys.argv[1], 'codex-security-missing-checkout')",
@@ -167,11 +160,12 @@ const findingsIndexProbe = [
   "    connection.execute('ALTER TABLE finding_locations ADD COLUMN start_line INTEGER DEFAULT 1')",
   "    connection.execute('ALTER TABLE finding_locations ADD COLUMN end_line INTEGER DEFAULT 1')",
   "    connection.execute('ALTER TABLE finding_triage ADD COLUMN note TEXT')",
-  "    connection.execute(\"UPDATE finding_triage SET note = 'Verified test dismissal' WHERE occurrence_id = 'current-old-occurrence'\")",
+  "    connection.execute(\"UPDATE finding_triage SET note = 'Verified test dismissal' WHERE close_reason = 'false_positive'\")",
   "    workbench.require_scan_target_identity = lambda *arguments, **keywords: None",
+  "    finding_results.require_scan_target_identity = workbench.require_scan_target_identity",
   "    workbench.finding_remediation_result = lambda *arguments: {'state': 'idle'}",
-  "    workbench.finding_source_excerpt = lambda *arguments: None",
-  "    workbench.finding_artifact_paths = lambda *arguments: []",
+  "    finding_results.finding_source_excerpt = lambda *arguments: None",
+  "    finding_results.finding_artifact_paths = lambda *arguments: []",
   "    workbench.backfill_legacy_finding_details = lambda *arguments: None",
   "    workbench.scan_history.finding_matches = lambda *arguments: ([{'findingId': 'previous-owner-finding', 'occurrenceId': 'current-old-occurrence', 'reason': 'Previous owner match reason', 'scanId': 'current-old', 'title': 'Previous owner match title'}], '2026-01-01', ['current-old', 'current-new']) if settings.get('previousOwnerHistory') else ([], '2026-01-01', [])",
   "    if settings.get('pendingMatchedRemediation'):",
@@ -188,7 +182,7 @@ const findingsIndexProbe = [
   "        connection.execute('CREATE TABLE finding_remediation_attempts (occurrence_id TEXT, created_at TEXT)')",
   "        connection.commit()",
   "        workbench.scan_context = lambda *arguments: {}",
-  "        workbench.set_finding_triage(connection, argparse.Namespace(occurrence_id='current-old-occurrence', status='closed', close_reason='already_fixed', note=None))",
+  "        workbench.set_finding_triage(connection, argparse.Namespace(occurrence_id='current-old-occurrence', status='closed', close_reason=settings['matchedTriage'], note='Verified test dismissal' if settings['matchedTriage'] == 'false_positive' else None))",
   "        result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
   "    selected_scan = 'orphan-new' if settings.get('targetlessHistory') else 'current-new'",
   "    selected_occurrence = selected_scan + '-occurrence'",
@@ -242,7 +236,6 @@ const findingsIndexProbe = [
   "    clauses, values, _, _ = indexes.scan_history.repository_scan_scope(connection, args.repository or sys.argv[1])",
   "    scoped_scan_ids = [row['id'] for row in connection.execute('SELECT scans.id FROM scans WHERE ' + ' AND '.join(clauses), values)]",
   "if settings.get('ownershipReuse'):",
-  "    connection.execute('CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT)')",
   "    matching = indexes.scan_history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[1], force=False), backfill_finding_details=lambda _connection, _scan: None, read_coverage=coverage)",
   "    matching_scan_count = matching['scanCount']",
   "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone() for scan in ('current-old', 'current-new')]",
@@ -259,7 +252,7 @@ function runFindingsIndex(
     query?: string;
     closeAfterRediscovery?: boolean;
     clockRollback?: boolean;
-    closedBeforeRollback?: boolean;
+    closedBeforeRollback?: "already_fixed" | "false_positive";
     coverageFailure?: "tampered" | "sealedArtifact" | "noncanonical" | "pruned";
     includeResolved?: boolean;
     incompatibleSibling?: boolean;
@@ -411,19 +404,21 @@ describe("workbench findings index", () => {
     ]);
   });
 
-  test("reopens fixed findings rediscovered after the system clock moves backward", () => {
-    const result = probeFindingsIndex("current-target", {
-      clockRollback: true,
-      closedBeforeRollback: true,
-    });
-
-    expect(result.findings).toEqual([
-      expect.objectContaining({
-        occurrenceId: "current-new-occurrence",
-        status: "open",
-      }),
-    ]);
-  });
+  test.each(["already_fixed", "false_positive"] as const)(
+    "reopens %s findings rediscovered after the system clock moves backward",
+    (closeReason) => {
+      const result = probeFindingsIndex("current-target", {
+        clockRollback: true,
+        closedBeforeRollback: closeReason,
+      });
+      expect(result.findings).toEqual([
+        expect.objectContaining({
+          occurrenceId: "current-new-occurrence",
+          status: "open",
+        }),
+      ]);
+    },
+  );
 
   test("uses inherited triage when showing matched finding details", () => {
     const result = probeFindingsIndex("current-target", {
@@ -529,24 +524,26 @@ describe("workbench findings index", () => {
     });
   });
 
-  test("keeps an earlier finding closed when fixed after its rediscovery", () => {
-    const result = probeFindingsIndex("current-target", {
-      closeAfterRediscovery: true,
-      matchedTriage: "already_fixed",
-    });
-
-    expect(result.findings).toEqual([
-      expect.objectContaining({
+  test.each(["already_fixed", "false_positive"] as const)(
+    "keeps an earlier finding closed when marked %s after its rediscovery",
+    (closeReason) => {
+      const result = probeFindingsIndex("current-target", {
+        closeAfterRediscovery: true,
+        matchedTriage: closeReason,
+      });
+      expect(result.findings).toEqual([
+        expect.objectContaining({
+          occurrenceId: "current-new-occurrence",
+          status: "closed",
+        }),
+      ]);
+      expect(result.findingDetail).toMatchObject({
         occurrenceId: "current-new-occurrence",
         status: "closed",
-      }),
-    ]);
-    expect(result.findingDetail).toMatchObject({
-      occurrenceId: "current-new-occurrence",
-      status: "closed",
-      triage: { closeReason: "already_fixed", status: "closed" },
-    });
-  });
+        triage: { closeReason, status: "closed" },
+      });
+    },
+  );
 
   test("keeps saved finding details available when the checkout is missing", () => {
     const result = probeFindingsIndex("current-target", {

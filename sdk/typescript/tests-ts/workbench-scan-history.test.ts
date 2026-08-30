@@ -287,8 +287,8 @@ test("finds registered ancestors beyond isolated targetless child scans", () => 
 
   expect(result.status, result.stderr).toBe(0);
   expect(JSON.parse(result.stdout)).toEqual({
-    direct: ["legacy-intermediate", "current-owner"],
-    nested: ["legacy-child", "current-owner"],
+    direct: ["current-owner"],
+    nested: ["current-owner"],
     standaloneGit: ["legacy-git-child"],
     standaloneDirectory: ["legacy-directory-child"],
   });
@@ -344,7 +344,7 @@ test("includes linked worktrees and recognizes separately verified clones", () =
   expect(result.status).toBe(0);
   expect(result.stderr).toBe("");
   expect(JSON.parse(result.stdout)).toEqual({
-    targets: ["linked", "main"],
+    targets: ["clone", "linked", "main"],
     clone: true,
     untrusted: false,
     unregistered: [],

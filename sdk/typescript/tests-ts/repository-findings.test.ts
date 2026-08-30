@@ -15,17 +15,18 @@ connection = sqlite3.connect(":memory:")
 connection.row_factory = sqlite3.Row
 connection.executescript("""
 CREATE TABLE security_targets(id TEXT, current_path TEXT, display_name TEXT);
-CREATE TABLE scans(id TEXT, target_id TEXT, scope TEXT, updated_at TEXT, status TEXT, started_at TEXT);
+CREATE TABLE scans(id TEXT, target_id TEXT, scope TEXT, updated_at TEXT, status TEXT, started_at TEXT, target_path TEXT, seal_manifest_digest TEXT, scan_dir TEXT, target_device INTEGER, target_inode INTEGER, target_revision TEXT);
 CREATE TABLE finding_occurrences(id TEXT, finding_id TEXT, severity TEXT, created_at TEXT, scan_id TEXT, title TEXT, summary TEXT);
 CREATE TABLE finding_triage(occurrence_id TEXT PRIMARY KEY, status TEXT, updated_at TEXT, close_reason TEXT);
 CREATE TABLE finding_decisions(occurrence_id TEXT);
 CREATE TABLE finding_locations(occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
 CREATE TABLE scan_comparison_matches(before_occurrence_id TEXT, after_occurrence_id TEXT);
+CREATE TABLE scan_comparisons(before_scan_id TEXT, after_scan_id TEXT, result_json TEXT);
 INSERT INTO security_targets VALUES('first', '/first', 'First'), ('second', '/second', 'Second');
 """)
 def add_scan(scan_id, target, day):
     timestamp = f"2026-01-{day:02d}T00:00:00Z"
-    connection.execute("INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?)", (scan_id, target, "repository", timestamp, "complete", timestamp))
+    connection.execute("INSERT INTO scans (id, target_id, scope, updated_at, status, started_at, target_path) VALUES (?, ?, ?, ?, ?, ?, ?)", (scan_id, target, "repository", timestamp, "complete", timestamp, "/" + target))
 
 def add_finding(occurrence, finding, scan):
     started = connection.execute("SELECT started_at FROM scans WHERE id = ?", (scan,)).fetchone()[0]
@@ -41,11 +42,11 @@ for scan_id, target, day in [("old", "first", 1), ("same", "first", 2), ("rename
 for occurrence, finding, scan in [("old-occurrence", "dismissed", "old"), ("same-occurrence", "dismissed", "same"), ("renamed-occurrence", "renamed", "renamed"), ("latest-occurrence", "renamed-again", "latest"), ("historical-occurrence", "historical", "old"), ("other-occurrence", "dismissed", "other")]:
     add_finding(occurrence, finding, scan)
 connection.executemany("INSERT INTO scan_comparison_matches VALUES (?, ?)", [("same-occurrence", "renamed-occurrence"), ("renamed-occurrence", "latest-occurrence"), ("latest-occurrence", "other-occurrence")])
-add_decision("old-occurrence", "closed", "2026-01-01T12:00:00Z", "false_positive")
+add_decision("latest-occurrence", "closed", "2026-01-01T12:00:00Z", "false_positive")
 
 def findings(target, status="open"):
     arguments = argparse.Namespace(limit=20, offset=0, query=None, severity=None, status=status, target_id=target)
-    return indexes.list_global_findings(connection, arguments)["findings"]
+    return indexes.list_global_findings(connection, arguments, read_coverage=lambda _scan: {"completeness": "partial"})["findings"]
 
 result = {"dismissed": findings("first"), "other": findings("second"), "closed": findings("first", None)}
 add_decision("latest-occurrence", "open", "2025-12-31T00:00:00Z", None)
@@ -63,16 +64,6 @@ add_finding("z-occurrence", "z-finding", "tied")
 add_finding("a-occurrence", "a-finding", "tied")
 connection.execute("UPDATE finding_occurrences SET severity = 'critical' WHERE id = 'historical-occurrence'")
 result["ordered"] = findings("first")
-connection.executescript("""
-ALTER TABLE scans ADD COLUMN target_path TEXT;
-ALTER TABLE scans ADD COLUMN seal_manifest_digest TEXT;
-ALTER TABLE scans ADD COLUMN scan_dir TEXT;
-UPDATE scans SET target_path = '/' || target_id, seal_manifest_digest = 'sealed';
-""")
-arguments = argparse.Namespace(limit=20, offset=0, query=None, severity=None, status="open", target_id="first")
-result["owned"] = indexes.list_global_findings(
-    connection, arguments, read_coverage=lambda _scan: {"completeness": "partial"}
-)["findings"]
 print(json.dumps(result))
 `;
 
@@ -130,5 +121,4 @@ print(json.dumps(result))
     "z-finding",
     "renamed-again",
   ]);
-  expect(result["owned"]).toEqual(result["ordered"]);
 });

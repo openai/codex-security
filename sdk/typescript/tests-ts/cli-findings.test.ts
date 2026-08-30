@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { JsonObject } from "../src/index.js";
@@ -5,6 +6,46 @@ import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 
 describe("CLI findings history", () => {
+  test("expands a home-relative repository before querying saved findings", async () => {
+    const calls: Array<readonly string[]> = [];
+    expect(
+      await main(
+        ["findings", "list", "~/repository", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => {
+            calls.push(args);
+            return { findings: [] };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls[0]).toContain(resolve(homedir(), "repository"));
+  });
+
+  test.each([
+    { scope: [] },
+    { scope: ["--all-repositories"] },
+    { scope: ["--scan", "saved-scan"] },
+  ])("accepts larger finding pages for scope %j", async ({ scope }) => {
+    const calls: Array<readonly string[]> = [];
+    expect(
+      await main(
+        ["findings", "list", ...scope, "--limit", "100", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => {
+            calls.push(args);
+            return { findings: [], findingsPage: { findings: [] } };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls[0]?.slice(-2)).toEqual(["--limit", "100"]);
+  });
+
   test("lists active findings for the current repository by default", async () => {
     const repository = resolve("/current/repository");
     for (const command of [
@@ -460,7 +501,7 @@ describe("CLI findings history", () => {
     const invalid = [
       ["findings", "list", "--scan", "scan-1", "--all-repositories"],
       ["findings", "list", "--limit", "0"],
-      ["findings", "list", "--limit", "21"],
+      ["findings", "list", "--limit", "0"],
       ["findings", "list", "--offset", "-1"],
       ["findings", "list", "--severity", "urgent"],
       ["findings", "list", "--scan"],
