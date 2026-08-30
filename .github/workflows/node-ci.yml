@@ -120,6 +120,38 @@ jobs:
             pnpm --dir sdk/typescript exec prettier --check "${files[@]}"
           fi
 
+  static-checks:
+    name: typecheck and formatting
+    needs: validate-title
+    if: needs.validate-title.outputs.ci-mode == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: sdk/typescript/package.json
+          cache: true
+          cache_dependency_path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+      - name: Install dependencies
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm --dir sdk/typescript run types
+      - name: Check formatting
+        run: pnpm --dir sdk/typescript run format
+
   package:
     name: build and check package
     needs: validate-title
@@ -152,10 +184,6 @@ jobs:
       - name: Audit production dependencies
         continue-on-error: true
         run: pnpm --dir sdk/typescript run audit:prod
-      - name: Typecheck
-        run: pnpm --dir sdk/typescript run types
-      - name: Check formatting
-        run: pnpm --dir sdk/typescript run format
       - name: Pack
         working-directory: sdk/typescript
         run: pnpm pack --pack-destination ../../dist
@@ -373,7 +401,16 @@ jobs:
 
   required-test:
     name: ${{ matrix.os }} / node-22
-    needs: [validate-title, package, test, compatibility, mcp, plugin-source]
+    needs:
+      [
+        validate-title,
+        static-checks,
+        package,
+        test,
+        compatibility,
+        mcp,
+        plugin-source,
+      ]
     if: always()
     runs-on: ubuntu-latest
     strategy:
@@ -382,7 +419,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1
 
   windows-test:
@@ -490,12 +527,12 @@ jobs:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
     if: always()
-    needs: [validate-title, windows-test, windows-verify]
+    needs: [validate-title, static-checks, windows-test, windows-verify]
     strategy:
       fail-fast: false
       matrix:
         node: ["22.13.0", "24"]
     steps:
       - name: Require every Windows coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1

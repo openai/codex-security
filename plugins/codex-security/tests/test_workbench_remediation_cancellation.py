@@ -5,7 +5,12 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from workbench_test_support import create_saved_workspace, run_workbench, write_completed_contract
+from workbench_test_support import (
+    create_saved_workspace,
+    run_workbench,
+    start_delivered_scan,
+    write_completed_contract,
+)
 
 
 def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Path) -> None:
@@ -15,9 +20,8 @@ def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Pa
     source = target / "source.txt"
     source.write_text("vulnerable\n")
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
