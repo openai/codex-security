@@ -1,0 +1,41 @@
+{
+  "name": "codex-security",
+  "version": "0.1.79",
+  "description": "Codex Security workflows for security scans, analysis, and investigation.",
+  "author": {
+    "name": "OpenAI"
+  },
+  "homepage": "https://developers.openai.com/codex/security",
+  "repository": "https://github.com/openai/codex-security",
+  "license": "Apache-2.0",
+  "keywords": [
+    "security",
+    "code-review",
+    "diff-review",
+    "appsec",
+    "threat-modeling"
+  ],
+  "skills": "./skills/",
+  "apps": "./.app.json",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Codex Security",
+    "shortDescription": "Security scanning for your codebase",
+    "longDescription": "Codex Security packages reusable workflows for security scans, analysis, validation, and investigation across code, diffs, and related artifacts.",
+    "developerName": "OpenAI",
+    "category": "Security",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "websiteURL": "https://openai.com/",
+    "privacyPolicyURL": "https://openai.com/policies/row-privacy-policy/",
+    "termsOfServiceURL": "https://openai.com/policies/row-terms-of-use/",
+    "defaultPrompt": [
+      "Run a Codex Security scan on this repository.",
+      "Run a Codex Security diff scan on this PR, commit, branch diff, or working-tree patch.",
+      "Triage existing security findings against this repository."
+    ],
+    "brandColor": "#111111",
+    "composerIcon": "./assets/logo.png",
+    "logo": "./assets/logo.png",
+    "screenshots": []
+  }
+}

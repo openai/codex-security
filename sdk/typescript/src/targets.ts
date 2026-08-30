@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { InvalidTargetError } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { windowsUnsafePathComponent } from "./windows-path.js";
 
 const execFile = promisify(execFileCallback);
 const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
@@ -111,6 +112,7 @@ export async function normalizeRepository(
   signal?: AbortSignal,
 ): Promise<string> {
   const candidate = resolveRepositoryPath(repository);
+  requirePortableWindowsRepositoryPath(candidate);
   let canonical: string;
   try {
     canonical = await abortable(() => realpath(candidate), signal);
@@ -126,11 +128,22 @@ export async function normalizeRepository(
       },
     );
   }
+  requirePortableWindowsRepositoryPath(canonical);
   return canonical;
 }
 
 export function resolveRepositoryPath(repository: string): string {
   return resolve(expandHome(repository));
+}
+
+function requirePortableWindowsRepositoryPath(path: string): void {
+  if (process.platform !== "win32") return;
+  const ambiguous = windowsUnsafePathComponent(path);
+  if (ambiguous !== undefined) {
+    throw new InvalidTargetError(
+      `Repository paths must not contain Windows-ambiguous components: ${ambiguous}`,
+    );
+  }
 }
 
 export async function enclosingGitWorktreeRoot(
@@ -238,7 +251,7 @@ export async function normalizeTarget(
     );
   }
 
-  const paths: string[] = [];
+  const paths = new Set<string>();
   for (const value of target) {
     throwIfAborted(signal);
     if (typeof value !== "string") {
@@ -276,12 +289,18 @@ export async function normalizeTarget(
         `Path target is outside the repository: ${value}`,
       );
     }
-    const normalized = relativePath.split(sep).join("/") || ".";
-    if (!paths.includes(normalized)) {
-      paths.push(normalized);
+    if (
+      process.platform === "win32" &&
+      relativePath.split(sep).some((part) => part.includes(":"))
+    ) {
+      throw new InvalidTargetError(
+        `Path target contains an unsupported colon component: ${value}`,
+      );
     }
+    const normalized = relativePath.split(sep).join("/") || ".";
+    paths.add(normalized);
   }
-  return { kind: "paths", paths };
+  return { kind: "paths", paths: [...paths] };
 }
 
 export async function validateCommittedDiffCheckout(
@@ -413,9 +432,10 @@ async function gitOutput(
       encoding: "utf8",
       signal,
       env: command.environment,
+      maxBuffer: Infinity,
     },
   );
-  return stdout.trim();
+  return stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
 }
 
 async function outermostGitMarkerRoot(
@@ -456,7 +476,7 @@ function isolatedGitEnvironment(
   return environment;
 }
 
-async function abortable<T>(
+export async function abortable<T>(
   operation: () => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
@@ -465,16 +485,18 @@ async function abortable<T>(
   return await new Promise<T>((resolvePromise, reject) => {
     const onAbort = (): void => reject(abortReason(signal));
     signal.addEventListener("abort", onAbort, { once: true });
-    void operation().then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolvePromise(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
+    void Promise.resolve()
+      .then(operation)
+      .then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolvePromise(value);
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
   });
 }
 

@@ -23,6 +23,7 @@ import {
   repositoryRevision,
   type ScanTarget,
 } from "../src/index.js";
+import { enclosingGitWorktreeRoot } from "../src/targets.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
 const structurallyInvalidTarget: ScanTarget = {
@@ -42,12 +43,12 @@ afterEach(async () => {
   );
 });
 
-async function repository(): Promise<string> {
+async function repository(name = "repo"): Promise<string> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-targets-")),
   );
   temporaryDirectories.push(root);
-  const repo = join(root, "repo");
+  const repo = join(root, name);
   await mkdir(join(repo, "src"), { recursive: true });
   await writeFile(join(repo, "src", "app.ts"), "export const ok = true;\n");
   git(repo, "init", "-b", "main");
@@ -118,12 +119,55 @@ describe("scan target normalization", () => {
       paths: [],
     });
     expect(
-      await normalizeTarget(repo, ["src", join(repo, "src", "app.ts")]),
+      await normalizeTarget(repo, [
+        "src",
+        join(repo, "src", "app.ts"),
+        join(repo, "src"),
+        "src/app.ts",
+      ]),
     ).toEqual({
       kind: "paths",
       paths: ["src", "src/app.ts"],
     });
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "rejects Windows repository roots that alias across runtimes",
+    async () => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-repository-alias-")),
+      );
+      temporaryDirectories.push(root);
+      const repository = join(root, "repository");
+      const ambiguous = join(root, "repository.");
+      const linked = join(root, "linked-repository");
+      await Promise.all([mkdir(repository), mkdir(ambiguous)]);
+      await symlink(ambiguous, linked, "junction");
+
+      expect(await realpath(repository)).not.toBe(await realpath(ambiguous));
+      await expect(normalizeRepository(repository)).resolves.toBe(
+        await realpath(repository),
+      );
+      for (const path of [ambiguous, linked]) {
+        await expect(normalizeRepository(path)).rejects.toThrow(
+          "Windows-ambiguous components",
+        );
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "preserves trailing whitespace in Git worktree paths",
+    async () => {
+      for (const suffix of [" ", "\r"]) {
+        const repo = await repository(`repo${suffix}`);
+        expect(await enclosingGitWorktreeRoot(repo)).toBe(await realpath(repo));
+        await expect(
+          normalizeTarget(repo, DiffTarget.refs({ base: "HEAD" })),
+        ).resolves.toMatchObject({ kind: "refs" });
+      }
+    },
+  );
 
   test("rejects empty and escaping paths", async () => {
     const repo = await repository();
@@ -132,6 +176,33 @@ describe("scan target normalization", () => {
       "outside the repository",
     );
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "rejects NTFS alternate streams before runtime initialization",
+    async () => {
+      const repo = await repository();
+      const stream = join(repo, "src", "app.ts:synthetic-stream");
+      await writeFile(stream, "export const hidden = true;\n");
+
+      await expect(normalizeTarget(repo, [stream])).rejects.toThrow(
+        "unsupported colon component",
+      );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "allows colons in POSIX path components",
+    async () => {
+      const repo = await repository();
+      const path = join(repo, "src", "app.ts:fixture");
+      await writeFile(path, "export const fixture = true;\n");
+
+      await expect(normalizeTarget(repo, [path])).resolves.toEqual({
+        kind: "paths",
+        paths: ["src/app.ts:fixture"],
+      });
+    },
+  );
 
   test("reports a path that disappears during normalization as invalid", async () => {
     const repo = await repository();

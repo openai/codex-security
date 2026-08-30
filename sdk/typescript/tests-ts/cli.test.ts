@@ -1,4 +1,3 @@
-import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
@@ -33,7 +32,12 @@ import {
   ScanInterruptedError,
   VERSION,
 } from "../src/index.js";
-import { main, parseCodexOverrides, Progress } from "../src/cli.js";
+import {
+  main,
+  parseCodexOverrides,
+  Progress,
+  resolveCliPath,
+} from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
@@ -50,6 +54,8 @@ import {
   fakePreflight,
   fakeResult,
 } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runCommand } from "./support/shell.js";
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
@@ -73,18 +79,41 @@ async function multiscanInventory(root: string): Promise<void> {
       "initial",
     ],
   ]) {
-    expect(spawnSync("git", args, { encoding: "utf8" }).status).toBe(0);
+    const result = await runCommand("git", args, { timeout: 10_000 });
+    expect(result.status, result.stderr).toBe(0);
   }
-  const revision = spawnSync("git", ["-C", repository, "rev-parse", "HEAD"], {
-    encoding: "utf8",
-  }).stdout.trim();
+  const { status, stdout, stderr } = await runCommand(
+    "git",
+    ["-C", repository, "rev-parse", "HEAD"],
+    { timeout: 10_000 },
+  );
+  expect(status, stderr).toBe(0);
   await writeFile(
     join(root, "repositories.csv"),
-    `id,repository,revision\nsample,${repository},${revision}\n`,
+    `id,repository,revision\nsample,${repository},${stdout.trim()}\n`,
   );
 }
 
 describe("CLI", () => {
+  test("passes the safety identifier as a per-scan option", async () => {
+    let options: unknown;
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", "--safety-identifier", "synthetic-user", ".", "--json"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onTurn: (_repository, value) => {
+            options = value;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(options).toMatchObject({ safetyIdentifier: "synthetic-user" });
+    expect(stderr.text()).not.toContain("synthetic-user");
+  });
+
   test("exposes Incur help, schemas, manifests, and completions", async () => {
     const root = capture();
     const stderr = capture();
@@ -127,6 +156,9 @@ describe("CLI", () => {
             enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
           },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
+          patch: { type: "boolean" },
+          patchSeverity: { enum: ["critical", "high", "medium", "low"] },
+          createPr: { type: "boolean" },
           headless: { type: "boolean" },
         },
       },
@@ -192,20 +224,26 @@ describe("CLI", () => {
       "codex-security install-hook [repository]",
     );
     expect(manifest.text()).toContain("codex-security bulk-scan [input]");
-    expect(manifest.text()).toContain("codex-security export <scanDir>");
+    expect(manifest.text()).toContain("codex-security export [scanDir]");
+    expect(manifest.text()).toContain(
+      "codex-security import github <repository>",
+    );
     expect(manifest.text()).toContain("codex-security validate <findings...>");
-    expect(manifest.text()).toContain("codex-security patch <issues...>");
+    expect(manifest.text()).toContain(
+      "codex-security verify-fix [findings...]",
+    );
+    expect(manifest.text()).toContain("codex-security patch [issues...]");
     expect(manifest.text()).toContain(
       "codex-security findings false-positive <occurrenceId>",
     );
     expect(manifest.text()).toContain("codex-security scans list [repository]");
-    expect(manifest.text()).toContain("codex-security scans show <scanId>");
-    expect(manifest.text()).toContain("codex-security scans rerun <scanId>");
+    expect(manifest.text()).toContain("codex-security scans show [scanId]");
+    expect(manifest.text()).toContain("codex-security scans rerun [scanId]");
     expect(manifest.text()).toContain(
       "codex-security scans match [beforeId] [afterId]",
     );
     expect(manifest.text()).toContain(
-      "codex-security scans compare <beforeId> <afterId>",
+      "codex-security scans compare [beforeId] [afterId]",
     );
     expect(manifest.text()).toContain("codex-security info");
 
@@ -224,6 +262,7 @@ describe("CLI", () => {
   test("documents every public command argument and option", async () => {
     const commands = [
       ["scan"],
+      ["dedupe"],
       ["bulk-scan"],
       ["export"],
       ["validate"],
@@ -376,20 +415,14 @@ describe("CLI", () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-deep-defaults-"));
 
     try {
-      const result = spawnSync(
+      const { status, stdout, stderr } = await runCommand(
         python!,
         [
-          fileURLToPath(
-            new URL(
-              "../_bundled_plugin/scripts/deep_scan_config.py",
-              import.meta.url,
-            ),
-          ),
+          join(PLUGIN_ROOT, "scripts", "deep_scan_config.py"),
           "--available-parallelism",
           "12",
         ],
         {
-          encoding: "utf8",
           env: {
             ...process.env,
             CODEX_HOME: join(root, "codex-home"),
@@ -399,11 +432,10 @@ describe("CLI", () => {
         },
       );
 
-      expect(result.error).toBeUndefined();
-      expect(result.status).toBe(0);
-      expect(result.stderr).toBe("");
+      expect(status, stderr).toBe(0);
+      expect(stderr).toBe("");
 
-      const defaults = JSON.parse(result.stdout) as {
+      const defaults = JSON.parse(stdout) as {
         workers: number;
         subagents: number;
         stopAfterNoNew: number;
@@ -558,12 +590,13 @@ describe("CLI", () => {
       await mkdtemp(join(tmpdir(), "codex-security-cli-pre-commit-")),
     );
     try {
-      execFileSync("git", ["init", "-q", root], { timeout: 10_000 });
-      execFileSync(
-        "git",
+      for (const args of [
+        ["init", "-q", root],
         ["-C", root, "config", "core.hooksPath", ".custom hooks"],
-        { timeout: 10_000 },
-      );
+      ]) {
+        const result = await runCommand("git", args, { timeout: 10_000 });
+        expect(result.status, result.stderr).toBe(0);
+      }
       let started = false;
       const hook = join(root, ".custom hooks", "pre-commit");
       const deps = dependencies({
@@ -665,12 +698,13 @@ describe("CLI", () => {
         '#!/bin/sh\nprintf "codex-security\\n" > "$CODEX_SECURITY_HOOK_MARKER"\nexit 0\n',
         { mode: 0o755 },
       );
-      execFileSync(
+      const staged = await runCommand(
         "git",
         ["-C", root, "add", "-f", "node_modules/.bin/codex-security"],
         { timeout: 10_000 },
       );
-      const commit = spawnSync(
+      expect(staged.status, staged.stderr).toBe(0);
+      const commit = await runCommand(
         "git",
         [
           "-C",
@@ -687,7 +721,6 @@ describe("CLI", () => {
           "test",
         ],
         {
-          encoding: "utf8",
           env: {
             ...process.env,
             CODEX_HOME: join(root, "codex-home"),
@@ -699,8 +732,7 @@ describe("CLI", () => {
           timeout: 10_000,
         },
       );
-      expect(commit.error).toBeUndefined();
-      expect(commit.status).not.toBe(0);
+      expect(commit.status, commit.stderr).toBeGreaterThan(0);
       await expect(stat(maliciousMarker)).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -777,6 +809,55 @@ describe("CLI", () => {
       expect(stderr.text()).toContain("sample started (attempt 1)");
       expect(stderr.text()).toContain("sample completed (attempt 1)");
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("expands home-relative bulk scan paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-home-"));
+    const home = join(root, "home");
+    const currentDirectory = join(root, "current");
+    const previousHome = process.env["HOME"];
+    const previousUserProfile = process.env["USERPROFILE"];
+    try {
+      await mkdir(home);
+      await mkdir(currentDirectory);
+      await multiscanInventory(home);
+      process.env["HOME"] = home;
+      process.env["USERPROFILE"] = home;
+
+      expect(resolveCliPath(currentDirectory, "~/repositories.csv")).toBe(
+        join(home, "repositories.csv"),
+      );
+      expect(resolveCliPath(currentDirectory, "~person/repositories.csv")).toBe(
+        join(currentDirectory, "~person", "repositories.csv"),
+      );
+
+      const stdout = capture();
+      expect(
+        await main(
+          [
+            "bulk-scan",
+            "~/repositories.csv",
+            "--output-dir",
+            "~/results",
+            "--json",
+          ],
+          stdout.stream,
+          capture().stream,
+          dependencies({ currentDirectory }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        completed: 1,
+        failed: 0,
+        resultsPath: join(home, "results", "results.jsonl"),
+      });
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      if (previousUserProfile === undefined) delete process.env["USERPROFILE"];
+      else process.env["USERPROFILE"] = previousUserProfile;
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -983,12 +1064,11 @@ describe("CLI", () => {
     );
   });
 
-  test("exposes only typed, read-only SDK metadata over MCP", () => {
-    const child = spawnSync(
+  test("exposes only typed, read-only SDK metadata over MCP", async () => {
+    const child = await runCommand(
       process.execPath,
       [join(import.meta.dir, "../src/cli.ts"), "--mcp"],
       {
-        encoding: "utf8",
         input: [
           '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-security-test","version":"1.0.0"}}}',
           '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
@@ -1112,6 +1192,81 @@ describe("CLI", () => {
     expect(text).not.toContain("juice-shop-remediated");
     expect(text).not.toContain("/private/tmp");
     expect(text).not.toContain("target-internal-id");
+  });
+
+  test("shows the latest completed scan for the current repository by default", async () => {
+    const stdout = capture();
+    const calls: Array<readonly string[]> = [];
+    const responses: JsonObject[] = [
+      { scans: [{ scanId: "latest-scan" }] },
+      { scan: { scanId: "latest-scan" } },
+    ];
+
+    expect(
+      await main(
+        ["scans", "show", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => responses[calls.push(args) - 1]!,
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual({ scanId: "latest-scan" });
+    expect(calls).toEqual([
+      [
+        "list-scans",
+        "--repository",
+        "/current/repository",
+        "--status",
+        "complete",
+        "--limit",
+        "1",
+      ],
+      ["get-scan", "--scan-id", "latest-scan"],
+    ]);
+  });
+
+  test("reports when the current repository has no saved scans", async () => {
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scans", "show"],
+        capture().stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "No completed scans found for the current repository.",
+    );
+  });
+
+  test("does not emit an ok: true envelope for a failed structured history command", async () => {
+    for (const argv of [
+      ["scans", "show", "--json"],
+      ["scans", "list", "--json"],
+      ["scans", "compare", "before", "after", "--json"],
+      ["scans", "match", "before", "after", "--json"],
+    ]) {
+      const stdout = capture();
+      const stderr = capture();
+      const result = await main(argv, stdout.stream, stderr.stream, {
+        ...dependencies({
+          onWorkbench: () => {
+            throw new Error(
+              "Scan ID prefixes must be at least eight characters.",
+            );
+          },
+        }),
+      });
+      expect(result).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "Scan ID prefixes must be at least eight characters.",
+      );
+    }
   });
 
   test("shows finding history and optionally reveals linked findings", async () => {
@@ -1375,7 +1530,7 @@ describe("CLI", () => {
   test("registers the scoped package as the MCP command", async () => {
     const home = await mkdtemp(join(tmpdir(), "codex-security-mcp-home-"));
     try {
-      const child = spawnSync(
+      const child = await runCommand(
         process.execPath,
         [
           join(import.meta.dir, "../src/cli.ts"),
@@ -1386,7 +1541,6 @@ describe("CLI", () => {
           "--full-output",
         ],
         {
-          encoding: "utf8",
           env: { ...process.env, HOME: home, USERPROFILE: home },
           timeout: 30_000,
         },
@@ -1600,6 +1754,31 @@ describe("CLI", () => {
     },
   );
 
+  test("passes the workflow ID to scans without changing their JSON output", async () => {
+    const deps = dependencies();
+    const result = fakeResult();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        expect(options?.workflowId).toBe("scan-workflow");
+        return result;
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", ".", "--workflow-id", "scan-workflow", "--json"],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      scanDir: result.scanDir,
+    });
+  });
+
   test("keeps verbose diagnostics separate from interactive progress", async () => {
     const stdout = capture();
     const stderr = capture(true);
@@ -1712,6 +1891,44 @@ describe("CLI", () => {
       expect(timers).toBe(0);
     }
   });
+
+  test.each([false, true])(
+    "subscribes to session details only with TTY stdin: %p",
+    async (stdinTTY) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        process.stdin,
+        "isTTY",
+      );
+      const stderr = capture(true);
+      let subscribed = false;
+      try {
+        Object.defineProperty(process.stdin, "isTTY", {
+          configurable: true,
+          value: stdinTTY,
+        });
+        const code = await main(
+          ["scan", "."],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            onTurn: (_repository, options) => {
+              subscribed =
+                typeof (options as ScanOptions).onSessionEvent === "function";
+            },
+          }),
+        );
+        expect(code).toBe(0);
+        expect(stderr.text()).toContain("CODEX SECURITY");
+        expect(subscribed).toBe(stdinTTY);
+      } finally {
+        if (descriptor === undefined) {
+          Reflect.deleteProperty(process.stdin, "isTTY");
+        } else {
+          Object.defineProperty(process.stdin, "isTTY", descriptor);
+        }
+      }
+    },
+  );
 
   test("uses plain scan progress in headless, CI, and noninteractive terminals", async () => {
     for (const { options, environment, isTTY } of [
@@ -2024,7 +2241,6 @@ describe("CLI", () => {
   test("rejects structured modes before starting interactive Codex commands", async () => {
     for (const [command, arguments_] of [
       ["validate", ["finding"]],
-      ["patch", ["issue"]],
       ["login", []],
       ["login", ["status"]],
       ["logout", []],
@@ -2097,7 +2313,7 @@ describe("CLI", () => {
     expect(
       await main(["export", "--help"], stdout.stream, stderr.stream, deps),
     ).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security export <scanDir>");
+    expect(stdout.text()).toContain("Usage: codex-security export [scanDir]");
     expect(stdout.text()).toContain("--export-format <csv|json|sarif>");
     expect(stdout.text()).toContain("--source-root <string>");
     expect(stdout.text()).not.toContain("--format {sarif}");
@@ -2633,14 +2849,16 @@ describe("CLI", () => {
         ],
         "--effort conflicts with --codex model_reasoning_effort",
       ],
-      [["export"], "scanDir"],
       [["export", "scan", "--unknown"], "Unknown flag: --unknown"],
       [["export", "scan", "--format", "sarif"], "Invalid format"],
       [["export", "scan", "--export-format", "xml"], "Invalid option"],
       [["export", "scan-a", "scan-b"], "Unexpected positional"],
       [["validate"], "findings..."],
       [["validate", ""], "A finding must not be empty"],
-      [["patch"], "issues..."],
+      [
+        ["patch"],
+        "Patch requires an issue, --linear-issue, or --linear-project.",
+      ],
       [["patch", ""], "An issue must not be empty"],
       [
         ["export", "scan", "--output", "--source-root", "repo"],
@@ -4425,6 +4643,29 @@ describe("CLI", () => {
       "Running scan: reviewing files (src, tests)",
     );
     expect(stderr.text()).not.toContain("% complete");
+  });
+
+  test("preserves directory names for absolute scan paths with trailing separators", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        [
+          "scan",
+          ".",
+          "--path",
+          "/synthetic-parent/trailing-directory/",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain("Running scan: trailing-directory");
+    expect(stderr.text()).not.toContain("synthetic-parent");
   });
 
   test("shows live stage, files, workers, tokens, and cost without a budget", async () => {

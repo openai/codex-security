@@ -1,12 +1,27 @@
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
+import { join, win32 } from "node:path";
+import {
+  Codex,
+  type CodexOptions,
+  type ThreadOptions,
+  type TurnOptions,
+} from "@openai/codex-sdk";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
 import {
   comparisonEnvironment,
   matchCompletedScan,
   matchScanFindings,
+  matchScanFindingsInternal,
   type ScanComparisonInput,
   type ScanComparisonOptions,
   type ScanComparisonResult,
@@ -16,9 +31,22 @@ const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
+    temporaryDirectories.splice(0).map(async (path) => {
+      // Bun 1.3.13 ignores fs.rm's retry options.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await rm(path, { recursive: true, force: true });
+          return;
+        } catch (error) {
+          if (
+            (error as NodeJS.ErrnoException).code !== "EBUSY" ||
+            attempt === 10
+          )
+            throw error;
+          await Bun.sleep(100 * (attempt + 1));
+        }
+      }
+    }),
   );
 });
 
@@ -53,6 +81,111 @@ function fakeCodex(response: unknown) {
 }
 
 describe("semantic scan comparison", () => {
+  test("uses comparison attribution for CLI comparison turns", async () => {
+    const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+    await matchScanFindingsInternal(
+      { before: [], after: [] },
+      { codex },
+      { surface: "cli" },
+    );
+    expect(calls.threadOptions?.threadSource).toBe("security_scan_comparison");
+  });
+
+  test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
+    const home = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+    temporaryDirectories.push(home);
+    await writeFile(
+      join(home, "config.toml"),
+      '[mcp_servers.inherited]\ncommand = "synthetic-inherited"\n',
+    );
+    const executable = join(
+      home,
+      process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
+    );
+    await copyFile(resolveCodexCommand({}).command, executable);
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      TEMP: process.env["TEMP"],
+      TMP: process.env["TMP"],
+      CODEX_HOME: home,
+      CODEX_CLI_PATH: executable,
+      OPENAI_API_KEY: "synthetic-key",
+    };
+    const { codex } = fakeCodex({ matches: [], uncertain: [] });
+    let config: CodexOptions["config"];
+    let codexPath: string | undefined;
+    let codexEnvironment: CodexOptions["env"];
+    const startThread = spyOn(
+      Codex.prototype,
+      "startThread",
+    ).mockImplementation(function (this: Codex, options) {
+      config = (this as unknown as { options: CodexOptions }).options.config;
+      codexPath = (this as unknown as { options: CodexOptions }).options
+        .codexPathOverride;
+      codexEnvironment = (this as unknown as { options: CodexOptions }).options
+        .env;
+      return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+    });
+    try {
+      await matchScanFindings(
+        { before: [], after: [] },
+        {
+          environment,
+          workingDirectory: home,
+          config: {
+            codexOverrides: {
+              mcp_servers: {
+                synthetic: { command: "synthetic-integration", enabled: true },
+              },
+            },
+          },
+        },
+      );
+      expect(config?.["mcp_servers"]).toEqual({
+        synthetic: { command: "synthetic-integration", enabled: false },
+        inherited: { enabled: false },
+      });
+      expect(codexPath).toBe(
+        process.platform === "win32"
+          ? win32.toNamespacedPath(executable)
+          : executable,
+      );
+      expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
+      const effective = await runCodexCommand(
+        resolveCodexCommand(environment),
+        [
+          "-C",
+          home,
+          "-c",
+          'mcp_servers.synthetic.command="synthetic-integration"',
+          ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
+            "-c",
+            `mcp_servers.${name}.enabled=false`,
+          ]),
+          "mcp",
+          "list",
+          "--json",
+        ],
+        environment,
+      );
+      expect(effective.success).toBe(true);
+      expect(
+        JSON.parse(effective.stdout).map(
+          (server: { name: string; enabled: boolean }) => ({
+            name: server.name,
+            enabled: server.enabled,
+          }),
+        ),
+      ).toEqual([
+        { name: "inherited", enabled: false },
+        { name: "synthetic", enabled: false },
+      ]);
+    } finally {
+      startThread.mockRestore();
+    }
+  });
+
   test("preserves environment API-key precedence over managed credentials", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
     temporaryDirectories.push(root);
@@ -86,11 +219,69 @@ describe("semantic scan comparison", () => {
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       CODEX_SECURITY_SCAN_ID: "scan",
       CODEX_HOME: "/provider-home",
+      CODEX_CLI_PATH: "/compatible-codex",
+      CODEX_SAFETY_IDENTIFIER: "synthetic-user",
       FIREWORKS_API_KEY: "provider-key",
     };
     expect(await comparisonEnvironment(provider, account)).toEqual(provider);
     expect(statusProbed).toBe(false);
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "recognizes provider scan variables regardless of Windows casing",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+      temporaryDirectories.push(root);
+      const stateDirectory = join(root, "state");
+      const providerHome = join(root, "provider-home");
+      await mkdir(join(stateDirectory, "codex-home"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      let statusProbed = false;
+      const provider = {
+        codex_security_scan_id: "scan",
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+        codex_home: providerHome,
+        FIREWORKS_API_KEY: "synthetic-provider-key",
+      };
+
+      const environment = await comparisonEnvironment(provider, async () => {
+        statusProbed = true;
+        return { authenticated: true, details: "Logged in using ChatGPT" };
+      });
+
+      expect(environment).toEqual(provider);
+      expect(statusProbed).toBe(false);
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "replaces differently cased Windows CODEX_HOME variables",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+      temporaryDirectories.push(root);
+      const stateDirectory = join(root, "state");
+      const credentialHome = join(stateDirectory, "codex-home");
+      await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+
+      const environment = await comparisonEnvironment(
+        {
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+          codex_home: join(root, "ambient-home"),
+        },
+        async () => ({
+          authenticated: true,
+          details: "Logged in using ChatGPT",
+        }),
+        undefined,
+        async () => await realpath(credentialHome),
+      );
+
+      expect(environment["CODEX_HOME"]).toBe(await realpath(credentialHome));
+      expect(environment["codex_home"]).toBeUndefined();
+    },
+  );
 
   test("reuses managed keyring credentials when no environment key is present", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
@@ -196,6 +387,25 @@ describe("semantic scan comparison", () => {
     expect(environment["CODEX_HOME"]).toBe(ambientHome);
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "recognizes stored credentials under a backslash home-relative path",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+      temporaryDirectories.push(root);
+      const ambientHome = join(root, "ambient-codex-home");
+      await mkdir(ambientHome);
+      await writeFile(join(ambientHome, "auth.json"), "{}");
+      const environment = await comparisonEnvironment({
+        CODEX_HOME: "~\\ambient-codex-home",
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        OPENAI_API_KEY: "",
+        USERPROFILE: root,
+      });
+
+      expect(environment["OPENAI_API_KEY"]).toBeUndefined();
+    },
+  );
+
   test("compares all findings with one restricted structured-output turn", async () => {
     const input: ScanComparisonInput = {
       before: [finding("before-1"), finding("before-2")],
@@ -231,6 +441,7 @@ describe("semantic scan comparison", () => {
       }),
     ).toEqual(result);
     expect(calls.threadOptions).toEqual({
+      threadSource: "security_scan_comparison",
       model: "comparison-model",
       modelReasoningEffort: "high",
       sandboxMode: "read-only",
@@ -255,11 +466,37 @@ describe("semantic scan comparison", () => {
     expect(calls.prompt).toContain(JSON.stringify(input));
   });
 
+  test("uses the requested scan model and effort for component matching", async () => {
+    const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+    const config = {
+      codexOverrides: {
+        model: "configured-model",
+        model_reasoning_effort: "high",
+        model_provider: "synthetic-provider",
+      },
+    };
+    await matchScanFindings({ before: [], after: [] }, { config, codex });
+    expect(calls.threadOptions).toMatchObject({
+      model: "configured-model",
+      modelReasoningEffort: "high",
+      sandboxMode: "read-only",
+      networkAccessEnabled: false,
+    });
+    await matchScanFindings(
+      { before: [], after: [] },
+      { config, codex, model: "explicit-model", reasoningEffort: "low" },
+    );
+    expect(calls.threadOptions).toMatchObject({
+      model: "explicit-model",
+      modelReasoningEffort: "low",
+    });
+  });
+
   test("matches open and dismissed findings from the same target", async () => {
     const open = { findingId: "open", occurrenceId: "old-open" };
     const dismissed = { findingId: "dismissed", occurrenceId: "old-dismissed" };
     const after = { findingId: "renamed", occurrenceId: "new-renamed" };
-    const commands: (readonly string[])[] = [];
+    const commands: Array<{ args: readonly string[]; input?: string }> = [];
     let input: ScanComparisonInput | undefined;
     await matchCompletedScan({
       scanId: "current",
@@ -272,8 +509,8 @@ describe("semantic scan comparison", () => {
         CODEX_SECURITY_SCAN_ID: "current",
         FIREWORKS_API_KEY: "synthetic-provider-key",
       },
-      async workbench(args) {
-        commands.push(args);
+      async workbench(args, commandInput) {
+        commands.push({ args, input: commandInput });
         return args[0] === "list-unmatched-scan-pairs"
           ? {
               batches: [
@@ -320,11 +557,12 @@ describe("semantic scan comparison", () => {
       },
     });
     expect(input).toEqual({ before: [open, dismissed], after: [after] });
-    expect(commands.map(([command]) => command)).toEqual([
+    expect(commands.map(({ args: [command] }) => command)).toEqual([
       "list-unmatched-scan-pairs",
       "save-scan-comparison",
     ]);
-    const saved = JSON.parse(commands[1]!.at(-1)!) as ScanComparisonResult;
+    expect(commands[1]!.args.at(-1)).toBe("--matches-json-stdin");
+    const saved = JSON.parse(commands[1]!.input!) as ScanComparisonResult;
     expect(
       saved.matches.map(({ beforeOccurrenceIds }) => beforeOccurrenceIds),
     ).toEqual([["old-dismissed"]]);

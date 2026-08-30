@@ -10,6 +10,8 @@ const provenancePredicate = "https://slsa.dev/provenance/v1";
 const publicNpmRegistry = "https://registry.npmjs.org/";
 const githubActionsOidcIssuer = "https://token.actions.githubusercontent.com";
 const fulcioExtensionPrefix = Buffer.from("2b0601040183bf3001", "hex");
+const releaseSummaryStart = "<!-- codex-security-release-summary:start -->";
+const releaseSummaryEnd = "<!-- codex-security-release-summary:end -->";
 
 function stableReleaseTagVersion(tag) {
   if (typeof tag !== "string" || !tag.startsWith("npm-v")) {
@@ -34,6 +36,103 @@ export function releaseVersion(packageJson) {
     throw new Error("Release package must have a stable X.Y.Z version.");
   }
   return packageJson.version;
+}
+
+function hasReviewedText(value) {
+  return !value.includes("\0") && /\S/u.test(value);
+}
+
+export function parseReviewedReleaseNotes(version, notes) {
+  const expectedHeader = `<!-- release-version: ${version} -->`;
+  const normalized =
+    typeof notes === "string" ? notes.replace(/\n+$/u, "") : "";
+  const firstNewline = normalized.indexOf("\n");
+  const summary = normalized.slice(firstNewline + 1);
+  if (
+    firstNewline === -1 ||
+    normalized.slice(0, firstNewline) !== expectedHeader ||
+    !hasReviewedText(summary)
+  ) {
+    throw new Error(
+      `Release notes must start with ${expectedHeader} and include a reviewed summary.`,
+    );
+  }
+  return summary;
+}
+
+export function extractHistoricalReleaseSummary(notes) {
+  if (typeof notes !== "string") {
+    throw new Error("Existing release notes must be a string.");
+  }
+
+  const markers = [...notes.matchAll(/^[^\r\n]+$/gmu)].filter(
+    ([line]) => line === releaseSummaryStart || line === releaseSummaryEnd,
+  );
+  if (markers.length === 0 || markers[0]?.index !== 0) return null;
+
+  const [startMarker, endMarker] = markers;
+  if (
+    markers.length !== 2 ||
+    startMarker?.[0] !== releaseSummaryStart ||
+    endMarker?.[0] !== releaseSummaryEnd
+  ) {
+    throw new Error("Existing release summary markers are malformed.");
+  }
+
+  const remainder = notes.slice(endMarker.index + endMarker[0].length);
+  if (remainder !== "" && !/^(?:\r?\n){2}/u.test(remainder)) {
+    throw new Error("Existing release summary markers are malformed.");
+  }
+
+  const summary = notes
+    .slice(startMarker.index + startMarker[0].length, endMarker.index)
+    .replace(/^\r?\n/u, "")
+    .replace(/\r?\n$/u, "");
+  if (!hasReviewedText(summary)) {
+    throw new Error("Existing release summary is empty.");
+  }
+  return summary;
+}
+
+export function resolveReleaseSummary(version, taggedNotes, existingNotes) {
+  if (taggedNotes !== undefined) {
+    return parseReviewedReleaseNotes(version, taggedNotes);
+  }
+  if (existingNotes === undefined || existingNotes.length === 0) {
+    return null;
+  }
+  return extractHistoricalReleaseSummary(existingNotes);
+}
+
+export function composeReleaseNotes(generatedNotes, releaseSummary) {
+  if (releaseSummary === null || releaseSummary === "") {
+    return generatedNotes;
+  }
+  return [
+    releaseSummaryStart,
+    releaseSummary,
+    releaseSummaryEnd,
+    "",
+    generatedNotes,
+  ].join("\n");
+}
+
+function releaseNoteFileArguments(args) {
+  const files = {};
+  for (let index = 0; index < args.length; index += 2) {
+    const option = args[index];
+    const file = args[index + 1];
+    if (
+      file === undefined ||
+      (option !== "--tagged-notes-file" &&
+        option !== "--existing-notes-file") ||
+      files[option] !== undefined
+    ) {
+      throw new Error("Invalid release note file arguments.");
+    }
+    files[option] = file;
+  }
+  return files;
 }
 
 export function releaseTagVersion(refType, ref, refName, packageJson) {
@@ -780,6 +879,35 @@ function main() {
     return;
   }
 
+  if (command === "validate-release-notes" && process.argv.length === 5) {
+    const notes = readFileSync(process.argv[4], "utf8");
+    process.stdout.write(parseReviewedReleaseNotes(process.argv[3], notes));
+    return;
+  }
+
+  if (command === "compose-release-notes" && process.argv.length >= 5) {
+    const version = process.argv[3];
+    const generatedNotes = readFileSync(process.argv[4], "utf8");
+    const normalizedGeneratedNotes = generatedNotes.replace(/(?:\r?\n)+$/u, "");
+    if (normalizedGeneratedNotes.length === 0) {
+      throw new Error("Generated GitHub release notes must not be empty.");
+    }
+    const files = releaseNoteFileArguments(process.argv.slice(5));
+    const taggedNotes =
+      files["--tagged-notes-file"] === undefined
+        ? undefined
+        : readFileSync(files["--tagged-notes-file"], "utf8");
+    const existingNotes =
+      files["--existing-notes-file"] === undefined
+        ? undefined
+        : readFileSync(files["--existing-notes-file"], "utf8");
+    const summary = resolveReleaseSummary(version, taggedNotes, existingNotes);
+    process.stdout.write(
+      composeReleaseNotes(normalizedGeneratedNotes, summary),
+    );
+    return;
+  }
+
   if (command === "release-history" && process.argv.length === 4) {
     const registryVersions = JSON.parse(
       process.env.CODEX_SECURITY_PUBLISHED_NPM_VERSIONS ?? "[]",
@@ -890,6 +1018,10 @@ function main() {
       "require-published-increase <version> " +
       "(published npm versions JSON from stdin), " +
       "release-mode <version> (published npm versions JSON from stdin), " +
+      "validate-release-notes <version> <release-notes-file>, " +
+      "compose-release-notes <version> <generated-notes-file> " +
+      "[--tagged-notes-file <file>] " +
+      "[--existing-notes-file <file>], " +
       "release-history <tag>, " +
       "verify-publication <archive> <version> <git-head> " +
       "(package metadata JSON from stdin), " +

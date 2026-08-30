@@ -14,6 +14,41 @@ Codex Security is a thin wrapper around Codex and its security plugin.
   only after checking that it is public. If you cannot confirm its visibility,
   leave it out.
 
+When changing `plugins/codex-security`, run its portable source checks before
+submitting the change:
+
+```bash
+python -m ruff check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
+python -m ruff format --check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
+python .github/scripts/check_plugin_source_compatibility.py
+```
+
+## Avoid speculative defenses
+
+- Do not add sanitization, redaction, validation, or fallback logic for
+  hypothetical problems. State the concrete failure it fixes.
+- When extending an existing command, preserve its output behavior. Do not
+  introduce a new sanitization policy for names, paths, or status messages.
+- Keep existing credential, unsafe-path, and scan-integrity protections.
+  Do not extend them to unrelated values without a demonstrated need.
+- Do not invent a restriction and then add tests whose only purpose is to
+  enforce that restriction.
+
+## Public CLI changes
+
+Treat commands, arguments, flags, accepted values, public environment
+variables, and defaults as public API.
+
+- Do not add or change public CLI surface unless the task explicitly calls for
+  it. A request for new behavior is not permission to invent a command or flag.
+- Prefer existing commands, settings, and Codex behavior. Do not add flags for
+  implementation convenience or when a safe, compatible default is enough.
+- Before adding CLI surface, explain the user need, exact syntax and defaults,
+  why existing behavior is insufficient, and compatibility impact. Ask if those
+  choices are unclear.
+- Update relevant help, schemas, documentation, and tests in the same change.
+  Describe the public CLI change in the pull request.
+
 ## Public repository and pull requests
 
 Everything published in this repository is public. Review branch names before

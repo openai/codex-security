@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmod,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -28,7 +30,13 @@ const packageManifest = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
 const pluginContract = JSON.parse(
-  await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+  await readFile(
+    new URL(
+      "../../../plugins/codex-security/plugin-files.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
 );
 
 async function resolveArchive() {
@@ -201,6 +209,50 @@ async function smokeNestedDeepScanWorker(installedRoot, consumer) {
     "The installed plugin must propagate the bundled Codex path into nested workers.",
   );
 
+  const pluginRoot = join(installedRoot, "_bundled_plugin");
+  const mcpLauncher = join(pluginRoot, "scripts", "launch_codex_security_mcp");
+  const windows = process.platform === "win32";
+  const initialized = spawnSync(
+    windows
+      ? process.env.ComSpec ??
+          join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe")
+      : mcpLauncher,
+    windows
+      ? ["/d", "/s", "/c", "call", `${mcpLauncher}.cmd`, "--stdio"]
+      : ["--stdio"],
+    {
+      cwd: pluginRoot,
+      encoding: "utf8",
+      env: { ...workerEnvironment, CODEX_MCP_NODE_PATH: process.execPath },
+      input: `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: {
+            name: "codex-security-package-smoke",
+            version: "0.1.0",
+          },
+        },
+      })}\n`,
+      timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  if (initialized.error !== undefined) {
+    throw new Error("Installed MCP launcher did not start.", {
+      cause: initialized.error,
+    });
+  }
+  assert.equal(initialized.status, 0, initialized.stderr);
+  assert.equal(
+    JSON.parse(initialized.stdout.trim()).result.serverInfo.name,
+    "codex-security",
+    "The installed MCP launcher must initialize the bundled security server.",
+  );
+
   const globalCodex = spawnSync("codex", ["--version"], {
     cwd: consumer,
     encoding: "utf8",
@@ -240,6 +292,7 @@ async function smokeNestedDeepScanWorker(installedRoot, consumer) {
     });
     const { events } = await codex
       .startThread({
+        threadSource: "security_scan",
         workingDirectory: workerHome,
         skipGitRepoCheck: true,
         sandboxMode: "read-only",
@@ -318,6 +371,8 @@ try {
       "--no-audit",
       "--no-fund",
       archive,
+      `typescript@${packageManifest.devDependencies.typescript}`,
+      `@types/node@${packageManifest.devDependencies["@types/node"]}`,
     ],
     { cwd: consumer },
   );
@@ -344,7 +399,30 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity.");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
+    ],
+    { cwd: consumer },
+  );
+
+  await cp(
+    join(packageRoot, "scripts", "fixtures", "package-consumer.ts"),
+    join(consumer, "consumer.ts"),
+  );
+  run(
+    process.execPath,
+    [
+      join(consumer, "node_modules", "typescript", "bin", "tsc"),
+      "--strict",
+      "--noEmit",
+      "--target",
+      "ES2022",
+      "--lib",
+      "ESNext",
+      "--module",
+      "NodeNext",
+      "--types",
+      "node",
+      "consumer.ts",
     ],
     { cwd: consumer },
   );
@@ -398,11 +476,206 @@ try {
 
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
+  assert.match(help, /\bpublish\b/u);
+  assert.match(help, /\bdedupe\b/u);
 
+  const publicationScan = join(consumer, "publication-scan");
+  await cp(
+    join(installedRoot, "_bundled_plugin", "examples", "completed-scan"),
+    publicationScan,
+    { recursive: true },
+  );
+  if (process.platform !== "win32") await chmod(publicationScan, 0o700);
+  const publication = JSON.parse(
+    run(
+      process.execPath,
+      [
+        launcher,
+        "publish",
+        "scan",
+        publicationScan,
+        "--to",
+        "linear",
+        "--linear-team",
+        "team-example",
+        "--dry-run",
+        "--json",
+      ],
+      {
+        cwd: consumer,
+        capture: true,
+        env: {
+          ...process.env,
+          CODEX_SECURITY_LINEAR_PROJECT: "",
+          CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+        },
+      },
+    ),
+  );
+  assert.equal(publication.scanId, "scan_example_001");
+  assert.equal(publication.uploadId, publication.scanId);
+  assert.deepEqual(publication.destination, {
+    type: "linear",
+    teamId: "team-example",
+  });
+  assert.equal(publication.dryRun, true);
+  assert.equal(publication.counts.findings, 1);
+  assert.equal(publication.counts.created, 0);
+  assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
+  assert.match(
+    run(process.execPath, [launcher, "publish", "scan", "--help"], {
+      cwd: consumer,
+      capture: true,
+    }),
+    /--skip-existing/u,
+  );
+  const missingHistory = spawnSync(
+    process.execPath,
+    [
+      launcher,
+      "publish",
+      "check",
+      publicationScan,
+      "--to",
+      "linear",
+      "--linear-team",
+      "team-example",
+      "--json",
+    ],
+    {
+      cwd: consumer,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CODEX_SECURITY_LINEAR_API_KEY: "",
+        CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+      },
+      timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  assert.equal(missingHistory.status, 2, missingHistory.stderr);
+  assert.match(missingHistory.stderr, /scan-history database does not exist/u);
+  await assert.rejects(stat(join(consumer, "publication-state")), {
+    code: "ENOENT",
+  });
+
+  const networkGuard = join(consumer, "reject-publication-network.cjs");
+  await writeFile(
+    networkGuard,
+    'globalThis.fetch = async () => { throw new Error("Publication dry runs must not make network requests."); };\n',
+  );
+  const directPublicationText = run(
+    process.execPath,
+    [
+      "--require",
+      networkGuard,
+      launcher,
+      "publish",
+      "scan",
+      publicationScan,
+      "--to",
+      "linear",
+      "--linear-team",
+      "team-example",
+      "--project",
+      "project-example",
+      "--linear-api-key",
+      "lin_api_SYNTHETIC_INSTALLED_OVERRIDE",
+      "--linear-assignee",
+      "security@example.test",
+      "--dry-run",
+      "--json",
+    ],
+    {
+      cwd: consumer,
+      capture: true,
+      env: {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+        CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_INSTALLED_ENV",
+      },
+    },
+  );
+  const directPublication = JSON.parse(directPublicationText);
+  assert.equal(directPublication.scanId, publication.scanId);
+  assert.equal(directPublication.dryRun, true);
+  assert.equal(directPublication.counts.findings, 1);
+  assert.equal(directPublication.counts.created, 0);
+  assert.doesNotMatch(
+    directPublicationText,
+    /lin_api_|security@example\.test/u,
+  );
+
+  const { startFindingsServer } = await import(
+    pathToFileURL(join(installedRoot, "dist/server/server.js")).href
+  );
+  const dashboardServer = await startFindingsServer({
+    // Package builders need only Node. Native and runtime-container tests cover SQLite.
+    store: {
+      async initialize() {},
+    },
+    embeddings: {
+      async embed() {
+        throw new Error("Dashboard reads must not call a model");
+      },
+    },
+    host: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    const base = `http://127.0.0.1:${dashboardServer.address().port}`;
+    for (const [path, contentType] of [
+      ["/dashboard", "text/html"],
+      ["/dashboard/app.js", "text/javascript"],
+      ["/dashboard/app.css", "text/css"],
+    ]) {
+      const response = await fetch(`${base}${path}`);
+      assert.equal(response.status, 200);
+      assert.ok(response.headers.get("content-type").startsWith(contentType));
+      const body = await response.text();
+      assert.ok(body.length > 0);
+      if (contentType === "text/html") {
+        const mounted = new URL("/service/dashboard/", base);
+        const assets = [...body.matchAll(/(?:href|src)="([^"]+)"/g)].map(
+          (match) => new URL(match[1], mounted).pathname,
+        );
+        assert.deepEqual(assets, [
+          "/service/dashboard/app.css",
+          "/service/dashboard/app.js",
+        ]);
+      }
+    }
+    assert.equal((await fetch(`${base}/dashboard/package.json`)).status, 404);
+  } finally {
+    await new Promise((resolve, reject) =>
+      dashboardServer.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "fixtures", "credential-lock.mjs"),
+      pathToFileURL(join(installedRoot, "dist", "runtime.js")).href,
+      join(consumer, "credential-lock-state"),
+    ],
+    { cwd: consumer },
+  );
+
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "fixtures", "package-behavior.mjs"),
+      installedRoot,
+      consumer,
+    ],
+    { cwd: consumer },
+  );
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI, ${expectedPluginFiles.length} bundled plugin files, bundled Codex version, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, dashboard assets, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {

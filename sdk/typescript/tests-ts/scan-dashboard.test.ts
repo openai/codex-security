@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
+import type { ComponentReceipt } from "../src/component-scan.js";
 import { ScanDashboard } from "../src/scan-dashboard.js";
 import { capture, fakeResult } from "./cli-fixtures.js";
 
@@ -40,6 +41,234 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("shows concurrent components and keeps their activity and costs separate", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    let timers = 0;
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 110, rows: 20 },
+      {
+        repository: "/synthetic/project",
+        presentation: "components",
+        input,
+        clock: {
+          ...fakeClock(),
+          setInterval: () => {
+            timers++;
+            return {} as NodeJS.Timeout;
+          },
+          clearInterval: () => {
+            timers--;
+          },
+        },
+      },
+    );
+    const receipts: ComponentReceipt[] = ["API", "Web", "Shared"].map(
+      (name, index) => ({
+        id: `component-${index + 1}`,
+        name,
+        paths: [`src/${name.toLowerCase()}`],
+        status: "pending",
+        outputDir: `/synthetic/results/${index + 1}`,
+      }),
+    );
+    const frame = () =>
+      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!);
+    dashboard.start();
+    dashboard.setComponents(receipts);
+    for (const receipt of receipts.slice(0, 2))
+      dashboard.updateComponent({ ...receipt, status: "started" });
+    const cost = fakeResult([], "complete", {
+      input_tokens: 100,
+      output_tokens: 10,
+    }).cost!;
+    for (const [index, receipt] of receipts.slice(0, 2).entries()) {
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "progress",
+        value: {
+          phase: index === 0 ? "validation" : "discovery",
+          filesCompleted: index + 1,
+          filesTotal: 10,
+        },
+      });
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "cost",
+        value: { ...cost, estimatedUsd: index + 1 },
+      });
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "activity",
+        value: {
+          id: "same-activity-id",
+          kind: "message",
+          status: "completed",
+          description: `${receipt.name} only activity`,
+          paths: [],
+        },
+      });
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "session",
+        value: {
+          threadId: receipt.id,
+          parentThreadId: null,
+          event: {
+            type: "event_msg",
+            payload: {
+              type: "agent_message",
+              message: `${receipt.name} session detail`,
+            },
+          },
+        },
+      });
+    }
+    expect(frame()).toContain("2 running · 1 queued");
+    expect(frame()).toContain("validating findings");
+    expect(frame()).toContain("1/10");
+    expect(frame()).toContain("2/10");
+    expect(frame()).toContain("$3.00 · component scans only");
+    expect(frame()).toContain("before deduplication");
+    expect(frame().split("\n")).toHaveLength(20);
+    input.emit("data", "\r");
+    expect(frame()).toContain("API only activity");
+    expect(frame()).not.toContain("Web only activity");
+    expect(frame()).toContain("$1.00");
+    input.emit("data", "d");
+    expect(frame()).toContain("API session detail");
+    expect(frame()).not.toContain("Web session detail");
+    input.emit("data", "\u001B");
+    input.emit("data", "\u001B[B\r");
+    expect(frame()).toContain("Web only activity");
+    expect(frame()).not.toContain("API only activity");
+    dashboard.updateComponent({
+      ...receipts[0]!,
+      status: "completed",
+      findingCount: 3,
+      scanId: "scan-api",
+    });
+    dashboard.showComponents("Combining duplicate findings");
+    expect(frame()).toContain("1 complete · 1 running · 1 queued");
+    expect(frame()).toContain("3 findings before deduplication");
+    dashboard.finishComponents({
+      total: 3,
+      completed: 1,
+      incomplete: 1,
+      failed: 1,
+      planPath: "/synthetic/plan.json",
+      sourceFindingCount: 3,
+      findingCount: 2,
+      deduplication: {
+        status: "incomplete",
+        confirmedGroups: 1,
+        uncertainPairs: 0,
+      },
+    });
+    expect(frame()).toContain("3 findings → 2 groups · matching incomplete");
+    expect(frame()).toContain("partial results");
+    expect(timers).toBe(1);
+    dashboard.stop();
+    expect(timers).toBe(0);
+    expect(input.isRaw).toBe(false);
+    expect(input.listenerCount("data")).toBe(0);
+    expect(stderr.text().split("\u001B[?1049h")).toHaveLength(2);
+  });
+
+  test("navigates a long component list and shows sanitized failure details", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    let interrupted = false;
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 80, rows: 14 },
+      {
+        repository: "/synthetic/project",
+        presentation: "components",
+        input,
+        clock: fakeClock(),
+        sanitize: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
+        onInterrupt: () => {
+          interrupted = true;
+        },
+      },
+    );
+    const receipts: ComponentReceipt[] = Array.from(
+      { length: 20 },
+      (_, index) => ({
+        id: `c${index}`,
+        name: `Component ${index}`,
+        paths: [`src/${index}`],
+        status: "pending",
+        outputDir: `/synthetic/${index}`,
+      }),
+    );
+    const frame = () =>
+      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!);
+    dashboard.start();
+    dashboard.setComponents(receipts);
+    dashboard.updateComponent({
+      ...receipts[19]!,
+      status: "failed",
+      error: "synthetic-secret unavailable",
+    });
+    input.emit("data", "\u001B[F");
+    expect(frame()).toContain("Component 19");
+    expect(frame()).not.toContain("Component 0 ");
+    expect(frame()).toContain("[redacted] unavailable");
+    expect(
+      frame()
+        .split("\n")
+        .every((line) => line.length <= 80),
+    ).toBe(true);
+    input.emit("data", "\r\u0003");
+    expect(interrupted).toBe(true);
+    dashboard.stop();
+  });
+
+  test("renders publication progress without scan-only inventory and cost fields", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 100, rows: 18 },
+      {
+        repository: "/synthetic/payments-api",
+        presentation: "publication",
+        input,
+        color: false,
+        clock: fakeClock(),
+      },
+    );
+
+    dashboard.setStage("Connecting to Linear");
+    dashboard.start();
+    input.emit("data", "d");
+    let text = stripVTControlCharacters(stderr.text());
+    expect(text).toContain("CODEX SECURITY  ·  PUBLISH  ·  payments-api");
+    expect(text).toContain("Waiting for publication activity");
+    expect(text).toContain("FINDINGS  waiting for findings");
+    expect(text).not.toContain("FILES");
+    expect(text).not.toContain("TOKENS");
+    expect(text).not.toContain("COST");
+    expect(text).not.toContain("DETAILS");
+    expect(text).not.toContain("d details");
+
+    dashboard.setPublicationProgress(2, 5);
+    dashboard.setStage("Publishing findings · 2/5");
+    dashboard.record({
+      id: "publication-reasoning",
+      kind: "reasoning",
+      status: "completed",
+      description: "Preparing the next Linear issue.",
+      paths: [],
+    });
+    text = stripVTControlCharacters(stderr.text());
+    expect(text).toContain("FINDINGS  2 / 5 processed");
+    expect(text).toContain("Publishing findings · 2/5");
+    expect(text).toContain("Preparing the next Linear issue.");
+    dashboard.stop();
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+  });
+
   test("restores terminal state when dashboard initialization fails", () => {
     const input = new DashboardTestInput();
     const output: string[] = [];
@@ -571,6 +800,227 @@ describe("live scan dashboard", () => {
     expect(lastFrame(stderr)).toContain("6 lines above live");
     input.emit("data", "\u001B[6~");
     expect(lastFrame(stderr)).not.toContain("above live");
+    dashboard.stop();
+  });
+
+  test("shows unredacted, chronological session events and keeps the activity view safe", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 140, rows: 24 },
+      {
+        repository: "/code/juice-shop",
+        input,
+        color: true,
+        clock: fakeClock(),
+        sanitize: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
+      },
+    );
+
+    dashboard.start();
+    dashboard.record({
+      id: "activity-1",
+      kind: "command",
+      status: "completed",
+      description: "rg -n synthetic-secret routes/login.ts",
+      paths: [],
+    });
+    for (const [seconds, type, payload] of [
+      [
+        2,
+        "turn_context",
+        { model: "gpt-5.6-sol", developer_instructions: "Check boundaries." },
+      ],
+      [0, "session_meta", { base_instructions: { text: "Inspect safely." } }],
+      [1, "message", { role: "user", content: [{ text: "Find bugs." }] }],
+      [
+        3,
+        "function_call",
+        {
+          name: "exec_command",
+          arguments:
+            "synthetic-secret `literal` **glob** \u001B[31mspoofed\u001B[0m\u0007",
+        },
+      ],
+      [
+        4,
+        "function_call_output",
+        {
+          output: [
+            {
+              text: "result\nfunction inspect() {\n  if (input) {\n    return input;\n  }\n\n  return null;\n}",
+            },
+          ],
+        },
+      ],
+      [5, "agent_reasoning", { text: "Inspect **critical** `db.raw(input)`." }],
+      [
+        5,
+        "reasoning",
+        {
+          summary: [
+            { text: "Inspect **critical** `db.raw(input)`." },
+            { text: "New final detail." },
+          ],
+          encrypted_content: "never-display-encrypted-reasoning",
+        },
+      ],
+      [6, "agent_message", { message: "Confirmed." }],
+      [6, "message", { role: "assistant", content: [{ text: "Confirmed." }] }],
+      [7, "token_count", {}],
+      [8, "reasoning", { summary: [] }],
+      [9, "agent_reasoning", { text: "   " }],
+    ] as [number, string, Record<string, unknown>][]) {
+      dashboard.recordDetails({
+        threadId: "scan-thread",
+        parentThreadId: null,
+        event: {
+          type: ["session_meta", "turn_context"].includes(type)
+            ? type
+            : type.startsWith("agent_") || type === "token_count"
+              ? "event_msg"
+              : "response_item",
+          payload: { type, ...payload },
+          timestamp: new Date(STARTED_AT + seconds * 1_000).toISOString(),
+        },
+      });
+    }
+
+    let frame = lastFrame(stderr);
+    expect(frame).toContain("rg -n [redacted] routes/login.ts");
+    expect(frame).toContain("d details");
+
+    input.emit("data", "d");
+    frame = lastFrame(stderr);
+    for (const line of [
+      "main · system: Inspect safely.",
+      "main · user: Find bugs.",
+      "main · context: gpt-5.6-sol · Check boundaries.",
+      "main · tool exec_command: synthetic-secret `literal` **glob** spoofed",
+      "main · result: result",
+      "main · reasoning: Inspect critical db.raw(input).",
+      "main · reasoning: New final detail.",
+      "main · assistant: Confirmed.",
+    ]) {
+      expect(frame).toContain(line);
+    }
+    expect(frame.indexOf("main · system:")).toBeLessThan(
+      frame.indexOf("main · context:"),
+    );
+    const continuation = " ".repeat("  [09:41:04] main · ".length);
+    expect(frame).toContain(`${continuation}  if (input) {`);
+    expect(frame).toContain(`\n${continuation}\n${continuation}  return null;`);
+    expect(frame).not.toContain("main · token count");
+    expect(frame.match(/main · reasoning:/gu)).toHaveLength(2);
+    expect(frame.match(/Inspect critical db\.raw\(input\)\./gu)).toHaveLength(
+      1,
+    );
+    expect(frame.match(/Confirmed\./gu)).toHaveLength(1);
+    for (const sequence of [
+      "\u001B[2m[09:41:05]\u001B[22m",
+      "\u001B[36mmain\u001B[39m",
+      "\u001B[35mreasoning:\u001B[39m",
+      "\u001B[36mtool exec_command:\u001B[39m",
+      "\u001B[32mresult:\u001B[39m",
+      "\u001B[36massistant:\u001B[39m",
+      "\u001B[1mcritical\u001B[22m",
+      "\u001B[2mdb.raw(input)\u001B[22m",
+    ]) {
+      expect(stderr.text()).toContain(sequence);
+    }
+    expect(frame).toContain("TOKENS");
+    expect(stderr.text()).not.toContain("never-display-encrypted-reasoning");
+    expect(stderr.text()).not.toContain("\u001B[31m");
+    expect(stderr.text()).not.toContain("\u0007");
+
+    input.emit("data", "d");
+    frame = lastFrame(stderr);
+    expect(frame).toContain("rg -n [redacted] routes/login.ts");
+    expect(frame).not.toContain("synthetic-secret");
+    dashboard.stop();
+  });
+
+  test("filters workers and scrolls the details separately from scan activity", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 120, rows: 14 },
+      { repository: "/code/juice-shop", input, clock: fakeClock() },
+    );
+    let payloadReads = 0;
+    const event = (threadId: string, text: string, worker?: number) => {
+      dashboard.recordDetails({
+        threadId,
+        parentThreadId: null,
+        worker,
+        event: {
+          type: "event_msg",
+          get payload() {
+            payloadReads += 1;
+            return { type: "agent_message", message: text };
+          },
+        },
+      });
+    };
+
+    dashboard.start();
+    event("worker-one", "Worker one inspected routes.", 1);
+    event("scan-thread", "Main scan started.");
+    event("worker-two", "Independent worker inspected models.", 2);
+    for (let index = 1; index <= 10; index += 1) {
+      event("scan-thread", `trace ${index}`);
+    }
+
+    input.emit("data", "d");
+    for (const [source, included, excluded] of [
+      ["m", "trace 10", "Worker one"],
+      ["1", "Worker one", "Independent worker"],
+      ["2", "Independent worker", "Worker one"],
+    ] as const) {
+      input.emit("data", source);
+      const frame = lastFrame(stderr);
+      expect(frame).toContain(
+        `DETAILS · ${source === "m" ? "main" : `worker ${source}`}`,
+      );
+      expect(frame).toContain(included);
+      expect(frame).not.toContain(excluded);
+    }
+
+    input.emit("data", "a");
+    input.emit("data", "\u001B[H");
+    let frame = lastFrame(stderr);
+    expect(frame).toContain("worker 1 · assistant: Worker one");
+    expect(frame).toContain("main · assistant: Main scan started.");
+    expect(frame).not.toContain("trace 10");
+    expect(frame).toContain("above live");
+
+    const readsBeforeScroll = payloadReads;
+    input.emit("data", "\u001B[B");
+    input.emit("data", "\u001B[A");
+    expect(payloadReads).toBe(readsBeforeScroll);
+
+    event("scan-thread", "live result\nsecond line");
+    frame = lastFrame(stderr);
+    expect(frame).toContain("Worker one inspected routes.");
+    expect(frame).not.toContain("live result");
+    expect(payloadReads).toBe(readsBeforeScroll + 3);
+
+    dashboard.record({
+      id: "background-activity",
+      kind: "command",
+      status: "completed",
+      description: "Background activity must not move the details.",
+      paths: [],
+    });
+    frame = lastFrame(stderr);
+    expect(frame).toContain("Worker one inspected routes.");
+    expect(frame).not.toContain("trace 10");
+
+    input.emit("data", "d");
+    frame = lastFrame(stderr);
+    expect(frame).toContain("Background activity must not move the details.");
+    expect(frame).not.toContain("above live");
+    expect(stderr.text()).not.toMatch(/\u001B\[[\d;]*m/u);
     dashboard.stop();
   });
 

@@ -50,6 +50,14 @@ describe("CLI workbench", () => {
       repository,
       findings: [{ title: "Finding 1" }, { title: "Finding 2" }],
     });
+    expect(
+      await main(
+        ["findings", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({ onWorkbench: () => ({ repositories: [] }) }),
+      ),
+    ).toBe(0);
     for (const confirmed of [[true, false], []]) {
       const result = fakeResult(["high"]);
       Object.assign(result, {
@@ -314,8 +322,11 @@ describe("CLI workbench", () => {
       const stdout = capture();
       const deps = dependencies({
         environment: { CODEX_SECURITY_STATE_DIR: state },
-        onWorkbench: (args) => {
+        onWorkbench: (args): JsonObject => {
           calls.push(args);
+          if (args[0] === "list-scans") {
+            return { scans: [{ scanId: "scan-1" }] };
+          }
           return {
             scan: {
               scanId: "scan-1",
@@ -345,6 +356,22 @@ describe("CLI workbench", () => {
       expect(stdout.text()).toContain("SYNTHETIC_KEY");
       expect(stdout.text()).toContain("independent worker");
       expect(stdout.text()).not.toContain("PRIVATE LATER SESSION");
+
+      calls.length = 0;
+      const latest = capture();
+      expect(
+        await main(
+          ["scans", "logs", "--json"],
+          latest.stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(calls).toEqual([
+        ["list-scans", "--repository", "/current/repository", "--limit", "1"],
+        ["get-scan", "--scan-id", "scan-1"],
+      ]);
+      expect(latest.text()).toContain("SYNTHETIC_KEY");
     } finally {
       await rm(state, { recursive: true, force: true });
     }
@@ -384,18 +411,30 @@ describe("CLI workbench", () => {
       uncertain: [],
     };
 
-    for (const command of ["match", "compare"]) {
+    for (const [command, scanIds, expectedBefore, expectedAfter] of [
+      ["match", ["before", "after"], "before", "after"],
+      ["compare", ["before", "after"], "before", "after"],
+      ["compare", [], "older-scan", "latest-scan"],
+      ["compare", ["baseline-scan"], "baseline-scan", "latest-scan"],
+    ] as const) {
       const calls: Array<readonly string[]> = [];
+      let comparisonInput: string | undefined;
       const stdout = capture();
 
       expect(
         await main(
-          ["scans", command, "before", "after", "--json"],
+          ["scans", command, ...scanIds, "--json"],
           stdout.stream,
           capture().stream,
           dependencies({
-            onWorkbench: (args): JsonObject => {
+            onWorkbench: (args, input): JsonObject => {
               calls.push(args);
+              if (args[0] === "list-scans") {
+                return {
+                  scans: [{ scanId: "latest-scan" }, { scanId: "older-scan" }],
+                };
+              }
+              if (args[0] === "save-scan-comparison") comparisonInput = input;
               return args[0] === "compare-scans"
                 ? { matchingCached: false, matchingInputs: { before, after } }
                 : { summary: { persisting: 1 } };
@@ -408,12 +447,37 @@ describe("CLI workbench", () => {
         ),
       ).toBe(0);
       expect(calls.map((args) => args[0])).toEqual([
+        ...(scanIds.length < 2 ? ["list-scans"] : []),
         "compare-scans",
         "save-scan-comparison",
       ]);
-      expect(JSON.parse(calls[1]![6]!)).toEqual(matching);
+      const comparison = calls.find((args) => args[0] === "compare-scans")!;
+      expect(comparison[2]).toBe(expectedBefore);
+      expect(comparison[4]).toBe(expectedAfter);
+      const save = calls.find((args) => args[0] === "save-scan-comparison")!;
+      expect(save.at(-1)).toBe("--matches-json-stdin");
+      expect(JSON.parse(comparisonInput!)).toEqual(matching);
       expect(JSON.parse(stdout.text())).toEqual({ summary: { persisting: 1 } });
     }
+  });
+
+  test("requires two completed scans for a default comparison", async () => {
+    const stderr = capture();
+    expect(
+      await main(
+        ["scans", "compare"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: () => ({
+            scans: [{ scanId: "scan-1" }],
+          }),
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "At least 2 completed scans are required for the current repository.",
+    );
   });
 
   test("reports automatic matching failures without saving a comparison", async () => {
@@ -461,6 +525,7 @@ describe("CLI workbench", () => {
       },
     ];
     const calls: Array<readonly string[]> = [];
+    const inputs: Array<string | undefined> = [];
     let matcherCalls = 0;
     const stdout = capture();
 
@@ -470,8 +535,9 @@ describe("CLI workbench", () => {
         stdout.stream,
         capture().stream,
         dependencies({
-          onWorkbench: (args): JsonObject => {
+          onWorkbench: (args, input): JsonObject => {
             calls.push(args);
+            inputs.push(input);
             return args[0] === "list-unmatched-scan-pairs"
               ? {
                   repository: "/current/repository",
@@ -531,10 +597,10 @@ describe("CLI workbench", () => {
       "--force",
     ]);
     expect(
-      calls.slice(1).map((args) => ({
+      calls.slice(1).map((args, index) => ({
         before: args[2],
         after: args[4],
-        result: JSON.parse(args[6]!),
+        result: JSON.parse(inputs[index + 1]!),
       })),
     ).toMatchObject([
       { before: "scan-a", after: "scan-b" },
@@ -570,9 +636,11 @@ describe("CLI workbench", () => {
 
   test("saves empty comparisons without starting Codex", async () => {
     const calls: Array<readonly string[]> = [];
+    let comparisonInput: string | undefined;
     const deps = dependencies({
-      onWorkbench: (args): JsonObject => {
+      onWorkbench: (args, input): JsonObject => {
         calls.push(args);
+        if (args[0] === "save-scan-comparison") comparisonInput = input;
         return args[0] === "list-unmatched-scan-pairs"
           ? {
               repository: "/repo",
@@ -607,7 +675,11 @@ describe("CLI workbench", () => {
         deps,
       ),
     ).toBe(0);
-    expect(JSON.parse(calls[1]![6]!)).toEqual({ matches: [], uncertain: [] });
+    expect(calls[1]!.at(-1)).toBe("--matches-json-stdin");
+    expect(JSON.parse(comparisonInput!)).toEqual({
+      matches: [],
+      uncertain: [],
+    });
   });
 
   test("does not save conflicting confirmed and uncertain matches", async () => {
@@ -715,11 +787,41 @@ describe("CLI workbench", () => {
     }
   });
 
+  test("reruns the latest completed scan by default", async () => {
+    let parentScanId: unknown;
+
+    expect(
+      await main(
+        ["scans", "rerun"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onTurn: (_repository, options) => {
+            parentScanId = (options as { parentScanId?: string }).parentScanId;
+          },
+          onWorkbench: (args): JsonObject =>
+            args[0] === "list-scans"
+              ? { scans: [{ scanId: "latest-scan" }] }
+              : {
+                  recipe: {
+                    repository: "/current/repository",
+                    target: { kind: "repository", paths: [] },
+                    mode: "standard",
+                    config: {},
+                  },
+                },
+        }),
+      ),
+    ).toBe(0);
+    expect(parentScanId).toBe("latest-scan");
+  });
+
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
     let config: CodexSecurityConfig | undefined;
     let repository: string | undefined;
     let options: Record<string, unknown> | undefined;
     const savedConfig = {
+      approval_policy: "on-request",
       model: "gpt-original",
       model_reasoning_effort: "high",
       features: { goals: true },
@@ -818,6 +920,48 @@ describe("CLI workbench", () => {
       expect(runOptions?.["target"]).toEqual(expected);
     }
   });
+
+  test.each([
+    ["legacy", undefined, "never"],
+    ["strict", "never", "never"],
+    ["reviewed", "on-request", "on-request"],
+  ] as const)(
+    "preserves %s scan approval policy when rerunning saved scans",
+    async (_scenario, savedApprovalPolicy, expectedApprovalPolicy) => {
+      let config: CodexSecurityConfig | undefined;
+      const savedConfig = {
+        model: "gpt-original",
+        ...(savedApprovalPolicy === undefined
+          ? {}
+          : { approval_policy: savedApprovalPolicy }),
+      };
+
+      expect(
+        await main(
+          ["scans", "rerun", "scan-original"],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onConfig: (value) => {
+              config = value;
+            },
+            onWorkbench: () => ({
+              recipe: {
+                repository: "/original/repository",
+                target: { kind: "repository", paths: [] },
+                mode: "standard",
+                config: savedConfig,
+              },
+            }),
+          }),
+        ),
+      ).toBe(0);
+      expect(config?.codexOverrides).toEqual({
+        ...savedConfig,
+        approval_policy: expectedApprovalPolicy,
+      });
+    },
+  );
 
   test("preserves workbench failures and does not initialize Codex", async () => {
     const stderr = capture();
