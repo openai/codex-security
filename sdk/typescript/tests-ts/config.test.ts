@@ -2,8 +2,10 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -592,6 +594,82 @@ describe("Codex configuration", () => {
           expect(await readFile(path, "utf8")).toBe("original");
         else await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
       }
+    },
+  );
+
+  test.skipIf(process.platform !== "darwin" || macOsSandboxUnavailable())(
+    "runs a linked Python environment without granting its unrelated siblings",
+    async () => {
+      const { root, codexHome, workspace, environment } =
+        await scanSandboxFixture();
+      const runtimeRoot = await temporaryDirectory();
+      const installation = join(runtimeRoot, "installation");
+      const interpreter = Bun.which("python3") ?? Bun.which("python");
+      expect(interpreter).not.toBeNull();
+      const created = Bun.spawnSync(
+        [interpreter!, "-I", "-B", "-m", "venv", "--without-pip", installation],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      expect(created.exitCode, new TextDecoder().decode(created.stderr)).toBe(
+        0,
+      );
+      const aliases = join(runtimeRoot, "aliases");
+      await mkdir(aliases);
+      await symlink(installation, join(aliases, "venv"));
+      const python = join(aliases, "venv", "bin", "python");
+      const unrelated = join(aliases, "unrelated.txt");
+      await writeFile(unrelated, "SYNTHETIC_UNRELATED");
+      const readRoots = await pluginPythonReadRoots(python, {
+        protectedPaths: [root],
+      });
+      const config = scanRuntimeCodexConfig(
+        await mergedCodexConfig({}),
+        codexHome,
+      );
+      const permissions = config["permissions"] as Record<
+        string,
+        { filesystem: Record<string, string> }
+      >;
+      Object.assign(
+        permissions["codex_security_policy"]!.filesystem,
+        Object.fromEntries(readRoots.map((path) => [path, "read"])),
+      );
+      await writeCodexConfig(join(codexHome, "config.toml"), config);
+      const sandbox = (script: string, ...args: string[]) =>
+        runPinnedCodex(
+          codexHome,
+          [
+            "sandbox",
+            "--permission-profile",
+            "codex_security_policy",
+            "--cd",
+            workspace,
+            python,
+            "-I",
+            "-B",
+            "-c",
+            script,
+            ...args,
+          ],
+          environment,
+        );
+      const allowed = sandbox(
+        "import os,sys;print(os.path.realpath(sys.prefix))",
+      );
+      expect(allowed.exitCode, new TextDecoder().decode(allowed.stderr)).toBe(
+        0,
+      );
+      expect(new TextDecoder().decode(allowed.stdout).trim()).toBe(
+        await realpath(installation),
+      );
+      const denied = sandbox(
+        "import sys;from pathlib import Path;print(Path(sys.argv[1]).read_text())",
+        unrelated,
+      );
+      expect(denied.exitCode).not.toBe(0);
+      expect(new TextDecoder().decode(denied.stdout)).not.toContain(
+        "SYNTHETIC_UNRELATED",
+      );
     },
   );
 

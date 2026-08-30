@@ -2718,24 +2718,10 @@ export async function pluginPythonReadRoots(
   const executableDirectories: string[] = [];
   try {
     let executable = python;
-    // Sandboxed execution needs every link in Homebrew and virtualenv chains.
     while (true) {
       throwIfSignalAborted(options.signal);
       const directory = await realpath(dirname(executable));
       executableDirectories.push(directory);
-      for (
-        let ancestor = dirname(executable);
-        dirname(ancestor) !== ancestor;
-        ancestor = dirname(ancestor)
-      ) {
-        const parent = dirname(ancestor);
-        if (
-          dirname(parent) !== parent &&
-          (await lstat(ancestor)).isSymbolicLink()
-        ) {
-          executableDirectories.push(parent);
-        }
-      }
       executable = join(directory, basename(executable));
       if (!(await lstat(executable)).isSymbolicLink()) break;
       executable = resolve(directory, await readlink(executable));

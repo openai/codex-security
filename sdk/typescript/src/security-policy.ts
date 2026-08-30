@@ -793,7 +793,7 @@ export async function runSecurityPolicyStages(options: {
     signal.throwIfAborted();
     const hasDocument = result.markdown.trim().length > 0;
     if (hasDocument) {
-      if (stage === "policy") validatePolicyContent(result.markdown);
+      validatePolicyContent(result.markdown, stage);
       await writePolicyArtifact(path, result.markdown, signal);
     }
     if (result.blockedReason !== null) {
@@ -2133,16 +2133,20 @@ async function resolveDraftTarget(
   return target;
 }
 
-function validatePolicyContent(content: string): void {
+function validatePolicyContent(
+  content: string,
+  stage: SecurityPolicyStage = "policy",
+): void {
   if (!content.isWellFormed()) {
     throw new CodexSecurityError(
-      "The security policy must contain valid Unicode text.",
+      `The ${stage === "policy" ? "security policy" : stage.replace("_", " ")} must contain valid Unicode text.`,
     );
   }
   if (content.trim().length === 0) {
     throw new CodexSecurityError("The security policy must not be empty.");
   }
-  validatePolicySize(Buffer.byteLength(content, "utf8"));
+  if (stage === "policy")
+    validatePolicySize(Buffer.byteLength(content, "utf8"));
 }
 
 function validatePolicySize(size: number): void {
