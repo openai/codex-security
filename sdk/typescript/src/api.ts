@@ -3294,6 +3294,22 @@ export function scanAuthentication(
     : { method: "api_key", source: key.source, verified: false };
 }
 
+/** Shell-neutral guidance so PowerShell users are not told to run POSIX `unset`. */
+export function formatEnvironmentVariableRemovalGuidance(
+  names: readonly string[],
+): string {
+  if (names.length === 0) {
+    return "remove OPENAI_API_KEY and CODEX_API_KEY from the environment";
+  }
+  if (names.length === 1) {
+    return `remove ${names[0]} from the environment`;
+  }
+  if (names.length === 2) {
+    return `remove ${names[0]} and ${names[1]} from the environment`;
+  }
+  return `remove ${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]} from the environment`;
+}
+
 async function runtimeScanAuthentication(
   environment: ProcessEnvironment,
   codexHome: string,

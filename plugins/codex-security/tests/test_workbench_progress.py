@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from workbench_test_support import create_saved_workspace, run_workbench
+from workbench_test_support import create_saved_workspace, run_workbench, start_delivered_scan
 
 
 def test_validation_clears_discovery_finding_count(tmp_path: Path) -> None:
@@ -9,7 +9,7 @@ def test_validation_clears_discovery_finding_count(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
 
     discovery = run_workbench(
@@ -40,7 +40,7 @@ def test_phase_progress_tracks_and_resets_phase_specific_receipts(tmp_path: Path
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
 
     discovery = run_workbench(
@@ -101,7 +101,7 @@ def test_phase_progress_rejects_regression_within_one_phase(tmp_path: Path) -> N
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     run_workbench(
         state_dir,
@@ -134,7 +134,7 @@ def test_preflight_issues_replace_and_remain_visible_after_preflight(tmp_path: P
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     blocked_issue = {
         "capability": "usable_worker_slots_6",
@@ -221,7 +221,7 @@ def test_preflight_unknown_check_completes_only_after_clean_rerun(tmp_path: Path
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     unknown_issue = {
         "capability": "delegated_workers",
@@ -276,7 +276,7 @@ def test_preflight_issues_reject_non_displayable_severity(tmp_path: Path) -> Non
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     rejected = run_workbench(
         state_dir,
         "update-progress",

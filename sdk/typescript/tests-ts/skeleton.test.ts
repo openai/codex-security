@@ -22,7 +22,7 @@ interface WorkflowStep {
 
 interface WorkflowJob {
   name?: string;
-  needs?: string[];
+  needs?: string | string[];
   env?: Record<string, unknown>;
   strategy?: { matrix: Record<string, unknown> };
   steps: WorkflowStep[];
@@ -122,6 +122,7 @@ describe("TypeScript package skeleton", () => {
     expect(jobs["required-test"]?.name).toBe("${{ matrix.os }} / node-22");
     expect(jobs["required-test"]?.needs).toEqual([
       "validate-title",
+      "static-checks",
       "package",
       "test",
       "compatibility",
@@ -130,6 +131,7 @@ describe("TypeScript package skeleton", () => {
     ]);
     expect(jobs["windows"]?.needs).toEqual([
       "validate-title",
+      "static-checks",
       "windows-test",
       "windows-verify",
     ]);
@@ -226,22 +228,18 @@ describe("TypeScript package skeleton", () => {
     ).toBe(false);
   });
 
-  test("runs shared static checks once and keeps every diagnostic upload non-blocking", async () => {
+  test("runs static checks independently and keeps diagnostic uploads non-blocking", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const steps = Object.values(jobs).flatMap((job) => job.steps);
+    expect(jobs["static-checks"]?.needs).toBe("validate-title");
+    expect(jobs["package"]?.needs).toBe("validate-title");
     for (const [name, job] of [
       ["Check plugin source boundary", "package"],
-      ["Typecheck", "test"],
-      ["Check formatting", "test"],
+      ["Typecheck", "static-checks"],
+      ["Check formatting", "static-checks"],
     ] as const) {
       expect(steps.filter((step) => step.name === name)).toHaveLength(1);
-      const step = jobs[job]!.steps.find((step) => step.name === name);
-      expect(step).toBeDefined();
-      if (job === "test") {
-        expect(step?.if).toBe(
-          "matrix.os == 'ubuntu-latest' && matrix.shard == 1",
-        );
-      }
+      expect(jobs[job]!.steps.some((step) => step.name === name)).toBe(true);
     }
     for (const name of [
       "Upload test reports",
