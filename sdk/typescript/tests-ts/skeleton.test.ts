@@ -288,15 +288,11 @@ describe("TypeScript package skeleton", () => {
       "false",
     );
     expect(quality.env?.["CODEX_SECURITY_INTEGRATION"]).toBe("0");
-    for (let shard = 1; shard <= 7; shard += 1) {
-      expect(
-        quality.jobs["runner"]?.strategy?.matrix["include"],
-      ).toContainEqual({
-        os: "windows-latest",
-        mode: `shard-${shard}`,
-        args: `--shard=${shard}/7`,
-      });
-    }
+    expect(
+      quality.jobs["runner"]?.steps.find(
+        (step) => step.name === "Test runner mode",
+      )?.run,
+    ).toContain("--path-ignore-patterns='**/windows-machine-policy.test.ts'");
   });
 
   test("keeps runner modes reproducible and report uploads rerunnable", async () => {
@@ -309,18 +305,42 @@ describe("TypeScript package skeleton", () => {
     expect(runner.env?.["CODEX_SECURITY_PROPERTY_SEED"]).toBe(seed);
     expect(runner.strategy?.matrix["mode"]).toEqual([
       "baseline",
-      "isolated",
-      "parallel",
+      "native-baseline",
     ]);
-    for (const [mode, args] of [
-      ["baseline", ""],
-      ["isolated", "--isolate"],
-      ["parallel", "--parallel=2"],
+    const variants = runner.strategy?.matrix["include"] as Array<{
+      os?: string;
+      mode: string;
+      args: string;
+    }>;
+    const baseline = variants.find(({ mode }) => mode === "baseline")!;
+    const candidate = variants.find(({ mode }) => mode === "native-baseline")!;
+    expect(baseline.args).toBe("");
+    expect(candidate.args).toBe("");
+    expect(quality.env?.["BUN_CANDIDATE_VERSION"]).not.toBe(
+      quality.env?.["BUN_BASELINE_VERSION"],
+    );
+    expect(
+      ci.jobs["test"]?.steps.find((step) => step.name === "Set up Bun")?.with?.[
+        "bun-version"
+      ],
+    ).toBe(quality.env?.["BUN_BASELINE_VERSION"]);
+    expect(
+      runner.steps.find((step) => step.uses?.startsWith("oven-sh/setup-bun@"))
+        ?.with?.["bun-version"],
+    ).toBe(
+      "${{ matrix.mode == 'baseline' && env.BUN_BASELINE_VERSION || env.BUN_CANDIDATE_VERSION }}",
+    );
+    for (const [os, count] of [
+      ["ubuntu-latest", 3],
+      ["windows-latest", 7],
     ] as const) {
-      expect(runner.strategy?.matrix["include"]).toContainEqual({
-        mode,
-        args,
-      });
+      for (let shard = 1; shard <= count; shard += 1) {
+        expect(variants).toContainEqual({
+          os,
+          mode: `native-shard-${shard}`,
+          args: `--shard=${shard}/${count} --timings=reports/native-test-timings.json`,
+        });
+      }
     }
     const command = runner.steps.find(
       (step) => step.name === "Test runner mode",

@@ -1,6 +1,5 @@
 import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
-import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import type { ComponentReceipt } from "../src/component-scan.js";
 import { ScanDashboard } from "../src/scan-dashboard.js";
@@ -17,7 +16,7 @@ function fakeClock(now: () => number = () => STARTED_AT) {
 }
 
 function lastFrame(stderr: ReturnType<typeof capture>): string {
-  return stripVTControlCharacters(stderr.text())
+  return Bun.stripANSI(stderr.text())
     .split("CODEX SECURITY  ·  juice-shop")
     .at(-1)!;
 }
@@ -72,8 +71,7 @@ describe("live scan dashboard", () => {
         outputDir: `/synthetic/results/${index + 1}`,
       }),
     );
-    const frame = () =>
-      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!);
+    const frame = () => Bun.stripANSI(stderr.text().split("\u001B[H").at(-1)!);
     dashboard.start();
     dashboard.setComponents(receipts);
     for (const receipt of receipts.slice(0, 2))
@@ -202,8 +200,7 @@ describe("live scan dashboard", () => {
         outputDir: `/synthetic/${index}`,
       }),
     );
-    const frame = () =>
-      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!);
+    const frame = () => Bun.stripANSI(stderr.text().split("\u001B[H").at(-1)!);
     dashboard.start();
     dashboard.setComponents(receipts);
     dashboard.updateComponent({
@@ -242,7 +239,7 @@ describe("live scan dashboard", () => {
     dashboard.setStage("Connecting to Linear");
     dashboard.start();
     input.emit("data", "d");
-    let text = stripVTControlCharacters(stderr.text());
+    let text = Bun.stripANSI(stderr.text());
     expect(text).toContain("CODEX SECURITY  ·  PUBLISH  ·  payments-api");
     expect(text).toContain("Waiting for publication activity");
     expect(text).toContain("FINDINGS  waiting for findings");
@@ -261,7 +258,7 @@ describe("live scan dashboard", () => {
       description: "Preparing the next Linear issue.",
       paths: [],
     });
-    text = stripVTControlCharacters(stderr.text());
+    text = Bun.stripANSI(stderr.text());
     expect(text).toContain("FINDINGS  2 / 5 processed");
     expect(text).toContain("Publishing findings · 2/5");
     expect(text).toContain("Preparing the next Linear issue.");
@@ -467,7 +464,7 @@ describe("live scan dashboard", () => {
     );
     dashboard.stop();
 
-    const text = stripVTControlCharacters(stderr.text());
+    const text = Bun.stripANSI(stderr.text());
     expect(text).toContain("CODEX SECURITY  ·  juice-shop");
     expect(text).not.toContain("ACTIVITY");
     expect(text).not.toContain("events · live");
@@ -625,7 +622,7 @@ describe("live scan dashboard", () => {
     });
     dashboard.stop();
 
-    expect(stripVTControlCharacters(stderr.text())).toContain(
+    expect(Bun.stripANSI(stderr.text())).toContain(
       '[09:41:00] ◐ worker 2 · rg -n "password" routes/login.ts',
     );
   });
@@ -1420,8 +1417,6 @@ describe("live scan dashboard", () => {
     dashboard.stop();
 
     expect(stderr.text()).not.toContain("\u001B[31m");
-    expect(stripVTControlCharacters(stderr.text())).toContain(
-      "routes/spoofed.ts",
-    );
+    expect(Bun.stripANSI(stderr.text())).toContain("routes/spoofed.ts");
   });
 });

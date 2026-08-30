@@ -80,14 +80,10 @@ describe("JUnit inventory comparison", () => {
     const script = workflow.jobs.compare.steps.find(
       (step) => step.name === "Compare inventories and outcomes",
     )!.run!;
-    const expected = [
-      ...["ubuntu-latest", "windows-latest"].flatMap((os) =>
-        ["isolated", "parallel"].map(
-          (mode) => `reports/runner-${os}-${mode}.xml`,
-        ),
-      ),
-      "reports/runner-windows-latest-shard-*.xml",
-    ];
+    const expected = ["ubuntu-latest", "windows-latest"].flatMap((os) => [
+      `reports/runner-${os}-native-baseline.xml`,
+      `reports/runner-${os}-native-shard-*.xml`,
+    ]);
     const mock = `python3() {
   printf '%s\\n' "$3"
   [[ "$3" != "$CODEX_SECURITY_TEST_FAIL_REPORT" ]]

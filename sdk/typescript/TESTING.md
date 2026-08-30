@@ -110,19 +110,24 @@ Failed tests and missing package artifacts block CI; failed diagnostic uploads
 do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
 
 The separate `test-quality` workflow runs weekly, can be dispatched manually,
-and runs on pull requests that change its workflow file. It compares Bun's
-default runner, `--isolate`, `--parallel=2`, and seven-way Windows sharding.
+and runs on pull requests that change its workflow file. Its baseline uses Bun
+1.3.14, matching required CI. It compares that run with an unsharded Bun 1.4.0
+candidate, then compares the candidate with native timing-aware shards: three
+on Linux and seven on Windows. Native timing files are derived from the same
+checked-in CI estimates as the required file-balanced runner, converting
+seconds to Bun's milliseconds. New files remain eligible without an estimate.
+
 Every mode uses the same seed for property cases and test ordering: pull
 requests replay seed 1; scheduled and manual runs use the workflow run number.
-The workflow compares test identities and outcomes against the unsharded
-default run and records timings, including failed shards, in the job summary.
-It is not a required check or part of the release trigger.
+The comparison checks test identities and outcomes and records test durations
+from JUnit reports, including failed shards, in the job summary. It is not a
+required check or part of the release trigger. Machine-wide policy tests are
+excluded from every trial and retain their separate serial CI step.
 
-Runner trials use Bun 1.3.13 to avoid the
-[async-module initialization bug in 1.3.14](https://github.com/oven-sh/bun/issues/31410)
-that breaks the Ink UI tests under isolation. Keep the trial pin until a newer
-release passes the full SDK suite in every mode. Required CI and the mutation
-trial remain on Bun 1.3.14.
+The candidate does not enable process parallelism or isolation. Those modes
+have separate compatibility concerns and are not needed to evaluate native
+sharding. Required CI and the mutation trial stay on Bun 1.3.14 while this
+experiment establishes candidate compatibility and shard inventories.
 
 Keep the measured file-balanced runner until the native runner has
 matching inventories and acceptable Windows timings. Before promotion, compare

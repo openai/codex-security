@@ -1086,7 +1086,8 @@ describe("publish scan", () => {
         deps,
       ),
     ).toBe(0);
-    expect(stdout.text()).toContain("  SEC-400\n");
+    // Terminal sanitizers may also discard the C1 control's printable payload.
+    expect(stdout.text()).toMatch(/\n {2}SEC-400(?: safe)?\n/u);
     for (const identifier of ["SEC-401", "SEC-402", "SEC-403", "SEC-404"]) {
       expect(stdout.text()).toContain(`  ${identifier}\n`);
     }

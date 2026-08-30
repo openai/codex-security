@@ -16,6 +16,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  BUN_BASELINE_VERSION: "1.3.14"
+  BUN_CANDIDATE_VERSION: "1.4.0"
   CODEX_SECURITY_INTEGRATION: "0"
   CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
 
@@ -30,35 +32,42 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        mode: [baseline, isolated, parallel]
+        mode: [baseline, native-baseline]
         include:
           - mode: baseline
             args: ""
-          - mode: isolated
-            args: --isolate
-          - mode: parallel
-            args: --parallel=2
+          - mode: native-baseline
+            args: ""
+          - os: ubuntu-latest
+            mode: native-shard-1
+            args: --shard=1/3 --timings=reports/native-test-timings.json
+          - os: ubuntu-latest
+            mode: native-shard-2
+            args: --shard=2/3 --timings=reports/native-test-timings.json
+          - os: ubuntu-latest
+            mode: native-shard-3
+            args: --shard=3/3 --timings=reports/native-test-timings.json
           - os: windows-latest
-            mode: shard-1
-            args: --shard=1/7
+            mode: native-shard-1
+            args: --shard=1/7 --timings=reports/native-test-timings.json
           - os: windows-latest
-            mode: shard-2
-            args: --shard=2/7
+            mode: native-shard-2
+            args: --shard=2/7 --timings=reports/native-test-timings.json
           - os: windows-latest
-            mode: shard-3
-            args: --shard=3/7
+            mode: native-shard-3
+            args: --shard=3/7 --timings=reports/native-test-timings.json
           - os: windows-latest
-            mode: shard-4
-            args: --shard=4/7
+            mode: native-shard-4
+            args: --shard=4/7 --timings=reports/native-test-timings.json
           - os: windows-latest
-            mode: shard-5
-            args: --shard=5/7
+            mode: native-shard-5
+            args: --shard=5/7 --timings=reports/native-test-timings.json
           - os: windows-latest
-            mode: shard-6
-            args: --shard=6/7
+            mode: native-shard-6
+            args: --shard=6/7 --timings=reports/native-test-timings.json
           - os: windows-latest
-            mode: shard-7
-            args: --shard=7/7
+            mode: native-shard-7
+            args: --shard=7/7 --timings=reports/native-test-timings.json
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -76,7 +85,7 @@ jobs:
             plugins/codex-security/mcp-app/pnpm-lock.yaml
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.3.13"
+          bun-version: ${{ matrix.mode == 'baseline' && env.BUN_BASELINE_VERSION || env.BUN_CANDIDATE_VERSION }}
       - name: Install dependencies
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
@@ -86,14 +95,27 @@ jobs:
         id: windows-temp
         shell: pwsh
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
+      - name: Prepare native timing estimates
+        shell: bash
+        working-directory: sdk/typescript
+        run: |
+          node --input-type=module <<'NODE'
+          import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+          const measured = JSON.parse(readFileSync('scripts/ci-test-durations.json', 'utf8'));
+          const durations = measured[process.platform === 'win32' ? 'windows' : 'unix'];
+          mkdirSync('reports', { recursive: true });
+          writeFileSync('reports/native-test-timings.json', JSON.stringify({
+            version: 1,
+            files: Object.fromEntries(Object.entries(durations).map(([file, seconds]) => [`tests-ts/${file}`, seconds * 1000])),
+          }));
+          NODE
       - name: Test runner mode
         env:
           TEMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
           TMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
           TMPDIR: ${{ steps.windows-temp.outputs.path || runner.temp }}
         run: |
-          node -e "require('node:fs').mkdirSync('sdk/typescript/reports',{recursive:true})"
-          pnpm --dir sdk/typescript run test ${{ runner.os == 'Windows' && '--timeout=120000' || '' }} ${{ matrix.args }} --seed=${{ env.CODEX_SECURITY_PROPERTY_SEED }} --reporter=junit --reporter-outfile=reports/runner-${{ matrix.os }}-${{ matrix.mode }}.xml
+          pnpm --dir sdk/typescript run test ${{ runner.os == 'Windows' && '--timeout=120000' || '' }} ${{ matrix.args }} --path-ignore-patterns='**/windows-machine-policy.test.ts' --seed=${{ env.CODEX_SECURITY_PROPERTY_SEED }} --reporter=junit --reporter-outfile=reports/runner-${{ matrix.os }}-${{ matrix.mode }}.xml
       - name: Upload runner report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -123,11 +145,9 @@ jobs:
         run: |
           comparison_status=0
           for os in ubuntu-latest windows-latest; do
-            for mode in isolated parallel; do
-              python3 sdk/typescript/scripts/compare-test-reports.py "reports/runner-$os-baseline.xml" "reports/runner-$os-$mode.xml" >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
-            done
+            python3 sdk/typescript/scripts/compare-test-reports.py "reports/runner-$os-baseline.xml" "reports/runner-$os-native-baseline.xml" >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
+            python3 sdk/typescript/scripts/compare-test-reports.py "reports/runner-$os-native-baseline.xml" "reports/runner-$os-native-shard-*.xml" >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
           done
-          python3 sdk/typescript/scripts/compare-test-reports.py reports/runner-windows-latest-baseline.xml 'reports/runner-windows-latest-shard-*.xml' >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
           exit "$comparison_status"
 
   mutation:
