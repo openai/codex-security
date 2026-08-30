@@ -13,6 +13,7 @@ from pathlib import Path
 MAX_SOURCE_FILE_BYTES = 150_000
 MAX_DEPENDENCY_LOCK_BYTES = 2_000_000
 DEPENDENCY_LOCK_NAMES = {
+    "bun.lock",
     "Cargo.lock",
     "package-lock.json",
     "pnpm-lock.yaml",

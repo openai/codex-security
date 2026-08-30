@@ -1422,14 +1422,14 @@ requests; keep it on loopback or behind an authenticated TLS proxy.
 From a source checkout's `sdk/typescript` directory:
 
 ```bash
-pnpm install --frozen-lockfile
-pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile
-pnpm run build:plugin
-pnpm run build
+bun install --frozen-lockfile
+bun install --cwd ../../plugins/codex-security/mcp-app --frozen-lockfile
+bun run build:plugin
+bun run build
 node bin/codex-security.mjs serve --port 3000
 ```
 
-`pnpm run start:server` and `node dist/server/index.js` still work.
+`bun run start:server` and `node dist/server/index.js` still work.
 
 Local defaults are `HOST=127.0.0.1` and `PORT=3000`. The existing
 `CODEX_SECURITY_STATE_DIR` and `PYTHON` settings select storage and Python;

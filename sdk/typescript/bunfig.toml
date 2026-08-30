@@ -1,3 +1,7 @@
+[install]
+linker = "isolated"
+minimumReleaseAge = 86400
+
 [test]
 randomize = true
 coverageSkipTestFiles = true

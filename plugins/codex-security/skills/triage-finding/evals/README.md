@@ -4,40 +4,40 @@ This Promptfoo suite verifies that `$codex-security:triage-finding` accepts the 
 JSON result shape. It also covers bare skill invocation with no supplied finding,
 which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub REST intake cases cover the repository-source control flow, endpoint selection, and connector auth-only rule without querying live GitHub during the eval.
 
-The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
+The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The eval directory owns a small pinned Bun environment so new cases can be added and run without a separate scratch setup.
 
-Run these commands from the repository root. That keeps the eval runner on the same Node/PATH setup as the OpenAI monorepo shell environment while still installing dependencies under this eval directory.
+Run these commands from the repository root.
 
-The eval directory has its own `pnpm-workspace.yaml` so pnpm treats it as a small standalone workspace instead of joining the root OpenAI monorepo workspace.
+The eval directory has its own `package.json`, `bun.lock`, and `bunfig.toml` so it remains a standalone workspace when imported into another repository. Use Bun 1.3.14 and a supported Node.js version. Installs preserve the seven-day minimum release age and allow only `better-sqlite3` to run dependency lifecycle scripts, including its native build.
 
 Install the local eval runner:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run setup
+bun run --cwd plugins/codex-security/skills/triage-finding/evals setup
 ```
 
 Validate the config:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run validate
+bun run --cwd plugins/codex-security/skills/triage-finding/evals validate
 ```
 
 Run the full eval:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run eval
+bun run --cwd plugins/codex-security/skills/triage-finding/evals eval
 ```
 
 Run the first case as a quick smoke test:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run eval:smoke
+bun run --cwd plugins/codex-security/skills/triage-finding/evals eval:smoke
 ```
 
 Run one case while iterating:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run eval --filter-metadata case_id=sarif-redirects
+bun run --cwd plugins/codex-security/skills/triage-finding/evals eval --filter-metadata case_id=sarif-redirects
 ```
 
 The eval target is `fixtures/repo`, a small synthetic Express app with both true positive and false positive/review cases. Assertions are deterministic:
@@ -60,43 +60,43 @@ ELI5: the dataset says "this exact old commit should be affected" and "this exac
 Validate the dataset structure:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run test:dataset
+bun run --cwd plugins/codex-security/skills/triage-finding/evals test:dataset
 ```
 
 Run all deterministic calibration checks:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run test:calibration
+bun run --cwd plugins/codex-security/skills/triage-finding/evals test:calibration
 ```
 
 Regenerate the Promptfoo calibration tests:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run calibration:generate
+bun run --cwd plugins/codex-security/skills/triage-finding/evals calibration:generate
 ```
 
 Hydrate the local OSS checkouts:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run calibration:hydrate
+bun run --cwd plugins/codex-security/skills/triage-finding/evals calibration:hydrate
 ```
 
 Validate the calibration Promptfoo config:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run validate:calibration
+bun run --cwd plugins/codex-security/skills/triage-finding/evals validate:calibration
 ```
 
 Run one OSS variant as a smoke eval:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run eval:calibration:smoke
+bun run --cwd plugins/codex-security/skills/triage-finding/evals eval:calibration:smoke
 ```
 
 Run the full OSS calibration eval:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run eval:calibration
+bun run --cwd plugins/codex-security/skills/triage-finding/evals eval:calibration
 ```
 
 The calibration config is separate from the default synthetic eval:

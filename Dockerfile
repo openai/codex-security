@@ -4,19 +4,18 @@ FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca440
 
 WORKDIR /build/sdk/typescript
 
-COPY sdk/typescript/package.json sdk/typescript/pnpm-lock.yaml sdk/typescript/pnpm-workspace.yaml ./
-COPY plugins/codex-security/mcp-app/package.json plugins/codex-security/mcp-app/pnpm-lock.yaml plugins/codex-security/mcp-app/pnpm-workspace.yaml /build/plugins/codex-security/mcp-app/
+COPY sdk/typescript/package.json sdk/typescript/bun.lock sdk/typescript/bunfig.toml ./
+COPY plugins/codex-security/mcp-app/package.json plugins/codex-security/mcp-app/bun.lock plugins/codex-security/mcp-app/bunfig.toml /build/plugins/codex-security/mcp-app/
 
-RUN corepack enable \
-    && corepack prepare "$(node --print 'require("./package.json").packageManager')" --activate \
-    && pnpm install --frozen-lockfile \
-    && pnpm --dir /build/plugins/codex-security/mcp-app install --frozen-lockfile
+RUN npm install --global bun@1.3.14 --no-audit --no-fund \
+    && bun install --frozen-lockfile \
+    && bun install --cwd /build/plugins/codex-security/mcp-app --frozen-lockfile
 
 COPY sdk/typescript/ ./
 COPY plugins/codex-security/ /build/plugins/codex-security/
 
-RUN pnpm run types \
-    && pnpm pack --pack-destination /build/package \
+RUN bun run types \
+    && bun pm pack --destination /build/package \
     && node scripts/check-package.mjs /build/package/*.tgz
 
 FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS scanner

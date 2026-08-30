@@ -56,7 +56,7 @@ async function resolveArchive() {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
     throw new Error(
-      "No packed npm tarball found. Run pnpm pack --pack-destination ../../dist first.",
+      "No packed npm tarball found. Run bun pm pack --destination ../../dist first.",
       { cause: error },
     );
   }

@@ -1,4 +1,4 @@
-/* Generated from the plugin JSON Schemas. Run `pnpm generate:models`. */
+/* Generated from the plugin JSON Schemas. Run `bun run generate:models`. */
 
 export interface ScanManifest {
   documentType: "codex-security.scan-manifest";

@@ -11,13 +11,13 @@ Run commands from the repository root. The parent `evals/` directory owns the pi
 Install dependencies once:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run setup
+bun run --cwd plugins/codex-security/skills/triage-finding/evals setup
 ```
 
 Install the pinned SastBench checkout and hydrate all 275 repository revisions:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run sastbench:prepare
+bun run --cwd plugins/codex-security/skills/triage-finding/evals sastbench:prepare
 ```
 
 Preparation verifies the SastBench origin, pinned commit, dataset SHA-256, record counts, target origins, target commits, and clean target worktrees. It must finish before any paid model evaluation begins.
@@ -27,14 +27,14 @@ Preparation verifies the SastBench origin, pinned commit, dataset SHA-256, recor
 Run deterministic tests and ask Promptfoo to load the dynamic test generator:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run test:sastbench
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run validate:sastbench
+bun run --cwd plugins/codex-security/skills/triage-finding/evals test:sastbench
+bun run --cwd plugins/codex-security/skills/triage-finding/evals validate:sastbench
 ```
 
 ## Run an evaluation
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run eval:sastbench \
+bun run --cwd plugins/codex-security/skills/triage-finding/evals eval:sastbench \
   --output ./artifacts/sastbench-results/canary.promptfoo.jsonl
 ```
 
@@ -51,8 +51,8 @@ The sample reuses the full eval's pinned dataset, hydrated repositories, prompt,
 Validate and run it from the repository root:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run validate:sastbench:sample
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run eval:sastbench:sample \
+bun run --cwd plugins/codex-security/skills/triage-finding/evals validate:sastbench:sample
+bun run --cwd plugins/codex-security/skills/triage-finding/evals eval:sastbench:sample \
   --output ./artifacts/sastbench-results/representative-sample.promptfoo.jsonl
 ```
 
@@ -130,7 +130,7 @@ Every denominator uses `max(denominator, 1)`. An empty denominator therefore pro
 Open the Promptfoo viewer to inspect the completed evaluation:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run pf:view
+bun run --cwd plugins/codex-security/skills/triage-finding/evals pf:view
 ```
 
 Promptfoo also records cost, latency, and token use without SastBench-specific code.

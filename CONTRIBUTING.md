@@ -10,7 +10,7 @@ maintainers.
 plugin. Make plugin changes there.
 
 The npm runtime under `sdk/typescript/_bundled_plugin/` is generated from the
-plugin source by `pnpm run build:plugin` and automatically during `prepack` for
+plugin source by `bun run build:plugin` and automatically during `prepack` for
 packages and releases. Do not edit or commit files in that directory. See the
 [SDK testing guide](sdk/typescript/TESTING.md) for the generation and validation
 commands.

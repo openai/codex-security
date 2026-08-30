@@ -46,15 +46,16 @@ def test_reports_tracked_source_violations_in_stable_order(tmp_path: Path) -> No
     ]
 
 
-def test_accepts_valid_source_and_ignores_untracked_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize("lock_name", ["package-lock.json", "bun.lock"])
+def test_accepts_valid_source_and_ignores_untracked_files(tmp_path: Path, lock_name: str) -> None:
     (tmp_path / "README.md").write_text("A complete sentence.\n", encoding="utf-8")
-    (tmp_path / "package-lock.json").write_bytes(b"x" * 150_001)
+    (tmp_path / lock_name).write_bytes(b"x" * 150_001)
     (tmp_path / "untracked.md").write_text(
         "This untracked prose continues\nonto another source line.\n",
         encoding="utf-8",
     )
     initialize_repository(tmp_path)
-    track(tmp_path, "README.md", "package-lock.json")
+    track(tmp_path, "README.md", lock_name)
 
     result = run_checker(tmp_path)
 
@@ -120,15 +121,16 @@ def test_accepts_wraps_adjacent_to_inline_markup(tmp_path: Path, content: str) -
     assert result.returncode == 0, result.stderr
 
 
-def test_rejects_dependency_lock_files_above_two_megabytes(tmp_path: Path) -> None:
-    (tmp_path / "pnpm-lock.yaml").write_bytes(b"x" * 2_000_001)
+@pytest.mark.parametrize("lock_name", ["pnpm-lock.yaml", "bun.lock"])
+def test_rejects_dependency_lock_files_above_two_megabytes(tmp_path: Path, lock_name: str) -> None:
+    (tmp_path / lock_name).write_bytes(b"x" * 2_000_001)
     initialize_repository(tmp_path)
-    track(tmp_path, "pnpm-lock.yaml")
+    track(tmp_path, lock_name)
 
     result = run_checker(tmp_path)
 
     assert result.returncode == 1
-    assert result.stderr == ("pnpm-lock.yaml: file is 2000001 bytes; maximum is 2000000 bytes\n")
+    assert result.stderr == f"{lock_name}: file is 2000001 bytes; maximum is 2000000 bytes\n"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="creating symlinks requires elevated Windows access")

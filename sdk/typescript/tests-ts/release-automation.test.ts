@@ -3955,7 +3955,7 @@ describe("GitHub release workflow safeguards", () => {
     );
     expect(markdownCommand).toContain("! -L");
     expect(markdownCommand).toContain(
-      "pnpm --dir sdk/typescript exec prettier --check",
+      "bun run --cwd sdk/typescript prettier --check",
     );
     expect(markdownCommand).not.toContain("--ignore-path");
     const requiredJobCondition = "always()";
@@ -4150,7 +4150,7 @@ describe("GitHub release workflow safeguards", () => {
           ]),
         );
         for (const stepName of [
-          "Set up pnpm",
+          "Set up Bun",
           "Set up Node.js",
           "Install dependencies",
           "Check Markdown formatting",
@@ -4232,7 +4232,7 @@ describe("GitHub release workflow safeguards", () => {
       const mocks = `git() {
       printf '%s\\0' README.md 'docs/guide with spaces.md' docs/link.md deleted.md
     }
-    pnpm() { printf '%s\\n' "$@" > "$MOCK_PNPM_ARGS"; }`;
+    bun() { printf '%s\\n' "$@" > "$MOCK_BUN_ARGS"; }`;
       try {
         const result = spawnSync(
           bash,
@@ -4244,15 +4244,15 @@ describe("GitHub release workflow safeguards", () => {
             env: {
               ...process.env,
               GITHUB_WORKSPACE: workspace,
-              MOCK_PNPM_ARGS: argsFile,
+              MOCK_BUN_ARGS: argsFile,
             },
           },
         );
         expect(result.status).toBe(0);
         expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual([
-          "--dir",
+          "run",
+          "--cwd",
           "sdk/typescript",
-          "exec",
           "prettier",
           "--check",
           readme,

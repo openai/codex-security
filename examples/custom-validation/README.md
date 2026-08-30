@@ -8,8 +8,8 @@ cross-account access, saves the evidence, and stops the server. It needs Python
 From the repository root, build the CLI and run the demo:
 
 ```bash
-pnpm --dir sdk/typescript install --frozen-lockfile
-pnpm --dir sdk/typescript run build
+bun install --cwd sdk/typescript --frozen-lockfile
+bun run --cwd sdk/typescript build
 node examples/custom-validation/run.mjs
 ```
 

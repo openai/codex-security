@@ -41,7 +41,7 @@ async function generate() {
 
   return format(
     [
-      "/* Generated from the plugin JSON Schemas. Run `pnpm generate:models`. */",
+      "/* Generated from the plugin JSON Schemas. Run `bun run generate:models`. */",
       ...models.map((model) => model.trim()),
       "export type ContractObject = Record<string, unknown>;",
       'export type ScanRecord = ScanManifest["scan"];',
@@ -87,7 +87,7 @@ generate().then((models) => {
   if (process.argv.includes("--check")) {
     if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== models) {
       console.error(
-        "src/models.ts is out of date. Run `pnpm generate:models`.",
+        "src/models.ts is out of date. Run `bun run generate:models`.",
       );
       process.exitCode = 1;
     }

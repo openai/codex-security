@@ -1,37 +1,39 @@
 # Testing the SDK and CLI
 
-Use the pnpm version in `package.json` and Bun 1.3.14, matching required CI.
+Use Bun 1.3.14, pinned in `package.json` and required CI, with a supported Node.js version. Bun manages dependencies, scripts, and packing; the CLI, SDK, and build tools continue to run on Node.js.
 Install both the SDK and MCP app dependencies before building or testing.
 Run these commands from `sdk/typescript`:
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile
-pnpm run check:plugin-source
+bun install --frozen-lockfile
+bun install --cwd ../../plugins/codex-security/mcp-app --frozen-lockfile
+bun run check:plugin-source
 bun test --timeout 30000 ./tests-ts/worker-progress.test.ts
-pnpm run types
-pnpm run test:mcp
-pnpm run format
-pnpm run test
-pnpm run test:ci
-pnpm pack --pack-destination ../../dist
-pnpm run test:package
+bun run types
+bun run test:mcp
+bun run format
+bun run test
+bun run test:ci
+bun pm pack --destination ../../dist
+bun run test:package
 ```
 
-The authored plugin lives in `plugins/codex-security`. `pnpm pack` generates
+Each package owns its lockfile and uses isolated installs. The SDK and MCP app keep the one-day minimum release age and disable dependency lifecycle scripts with `trustedDependencies: []`. The separate triage eval environment keeps a seven-day minimum and trusts only the native `better-sqlite3` build. These policies do not disable the package's own `prepack` build.
+
+The authored plugin lives in `plugins/codex-security`. `bun pm pack` generates
 the ignored `_bundled_plugin` runtime payload from `plugins/codex-security/plugin-files.json` during
 `prepack`, including the MCP runtime built from `mcp-app`; do not edit generated
-files there. Run `pnpm run build:plugin` when you need to inspect the staged
+files there. Run `bun run build:plugin` when you need to inspect the staged
 payload locally. `plugins/codex-security` contains authored source and assets,
 not the generated `mcp/server.mjs` or compressed runtime chunks.
-`pnpm run check:plugin-source` fails if any file beneath `_bundled_plugin` is
+`bun run check:plugin-source` fails if any file beneath `_bundled_plugin` is
 tracked by Git. Required CI runs the same check before installing dependencies.
 
 For CI's full archive inspection, pass the exact `.tgz` path printed by
-`pnpm pack` to `pnpm run check:package`.
+`bun pm pack` to `bun run check:package`.
 
 Tests run in random order by default. To replay a failure, pass the seed from
-Bun's summary to `pnpm run test --seed 12345`.
+Bun's summary to `bun run test --seed 12345`.
 
 The local test commands pass a 30-second per-test timeout explicitly. Windows
 CI and the Windows runner experiment allow 120 seconds for slower native
@@ -134,8 +136,8 @@ runtime are not necessarily part of Bun's import graph.
 ## Mutation testing
 
 ```sh
-pnpm run test:mutation
-pnpm exec stryker run --mutate src/worker-progress.ts
+bun run test:mutation
+bun run stryker run --mutate src/worker-progress.ts
 ```
 
 The initial Stryker trial covers progress parsing, safe error messages, and

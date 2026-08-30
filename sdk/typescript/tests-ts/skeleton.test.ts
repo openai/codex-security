@@ -157,7 +157,7 @@ describe("TypeScript package skeleton", () => {
       "node --run build:plugin && bun test --timeout 30000 ./tests-ts",
     );
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
-    expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
+    expect(packageJson.scripts["test:ci"]).toContain("bun run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
         run: "node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7",
@@ -369,7 +369,7 @@ describe("TypeScript package skeleton", () => {
     );
     expect(packageJson.scripts.types).not.toContain("check:plugin-source");
     expect(packageJson.scripts["audit:prod"]).toBe(
-      "pnpm audit --prod --audit-level high",
+      "bun audit --production --audit-level high",
     );
   });
 
@@ -383,7 +383,7 @@ describe("TypeScript package skeleton", () => {
       for (const audit of audits) {
         expect(audit["continue-on-error"]).toBe(true);
         expect(audit.run).toMatch(
-          /^(?:sfw )?pnpm --dir sdk\/typescript run audit:prod$/u,
+          /^(?:sfw )?bun run --cwd sdk\/typescript audit:prod$/u,
         );
       }
     }
