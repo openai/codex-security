@@ -111,6 +111,21 @@ describe("candidate normalizer", () => {
     },
   );
 
+  test.each(["\n", "\r\n", "\r"])(
+    "counts source lines separated by %j",
+    (newline) => {
+      const { repository } = fixture();
+      writeSource(repository, location.path, `one${newline}two${newline}`);
+      const row = normalizeCandidate(
+        { ...candidate, locations: [{ ...location, start_line: 2 }] },
+        repository,
+        new Set([location.path]),
+        new Map(),
+      );
+      expect(row.locations[0]?.end_line).toBe(2);
+    },
+  );
+
   test.each([
     { name: "empty locations", patch: { locations: [] } },
     { name: "blank summary", patch: { summary: " \t" } },

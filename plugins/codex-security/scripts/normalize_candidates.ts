@@ -132,10 +132,8 @@ function cweIds(value: unknown): string[] {
 }
 
 function countLines(path: string): number {
-  const contents = readFileSync(path, "utf8");
-  return contents === ""
-    ? 0
-    : contents.split("\n").length - (contents.endsWith("\n") ? 1 : 0);
+  const lines = readFileSync(path, "utf8").split(/\r\n|\r|\n/u);
+  return lines.length - (lines.at(-1) === "" ? 1 : 0);
 }
 
 function compareStrings(left: string, right: string): number {
