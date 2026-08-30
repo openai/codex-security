@@ -13,7 +13,6 @@ import {
   existsSync,
   lstatSync,
   realpathSync,
-  type BigIntStats,
   writeSync,
 } from "node:fs";
 import {
@@ -21,7 +20,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  open,
   readFile,
   realpath,
   rm,
@@ -36,7 +34,6 @@ import {
   parse,
   relative,
   resolve,
-  sep,
   win32,
 } from "node:path";
 import { cwd } from "node:process";
@@ -95,6 +92,11 @@ import {
   type JsonValue,
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
+import {
+  isOutsidePath,
+  readRegularInputFile,
+  resolveScanPrompts,
+} from "./prompt-files.js";
 import {
   CodexSecurityError,
   ConfigurationError,
@@ -181,15 +183,24 @@ import {
 } from "./version.js";
 
 import {
-  loadProjectConfig,
-  resolveProjectConfig,
+  readProjectConfig,
+  resolveScanSettings,
+  projectScopeTarget,
   type ProjectConfigProvenance,
-  type ScanSettings,
 } from "./project-config.js";
+import type { ProjectScope } from "./project-config-schema.js";
 import {
   DEEP_SCAN_SETTINGS,
   DeepScanSettingsSchema,
+  DEFAULT_SCAN_AUTH,
+  FailureSeveritySchema,
   REPORTABLE_SEVERITIES,
+  SCAN_SEVERITIES,
+  ScanSettingsSchema,
+  scanSettings,
+  meetsSeverity,
+  type FailureSeverity,
+  type ResolvedScanSettings,
 } from "./scan-settings.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
@@ -214,12 +225,8 @@ type Writable = Pick<NodeJS.WriteStream, "write"> & {
   readonly columns?: number;
 };
 type SignalName = "SIGINT" | "SIGTERM";
-type FailureSeverity = Exclude<SeverityLevel, "informational">;
 
-const DISPLAY_SEVERITIES: readonly SeverityLevel[] = [
-  ...REPORTABLE_SEVERITIES,
-  "informational",
-];
+const DISPLAY_SEVERITIES: readonly SeverityLevel[] = SCAN_SEVERITIES;
 const MODEL_REASONING_EFFORTS = [
   "minimal",
   "low",
@@ -862,102 +869,17 @@ const DEEP_SCAN_OPTION_SCHEMAS = {
   maxTimeHours: DeepScanSettingsSchema.shape.maxTimeHours,
 };
 
-async function readPromptFiles(
-  directory: string,
-  scanPromptFile?: string,
-  postScanPromptFile?: string,
-  repository = directory,
-  validationPromptFile?: string,
-): Promise<
-  Pick<ScanOptions, "scanPrompt" | "validationPrompt" | "postScanPrompt">
-> {
-  const [scanPrompt, postScanPrompt, validationPrompt] = await Promise.all([
-    scanPromptFile === undefined
-      ? undefined
-      : readRegularInputFile(
-          resolveCliPath(directory, scanPromptFile),
-          repository,
-        ),
-    postScanPromptFile === undefined
-      ? undefined
-      : readRegularInputFile(
-          resolveCliPath(directory, postScanPromptFile),
-          repository,
-        ),
-    validationPromptFile === undefined
-      ? undefined
-      : readRegularInputFile(
-          resolveCliPath(directory, validationPromptFile),
-          repository,
-        ),
-  ]);
-  if (validationPrompt !== undefined && !validationPrompt.trim()) {
-    throw new CodexSecurityError("The validation prompt must not be empty.");
-  }
-  return {
-    ...(scanPrompt?.trim() ? { scanPrompt } : {}),
-    ...(validationPrompt === undefined ? {} : { validationPrompt }),
-    ...(postScanPrompt?.trim() ? { postScanPrompt } : {}),
-  };
-}
-
-async function readRegularInputFile(
-  path: string,
-  repository: string,
-  metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
-): Promise<string> {
-  const selected = metadata ?? (await lstat(path, { bigint: true }));
-  if (!selected.isFile()) {
-    throw new CodexSecurityError("Input files must be regular files.");
-  }
-  const canonicalRepository = await realpath(repository);
-  const canonicalParent = await realpath(dirname(path));
-  if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
-    for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
-      if (
-        !isOutsidePath(relative(canonicalRepository, await realpath(ancestor)))
-      ) {
-        throw new CodexSecurityError(
-          "Input files must not follow repository directory links outside the selected repository.",
-        );
-      }
-      if (dirname(ancestor) === ancestor) {
-        break;
-      }
-    }
-  }
-  const file = await open(
-    join(canonicalParent, basename(path)),
-    constants.O_RDONLY |
-      (constants.O_NOFOLLOW ?? 0) |
-      (constants.O_NONBLOCK ?? 0),
-  );
-  try {
-    const opened = await file.stat({ bigint: true });
-    if (
-      !opened.isFile() ||
-      opened.dev !== selected.dev ||
-      opened.ino !== selected.ino
-    ) {
-      throw new CodexSecurityError("Input files must remain regular files.");
-    }
-    return await file.readFile({ encoding: "utf8" });
-  } finally {
-    await file.close();
-  }
-}
-
 export function resolveCliPath(directory: string, value: string): string {
   return resolve(directory, expandHome(value));
 }
 
-interface ScanArguments extends ScanSettings {
+interface ScanArguments extends ResolvedScanSettings {
+  codexOverrides: JsonObject;
   projectConfig?: ProjectConfigProvenance;
   workflowId?: string;
   safetyIdentifier?: string;
   verbose?: boolean;
   repository?: string;
-  postScanPromptFile?: string;
   archiveExisting: boolean;
   pluginPath?: string;
   pythonPath?: string;
@@ -2776,13 +2698,9 @@ export async function main(
             .describe(
               "Reuse completed work in the named local findings workflow.",
             ),
-          auth: z
-            .enum(SCAN_AUTH_MODES)
-            .optional()
-            .meta({ default: "auto" })
-            .describe(
-              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
-            ),
+          auth: ScanSettingsSchema.shape.auth.describe(
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
+          ),
           verbose: z
             .boolean()
             .default(false)
@@ -2831,13 +2749,9 @@ export async function main(
           base: optionValue("--base")
             .optional()
             .describe("Git base ref for --working-tree (default: HEAD)."),
-          mode: z
-            .enum(["standard", "deep"])
-            .optional()
-            .meta({ default: "standard" })
-            .describe(
-              "Scan mode (default: standard); deep supports repository and path targets.",
-            ),
+          mode: ScanSettingsSchema.shape.mode.describe(
+            "Scan mode (default: standard); deep supports repository and path targets.",
+          ),
           ...DEEP_SCAN_OPTION_SCHEMAS,
           model: optionValue("--model")
             .optional()
@@ -2865,10 +2779,9 @@ export async function main(
             .array(optionValue("--codex"))
             .default([])
             .describe(CODEX_OVERRIDE_DESCRIPTION),
-          failOnSeverity: z
-            .enum(REPORTABLE_SEVERITIES)
-            .optional()
-            .describe("Exit 1 for findings at or above LEVEL."),
+          failOnSeverity: FailureSeveritySchema.optional().describe(
+            "Exit 1 for findings at or above LEVEL.",
+          ),
           patch: z
             .boolean()
             .default(false)
@@ -2878,11 +2791,9 @@ export async function main(
             .optional()
             .describe("Patch findings at or above LEVEL; requires --patch."),
           createPr: CREATE_PR_OPTION,
-          maxCost: z
-            .number()
-            .positive()
-            .optional()
-            .describe("Stop the scan if estimated USD cost exceeds AMOUNT."),
+          maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+            "Stop the scan if estimated USD cost exceeds AMOUNT.",
+          ),
           headless: z
             .boolean()
             .default(false)
@@ -2954,19 +2865,26 @@ export async function main(
           const project =
             options.config === undefined
               ? undefined
-              : await loadProjectConfig(options.config, directory);
-          const { settings, provenance } = resolveProjectConfig(
+              : await readProjectConfig(options.config, directory);
+          const scope = resolveCliScope(project?.input.scan?.scope, {
+            paths: options.path,
+            diff: options.diff,
+            workingTree: options.workingTree,
+            head: options.head,
+            base: options.base,
+          });
+          const {
+            config,
+            options: settings,
+            projectConfig: provenance,
+          } = resolveScanSettings(
             project,
             {
               auth: options.auth,
-              paths: options.path,
+              target: scope.target,
               knowledgeBasePaths: options.knowledgeBase,
               scanPromptFile: options.scanPromptFile,
               validationPromptFile: options.validationPromptFile,
-              diff: options.diff,
-              workingTree: options.workingTree,
-              head: options.head,
-              base: options.base,
               mode: options.mode,
               workers: options.workers,
               subagents: options.subagents,
@@ -2974,7 +2892,7 @@ export async function main(
               maxDiscoveryRuns: options.maxDiscoveryRuns,
               maxTimeHours: options.maxTimeHours,
               outputDir: options.outputDir,
-              failOnSeverity: options.failOnSeverity,
+              failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
               codexOverrides: parseCodexOverrides(
                 options.codex,
@@ -2986,6 +2904,8 @@ export async function main(
             },
             directory,
           );
+          if (provenance !== undefined)
+            Object.assign(provenance.sources, scope.sources);
           if (options.archiveExisting && settings.outputDir === undefined) {
             throw new CodexSecurityError(
               "--archive-existing requires --output-dir.",
@@ -2994,6 +2914,7 @@ export async function main(
           outcome = await runScan(
             {
               ...settings,
+              codexOverrides: config.codexOverrides,
               projectConfig: provenance,
               workflowId: options.workflowId,
               safetyIdentifier: options.safetyIdentifier,
@@ -3380,11 +3301,13 @@ export async function main(
               knowledgeBasePaths: options.knowledgeBase.map((path) =>
                 resolveCliPath(directory, path),
               ),
-              ...(await readPromptFiles(
-                directory,
-                options.scanPromptFile,
-                options.postScanPromptFile,
+              ...(await resolveScanPrompts(
+                {
+                  scanPromptFile: options.scanPromptFile,
+                  postScanPromptFile: options.postScanPromptFile,
+                },
                 repository,
+                directory,
               )),
               ...(options.maxCost === undefined
                 ? {}
@@ -3552,12 +3475,14 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
-          const prompts = await readPromptFiles(
+          const prompts = await resolveScanPrompts(
+            {
+              scanPromptFile: options.scanPromptFile,
+              postScanPromptFile: options.postScanPromptFile,
+              validationPromptFile: options.validationPromptFile,
+            },
             currentDirectory,
-            options.scanPromptFile,
-            options.postScanPromptFile,
             currentDirectory,
-            options.validationPromptFile,
           );
           let inputPath: string;
           let outputDir: string;
@@ -4624,21 +4549,24 @@ function scanArgumentsFromRecipe(
   }
   return {
     repository,
-    auth: auth.data,
-    paths,
+    auth: auth.data ?? DEFAULT_SCAN_AUTH,
+    target:
+      paths.length > 0
+        ? paths
+        : kind === "refs"
+          ? DiffTarget.refs({ base: reference!, head: head ?? "HEAD" })
+          : kind === "working_tree"
+            ? DiffTarget.workingTree({ base: reference ?? "HEAD" })
+            : "repository",
     knowledgeBasePaths,
     validationPromptFile,
-    diff: kind === "refs" ? reference : undefined,
-    workingTree: kind === "working_tree",
-    head: kind === "refs" ? head ?? "HEAD" : undefined,
-    base: kind === "working_tree" ? reference : undefined,
     mode,
     ...deepScan.data,
     archiveExisting: false,
     codexOverrides: Object.hasOwn(config, "approval_policy")
       ? config
       : { ...config, approval_policy: "never" },
-    failOnSeverity: threshold as FailureSeverity | undefined,
+    failureSeverity: threshold as FailureSeverity | undefined,
     maxCostUsd,
     dryRun: false,
     parentScanId,
@@ -4911,11 +4839,6 @@ function staysWithinWindowsDeviceRoot(input: string, root: string): boolean {
 
 function isFindingIdentifier(value: string): boolean {
   return /^(?:occ|csf)_[A-Za-z0-9_-]+$/u.test(value);
-}
-
-function meetsSeverity(finding: Finding, threshold: FailureSeverity): boolean {
-  const severity = DISPLAY_SEVERITIES.indexOf(finding.severity.level);
-  return severity >= 0 && severity <= REPORTABLE_SEVERITIES.indexOf(threshold);
 }
 
 async function* workbenchFindings(
@@ -6098,10 +6021,6 @@ function incurErrorMessage(output: string): string {
   }
 }
 
-function isOutsidePath(path: string): boolean {
-  return path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path);
-}
-
 async function runExport(
   arguments_: ExportArguments,
   output: Writable,
@@ -6396,13 +6315,11 @@ async function executeScan(
   try {
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
-    const target = targetFromArguments(arguments_);
-    const prompts = await readPromptFiles(
-      directory,
-      arguments_.scanPromptFile,
-      arguments_.postScanPromptFile,
+    const target = arguments_.target;
+    const prompts = await resolveScanPrompts(
+      arguments_,
       resolve(directory, repository),
-      arguments_.validationPromptFile,
+      directory,
     );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
@@ -6453,14 +6370,14 @@ async function executeScan(
       mode: arguments_.mode,
       max_cost_usd: arguments_.maxCostUsd,
       target:
-        arguments_.paths.length > 0
+        Array.isArray(target) && target.length > 0
           ? "paths"
-          : arguments_.diff !== undefined
+          : target instanceof DiffTarget && target.kind === "refs"
             ? "diff"
-            : arguments_.workingTree
+            : target instanceof DiffTarget
               ? "working_tree"
               : "repository",
-      requested_auth: auth ?? "auto",
+      requested_auth: auth ?? DEFAULT_SCAN_AUTH,
       dry_run: arguments_.dryRun,
       profile:
         typeof selectedProfileName === "string"
@@ -6537,27 +6454,16 @@ async function executeScan(
     }
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
+      ...scanSettings(arguments_),
       ...(arguments_.workflowId === undefined
         ? {}
         : { workflowId: arguments_.workflowId }),
       auth,
       safetyIdentifier: arguments_.safetyIdentifier,
-      target,
-      knowledgeBasePaths: arguments_.knowledgeBasePaths,
       ...prompts,
-      mode: arguments_.mode,
-      workers: arguments_.workers,
-      subagents: arguments_.subagents,
-      stopAfterNoNew: arguments_.stopAfterNoNew,
-      stopAfterConsecutiveErrors: arguments_.stopAfterConsecutiveErrors,
-      maxDiscoveryRuns: arguments_.maxDiscoveryRuns,
-      maxTimeHours: arguments_.maxTimeHours,
-      outputDir: arguments_.outputDir,
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
-      failureSeverity: arguments_.failOnSeverity,
-      maxCostUsd: arguments_.maxCostUsd,
       onCost: (cost) => {
         diagnostic("cost.updated", {
           model: cost.model,
@@ -6616,7 +6522,7 @@ async function executeScan(
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
         diagnostic("authentication.selected", {
-          requested: auth ?? "auto",
+          requested: auth ?? DEFAULT_SCAN_AUTH,
           method: authentication.method,
           source:
             authentication.method !== "stored_credentials"
@@ -6895,7 +6801,7 @@ async function executeScan(
               projectConfig: arguments_.projectConfig,
               scanPromptFile: arguments_.scanPromptFile,
               validationPromptFile: arguments_.validationPromptFile,
-              failOnSeverity: arguments_.failOnSeverity,
+              failOnSeverity: arguments_.failureSeverity,
             }),
       },
     };
@@ -6908,7 +6814,7 @@ async function executeScan(
     errorOutput.write("scan completed without a result\n");
     return { exitCode: 2, error: "Scan completed without a result." };
   }
-  const threshold = arguments_.failOnSeverity;
+  const threshold = arguments_.failureSeverity;
   const findings = result.findings.findings;
   const actionableFindings = findings.filter((finding) =>
     meetsSeverity(finding, "low"),
@@ -7185,8 +7091,11 @@ function scanFailureMessage(
 }
 
 function scanScope(arguments_: ScanArguments): string | null {
-  if (arguments_.paths.length > 0) {
-    const displayed = arguments_.paths.slice(0, 3).map((path) => {
+  const paths: readonly string[] = Array.isArray(arguments_.target)
+    ? arguments_.target
+    : [];
+  if (paths.length > 0) {
+    const displayed = paths.slice(0, 3).map((path) => {
       const portable = path.replaceAll("\\", "/");
       const scoped =
         isAbsolute(path) ||
@@ -7196,10 +7105,12 @@ function scanScope(arguments_: ScanArguments): string | null {
           : portable;
       return errorMessage(scoped.replaceAll(/[\u0000-\u001F\u007F]/gu, " "));
     });
-    return `${displayed.join(", ")}${arguments_.paths.length > displayed.length ? `, +${arguments_.paths.length - displayed.length} more` : ""}`;
+    return `${displayed.join(", ")}${paths.length > displayed.length ? `, +${paths.length - displayed.length} more` : ""}`;
   }
-  if (arguments_.diff !== undefined) return "committed changes";
-  if (arguments_.workingTree) return "working-tree changes";
+  if (arguments_.target instanceof DiffTarget)
+    return arguments_.target.kind === "refs"
+      ? "committed changes"
+      : "working-tree changes";
   return null;
 }
 
@@ -7444,18 +7355,62 @@ function quoteCliPath(path: string): string {
     : `'${path.replaceAll("'", `'"'"'`)}'`;
 }
 
-function targetFromArguments(arguments_: ScanArguments): ScanTarget {
-  if (arguments_.paths.length > 0) return arguments_.paths;
-  if (arguments_.diff !== undefined) {
-    return DiffTarget.refs({
-      base: arguments_.diff,
-      head: arguments_.head ?? "HEAD",
-    });
+function resolveCliScope(
+  configured: ProjectScope | undefined,
+  overrides: {
+    paths?: string[];
+    diff?: string;
+    workingTree?: boolean;
+    head?: string;
+    base?: string;
+  },
+): { target?: ScanTarget; sources: ProjectConfigProvenance["sources"] } {
+  const sources: ProjectConfigProvenance["sources"] = {};
+  const explicitScopes =
+    Number(!!overrides.paths?.length) +
+    Number(overrides.diff !== undefined) +
+    Number(overrides.workingTree === true);
+  if (explicitScopes > 1)
+    throw new ConfigurationError(
+      "--path, --diff, and --working-tree are mutually exclusive.",
+    );
+  let scope = configured;
+  let changed = false;
+  sources["scan.scope"] = scope === undefined ? "default" : "project";
+  if (overrides.paths?.length) scope = { paths: overrides.paths };
+  else if (overrides.diff !== undefined)
+    scope = { diff: { base: overrides.diff } };
+  else if (overrides.workingTree === true) scope = { workingTree: {} };
+  else if (
+    overrides.workingTree === false &&
+    scope !== undefined &&
+    "workingTree" in scope
+  ) {
+    scope = undefined;
+    changed = true;
   }
-  if (arguments_.workingTree) {
-    return DiffTarget.workingTree({ base: arguments_.base ?? "HEAD" });
+  if (explicitScopes > 0 || changed) {
+    changed = true;
+    sources["scan.scope"] = "cli";
   }
-  return "repository";
+  if (overrides.head !== undefined) {
+    if (scope === undefined || !("diff" in scope))
+      throw new ConfigurationError("--head requires --diff.");
+    scope = { diff: { ...scope.diff, head: overrides.head } };
+    sources["scan.scope.diff.head"] = "cli";
+    changed = true;
+  }
+  if (overrides.base !== undefined) {
+    if (scope === undefined || !("workingTree" in scope))
+      throw new ConfigurationError("--base requires --working-tree.");
+    scope = { workingTree: { base: overrides.base } };
+    sources["scan.scope.workingTree.base"] = "cli";
+    changed = true;
+  }
+  return {
+    ...(changed ? { target: projectScopeTarget(scope) ?? "repository" } : {}),
+    sources,
+  };
 }
 
 export function parseCodexOverrides(

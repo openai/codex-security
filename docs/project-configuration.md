@@ -64,6 +64,87 @@ The file configures scan settings. Patching, PR creation, publication, post-scan
 actions, and machine-specific plugin or Python selection remain explicit CLI/SDK
 inputs.
 
+## SDK and CLI contract
+
+The SDK's `ScanSettings` type is shared by `ScanOptions`, CLI resolution, and
+project-file resolution. Existing names stay compatible:
+
+| Project file                           | SDK option                            | CLI flag                        |
+| -------------------------------------- | ------------------------------------- | ------------------------------- |
+| `auth`                                 | `auth`                                | `--auth`                        |
+| `scan.mode`                            | `mode`                                | `--mode`                        |
+| `scan.scope.paths`                     | `target: ["src"]`                     | `--path`                        |
+| `scan.scope.diff`                      | `target: DiffTarget.refs(...)`        | `--diff`, `--head`              |
+| `scan.scope.workingTree`               | `target: DiffTarget.workingTree(...)` | `--working-tree`, `--base`      |
+| `scan.knowledgeBase`                   | `knowledgeBasePaths`                  | `--knowledge-base`              |
+| `scan.instructionsFile`                | `scanPromptFile`                      | `--scan-prompt-file`            |
+| `scan.validationFile`                  | `validationPromptFile`                | `--validation-prompt-file`      |
+| `scan.deep.workers`                    | `workers`                             | `--workers`                     |
+| `scan.deep.subagentsPerWorker`         | `subagents`                           | `--subagents`                   |
+| `scan.deep.stopAfterNoNew`             | `stopAfterNoNew`                      | `--stop-after-no-new`           |
+| `scan.deep.stopAfterConsecutiveErrors` | `stopAfterConsecutiveErrors`          | No flag                         |
+| `scan.deep.maxDiscoveryRuns`           | `maxDiscoveryRuns`                    | `--max-discovery-runs`          |
+| `scan.deep.maxTimeHours`               | `maxTimeHours`                        | `--max-time-hours`              |
+| `limits.maxCostUsdPerScan`             | `maxCostUsd`                          | `--max-cost`                    |
+| `policy.failOnSeverity`                | `failureSeverity`                     | `--fail-on-severity`            |
+| `output.directory`                     | `outputDir`                           | `--output-dir`                  |
+| `codex`                                | Constructor `codexOverrides`          | `--codex`, model/provider flags |
+
+Use an explicit file with `loadProjectConfig()`:
+
+```ts
+import { CodexSecurity, loadProjectConfig } from "@openai/codex-security";
+
+const { config, options } = await loadProjectConfig("codex-security.yaml");
+await using security = new CodexSecurity(config);
+const result = await security.run(repository, options);
+if (
+  options.failureSeverity !== undefined &&
+  result.hasFindingsAtOrAbove(options.failureSeverity)
+) {
+  process.exitCode = 1;
+}
+```
+
+For configuration already in memory, pass the same structured object to
+`resolveProjectConfig()`:
+
+```ts
+import {
+  resolveProjectConfig,
+  type ProjectConfigInput,
+} from "@openai/codex-security";
+
+const input = {
+  scan: { mode: "deep", scope: { paths: ["src"] } },
+  limits: { maxCostUsdPerScan: 5 },
+} satisfies ProjectConfigInput;
+const { config, options } = resolveProjectConfig(input, process.cwd());
+```
+
+Both return constructor `config` and scan `options`; the file loader also returns
+`projectConfig` path and source metadata. The optional directory argument defaults
+to the current directory. It locates a selected file or anchors an in-memory
+object's context, prompt, and output paths. Files anchor those paths to their own
+directory. Neither helper reads prompt contents or prepares a runtime.
+
+Use `security.preflight(repository, options)` for the same local checks as CLI
+`--dry-run`, including active-mode compatibility and remaining legacy deep
+defaults. To override a resolved value or attach a callback, pass
+`{ ...options, maxCostUsd: 10, onProgress }` to `run()`.
+
+SDK callers can use inline `scanPrompt`, `validationPrompt`, and `postScanPrompt`,
+or the corresponding `*PromptFile` options. Inline text wins without reading the
+matching file. Direct SDK file paths resolve from the current directory and use
+the CLI's existing file protections. Post-scan instructions remain explicit
+SDK/CLI options and are not part of project files.
+
+`failureSeverity` records the policy in the scan recipe. The SDK does not throw or
+set process status when the threshold is met; call `hasFindingsAtOrAbove()` and
+choose the caller's response. The method uses the same ordering as the CLI and
+does not filter findings. The CLI/file contract keeps its four reportable levels;
+existing SDK calls also accept `informational`.
+
 ## Overrides and paths
 
 Settings apply in this order: built-in defaults, applicable legacy deep settings,

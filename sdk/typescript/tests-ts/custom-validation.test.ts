@@ -352,6 +352,8 @@ describe("custom validation", () => {
         );
       }
       const workflow = "Run the synthetic validation script, then clean up.";
+      const workflowFile = join(root, "validation.md");
+      if (scenario === "standard") await writeFile(workflowFile, workflow);
       const falsePositive = {
         reason: "The fixture is not included in the deployed application.",
       };
@@ -515,7 +517,9 @@ describe("custom validation", () => {
       );
       try {
         const pending = client.run(repository, {
-          validationPrompt: workflow,
+          ...(scenario === "standard"
+            ? { validationPromptFile: workflowFile }
+            : { validationPrompt: workflow }),
           onActivity: (activity) => activities.push(activity),
           ...(diff ? { target: DiffTarget.workingTree({}) } : {}),
         });

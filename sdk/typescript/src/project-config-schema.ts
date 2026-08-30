@@ -1,8 +1,8 @@
 import { z } from "zod";
 import {
   DeepScanSettingsSchema,
-  REPORTABLE_SEVERITIES,
-  SCAN_AUTH_MODES,
+  FailureSeveritySchema,
+  ScanSettingsSchema,
 } from "./scan-settings.js";
 
 const nonempty = z.string().min(1);
@@ -33,33 +33,24 @@ export const ProjectConfigInputSchema = z.strictObject({
     .describe(
       "Editor schema URI or relative path. The CLI does not fetch or select a validator from this value.",
     ),
-  auth: z.enum(SCAN_AUTH_MODES).optional().meta({
-    default: "auto",
-    description: "Credential-source choice only; never a credential value.",
-  }),
+  auth: ScanSettingsSchema.shape.auth.describe(
+    "Credential-source choice only; never a credential value.",
+  ),
   scan: z
     .strictObject({
-      mode: z
-        .enum(["standard", "deep"])
-        .optional()
-        .meta({ default: "standard" }),
+      mode: ScanSettingsSchema.shape.mode,
       scope: ProjectScopeSchema.optional().describe(
         "One scope variant. Omit for the whole repository. Mode compatibility is checked after overrides.",
       ),
-      knowledgeBase: z
-        .array(nonempty)
-        .optional()
-        .describe(
-          "Context files or directories, relative to this file. An empty list selects no additional context.",
-        ),
-      instructionsFile: nonempty
-        .optional()
-        .describe("Additional scan instructions, relative to this file."),
-      validationFile: nonempty
-        .optional()
-        .describe(
-          "Custom validation instructions, relative to this file; not supported in active deep scans.",
-        ),
+      knowledgeBase: ScanSettingsSchema.shape.knowledgeBasePaths.describe(
+        "Context files or directories, relative to this file. An empty list selects no additional context.",
+      ),
+      instructionsFile: ScanSettingsSchema.shape.scanPromptFile.describe(
+        "Additional scan instructions, relative to this file.",
+      ),
+      validationFile: ScanSettingsSchema.shape.validationPromptFile.describe(
+        "Custom validation instructions, relative to this file; not supported in active deep scans.",
+      ),
       deep: DeepScanSettingsSchema.omit({ subagents: true })
         .extend({
           subagentsPerWorker: DeepScanSettingsSchema.shape.subagents,
@@ -83,32 +74,23 @@ export const ProjectConfigInputSchema = z.strictObject({
     ),
   limits: z
     .strictObject({
-      maxCostUsdPerScan: z
-        .number()
-        .positive()
-        .optional()
-        .describe(
-          "Estimated USD limit per launched scan attempt, not a total batch budget. Omit for no limit.",
-        ),
+      maxCostUsdPerScan: ScanSettingsSchema.shape.maxCostUsd.describe(
+        "Estimated USD limit per launched scan attempt, not a total batch budget. Omit for no limit.",
+      ),
     })
     .optional(),
   policy: z
     .strictObject({
-      failOnSeverity: z
-        .enum(REPORTABLE_SEVERITIES)
-        .optional()
-        .describe(
-          "Exit threshold; does not filter retained findings. Omit for report-only behavior.",
-        ),
+      failOnSeverity: FailureSeveritySchema.optional().describe(
+        "Exit threshold; does not filter retained findings. Omit for report-only behavior.",
+      ),
     })
     .optional(),
   output: z
     .strictObject({
-      directory: nonempty
-        .optional()
-        .describe(
-          "Artifact directory relative to this file; existing outside-worktree checks still apply.",
-        ),
+      directory: ScanSettingsSchema.shape.outputDir.describe(
+        "Artifact directory relative to this file; existing outside-worktree checks still apply.",
+      ),
     })
     .optional(),
 });

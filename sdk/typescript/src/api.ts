@@ -69,10 +69,16 @@ import {
   type ResolvedDeepScanConfig,
 } from "./deep-config.js";
 import {
+  DEFAULT_SCAN_AUTH,
+  DEFAULT_SCAN_MODE,
   SCAN_AUTH_MODES,
+  ScanSettingsSchema,
   type DeepScanOptions,
   type ScanAuthMode,
+  type ScanSettings,
+  type ScanPromptSettings,
 } from "./scan-settings.js";
+import { resolveScanPrompts } from "./prompt-files.js";
 export { SCAN_AUTH_MODES } from "./scan-settings.js";
 export type { DeepScanOptions, ScanAuthMode } from "./scan-settings.js";
 import {
@@ -167,7 +173,6 @@ import {
   resolveRepositoryPath,
   type NormalizedTarget,
   type ScanMode,
-  type ScanTarget,
   validatedGitEnvironment,
   validateCommittedDiffCheckout,
   validateMode,
@@ -224,24 +229,14 @@ interface PreparedSession {
 const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
-export interface ScanOptions extends DeepScanOptions {
+export interface ScanOptions extends ScanSettings {
   /** Opt into a durable scan -> custom publication -> dedupe workflow. */
   workflowId?: string;
-  auth?: ScanAuthMode;
   /** Stable, privacy-preserving end-user ID for this scan's model requests. */
   safetyIdentifier?: string;
-  target?: ScanTarget;
-  mode?: ScanMode;
-  knowledgeBasePaths?: string[];
-  scanPrompt?: string;
-  validationPrompt?: string;
-  postScanPrompt?: string;
-  outputDir?: string;
   archiveExisting?: boolean;
   parentScanId?: string;
   expectedPluginVersion?: string;
-  failureSeverity?: SeverityLevel;
-  maxCostUsd?: number;
   onCost?: (cost: Readonly<ScanCost>) => void;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
@@ -365,6 +360,7 @@ interface LocalScanInputs
   protectedRoot: string;
   stateDirectory: string;
   deepScanConfiguration?: ResolvedDeepScanConfig;
+  prompts: ScanPromptSettings;
 }
 
 export interface CodexSecurityMetadata {
@@ -469,7 +465,11 @@ export class CodexSecurity {
       { ...options, outputDir: undefined, archiveExisting: false },
       signal,
     );
-    options = { ...options, ...local.deepScanConfiguration?.settings };
+    options = {
+      ...options,
+      ...local.prompts,
+      ...local.deepScanConfiguration?.settings,
+    };
     const workflow = new FindingWorkflow(
       workflowId,
       this.#dependencies.environment,
@@ -485,7 +485,7 @@ export class CodexSecurity {
         options: {
           ...options,
           target: options.target ?? "repository",
-          mode: options.mode ?? "standard",
+          mode: options.mode ?? DEFAULT_SCAN_MODE,
           outputDir:
             options.outputDir === undefined
               ? undefined
@@ -786,7 +786,9 @@ export class CodexSecurity {
         protectedRoot,
         stateDirectory,
         deepScanConfiguration,
+        prompts,
       } = await this.#validateLocalInputs(repository, options, signal);
+      options = { ...options, ...prompts };
       checkOpen();
       let temporaryRoot: string | undefined;
       if (
@@ -2338,7 +2340,7 @@ export class CodexSecurity {
     }
     if (
       options.maxCostUsd !== undefined &&
-      (!Number.isFinite(options.maxCostUsd) || options.maxCostUsd <= 0)
+      !ScanSettingsSchema.shape.maxCostUsd.safeParse(options.maxCostUsd).success
     ) {
       throw new CodexSecurityError(
         "The scan cost limit must be a positive USD amount.",
@@ -2351,12 +2353,13 @@ export class CodexSecurity {
     validatedGitEnvironment(this.#dependencies.environment);
     const normalized = await normalizeTarget(repo, requestedTarget, signal);
     throwIfAborted(signal);
-    const mode = options.mode ?? "standard";
+    const mode = options.mode ?? DEFAULT_SCAN_MODE;
     validateMode(normalized, mode);
-    if (options.validationPrompt !== undefined) {
+    const prompts = await resolveScanPrompts(options, repo);
+    if (prompts.validationPrompt !== undefined) {
       if (
-        typeof options.validationPrompt !== "string" ||
-        !options.validationPrompt.trim()
+        typeof prompts.validationPrompt !== "string" ||
+        !prompts.validationPrompt.trim()
       ) {
         throw new CodexSecurityError(
           "The validation prompt must not be empty.",
@@ -2404,6 +2407,7 @@ export class CodexSecurity {
       outputDir: requestedOutput,
       protectedRoot,
       stateDirectory,
+      prompts,
       ...(mode === "deep"
         ? {
             deepScanConfiguration: await resolveDeepScanConfig(
@@ -3167,7 +3171,7 @@ async function collectResult(
 
 export function scanAuthentication(
   environment: ProcessEnvironment,
-  auth: ScanAuthMode = "auto",
+  auth: ScanAuthMode = DEFAULT_SCAN_AUTH,
   modelProvider?: unknown,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {

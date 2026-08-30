@@ -1,4 +1,14 @@
 export { CodexSecurity, createSecurity } from "./api.js";
+export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
+export type {
+  ResolvedProjectConfig,
+  ProjectConfigProvenance,
+} from "./project-config.js";
+export type {
+  ProjectConfigInput,
+  ProjectScope,
+} from "./project-config-schema.js";
+export type { ScanSettings } from "./scan-settings.js";
 export { runComponentScans } from "./component-scan.js";
 export type {
   ComponentDeduplicationSummary,

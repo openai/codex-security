@@ -186,6 +186,7 @@ const distFiles = new Set(
     "deep-scan-defaults",
     "project-config",
     "project-config-schema",
+    "prompt-files",
     "scan-settings",
     "errors",
     "github",

@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import {
-  loadProjectConfig,
-  resolveProjectConfig,
+  readProjectConfig,
+  resolveScanSettings,
 } from "../src/project-config.js";
 import {
   ProjectConfigInputSchema,
@@ -166,8 +166,8 @@ describe("project configuration input contract", () => {
       "scan:\n  deep:\n    subagentsPerWorker: 0\ncodex:\n  synthetic_setting: ${LITERAL_VALUE}\n",
     );
     await writeFile(json, JSON.stringify(input));
-    expect((await loadProjectConfig(yaml)).input).toEqual(input);
-    expect((await loadProjectConfig(json)).input).toEqual(input);
+    expect((await readProjectConfig(yaml)).input).toEqual(input);
+    expect((await readProjectConfig(json)).input).toEqual(input);
   });
 
   test.each([
@@ -181,12 +181,12 @@ describe("project configuration input contract", () => {
     const root = await temporaryDirectory();
     const path = join(root, name);
     await writeFile(path, contents);
-    await expect(loadProjectConfig(path)).rejects.toThrow();
+    await expect(readProjectConfig(path)).rejects.toThrow();
   });
 
   test("reports a missing selected file", async () => {
     await expect(
-      loadProjectConfig("missing.yaml", await temporaryDirectory()),
+      readProjectConfig("missing.yaml", await temporaryDirectory()),
     ).rejects.toThrow("Cannot read project configuration");
   });
 });
@@ -196,6 +196,7 @@ describe("project configuration resolution", () => {
     const root = await temporaryDirectory();
     const project = {
       path: join(root, "settings", "scan.yaml"),
+      directory: join(root, "settings"),
       input: {
         scan: {
           scope: { paths: ["src"] },
@@ -206,16 +207,17 @@ describe("project configuration resolution", () => {
         output: { directory: "../artifacts" },
       } satisfies ProjectConfigInput,
     };
-    const { settings, provenance } = resolveProjectConfig(
-      project,
-      {
-        knowledgeBasePaths: ["cli-context.md"],
-        validationPromptFile: "cli-validate.md",
-      },
-      join(root, "invocation"),
-    );
+    const { options: settings, projectConfig: provenance } =
+      resolveScanSettings(
+        project,
+        {
+          knowledgeBasePaths: ["cli-context.md"],
+          validationPromptFile: "cli-validate.md",
+        },
+        join(root, "invocation"),
+      );
     expect(settings).toMatchObject({
-      paths: ["src"],
+      target: ["src"],
       knowledgeBasePaths: [join(root, "invocation", "cli-context.md")],
       scanPromptFile: join(root, "settings", "scan.md"),
       validationPromptFile: join(root, "invocation", "cli-validate.md"),
@@ -234,6 +236,7 @@ describe("project configuration resolution", () => {
     const root = await temporaryDirectory();
     const project = {
       path: join(root, "scan.yaml"),
+      directory: root,
       input: {
         scan: { mode: "deep", deep: { subagentsPerWorker: 3, workers: 8 } },
         codex: {
@@ -245,7 +248,11 @@ describe("project configuration resolution", () => {
         },
       } satisfies ProjectConfigInput,
     };
-    const { settings, provenance } = resolveProjectConfig(
+    const {
+      config,
+      options: settings,
+      projectConfig: provenance,
+    } = resolveScanSettings(
       project,
       {
         subagents: 0,
@@ -259,6 +266,8 @@ describe("project configuration resolution", () => {
     expect(settings).toMatchObject({
       subagents: 0,
       workers: 8,
+    });
+    expect(config).toEqual({
       codexOverrides: {
         model: "gpt-5.6-sol",
         profile: "review",
@@ -278,16 +287,16 @@ describe("project configuration resolution", () => {
     const root = await temporaryDirectory();
     const project = {
       path: join(root, "scan.yaml"),
+      directory: root,
       input: {
         scan: { mode: "deep", deep: { workers: 8 } },
       } satisfies ProjectConfigInput,
     };
     expect(
-      resolveProjectConfig(project, { mode: "standard" }, root).settings
-        .workers,
+      resolveScanSettings(project, { mode: "standard" }, root).options.workers,
     ).toBeUndefined();
     expect(() =>
-      resolveProjectConfig(project, { mode: "standard", workers: 2 }, root),
+      resolveScanSettings(project, { mode: "standard", workers: 2 }, root),
     ).toThrow("require --mode deep");
   });
 
@@ -298,8 +307,8 @@ describe("project configuration resolution", () => {
       ["scan.yaml", "codex:\n  __proto__:\n    syntheticPollution: true\n"],
     ] as const) {
       await writeFile(join(root, filename), contents);
-      const project = await loadProjectConfig(filename, root);
-      expect(() => resolveProjectConfig(project, {}, root)).toThrow(
+      const project = await readProjectConfig(filename, root);
+      expect(() => resolveScanSettings(project, {}, root)).toThrow(
         "Invalid Codex override key: __proto__.",
       );
     }
@@ -317,7 +326,7 @@ describe("project configuration resolution", () => {
       const root = await temporaryDirectory();
       const path = join(root, "scan.json");
       await writeFile(path, contents);
-      await expect(loadProjectConfig(path)).rejects.toThrow(
+      await expect(readProjectConfig(path)).rejects.toThrow(
         "Unknown key __proto__.",
       );
     },

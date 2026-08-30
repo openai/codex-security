@@ -135,22 +135,25 @@ Constructor options:
 Options for `security.run(repository, options)` and
 `security.preflight(repository, options)`:
 
-| Option                       | Description                                                                    |
-| ---------------------------- | ------------------------------------------------------------------------------ |
-| `auth`                       | Credential source: `"auto"`, `"chatgpt"`, or `"api-key"`.                      |
-| `safetyIdentifier`           | Stable hashed end-user ID for model requests; requires API-key authentication. |
-| `target`                     | Repository, repository-relative paths, committed diff, or working-tree diff.   |
-| `mode`                       | `"standard"` or `"deep"`; deep mode supports repositories and paths.           |
-| `knowledgeBasePaths`         | Architecture documents, security policies, threat models, or directories.      |
-| `outputDir`                  | Artifact directory outside the enclosing Git worktree.                         |
-| `archiveExisting`            | Archive existing results in `outputDir` before scanning.                       |
-| `maxCostUsd`                 | Stop when estimated model cost exceeds this positive USD amount.               |
-| `stopAfterConsecutiveErrors` | Stop deep discovery after this many consecutive errors (default: 3).           |
-| `maxTimeHours`               | Deep-scan discovery limit in hours: greater than zero, up to 96.               |
-| `failureSeverity`            | Finding-severity policy to record in the saved scan recipe.                    |
-| `parentScanId`               | Parent scan ID for a rerun.                                                    |
-| `expectedPluginVersion`      | Required original plugin version when replaying a scan.                        |
-| `signal`                     | `AbortSignal` to cancel a scan.                                                |
+| Option                                      | Description                                                                         |
+| ------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `auth`                                      | Credential source: `"auto"`, `"chatgpt"`, or `"api-key"`.                           |
+| `safetyIdentifier`                          | Stable hashed end-user ID for model requests; requires API-key authentication.      |
+| `target`                                    | Repository, repository-relative paths, committed diff, or working-tree diff.        |
+| `mode`                                      | `"standard"` or `"deep"`; deep mode supports repositories and paths.                |
+| `knowledgeBasePaths`                        | Architecture documents, security policies, threat models, or directories.           |
+| `scanPrompt` / `scanPromptFile`             | Additional scan instructions as text or a local file.                               |
+| `validationPrompt` / `validationPromptFile` | Custom validation instructions as text or a local file; not Deep.                   |
+| `postScanPrompt` / `postScanPromptFile`     | Follow-up instructions as text or a local file.                                     |
+| `outputDir`                                 | Artifact directory outside the enclosing Git worktree.                              |
+| `archiveExisting`                           | Archive existing results in `outputDir` before scanning.                            |
+| `maxCostUsd`                                | Stop when estimated model cost exceeds this positive USD amount.                    |
+| `stopAfterConsecutiveErrors`                | Stop deep discovery after this many consecutive errors (default: 3).                |
+| `maxTimeHours`                              | Deep-scan discovery limit in hours: greater than zero, up to 96.                    |
+| `failureSeverity`                           | Severity threshold recorded in the recipe; the SDK caller decides how to handle it. |
+| `parentScanId`                              | Parent scan ID for a rerun.                                                         |
+| `expectedPluginVersion`                     | Required original plugin version when replaying a scan.                             |
+| `signal`                                    | `AbortSignal` to cancel a scan.                                                     |
 
 Follow scans with `onWorkerStatus` and `onReconnect`. `onSessionEvent` receives
 saved events with thread IDs and worker numbers. Deep scans can additionally use
@@ -164,6 +167,40 @@ inspect the plugin, or run scan-lifecycle callbacks. Dry runs print effective se
 Deep preflight includes all six resolved deep settings and their origins in
 `deepScanSources`. Applicable legacy deep configuration is validated during
 preflight rather than after runtime startup.
+
+`ScanSettings` is the shared settings type. `ScanOptions` adds callbacks,
+cancellation, workflow, and runtime controls. Load the same project file used by
+`scan -c` through the SDK:
+
+```ts
+import { CodexSecurity, loadProjectConfig } from "@openai/codex-security";
+
+const { config, options } = await loadProjectConfig("codex-security.yaml");
+await using security = new CodexSecurity(config);
+const result = await security.run(repository, options);
+if (
+  options.failureSeverity !== undefined &&
+  result.hasFindingsAtOrAbove(options.failureSeverity)
+) {
+  process.exitCode = 1;
+}
+```
+
+`resolveProjectConfig(input, directory?)` accepts a typed `ProjectConfigInput`
+object with the same structure as YAML/JSON and returns the same `{ config,
+options }` pair. `loadProjectConfig(file, directory?)` resolves the selected file
+from `directory`, which defaults to the current directory; paths inside the file
+are relative to that file. Object paths are relative to the supplied directory.
+Scope paths remain relative to the selected repository. Neither helper starts a
+scan, reads prompt contents, or discovers another configuration file. `preflight`
+and `run` apply the existing local checks and remaining legacy deep defaults.
+
+Override resolved SDK options with `{ ...options, maxCostUsd: 5 }`, or add
+callbacks there. Direct SDK prompt-file paths use the current directory; inline
+text takes precedence over its matching file. Files use the same regular-file
+protections as the CLI. The SDK records `failureSeverity` without throwing or
+changing process status. `hasFindingsAtOrAbove()` uses the CLI's severity ordering
+and leaves the findings unchanged.
 
 ## Authentication
 
@@ -618,7 +655,8 @@ file. Source review still runs; discovery workers do not receive this prompt.
 npx @openai/codex-security scan . --validation-prompt-file validation.md
 ```
 
-The SDK accepts the same text as `validationPrompt`:
+The SDK accepts the same file as `validationPromptFile`, or inline text as
+`validationPrompt`:
 
 ```ts
 const result = await security.run(repository, {

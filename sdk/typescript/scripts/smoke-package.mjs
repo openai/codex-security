@@ -399,7 +399,17 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "loadProjectConfig", "resolveProjectConfig"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");
+       const assert = await import("node:assert/strict");
+       const { writeFile } = await import("node:fs/promises");
+       const input = { scan: { mode: "deep", deep: { subagentsPerWorker: 0 } }, policy: { failOnSeverity: "high" } };
+       await writeFile("scan.json", JSON.stringify(input));
+       const loaded = await sdk.loadProjectConfig("scan.json");
+       const resolved = sdk.resolveProjectConfig(input);
+       assert.deepEqual(loaded.config, resolved.config);
+       assert.deepEqual(loaded.options, resolved.options);
+       assert.equal(loaded.options.subagents, 0);
+       assert.equal(loaded.options.failureSeverity, "high");`,
     ],
     { cwd: consumer },
   );

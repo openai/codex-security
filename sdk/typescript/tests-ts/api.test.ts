@@ -80,7 +80,7 @@ const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
 afterEach(cleanup);
 
-test.each(["completed", "receipt-lost", "scan-interrupted"])(
+test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
   "durable scan workflow resumes after %s without rerunning completed work",
   async (scenario) => {
     const root = await temporaryDirectory();
@@ -94,6 +94,9 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     };
     const workflowId = "durable-scan";
+    const scanPrompt = "Review synthetic authentication boundaries.";
+    const promptFile = join(root, "instructions.md");
+    if (scenario === "prompt-files") await writeFile(promptFile, scanPrompt);
     let modelCalls = 0;
     let completed = false;
     let loseReceipt = scenario === "receipt-lost";
@@ -119,7 +122,10 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
                 loseReceipt = false;
                 throw new Error("Synthetic receipt write failure");
               }
-              return await runWorkbench(options, args, input);
+              const state = await runWorkbench(options, args, input);
+              if (scenario === "prompt-files" && payload.action === "begin")
+                await rm(promptFile);
+              return state;
             }
             if (args[0] === "get-scan")
               return {
@@ -143,8 +149,10 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
           createCodex: () => ({
             startThread: () => ({
               id: "thread-1",
-              async runStreamed() {
+              async runStreamed(input: string) {
                 modelCalls++;
+                if (scenario === "prompt-files")
+                  expect(input).toContain(scanPrompt);
                 if (scenario === "scan-interrupted" && modelCalls === 1)
                   throw new Error("Synthetic interrupted scan");
                 await copyCompletedScan(root);
@@ -158,8 +166,15 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
     const first = await makeClient(1);
     let original: Record<string, unknown> | undefined;
     try {
-      if (scenario === "completed")
-        original = (await first.run(repository, { workflowId })).toJSON();
+      if (scenario === "completed" || scenario === "prompt-files")
+        original = (
+          await first.run(repository, {
+            workflowId,
+            ...(scenario === "prompt-files"
+              ? { scanPromptFile: promptFile }
+              : {}),
+          })
+        ).toJSON();
       else
         await expect(first.run(repository, { workflowId })).rejects.toThrow(
           "Synthetic",
@@ -169,7 +184,12 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
     }
     const resumed = await makeClient(2);
     try {
-      const result = await resumed.run(repository, { workflowId });
+      const replacement = join(root, "replacement-instructions.md");
+      if (scenario === "prompt-files") await writeFile(replacement, scanPrompt);
+      const result = await resumed.run(repository, {
+        workflowId,
+        ...(scenario === "prompt-files" ? { scanPromptFile: replacement } : {}),
+      });
       expect(result.manifest.scan.id).toBe("scan_example_001");
       if (original) expect(result.toJSON()).toEqual(original);
       expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
@@ -2355,10 +2375,17 @@ describe("CodexSecurity orchestration", () => {
       },
     );
 
+    const scanPromptFile = join(root, "instructions.md");
+    const postScanPromptFile = join(root, "follow-up.md");
+    await writeFile(
+      scanPromptFile,
+      "Focus on authentication and authorization.",
+    );
+    await writeFile(postScanPromptFile, "Draft fixes for confirmed findings.");
     const scanStartedAt = Date.now();
     const result = await client.run(repository, {
-      scanPrompt: "Focus on authentication and authorization.",
-      postScanPrompt: "Draft fixes for confirmed findings.",
+      scanPromptFile,
+      postScanPromptFile,
       onScanStarted: () => {
         scanStarted = true;
       },

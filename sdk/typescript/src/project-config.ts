@@ -15,37 +15,30 @@ import {
 } from "./project-config-schema.js";
 import { expandHome } from "./runtime.js";
 import {
+  DEFAULT_SCAN_AUTH,
+  DEFAULT_SCAN_MODE,
   DEEP_SCAN_SETTINGS,
+  scanSettings,
   type DeepScanOptions,
-  type ScanAuthMode,
+  type ResolvedScanSettings,
+  type ScanSettings,
 } from "./scan-settings.js";
-import type { ScanMode } from "./targets.js";
-import type { SeverityLevel } from "./models.js";
+import { DiffTarget, type ScanTarget } from "./targets.js";
 
 const validateProjectConfig = new Ajv({
   allErrors: true,
 }).compile<ProjectConfigInput>(projectConfigJsonSchema());
 
-export interface LoadedProjectConfig {
-  path: string;
+export interface ProjectConfigSource {
+  path?: string;
+  directory: string;
   input: ProjectConfigInput;
 }
 
-export interface ScanSettings extends DeepScanOptions {
-  auth?: ScanAuthMode;
-  mode: ScanMode;
-  paths: string[];
-  diff?: string;
-  workingTree: boolean;
-  base?: string;
-  head?: string;
-  knowledgeBasePaths: string[];
-  scanPromptFile?: string;
-  validationPromptFile?: string;
-  outputDir?: string;
-  failOnSeverity?: Exclude<SeverityLevel, "informational">;
-  maxCostUsd?: number;
-  codexOverrides: JsonObject;
+export interface ResolvedProjectConfig {
+  config: { codexOverrides: JsonObject };
+  options: ResolvedScanSettings;
+  projectConfig?: ProjectConfigProvenance;
 }
 
 export type ConfigurationSource = "default" | "legacy" | "project" | "cli";
@@ -57,7 +50,30 @@ export interface ProjectConfigProvenance {
 export async function loadProjectConfig(
   file: string,
   directory = process.cwd(),
-): Promise<LoadedProjectConfig> {
+): Promise<ResolvedProjectConfig> {
+  return resolveScanSettings(
+    await readProjectConfig(file, directory),
+    {},
+    directory,
+  );
+}
+
+export function resolveProjectConfig(
+  input: ProjectConfigInput,
+  directory = process.cwd(),
+): ResolvedProjectConfig {
+  requireProjectConfig(input);
+  return resolveScanSettings(
+    { input, directory: resolve(directory) },
+    {},
+    directory,
+  );
+}
+
+export async function readProjectConfig(
+  file: string,
+  directory = process.cwd(),
+): Promise<ProjectConfigSource> {
   const path = resolve(directory, expandHome(file));
   const extension = extname(path).toLowerCase();
   if (![".yaml", ".yml", ".json"].includes(extension)) {
@@ -89,6 +105,14 @@ export async function loadProjectConfig(
       { cause: error },
     );
   }
+  requireProjectConfig(value, path);
+  return { path, directory: dirname(path), input: value };
+}
+
+function requireProjectConfig(
+  value: unknown,
+  path?: string,
+): asserts value is ProjectConfigInput {
   if (!validateProjectConfig(value)) {
     const issues = validateProjectConfig
       .errors!.map((issue) => {
@@ -100,17 +124,16 @@ export async function loadProjectConfig(
       })
       .join("; ");
     throw new ConfigurationError(
-      `Invalid project configuration at ${path}: ${issues}`,
+      `Invalid project configuration${path === undefined ? "" : ` at ${path}`}: ${issues}`,
     );
   }
-  return { path, input: value };
 }
 
-export function resolveProjectConfig(
-  project: LoadedProjectConfig | undefined,
-  overrides: Partial<ScanSettings>,
+export function resolveScanSettings(
+  project: ProjectConfigSource | undefined,
+  overrides: Partial<ScanSettings> & { codexOverrides?: JsonObject },
   directory: string,
-): { settings: ScanSettings; provenance?: ProjectConfigProvenance } {
+): ResolvedProjectConfig {
   const file = project?.input;
   const sources: Record<string, ConfigurationSource> = {
     auth: "default",
@@ -136,53 +159,24 @@ export function resolveProjectConfig(
   const filePath = (value: string | undefined): string | undefined =>
     value === undefined
       ? undefined
-      : resolve(dirname(project!.path), expandHome(value));
+      : resolve(project!.directory, expandHome(value));
   const cliPath = (value: string | undefined): string | undefined =>
     value === undefined ? undefined : resolve(directory, expandHome(value));
 
   const mode =
-    choose("scan.mode", file?.scan?.mode, overrides.mode) ?? "standard";
+    choose("scan.mode", file?.scan?.mode, overrides.mode) ?? DEFAULT_SCAN_MODE;
   if (
     mode !== "deep" &&
     DEEP_SCAN_SETTINGS.some(([name]) => overrides[name] !== undefined)
   ) {
     throw new ConfigurationError("Deep scan settings require --mode deep.");
   }
-  const explicitScopes =
-    Number(!!overrides.paths?.length) +
-    Number(overrides.diff !== undefined) +
-    Number(overrides.workingTree === true);
-  if (explicitScopes > 1)
-    throw new ConfigurationError(
-      "--path, --diff, and --working-tree are mutually exclusive.",
-    );
-  let scope: ProjectScope | undefined = file?.scan?.scope;
-  if (scope !== undefined) sources["scan.scope"] = "project";
-  if (overrides.paths?.length) scope = { paths: overrides.paths };
-  else if (overrides.diff !== undefined)
-    scope = { diff: { base: overrides.diff } };
-  else if (overrides.workingTree === true) scope = { workingTree: {} };
-  else if (
-    overrides.workingTree === false &&
-    scope !== undefined &&
-    "workingTree" in scope
-  ) {
-    scope = undefined;
-    sources["scan.scope"] = "cli";
-  }
-  if (explicitScopes > 0) sources["scan.scope"] = "cli";
-  if (overrides.head !== undefined) {
-    if (scope === undefined || !("diff" in scope))
-      throw new ConfigurationError("--head requires --diff.");
-    scope = { diff: { ...scope.diff, head: overrides.head } };
-    sources["scan.scope.diff.head"] = "cli";
-  }
-  if (overrides.base !== undefined) {
-    if (scope === undefined || !("workingTree" in scope))
-      throw new ConfigurationError("--base requires --working-tree.");
-    scope = { workingTree: { base: overrides.base } };
-    sources["scan.scope.workingTree.base"] = "cli";
-  }
+  const target =
+    choose(
+      "scan.scope",
+      projectScopeTarget(file?.scan?.scope),
+      overrides.target,
+    ) ?? "repository";
   const configuredDeep = file?.scan?.deep;
   const deep: DeepScanOptions = {};
   if (mode === "deep") {
@@ -228,17 +222,11 @@ export function resolveProjectConfig(
       file?.scan?.knowledgeBase?.map((value) => filePath(value)!),
       overrides.knowledgeBasePaths?.map((value) => cliPath(value)!),
     ) ?? [];
-  const settings: ScanSettings = {
-    auth: choose("auth", file?.auth, overrides.auth) ?? "auto",
+  const settings: ResolvedScanSettings = {
+    ...scanSettings(overrides),
+    auth: choose("auth", file?.auth, overrides.auth) ?? DEFAULT_SCAN_AUTH,
     mode,
-    paths: scope !== undefined && "paths" in scope ? [...scope.paths] : [],
-    workingTree: scope !== undefined && "workingTree" in scope,
-    ...(scope !== undefined && "diff" in scope
-      ? { diff: scope.diff.base, head: scope.diff.head ?? "HEAD" }
-      : {}),
-    ...(scope !== undefined && "workingTree" in scope
-      ? { base: scope.workingTree.base ?? "HEAD" }
-      : {}),
+    target,
     knowledgeBasePaths,
     scanPromptFile: choose(
       "scan.instructionsFile",
@@ -255,23 +243,32 @@ export function resolveProjectConfig(
       filePath(file?.output?.directory),
       cliPath(overrides.outputDir),
     ),
-    failOnSeverity: choose(
+    failureSeverity: choose(
       "policy.failOnSeverity",
       file?.policy?.failOnSeverity,
-      overrides.failOnSeverity,
+      overrides.failureSeverity,
     ),
     maxCostUsd: choose(
       "limits.maxCostUsdPerScan",
       file?.limits?.maxCostUsdPerScan,
       overrides.maxCostUsd,
     ),
-    codexOverrides,
     ...deep,
   };
   return {
-    settings,
-    ...(project === undefined
+    config: { codexOverrides },
+    options: settings,
+    ...(project?.path === undefined
       ? {}
-      : { provenance: { path: project.path, sources } }),
+      : { projectConfig: { path: project.path, sources } }),
   };
+}
+
+export function projectScopeTarget(
+  scope: ProjectScope | undefined,
+): ScanTarget | undefined {
+  if (scope === undefined) return undefined;
+  if ("paths" in scope) return [...scope.paths];
+  if ("diff" in scope) return DiffTarget.refs(scope.diff);
+  return DiffTarget.workingTree(scope.workingTree);
 }

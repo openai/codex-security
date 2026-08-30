@@ -3,7 +3,12 @@ import { parse as parseToml, type TomlTable } from "smol-toml";
 import { writeCodexConfig, type JsonObject } from "./config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import { CodexSecurityError } from "./errors.js";
-import { DEEP_SCAN_SETTINGS, type DeepScanOptions } from "./scan-settings.js";
+import {
+  DEFAULT_SCAN_MODE,
+  DEEP_SCAN_SETTINGS,
+  DeepScanSettingsSchema,
+  type DeepScanOptions,
+} from "./scan-settings.js";
 import type { ScanMode } from "./targets.js";
 
 export type DeepScanSources = Record<
@@ -25,16 +30,15 @@ export function deepScanOptions(
   for (const [name, , minimum] of DEEP_SCAN_SETTINGS) {
     const value = options[name];
     if (value === undefined) continue;
-    if ((options.mode ?? "standard") !== "deep") {
+    if ((options.mode ?? DEFAULT_SCAN_MODE) !== "deep") {
       throw new CodexSecurityError("Deep scan settings require deep mode.");
     }
-    if (name === "maxTimeHours") {
-      if (!Number.isFinite(value) || value <= 0 || value > 96) {
+    if (!DeepScanSettingsSchema.shape[name].safeParse(value).success) {
+      if (name === "maxTimeHours") {
         throw new CodexSecurityError(
           "Deep scan maxTimeHours must be a positive number no greater than 96.",
         );
       }
-    } else if (!Number.isSafeInteger(value) || value < minimum) {
       throw new CodexSecurityError(
         `Deep scan ${name} must be ${minimum === 0 ? "a non-negative" : "a positive"} integer.`,
       );

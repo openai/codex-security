@@ -1,14 +1,26 @@
 import { z } from "zod";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
+import type { Finding, SeverityLevel } from "./models.js";
+import type { ScanTarget } from "./targets.js";
 
 export const SCAN_AUTH_MODES = ["auto", "chatgpt", "api-key"] as const;
 export type ScanAuthMode = (typeof SCAN_AUTH_MODES)[number];
+export const SCAN_MODES = ["standard", "deep"] as const;
+export type ScanMode = (typeof SCAN_MODES)[number];
+export const DEFAULT_SCAN_AUTH = "auto";
+export const DEFAULT_SCAN_MODE = "standard";
 export const REPORTABLE_SEVERITIES = [
   "critical",
   "high",
   "medium",
   "low",
 ] as const;
+export const SCAN_SEVERITIES = [
+  ...REPORTABLE_SEVERITIES,
+  "informational",
+] as const;
+export const FailureSeveritySchema = z.enum(REPORTABLE_SEVERITIES);
+export type FailureSeverity = z.infer<typeof FailureSeveritySchema>;
 
 export const DEEP_SCAN_SETTINGS = [
   ["workers", "workers", 1],
@@ -48,3 +60,62 @@ export const DeepScanSettingsSchema = z.strictObject({
 });
 
 export type DeepScanOptions = z.infer<typeof DeepScanSettingsSchema>;
+
+const inputPath = z.string().min(1);
+
+export const ScanSettingsSchema = DeepScanSettingsSchema.extend({
+  auth: z.enum(SCAN_AUTH_MODES).optional().meta({ default: DEFAULT_SCAN_AUTH }),
+  mode: z.enum(SCAN_MODES).optional().meta({ default: DEFAULT_SCAN_MODE }),
+  knowledgeBasePaths: z.array(inputPath).optional(),
+  scanPrompt: z.string().optional(),
+  scanPromptFile: inputPath.optional(),
+  validationPrompt: z.string().optional(),
+  validationPromptFile: inputPath.optional(),
+  postScanPrompt: z.string().optional(),
+  postScanPromptFile: inputPath.optional(),
+  outputDir: inputPath.optional(),
+  failureSeverity: z.enum(SCAN_SEVERITIES).optional(),
+  maxCostUsd: z.number().positive().optional(),
+});
+
+/** Scan settings shared by SDK calls, CLI flags, and project files. */
+export interface ScanSettings extends z.infer<typeof ScanSettingsSchema> {
+  target?: ScanTarget;
+}
+
+export interface ResolvedScanSettings extends ScanSettings {
+  auth: ScanAuthMode;
+  mode: ScanMode;
+  target: ScanTarget;
+  knowledgeBasePaths: string[];
+}
+
+export type ScanPromptSettings = Pick<
+  ScanSettings,
+  | "scanPrompt"
+  | "scanPromptFile"
+  | "validationPrompt"
+  | "validationPromptFile"
+  | "postScanPrompt"
+  | "postScanPromptFile"
+>;
+
+export function scanSettings(settings: ScanSettings): ScanSettings {
+  const keys = [
+    "target",
+    ...Object.keys(ScanSettingsSchema.shape),
+  ] as (keyof ScanSettings)[];
+  return Object.fromEntries(
+    keys
+      .filter((key) => settings[key] !== undefined)
+      .map((key) => [key, settings[key]]),
+  ) as ScanSettings;
+}
+
+export function meetsSeverity(
+  finding: Pick<Finding, "severity">,
+  threshold: SeverityLevel,
+): boolean {
+  const severity = SCAN_SEVERITIES.indexOf(finding.severity.level);
+  return severity >= 0 && severity <= SCAN_SEVERITIES.indexOf(threshold);
+}
