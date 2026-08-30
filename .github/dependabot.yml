@@ -1,0 +1,58 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - /sdk/typescript
+      - /plugins/codex-security/mcp-app
+      - /plugins/codex-security/skills/triage-finding/evals
+    schedule:
+      interval: cron
+      cronjob: "0 * * * *"
+    cooldown:
+      default-days: 7
+      exclude:
+        - openai
+        - "@openai/*"
+    groups:
+      codex:
+        patterns:
+          - "@openai/codex"
+          - "@openai/codex-sdk"
+      openai:
+        patterns:
+          - openai
+          - "@openai/*"
+      third-party:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: pip
+    directory: /plugins/codex-security
+    schedule:
+      interval: cron
+      cronjob: "0 * * * *"
+    cooldown:
+      default-days: 7
+      exclude:
+        - openai
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: cron
+      cronjob: "0 * * * *"
+    cooldown:
+      default-days: 7
+      exclude:
+        - "openai/*"
+    commit-message:
+      prefix: ci

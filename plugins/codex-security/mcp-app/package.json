@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@openai/codex-sdk": "0.149.1",
+    "@openai/codex-sdk": "0.151.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

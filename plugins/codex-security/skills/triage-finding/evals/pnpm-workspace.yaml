@@ -1,9 +1,13 @@
 packages:
   - .
 minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - openai
+  - "@openai/*"
 trustLockfile: true
 
 overrides:
+  "@openai/codex-sdk": "$@openai/codex-sdk"
   "@opencode-ai/sdk": 1.14.33
 
 onlyBuiltDependencies:
