@@ -15,7 +15,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { basename, delimiter, dirname, join, win32 } from "node:path";
+import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   Codex,
@@ -2911,9 +2911,14 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each(["defaults", "complete overrides", "missing configuration"])(
-    "preserves ambient configuration when the deep-scan runtime uses the same home with %s",
-    async (settings) => {
+  test.each([
+    ["defaults", "absolute"],
+    ["complete overrides", "absolute"],
+    ["missing configuration", "absolute"],
+    ["missing configuration", "relative"],
+  ] as const)(
+    "preserves ambient configuration when the deep-scan runtime uses the same home with %s (%s path)",
+    async (settings, homeKind) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -2929,7 +2934,12 @@ describe("CodexSecurity orchestration", () => {
       await using client = new TestClient(
         {},
         {
-          environment: { CODEX_HOME: codexHome },
+          environment: {
+            CODEX_HOME:
+              homeKind === "relative"
+                ? relative(process.cwd(), codexHome)
+                : codexHome,
+          },
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,

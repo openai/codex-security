@@ -1,4 +1,5 @@
 import { readFile, realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
 import { writeCodexConfig, type JsonObject } from "./config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
@@ -110,7 +111,11 @@ export async function writeDeepScanConfig(
   destination: string,
   resolved: ResolvedDeepScanConfig,
 ): Promise<void> {
-  if (destination === resolved.source && !resolved.hasOverrides) return;
+  if (
+    !resolved.hasOverrides &&
+    resolve(destination) === resolve(resolved.source)
+  )
+    return;
   const [source, target] = await Promise.all([
     realpath(resolved.source).catch(() => null),
     realpath(destination).catch(() => null),
