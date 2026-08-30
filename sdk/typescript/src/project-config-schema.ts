@@ -21,7 +21,7 @@ export const ProjectScopeSchema = z.union([
     }),
   }),
   z.strictObject({
-    workingTree: z.strictObject({
+    working_tree: z.strictObject({
       base: nonempty.optional().meta({ default: "HEAD" }),
     }),
   }),
@@ -42,18 +42,24 @@ export const ProjectConfigInputSchema = z.strictObject({
       scope: ProjectScopeSchema.optional().describe(
         "One scope variant. Omit for the whole repository. Mode compatibility is checked after overrides.",
       ),
-      knowledgeBase: ScanSettingsSchema.shape.knowledgeBasePaths.describe(
+      knowledge_base: ScanSettingsSchema.shape.knowledgeBasePaths.describe(
         "Context files or directories, relative to this file. An empty list selects no additional context.",
       ),
-      instructionsFile: ScanSettingsSchema.shape.scanPromptFile.describe(
+      instructions_file: ScanSettingsSchema.shape.scanPromptFile.describe(
         "Additional scan instructions, relative to this file.",
       ),
-      validationFile: ScanSettingsSchema.shape.validationPromptFile.describe(
+      validation_file: ScanSettingsSchema.shape.validationPromptFile.describe(
         "Custom validation instructions, relative to this file; not supported in active deep scans.",
       ),
-      deep: DeepScanSettingsSchema.omit({ subagents: true })
-        .extend({
-          subagentsPerWorker: DeepScanSettingsSchema.shape.subagents,
+      deep: z
+        .strictObject({
+          workers: DeepScanSettingsSchema.shape.workers,
+          subagents_per_worker: DeepScanSettingsSchema.shape.subagents,
+          stop_after_no_new: DeepScanSettingsSchema.shape.stopAfterNoNew,
+          stop_after_consecutive_errors:
+            DeepScanSettingsSchema.shape.stopAfterConsecutiveErrors,
+          max_discovery_runs: DeepScanSettingsSchema.shape.maxDiscoveryRuns,
+          max_time_hours: DeepScanSettingsSchema.shape.maxTimeHours,
         })
         .optional()
         .describe(
@@ -74,14 +80,14 @@ export const ProjectConfigInputSchema = z.strictObject({
     ),
   limits: z
     .strictObject({
-      maxCostUsdPerScan: ScanSettingsSchema.shape.maxCostUsd.describe(
+      max_cost_usd_per_scan: ScanSettingsSchema.shape.maxCostUsd.describe(
         "Estimated USD limit per launched scan attempt, not a total batch budget. Omit for no limit.",
       ),
     })
     .optional(),
   policy: z
     .strictObject({
-      failOnSeverity: FailureSeveritySchema.optional().describe(
+      fail_on_severity: FailureSeveritySchema.optional().describe(
         "Exit threshold; does not filter retained findings. Omit for report-only behavior.",
       ),
     })

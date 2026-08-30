@@ -6783,10 +6783,10 @@ async function executeScan(
     });
     progress?.stopTimer();
     if (arguments_.projectConfig !== undefined) {
-      for (const [name] of DEEP_SCAN_SETTINGS) {
+      for (const [name, key] of DEEP_SCAN_SETTINGS) {
         const source = preflight.deepScanSources?.[name];
         if (source === undefined || source === "override") continue;
-        const field = name === "subagents" ? "subagentsPerWorker" : name;
+        const field = name === "subagents" ? "subagents_per_worker" : key;
         arguments_.projectConfig.sources[`scan.deep.${field}`] = source;
       }
     }
@@ -7380,11 +7380,11 @@ function resolveCliScope(
   if (overrides.paths?.length) scope = { paths: overrides.paths };
   else if (overrides.diff !== undefined)
     scope = { diff: { base: overrides.diff } };
-  else if (overrides.workingTree === true) scope = { workingTree: {} };
+  else if (overrides.workingTree === true) scope = { working_tree: {} };
   else if (
     overrides.workingTree === false &&
     scope !== undefined &&
-    "workingTree" in scope
+    "working_tree" in scope
   ) {
     scope = undefined;
     changed = true;
@@ -7401,10 +7401,10 @@ function resolveCliScope(
     changed = true;
   }
   if (overrides.base !== undefined) {
-    if (scope === undefined || !("workingTree" in scope))
+    if (scope === undefined || !("working_tree" in scope))
       throw new ConfigurationError("--base requires --working-tree.");
-    scope = { workingTree: { base: overrides.base } };
-    sources["scan.scope.workingTree.base"] = "cli";
+    scope = { working_tree: { base: overrides.base } };
+    sources["scan.scope.working_tree.base"] = "cli";
     changed = true;
   }
   return {

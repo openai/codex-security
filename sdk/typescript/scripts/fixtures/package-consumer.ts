@@ -62,7 +62,17 @@ export async function scan(repository: string): Promise<ScanResult> {
   }
 }
 
-export function configuredScanOptions(input: ProjectConfigInput): ScanSettings {
+export function configuredScanOptions(
+  input: ProjectConfigInput = {
+    scan: {
+      mode: "deep",
+      scope: { paths: ["src"] },
+      deep: { subagents_per_worker: 0, stop_after_consecutive_errors: 2 },
+    },
+    limits: { max_cost_usd_per_scan: 5 },
+    policy: { fail_on_severity: "high" },
+  },
+): ScanSettings {
   return resolveProjectConfig(input).options;
 }
 

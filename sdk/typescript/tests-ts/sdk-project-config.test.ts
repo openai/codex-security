@@ -37,19 +37,25 @@ test.each(["standard", "deep"] as const)(
       maxDiscoveryRuns: 6,
       maxTimeHours: 1.5,
     };
-    const { subagents, ...fileDeep } = deep;
     const input = {
       auth: "api-key",
       scan: {
         mode,
         scope: { paths: ["src"] },
-        knowledgeBase: ["context.md"],
-        instructionsFile: "scan.md",
-        deep: { ...fileDeep, subagentsPerWorker: subagents },
+        knowledge_base: ["context.md"],
+        instructions_file: "scan.md",
+        deep: {
+          workers: 2,
+          subagents_per_worker: 0,
+          stop_after_no_new: 3,
+          stop_after_consecutive_errors: 2,
+          max_discovery_runs: 6,
+          max_time_hours: 1.5,
+        },
       },
       output: { directory: "../output" },
-      limits: { maxCostUsdPerScan: 5 },
-      policy: { failOnSeverity: "high" },
+      limits: { max_cost_usd_per_scan: 5 },
+      policy: { fail_on_severity: "high" },
       codex: {
         profile: "review",
         profiles: {
@@ -218,7 +224,7 @@ test("typed configuration keeps repository-relative scopes and does not discover
   for (const [scope, target] of [
     [{ paths: ["src"] }, ["src"]],
     [{ diff: { base: "HEAD~1" } }, DiffTarget.refs({ base: "HEAD~1" })],
-    [{ workingTree: {} }, DiffTarget.workingTree({})],
+    [{ working_tree: {} }, DiffTarget.workingTree({})],
   ] as const) {
     expect(
       resolveProjectConfig(
@@ -233,8 +239,9 @@ test("public file and object entry points reject the same invalid settings", asy
   const directory = await temporaryDirectory();
   for (const input of [
     { scan: { workres: 2 } },
-    { limits: { maxCostUsdPerScan: 0 } },
-    { scan: { deep: { subagentsPerWorker: -1 } } },
+    { limits: { max_cost_usd_per_scan: 0 } },
+    { scan: { deep: { subagents_per_worker: -1 } } },
+    { limits: { maxCostUsdPerScan: 5 } },
     JSON.parse('{"codex":{"__proto__":{"synthetic":true}}}'),
   ]) {
     const file = join(directory, "scan.json");

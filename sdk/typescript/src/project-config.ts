@@ -139,7 +139,7 @@ export function resolveScanSettings(
     auth: "default",
     "scan.mode": "default",
     "scan.scope": "default",
-    "scan.knowledgeBase": "default",
+    "scan.knowledge_base": "default",
   };
   const choose = <T>(
     key: string,
@@ -180,8 +180,8 @@ export function resolveScanSettings(
   const configuredDeep = file?.scan?.deep;
   const deep: DeepScanOptions = {};
   if (mode === "deep") {
-    for (const [name] of DEEP_SCAN_SETTINGS) {
-      const field = name === "subagents" ? "subagentsPerWorker" : name;
+    for (const [name, key] of DEEP_SCAN_SETTINGS) {
+      const field = name === "subagents" ? "subagents_per_worker" : key;
       const value = choose(
         `scan.deep.${field}`,
         configuredDeep?.[field],
@@ -218,8 +218,8 @@ export function resolveScanSettings(
   recordNativeSources(overrides.codexOverrides ?? {}, "cli");
   const knowledgeBasePaths =
     choose(
-      "scan.knowledgeBase",
-      file?.scan?.knowledgeBase?.map((value) => filePath(value)!),
+      "scan.knowledge_base",
+      file?.scan?.knowledge_base?.map((value) => filePath(value)!),
       overrides.knowledgeBasePaths?.map((value) => cliPath(value)!),
     ) ?? [];
   const settings: ResolvedScanSettings = {
@@ -229,13 +229,13 @@ export function resolveScanSettings(
     target,
     knowledgeBasePaths,
     scanPromptFile: choose(
-      "scan.instructionsFile",
-      filePath(file?.scan?.instructionsFile),
+      "scan.instructions_file",
+      filePath(file?.scan?.instructions_file),
       cliPath(overrides.scanPromptFile),
     ),
     validationPromptFile: choose(
-      "scan.validationFile",
-      filePath(file?.scan?.validationFile),
+      "scan.validation_file",
+      filePath(file?.scan?.validation_file),
       cliPath(overrides.validationPromptFile),
     ),
     outputDir: choose(
@@ -244,13 +244,13 @@ export function resolveScanSettings(
       cliPath(overrides.outputDir),
     ),
     failureSeverity: choose(
-      "policy.failOnSeverity",
-      file?.policy?.failOnSeverity,
+      "policy.fail_on_severity",
+      file?.policy?.fail_on_severity,
       overrides.failureSeverity,
     ),
     maxCostUsd: choose(
-      "limits.maxCostUsdPerScan",
-      file?.limits?.maxCostUsdPerScan,
+      "limits.max_cost_usd_per_scan",
+      file?.limits?.max_cost_usd_per_scan,
       overrides.maxCostUsd,
     ),
     ...deep,
@@ -270,5 +270,5 @@ export function projectScopeTarget(
   if (scope === undefined) return undefined;
   if ("paths" in scope) return [...scope.paths];
   if ("diff" in scope) return DiffTarget.refs(scope.diff);
-  return DiffTarget.workingTree(scope.workingTree);
+  return DiffTarget.workingTree(scope.working_tree);
 }

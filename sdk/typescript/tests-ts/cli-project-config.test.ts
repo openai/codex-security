@@ -47,12 +47,12 @@ test("actual CLI parsing preserves file values when flags are absent", async () 
       scope: { paths: ["src"] },
       deep: {
         workers: 8,
-        subagentsPerWorker: 0,
-        stopAfterConsecutiveErrors: 2,
+        subagents_per_worker: 0,
+        stop_after_consecutive_errors: 2,
       },
     },
-    limits: { maxCostUsdPerScan: 7 },
-    policy: { failOnSeverity: "high" },
+    limits: { max_cost_usd_per_scan: 7 },
+    policy: { fail_on_severity: "high" },
     codex: { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
   });
   let selected: ScanOptions | undefined;
@@ -105,11 +105,11 @@ test("CLI values override matching file values, including native objects and lis
     scan: {
       mode: "deep",
       scope: { paths: ["src"] },
-      knowledgeBase: ["file-context.md"],
-      deep: { workers: 8, subagentsPerWorker: 3 },
+      knowledge_base: ["file-context.md"],
+      deep: { workers: 8, subagents_per_worker: 3 },
     },
-    limits: { maxCostUsdPerScan: 7 },
-    policy: { failOnSeverity: "high" },
+    limits: { max_cost_usd_per_scan: 7 },
+    policy: { fail_on_severity: "high" },
     codex: {
       model: "gpt-5.6-sol",
       synthetic_setting: { enabled: true, names: ["first"] },
@@ -187,11 +187,11 @@ test.each([
     { kind: "refs", base: "HEAD", head: "HEAD" },
   ],
   [
-    { workingTree: {} },
+    { working_tree: {} },
     ["--base", "HEAD~1"],
     { kind: "working_tree", base: "HEAD~1" },
   ],
-  [{ workingTree: {} }, ["--no-working-tree"], "repository"],
+  [{ working_tree: {} }, ["--no-working-tree"], "repository"],
 ] as const)(
   "resolves scope %j with overrides %j",
   async (scope, flags, target) => {
@@ -254,7 +254,10 @@ test.each([
 
 test("selecting standard mode leaves inactive file deep settings out of the active scan", async () => {
   const input = await fixture({
-    scan: { mode: "deep", deep: { workers: 8, stopAfterConsecutiveErrors: 2 } },
+    scan: {
+      mode: "deep",
+      deep: { workers: 8, stop_after_consecutive_errors: 2 },
+    },
   });
   let selected: ScanOptions | undefined;
   expect(
@@ -277,7 +280,7 @@ test("selecting standard mode leaves inactive file deep settings out of the acti
 
 test("file prompts use the config directory and CLI prompt overrides use the invocation directory", async () => {
   const input = await fixture({
-    scan: { instructionsFile: "scan.md", validationFile: "validate.md" },
+    scan: { instructions_file: "scan.md", validation_file: "validate.md" },
   });
   await writeFile(
     join(input.configDirectory, "scan.md"),
@@ -484,7 +487,7 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     scan: {
       mode: "deep",
       scope: { paths: ["src"] },
-      deep: { workers: 8, stopAfterConsecutiveErrors: 2 },
+      deep: { workers: 8, stop_after_consecutive_errors: 2 },
     },
     codex: {
       profile: "review",
@@ -493,7 +496,7 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
         review: { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
       },
     },
-    policy: { failOnSeverity: "high" },
+    policy: { fail_on_severity: "high" },
   });
   const ambient = join(input.root, "ambient");
   await mkdir(join(ambient, "codex-security"), { recursive: true });
@@ -564,9 +567,9 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
       path: input.config,
       sources: {
         "scan.deep.workers": "project",
-        "scan.deep.subagentsPerWorker": "cli",
-        "scan.deep.stopAfterNoNew": "legacy",
-        "scan.deep.maxTimeHours": "default",
+        "scan.deep.subagents_per_worker": "cli",
+        "scan.deep.stop_after_no_new": "legacy",
+        "scan.deep.max_time_hours": "default",
         "codex.model": "cli",
         "codex.profiles.review.model": "project",
       },
@@ -578,7 +581,7 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
 test.each([
   [{ output: { directory: "../repository/artifacts" } }, "outside"],
   [{ codex: { plugins: {} } }, "plugin"],
-  [{ scan: { mode: "deep", validationFile: "validate.md" } }, "Deep"],
+  [{ scan: { mode: "deep", validation_file: "validate.md" } }, "Deep"],
 ] as const)(
   "project files retain active scan checks: %j",
   async (config, message) => {

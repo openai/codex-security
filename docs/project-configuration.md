@@ -19,18 +19,20 @@ For a project with a `src` directory:
 scan:
   scope:
     paths: [src]
-  knowledgeBase: [SECURITY.md, docs/architecture.md]
+  knowledge_base: [SECURITY.md, docs/architecture.md]
 codex:
   model: gpt-5.6-sol
   model_reasoning_effort: xhigh
 policy:
-  failOnSeverity: high
+  fail_on_severity: high
 ```
 
 All settings are optional; `{}` uses the existing defaults. No `version` field
 is needed. Unknown wrapper keys and invalid types are errors. Values are literal:
 there is no executable configuration, environment interpolation, remote include,
-or multiple-file merge. Wrapper `null` values do not reset settings.
+or multiple-file merge. Wrapper `null` values do not reset settings. Project-file
+keys use `snake_case`, matching native Codex configuration. Keys inside `codex`
+keep their native spelling; names and values are not converted.
 
 The [YAML example](examples/codex-security.yaml) and equivalent
 [JSON example](examples/codex-security.json) select this repository's TypeScript
@@ -46,19 +48,19 @@ node sdk/typescript/bin/codex-security.mjs scan . -c docs/examples/codex-securit
 
 ## Settings
 
-| Field                      | Meaning                                                                      | Default                            |
-| -------------------------- | ---------------------------------------------------------------------------- | ---------------------------------- |
-| `auth`                     | Credential source: `auto`, `chatgpt`, or `api-key`; never a credential value | `auto`                             |
-| `scan.mode`                | `standard` or `deep`                                                         | `standard`                         |
-| `scan.scope`               | Exactly one of `paths: [src]`, `diff: {base: HEAD}`, or `workingTree: {}`    | Whole repository                   |
-| `scan.knowledgeBase`       | Context files or directories                                                 | Empty list                         |
-| `scan.instructionsFile`    | Additional scan instructions                                                 | Unset                              |
-| `scan.validationFile`      | Custom validation instructions; incompatible with active deep mode           | Built-in validation                |
-| `scan.deep`                | Deep discovery settings shown below                                          | Existing deep defaults             |
-| `codex`                    | Native Codex settings and profiles                                           | Existing isolated configuration    |
-| `limits.maxCostUsdPerScan` | Estimated USD limit for one scan attempt                                     | No limit                           |
-| `policy.failOnSeverity`    | Exit threshold: `critical`, `high`, `medium`, or `low`                       | Report-only                        |
-| `output.directory`         | Artifact directory outside the scanned Git worktree                          | Existing private artifact location |
+| Field                          | Meaning                                                                      | Default                            |
+| ------------------------------ | ---------------------------------------------------------------------------- | ---------------------------------- |
+| `auth`                         | Credential source: `auto`, `chatgpt`, or `api-key`; never a credential value | `auto`                             |
+| `scan.mode`                    | `standard` or `deep`                                                         | `standard`                         |
+| `scan.scope`                   | Exactly one of `paths: [src]`, `diff: {base: HEAD}`, or `working_tree: {}`   | Whole repository                   |
+| `scan.knowledge_base`          | Context files or directories                                                 | Empty list                         |
+| `scan.instructions_file`       | Additional scan instructions                                                 | Unset                              |
+| `scan.validation_file`         | Custom validation instructions; incompatible with active deep mode           | Built-in validation                |
+| `scan.deep`                    | Deep discovery settings shown below                                          | Existing deep defaults             |
+| `codex`                        | Native Codex settings and profiles                                           | Existing isolated configuration    |
+| `limits.max_cost_usd_per_scan` | Estimated USD limit for one scan attempt                                     | No limit                           |
+| `policy.fail_on_severity`      | Exit threshold: `critical`, `high`, `medium`, or `low`                       | Report-only                        |
+| `output.directory`             | Artifact directory outside the scanned Git worktree                          | Existing private artifact location |
 
 The file configures scan settings. Patching, PR creation, publication, post-scan
 actions, and machine-specific plugin or Python selection remain explicit CLI/SDK
@@ -67,28 +69,30 @@ inputs.
 ## SDK and CLI contract
 
 The SDK's `ScanSettings` type is shared by `ScanOptions`, CLI resolution, and
-project-file resolution. Existing names stay compatible:
+project-file resolution. Project files and typed `ProjectConfigInput` objects
+use `snake_case`; SDK options keep `camelCase`, and CLI flags keep `kebab-case`.
+The resolver maps file keys to the existing SDK options:
 
-| Project file                           | SDK option                            | CLI flag                        |
-| -------------------------------------- | ------------------------------------- | ------------------------------- |
-| `auth`                                 | `auth`                                | `--auth`                        |
-| `scan.mode`                            | `mode`                                | `--mode`                        |
-| `scan.scope.paths`                     | `target: ["src"]`                     | `--path`                        |
-| `scan.scope.diff`                      | `target: DiffTarget.refs(...)`        | `--diff`, `--head`              |
-| `scan.scope.workingTree`               | `target: DiffTarget.workingTree(...)` | `--working-tree`, `--base`      |
-| `scan.knowledgeBase`                   | `knowledgeBasePaths`                  | `--knowledge-base`              |
-| `scan.instructionsFile`                | `scanPromptFile`                      | `--scan-prompt-file`            |
-| `scan.validationFile`                  | `validationPromptFile`                | `--validation-prompt-file`      |
-| `scan.deep.workers`                    | `workers`                             | `--workers`                     |
-| `scan.deep.subagentsPerWorker`         | `subagents`                           | `--subagents`                   |
-| `scan.deep.stopAfterNoNew`             | `stopAfterNoNew`                      | `--stop-after-no-new`           |
-| `scan.deep.stopAfterConsecutiveErrors` | `stopAfterConsecutiveErrors`          | No flag                         |
-| `scan.deep.maxDiscoveryRuns`           | `maxDiscoveryRuns`                    | `--max-discovery-runs`          |
-| `scan.deep.maxTimeHours`               | `maxTimeHours`                        | `--max-time-hours`              |
-| `limits.maxCostUsdPerScan`             | `maxCostUsd`                          | `--max-cost`                    |
-| `policy.failOnSeverity`                | `failureSeverity`                     | `--fail-on-severity`            |
-| `output.directory`                     | `outputDir`                           | `--output-dir`                  |
-| `codex`                                | Constructor `codexOverrides`          | `--codex`, model/provider flags |
+| Project file                              | SDK option                            | CLI flag                        |
+| ----------------------------------------- | ------------------------------------- | ------------------------------- |
+| `auth`                                    | `auth`                                | `--auth`                        |
+| `scan.mode`                               | `mode`                                | `--mode`                        |
+| `scan.scope.paths`                        | `target: ["src"]`                     | `--path`                        |
+| `scan.scope.diff`                         | `target: DiffTarget.refs(...)`        | `--diff`, `--head`              |
+| `scan.scope.working_tree`                 | `target: DiffTarget.workingTree(...)` | `--working-tree`, `--base`      |
+| `scan.knowledge_base`                     | `knowledgeBasePaths`                  | `--knowledge-base`              |
+| `scan.instructions_file`                  | `scanPromptFile`                      | `--scan-prompt-file`            |
+| `scan.validation_file`                    | `validationPromptFile`                | `--validation-prompt-file`      |
+| `scan.deep.workers`                       | `workers`                             | `--workers`                     |
+| `scan.deep.subagents_per_worker`          | `subagents`                           | `--subagents`                   |
+| `scan.deep.stop_after_no_new`             | `stopAfterNoNew`                      | `--stop-after-no-new`           |
+| `scan.deep.stop_after_consecutive_errors` | `stopAfterConsecutiveErrors`          | No flag                         |
+| `scan.deep.max_discovery_runs`            | `maxDiscoveryRuns`                    | `--max-discovery-runs`          |
+| `scan.deep.max_time_hours`                | `maxTimeHours`                        | `--max-time-hours`              |
+| `limits.max_cost_usd_per_scan`            | `maxCostUsd`                          | `--max-cost`                    |
+| `policy.fail_on_severity`                 | `failureSeverity`                     | `--fail-on-severity`            |
+| `output.directory`                        | `outputDir`                           | `--output-dir`                  |
+| `codex`                                   | Constructor `codexOverrides`          | `--codex`, model/provider flags |
 
 Use an explicit file with `loadProjectConfig()`:
 
@@ -117,7 +121,7 @@ import {
 
 const input = {
   scan: { mode: "deep", scope: { paths: ["src"] } },
-  limits: { maxCostUsdPerScan: 5 },
+  limits: { max_cost_usd_per_scan: 5 },
 } satisfies ProjectConfigInput;
 const { config, options } = resolveProjectConfig(input, process.cwd());
 ```
@@ -185,13 +189,13 @@ scan:
   mode: deep
   deep:
     workers: 4
-    subagentsPerWorker: 3
-    stopAfterNoNew: 4
-    stopAfterConsecutiveErrors: 3
-    maxDiscoveryRuns: 40
-    maxTimeHours: 96
+    subagents_per_worker: 3
+    stop_after_no_new: 4
+    stop_after_consecutive_errors: 3
+    max_discovery_runs: 40
+    max_time_hours: 96
 limits:
-  maxCostUsdPerScan: 10
+  max_cost_usd_per_scan: 10
 ```
 
 These deep settings show the existing defaults, shared with the Python plugin.
@@ -205,9 +209,9 @@ still require deep mode. Deep diff scans and custom validation remain unsupporte
 Counts retain their existing bounds; zero subagents is valid, and discovery time
 cannot exceed 96 hours.
 
-`maxCostUsdPerScan` has the same meaning as `--max-cost`: an estimated limit for one
+`max_cost_usd_per_scan` has the same meaning as `--max-cost`: an estimated limit for one
 scan attempt. In-flight work may exceed it. It is not a total budget for a batch or
-follow-up actions. `failOnSeverity` changes the exit status without filtering the
+follow-up actions. `fail_on_severity` changes the exit status without filtering the
 retained findings.
 
 ## Dry run and editor support
@@ -222,6 +226,9 @@ With `-c`, the output also includes `projectConfig.path`, per-setting sources,
 selected instruction/validation file paths, and the finding policy. Native sources
 identify which layer supplied a key; profile selection still determines the
 effective model and effort. Raw native configuration and credentials are not dumped.
+Source paths use the project-file spelling, such as
+`scan.deep.stop_after_no_new`; existing output properties such as `deepScanSources`
+keep their names.
 
 Help, version, and command schema output do not load project files. Missing,
 malformed, or invalid selected files exit `2`. Scan exit codes remain `0` for

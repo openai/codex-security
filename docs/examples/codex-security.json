@@ -8,5 +8,5 @@
     "model": "gpt-5.6-sol",
     "model_reasoning_effort": "xhigh"
   },
-  "policy": { "failOnSeverity": "high" }
+  "policy": { "fail_on_severity": "high" }
 }

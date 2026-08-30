@@ -42,14 +42,14 @@ const cases: [string, unknown, boolean][] = [
     {
       scan: {
         mode: "deep",
-        deep: { workers: 4, subagentsPerWorker: 0, maxTimeHours: 96 },
+        deep: { workers: 4, subagents_per_worker: 0, max_time_hours: 96 },
       },
     },
     true,
   ],
   [
     "working tree with an absent base",
-    { scan: { scope: { workingTree: {} } } },
+    { scan: { scope: { working_tree: {} } } },
     true,
   ],
   [
@@ -57,7 +57,7 @@ const cases: [string, unknown, boolean][] = [
     { scan: { scope: { diff: { base: "HEAD" } } } },
     true,
   ],
-  ["empty context list", { scan: { knowledgeBase: [] } }, true],
+  ["empty context list", { scan: { knowledge_base: [] } }, true],
   [
     "editor metadata",
     { $schema: "../schemas/project-config.schema.json" },
@@ -82,11 +82,24 @@ const cases: [string, unknown, boolean][] = [
   ],
   [
     "custom validation may be overridden later",
-    { scan: { mode: "deep", validationFile: "validate.md" } },
+    { scan: { mode: "deep", validation_file: "validate.md" } },
     true,
   ],
   ["unknown wrapper key", { concurrency: 4 }, false],
   ["unknown scan key", { scan: { workres: 4 } }, false],
+  [
+    "camelCase names are not project-file keys",
+    {
+      scan: {
+        knowledgeBase: [],
+        deep: { stopAfterNoNew: 4 },
+        scope: { workingTree: {} },
+      },
+      limits: { maxCostUsdPerScan: 5 },
+      policy: { failOnSeverity: "high" },
+    },
+    false,
+  ],
   [
     "repository selection is not file configuration",
     { repository: "." },
@@ -104,13 +117,17 @@ const cases: [string, unknown, boolean][] = [
   ["zero workers", { scan: { deep: { workers: 0 } } }, false],
   ["fractional workers", { scan: { deep: { workers: 1.5 } } }, false],
   ["no string coercion", { scan: { deep: { workers: "4" } } }, false],
-  ["negative subagents", { scan: { deep: { subagentsPerWorker: -1 } } }, false],
   [
-    "hours above the existing maximum",
-    { scan: { deep: { maxTimeHours: 97 } } },
+    "negative subagents",
+    { scan: { deep: { subagents_per_worker: -1 } } },
     false,
   ],
-  ["nonpositive cost", { limits: { maxCostUsdPerScan: 0 } }, false],
+  [
+    "hours above the existing maximum",
+    { scan: { deep: { max_time_hours: 97 } } },
+    false,
+  ],
+  ["nonpositive cost", { limits: { max_cost_usd_per_scan: 0 } }, false],
   ["incorrect native model type", { codex: { model: 42 } }, false],
 ];
 
@@ -158,12 +175,12 @@ describe("project configuration input contract", () => {
     const yaml = join(root, "scan.yaml");
     const json = join(root, "scan.json");
     const input = {
-      scan: { deep: { subagentsPerWorker: 0 } },
+      scan: { deep: { subagents_per_worker: 0 } },
       codex: { synthetic_setting: "${LITERAL_VALUE}" },
     } satisfies ProjectConfigInput;
     await writeFile(
       yaml,
-      "scan:\n  deep:\n    subagentsPerWorker: 0\ncodex:\n  synthetic_setting: ${LITERAL_VALUE}\n",
+      "scan:\n  deep:\n    subagents_per_worker: 0\ncodex:\n  synthetic_setting: ${LITERAL_VALUE}\n",
     );
     await writeFile(json, JSON.stringify(input));
     expect((await readProjectConfig(yaml)).input).toEqual(input);
@@ -200,9 +217,9 @@ describe("project configuration resolution", () => {
       input: {
         scan: {
           scope: { paths: ["src"] },
-          knowledgeBase: ["context.md"],
-          instructionsFile: "scan.md",
-          validationFile: "validate.md",
+          knowledge_base: ["context.md"],
+          instructions_file: "scan.md",
+          validation_file: "validate.md",
         },
         output: { directory: "../artifacts" },
       } satisfies ProjectConfigInput,
@@ -224,27 +241,30 @@ describe("project configuration resolution", () => {
       outputDir: join(root, "artifacts"),
     });
     expect(provenance?.sources).toMatchObject({
-      "scan.knowledgeBase": "cli",
-      "scan.instructionsFile": "project",
-      "scan.validationFile": "cli",
+      "scan.knowledge_base": "cli",
+      "scan.instructions_file": "project",
+      "scan.validation_file": "cli",
       "output.directory": "project",
     });
-    expect(project.input.scan.knowledgeBase).toEqual(["context.md"]);
+    expect(project.input.scan.knowledge_base).toEqual(["context.md"]);
   });
 
-  test("retains valid false and zero native values and native profile structure", async () => {
+  test("keeps native key spelling and false/zero values when merging overrides", async () => {
     const root = await temporaryDirectory();
     const project = {
       path: join(root, "scan.yaml"),
       directory: root,
       input: {
-        scan: { mode: "deep", deep: { subagentsPerWorker: 3, workers: 8 } },
+        scan: { mode: "deep", deep: { subagents_per_worker: 3, workers: 8 } },
         codex: {
-          profile: "review",
+          profile: "reviewCase",
           profiles: {
-            review: { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
+            reviewCase: {
+              model: "gpt-5.6-terra",
+              model_reasoning_effort: "high",
+            },
           },
-          synthetic_setting: { enabled: true, count: 2, names: ["first"] },
+          synthetic_setting: { enabled: true, itemCount: 2, names: ["first"] },
         },
       } satisfies ProjectConfigInput,
     };
@@ -258,7 +278,7 @@ describe("project configuration resolution", () => {
         subagents: 0,
         codexOverrides: {
           model: "gpt-5.6-sol",
-          synthetic_setting: { enabled: false, count: 0, names: [] },
+          synthetic_setting: { enabled: false, itemCount: 0, names: [] },
         },
       },
       root,
@@ -270,16 +290,17 @@ describe("project configuration resolution", () => {
     expect(config).toEqual({
       codexOverrides: {
         model: "gpt-5.6-sol",
-        profile: "review",
+        profile: "reviewCase",
         profiles: project.input.codex.profiles,
-        synthetic_setting: { enabled: false, count: 0, names: [] },
+        synthetic_setting: { enabled: false, itemCount: 0, names: [] },
       },
     });
     expect(provenance?.sources).toMatchObject({
-      "scan.deep.subagentsPerWorker": "cli",
+      "scan.deep.subagents_per_worker": "cli",
       "scan.deep.workers": "project",
       "codex.model": "cli",
-      "codex.profiles.review.model": "project",
+      "codex.profiles.reviewCase.model": "project",
+      "codex.synthetic_setting.itemCount": "cli",
     });
   });
 

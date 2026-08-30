@@ -187,13 +187,15 @@ if (
 ```
 
 `resolveProjectConfig(input, directory?)` accepts a typed `ProjectConfigInput`
-object with the same structure as YAML/JSON and returns the same `{ config,
+object with the same `snake_case` keys as YAML/JSON and returns the same `{ config,
 options }` pair. `loadProjectConfig(file, directory?)` resolves the selected file
 from `directory`, which defaults to the current directory; paths inside the file
 are relative to that file. Object paths are relative to the supplied directory.
 Scope paths remain relative to the selected repository. Neither helper starts a
 scan, reads prompt contents, or discovers another configuration file. `preflight`
 and `run` apply the existing local checks and remaining legacy deep defaults.
+Project-file keys follow Codex's configuration convention; SDK options keep their
+existing `camelCase` names, and CLI flags keep `kebab-case`.
 
 Override resolved SDK options with `{ ...options, maxCostUsd: 5 }`, or add
 callbacks there. Direct SDK prompt-file paths use the current directory; inline
@@ -330,7 +332,7 @@ codex:
   model: gpt-5.6-sol
   model_reasoning_effort: xhigh
 policy:
-  failOnSeverity: high
+  fail_on_severity: high
 ```
 
 All settings are optional; `{}` uses the existing defaults. JSON files can use a
@@ -494,7 +496,7 @@ max_time_hours = 96
 ```
 
 CLI and SDK options override these defaults. Project files can use
-`scan.deep.stopAfterConsecutiveErrors`, and SDK calls can use
+`scan.deep.stop_after_consecutive_errors`, and SDK calls can use
 `stopAfterConsecutiveErrors`; there is no new CLI flag for it. `--codex` cannot
 configure this section. Worker and run counts must
 be positive integers; `subagents` can be zero. Legacy `workers = "auto"` means
@@ -506,7 +508,7 @@ At the deadline, discovery stops; the scan combines and returns completed findin
 `scan --workers` controls discovery workers within one deep scan;
 `bulk-scan --workers` controls how many repositories are scanned concurrently.
 
-The project-file deep block uses `subagentsPerWorker` for the existing SDK/CLI
+The project-file deep block uses `subagents_per_worker` for the existing SDK/CLI
 `subagents` setting. A valid deep block can remain inactive in standard mode;
 explicit deep CLI options require deep mode. All six active values are resolved
 before runtime preparation and saved in new recipes. Complete saved values are

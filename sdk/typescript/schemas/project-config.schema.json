@@ -60,7 +60,7 @@
             {
               "type": "object",
               "properties": {
-                "workingTree": {
+                "working_tree": {
                   "type": "object",
                   "properties": {
                     "base": {
@@ -72,22 +72,22 @@
                   "additionalProperties": false
                 }
               },
-              "required": ["workingTree"],
+              "required": ["working_tree"],
               "additionalProperties": false
             }
           ]
         },
-        "knowledgeBase": {
+        "knowledge_base": {
           "description": "Context files or directories, relative to this file. An empty list selects no additional context.",
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
         },
-        "instructionsFile": {
+        "instructions_file": {
           "description": "Additional scan instructions, relative to this file.",
           "type": "string",
           "minLength": 1
         },
-        "validationFile": {
+        "validation_file": {
           "description": "Custom validation instructions, relative to this file; not supported in active deep scans.",
           "type": "string",
           "minLength": 1
@@ -103,40 +103,40 @@
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             },
-            "stopAfterNoNew": {
+            "subagents_per_worker": {
+              "default": 3,
+              "description": "Subagents available to each deep-scan worker. Zero is valid.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "stop_after_no_new": {
               "default": 4,
               "description": "Stop after this many runs find no new issues.",
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             },
-            "stopAfterConsecutiveErrors": {
+            "stop_after_consecutive_errors": {
               "default": 3,
               "description": "Stop after this many consecutive discovery errors.",
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             },
-            "maxDiscoveryRuns": {
+            "max_discovery_runs": {
               "default": 40,
               "description": "Maximum deep-scan discovery runs.",
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             },
-            "maxTimeHours": {
+            "max_time_hours": {
               "default": 96,
               "description": "Maximum deep-scan discovery hours (default: 96; maximum: 96).",
               "type": "number",
               "exclusiveMinimum": 0,
               "maximum": 96
-            },
-            "subagentsPerWorker": {
-              "default": 3,
-              "description": "Subagents available to each deep-scan worker. Zero is valid.",
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
             }
           },
           "additionalProperties": false
@@ -157,7 +157,7 @@
     "limits": {
       "type": "object",
       "properties": {
-        "maxCostUsdPerScan": {
+        "max_cost_usd_per_scan": {
           "description": "Estimated USD limit per launched scan attempt, not a total batch budget. Omit for no limit.",
           "type": "number",
           "exclusiveMinimum": 0
@@ -168,7 +168,7 @@
     "policy": {
       "type": "object",
       "properties": {
-        "failOnSeverity": {
+        "fail_on_severity": {
           "description": "Exit threshold; does not filter retained findings. Omit for report-only behavior.",
           "type": "string",
           "enum": ["critical", "high", "medium", "low"]
