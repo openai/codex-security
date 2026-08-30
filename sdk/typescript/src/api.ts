@@ -157,7 +157,7 @@ import {
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
-  pluginPythonReadRoots,
+  pluginPythonRuntime,
   planOutputArchive,
   prepareScanArtifactRestorer,
   prepareOutputDir,
@@ -940,34 +940,47 @@ export class CodexSecurity {
         options.onObserverError,
         outputDir,
       );
-      const guidance = await resolveSecurityPolicyGuidance(
+      let guidance = await resolveSecurityPolicyGuidance(
         target,
         python,
         runtime.plugin.pluginRoot,
         session.scanEnvironment,
         signal,
       );
+      for (const path of inputs.policyPaths) {
+        const targetPath = join(target.repository, path);
+        if (targetPath === target.targetPath) continue;
+        const policyGuidance = await resolveSecurityPolicyGuidance(
+          { ...target, targetPath },
+          python,
+          runtime.plugin.pluginRoot,
+          session.scanEnvironment,
+          signal,
+        );
+        guidance += `\n\nGuidance for repository-relative scope ${JSON.stringify(dirname(path))}:\n${policyGuidance}`;
+      }
       await requireUnchangedSecurityPolicy(target, snapshot, signal);
       await requireSecurityPolicyRepositoryBinding(target, signal);
+      const policyPython = await pluginPythonRuntime(python, {
+        environment: session.scanEnvironment,
+        protectedPaths: [
+          homedir(),
+          inputs.stateDirectory,
+          runtime.codexHome,
+          ...inputs.protectedRoots,
+        ],
+        signal,
+      });
       const policyReadRoots = [
-        target.repository,
+        dirname(target.targetPath),
         runtime.plugin.pluginRoot,
-        ...(await pluginPythonReadRoots(python, {
-          environment: session.scanEnvironment,
-          protectedPaths: [
-            homedir(),
-            inputs.stateDirectory,
-            runtime.codexHome,
-            ...inputs.protectedRoots,
-          ],
-          signal,
-        })),
+        ...policyPython.readRoots,
         ...(knowledgeBase === null ? [] : [knowledgeBase.path]),
       ].filter((path, index, roots) => roots.indexOf(path) === index);
       const { codex } = this.#createSessionCodex(
         session,
         {
-          PYTHON: python,
+          PYTHON: policyPython.executable,
           CODEX_SECURITY_REPOSITORY: target.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
           CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,

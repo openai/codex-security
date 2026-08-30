@@ -686,13 +686,44 @@ describe("CodexSecurity policy API", () => {
     }
   });
 
-  test("gives Codex only the checked policy inventory", async () => {
+  test.each(["path", "directory"])(
+    "limits model reads to the selected component via %s",
+    async (selection) => {
+      const f = await setup();
+      policyGit(f.repository, "init", "--quiet");
+      const component = join(f.repository, "component");
+      await mkdir(component);
+      await writeFile(
+        join(f.repository, "SECURITY.md"),
+        "# Inherited guidance\n",
+      );
+      await writeFile(join(f.repository, "unrelated.txt"), "SYNTHETIC_SIBLING");
+      await f.security.generatePolicy(
+        selection === "path" ? f.repository : component,
+        {
+          ...(selection === "path" ? { path: "component" } : {}),
+          outputDir: f.outputDir,
+        },
+      );
+      for (const thread of f.threads) {
+        expect(thread.additionalDirectories).toContain(component);
+        expect(thread.additionalDirectories).not.toContain(f.repository);
+      }
+      expect(
+        f.prompts.every((prompt) => prompt.includes("# Inherited guidance")),
+      ).toBe(true);
+      expect(f.prompts.join("\n")).not.toContain("SYNTHETIC_SIBLING");
+      await f.security.close();
+    },
+  );
+
+  test("gives Codex only the checked, host-resolved policy inventory", async () => {
     const f = await setup();
     policyGit(f.repository, "init", "--quiet");
     const component = join(f.repository, "component");
     await mkdir(join(component, "child"), { recursive: true });
     policyGit(join(component, "child"), "init", "--quiet");
-    const ownerPolicy = join(component, "owner-policy.md");
+    const ownerPolicy = join(f.repository, "owner-policy.md");
     await writeFile(ownerPolicy, "# Owner policy\n");
     await symlink(ownerPolicy, join(component, "child", "SECURITY.md"), "file");
     const outside = join(f.root, "outside");
@@ -712,8 +743,8 @@ describe("CodexSecurity policy API", () => {
     });
     expect(f.prompts[0]).toContain('["component/child/SECURITY.md"]');
     const policyScope = join(component, "child");
-    expect(f.prompts[0]).toContain(JSON.stringify([policyScope]));
-    expect(f.prompts[0]).toContain("resolve_security_md.py helper");
+    expect(f.prompts[0]).toContain("# Owner policy");
+    expect(f.threads[0]!.additionalDirectories).not.toContain(f.repository);
     expect(
       execFileSync(
         PYTHON,

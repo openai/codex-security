@@ -256,9 +256,10 @@ Cyber approval. Apply or check your access at
 `policy` drafts `SECURITY.md` guidance for future scans and can install it after
 review. It does not run a vulnerability scan or change application settings.
 Generation uses the scan runtime and authentication, requesting read-only access
-to the selected repository and required tools. Network access,
+to the selected repository or component and required tools. Network access,
 web search, apps, and MCP servers are disabled. Drafts stay outside the checkout.
-Git metadata outside the selected checkout is inspected only by the host.
+Inherited and linked policy guidance is resolved by the host. The model cannot
+read sibling components or external Git metadata.
 Knowledge-base text stays with the private review artifacts during generation
 and is removed afterward.
 

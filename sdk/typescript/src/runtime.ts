@@ -154,7 +154,7 @@ export interface PluginPythonOptions {
   signal?: AbortSignal;
 }
 
-export interface PluginPythonReadRootsOptions {
+export interface PluginPythonRuntimeOptions {
   environment?: ProcessEnvironment;
   protectedPaths: readonly string[];
   signal?: AbortSignal;
@@ -2640,10 +2640,10 @@ export async function resolvePluginPython(
   );
 }
 
-export async function pluginPythonReadRoots(
+export async function pluginPythonRuntime(
   python: string,
-  options: PluginPythonReadRootsOptions,
-): Promise<string[]> {
+  options: PluginPythonRuntimeOptions,
+): Promise<{ executable: string; readRoots: string[] }> {
   throwIfSignalAborted(options.signal);
   if (!isAbsolute(python)) {
     throw new PluginPythonUnavailableError(
@@ -2775,7 +2775,15 @@ export async function pluginPythonReadRoots(
     }
   }
   throwIfSignalAborted(options.signal);
-  return roots;
+  const prefix = runtimeDirectories[1];
+  const relativeExecutable =
+    prefix === undefined ? null : relative(prefix, python);
+  // Resolve directory aliases without changing the selected virtual environment.
+  const executable =
+    relativeExecutable !== null && !relativePathIsOutside(relativeExecutable)
+      ? join(await realpath(prefix!), relativeExecutable)
+      : await realpath(python);
+  return { executable, readRoots: roots };
 }
 
 export function pluginExecutionEnvironment(
