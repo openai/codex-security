@@ -753,7 +753,8 @@ the same destination options for a read-only check.
 ### Scan history and reruns
 
 Commands default to the current repository. Select scans by full ID or a
-unique prefix of at least eight characters.
+unique prefix of at least eight characters. Repository findings track an issue
+across scans; a scan view shows the occurrences reported by that particular run.
 
 | Command                                               | Purpose                                                                                                     |
 | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
@@ -771,8 +772,19 @@ unique prefix of at least eight characters.
 Use `findings list --scan SCAN_ID` for one saved scan, or `--all-repositories`
 for every repository. These options cannot be combined with a repository
 argument. Filter with `--query TEXT`, `--severity LEVEL`, or `--status open|closed`.
-Pages default to 20 findings; use `--limit N` to choose the page size. Start at
-offset 0 and follow `nextOffset` with `--offset N` until it is null.
+Repository and all-repository lists default to open findings; scan-specific
+lists include both statuses unless filtered.
+
+An unfiltered repository list in an interactive terminal shows all open findings.
+Filtered, scan-specific, all-repository, and machine-readable lists return one
+page. Pages default to 20 findings; use `--limit N` to choose the page size.
+Start at offset 0 and follow `nextOffset` with `--offset N` until it is null,
+keeping the same scope and filters on each request. For example:
+
+```bash
+codex-security findings list --severity high --limit 50 --json
+codex-security findings list --status closed
+```
 
 Finding lists include the occurrence IDs used by `findings show` and
 `findings false-positive`. Closed finding details distinguish fixed, false
@@ -780,11 +792,19 @@ positive, and ignored findings. An explicit triage action applies to the matched
 finding history; a later scan that reports a fixed or false-positive finding
 again reopens it.
 
+Listing and showing saved findings or scans reads local data without calling a
+model. Matching and comparisons use Codex when saved matches are unavailable,
+and save the resulting links. Rerunning a scan starts a new scan.
+
 Matching requires sealed artifacts and reuses saved matches unless you pass
 `--force`. Comparisons classify findings as new, persisting, reopened, resolved,
 or unknown. Missing findings aren't resolved if the later scan is incomplete
 or excludes their original scope. With one ID, `scans compare` compares it
 to the latest completed scan.
+
+The TypeScript SDK exposes `ScanResult.repositoryFindings` as an optional
+post-scan summary. It does not have a saved-history browsing API; scripts can
+use the CLI's paginated `--json` output.
 
 History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. The CLI and

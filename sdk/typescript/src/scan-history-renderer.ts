@@ -8,7 +8,7 @@ export type HistoryCommand =
   | "match-all"
   | "findings"
   | "finding";
-type RendererOptions = {
+export type HistoryRendererOptions = {
   columns?: number;
   color?: boolean;
   now?: number;
@@ -16,6 +16,9 @@ type RendererOptions = {
   repository?: string;
   scanRoot?: string;
   showLinkedFindings?: boolean;
+  status?: "open" | "closed";
+  query?: string;
+  severity?: string;
 };
 
 const STALE_SCAN_MILLISECONDS = 24 * 60 * 60 * 1_000;
@@ -66,7 +69,7 @@ function findingSeverity(finding: JsonObject): string {
 export function renderScanHistory(
   result: JsonObject,
   command: HistoryCommand,
-  options: RendererOptions = {},
+  options: HistoryRendererOptions = {},
 ): string {
   const color = options.color ?? true;
   const width = Math.max(48, Math.min(options.columns ?? 96, 120));
@@ -138,7 +141,7 @@ export function renderScanHistory(
       entry["locationPath"] ??
       `${location?.["path"]}${location?.["startLine"] ? `:${location["startLine"]}` : ""}`;
     lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
-    if (command === "findings" || command === "finding") {
+    if (command === "findings" || command === "finding" || command === "show") {
       const occurrenceId = entry["occurrenceId"];
       const triage = entry["triage"] as JsonObject | undefined;
       const status = triage?.["status"] ?? entry["status"];
@@ -181,7 +184,7 @@ export function renderScanHistory(
       lines.push(`              ${accent("↔")} ${strong("LINKED FINDINGS")}`);
       for (const match of matches) {
         lines.push(
-          `                ${strong("MATCHED SCAN")} ${accent(clean(match["scanId"]).slice(0, 8))}`,
+          `                ${strong("MATCHED SCAN")} ${accent(clean(match["scanId"]).slice(0, 8))}${match["occurrenceId"] ? `  ${accent("·")}  ${strong("ID")} ${clean(match["occurrenceId"])}` : ""}`,
         );
         wrap(`↳ ${clean(match["title"])}`, 18);
       }
@@ -223,14 +226,29 @@ export function renderScanHistory(
           : `0 of ${total}`
         : `${findings.length} finding${findings.length === 1 ? "" : "s"}`;
     lines.push(`  ${strong(scope)}  ${accent("·")}  ${range}`);
+    wrap(
+      [
+        `Status: ${options.status ?? "all"}`,
+        ...(options.severity === undefined
+          ? []
+          : [`Severity: ${options.severity}`]),
+        ...(options.query === undefined ? [] : [`Search: "${options.query}"`]),
+      ].join(" · "),
+      2,
+    );
     if (findings.length === 0) {
-      lines.push("", "  No saved findings match these filters.");
+      lines.push(
+        "",
+        offset > 0
+          ? `  No findings at offset ${offset}. Rerun with --offset 0 to start over.`
+          : `  No ${options.status ?? "saved"} findings match this view.`,
+      );
     }
     for (const entry of findings) {
       lines.push("");
       if (typeof entry["confirmedInLatestScan"] === "boolean") {
         lines.push(
-          `  ${strong(entry["confirmedInLatestScan"] ? "Seen this scan" : "Not confirmed in latest scan")}`,
+          `  ${strong(entry["confirmedInLatestScan"] ? "Seen in latest scan" : "Not confirmed in latest scan")}`,
         );
       }
       finding(entry, false);
@@ -239,12 +257,6 @@ export function renderScanHistory(
       lines.push(
         "",
         `  ${strong("NEXT PAGE")}  rerun with --offset ${clean(result["nextOffset"])}`,
-      );
-    }
-    if (findings.length > 0) {
-      lines.push(
-        "",
-        `  ${strong("DETAILS")}  codex-security findings show OCCURRENCE_ID`,
       );
     }
   } else if (command === "finding") {
@@ -826,5 +838,14 @@ export function renderScanHistory(
     }
   }
 
+  if (
+    (command === "findings" || command === "show") &&
+    (result["findings"] as JsonObject[]).length > 0
+  ) {
+    lines.push(
+      "",
+      `  ${strong("DETAILS")}  codex-security findings show OCCURRENCE_ID`,
+    );
+  }
   return `${lines.join("\n")}\n\n`;
 }

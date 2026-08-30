@@ -157,6 +157,7 @@ import { readScanLogs } from "./scan-logs.js";
 import {
   renderScanHistory,
   type HistoryCommand,
+  type HistoryRendererOptions,
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
 import type { PatchSelection } from "./patch-tui.js";
@@ -1610,6 +1611,9 @@ export async function main(
   let frameworkOutput = "";
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
+  const interactiveHistory =
+    output.isTTY === true &&
+    !argv.some((argument) => OUTPUT_OPTION.test(argument));
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
@@ -1687,39 +1691,28 @@ export async function main(
     result: JsonObject | undefined,
     command: HistoryCommand,
     format: string,
-    settings: {
-      repository?: string;
-      scanRoot?: string;
-      showLinkedFindings?: boolean;
-    } = {},
+    settings: HistoryRendererOptions = {},
   ): JsonObject | undefined => {
-    if (
-      result === undefined ||
-      format !== "toon" ||
-      output.isTTY !== true ||
-      argv.some((argument) => OUTPUT_OPTION.test(argument))
-    ) {
+    if (result === undefined || format !== "toon" || !interactiveHistory) {
       return result;
     }
     renderedHistory = renderScanHistory(result, command, {
+      ...settings,
       columns: output.columns,
       color:
         dependencies.environment["NO_COLOR"] === undefined &&
         dependencies.environment["TERM"] !== "dumb",
       now: dependencies.now(),
       currentDirectory: dependencies.currentDirectory(),
-      repository: settings.repository,
-      scanRoot: settings.scanRoot,
-      showLinkedFindings: settings.showLinkedFindings,
     });
     return result;
   };
   const findingFeedback = Cli.create("findings", {
-    description: "Browse, inspect, and manage security findings across scans.",
+    description: "Browse and manage saved findings (defaults to list).",
   })
     .command("list", {
       description:
-        "List repository vulnerabilities or findings from one previous scan.",
+        "List open findings across repository scans, or inspect one saved scan.",
       mcp: false,
       args: z.object({
         repository: z
@@ -1731,7 +1724,7 @@ export async function main(
         .object({
           scan: optionValue("--scan")
             .optional()
-            .describe("List every finding from a saved scan ID or prefix."),
+            .describe("Saved scan ID or unique prefix; includes all statuses."),
           allRepositories: z
             .boolean()
             .default(false)
@@ -1746,7 +1739,7 @@ export async function main(
           status: z
             .enum(["open", "closed"])
             .optional()
-            .describe("Include only findings with this triage status."),
+            .describe("Triage status (default: open; --scan includes both)."),
           offset: z
             .number()
             .int()
@@ -1758,7 +1751,7 @@ export async function main(
             .int()
             .min(1)
             .default(20)
-            .describe("Maximum findings per page (default: 20)."),
+            .describe("Findings per page."),
         })
         .refine((options) => !(options.scan && options.allRepositories), {
           message: "--scan cannot be combined with --all-repositories.",
@@ -1777,89 +1770,66 @@ export async function main(
           exitCode = 2;
           return undefined;
         }
-        const repository = options.allRepositories
-          ? undefined
-          : resolveCliPath(
-              dependencies.currentDirectory(),
-              args.repository ?? ".",
-            );
-        if (
+        const repository =
+          options.scan !== undefined || options.allRepositories
+            ? undefined
+            : resolveCliPath(
+                dependencies.currentDirectory(),
+                args.repository ?? ".",
+              );
+        const status =
+          options.status ?? (options.scan === undefined ? "open" : undefined);
+        const allPages =
           repository !== undefined &&
           format === "toon" &&
-          output.isTTY === true &&
-          !argv.some((argument) => OUTPUT_OPTION.test(argument)) &&
-          options.scan === undefined &&
-          !options.allRepositories &&
+          interactiveHistory &&
           options.query === undefined &&
           options.severity === undefined &&
           options.status === undefined &&
-          !argv.some((argument) => /^--(?:offset|limit)(?:=|$)/u.test(argument))
-        ) {
-          const scopedArguments = [
-            "list-global-findings",
-            "--repository",
-            repository,
-            "--status",
-            "open",
-          ];
-          return presentHistory(
-            await history(
-              scopedArguments,
-              async (first): Promise<JsonObject> => {
-                const findings: JsonObject[] = [];
-                let page = first;
-                while (Array.isArray(page["findings"])) {
-                  findings.push(...(page["findings"] as JsonObject[]));
-                  if (typeof page["nextOffset"] !== "number") break;
-                  page = await dependencies.runWorkbench([
-                    ...scopedArguments,
-                    "--offset",
-                    String(page["nextOffset"]),
-                  ]);
-                }
-                return { repository, findings };
-              },
-            ),
-            "findings",
-            format,
-            { repository },
+          !argv.some((argument) =>
+            /^--(?:offset|limit)(?:=|$)/u.test(argument),
           );
-        }
-        const filters = [
+        const arguments_ = [
+          ...(options.scan === undefined
+            ? ["list-global-findings"]
+            : ["list-findings", "--scan-id", options.scan]),
+          ...(repository === undefined ? [] : ["--repository", repository]),
           ...(options.query === undefined ? [] : ["--query", options.query]),
           ...(options.severity === undefined
             ? []
             : ["--severity", options.severity]),
-          ...(options.status === undefined
-            ? options.scan === undefined
-              ? ["--status", "open"]
-              : []
-            : ["--status", options.status]),
-          "--offset",
-          String(options.offset),
-          "--limit",
-          String(options.limit),
+          ...(status === undefined ? [] : ["--status", status]),
+          ...(allPages
+            ? []
+            : [
+                "--offset",
+                String(options.offset),
+                "--limit",
+                String(options.limit),
+              ]),
         ];
-        if (options.scan !== undefined) {
-          return presentHistory(
-            await history(
-              ["list-findings", "--scan-id", options.scan, ...filters],
-              ({ findingsPage }) => findingsPage as JsonObject,
-            ),
-            "findings",
-            format,
-          );
-        }
-
         return presentHistory(
-          await history([
-            "list-global-findings",
-            ...(repository === undefined ? [] : ["--repository", repository]),
-            ...filters,
-          ]),
+          await history(arguments_, async (response): Promise<JsonObject> => {
+            const page = (response["findingsPage"] ?? response) as JsonObject;
+            if (!allPages) return page;
+            const findings: JsonObject[] = [];
+            for await (const finding of workbenchFindings(
+              arguments_,
+              dependencies,
+              page,
+            )) {
+              findings.push(finding);
+            }
+            return { repository: repository!, findings };
+          }),
           "findings",
           format,
-          { repository },
+          {
+            repository,
+            status,
+            query: options.query,
+            severity: options.severity,
+          },
         );
       },
     })
@@ -2016,9 +1986,7 @@ export async function main(
         showLinkedFindings: z
           .boolean()
           .default(false)
-          .describe(
-            "Show saved links; run scans compare or scans match --all first.",
-          ),
+          .describe("Include saved finding history across scans."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
@@ -5100,23 +5068,25 @@ function meetsSeverity(finding: Finding, threshold: FailureSeverity): boolean {
 async function* workbenchFindings(
   arguments_: readonly string[],
   dependencies: CliDependencies,
-): AsyncGenerator<Finding & { scanId?: string }> {
-  let offset: number | undefined;
-  do {
-    const response = await dependencies.runWorkbench([
-      ...arguments_,
-      ...(offset === undefined ? [] : ["--offset", String(offset)]),
-    ]);
+  firstPage?: JsonObject,
+): AsyncGenerator<Finding & JsonObject & { scanId?: string }> {
+  let response = firstPage ?? (await dependencies.runWorkbench(arguments_));
+  while (true) {
     const page = (response["findingsPage"] ?? response) as {
-      findings?: (Finding & { scanId?: string })[];
+      findings?: (Finding & JsonObject & { scanId?: string })[];
       nextOffset?: unknown;
     };
     if (!Array.isArray(page.findings)) {
       throw new CodexSecurityError("Could not read saved findings.");
     }
     yield* page.findings;
-    offset = typeof page.nextOffset === "number" ? page.nextOffset : undefined;
-  } while (offset !== undefined);
+    if (typeof page.nextOffset !== "number") return;
+    response = await dependencies.runWorkbench([
+      ...arguments_,
+      "--offset",
+      String(page.nextOffset),
+    ]);
+  }
 }
 
 async function selectSavedFindings(

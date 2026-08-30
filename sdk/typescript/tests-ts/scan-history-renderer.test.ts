@@ -18,7 +18,7 @@ describe("scan history renderer", () => {
       { color: false },
     );
     expect(text).toMatch(
-      /Seen this scan[\s\S]*Current finding[\s\S]*Not confirmed in latest scan[\s\S]*Earlier finding/,
+      /Seen in latest scan[\s\S]*Current finding[\s\S]*Not confirmed in latest scan[\s\S]*Earlier finding/,
     );
   });
 
@@ -413,6 +413,26 @@ describe("scan history renderer", () => {
     expect(output).not.toContain("CLOSED");
   });
 
+  test.each([undefined, 25])(
+    "offers recovery from an empty findings page with total %s",
+    (total) => {
+      const output = renderScanHistory(
+        {
+          findings: [],
+          offset: 200,
+          ...(total === undefined ? {} : { scanId: "saved-scan", total }),
+        },
+        "findings",
+        { color: false, status: "closed" },
+      );
+
+      expect(output).toContain("offset 200");
+      expect(output).toContain("--offset 0");
+      expect(output).toContain("Status: closed");
+      expect(output).not.toContain("No saved findings");
+    },
+  );
+
   test("renders repeated finding history without a semantic match", () => {
     const output = stripVTControlCharacters(
       renderScanHistory(
@@ -435,6 +455,30 @@ describe("scan history renderer", () => {
     expect(output).toContain("Known since");
     expect(output).toContain("2 scans");
     expect(output).not.toContain("LINKED FINDINGS");
+  });
+
+  test("keeps linked occurrence identifiers available for inspection", () => {
+    const output = renderScanHistory(
+      {
+        occurrenceId: "current-occurrence",
+        scanId: "current-scan",
+        severity: { level: "high" },
+        title: "Missing authorization",
+        matches: [
+          {
+            occurrenceId: "earlier-occurrence",
+            scanId: "earlier-scan",
+            title: "Earlier authorization finding",
+            reason: "Same root cause.",
+          },
+        ],
+      },
+      "finding",
+      { color: false },
+    );
+    expect(output).toContain("ID current-occurrence");
+    expect(output).toContain("ID earlier-occurrence");
+    expect(output).toContain("Earlier authorization finding");
   });
 
   test.each([
@@ -470,24 +514,39 @@ describe("scan history renderer", () => {
     ["false_positive", "FALSE POSITIVE", "False Positive"],
     ["wont_fix", "IGNORED", "Ignored"],
   ])("uses clear finding-status labels for %s", (reason, status, label) => {
-    const output = stripVTControlCharacters(
-      renderScanHistory(
-        {
-          occurrenceId: "saved-occurrence",
-          scanId: "saved-scan",
-          targetPath: "/demo/repository",
-          severity: { level: "high" },
-          title: "Missing authorization",
-          locations: [{ path: "routes/login.ts", startLine: 34 }],
-          triage: { closeReason: reason, status: "closed" },
-        },
-        "finding",
-      ),
-    );
+    const finding = {
+      occurrenceId: "saved-occurrence",
+      scanId: "saved-scan",
+      targetPath: "/demo/repository",
+      severity: { level: "high" },
+      title: "Missing authorization",
+      locations: [{ path: "routes/login.ts", startLine: 34 }],
+      triage: { closeReason: reason, status: "closed" },
+    };
+    for (const command of ["finding", "show"] as const) {
+      const output = renderScanHistory(
+        command === "finding"
+          ? finding
+          : {
+              scanId: finding.scanId,
+              targetPath: finding.targetPath,
+              mode: "standard",
+              progress: { status: "complete" },
+              findings: [finding],
+            },
+        command,
+        { color: false },
+      );
 
-    expect(output).toContain(status);
-    expect(output).toContain(`Reason: ${label}`);
-    expect(output).not.toContain(reason);
-    expect(output).not.toContain("CLOSED");
+      expect(output).toContain(status);
+      expect(output).toContain("ID saved-occurrence");
+      expect(output).toContain(
+        command === "finding"
+          ? `Reason: ${label}`
+          : "findings show OCCURRENCE_ID",
+      );
+      expect(output).not.toContain(reason);
+      expect(output).not.toContain("CLOSED");
+    }
   });
 });

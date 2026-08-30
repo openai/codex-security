@@ -179,6 +179,40 @@ describe("CLI findings history", () => {
     expect(JSON.parse(stdout.text())).toEqual(page);
   });
 
+  test.each([
+    { scope: [], status: "open" },
+    { scope: ["--scan", "saved-scan"], status: "all" },
+  ])("shows the effective filters for scope %j", async ({ scope, status }) => {
+    const stdout = capture(true);
+    const calls: Array<readonly string[]> = [];
+    const page = { findings: [], limit: 20, nextOffset: null, offset: 0 };
+    expect(
+      await main(
+        [
+          "findings",
+          "list",
+          ...scope,
+          "--query",
+          "authorization",
+          "--severity",
+          "high",
+        ],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => {
+            calls.push(args);
+            return scope.length === 0 ? page : { findingsPage: page };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(stdout.text()).toContain(`Status: ${status}`);
+    expect(stdout.text()).toContain("Severity: high");
+    expect(stdout.text()).toContain('Search: "authorization"');
+  });
+
   test("defaults all-repository finding lists to open without overriding explicit status", async () => {
     for (const [arguments_, expectedStatus] of [
       [[], "open"],
@@ -500,7 +534,6 @@ describe("CLI findings history", () => {
   test("rejects invalid filters before querying saved findings", async () => {
     const invalid = [
       ["findings", "list", "--scan", "scan-1", "--all-repositories"],
-      ["findings", "list", "--limit", "0"],
       ["findings", "list", "--limit", "0"],
       ["findings", "list", "--offset", "-1"],
       ["findings", "list", "--severity", "urgent"],
