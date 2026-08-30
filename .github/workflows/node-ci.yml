@@ -152,10 +152,6 @@ jobs:
       - name: Audit production dependencies
         continue-on-error: true
         run: pnpm --dir sdk/typescript run audit:prod
-      - name: Typecheck
-        run: pnpm --dir sdk/typescript run types
-      - name: Check formatting
-        run: pnpm --dir sdk/typescript run format
       - name: Pack
         working-directory: sdk/typescript
         run: pnpm pack --pack-destination ../../dist
@@ -181,7 +177,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        shard: [1, 2, 3]
+        shard: [1, 2]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -219,6 +215,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes ripgrep
+      - name: Typecheck
+        if: matrix.os == 'ubuntu-latest' && matrix.shard == 1
+        run: pnpm --dir sdk/typescript run types
+      - name: Check formatting
+        if: matrix.os == 'ubuntu-latest' && matrix.shard == 1
+        run: pnpm --dir sdk/typescript run format
       - name: Test
         timeout-minutes: 10
         working-directory: sdk/typescript
@@ -227,7 +229,7 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: node scripts/run-ci-tests.mjs ${{ matrix.shard }}/3 ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
+        run: node scripts/run-ci-tests.mjs ${{ matrix.shard }}/2 ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
       - name: Upload test reports
         if: always()
         continue-on-error: true
@@ -394,7 +396,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -433,7 +435,7 @@ jobs:
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7
+        run: node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/6
       - name: Upload Windows test reports
         if: always()
         continue-on-error: true
@@ -487,14 +489,10 @@ jobs:
         run: node scripts/check-package.mjs ../../dist/*.tgz
 
   windows:
-    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    name: windows-latest / node-22
     runs-on: ubuntu-latest
     if: always()
     needs: [validate-title, windows-test, windows-verify]
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ["22.13.0", "24"]
     steps:
       - name: Require every Windows coverage job
         if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')

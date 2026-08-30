@@ -105,7 +105,7 @@ describe("TypeScript package skeleton", () => {
     const { jobs } = await workflow("node-ci.yml");
     expect(jobs["test"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest", "macos-latest"],
-      shard: [1, 2, 3],
+      shard: [1, 2],
     });
     expect(jobs["compatibility"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest"],
@@ -113,7 +113,7 @@ describe("TypeScript package skeleton", () => {
       include: [{ os: "macos-latest", node: "22.13.0" }],
     });
     expect(jobs["windows-test"]?.strategy?.matrix).toEqual({
-      shard: [1, 2, 3, 4, 5, 6, 7],
+      shard: [1, 2, 3, 4, 5, 6],
     });
     expect(jobs["windows-verify"]?.strategy?.matrix["node"]).toEqual([
       "22.13.0",
@@ -160,7 +160,7 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
-        run: "node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7",
+        run: "node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/6",
       }),
     );
   });
@@ -229,15 +229,19 @@ describe("TypeScript package skeleton", () => {
   test("runs shared static checks once and keeps every diagnostic upload non-blocking", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const steps = Object.values(jobs).flatMap((job) => job.steps);
-    for (const name of [
-      "Check plugin source boundary",
-      "Typecheck",
-      "Check formatting",
-    ]) {
+    for (const [name, job] of [
+      ["Check plugin source boundary", "package"],
+      ["Typecheck", "test"],
+      ["Check formatting", "test"],
+    ] as const) {
       expect(steps.filter((step) => step.name === name)).toHaveLength(1);
-      expect(jobs["package"]!.steps.some((step) => step.name === name)).toBe(
-        true,
-      );
+      const step = jobs[job]!.steps.find((step) => step.name === name);
+      expect(step).toBeDefined();
+      if (job === "test") {
+        expect(step?.if).toBe(
+          "matrix.os == 'ubuntu-latest' && matrix.shard == 1",
+        );
+      }
     }
     for (const name of [
       "Upload test reports",
