@@ -940,8 +940,8 @@ def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -
                 "SELECT details_json FROM finding_occurrences WHERE id = ?", (occurrence_id,)
             ).fetchone()[0]
         )
-        details["evidenceExcerpt"] = "x" * 300_000
-        details["attackPath"] = {"nested": {"value": "\n😀" * 1_000}}
+        details["evidenceExcerpt"] = "x" * 8_001
+        details["attackPath"] = {"nested": {"value": "\n😀" * 300}}
         connection.execute(
             """
             UPDATE finding_occurrences
@@ -951,17 +951,17 @@ def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -
             """,
             (
                 json.dumps(details),
-                "t" * 100_000,
-                "s" * 100_000,
-                "r" * 100_000,
-                "v" * 100_000,
-                "c" * 100_000,
+                "t" * 513,
+                "s" * 2_001,
+                "r" * 2_001,
+                "v" * 129,
+                "c" * 129,
                 occurrence_id,
             ),
         )
         connection.execute(
             "UPDATE finding_locations SET relative_path = ?, role = ? WHERE occurrence_id = ?",
-            ("p" * 100_000, "o" * 100_000, occurrence_id),
+            ("p" * 4_097, "o" * 129, occurrence_id),
         )
     embedded = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
     paged = run_workbench(state_dir, "list-findings", "--scan-id", scan_id)["findingsPage"][
