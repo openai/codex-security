@@ -2884,43 +2884,73 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("preserves ambient configuration when the deep-scan runtime uses the same home", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    const configPath = join(codexHome, "codex-security", "config.toml");
-    const originalConfiguration = "[other]\nenabled = true\n";
-    await mkdir(repository);
-    await mkdir(join(codexHome, "codex-security"), { recursive: true });
-    await writeFile(configPath, originalConfiguration);
-    await mkdir(scanDir, { mode: 0o700 });
+  test.each(["defaults", "complete overrides"])(
+    "preserves ambient configuration when the deep-scan runtime uses the same home with %s",
+    async (settings) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      const configPath = join(codexHome, "codex-security", "config.toml");
+      const originalConfiguration = "[other]\nenabled = true\n";
+      await mkdir(repository);
+      await mkdir(join(codexHome, "codex-security"), { recursive: true });
+      await writeFile(configPath, originalConfiguration);
+      await mkdir(scanDir, { mode: 0o700 });
 
-    const client = new TestClient(
-      {},
-      {
-        environment: { CODEX_HOME: codexHome },
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              throw new Error("deep scan settings captured");
-            },
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_HOME: codexHome },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("deep scan settings captured");
+              },
+            }),
           }),
-        }),
-      },
-    );
+        },
+      );
 
-    await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-      "deep scan settings captured",
-    );
-    expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
-    await client.close();
-  });
+      await expect(
+        client.run(repository, {
+          mode: "deep",
+          ...(settings === "complete overrides"
+            ? {
+                workers: 2,
+                subagents: 0,
+                stopAfterNoNew: 7,
+                stopAfterConsecutiveErrors: 2,
+                maxDiscoveryRuns: 12,
+                maxTimeHours: 1.5,
+              }
+            : {}),
+        }),
+      ).rejects.toThrow("deep scan settings captured");
+      const written = await readFile(configPath, "utf8");
+      if (settings === "defaults") {
+        expect(written).toBe(originalConfiguration);
+      } else {
+        expect(parseToml(written)).toEqual({
+          other: { enabled: true },
+          deep_scan: {
+            workers: 2,
+            subagents: 0,
+            stop_after_no_new: 7,
+            stop_after_consecutive_errors: 2,
+            max_discovery_runs: 12,
+            max_time_hours: 1.5,
+          },
+        });
+      }
+      await client.close();
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "preserves ambient configuration when the same Windows home uses different casing",

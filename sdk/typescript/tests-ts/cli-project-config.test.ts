@@ -342,6 +342,76 @@ test("an explicit file can supply the model required by a provider override", as
   });
 });
 
+test.each(["file", "CLI"])(
+  "a profile selected by the %s supplies the provider model",
+  async (selection) => {
+    const overrideProfile = selection === "CLI";
+    const input = await fixture({
+      codex: {
+        profile: overrideProfile ? "other" : "review",
+        profiles: {
+          review: { model: "synthetic-profile-model" },
+          other: { model: "synthetic-other-model" },
+        },
+      },
+    });
+    let native: CodexSecurityConfig | undefined;
+    expect(
+      await main(
+        [
+          "scan",
+          "-c",
+          input.config,
+          "--provider",
+          "amazon-bedrock",
+          ...(overrideProfile ? ["--codex", 'profile="review"'] : []),
+          "--json",
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          currentDirectory: input.repository,
+          onConfig: (value) => {
+            native = value;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(native?.codexOverrides).toMatchObject({
+      profile: "review",
+      profiles: { review: { model: "synthetic-profile-model" } },
+      model_provider: "amazon-bedrock",
+    });
+  },
+);
+
+test("an unselected file profile does not satisfy the provider model requirement", async () => {
+  const input = await fixture({
+    codex: {
+      profiles: { review: { model: "synthetic-profile-model" } },
+    },
+  });
+  const stderr = capture();
+  let initialized = false;
+  expect(
+    await main(
+      ["scan", "-c", input.config, "--provider", "amazon-bedrock", "--json"],
+      capture().stream,
+      stderr.stream,
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig: () => {
+          initialized = true;
+        },
+      }),
+    ),
+  ).toBe(2);
+  expect(initialized).toBe(false);
+  expect(stderr.text()).toContain(
+    "--model is required when using --provider amazon-bedrock",
+  );
+});
+
 test.each([
   { argv: ["scan", "--help"] },
   { argv: ["scan", "--schema", "--json"] },

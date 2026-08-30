@@ -4,10 +4,11 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -109,6 +110,58 @@ test("complete saved settings do not read a changed or invalid legacy file", asy
   const result = await resolveDeepScanConfig(saved, input.source);
   expect(result.settings).toEqual(saved);
   expect(new Set(Object.values(result.sources))).toEqual(new Set(["override"]));
+  const destination = join(input.root, "runtime", "deep-scan.toml");
+  await writeDeepScanConfig(destination, result);
+  expect(parseToml(await readFile(destination, "utf8"))).toMatchObject({
+    deep_scan: { workers: 2, subagents: 0, stop_after_no_new: 7 },
+  });
+  expect(await readFile(input.source, "utf8")).toBe("not valid TOML [");
+});
+
+test.each(["same path", "directory link"])(
+  "complete settings preserve ambient sections through the %s",
+  async (destinationKind) => {
+    const input = await fixture("[other]\nenabled = true\n");
+    const result = await resolveDeepScanConfig(
+      { ...DEFAULT_DEEP_SCAN_SETTINGS, workers: 2 },
+      input.source,
+    );
+    await writeFile(
+      input.source,
+      "[deep_scan]\nworkers = 9\n[other]\nenabled = false\n",
+    );
+    let destination = input.source;
+    if (destinationKind === "directory link") {
+      const link = join(input.root, "runtime");
+      await symlink(dirname(input.source), link, "junction");
+      destination = join(link, "config.toml");
+    }
+    await writeDeepScanConfig(destination, result);
+    expect(parseToml(await readFile(input.source, "utf8"))).toEqual({
+      deep_scan: {
+        workers: 2,
+        subagents: 3,
+        stop_after_no_new: 4,
+        stop_after_consecutive_errors: 3,
+        max_discovery_runs: 40,
+        max_time_hours: 96,
+      },
+      other: { enabled: false },
+    });
+  },
+);
+
+test("complete settings do not overwrite an invalid ambient destination", async () => {
+  const contents = "not valid TOML [";
+  const input = await fixture(contents);
+  const result = await resolveDeepScanConfig(
+    DEFAULT_DEEP_SCAN_SETTINGS,
+    input.source,
+  );
+  await expect(writeDeepScanConfig(input.source, result)).rejects.toThrow(
+    "Cannot read Codex Security configuration",
+  );
+  expect(await readFile(input.source, "utf8")).toBe(contents);
 });
 
 test("runtime preparation writes the snapshot even if the ambient file changes", async () => {

@@ -79,10 +79,7 @@ export function scanModelConfiguration(
   config: Readonly<JsonObject>,
 ): ScanModelConfiguration {
   const selectedProfile = selectedScanProfile(config);
-  const model =
-    selectedProfile !== undefined && Object.hasOwn(selectedProfile, "model")
-      ? selectedProfile["model"]
-      : config["model"];
+  const model = scanModel(config);
   if (typeof model !== "string" || model.trim().length === 0) {
     throw new ConfigurationError(
       "The configured Codex model must be a nonempty string.",
@@ -102,6 +99,14 @@ export function scanModelConfiguration(
     );
   }
   return { model, reasoningEffort };
+}
+
+export function scanModel(config: Readonly<JsonObject>): unknown {
+  const selectedProfile = selectedScanProfile(config);
+  return selectedProfile !== undefined &&
+    Object.hasOwn(selectedProfile, "model")
+    ? selectedProfile["model"]
+    : config["model"];
 }
 
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {

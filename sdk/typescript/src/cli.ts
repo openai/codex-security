@@ -84,7 +84,9 @@ import {
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
+  mergeCodexOverrides,
   mergedCodexConfig,
+  scanModel,
   scanModelConfiguration,
   scanModelProvider,
   type CodexSecurityConfig,
@@ -7536,8 +7538,7 @@ export function parseCodexOverrides(
   }
   if (
     (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
-    !("model" in result) &&
-    defaults?.["model"] === undefined
+    scanModel(mergeCodexOverrides(defaults ?? {}, result)) === undefined
   ) {
     throw new CodexSecurityError(
       `--model is required when using --provider ${provider}`,

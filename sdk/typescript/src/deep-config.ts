@@ -53,18 +53,7 @@ export async function resolveDeepScanConfig(
   let document: TomlTable = {};
   // Complete saved settings do not depend on today's ambient configuration.
   if (!DEEP_SCAN_SETTINGS.every(([name]) => explicit[name] !== undefined)) {
-    try {
-      document = parseToml(
-        await readFile(source, { encoding: "utf8", signal }),
-      );
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw new CodexSecurityError(
-          `Cannot read Codex Security configuration at ${source}.`,
-          { cause: error },
-        );
-      }
-    }
+    document = await readDeepScanDocument(source, signal);
   }
   const existing = document["deep_scan"];
   if (
@@ -117,17 +106,36 @@ export async function writeDeepScanConfig(
   destination: string,
   resolved: ResolvedDeepScanConfig,
 ): Promise<void> {
-  if (!resolved.hasOverrides) {
-    const [source, target] = await Promise.all([
-      realpath(resolved.source).catch(() => null),
-      realpath(destination).catch(() => null),
-    ]);
-    if (source !== null && source === target) return;
+  const [source, target] = await Promise.all([
+    realpath(resolved.source).catch(() => null),
+    realpath(destination).catch(() => null),
+  ]);
+  let document = resolved.document;
+  if (source !== null && source === target) {
+    if (!resolved.hasOverrides) return;
+    document = await readDeepScanDocument(destination);
   }
   await writeCodexConfig(destination, {
-    ...resolved.document,
+    ...document,
     deep_scan: Object.fromEntries(
       DEEP_SCAN_SETTINGS.map(([name, key]) => [key, resolved.settings[name]]),
     ),
   } as JsonObject);
+}
+
+async function readDeepScanDocument(
+  source: string,
+  signal?: AbortSignal,
+): Promise<TomlTable> {
+  try {
+    return parseToml(await readFile(source, { encoding: "utf8", signal }));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new CodexSecurityError(
+        `Cannot read Codex Security configuration at ${source}.`,
+        { cause: error },
+      );
+    }
+    return {};
+  }
 }
