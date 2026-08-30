@@ -2,19 +2,20 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { releaseVersion } from "./release-automation.mjs";
+import { assertStableVersion, releaseVersion } from "./release-automation.mjs";
 
 export const packagePath = "sdk/typescript/package.json";
 export const notesPath = ".github/release-notes.md";
 export const statePath = ".github/release-pr-state.json";
 const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
 const sectionIds = ["highlights", "upgrades"];
+const releaseBranchPrefix = "release/next-";
 const conventionalTitle = /^([a-z][a-z0-9-]*)(?:\([^)]*\))?(!)?: (.+)$/u;
 
 function isReleasePull(pull) {
   return (
     conventionalTitle.exec(pull.title)?.[1] === "release" ||
-    pull.head.ref.startsWith("release/next-")
+    pull.head.ref.startsWith(releaseBranchPrefix)
   );
 }
 
@@ -27,7 +28,7 @@ export function isBreakingChange(change) {
 }
 
 export function nextReleaseVersion(version, changes) {
-  releaseVersion({ name: "@openai/codex-security", version });
+  assertStableVersion(version);
   const [major, minor, patch] = version.split(".").map(BigInt);
   if (major !== 0n) {
     throw new Error(
@@ -161,6 +162,23 @@ export function updateReleaseNotes(
   return { notes, sections };
 }
 
+function updatePackageVersion(packageText, version) {
+  const expected = JSON.parse(packageText);
+  expected.version = version;
+  // Preserve formatting while selecting only the top-level version field.
+  for (const match of packageText.matchAll(
+    /("version"\s*:\s*)("(?:\\.|[^"\\])*")/gu,
+  )) {
+    const start = match.index + match[1].length;
+    const updated =
+      packageText.slice(0, start) +
+      JSON.stringify(version) +
+      packageText.slice(start + match[2].length);
+    if (isDeepStrictEqual(JSON.parse(updated), expected)) return updated;
+  }
+  throw new Error("Unable to update only the top-level package version.");
+}
+
 export function createReleasePlan(history, previous = null) {
   const { baseVersion, baseCommit, mainSha, packageText, changes } = history;
   if (
@@ -180,13 +198,13 @@ export function createReleasePlan(history, previous = null) {
     previous?.notes ?? null,
     previous?.state.sections,
   );
-  const state = { baseVersion, baseCommit, mainSha, sections };
+  const state = { baseVersion, baseCommit, sections };
   return {
     baseVersion,
     baseCommit,
     mainSha,
     version,
-    branch: `release/next-${baseVersion}`,
+    branch: `${releaseBranchPrefix}${baseVersion}`,
     title:
       changes.length > 0
         ? `release: bump Codex Security to ${version}`
@@ -195,10 +213,7 @@ export function createReleasePlan(history, previous = null) {
     generated,
     humanOwned: sectionIds.filter((id) => sections[id].humanOwned),
     files: {
-      [packagePath]: packageText.replace(
-        /("version"\s*:\s*")[^"]+(")/u,
-        (_match, prefix, suffix) => `${prefix}${version}${suffix}`,
-      ),
+      [packagePath]: updatePackageVersion(packageText, version),
       [notesPath]: notes,
       [statePath]: `${JSON.stringify(state, null, 2)}\n`,
     },
@@ -291,18 +306,20 @@ function readReleaseBranch(repo, mainSha, headSha) {
   if (
     paths.some((path) => ![packagePath, notesPath, statePath].includes(path))
   ) {
-    throw new Error(
-      "The release branch has other file edits. Preserve or merge them before running the updater.",
-    );
+    return {
+      holdReason:
+        "The release branch has other file edits. Preserve or merge them before running the updater.",
+    };
   }
   const originalPackage = JSON.parse(repo.readFile(mergeBase, packagePath));
   const branchPackage = JSON.parse(repo.readFile(headSha, packagePath));
   delete originalPackage.version;
   delete branchPackage.version;
   if (!isDeepStrictEqual(originalPackage, branchPackage)) {
-    throw new Error(
-      "The release branch has package edits beyond its version. Preserve them before running the updater.",
-    );
+    return {
+      holdReason:
+        "The release branch has package edits beyond its version. Preserve them before running the updater.",
+    };
   }
   const state = JSON.parse(repo.readFile(headSha, statePath));
   if (!state?.sections) {
@@ -310,7 +327,7 @@ function readReleaseBranch(repo, mainSha, headSha) {
       "The existing release branch has no note ownership state; it must be reviewed manually.",
     );
   }
-  return { state, notes: repo.readFile(headSha, notesPath) };
+  return { state, notes: repo.readFile(headSha, notesPath), mergeBase };
 }
 
 function initialPullBody(template) {
@@ -320,7 +337,7 @@ function initialPullBody(template) {
     Changes:
       "Update the package version and draft release notes. The version header and PR title are maintained by automation. Edit the marked note sections in `.github/release-notes.md`; edited or deleted sections become human-owned. New suggestions appear in subsequent bot comments. The PR description is never regenerated.",
     Testing:
-      "The updater does not run package tests. Review required CI and Codex review on the current head before marking this draft ready. Record any additional checks here.",
+      "The updater does not run package tests. Check required CI and Codex review on the current head before marking this draft ready. Request a final Codex review if the last review targets an older head. Record any additional checks here.",
     "Risk and rollout":
       "This PR does not merge itself. Merging a nonempty proposal starts the existing CI and protected release process. An empty proposal leaves the package version unchanged. Review migration details and complete the public disclosure review before merging.",
   };
@@ -334,17 +351,25 @@ function initialPullBody(template) {
   return body;
 }
 
-function reviewComment(plan, headSha) {
+function reviewComment(
+  plan,
+  headSha,
+  proposalMarker,
+  suggestionsMarker,
+  requestReview,
+) {
   const marker = `<!-- release-pr-head: ${headSha} -->`;
   return [
     marker,
+    proposalMarker,
+    suggestionsMarker,
     `Release proposal updated through main commit \`${plan.mainSha}\`.`,
     plan.humanOwned.length > 0
       ? `Preserved human-owned sections: ${plan.humanOwned.join(", ")}. The suggestions below have not replaced them.`
       : "The note sections still match the generated draft and were refreshed.",
     "These suggestions use merged titles, not a review of migration requirements. The committed notes remain authoritative.",
     ...sectionIds.map((id) => plan.generated[id]),
-    `@codex review the current head ${headSha}.`,
+    ...(requestReview ? [`@codex review the current head ${headSha}.`] : []),
   ].join("\n\n");
 }
 
@@ -357,21 +382,18 @@ async function branchHead(github, branch) {
   }
 }
 
-function assertReleasePull(pull, plan) {
+function pullHoldReason(pull, branch) {
   if (
     pull?.state !== "open" ||
-    pull.head.ref !== plan.branch ||
+    pull.head.ref !== branch ||
     pull.base.ref !== "main"
   ) {
-    throw new Error(
-      "The release PR was closed or retargeted during the update. Review it before continuing.",
-    );
+    return "The release PR was closed or retargeted during the update. Review it before continuing.";
   }
   if (!pull.draft) {
-    throw new Error(
-      "The release PR is no longer a draft. Convert it back to a draft to resume automatic updates.",
-    );
+    return `Release PR #${pull.number} is ready for review. Convert it back to a draft to resume automatic updates.`;
   }
+  return null;
 }
 
 function releaseHoldReason(openPulls, pullNumber, branch, repository) {
@@ -394,22 +416,35 @@ function releaseHoldReason(openPulls, pullNumber, branch, repository) {
   const current = openPulls.find(
     (candidate) => candidate.number === pullNumber,
   );
-  if (current && !current.draft)
-    return `Release PR #${current.number} is ready for review. Convert it back to a draft to resume automatic updates.`;
-  return null;
+  return pullNumber === undefined ? null : pullHoldReason(current, branch);
 }
 
-async function ensurePullRequest(github, plan, pull, template, headSha) {
+async function ensurePullRequest(
+  github,
+  plan,
+  pull,
+  template,
+  headSha,
+  currentPulls,
+) {
   const holdReason = releaseHoldReason(
-    await github.list("pulls?state=open&per_page=100"),
+    currentPulls ?? (await github.list("pulls?state=open&per_page=100")),
     pull?.number,
     plan.branch,
     github.repository,
   );
-  if (holdReason) throw new Error(holdReason);
+  if (holdReason)
+    return { action: "held", reason: holdReason, reviewRequested: false };
   if (pull) {
     pull = await github.request("GET", `pulls/${pull.number}`);
-    assertReleasePull(pull, plan);
+    const reason = pullHoldReason(pull, plan.branch);
+    if (reason)
+      return {
+        action: "held",
+        reason,
+        pull: pull.number,
+        reviewRequested: false,
+      };
     if (pull.title !== plan.title) {
       await github.request("PATCH", `pulls/${pull.number}`, {
         title: plan.title,
@@ -425,21 +460,52 @@ async function ensurePullRequest(github, plan, pull, template, headSha) {
     });
   }
   const current = await github.request("GET", `pulls/${pull.number}`);
-  assertReleasePull(current, plan);
+  const reason = pullHoldReason(current, plan.branch);
+  if (reason)
+    return {
+      action: "held",
+      reason,
+      pull: current.number,
+      reviewRequested: false,
+    };
   if (current.head.sha !== headSha) {
-    // A subsequent run will request a review after reconciling this new head.
-    return { pull: current.number, reviewRequested: false };
+    return {
+      pull: current.number,
+      reviewRequested: false,
+      reason:
+        "GitHub has not exposed the updated PR head yet. Rerun the updater before final review.",
+    };
   }
   const marker = `<!-- release-pr-head: ${headSha} -->`;
+  const proposalMarker = `<!-- release-pr-proposal: ${hash(JSON.stringify(plan.files))} -->`;
+  const suggestionsMarker = `<!-- release-pr-suggestions: ${hash(JSON.stringify(plan.generated))} -->`;
   const comments = await github.list(
     `issues/${current.number}/comments?per_page=100`,
   );
-  if (!comments.some((comment) => comment.body?.includes(marker))) {
+  const previous = comments.findLast((comment) =>
+    comment.body?.startsWith("<!-- release-pr-head: "),
+  );
+  const requestReview = !previous?.body.includes(proposalMarker);
+  const reviewRequested = comments.some(
+    (comment) =>
+      comment.body?.includes(marker) &&
+      comment.body.includes(`@codex review the current head ${headSha}.`),
+  );
+  if (requestReview || !previous?.body.includes(suggestionsMarker)) {
     await github.request("POST", `issues/${current.number}/comments`, {
-      body: reviewComment(plan, headSha),
+      body: reviewComment(
+        plan,
+        headSha,
+        proposalMarker,
+        suggestionsMarker,
+        requestReview,
+      ),
     });
   }
-  return { pull: current.number, reviewRequested: true };
+  return {
+    pull: current.number,
+    reviewRequested: reviewRequested || requestReview,
+  };
 }
 
 export async function reconcileReleasePullRequest({
@@ -451,49 +517,37 @@ export async function reconcileReleasePullRequest({
   for (;;) {
     const mainSha = await branchHead(github, "main");
     const history = await readReleaseHistory(repo, mainSha, github);
-    let plan = createReleasePlan(history);
+    const branch = `${releaseBranchPrefix}${history.baseVersion}`;
     const openPulls = await github.list("pulls?state=open&per_page=100");
     const pull = openPulls.find(
       (candidate) =>
-        candidate.head.ref === plan.branch &&
+        candidate.head.ref === branch &&
         candidate.head.repo?.full_name === github.repository,
     );
-    const holdReason = releaseHoldReason(
+    let holdReason = releaseHoldReason(
       openPulls,
       pull?.number,
-      plan.branch,
+      branch,
       github.repository,
     );
-    if (holdReason)
-      return {
-        action: "held",
-        reason: holdReason,
-        dryRun,
-        plan,
-      };
-    if (!pull) {
+    if (!holdReason && !pull) {
       const previousPulls = await github.list(
-        `pulls?state=closed&head=${encodeURIComponent(`${github.owner}:${plan.branch}`)}&per_page=100`,
+        `pulls?state=closed&head=${encodeURIComponent(`${github.owner}:${branch}`)}&per_page=100`,
       );
       if (previousPulls.length > 0)
-        return {
-          action: "held",
-          reason: `Release PR #${previousPulls[0].number} was closed. Reopen it to resume this cycle.`,
-          dryRun,
-          plan,
-        };
+        holdReason = `Release PR #${previousPulls[0].number} was closed. Reopen it to resume this cycle.`;
     }
 
-    const headSha = await branchHead(github, plan.branch);
-    if (headSha)
-      plan = createReleasePlan(
-        history,
-        readReleaseBranch(repo, mainSha, headSha),
-      );
+    const headSha = holdReason ? null : await branchHead(github, branch);
+    const previous = headSha ? readReleaseBranch(repo, mainSha, headSha) : null;
+    holdReason ??= previous?.holdReason;
+    const plan = createReleasePlan(history, holdReason ? null : previous);
+    if (holdReason) return { action: "held", reason: holdReason, dryRun, plan };
     if (pull && !headSha)
       throw new Error("The open release PR has no branch head.");
     const changed =
       !headSha ||
+      previous.mergeBase !== mainSha ||
       Object.entries(plan.files).some(
         ([path, content]) => repo.readFile(headSha, path) !== content,
       );
@@ -505,6 +559,7 @@ export async function reconcileReleasePullRequest({
       };
 
     let commitSha = headSha;
+    let currentPulls;
     if (changed) {
       if ((await branchHead(github, "main")) !== mainSha) continue;
       const tree = await github.request("POST", "git/trees", {
@@ -522,7 +577,7 @@ export async function reconcileReleasePullRequest({
         parents: [...new Set([headSha, mainSha].filter(Boolean))],
       });
       if ((await branchHead(github, "main")) !== mainSha) continue;
-      const currentPulls = await github.list("pulls?state=open&per_page=100");
+      currentPulls = await github.list("pulls?state=open&per_page=100");
       const holdReason = releaseHoldReason(
         currentPulls,
         pull?.number,
@@ -531,11 +586,6 @@ export async function reconcileReleasePullRequest({
       );
       if (holdReason)
         return { action: "held", reason: holdReason, dryRun, plan };
-      if (pull)
-        assertReleasePull(
-          currentPulls.find((candidate) => candidate.number === pull.number),
-          plan,
-        );
       try {
         if (headSha) {
           await github.request("PATCH", `git/refs/heads/${plan.branch}`, {
@@ -565,6 +615,7 @@ export async function reconcileReleasePullRequest({
       pull,
       repo.readFile(mainSha, templatePath),
       commitSha,
+      pull ? currentPulls : undefined,
     );
     return {
       action: !pull ? "created" : changed ? "updated" : "unchanged",
@@ -578,7 +629,7 @@ export async function reconcileReleasePullRequest({
 
 export function createGitHubClient(repository, token, fetcher = fetch) {
   const apiRoot = `https://api.github.com/repos/${repository}/`;
-  async function request(method, path, body) {
+  async function responseFor(method, path, body) {
     const response = await fetcher(`${apiRoot}${path}`, {
       method,
       headers: {
@@ -596,22 +647,24 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
       error.status = response.status;
       throw error;
     }
-    return response.json();
+    return response;
   }
   return {
     repository,
     owner: repository.split("/")[0],
     repositoryUrl: `https://github.com/${repository}`,
-    request,
+    async request(method, path, body) {
+      return (await responseFor(method, path, body)).json();
+    },
     async list(path) {
       const items = [];
       for (let page = 1; ; page += 1) {
-        const batch = await request(
+        const response = await responseFor(
           "GET",
           `${path}${path.includes("?") ? "&" : "?"}page=${page}`,
         );
-        items.push(...batch);
-        if (batch.length < 100) return items;
+        items.push(...(await response.json()));
+        if (!response.headers.get("link")?.includes('rel="next"')) return items;
       }
     },
   };
@@ -634,9 +687,5 @@ if (
     github: createGitHubClient(repository, token),
     dryRun: process.env.RELEASE_PR_DRY_RUN !== "false",
   });
-  // Do not copy PR bodies into logs or the generated proposal.
-  result.plan.changes = result.plan.changes.map(
-    ({ body: _body, ...change }) => change,
-  );
   console.log(JSON.stringify(result, null, 2));
 }

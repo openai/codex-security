@@ -69,7 +69,16 @@ repository's enabled merge method, so the whole proposal lands as one
 release boundary commit. A later breaking change changes the version on the
 same PR. Each update incorporates the latest `main` and appends a commit;
 the updater never force-pushes. A concurrent commit causes it to reread and
-retry. It requests Codex review on each updated head.
+retry. It requests Codex review when the proposal files change. Updates that
+only incorporate `main` keep CI current without repeating the same proposal
+review. New suggestions for human-owned notes still appear in a comment.
+Before marking the proposal ready, check CI and request a final Codex review
+if the last review targets an older head.
+
+If a run reports that GitHub has not exposed the updated PR head, manually
+rerun the updater with **dry_run** disabled after the PR catches up. This
+allows any deferred review request or note suggestions to be posted. Verify
+review on the current head before marking the proposal ready.
 
 When the release version merges, the next draft can open immediately, even
 while publication is still running. Until another change reaches `main`,
@@ -86,8 +95,10 @@ ready pauses updates, preserving the reviewed version and notes. To resume,
 convert it back to a draft and rerun the updater. Do this before merging if
 `main` has advanced, then review the updated proposal. The updater rechecks
 these conditions before advancing the branch. Changes to other files on the
-release branch, or to package fields other than the version, also pause the updater
-so those edits cannot be lost.
+release branch, or to package fields other than the version, also pause the
+updater so those edits cannot be lost. These intentional pauses return
+`action: "held"` and leave the workflow successful. Preserve or merge the
+additional changes, then rerun the updater to resume.
 
 ### Editing the draft notes
 
@@ -109,7 +120,9 @@ Review and refine these suggestions before releasing.
   To explicitly regenerate a section, add `"reset": true` to that section's
   state entry. The next run consumes the reset and resumes automatic updates.
   Restore any damaged section markers before resetting. Do not delete the
-  state file to reset ownership.
+  state file to reset ownership. A section with missing ownership metadata
+  is preserved until explicitly reset; missing state does not authorize
+  replacing manual notes.
 - Deleting the notes file is preserved too. Restore reviewed notes, or
   explicitly reset the sections, before merging; publication requires the
   versioned notes file.

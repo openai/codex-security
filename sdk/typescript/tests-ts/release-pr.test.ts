@@ -83,7 +83,7 @@ const {
     history: History,
     previous?: {
       notes: string | null;
-      state: Pick<History, "baseVersion" | "baseCommit" | "mainSha"> & {
+      state: Pick<History, "baseVersion" | "baseCommit"> & {
         sections: Sections;
       };
     } | null,
@@ -517,30 +517,40 @@ describe("GitHub request transport", () => {
     );
   });
 
-  test("follows list pagination without losing the original query", async () => {
-    const pages: number[] = [];
-    const github = createGitHubClient(
-      "example/release-fixture",
-      "synthetic-release-token",
-      async (url, options) => {
-        const endpoint = new URL(url);
-        expect(options.method).toBe("GET");
-        expect(endpoint.searchParams.get("state")).toBe("open");
-        expect(endpoint.searchParams.get("per_page")).toBe("100");
-        const page = Number(endpoint.searchParams.get("page"));
-        pages.push(page);
-        return Response.json(
-          page === 1
-            ? Array.from({ length: 100 }, (_, index) => ({ number: index + 1 }))
-            : [{ number: 101 }],
-        );
-      },
-    );
-    const pulls = await github.list("pulls?state=open&per_page=100");
-    expect(pulls).toHaveLength(101);
-    expect(pulls.at(-1)).toEqual({ number: 101 });
-    expect(pages).toEqual([1, 2]);
-  });
+  test.each([30, 100])(
+    "follows %i-item pages without losing the original query",
+    async (pageSize) => {
+      const pages: number[] = [];
+      const github = createGitHubClient(
+        "example/release-fixture",
+        "synthetic-release-token",
+        async (url, options) => {
+          const endpoint = new URL(url);
+          expect(options.method).toBe("GET");
+          expect(endpoint.searchParams.get("state")).toBe("open");
+          expect(endpoint.searchParams.get("per_page")).toBe(String(pageSize));
+          const page = Number(endpoint.searchParams.get("page"));
+          pages.push(page);
+          endpoint.searchParams.set("page", "2");
+          return Response.json(
+            page === 1
+              ? Array.from({ length: pageSize }, (_, index) => ({
+                  number: index + 1,
+                }))
+              : [{ number: pageSize + 1 }],
+            {
+              headers:
+                page === 1 ? { link: `<${endpoint.href}>; rel="next"` } : {},
+            },
+          );
+        },
+      );
+      const pulls = await github.list(`pulls?state=open&per_page=${pageSize}`);
+      expect(pulls).toHaveLength(pageSize + 1);
+      expect(pulls.at(-1)).toEqual({ number: pageSize + 1 });
+      expect(pages).toEqual([1, 2]);
+    },
+  );
 });
 
 describe("release workflow controls", () => {
@@ -650,6 +660,35 @@ describe("pre-1.0 release policy", () => {
       nextReleaseVersion("1.0.0", [change("feat: add behavior")]),
     ).toThrow("policy");
   });
+
+  test.each([
+    { format: "compact", indent: undefined },
+    { format: "indented", indent: 2 },
+  ])(
+    "updates only the top-level package version with $format formatting",
+    ({ indent }) => {
+      const metadata = {
+        config: { version: 'legacy "1.2.3"' },
+        name: "@openai/codex-security",
+        version: "0.1.23",
+        dependencies: { example: "1.0.0" },
+      };
+      const text = `${JSON.stringify(metadata, null, indent)}\n`;
+      const plan = createReleasePlan({
+        ...history([change("fix: repair output")]),
+        packageText: text,
+      });
+      expect(JSON.parse(plan.files[packagePath]!)).toEqual({
+        ...metadata,
+        version: "0.1.24",
+      });
+      expect(plan.files[packagePath]).toBe(
+        text.replace('"0.1.23"', '"0.1.24"'),
+      );
+      const empty = createReleasePlan({ ...history([]), packageText: text });
+      expect(empty.files[packagePath]).toBe(text);
+    },
+  );
 });
 
 describe("human note ownership", () => {
@@ -740,6 +779,29 @@ describe("human note ownership", () => {
     expect(preserved.files[notesPath]).not.toContain("new feature");
   });
 
+  test("preserves existing prose when a section loses its ownership metadata until explicitly reset", () => {
+    const first = createReleasePlan(history([change("feat: initial feature")]));
+    const notes = first.files[notesPath]!.replace(
+      "initial feature",
+      "Human-reviewed notes",
+    );
+    const state = JSON.parse(first.files[statePath]!);
+    delete state.sections.highlights;
+    const changes = [change("feat: later feature", 2)];
+    const preserved = createReleasePlan(history(changes), { notes, state });
+    expect(preserved.humanOwned).toEqual(["highlights"]);
+    expect(preserved.files[notesPath]).toContain("Human-reviewed notes");
+    expect(preserved.files[notesPath]).not.toContain("later feature");
+    const nextState = JSON.parse(preserved.files[statePath]!);
+    nextState.sections.highlights.reset = true;
+    const reset = createReleasePlan(history(changes), {
+      notes: preserved.files[notesPath] ?? null,
+      state: nextState,
+    });
+    expect(reset.humanOwned).toEqual([]);
+    expect(reset.files[notesPath]).toContain("later feature");
+  });
+
   test("feeds the preserved canonical notes into the existing publisher", () => {
     const first = createReleasePlan(history([change("feat: initial feature")]));
     const edited = first.files[notesPath]!.replace(
@@ -815,6 +877,130 @@ describe("rolling release reconciliation", () => {
     expect(fixture.github.writes).toHaveLength(writes);
   });
 
+  test("incorporates main-only changes without another proposal review or repeated commits", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    const first = await fixture.run();
+    fixture.merge("test: add coverage", {
+      "sdk/typescript/tests-ts/example.test.ts": "// Additional coverage.\n",
+    });
+    const updated = await fixture.run();
+    expect(updated.action).toBe("updated");
+    expect(updated.headSha).not.toBe(first.headSha);
+    expect(updated.plan.files[packagePath]).toBe(first.plan.files[packagePath]);
+    expect(updated.plan.files[notesPath]).toBe(first.plan.files[notesPath]);
+    expect(updated.reviewRequested).toBe(false);
+    expect(fixture.github.comments.get(first.pull!)).toHaveLength(1);
+    expect(
+      fixture.repo.readFile(
+        updated.headSha!,
+        "sdk/typescript/tests-ts/example.test.ts",
+      ),
+    ).toBe("// Additional coverage.\n");
+    fixture.git(
+      "merge-base",
+      "--is-ancestor",
+      fixture.head()!,
+      updated.headSha!,
+    );
+    const writes = fixture.github.writes.length;
+    const rerun = await fixture.run();
+    expect(rerun.action).toBe("unchanged");
+    expect(rerun.headSha).toBe(updated.headSha);
+    expect(rerun.reviewRequested).toBe(false);
+    expect(fixture.github.writes).toHaveLength(writes);
+  });
+
+  test("posts new suggestions for human-owned notes without repeating an unchanged proposal review", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    const first = await fixture.run();
+    fixture.commit(
+      first.plan.branch,
+      {
+        [notesPath]: first.plan.files[notesPath]!.replace(
+          "initial feature",
+          "Human-reviewed notes",
+        ),
+      },
+      "docs: review release notes",
+    );
+    const reviewed = await fixture.run();
+    const commentCount = fixture.github.comments.get(first.pull!)!.length;
+    fixture.merge("feat: another feature");
+    const updated = await fixture.run();
+    expect(updated.plan.files).toEqual(reviewed.plan.files);
+    expect(updated.reviewRequested).toBe(false);
+    const comments = fixture.github.comments.get(first.pull!)!;
+    expect(comments).toHaveLength(commentCount + 1);
+    expect(comments.at(-1)!.body).toContain("another feature");
+    expect(comments.at(-1)!.body).not.toContain("@codex review");
+    const rerun = await fixture.run();
+    expect(rerun.action).toBe("unchanged");
+    expect(comments).toHaveLength(commentCount + 1);
+  });
+
+  test("recovers a failed review comment without another release commit", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    const request = fixture.github.request.bind(fixture.github);
+    let failComment = true;
+    fixture.github.request = async (method, path, body) => {
+      if (failComment && method === "POST" && path.startsWith("issues/")) {
+        failComment = false;
+        throw apiError(500);
+      }
+      return request(method, path, body);
+    };
+    await expect(fixture.run()).rejects.toThrow("HTTP 500");
+    const head = fixture.head("release/next-0.1.23");
+    const recovered = await fixture.run();
+    expect(recovered.headSha).toBe(head!);
+    expect(recovered.reviewRequested).toBe(true);
+    expect(fixture.github.comments.get(recovered.pull!)).toHaveLength(1);
+  });
+
+  test("recovers review on a manual rerun after GitHub exposes the updated head", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    const first = await fixture.run();
+    fixture.merge("fix: later fix");
+    const request = fixture.github.request.bind(fixture.github);
+    let headLagged = true;
+    fixture.github.request = async (method, path, body) => {
+      const result = structuredClone(await request(method, path, body));
+      if (headLagged && method === "GET" && path === `pulls/${first.pull}`) {
+        (result as Pull).head.sha = first.headSha!;
+      }
+      return result;
+    };
+    const pending = await fixture.run();
+    expect(pending.reviewRequested).toBe(false);
+    expect(pending.reason).toContain("Rerun");
+    expect(fixture.github.comments.get(first.pull!)).toHaveLength(1);
+    headLagged = false;
+    const recovered = await fixture.run();
+    expect(recovered.action).toBe("unchanged");
+    expect(recovered.headSha).toBe(pending.headSha);
+    expect(recovered.reviewRequested).toBe(true);
+    expect(fixture.github.comments.get(first.pull!)).toHaveLength(2);
+  });
+
+  test("requests review when the proposal changes back to previously reviewed content", async () => {
+    const fixture = new Fixture();
+    const merged = fixture.merge("feat: initial feature");
+    const first = await fixture.run();
+    const mergedPull = fixture.github.commitPulls.get(merged)![0]!;
+    mergedPull.title = "feat: reworded feature";
+    expect((await fixture.run()).reviewRequested).toBe(true);
+    mergedPull.title = "feat: initial feature";
+    const restored = await fixture.run();
+    expect(restored.plan.files).toEqual(first.plan.files);
+    expect(restored.headSha).not.toBe(first.headSha);
+    expect(restored.reviewRequested).toBe(true);
+    expect(fixture.github.comments.get(first.pull!)).toHaveLength(3);
+  });
+
   test("retries a concurrent human commit without dropping its notes or history", async () => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
@@ -886,7 +1072,9 @@ describe("rolling release reconciliation", () => {
         }
         return result;
       };
-      await expect(fixture.run()).rejects.toThrow(
+      const held = await fixture.run();
+      expect(held.action).toBe("held");
+      expect(held.reason).toContain(
         change === "ready" ? "draft" : "closed or retargeted",
       );
       expect(fixture.github.comments.get(pull.number)).toHaveLength(
@@ -958,7 +1146,7 @@ describe("rolling release reconciliation", () => {
         fixture.head()!,
       );
     };
-    await expect(fixture.run()).rejects.toThrow("Another release PR");
+    expect((await fixture.run()).action).toBe("held");
     expect(
       fixture.github.pulls.filter((pull) => pull.state === "open"),
     ).toHaveLength(1);
@@ -991,11 +1179,19 @@ describe("rolling release reconciliation", () => {
       files,
       "fix: additional human changes",
     );
-    fixture.merge("fix: another fix");
     const writes = fixture.github.writes.length;
-    await expect(fixture.run()).rejects.toThrow("edits");
-    expect(fixture.head(first.plan.branch)).toBe(humanSha);
-    expect(fixture.github.writes).toHaveLength(writes);
+    for (const title of [
+      "fix: first fix",
+      "fix: second fix",
+      "fix: third fix",
+    ]) {
+      fixture.merge(title);
+      const held = await fixture.run();
+      expect(held.action).toBe("held");
+      expect(held.reason).toContain("edits");
+      expect(fixture.head(first.plan.branch)).toBe(humanSha);
+      expect(fixture.github.writes).toHaveLength(writes);
+    }
   });
 
   test("recovers a branch whose PR creation failed without another commit or a duplicate PR", async () => {
