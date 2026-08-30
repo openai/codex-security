@@ -365,7 +365,7 @@ describe("TypeScript package skeleton", () => {
       "node scripts/check-plugin-source.mjs",
     );
     expect(packageJson.scripts.prepack).toBe(
-      "node --run build:plugin && node --run build",
+      "node --run check:versions && node --run build:plugin && node --run build",
     );
     expect(packageJson.scripts.types).not.toContain("check:plugin-source");
     expect(packageJson.scripts["audit:prod"]).toBe(
