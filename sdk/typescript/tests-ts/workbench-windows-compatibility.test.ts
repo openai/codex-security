@@ -28,16 +28,19 @@ function probe(program: string, ...args: string[]): void {
 test("normalizes absolute Windows scopes without accepting escapes", () => {
   probe(
     [
-      "import sys",
+      "import ntpath, sys",
       "from pathlib import PureWindowsPath",
       "from types import SimpleNamespace",
       "sys.path.insert(0, sys.argv[1])",
       "import workbench_db as workbench",
+      "import windows_paths",
       "class WindowsPath(PureWindowsPath):",
       "    def resolve(self): return self",
       "    def is_dir(self): return True",
       "workbench.Path = WindowsPath",
       "workbench.os = SimpleNamespace(name='nt')",
+      "windows_paths.Path = WindowsPath",
+      "windows_paths.os = SimpleNamespace(name='nt', path=ntpath)",
       "target = WindowsPath('C:/repository')",
       "assert workbench.require_scope(r'C:\\repository\\src', 'standard', target) == 'src'",
       "assert workbench.require_scope('src/nested', 'standard', target) == 'src/nested'",
