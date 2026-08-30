@@ -288,15 +288,15 @@ In a terminal, it asks about facts the source cannot establish, shows the exact
 diff, and asks whether to install the policy. The write confirmation defaults to
 No. If both ChatGPT and API-key credentials are available, it asks which to use; `--auth chatgpt` or `--auth api-key` selects one explicitly.
 
-| Invocation                                 | Calls Codex? | Result                                                                           |
-| ------------------------------------------ | ------------ | -------------------------------------------------------------------------------- |
-| `policy .`                                 | Yes          | Ask owner questions, save documents, preview the draft, and offer to install it. |
-| `policy . --headless --json`               | Yes          | Save documents without prompts and return their paths and review notes.          |
-| `policy . --format md`                     | Yes          | Generate a draft and write its Markdown to stdout without installing it.         |
-| `policy . --dry-run --json`                | No           | Check local inputs and show the resolved target and settings.                    |
-| `policy . --apply DRAFT`                   | No           | Preview a saved draft and offer to install it.                                   |
-| `policy . --apply DRAFT --headless --json` | No           | Preview a saved draft without writing or prompting.                              |
-| `policy . --apply DRAFT --write --json`    | No           | Install the reviewed draft without another confirmation.                         |
+| Invocation                              | Calls Codex? | Result                                                                           |
+| --------------------------------------- | ------------ | -------------------------------------------------------------------------------- |
+| `policy .`                              | Yes          | Ask owner questions, save documents, preview the draft, and offer to install it. |
+| `policy . --headless --json`            | Yes          | Save documents without prompts and return their paths and review notes.          |
+| `policy . --format md`                  | Yes          | Generate a draft and write its Markdown to stdout without installing it.         |
+| `policy . --dry-run --json`             | No           | Check local inputs and show the resolved target and settings.                    |
+| `policy . --apply DRAFT`                | No           | Preview a saved draft and offer to install it.                                   |
+| `policy . --apply DRAFT --headless`     | No           | Preview a saved draft without writing or prompting.                              |
+| `policy . --apply DRAFT --write --json` | No           | Install the reviewed draft without another confirmation.                         |
 
 `DRAFT` is the saved artifact directory. Output formats change presentation;
 `policy . --json` still generates a new draft. Use `--apply` to load one instead.
