@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   rm,
+  writeFile,
 } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -16,6 +17,7 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(scriptDirectory, "..");
 const repositoryRoot = resolve(packageRoot, "../..");
 const publicManifest = ".codex-plugin/plugin.json";
+const normalizer = "scripts/normalize_candidates.mjs";
 const execFileAsync = promisify(execFile);
 
 function sourcePath(root, relativePath) {
@@ -89,7 +91,9 @@ export async function buildBundledPlugin({
     throw new Error("Plugin projection contract contains duplicate paths.");
   }
 
-  const copiedPaths = files.filter((path) => !path.startsWith("mcp/"));
+  const copiedPaths = files.filter(
+    (path) => !path.startsWith("mcp/") && path !== normalizer,
+  );
   const sourceFiles = await Promise.all(
     copiedPaths.map(async (path) => {
       const file = sourcePath(source, path);
@@ -129,6 +133,25 @@ export async function buildBundledPlugin({
     await mkdir(dirname(output), { recursive: true });
     await copyFile(file, output);
     await chmod(output, mode);
+  }
+
+  if (files.includes(normalizer)) {
+    const { transform } = await import("esbuild");
+    const { code } = await transform(
+      await readFile(
+        sourcePath(source, "scripts/normalize_candidates.ts"),
+        "utf8",
+      ),
+      {
+        loader: "ts",
+        format: "esm",
+        target: "node22.13",
+        banner: "#!/usr/bin/env node",
+      },
+    );
+    const output = sourcePath(destination, normalizer);
+    await mkdir(dirname(output), { recursive: true });
+    await writeFile(output, code, "utf8");
   }
 
   const generated = await destinationFiles(destination);

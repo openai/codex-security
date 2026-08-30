@@ -1963,6 +1963,10 @@ describe("plugin runtime preparation", () => {
   test("upgrades the predecessor cache and restores with the SDK-owned helper", async () => {
     const root = await temporaryDirectory();
     const previous = await plugin(join(root, "previous"), "0.1.60");
+    await writeFile(
+      join(previous, "scripts", "normalize_candidates.mjs"),
+      "throw new Error('stale normalizer must be replaced');\n",
+    );
     // Keep the stale MCP configuration regression covered while upgrading the
     // current predecessor cache to the generated bundle.
     await writeFile(
@@ -2009,11 +2013,25 @@ describe("plugin runtime preparation", () => {
     expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
     expect(upgraded.version).not.toBe(stale.version);
     expect(upgraded.installedRoot).not.toBe(stale.installedRoot);
-    for (const script of ["workbench_target.py", "finalize_scan_contract.py"]) {
+    for (const script of [
+      "workbench_target.py",
+      "finalize_scan_contract.py",
+      "normalize_candidates.mjs",
+    ]) {
       expect(
         await readFile(join(upgraded.installedRoot, "scripts", script)),
       ).toEqual(await readFile(join(PLUGIN_ROOT, "scripts", script)));
     }
+    const help = spawnSync(
+      "node",
+      [
+        join(upgraded.installedRoot, "scripts", "normalize_candidates.mjs"),
+        "--help",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(help.status, help.stderr).toBe(0);
+    expect(help.stdout).toContain("Usage:");
     const configuration = JSON.parse(
       await readFile(join(upgraded.installedRoot, ".mcp.json"), "utf8"),
     ) as {

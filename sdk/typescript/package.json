@@ -48,7 +48,7 @@
     "build:plugin": "node scripts/build-plugin.mjs",
     "check:plugin-source": "node scripts/check-plugin-source.mjs",
     "check:package": "node scripts/check-package.mjs",
-    "format": "prettier --check --ignore-path .gitignore --ignore-path .prettierignore \"**/*.{cjs,mjs,js,ts,tsx,json,md}\"",
+    "format": "prettier --check --ignore-path .gitignore --ignore-path .prettierignore \"**/*.{cjs,mjs,js,ts,tsx,json,md}\" \"../../plugins/codex-security/scripts/*.ts\"",
     "generate:models": "node scripts/generate-models.cjs",
     "generate:models:check": "node scripts/generate-models.cjs --check",
     "lint": "tsc --noEmit",
@@ -59,7 +59,8 @@
     "test:mcp": "node --run build:plugin && pnpm --dir ../../plugins/codex-security/mcp-app run test:mcp",
     "test:mutation": "stryker run",
     "test:package": "node scripts/smoke-package.mjs",
-    "types": "pnpm run generate:models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
+    "types": "pnpm run generate:models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit",
+    "test:normalizer-differential": "node --run build:plugin && bun test --timeout 30000 tests-ts/normalize-candidates.test.ts tests-ts/normalize-candidates-filesystem.test.ts tests-ts/normalize-candidates.property.test.ts"
   },
   "dependencies": {
     "@inquirer/prompts": "8.3.0",
