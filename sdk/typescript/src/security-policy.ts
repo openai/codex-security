@@ -1316,6 +1316,10 @@ export async function applySecurityPolicy(
       );
     }
     const permissionsReference = recoveryPath ?? verificationRecoveryPath;
+    const recoveryGeneration =
+      permissionsReference === null
+        ? null
+        : await securityPolicyRecoveryGeneration(permissionsReference);
     if (
       permissionsReference !== null &&
       (await readSecurityPolicy(permissionsReference)) !== draft.previousContent
@@ -1375,6 +1379,15 @@ export async function applySecurityPolicy(
       inheritedPolicySha256: draft.inheritedPolicySha256,
     });
     await validatePolicyLinks(target);
+    if (
+      permissionsReference !== null &&
+      (await securityPolicyRecoveryGeneration(permissionsReference)) !==
+        recoveryGeneration
+    ) {
+      throw new CodexSecurityError(
+        "The previous SECURITY.md changed during final policy verification.",
+      );
+    }
     if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
       throw new CodexSecurityError(
         "The written policy contents changed during final permission verification.",

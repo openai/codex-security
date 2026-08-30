@@ -1167,6 +1167,60 @@ describe("security policy review and application", () => {
     }
   });
 
+  for (const change of ["content", "permissions"] as const) {
+    const name = `detects recovery ${change} changed during the final policy traversal`;
+    test(name, async () => {
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const f = await fixture();
+      const target = join(f.repository, "SECURITY.md");
+      const original = "# Existing policy\n";
+      await writeFile(target, original);
+      const writer = await open(target, "r+");
+      const draft = await f.generate();
+      const applied = await applySecurityPolicy(draft);
+      const recovery = applied.recoveryPath!;
+      const originalReaddir = fsPromises.readdir;
+      let traversals = 0;
+      let changed = false;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        readdir: async (...args: Parameters<typeof originalReaddir>) => {
+          const entries = await originalReaddir(...args);
+          // Skip the initial checks and recovery lookup; edit during the final alias walk.
+          if (args[0] === f.repository && ++traversals === 4) {
+            changed = true;
+            if (change === "content") {
+              await writer.truncate(0);
+              await writer.writeFile("# Late recovery edit\n");
+            } else await writer.chmod(0o444);
+          }
+          return entries;
+        },
+      }));
+      try {
+        const error = await applySecurityPolicy(draft).catch(
+          (value: unknown) => value,
+        );
+        expect(changed).toBe(true);
+        expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
+        expect((error as SecurityPolicyVerificationError).recoveryPath).toBe(
+          recovery,
+        );
+        expect(await readFile(target, "utf8")).toBe(draft.content);
+        expect(await readFile(recovery, "utf8")).toBe(
+          change === "content" ? "# Late recovery edit\n" : original,
+        );
+      } finally {
+        await writer.close();
+        await chmod(recovery, 0o644);
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          readdir: originalReaddir,
+        }));
+      }
+    });
+  }
+
   test("rechecks installed policy contents after final permission verification", async () => {
     const name =
       "rechecks installed policy contents after final permission verification";
