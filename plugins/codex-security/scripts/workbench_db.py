@@ -1903,25 +1903,21 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
         scan = require_scan(connection, occurrence["scan_id"])
         indexed_finding = _indexed_scan_findings(connection, scan).get(occurrence["id"])
         triaged_occurrences = [occurrence]
+        verification_ids = {occurrence["id"]}
+        if indexed_finding is not None:
+            triaged_occurrences = connection.execute(
+                """
+                SELECT occurrences.*
+                FROM finding_occurrences AS occurrences
+                JOIN scans ON scans.id = occurrences.scan_id
+                WHERE occurrences.id IN (SELECT value FROM json_each(?))
+                ORDER BY scans.rowid, occurrences.id
+                """,
+                (json.dumps(sorted(indexed_finding["occurrence_ids"])),),
+            ).fetchall()
+            verification_ids.add(indexed_finding["occurrence_id"])
         if args.status == "closed":
-            if (
-                close_reason in {"already_fixed", "false_positive"}
-                and indexed_finding is not None
-                and indexed_finding["occurrence_id"] != occurrence["id"]
-            ):
-                triaged_occurrences.append(
-                    require_occurrence(connection, indexed_finding["occurrence_id"])
-                )
-            checked_occurrences = (
-                [
-                    require_occurrence(connection, occurrence_id)
-                    for occurrence_id in indexed_finding["occurrence_ids"]
-                ]
-                if indexed_finding is not None
-                else triaged_occurrences
-            )
-            triaged_ids = {entry["id"] for entry in triaged_occurrences}
-            for checked_occurrence in checked_occurrences:
+            for checked_occurrence in triaged_occurrences:
                 remediation = connection.execute(
                     """
                     SELECT *
@@ -1945,7 +1941,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                     )
                 if (
                     close_reason == "already_fixed"
-                    and checked_occurrence["id"] in triaged_ids
+                    and checked_occurrence["id"] in verification_ids
                     and remediation is not None
                     and remediation["state"] == "verified"
                 ):

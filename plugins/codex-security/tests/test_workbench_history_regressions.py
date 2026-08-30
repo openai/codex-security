@@ -23,6 +23,19 @@ def history(tmp_path: Path):
     return tmp_path / "state", tmp_path / "scans", repository
 
 
+@pytest.fixture
+def linked_history(history):
+    state, root, parent = history
+    repository = parent / "checkout"
+    revision = initialize_git_repository(repository)
+    linked = repository.with_name("linked-worktree")
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)],
+        check=True,
+    )
+    return state, root, repository, linked, revision
+
+
 def test_legacy_descendant_scans_stay_inside_the_current_checkout_owner(history) -> None:
     state, root, repository = history
     child = repository / "nested"
@@ -200,16 +213,49 @@ def test_matched_triage_agrees_in_details_comparisons_and_csv(history, reason) -
         assert {row["close_reason"] for row in rows} == {reason if status == "closed" else ""}
 
 
+@pytest.mark.parametrize("reason", ["already_fixed", "false_positive", "wont_fix"])
+def test_explicit_triage_updates_every_matched_worktree_occurrence(linked_history, reason) -> None:
+    state, root, repository, linked, revision = linked_history
+    before = create_cli_scan(state, root, repository, target_revision=revision)
+    after = create_cli_scan(state, root, linked, target_revision=revision)
+    occurrences = [
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0][
+            "occurrenceId"
+        ]
+        for scan in (before, after)
+    ]
+    save_scan_matches(state, before, after, confirmed_match(*occurrences))
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        targets = [row[0] for row in connection.execute("SELECT id FROM security_targets")]
+    for status in ("closed", "open"):
+        run_workbench(
+            state,
+            "set-finding-triage",
+            "--occurrence-id",
+            occurrences[0],
+            "--status",
+            status,
+            *(
+                ["--close-reason", reason, "--note", "Synthetic triage."]
+                if status == "closed"
+                else []
+            ),
+        )
+        scopes = [
+            ([], 2),
+            (["--repository", str(repository)], 1),
+            (["--repository", str(linked)], 1),
+            *((["--target-id", target], 1) for target in targets),
+        ]
+        for scope, count in scopes:
+            findings = run_workbench(state, "list-global-findings", *scope)["findings"]
+            assert len(findings) == count
+            assert {finding["status"] for finding in findings} == {status}
+
+
 @pytest.mark.parametrize("checkout", ["missing", "replaced", "previous-epoch-missing"])
-def test_saved_linked_history_keeps_only_current_checkout_owners(history, checkout) -> None:
-    state, root, repository = history
-    repository = repository / "checkout"
-    revision = initialize_git_repository(repository)
-    linked = repository.with_name("linked-worktree")
-    subprocess.run(
-        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)],
-        check=True,
-    )
+def test_saved_linked_history_keeps_only_current_checkout_owners(linked_history, checkout) -> None:
+    state, root, repository, linked, revision = linked_history
     before = create_cli_scan(state, root, repository, target_revision=revision)
     after = create_cli_scan(state, root, linked, target_revision=revision)
     occurrences = [
