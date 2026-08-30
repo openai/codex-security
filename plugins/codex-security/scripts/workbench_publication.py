@@ -7,7 +7,7 @@ import csv
 import io
 import os
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +31,7 @@ class WorkbenchPublicationContext:
     available_artifact_path: Callable[[Path, Path], Path | None]
     database_path: Callable[[], Path]
     expected_coverage_mode: Callable[[sqlite3.Row], str]
+    finding_triage: Callable[[sqlite3.Connection, sqlite3.Row], dict[str, dict[str, Any]]]
     now: Callable[[], str]
     pin_legacy_manifest_digest: Callable[[sqlite3.Connection, str, str], None]
     published_manifest_digest: Callable[[Path, dict[str, Any]], str]
@@ -439,7 +440,7 @@ def write_csv_export(
         "end_line",
     )
     writer.writerow(columns)
-    for row in finding_export_rows(connection, scan["id"]):
+    for row in finding_export_rows(connection, scan["id"], db.finding_triage(connection, scan)):
         writer.writerow(
             (
                 csv_cell(row["occurrence_id"]),
@@ -479,8 +480,10 @@ def write_csv_export(
     return path
 
 
-def finding_export_rows(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Cursor:
-    return connection.execute(
+def finding_export_rows(
+    connection: sqlite3.Connection, scan_id: str, triage: dict[str, dict[str, Any]]
+) -> Iterator[dict[str, Any]]:
+    for row in connection.execute(
         """
         SELECT
             occurrences.id AS occurrence_id,
@@ -490,14 +493,10 @@ def finding_export_rows(connection: sqlite3.Connection, scan_id: str) -> sqlite3
             occurrences.severity,
             occurrences.confidence,
             occurrences.remediation,
-            COALESCE(triage.status, 'open') AS status,
-            triage.close_reason,
-            triage.note,
             locations.relative_path,
             locations.start_line,
             locations.end_line
         FROM finding_occurrences AS occurrences
-        LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
         LEFT JOIN finding_locations AS locations
             ON locations.occurrence_id = occurrences.id
             AND locations.sort_order = (
@@ -513,7 +512,14 @@ def finding_export_rows(connection: sqlite3.Connection, scan_id: str) -> sqlite3
         ORDER BY occurrences.created_at, occurrences.id
         """,
         (scan_id,),
-    )
+    ):
+        decision = triage[row["occurrence_id"]]
+        yield {
+            **dict(row),
+            "status": decision["status"],
+            "close_reason": decision.get("closeReason"),
+            "note": decision.get("note"),
+        }
 
 
 if __name__ == "__main__":

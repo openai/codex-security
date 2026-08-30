@@ -2786,8 +2786,11 @@ def _indexed_scan_findings(
             "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
         ).fetchone()
         scope = (
-            {"repository": target["current_path"]}
-            if target is not None and Path(target["current_path"]).exists()
+            {
+                "repository": target["current_path"],
+                "matched_target_ids": scan_history.saved_repository_target_ids(connection, scan),
+            }
+            if target is not None
             else {"target_ids": {scan["target_id"]}}
         )
     return {
@@ -2800,6 +2803,14 @@ def _indexed_scan_findings(
         )
         for occurrence_id in finding.get("occurrence_ids", ())
     }
+
+
+def scan_finding_triage(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> dict[str, dict[str, Any]]:
+    return finding_results.scan_finding_triage(
+        connection, scan, _indexed_scan_findings(connection, scan)
+    )
 
 
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -3315,6 +3326,7 @@ _WORKBENCH_PUBLICATION_CONTEXT = publication.WorkbenchPublicationContext(
     available_artifact_path=available_artifact_path,
     database_path=database_path,
     expected_coverage_mode=expected_coverage_mode,
+    finding_triage=scan_finding_triage,
     now=now,
     pin_legacy_manifest_digest=pin_legacy_manifest_digest,
     published_manifest_digest=published_manifest_digest,
@@ -3470,6 +3482,7 @@ def main() -> None:
                 args,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
+                finding_triage=scan_finding_triage,
                 backfill_finding_details=backfill_legacy_finding_details,
                 include_matching_inputs=args.include_matching_inputs,
                 require_matches=args.require_matches,
@@ -3481,6 +3494,7 @@ def main() -> None:
                 now=now,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
+                finding_triage=scan_finding_triage,
             )
         elif args.command == "list-global-findings":
             result = native_indexes.list_global_findings(

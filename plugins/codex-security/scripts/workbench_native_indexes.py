@@ -366,6 +366,7 @@ def _active_findings(
     target_ids: set[str] | None = None,
     target_paths: set[str] | None = None,
     repository: str | None = None,
+    matched_target_ids: set[str] | None = None,
     query: str = "",
     include_resolved: bool = False,
 ) -> Iterator[dict[str, Any]]:
@@ -385,6 +386,15 @@ def _active_findings(
         if repository is not None
         else ([], [], [], [])
     )
+    if matched_target_ids:
+        placeholders = ", ".join("?" for _ in matched_target_ids)
+        matched_filter = f"scans.target_id IN ({placeholders})"
+        repository_clauses = [
+            f"({' AND '.join(repository_clauses)}) OR {matched_filter}"
+            if repository_clauses
+            else matched_filter
+        ]
+        repository_values.extend(matched_target_ids)
     repository_filter = (
         "AND (" + " AND ".join(repository_clauses) + ")" if repository_clauses else ""
     )

@@ -814,6 +814,10 @@ def _same_registered_repository(
             except OSError:
                 return False
             else:
+                if not stored_filesystem_identity_matches(
+                    scan["target_device"], metadata.st_dev
+                ) or not stored_filesystem_identity_matches(scan["target_inode"], metadata.st_ino):
+                    return False
                 epoch_start = _ownership_epoch_start(connection, scan["target_id"], metadata)
             if epoch_start is not None:
                 sequence = connection.execute(
@@ -824,7 +828,16 @@ def _same_registered_repository(
                     return False
         paths.append(target["current_path"])
     if missing_checkout:
-        return before["target_id"] == after["target_id"]
+        return (
+            before["target_id"] == after["target_id"]
+            or connection.execute(
+                "SELECT 1 FROM scan_comparisons "
+                "WHERE (before_scan_id = ? AND after_scan_id = ?) "
+                "OR (before_scan_id = ? AND after_scan_id = ?)",
+                (before["id"], after["id"], after["id"], before["id"]),
+            ).fetchone()
+            is not None
+        )
     return _same_repository(
         before,
         after,
@@ -834,12 +847,47 @@ def _same_registered_repository(
     )
 
 
+def saved_repository_target_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> set[str]:
+    target_ids = {scan["target_id"]}
+    pending = list(target_ids)
+    checked_pairs = set()
+    while pending:
+        target_id = pending.pop()
+        for pair in connection.execute(
+            """
+            SELECT comparisons.before_scan_id, comparisons.after_scan_id
+            FROM scan_comparisons AS comparisons
+            JOIN scans AS before ON before.id = comparisons.before_scan_id
+            JOIN scans AS after ON after.id = comparisons.after_scan_id
+            WHERE (before.target_id = ? OR after.target_id = ?)
+                AND before.status = 'complete' AND after.status = 'complete'
+            """,
+            (target_id, target_id),
+        ):
+            scan_ids = (pair["before_scan_id"], pair["after_scan_id"])
+            if scan_ids in checked_pairs:
+                continue
+            checked_pairs.add(scan_ids)
+            scans = [
+                connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+                for scan_id in scan_ids
+            ]
+            if not _same_registered_repository(connection, *scans):
+                continue
+            for related in scans:
+                if related["target_id"] not in target_ids:
+                    target_ids.add(related["target_id"])
+                    pending.append(related["target_id"])
+    return target_ids
+
+
 def compare_scans(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
     *,
     require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    finding_triage: Callable[[sqlite3.Connection, sqlite3.Row], dict[str, dict[str, Any]]],
     backfill_finding_details: Callable[[sqlite3.Connection, sqlite3.Row], None] | None = None,
     include_matching_inputs: bool = False,
     require_matches: bool = False,
@@ -876,6 +924,7 @@ def compare_scans(
     comparable = after_coverage.get("completeness") == "complete"
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
+    current_triage = finding_triage(connection, after)
     matches = json.loads(cached["result_json"]) if cached is not None else None
     groups = _finding_groups(before_findings, after_findings, matches)
     uncertain = (
@@ -920,7 +969,7 @@ def compare_scans(
                     row["triage_status"] == "closed" and row["close_reason"] == "already_fixed"
                     for row in previous_rows
                 )
-                and any(row["triage_status"] == "open" for row in current_rows)
+                and any(current_triage[row["id"]]["status"] == "open" for row in current_rows)
                 else "persisting"
             )
             if match_reason is not None:
@@ -951,8 +1000,8 @@ def compare_scans(
             item["afterOccurrenceIds"] = [row["id"] for row in current_rows]
         if current is not None:
             item["triage"] = {
-                "closeReason": current["close_reason"],
-                "status": current["triage_status"],
+                "closeReason": current_triage[current["id"]].get("closeReason"),
+                "status": current_triage[current["id"]]["status"],
             }
         item["status"] = status
         findings.append(item)
@@ -983,6 +1032,7 @@ def save_scan_comparison(
     now: Callable[[], str],
     require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    finding_triage: Callable[[sqlite3.Connection, sqlite3.Row], dict[str, dict[str, Any]]],
 ) -> dict[str, Any]:
     before = require_scan(connection, args.before_scan_id)
     after = require_scan(connection, args.after_scan_id)
@@ -1065,60 +1115,42 @@ def save_scan_comparison(
                 for current in match["afterOccurrenceIds"]
             ),
         )
-    return compare_scans(connection, args, require_scan=require_scan, read_coverage=read_coverage)
+    return compare_scans(
+        connection,
+        args,
+        require_scan=require_scan,
+        read_coverage=read_coverage,
+        finding_triage=finding_triage,
+    )
 
 
 def finding_matches(
-    connection: sqlite3.Connection, occurrence_id: str, scan_id: str, started_at: str
+    connection: sqlite3.Connection, occurrence_id: str, occurrence_ids: set[str]
 ) -> tuple[list[dict[str, Any]], str, list[str]]:
     rows = connection.execute(
         """
-        SELECT matches.after_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
-            occurrences.title, matches.reason
-        FROM scan_comparison_matches AS matches
-        JOIN finding_occurrences AS occurrences ON occurrences.id = matches.after_occurrence_id
-        WHERE matches.before_occurrence_id = ?
-        UNION
-        SELECT matches.before_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
-            occurrences.title, matches.reason
-        FROM scan_comparison_matches AS matches
-        JOIN finding_occurrences AS occurrences ON occurrences.id = matches.before_occurrence_id
-        WHERE matches.after_occurrence_id = ?
-        ORDER BY scan_id, occurrence_id
+        WITH selected_occurrences AS (SELECT value AS id FROM json_each(?))
+        SELECT occurrences.id AS occurrence_id, occurrences.finding_id,
+            occurrences.title, scans.id AS scan_id, scans.started_at,
+            COALESCE((
+                SELECT matches.reason
+                FROM scan_comparison_matches AS matches
+                WHERE (matches.before_occurrence_id = occurrences.id
+                    OR matches.after_occurrence_id = occurrences.id)
+                    AND matches.before_occurrence_id IN (SELECT id FROM selected_occurrences)
+                    AND matches.after_occurrence_id IN (SELECT id FROM selected_occurrences)
+                ORDER BY CASE WHEN matches.before_occurrence_id = ?
+                    OR matches.after_occurrence_id = ? THEN 0 ELSE 1 END,
+                    matches.rowid
+                LIMIT 1
+            ), 'Same stable finding identifier.') AS reason
+        FROM finding_occurrences AS occurrences
+        JOIN scans ON scans.id = occurrences.scan_id
+        WHERE occurrences.id IN (SELECT id FROM selected_occurrences)
+        ORDER BY scans.rowid, occurrences.id
         """,
-        (occurrence_id, occurrence_id),
+        (json.dumps(sorted(occurrence_ids)), occurrence_id, occurrence_id),
     ).fetchall()
-    known_scans = [(started_at, scan_id)]
-    if rows:
-        known_scans = [
-            (row["started_at"], row["scan_id"])
-            for row in connection.execute(
-                """
-                WITH RECURSIVE linked_occurrences(occurrence_id) AS (
-                    SELECT ?
-                    UNION
-                    SELECT CASE
-                        WHEN matches.before_occurrence_id = linked.occurrence_id
-                            THEN matches.after_occurrence_id
-                        ELSE matches.before_occurrence_id
-                    END
-                    FROM scan_comparison_matches AS matches
-                    JOIN linked_occurrences AS linked
-                        ON matches.before_occurrence_id = linked.occurrence_id
-                        OR matches.after_occurrence_id = linked.occurrence_id
-                )
-                SELECT DISTINCT scans.started_at, scans.id AS scan_id, scans.rowid AS scan_sequence
-                FROM linked_occurrences AS linked
-                JOIN finding_occurrences AS occurrences ON occurrences.id = linked.occurrence_id
-                JOIN scans ON scans.id = occurrences.scan_id
-                ORDER BY scan_sequence
-                """,
-                (occurrence_id,),
-            )
-        ]
-    known_scan_ids = [known_scans[0][1]]
-    if len(known_scans) > 1:
-        known_scan_ids.append(known_scans[-1][1])
     return (
         [
             {
@@ -1129,9 +1161,10 @@ def finding_matches(
                 "title": row["title"],
             }
             for row in rows
+            if row["occurrence_id"] != occurrence_id
         ],
-        known_scans[0][0],
-        known_scan_ids,
+        rows[0]["started_at"],
+        list(dict.fromkeys(row["scan_id"] for row in rows)),
     )
 
 

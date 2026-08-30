@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ from test_workbench_scan_history import (
     run_workbench,
     save_scan_matches,
 )
+from workbench_test_support import initialize_git_repository
 
 
 @pytest.fixture
@@ -146,3 +149,116 @@ def test_finding_pages_honor_larger_limits(history) -> None:
         assert len(page["findings"]) == 25
         assert page["limit"] == 100
         assert page["nextOffset"] is None
+
+
+@pytest.mark.parametrize("reason", ["already_fixed", "false_positive", "wont_fix"])
+def test_matched_triage_agrees_in_details_comparisons_and_csv(history, reason) -> None:
+    state, root, repository = history
+    before = create_cli_scan(state, root, repository, identity_anchor="before")
+    after = create_cli_scan(
+        state, root, repository, identity_anchor="after", extra_anchors=("another-path",)
+    )
+    previous = run_workbench(state, "get-scan", "--scan-id", before["scanId"])["scan"]["findings"][
+        0
+    ]
+    current = run_workbench(state, "get-scan", "--scan-id", after["scanId"])["scan"]["findings"]
+    save_scan_matches(
+        state,
+        before,
+        after,
+        confirmed_match(previous["occurrenceId"], [row["occurrenceId"] for row in current]),
+    )
+    for status in ("closed", "open"):
+        run_workbench(
+            state,
+            "set-finding-triage",
+            "--occurrence-id",
+            previous["occurrenceId"],
+            "--status",
+            status,
+            *(
+                ["--close-reason", reason, "--note", "Synthetic triage."]
+                if status == "closed"
+                else []
+            ),
+        )
+        shown = run_workbench(state, "get-scan", "--scan-id", after["scanId"])["scan"]["findings"]
+        assert {row["status"] for row in shown} == {status}
+        comparison = compare_scan_pair(state, before, after)
+        assert comparison["findings"][0]["triage"] == {
+            "status": status,
+            "closeReason": reason if status == "closed" else None,
+        }
+        if status == "closed":
+            assert comparison["summary"]["reopened"] == 0
+        exported = run_workbench(
+            state, "export-findings", "--scan-id", after["scanId"], "--format", "csv"
+        )["export"]
+        with Path(exported["path"]).open(newline="") as source:
+            rows = list(csv.DictReader(source))
+        assert {row["status"] for row in rows} == {status}
+        assert {row["close_reason"] for row in rows} == {reason if status == "closed" else ""}
+
+
+@pytest.mark.parametrize("checkout", ["missing", "replaced", "previous-epoch-missing"])
+def test_saved_linked_history_keeps_only_current_checkout_owners(history, checkout) -> None:
+    state, root, repository = history
+    repository = repository / "checkout"
+    revision = initialize_git_repository(repository)
+    linked = repository.with_name("linked-worktree")
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)],
+        check=True,
+    )
+    before = create_cli_scan(state, root, repository, target_revision=revision)
+    after = create_cli_scan(state, root, linked, target_revision=revision)
+    occurrences = [
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0][
+            "occurrenceId"
+        ]
+        for scan in (before, after)
+    ]
+    save_scan_matches(state, before, after, confirmed_match(*occurrences))
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrences[0],
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic linked triage.",
+    )
+    linked.rename(linked.with_name("offline-worktree"))
+    if checkout != "missing":
+        linked.mkdir()
+    if checkout == "previous-epoch-missing":
+        create_cli_scan(state, root, linked)
+        linked.rename(linked.with_name("newer-offline-worktree"))
+
+    if checkout == "missing":
+        assert compare_scan_pair(state, before, after)["summary"]["persisting"] == 1
+        for occurrence, scan in zip(occurrences, (before, after), strict=True):
+            detail = run_workbench(state, "get-finding", "--occurrence-id", occurrence)["scan"][
+                "findings"
+            ][0]
+            assert detail["occurrenceCount"] == 2
+            assert detail["knownScanIds"] == [before["scanId"], after["scanId"]]
+            assert detail["status"] == "closed"
+            listed = run_workbench(state, "list-findings", "--scan-id", scan["scanId"])[
+                "findingsPage"
+            ]["findings"][0]
+            assert listed["occurrenceCount"] == 2
+    else:
+        rejected = run_workbench(
+            state, "get-finding", "--occurrence-id", occurrences[1], check=False
+        )
+        assert rejected["returncode"] != 0
+        assert "checkout owner" in rejected["stderr"]
+        detail = run_workbench(state, "get-finding", "--occurrence-id", occurrences[0])["scan"][
+            "findings"
+        ][0]
+        assert "matches" not in detail
+        assert "occurrenceCount" not in detail

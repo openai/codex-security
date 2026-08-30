@@ -172,7 +172,7 @@ test("orders finding-detail history by scan insertion after clock rollback", () 
     "connection.executemany('INSERT INTO scans VALUES (?, ?)', [('older-scan', '2026-02-01'), ('newer-scan', '2026-01-01')])",
     "connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', [('older-occurrence', 'finding', 'older-scan', 'Older'), ('newer-occurrence', 'finding', 'newer-scan', 'Newer')])",
     "connection.execute(\"INSERT INTO scan_comparison_matches VALUES ('older-scan', 'newer-scan', 'older-occurrence', 'newer-occurrence', 'Same finding')\")",
-    "matches, known_since, scan_ids = history.finding_matches(connection, 'newer-occurrence', 'newer-scan', '2026-01-01')",
+    "matches, known_since, scan_ids = history.finding_matches(connection, 'newer-occurrence', {'older-occurrence', 'newer-occurrence'})",
     "print(json.dumps({'knownSince': known_since, 'knownScanIds': scan_ids, 'matches': matches}))",
   ].join("\n");
 
@@ -376,7 +376,7 @@ test("loads oversized comparison matches from stdin", async () => {
     "history.compare_scans = lambda *_args, **_kwargs: {'saved': True}",
     "payload = sys.stdin.read()",
     "sys.stdin = io.StringIO(payload)",
-    "result = history.save_scan_comparison(connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=None, matches_json_stdin=True), now=lambda: 'now', require_scan=lambda _connection, scan_id: scans[scan_id], read_coverage=lambda _scan: {})",
+    "result = history.save_scan_comparison(connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=None, matches_json_stdin=True), now=lambda: 'now', require_scan=lambda _connection, scan_id: scans[scan_id], read_coverage=lambda _scan: {}, finding_triage=lambda _connection, _scan: {})",
     "print(json.dumps(result))",
   ].join("\n");
   const payload = JSON.stringify({

@@ -25,6 +25,7 @@ test.skipIf(process.platform !== "win32")(
         "connection = sqlite3.connect(':memory:')",
         "connection.row_factory = sqlite3.Row",
         "connection.executescript('''",
+        "CREATE TABLE security_targets (id TEXT, current_path TEXT);",
         "CREATE TABLE scans (id TEXT, target_path TEXT, target_id TEXT, status TEXT, started_at TEXT, completed_at TEXT, continuation_thread_id TEXT, cost_json TEXT, handoff_status TEXT, mode TEXT, model TEXT, parent_scan_id TEXT, phase TEXT, recipe_json TEXT, reasoning_effort TEXT, scan_dir TEXT, scope TEXT, target_revision TEXT, target_summary TEXT, updated_at TEXT, canceled_at TEXT, completion_warnings_json TEXT);",
         "CREATE TABLE scan_progress (scan_id TEXT, reportable_findings_count INTEGER, scope_file_count INTEGER, review_items_completed INTEGER, review_items_total INTEGER, updated_at TEXT);",
         "CREATE TABLE finding_occurrences (scan_id TEXT);",

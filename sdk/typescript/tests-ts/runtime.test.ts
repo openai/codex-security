@@ -1960,7 +1960,7 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test.each(["0.1.79", "0.1.85"])(
+  test.each(["0.1.79", "0.1.85", "0.1.86"])(
     "upgrades cached %s history and preserves SDK restoration",
     async (previousVersion) => {
       const root = await temporaryDirectory();

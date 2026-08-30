@@ -114,11 +114,7 @@ def finding_result(
                 else bounded_output_text(absolute_path, FINDING_ABSOLUTE_PATH_BYTES)
             )
         locations.append(location)
-    triage = finding_triage_result(connection, occurrence["id"])
-    if indexed_finding is not None and indexed_finding["decision_occurrence_id"] is not None:
-        triage = finding_triage_result(connection, indexed_finding["decision_occurrence_id"])
-        if triage["status"] != indexed_finding["status"]:
-            triage = {"status": indexed_finding["status"]}
+    triage = finding_triage_result(connection, occurrence["id"], indexed_finding)
     result = {
         **details,
         "confidence": {
@@ -153,7 +149,9 @@ def finding_result(
         "triage": triage,
     }
     matches, known_since, known_scan_ids = scan_history.finding_matches(
-        connection, occurrence["id"], scan["id"], scan["started_at"]
+        connection,
+        occurrence["id"],
+        indexed_finding["occurrence_ids"] if indexed_finding is not None else {occurrence["id"]},
     )
     if indexed_finding is not None:
         matches = [
@@ -272,19 +270,42 @@ def finding_management_updated_at(connection: sqlite3.Connection, scan_id: str) 
     ).fetchone()[0]
 
 
-def finding_triage_result(connection: sqlite3.Connection, occurrence_id: str) -> dict[str, Any]:
+def scan_finding_triage(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    indexed_findings: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {
+        row["id"]: finding_triage_result(connection, row["id"], indexed_findings.get(row["id"]))
+        for row in connection.execute(
+            "SELECT id FROM finding_occurrences WHERE scan_id = ?", (scan["id"],)
+        )
+    }
+
+
+def finding_triage_result(
+    connection: sqlite3.Connection,
+    occurrence_id: str,
+    indexed_finding: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    decision_id = indexed_finding["decision_occurrence_id"] if indexed_finding is not None else None
     row = connection.execute(
         "SELECT status, close_reason, note, updated_at FROM finding_triage WHERE occurrence_id = ?",
-        (occurrence_id,),
+        (decision_id or occurrence_id,),
     ).fetchone()
-    if row is None:
-        return {"status": "open"}
-    return {
-        "closeReason": row["close_reason"],
-        "note": row["note"],
-        "status": row["status"],
-        "updatedAt": row["updated_at"],
-    }
+    triage = (
+        {
+            "closeReason": row["close_reason"],
+            "note": row["note"],
+            "status": row["status"],
+            "updatedAt": row["updated_at"],
+        }
+        if row is not None
+        else {"status": "open"}
+    )
+    if indexed_finding is not None and triage["status"] != indexed_finding["status"]:
+        return {"status": indexed_finding["status"]}
+    return triage
 
 
 if __name__ == "__main__":

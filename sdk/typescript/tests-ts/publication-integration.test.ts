@@ -1132,8 +1132,9 @@ describe("database-backed Linear publication integration", () => {
     const preload = join(root, "publisher.cjs");
     const publisherPidFile = join(root, "publisher.pid");
     const descendantPidFile = join(root, "descendant.pid");
+    // The parent treats the PID file's existence as readiness, so publish it atomically.
     const descendant =
-      'const fs = require("node:fs");process.on("SIGINT", () => {});process.on("SIGTERM", () => {});fs.writeFileSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID, String(process.pid));setInterval(() => {}, 1000);';
+      'const fs = require("node:fs");const pidFile = process.env.CODEX_PUBLICATION_DESCENDANT_PID;process.on("SIGINT", () => {});process.on("SIGTERM", () => {});fs.writeFileSync(pidFile + ".tmp", String(process.pid));fs.renameSync(pidFile + ".tmp", pidFile);setInterval(() => {}, 1000);';
     await writeFile(
       preload,
       `const fs = require("node:fs"); const { spawn } = require("node:child_process");

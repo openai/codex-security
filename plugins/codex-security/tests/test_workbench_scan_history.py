@@ -1014,6 +1014,9 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
         ][0]
         assert finding["knownScanIds"] == [before["scanId"], after["scanId"], latest["scanId"]]
         assert finding["knownSince"] == known_since
+        assert {match["scanId"] for match in finding["matches"]} == {
+            other["scanId"] for other in (before, after, latest) if other != scan
+        }
 
     save_scan_matches(
         state_dir,
@@ -1111,6 +1114,10 @@ def test_semantic_scan_comparison_supports_one_to_many_without_copying_triage(
     )
     assert saved["summary"]["persisting"] == 1
     assert saved["summary"]["new"] == 0
+    assert saved["findings"][0]["triage"] == {
+        "status": "closed",
+        "closeReason": "false_positive",
+    }
     assert saved["findings"][0]["severity"] == "critical"
     assert saved["findings"][0]["title"] == current[1]["title"]
     assert saved["findings"][0]["beforeOccurrenceId"] == previous["occurrenceId"]
