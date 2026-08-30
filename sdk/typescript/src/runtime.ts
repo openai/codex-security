@@ -2426,13 +2426,7 @@ export async function bootstrapPlugin(
     );
   }
 
-  const staged =
-    existing === null
-      ? null
-      : await pluginMetadata(join(marketplace, "plugins", PLUGIN_NAME)).catch(
-          () => null,
-        );
-  if (staged?.version !== version) {
+  if (!(await sameFile(root, join(marketplace, "plugins", PLUGIN_NAME)))) {
     if (existing !== null) {
       await rm(marketplace, { recursive: true, force: true });
     }

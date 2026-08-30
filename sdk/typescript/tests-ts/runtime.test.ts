@@ -1661,6 +1661,29 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
+  test("keeps an explicitly selected staged plugin intact", async () => {
+    const root = await temporaryDirectory();
+    const source = await plugin(root);
+    const home = join(root, "home");
+    const marketplace = await createMarketplace(home, source);
+    const staged = join(marketplace, "plugins", "codex-security");
+    const helper = await readFile(join(staged, "scripts", "helper.py"));
+
+    const installed = await bootstrapPlugin(home, staged, {
+      codexCommand: { command: "/codex" },
+      runCodex: async () =>
+        JSON.stringify({
+          installedPath: join(home, "installed"),
+          version: "1.2.3",
+        }),
+    });
+
+    expect(installed.pluginRoot).toBe(await realpath(staged));
+    expect(await readFile(join(staged, "scripts", "helper.py"))).toEqual(
+      helper,
+    );
+  });
+
   test("does not preserve a different marketplace when numeric identities collide", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
@@ -1960,13 +1983,11 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test.each(["0.1.79", "0.1.85", "0.1.86", "0.1.87"])(
-    "upgrades cached %s history and preserves SDK restoration",
+  test.each(["0.1.60", BUNDLED_PLUGIN_VERSION])(
+    "refreshes cached %s history and preserves SDK restoration",
     async (previousVersion) => {
       const root = await temporaryDirectory();
       const previous = await plugin(join(root, "previous"), previousVersion);
-      // Keep the stale MCP configuration regression covered while upgrading the
-      // current predecessor cache to the generated bundle.
       await writeFile(
         join(previous, ".mcp.json"),
         JSON.stringify({ mcpServers: { "codex-security": { env_vars: [] } } }),
@@ -2021,8 +2042,6 @@ describe("plugin runtime preparation", () => {
 
       expect(stale.version).toBe(previousVersion);
       expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
-      expect(upgraded.version).not.toBe(stale.version);
-      expect(upgraded.installedRoot).not.toBe(stale.installedRoot);
       for (const script of [
         "workbench_target.py",
         "finalize_scan_contract.py",
