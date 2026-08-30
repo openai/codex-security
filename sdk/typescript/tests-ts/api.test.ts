@@ -6021,6 +6021,7 @@ describe("CodexSecurity orchestration", () => {
       { pluginPath: join(root, "missing-plugin") },
       {
         environment: {
+          CODEX_HOME: join(root, "ambient-codex-home"),
           CODEX_SECURITY_STATE_DIR: stateDirectory,
           ...fakeCommand.environment,
         },

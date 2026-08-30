@@ -1,12 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import { initialCredentialsAvailable } from "../src/api.js";
+import {
+  initialCredentialsAvailable,
+  selectedScanEnvironment,
+} from "../src/api.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
@@ -30,10 +33,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(scanDir, { mode: 0o700 });
     await writeFile(join(ambientHome, "auth.json"), "{}\n");
     const interpreter =
-      process.env["PYTHON"] ??
-      Bun.which("python") ??
-      Bun.which("py") ??
-      Bun.which("python3");
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     expect(interpreter).not.toBeNull();
     let capturedConfigPath: string | undefined;
     let capturedCodexHome: string | undefined;
@@ -478,6 +478,37 @@ describe("CodexSecurity orchestration", () => {
     ).resolves.toBe(true);
   });
 
+  test.skipIf(process.platform === "win32" || process.geteuid?.() === 0)(
+    "reports unreadable ambient credentials during account()",
+    async () => {
+      const root = await temporaryDirectory();
+      const ambientHome = join(root, "ambient-home");
+      const authPath = join(ambientHome, "auth.json");
+      await mkdir(ambientHome);
+      await writeFile(authPath, '{"auth_mode":"chatgpt"}\n', { mode: 0o000 });
+      const client = new TestClient(
+        {},
+        {
+          environment: {
+            CODEX_HOME: ambientHome,
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          },
+          resolveCodexCommand: () => {
+            throw new Error("Must not query Codex after an import failure");
+          },
+        },
+      );
+      try {
+        await expect(client.account()).rejects.toThrow(
+          "Unable to copy ambient Codex authentication.",
+        );
+      } finally {
+        await chmod(authPath, 0o600);
+        await client.close();
+      }
+    },
+  );
+
   test("recognizes ambient credentials during account() on a fresh instance", async () => {
     const root = await temporaryDirectory();
     const ambientHome = join(root, "ambient-home");
@@ -513,7 +544,7 @@ process.exit(process.exitCode ?? 0);
       { pluginPath: PLUGIN_ROOT },
       {
         environment: {
-          ...process.env,
+          ...selectedScanEnvironment(process.env, "chatgpt"),
           NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
           CODEX_HOME: ambientHome,
           CODEX_SECURITY_STATE_DIR: stateDir,
