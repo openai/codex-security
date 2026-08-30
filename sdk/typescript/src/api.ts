@@ -1040,7 +1040,7 @@ export class CodexSecurity {
         deepScanConfiguration?.settings,
         options.auth,
       );
-      if (options.scanPrompt !== undefined) recipe["requiresScanPrompt"] = true;
+      if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
       if (options.validationPrompt !== undefined)
         recipe["validationMode"] = "custom";
       const workbenchOptions: WorkbenchCommandOptions = {
