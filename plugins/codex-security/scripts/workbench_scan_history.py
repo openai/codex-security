@@ -284,8 +284,7 @@ def list_unmatched_scan_pairs(
             if scan["id"] not in matching_findings:
                 backfill_finding_details(connection, scan)
                 matching_findings[scan["id"]] = [
-                    _matching_input(row)
-                    for row in _scan_findings(connection, scan["id"]).values()
+                    _matching_input(row) for row in _scan_findings(connection, scan["id"]).values()
                 ]
         batches.append(
             {

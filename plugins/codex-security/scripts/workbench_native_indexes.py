@@ -101,8 +101,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
 
     latest_scan_by_target = dict(
         connection.execute(
-            "SELECT target_id, id FROM scans "
-            "WHERE status = 'complete' ORDER BY started_at, id"
+            "SELECT target_id, id FROM scans WHERE status = 'complete' ORDER BY started_at, id"
         )
     )
 

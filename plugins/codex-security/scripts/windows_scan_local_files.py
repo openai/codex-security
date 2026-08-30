@@ -410,13 +410,8 @@ def _locked_parent(
     _require_windows()
     parts = _validated_parts(relative_path)
     root_path, observed_root_identity = _canonical_scan_directory(scan_dir)
-    if (
-        expected_root_identity is not None
-        and observed_root_identity != expected_root_identity
-    ):
-        raise _invalid_path(
-            scan_dir, "scan directory changed after artifact restoration setup"
-        )
+    if expected_root_identity is not None and observed_root_identity != expected_root_identity:
+        raise _invalid_path(scan_dir, "scan directory changed after artifact restoration setup")
     handles: list[_OwnedHandle] = []
     try:
         # Absolute-path Win32 calls remain safe only while every ancestor is
@@ -429,12 +424,9 @@ def _locked_parent(
         current_root = root_path.lstat()
         current_root_identity = (current_root.st_dev, current_root.st_ino)
         if current_root_identity != observed_root_identity or (
-            expected_root_identity is not None
-            and current_root_identity != expected_root_identity
+            expected_root_identity is not None and current_root_identity != expected_root_identity
         ):
-            raise _invalid_path(
-                scan_dir, "scan directory changed while it was being opened"
-            )
+            raise _invalid_path(scan_dir, "scan directory changed while it was being opened")
         current_path = root_path
         for component in parts[:-1]:
             current_path /= component
@@ -596,9 +588,7 @@ def _existing_output_matches(path: Path, payload: bytes) -> bool:
         raw_handle = handle.detach()
         try:
             assert _msvcrt is not None
-            descriptor = _msvcrt.open_osfhandle(
-                raw_handle, os.O_RDONLY | os.O_BINARY
-            )
+            descriptor = _msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | os.O_BINARY)
         except BaseException:
             _close_handle(raw_handle)
             raise

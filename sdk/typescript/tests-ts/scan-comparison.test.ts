@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import {
   Codex,
   type CodexOptions,
@@ -31,9 +31,22 @@ const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
+    temporaryDirectories.splice(0).map(async (path) => {
+      // Bun 1.3.13 ignores fs.rm's retry options.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await rm(path, { recursive: true, force: true });
+          return;
+        } catch (error) {
+          if (
+            (error as NodeJS.ErrnoException).code !== "EBUSY" ||
+            attempt === 10
+          )
+            throw error;
+          await Bun.sleep(100 * (attempt + 1));
+        }
+      }
+    }),
   );
 });
 
@@ -102,6 +115,7 @@ describe("semantic scan comparison", () => {
     const { codex } = fakeCodex({ matches: [], uncertain: [] });
     let config: CodexOptions["config"];
     let codexPath: string | undefined;
+    let codexEnvironment: CodexOptions["env"];
     const startThread = spyOn(
       Codex.prototype,
       "startThread",
@@ -109,6 +123,8 @@ describe("semantic scan comparison", () => {
       config = (this as unknown as { options: CodexOptions }).options.config;
       codexPath = (this as unknown as { options: CodexOptions }).options
         .codexPathOverride;
+      codexEnvironment = (this as unknown as { options: CodexOptions }).options
+        .env;
       return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
     });
     try {
@@ -130,7 +146,12 @@ describe("semantic scan comparison", () => {
         synthetic: { command: "synthetic-integration", enabled: false },
         inherited: { enabled: false },
       });
-      expect(codexPath).toBe(executable);
+      expect(codexPath).toBe(
+        process.platform === "win32"
+          ? win32.toNamespacedPath(executable)
+          : executable,
+      );
+      expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
       const effective = await runCodexCommand(
         resolveCodexCommand(environment),
         [

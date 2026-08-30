@@ -39,6 +39,7 @@ import {
   relative,
   resolve,
   sep,
+  win32,
 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -941,7 +942,12 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "  foreach ($entry in $entries) {",
     "    if (($entry.Attributes -band 1024) -and ($entry.LinkType -in @('SymbolicLink', 'Junction'))) { throw 'Windows credential home contains a symbolic link or junction' }",
     "    if ($entry.PSObject.TypeNames -notcontains 'System.IO.DirectoryInfo' -and $entry.PSObject.TypeNames -notcontains 'System.IO.FileInfo') { throw 'Windows credential home contains an unsafe entry' }",
-    "    try { Write-CredentialAcl $entry.FullName } catch { if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { continue }; throw }",
+    "    try { Write-CredentialAcl $entry.FullName } catch {",
+    // A descendant can disappear inside Get-Acl after it was enumerated.
+    `      if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand' -or $_.FullyQualifiedErrorId -eq 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
+    "      if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { continue }",
+    "      throw",
+    "    }",
     "    if ($entry.PSIsContainer) { Read-CredentialDescendants $entry.FullName }",
     "  }",
     "}",
@@ -2409,6 +2415,16 @@ export function resolveCodexCommand(
   return { command };
 }
 
+export function executablePathForSpawn(command: string): string {
+  if (process.platform !== "win32" || !win32.isAbsolute(command))
+    return command;
+  // Root-relative paths still depend on the child's drive and working directory.
+  const root = win32.parse(command).root;
+  return root === "\\" || root === "/"
+    ? command
+    : win32.toNamespacedPath(command);
+}
+
 export async function bootstrapPlugin(
   codexHome: string,
   pluginRoot: string,
@@ -2812,7 +2828,7 @@ export async function runCodexCommand(
   input?: string | Uint8Array,
   signal?: AbortSignal,
 ): Promise<CodexCommandResult> {
-  const child = spawn(command.command, [...args], {
+  const child = spawn(executablePathForSpawn(command.command), [...args], {
     env: environment,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,

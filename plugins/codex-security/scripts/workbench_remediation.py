@@ -53,6 +53,43 @@ def remediation_claim_is_active(remediation: sqlite3.Row) -> bool:
     return parsed > datetime.now(timezone.utc) - timedelta(seconds=lease_seconds)
 
 
+def require_transition(current: str, requested: str) -> None:
+    allowed = {
+        "requested": {"requested", "generated", "failed"},
+        "generated": {"generated", "applied", "failed"},
+        "applied": {"applied", "verifying", "failed"},
+        "verifying": {"verifying", "verified", "failed"},
+        "verified": {"verifying", "verified"},
+        "failed": {"generated", "applied", "verifying", "verified", "failed"},
+    }
+    if requested not in allowed.get(current, set()):
+        raise SystemExit(f"Finding remediation cannot move from {current} to {requested}.")
+
+
+def require_pending_action(current: sqlite3.Row, requested: str) -> None:
+    pending_action = current["pending_action"]
+    if pending_action is not None:
+        allowed = {
+            "generate": {"generated", "failed"},
+            "apply": {"applied", "failed"},
+            "verify": {"verifying", "verified", "failed"},
+        }
+        if requested not in allowed[pending_action]:
+            raise SystemExit(
+                f"Pending remediation action {pending_action} cannot record state {requested}."
+            )
+        return
+    required_action = {
+        ("requested", "generated"): "generate",
+        ("generated", "applied"): "apply",
+        ("applied", "verifying"): "verify",
+    }.get((current["state"], requested))
+    if required_action is not None:
+        raise SystemExit(
+            f"Request {required_action} before recording remediation state {requested}."
+        )
+
+
 def register_cancel_finding_remediation_request(subparsers: Any) -> None:
     parser = subparsers.add_parser("cancel-finding-remediation-request")
     parser.add_argument("--occurrence-id", required=True)

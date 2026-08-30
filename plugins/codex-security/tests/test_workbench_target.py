@@ -57,9 +57,8 @@ def test_git_output_decodes_repository_paths_as_utf8(
     initialize_git_repository(target)
     monkeypatch.setattr(subprocess, "_text_encoding", lambda: encoding)
 
-    assert WORKBENCH_TARGET["git_output"](target, "rev-parse", "--show-toplevel") == str(
-        target
-    )
+    output = WORKBENCH_TARGET["git_output"](target, "rev-parse", "--show-toplevel")
+    assert Path(output) == target
 
 
 def test_directory_content_digest_uses_git_file_set(tmp_path: Path) -> None:

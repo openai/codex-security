@@ -152,7 +152,10 @@ Options for `security.run(repository, options)` and
 | `signal`                | `AbortSignal` to cancel a scan.                                                |
 
 Follow scans with `onWorkerStatus` and `onReconnect`. `onSessionEvent` receives
-saved events with thread IDs and worker numbers; `ScanOptions` lists all callbacks.
+saved events with thread IDs and worker numbers. Deep scans can additionally use
+`onDeepProgress` for durable independent-review counts: `completed`, `active`,
+and `maximum`. The maximum is a configured cap, not a percentage denominator.
+`ScanOptions` lists all callbacks.
 
 `preflight` and CLI `--dry-run` check local inputs without starting Codex or
 using the network. They don't authenticate, verify model access, resolve Python,
@@ -1501,15 +1504,31 @@ migrated database.
 
 ### Running without Docker
 
-To run locally, use Node.js and Python 3 as described in the prerequisites.
-Export the API key in your shell; the server does not load `.env` automatically.
-From `sdk/typescript`, install dependencies, build, and start:
+With Node.js and Python 3 installed:
+
+```bash
+npm install -g @openai/codex-security
+CODEX_SECURITY_STATE_DIR="$HOME/.codex-security-findings" codex-security serve --port 3000
+```
+
+`--port` overrides `PORT` (default: `3000`). Open
+`http://127.0.0.1:3000/dashboard`. Stop with Ctrl+C or SIGTERM.
+
+Export `OPENAI_API_KEY` or `CODEX_API_KEY` to import findings with embeddings.
+Startup and listing need no key. The service does not load `.env` or authenticate
+requests; keep it on loopback or behind an authenticated TLS proxy.
+
+From a source checkout's `sdk/typescript` directory:
 
 ```bash
 pnpm install --frozen-lockfile
+pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile
+pnpm run build:plugin
 pnpm run build
-pnpm run start:server
+node bin/codex-security.mjs serve --port 3000
 ```
+
+`pnpm run start:server` and `node dist/server/index.js` still work.
 
 Local defaults are `HOST=127.0.0.1` and `PORT=3000`. The existing
 `CODEX_SECURITY_STATE_DIR` and `PYTHON` settings select storage and Python;

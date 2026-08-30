@@ -1,5 +1,6 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
+import { statSync } from "node:fs";
 import {
   chmod,
   lstat,
@@ -13,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import {
   basename,
+  delimiter,
   dirname,
   isAbsolute,
   join,
@@ -63,6 +65,10 @@ import {
   type ScanCost,
   type ScanSessionEvent,
 } from "./cost.js";
+import {
+  DeepScanProgressTracker,
+  type DeepScanProgress,
+} from "./deep-progress.js";
 import {
   loadContract,
   readScanFile,
@@ -145,6 +151,7 @@ import {
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
+  executablePathForSpawn,
   expandHome,
   importAmbientAuth,
   prepareCodexSecurityCredentialHome,
@@ -277,6 +284,7 @@ export interface ScanOptions extends DeepScanOptions {
   onActivity?: (activity: ScanActivity) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onProgress?: (progress: ScanProgress) => void;
+  onDeepProgress?: (progress: DeepScanProgress) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string, details?: ScanWarningDetails) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
@@ -364,6 +372,7 @@ type ScanObserverName =
   | "onActivity"
   | "onSessionEvent"
   | "onProgress"
+  | "onDeepProgress"
   | "onWorkerStatus"
   | "onStage"
   | "onWarning";
@@ -1139,6 +1148,7 @@ export class CodexSecurity {
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
+    let deepProgressTracker: DeepScanProgressTracker | null = null;
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
     let customValidationComplete = false;
@@ -1535,6 +1545,37 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      if (mode === "deep" && options.onDeepProgress !== undefined) {
+        let progressWarningReported = false;
+        deepProgressTracker = new DeepScanProgressTracker({
+          read: (progressSignal) =>
+            workbench(
+              {
+                ...workbenchOptions,
+                signal: AbortSignal.any([signal, progressSignal]),
+              },
+              ["get-scan", "--scan-id", scanId],
+            ),
+          onProgress: (progress) =>
+            notifyObserver(
+              "onDeepProgress",
+              options.onDeepProgress,
+              options.onObserverError,
+              progress,
+            ),
+          onError: (error) => {
+            if (progressWarningReported) return;
+            progressWarningReported = true;
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              `Could not track Deep Scan progress: ${errorMessage(error)}`,
+            );
+          },
+        });
+        deepProgressTracker.start();
+      }
       if (options.validationPrompt !== undefined) {
         await writeCustomValidationStatus(
           scanDir,
@@ -2114,6 +2155,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      deepProgressTracker?.stop();
       // Removing the temporary scan inputs is best effort. A throw here would replace the
       // outcome the try and catch blocks already produced, so these failures are reported
       // as warnings: a scan that failed has to say why it failed, not why its temporary
@@ -2374,15 +2416,27 @@ export class CodexSecurity {
     )
       ? sdkCodexConfig["responses_api_metadata"]
       : {};
-    const codexPathOverride =
+    let codexPathOverride =
       environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") ===
       undefined
         ? undefined
         : this.#codexCommand().command;
+    let sdkEnvironment = definedEnvironment(
+      selectedScanEnvironment(environment, "chatgpt"),
+    );
+    if (process.platform === "win32" && codexPathOverride === undefined) {
+      codexPathOverride = environment["CODEX_CLI_PATH"]!;
+      sdkEnvironment = bundledCodexSdkEnvironment(
+        codexPathOverride,
+        sdkEnvironment,
+      );
+    }
     const codex = this.#dependencies.createCodex({
-      ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
+      ...(codexPathOverride === undefined
+        ? {}
+        : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      env: definedEnvironment(selectedScanEnvironment(environment, "chatgpt")),
+      env: sdkEnvironment,
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
         responses_api_metadata: {
@@ -4159,6 +4213,34 @@ function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
     ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";
   throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
+}
+
+function bundledCodexSdkEnvironment(
+  command: string,
+  environment: Record<string, string>,
+): Record<string, string> {
+  // An SDK executable override disables its bundled-tool PATH setup.
+  const toolsDirectory = join(dirname(dirname(command)), "codex-path");
+  try {
+    if (!statSync(toolsDirectory).isDirectory()) return environment;
+  } catch {
+    return environment;
+  }
+  const result = { ...environment };
+  const pathKeys = Object.keys(result).filter(
+    (key) => key.toLowerCase() === "path",
+  );
+  const pathKey = pathKeys.includes("Path")
+    ? "Path"
+    : pathKeys.at(-1) ?? "PATH";
+  for (const key of pathKeys) {
+    if (key !== pathKey) delete result[key];
+  }
+  const entries = (result[pathKey] ?? "")
+    .split(delimiter)
+    .filter((entry) => entry.length > 0 && entry !== toolsDirectory);
+  result[pathKey] = [toolsDirectory, ...entries].join(delimiter);
+  return result;
 }
 
 function definedEnvironment(

@@ -30,6 +30,7 @@ import {
   parse,
   relative,
   sep,
+  win32,
 } from "node:path";
 import { PassThrough } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
@@ -38,6 +39,7 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
+import { build } from "esbuild";
 import {
   BUNDLED_PLUGIN_VERSION,
   bootstrapPlugin,
@@ -63,6 +65,7 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
@@ -220,6 +223,7 @@ describe("plugin runtime preparation", () => {
 
   test("forwards configured provider credentials through the MCP worker environment", async () => {
     const providerKeys = [
+      "OPENAI_API_KEY",
       "OPENROUTER_API_KEY",
       "FIREWORKS_API_KEY",
       "AWS_BEARER_TOKEN_BEDROCK",
@@ -2097,6 +2101,108 @@ describe("plugin runtime preparation", () => {
     });
   });
 
+  test.each([
+    [
+      "drive",
+      String.raw`C:\Program Files\codex.exe`,
+      String.raw`\\?\C:\Program Files\codex.exe`,
+    ],
+    [
+      "drive with forward slashes",
+      "C:/tools/codex.exe",
+      String.raw`\\?\C:\tools\codex.exe`,
+    ],
+    [
+      "UNC",
+      String.raw`\\server\share\codex.exe`,
+      String.raw`\\?\UNC\server\share\codex.exe`,
+    ],
+    [
+      "namespaced",
+      String.raw`\\?\C:\tools\codex.exe`,
+      String.raw`\\?\C:\tools\codex.exe`,
+    ],
+    ["bare", "codex.exe", "codex.exe"],
+    ["relative", String.raw`.\tools\codex.exe`, String.raw`.\tools\codex.exe`],
+    ["drive-relative", "C:codex.exe", "C:codex.exe"],
+    [
+      "root-relative",
+      String.raw`\tools\codex.exe`,
+      String.raw`\tools\codex.exe`,
+    ],
+    ["slash-root-relative", "/tools/codex.exe", "/tools/codex.exe"],
+    ["tilde", "~/tools/codex", "~/tools/codex"],
+  ])(
+    "preserves executable lookup semantics for %s paths",
+    (_name, command, windowsCommand) => {
+      expect(executablePathForSpawn(command!)).toBe(
+        process.platform === "win32" ? windowsCommand : command,
+      );
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "launches long Windows executable paths through the Node runtime",
+    async () => {
+      const root = await temporaryDirectory();
+      const { stdout } = await promisify(execFile)(
+        "node",
+        ["-p", "process.execPath"],
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          windowsHide: true,
+        },
+      );
+      const node = stdout.trim();
+      const executable = join(
+        root,
+        ...Array<string>(10).fill("nested executable directory"),
+        "node.exe",
+      );
+      await mkdir(dirname(executable), { recursive: true });
+      await copyFile(node, executable);
+      expect(executable.length).toBeGreaterThan(260);
+
+      const runtimeSource = new URL("../src/runtime.ts", import.meta.url);
+      const runtimeModule = join(root, "runtime.cjs");
+      await build({
+        entryPoints: [fileURLToPath(runtimeSource)],
+        outfile: runtimeModule,
+        bundle: true,
+        platform: "node",
+        format: "cjs",
+        define: { "import.meta.url": JSON.stringify(runtimeSource.href) },
+      });
+      const script = [
+        "const { runCodexCommand } = require(process.argv[1]);",
+        "runCodexCommand({ command: process.argv[2] }, ['--eval', \"process.stdout.write('synthetic launch')\"], process.env)",
+        "  .then((result) => process.stdout.write(JSON.stringify(result)), (error) => { console.error(error); process.exitCode = 1; });",
+      ].join("\n");
+      for (const command of [
+        node,
+        executable,
+        win32.toNamespacedPath(executable),
+      ]) {
+        const result = await promisify(execFile)(
+          node,
+          ["--eval", script, runtimeModule, command],
+          {
+            encoding: "utf8",
+            timeout: 10_000,
+            windowsHide: true,
+          },
+        );
+        expect(JSON.parse(result.stdout)).toEqual({
+          success: true,
+          exitCode: 0,
+          stdout: "synthetic launch",
+          stderr: "",
+        });
+      }
+    },
+  );
+
   test("replaces unspawnable Windows Codex shims with the bundled executable", () => {
     const fallback = resolveCodexCommand({});
 
@@ -2843,6 +2949,110 @@ describe("runtime directories and plugin Python boundary", () => {
       home: { owner: sid, protected: true },
       descendantsArePrivate: true,
     });
+  });
+
+  test
+    .skipIf(process.platform !== "win32")
+    .each([
+      "transient missing descendant",
+      "persistent missing descendant",
+      "access denied",
+      "unexpected error",
+      "missing home",
+      "transient path-not-found descendant",
+      "persistent path-not-found descendant",
+      "path-not-found home",
+    ] as const)("replays Windows credential ACL %s", async (kind) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `replays Windows credential ACL ${kind}`,
+      )
+    ) {
+      return;
+    }
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    await requireSecureCredentialHome(home);
+    const descendant = join(home, ".auth-replay.tmp");
+    await writeFile(descendant, "synthetic credential\n", { mode: 0o600 });
+    const pathNotFound = kind.includes("path-not-found");
+    const missing = pathNotFound || kind.includes("missing");
+    const transient = kind.startsWith("transient ");
+    const persistent = kind.startsWith("persistent ");
+    const exception = pathNotFound
+      ? "System.Management.Automation.ItemNotFoundException"
+      : missing
+        ? "System.IO.FileNotFoundException"
+        : kind === "access denied"
+          ? "System.UnauthorizedAccessException"
+          : "System.InvalidOperationException";
+    const errorId = pathNotFound
+      ? "GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand"
+      : missing
+        ? "System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand"
+        : kind === "access denied"
+          ? "System.UnauthorizedAccessException,Microsoft.PowerShell.Commands.GetAclCommand"
+          : "SyntheticCredentialAclFailure";
+    const category =
+      kind === "access denied"
+        ? "PermissionDenied"
+        : missing && !pathNotFound
+          ? "NotSpecified"
+          : "ObjectNotFound";
+    const failurePath = kind.endsWith("home") ? home : descendant;
+    // Replay the native error without relying on racing a filesystem deletion.
+    const injection = `if ($path -eq '${failurePath.replaceAll("'", "''")}') { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
+    const marker = "function Write-CredentialAcl($path) {";
+    const originalSpawn = childProcess.spawn;
+    let attempts = 0;
+    mock.module("node:child_process", () => ({
+      ...childProcess,
+      spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
+        const [command, args, options] = spawnArgs;
+        if (
+          options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
+          !Array.isArray(args)
+        ) {
+          return originalSpawn(...spawnArgs);
+        }
+        const scriptIndex = args.indexOf("-Command") + 1;
+        const script = args[scriptIndex];
+        if (typeof script !== "string" || !script.includes(marker)) {
+          return originalSpawn(...spawnArgs);
+        }
+        attempts += 1;
+        if (transient && attempts > 1) {
+          return originalSpawn(...spawnArgs);
+        }
+        expect(script.split(marker)).toHaveLength(2);
+        const replayArgs = [...args];
+        replayArgs[scriptIndex] = script.replace(
+          marker,
+          `${marker} ${injection}`,
+        );
+        return originalSpawn(command, replayArgs, options);
+      },
+    }));
+    try {
+      if (transient) {
+        await requireSecureCredentialHome(home);
+        expect(attempts).toBe(2);
+      } else {
+        await expect(requireSecureCredentialHome(home)).rejects.toThrow(
+          persistent
+            ? "Windows credential descendants could not be verified"
+            : "synthetic credential ACL error",
+        );
+        expect(attempts).toBe(persistent ? 3 : 1);
+      }
+    } finally {
+      mock.module("node:child_process", () => ({
+        ...childProcess,
+        spawn: originalSpawn,
+      }));
+    }
   });
 
   test("retries interrupted Windows credential ACL enumeration", async () => {

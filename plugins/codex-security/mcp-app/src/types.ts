@@ -32,6 +32,7 @@ export interface ScanResults {
   progress?: JsonObject;
   remediationAvailable?: boolean;
   remediationUnavailableReason?: string;
+  resultsRecoveryNeeded: boolean;
   scanDir: string;
   scanId: string;
   scope?: string;
