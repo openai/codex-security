@@ -32,7 +32,13 @@ const packageManifest = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
 const pluginContract = JSON.parse(
-  await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+  await readFile(
+    new URL(
+      "../../../plugins/codex-security/plugin-files.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
 );
 
 async function resolveArchive() {
@@ -403,7 +409,7 @@ try {
       "--eval",
       [
         `const sdk = await import(${JSON.stringify(packageManifest.name)});`,
-        `for (const name of ${JSON.stringify(["CodexSecurity", "publishScan", "checkScanPublication", "applySecurityPolicy", "loadSecurityPolicyDraft", "securityPolicyDiff", "SecurityPolicyRecoveryError", "SecurityPolicyVerificationError"])}) {`,
+        `for (const name of ${JSON.stringify(["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "applySecurityPolicy", "loadSecurityPolicyDraft", "securityPolicyDiff", "SecurityPolicyRecoveryError", "SecurityPolicyVerificationError"])}) {`,
         '  if (typeof sdk[name] !== "function") throw new Error(`The installed package does not export ${name}.`);',
         "}",
         'if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function") throw new Error("The installed package does not export generatePolicy.");',
@@ -485,6 +491,7 @@ try {
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
   assert.match(help, /\bpublish\b/u);
+  assert.match(help, /\bdedupe\b/u);
   assert.match(help, /\bpolicy\b/u);
   const policyHelp = run(process.execPath, [launcher, "policy", "--help"], {
     cwd: consumer,
@@ -837,6 +844,52 @@ try {
     /lin_api_|security@example\.test/u,
   );
 
+  const { startFindingsServer } = await import(
+    pathToFileURL(join(installedRoot, "dist/server/server.js")).href
+  );
+  const dashboardServer = await startFindingsServer({
+    // Package builders need only Node. Native and runtime-container tests cover SQLite.
+    store: {
+      async initialize() {},
+    },
+    embeddings: {
+      async embed() {
+        throw new Error("Dashboard reads must not call a model");
+      },
+    },
+    host: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    const base = `http://127.0.0.1:${dashboardServer.address().port}`;
+    for (const [path, contentType] of [
+      ["/dashboard", "text/html"],
+      ["/dashboard/app.js", "text/javascript"],
+      ["/dashboard/app.css", "text/css"],
+    ]) {
+      const response = await fetch(`${base}${path}`);
+      assert.equal(response.status, 200);
+      assert.ok(response.headers.get("content-type").startsWith(contentType));
+      const body = await response.text();
+      assert.ok(body.length > 0);
+      if (contentType === "text/html") {
+        const mounted = new URL("/service/dashboard/", base);
+        const assets = [...body.matchAll(/(?:href|src)="([^"]+)"/g)].map(
+          (match) => new URL(match[1], mounted).pathname,
+        );
+        assert.deepEqual(assets, [
+          "/service/dashboard/app.css",
+          "/service/dashboard/app.js",
+        ]);
+      }
+    }
+    assert.equal((await fetch(`${base}/dashboard/package.json`)).status, 404);
+  } finally {
+    await new Promise((resolve, reject) =>
+      dashboardServer.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+
   run(
     process.execPath,
     [
@@ -847,10 +900,19 @@ try {
     { cwd: consumer },
   );
 
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "fixtures", "package-behavior.mjs"),
+      installedRoot,
+      consumer,
+    ],
+    { cwd: consumer },
+  );
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, dashboard assets, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {

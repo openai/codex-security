@@ -491,7 +491,7 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
-  test("keeps policy output and state out of external Git metadata", async () => {
+  test("keeps policy output, state and model reads out of external Git metadata", async () => {
     for (const kind of ["separate", "linked"]) {
       let prepared = false;
       const f = await setup({ onPrepare: () => (prepared = true) });
@@ -547,6 +547,12 @@ describe("CodexSecurity policy API", () => {
       }
       expect(prepared).toBe(false);
       expect(f.threads).toHaveLength(0);
+      await f.security.generatePolicy(repository, { outputDir: f.outputDir });
+      for (const thread of f.threads) {
+        expect(thread.additionalDirectories).toContain(repository);
+        expect(thread.additionalDirectories).not.toContain(common);
+        expect(thread.additionalDirectories).not.toContain(gitDirectory);
+      }
       await f.security.close();
     }
   });

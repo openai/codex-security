@@ -537,6 +537,25 @@ export async function requireScanFile(
   ).path;
 }
 
+export async function readScanFile(
+  scanDirectory: string,
+  relativePath: string,
+  context: string,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const file = await openCheckedScanFile(
+    scanDirectory,
+    relativePath,
+    context,
+    signal,
+  );
+  try {
+    return await file.readFile({ signal });
+  } finally {
+    await file.close();
+  }
+}
+
 async function requireCheckedScanFile(
   scanDirectory: string,
   relativePath: string,
