@@ -147,7 +147,6 @@ const client = new sdk.CodexSecurity(
       };
     },
   },
-  { surface: "sdk" },
 );
 
 async function savedScan(index) {
@@ -199,7 +198,6 @@ try {
   assert.equal((await savedScan(2)).progress.status, "failed");
   assert.equal(finished.has(2), true);
   assert.equal(turns.length, 3);
-  await client.close();
   await assert.rejects(client.run(repository), /CodexSecurity is closed/u);
   await assert.rejects(stat(codexHome), { code: "ENOENT" });
   assert.equal(
@@ -284,6 +282,7 @@ assert.equal(
     },
   ),
   0,
+  errors.text(),
 );
 assert.equal(errors.text(), "");
 assert.match(output.text(), /\n {2}SEC-400 safe\n/u);
