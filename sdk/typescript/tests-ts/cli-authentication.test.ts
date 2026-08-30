@@ -65,8 +65,7 @@ describe("CLI authentication", () => {
       const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
-      deps.prepareAuthenticationHome = async () =>
-        join(stateDirectory, "codex-home");
+      deps.prepareAuthenticationHome = prepareCodexSecurityCredentialHome;
       let forwarded: readonly string[] | undefined;
       deps.createSecurity = () => {
         throw new Error("must not initialize Codex Security");
