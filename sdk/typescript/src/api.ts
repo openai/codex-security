@@ -876,12 +876,6 @@ export class CodexSecurity {
         temporaryRoot,
         "temporary",
       );
-      if (options.knowledgeBasePaths?.length) {
-        knowledgeBase = await prepareKnowledgeBase(
-          options.knowledgeBasePaths,
-          signal,
-        );
-      }
       const session = await this.#prepareSession(
         inputs,
         options,
@@ -933,6 +927,13 @@ export class CodexSecurity {
         this.#dependencies.requirePrivatePolicyOutputDirectory ??
         requirePrivatePolicyOutputDirectory
       )(outputDir);
+      if (options.knowledgeBasePaths?.length) {
+        knowledgeBase = await prepareKnowledgeBase(
+          options.knowledgeBasePaths,
+          signal,
+          outputDir,
+        );
+      }
       notifyObserver(
         "onOutputDirReady",
         options.onOutputDirReady,
@@ -953,7 +954,12 @@ export class CodexSecurity {
         runtime.plugin.pluginRoot,
         ...(await pluginPythonReadRoots(python, {
           environment: session.scanEnvironment,
-          protectedPaths: [homedir(), inputs.stateDirectory, runtime.codexHome],
+          protectedPaths: [
+            homedir(),
+            inputs.stateDirectory,
+            runtime.codexHome,
+            ...inputs.protectedRoots,
+          ],
           signal,
         })),
         ...(knowledgeBase === null ? [] : [knowledgeBase.path]),

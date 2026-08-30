@@ -59,6 +59,7 @@ async function setup(
     secureOutput?: (path: string) => Promise<void>;
     surface?: "cli" | "sdk";
     config?: Record<string, unknown>;
+    python?: () => string;
   } = {},
 ) {
   const f = await policyFixture();
@@ -86,7 +87,7 @@ async function setup(
       },
       resolvePluginPython: async (selection: PluginPythonOptions) => {
         pythonSelections.push(selection);
-        return PYTHON;
+        return options.python?.() ?? PYTHON;
       },
       requirePrivatePolicyOutputDirectory: async (path: string) => {
         await options.secureOutput?.(path);
@@ -553,6 +554,33 @@ describe("CodexSecurity policy API", () => {
       }
       await f.security.close();
     }
+  });
+
+  test("rejects Python runtime roots containing external Git metadata", async () => {
+    let python = PYTHON;
+    const f = await setup({ python: () => python });
+    const runtime = join(f.root, "python-runtime");
+    execFileSync(PYTHON, ["-I", "-B", "-m", "venv", "--without-pip", runtime], {
+      windowsHide: true,
+    });
+    python = join(
+      runtime,
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "python.exe" : "python",
+    );
+    policyGit(
+      f.repository,
+      "init",
+      "--quiet",
+      "--separate-git-dir",
+      join(runtime, "git-data"),
+    );
+    policyGit(f.repository, "config", "core.worktree", f.repository);
+    await expect(
+      f.security.generatePolicy(f.repository, { outputDir: f.outputDir }),
+    ).rejects.toThrow("contains a protected path");
+    expect(f.threads).toHaveLength(0);
+    await f.security.close();
   });
 
   test("checks descendant policy links before starting Codex", async () => {
@@ -1137,7 +1165,7 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
-  test("keeps knowledge-base context out of source and removes its temporary extraction", async () => {
+  test("keeps knowledge-base context with private review artifacts and removes it afterward", async () => {
     const f = await setup();
     const context = join(f.root, "architecture.md");
     await writeFile(context, "The synthetic service is private.\n");
@@ -1147,6 +1175,7 @@ describe("CodexSecurity policy API", () => {
     });
     const extracted = f.configuration()?.env?.["CODEX_SECURITY_KNOWLEDGE_BASE"];
     expect(extracted).toBeDefined();
+    expect(dirname(extracted!)).toBe(f.outputDir);
     expect(f.threads[0]!.additionalDirectories).toContain(extracted);
     expect(
       f.prompts.every((prompt) => prompt.includes(JSON.stringify(extracted))),

@@ -259,6 +259,8 @@ checkout. It uses the scan runtime and authentication, requesting read-only
 access to the selected repository and required tools. Network access,
 web search, apps, and MCP servers are disabled. Drafts stay outside the checkout.
 Git metadata outside the selected checkout is inspected only by the host.
+Knowledge-base text stays with the private review artifacts during generation
+and is removed afterward.
 
 On macOS, the pinned Codex runtime does not fully enforce write restrictions
 under `/tmp` (including `/private/tmp`). Keep the repository and artifacts outside

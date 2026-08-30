@@ -549,6 +549,48 @@ describe("security policy generation", () => {
     await expect(existing.generate()).rejects.toThrow("1 MiB limit");
     expect(await readdir(existing.outputDir)).toEqual([]);
   });
+
+  test.each(["architecture", "threat_model"] as const)(
+    "rejects malformed Unicode in %s evidence before saving it",
+    async (invalidStage) => {
+      const f = await fixture();
+      const stages: SecurityPolicyStage[] = [];
+      await expect(
+        f.generate({
+          run: async (stage) => {
+            stages.push(stage);
+            return {
+              ...stageResult(stage),
+              ...(stage === invalidStage
+                ? { markdown: "# Evidence\n\ud800" }
+                : {}),
+            };
+          },
+        }),
+      ).rejects.toThrow("valid Unicode");
+      expect(stages.at(-1)).toBe(invalidStage);
+      expect((await readdir(f.outputDir)).sort()).toEqual(
+        invalidStage === "architecture"
+          ? ["previous-SECURITY.md"]
+          : ["previous-SECURITY.md", "project-spec.md"],
+      );
+      expect(await readdir(f.repository)).toEqual([]);
+    },
+  );
+
+  test("does not apply the policy byte limit to supporting evidence", async () => {
+    const f = await fixture();
+    const document = `# Evidence\n${"x".repeat(1024 * 1024)}`;
+    const draft = await f.generate({
+      run: async (stage) => ({
+        ...stageResult(stage),
+        ...(stage === "policy" ? {} : { markdown: document }),
+      }),
+    });
+    expect(await readFile(draft.specificationPath, "utf8")).toBe(document);
+    expect(await readFile(draft.threatModelPath, "utf8")).toBe(document);
+    expect(draft.content).toBe(POLICY);
+  });
 });
 
 describe("security policy preview", () => {

@@ -5707,7 +5707,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   testPosix(
-    "includes executable symlink directories and deduplicates Python read roots",
+    "keeps Python symlink siblings outside model read roots",
     async () => {
       const root = await temporaryDirectory();
       const launcher = join(root, "launcher");
@@ -5738,7 +5738,6 @@ describe("runtime directories and plugin Python boundary", () => {
       ).toEqual([
         await realpath(launcher),
         await realpath(binaries),
-        await realpath(aliases),
         await realpath(runtime),
       ]);
     },
