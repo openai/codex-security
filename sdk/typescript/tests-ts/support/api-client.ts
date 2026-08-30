@@ -9,10 +9,10 @@ export function mockScanRegistration(
   args: readonly string[],
   input?: string,
 ): JsonObject {
-  if (!args.includes("--recipe-json-stdin") || input === undefined) {
-    throw new Error("missing stdin scan recipe");
+  if (!args.includes("--registration-json-stdin") || input === undefined) {
+    throw new Error("missing stdin scan registration");
   }
-  const recipe = JSON.parse(input) as {
+  const recipe = JSON.parse(input).recipe as {
     repositoryRevision?: string;
     target: { kind: string };
   };
@@ -68,6 +68,9 @@ export class TestClient extends CodexSecurity {
           throw new Error("Unexpected Codex invocation in test");
         },
         environment: {},
+        prepareScanArtifactRestorer: async () => ({
+          restore: async () => {},
+        }),
         runWorkbench: async (_options, args, input) =>
           mockWorkbench(args, input),
         ...dependencies,

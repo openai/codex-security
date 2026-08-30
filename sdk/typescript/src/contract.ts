@@ -66,6 +66,7 @@ export interface LoadedContract {
 
 type LoadContractOptions = {
   pluginRoot: string;
+  expectedScanId?: string;
   expectation?: ScanExpectation;
   workbenchValidated?: boolean;
   signal?: AbortSignal;
@@ -154,6 +155,14 @@ export async function loadContractWithScanDirectory(
   const manifest = payloads["scan-manifest.json"] as unknown as ScanManifest;
   const findings = findingsPayload as FindingsDocument;
   const coverage = payloads["coverage.json"] as unknown as CoverageDocument;
+  if (
+    options.expectedScanId !== undefined &&
+    manifest.scan.id !== options.expectedScanId
+  ) {
+    throw new ContractValidationError(
+      `Scan artifacts do not match selected scan ${options.expectedScanId}.`,
+    );
+  }
   if (
     findings.scanId !== manifest.scan.id ||
     coverage.scanId !== manifest.scan.id
@@ -526,6 +535,25 @@ export async function requireScanFile(
   return (
     await requireCheckedScanFile(scanDirectory, relativePath, context, signal)
   ).path;
+}
+
+export async function readScanFile(
+  scanDirectory: string,
+  relativePath: string,
+  context: string,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const file = await openCheckedScanFile(
+    scanDirectory,
+    relativePath,
+    context,
+    signal,
+  );
+  try {
+    return await file.readFile({ signal });
+  } finally {
+    await file.close();
+  }
 }
 
 async function requireCheckedScanFile(

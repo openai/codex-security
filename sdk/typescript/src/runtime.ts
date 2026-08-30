@@ -1,6 +1,7 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  chmodSync,
   constants,
   existsSync,
   readdirSync,
@@ -16,7 +17,6 @@ import {
   mkdir,
   mkdtemp,
   open,
-  opendir,
   readFile,
   readdir,
   realpath,
@@ -24,6 +24,7 @@ import {
   rm,
   rmdir,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -37,6 +38,7 @@ import {
   relative,
   resolve,
   sep,
+  win32,
 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -73,11 +75,51 @@ const MAX_ZIP_ENTRY_SIZE = 128 * 1024 * 1024;
 const MAX_ZIP_EXPANDED_SIZE = 512 * 1024 * 1024;
 const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
+const CREDENTIAL_LOCK_DATABASE = ".codex-security-scan.sqlite3";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
+const CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS = 5_000;
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
 const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
+const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
+  "OPENAI_API_KEY",
+  "CODEX_API_KEY",
+  "OPENROUTER_API_KEY",
+  "FIREWORKS_API_KEY",
+]);
+const PREPARE_SCAN_ARTIFACT_RESTORER_PROGRAM = `
+from pathlib import Path
+from runpy import run_path
+import json
+import sys
+
+module = run_path(sys.argv[1])
+canonical_path, root_identity = module["scan_root_identity"](Path(sys.argv[2]))
+print(json.dumps({
+    "canonicalPath": str(canonical_path),
+    "dev": str(root_identity[0]),
+    "ino": str(root_identity[1]),
+}, ensure_ascii=False))
+`.trim();
+const RESTORE_SCAN_ARTIFACT_PROGRAM = `
+from pathlib import Path
+from runpy import run_path
+import sys
+
+module = run_path(sys.argv[1])
+try:
+    module["write_scan_local_bytes"](
+        Path(sys.argv[2]),
+        sys.argv[3],
+        sys.stdin.buffer.read(),
+        expected_root_identity=(int(sys.argv[4]), int(sys.argv[5])),
+    )
+except (module["ContractError"], OSError) as error:
+    raise SystemExit(str(error))
+`.trim();
+const WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX = "CODEX_SECURITY_ACL_COMPLETE:";
+const WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE = 2;
 
 export interface PluginInstall {
   pluginRoot: string;
@@ -116,6 +158,10 @@ export interface WorkbenchCommandOptions {
   environment: ProcessEnvironment;
   signal?: AbortSignal;
   failureMessage?: string;
+}
+
+export interface ScanArtifactRestorer {
+  restore(relativePath: string, contents: Uint8Array): Promise<void>;
 }
 
 function environmentValue(
@@ -412,6 +458,8 @@ class RepairableWindowsCredentialOwnerError extends Error {
   }
 }
 
+class WindowsCredentialDescendantsChangedError extends Error {}
+
 /** Inspect a Windows DACL without translating locale-specific account names. */
 export function inspectWindowsCredentialAcl(
   descriptor: string,
@@ -611,48 +659,6 @@ function windowsAceAllowsAncestorReplacement(
   return false;
 }
 
-export async function verifyStableWindowsCredentialDescendants(
-  path: string,
-  inspectDescriptors: () => Promise<number>,
-  options: { inspectEmpty?: boolean } = {},
-): Promise<void> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    let descendants = 0;
-    const pending = [path];
-    try {
-      while (pending.length !== 0) {
-        const current = pending.pop()!;
-        const directory = await opendir(current);
-        for await (const entry of directory) {
-          const child = join(current, entry.name);
-          const metadata = await lstat(child);
-          if (metadata.isSymbolicLink()) {
-            throw new Error(
-              "Windows credential home contains a symbolic link or junction",
-            );
-          }
-          if (!metadata.isDirectory() && !metadata.isFile()) {
-            throw new Error("Windows credential home contains an unsafe entry");
-          }
-          descendants += 1;
-          if (metadata.isDirectory()) pending.push(child);
-        }
-      }
-    } catch (error) {
-      const failure = error as NodeJS.ErrnoException;
-      if (failure.code === "ENOENT" && failure.path !== path) {
-        continue;
-      }
-      throw error;
-    }
-    if (descendants === 0 && options.inspectEmpty !== true) return;
-
-    if ((await inspectDescriptors()) === descendants) return;
-  }
-
-  throw new Error("Windows credential descendants could not be verified");
-}
-
 export async function streamWindowsCredentialAclDescriptors(
   command: string,
   args: readonly string[],
@@ -671,10 +677,16 @@ export async function streamWindowsCredentialAclDescriptors(
     if (remaining > 0) stderr += chunk.slice(0, remaining);
   });
 
+  let descendantsChanged = false;
   const completion = new Promise<void>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => {
       if (code === 0) {
+        resolve();
+        return;
+      }
+      if (code === WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE) {
+        descendantsChanged = true;
         resolve();
         return;
       }
@@ -709,6 +721,12 @@ export async function streamWindowsCredentialAclDescriptors(
     throw error;
   }
 
+  if (descendantsChanged) {
+    // Finish descriptor callbacks before allowing another snapshot attempt.
+    throw new WindowsCredentialDescendantsChangedError(
+      "Windows credential descendants changed during ACL inspection",
+    );
+  }
   return descriptors;
 }
 
@@ -732,18 +750,33 @@ export async function inspectWindowsCredentialAclSnapshot(
     if (ancestor === dirname(ancestor)) break;
   }
 
-  let home: WindowsCredentialAcl | undefined;
-  let descendantsArePrivate = true;
-  await verifyStableWindowsCredentialDescendants(
-    path,
-    async () => {
-      home = undefined;
-      descendantsArePrivate = true;
-      let inspected = 0;
-      const descriptors = await streamWindowsCredentialAclDescriptors(
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let home: WindowsCredentialAcl | undefined;
+    let descendantsArePrivate = true;
+    let inspected = 0;
+    let completed = false;
+    try {
+      await streamWindowsCredentialAclDescriptors(
         options.command,
         options.args,
         async (descriptor) => {
+          if (completed) {
+            throw new Error(
+              "Windows credential ACL inspection continued after completion",
+            );
+          }
+          if (descriptor.startsWith(WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX)) {
+            if (
+              descriptor !==
+              `${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}${inspected}`
+            ) {
+              throw new Error(
+                "Windows credential descendants could not be verified",
+              );
+            }
+            completed = true;
+            return;
+          }
           const index = inspected;
           inspected += 1;
           await options.resolveDescriptorAliases?.(descriptor);
@@ -796,20 +829,22 @@ export async function inspectWindowsCredentialAclSnapshot(
         },
         { environment: options.environment },
       );
-      if (descriptors <= ancestors) {
-        throw new Error(
-          "Windows credential-home ancestry could not be verified",
-        );
-      }
-      return descriptors - ancestors - 1;
-    },
-    { inspectEmpty: true },
-  );
-
-  if (home === undefined) {
-    throw new Error("Windows credential ACL could not be verified");
+    } catch (error) {
+      if (error instanceof WindowsCredentialDescendantsChangedError) continue;
+      throw error;
+    }
+    if (inspected <= ancestors) {
+      throw new Error("Windows credential-home ancestry could not be verified");
+    }
+    if (!completed) {
+      throw new Error("Windows credential descendants could not be verified");
+    }
+    if (home === undefined) {
+      throw new Error("Windows credential ACL could not be verified");
+    }
+    return { home, descendantsArePrivate };
   }
-  return { home, descendantsArePrivate };
+  throw new Error("Windows credential descendants could not be verified");
 }
 
 async function secureWindowsCredentialHome(path: string): Promise<void> {
@@ -855,15 +890,38 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
 
   // Signed built-in cmdlets remain available under ConstrainedLanguage;
   // arbitrary .NET constructors, static methods, and SID translation do not.
+  // Enumerate and count ACLs in the same process: parallel startup can create
+  // or remove private cache and lock files while this traversal is running.
   const script = [
     "$ErrorActionPreference = 'Stop'",
+    "$script:descriptorCount = 0",
+    "function Write-CredentialAcl($path) { $descriptor = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $path | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; if (-not $descriptor) { throw 'Windows credential ACL could not be verified' }; $script:descriptorCount += 1; $descriptor }",
+    "function Read-CredentialDescendants($path) {",
+    "  try { $entries = @(Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $path -Force) } catch {",
+    // A child can disappear while an existing directory is being enumerated.
+    // Retry that incomplete listing before accepting a vanished descendant.
+    `    if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetChildItemCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
+    "    if ($path -ne $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -and $_.CategoryInfo.Category -eq 'ObjectNotFound') { return }",
+    "    throw",
+    "  }",
+    "  foreach ($entry in $entries) {",
+    "    if (($entry.Attributes -band 1024) -and ($entry.LinkType -in @('SymbolicLink', 'Junction'))) { throw 'Windows credential home contains a symbolic link or junction' }",
+    "    if ($entry.PSObject.TypeNames -notcontains 'System.IO.DirectoryInfo' -and $entry.PSObject.TypeNames -notcontains 'System.IO.FileInfo') { throw 'Windows credential home contains an unsafe entry' }",
+    "    try { Write-CredentialAcl $entry.FullName } catch {",
+    // A descendant can disappear inside Get-Acl after it was enumerated.
+    `      if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand' -or $_.FullyQualifiedErrorId -eq 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
+    "      if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { continue }",
+    "      throw",
+    "    }",
+    "    if ($entry.PSIsContainer) { Read-CredentialDescendants $entry.FullName }",
+    "  }",
+    "}",
     "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $path = $parent }",
-    "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
-    // A temporary descendant can disappear after enumeration. Its missing
-    // descriptor reduces the count and retries the stable snapshot.
-    "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Core\\ForEach-Object { try { Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $_.FullName | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl } catch { if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw } } }",
-  ].join("; ");
+    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Write-CredentialAcl $parent; $path = $parent }",
+    "Write-CredentialAcl $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    "Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    `"${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}$script:descriptorCount"`,
+  ].join("\n");
   const resolvePrincipalScript = [
     "$ErrorActionPreference = 'Stop'",
     "$descriptor = 'O:' + $env:CODEX_SECURITY_CREDENTIAL_PRINCIPAL + 'G:SYD:(A;;GA;;;SY)'",
@@ -1042,6 +1100,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
     secureWindowsHome?: (path: string) => Promise<void>;
   } = {},
 ): Promise<() => Promise<void>> {
+  throwIfSignalAborted(signal);
   const homeMetadata = await requireSecureCredentialHome(
     codexHome,
     securityOptions,
@@ -1051,69 +1110,175 @@ export async function acquireCodexSecurityCredentialHomeLock(
   const lock = join(codexHome, CREDENTIAL_LOCK_NAME);
   const ownerPath = join(lock, "owner.json");
   const token = randomUUID();
-
-  while (true) {
-    throwIfSignalAborted(signal);
-    await requireSecureCredentialHome(codexHome, {
-      ...securityOptions,
-      expectedDevice,
-      expectedInode,
-      validateWindowsAcl: false,
-    });
-    const existingLock = await lstat(lock).catch((error: unknown) => {
+  const databasePath = join(codexHome, CREDENTIAL_LOCK_DATABASE);
+  const existingDatabaseMetadata = await lstat(databasePath).catch(
+    (error: unknown) => {
       if (nodeErrorCode(error) === "ENOENT") return null;
       throw error;
-    });
-    if (existingLock !== null) {
-      if (await recoverStaleCredentialHomeLock(lock)) continue;
-      await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
-      continue;
-    }
-    await requireSecureCredentialHome(codexHome, {
-      ...securityOptions,
-      expectedDevice,
-      expectedInode,
-    });
-    try {
-      await mkdir(lock, { mode: 0o700 });
-    } catch (error) {
-      if (nodeErrorCode(error) !== "EEXIST") throw error;
-      if (await recoverStaleCredentialHomeLock(lock)) continue;
-      await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
-      continue;
-    }
+    },
+  );
+  if (existingDatabaseMetadata !== null) {
+    requireCredentialLockDatabaseFile(existingDatabaseMetadata, databasePath);
+  }
+  const require = createRequire(import.meta.url);
+  // Both supported runtimes bundle SQLite. Keep the transaction in the process
+  // doing the protected work, so pausing it cannot expire its lock.
+  const Database = process.versions["bun"]
+    ? (require("bun:sqlite") as { Database: CredentialLockDatabaseConstructor })
+        .Database
+    : (
+        require("node:sqlite") as {
+          DatabaseSync: CredentialLockDatabaseConstructor;
+        }
+      ).DatabaseSync;
+  // Let SQLite create a missing guard so no separate descriptor can close after
+  // another connection acquires its process-owned POSIX lock. Keep the guard
+  // across releases so every contender locks the same inode.
+  const database = new Database(databasePath);
+  let databaseLocked = false;
 
-    try {
-      await writeFile(
-        ownerPath,
-        `${JSON.stringify({ pid: process.pid, token })}\n`,
-        { encoding: "utf8", flag: "wx", mode: 0o600 },
+  try {
+    // SQLite creates new databases with the process umask. Tighten or repair
+    // the guard synchronously before yielding so concurrent first-time callers
+    // cannot reject its transient mode. The credential home is already private,
+    // and the pre-open check above rejects linked existing files.
+    if (process.platform !== "win32") chmodSync(databasePath, 0o600);
+    const databaseMetadata = await lstat(databasePath);
+    requireCredentialLockDatabaseFile(databaseMetadata, databasePath);
+    if (
+      existingDatabaseMetadata !== null &&
+      (databaseMetadata.dev !== existingDatabaseMetadata.dev ||
+        databaseMetadata.ino !== existingDatabaseMetadata.ino)
+    ) {
+      throw new OutputDirectoryError(
+        `Codex Security credential-home lock changed while opening it: ${databasePath}`,
       );
-    } catch (error) {
-      await rm(lock, { recursive: true, force: true }).catch(() => undefined);
-      throw error;
     }
+    requirePrivateCredentialFile(databaseMetadata, databasePath);
 
-    let released = false;
-    return async () => {
-      if (released) return;
+    database.exec("PRAGMA busy_timeout = 0");
+    while (true) {
+      throwIfSignalAborted(signal);
+      await requireSecureCredentialHome(codexHome, {
+        ...securityOptions,
+        expectedDevice,
+        expectedInode,
+        validateWindowsAcl: false,
+      });
+      if (!databaseLocked) {
+        try {
+          database.exec("BEGIN EXCLUSIVE");
+        } catch (error) {
+          if (
+            !isRecord(error) ||
+            (error["errcode"] !== 5 && error["code"] !== "SQLITE_BUSY")
+          ) {
+            throw error;
+          }
+          await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
+          continue;
+        }
+        const currentDatabase = await lstat(databasePath);
+        if (
+          currentDatabase.dev !== databaseMetadata.dev ||
+          currentDatabase.ino !== databaseMetadata.ino
+        ) {
+          throw new OutputDirectoryError(
+            `Codex Security credential-home lock changed while acquiring it: ${databasePath}`,
+          );
+        }
+        databaseLocked = true;
+      }
+      const existingLock = await lstat(lock).catch((error: unknown) => {
+        if (nodeErrorCode(error) === "ENOENT") return null;
+        throw error;
+      });
+      if (existingLock !== null) {
+        if (await recoverStaleCredentialHomeLock(lock)) continue;
+        await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
+        continue;
+      }
       await requireSecureCredentialHome(codexHome, {
         ...securityOptions,
         expectedDevice,
         expectedInode,
       });
-      const owner = JSON.parse(await readFile(ownerPath, "utf8")) as {
-        token?: unknown;
-      };
-      if (owner.token !== token) {
-        throw new PluginBootstrapError(
-          "The Codex Security credential-home lock is no longer owned by this scan.",
-        );
+      try {
+        await mkdir(lock, { mode: 0o700 });
+      } catch (error) {
+        if (nodeErrorCode(error) !== "EEXIST") throw error;
+        if (await recoverStaleCredentialHomeLock(lock)) continue;
+        await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
+        continue;
       }
-      await rm(lock, { recursive: true, force: true });
-      released = true;
-    };
+
+      try {
+        await writeFile(
+          ownerPath,
+          `${JSON.stringify({ pid: process.pid, token, protocol: "sqlite" })}\n`,
+          { encoding: "utf8", flag: "wx", mode: 0o600 },
+        );
+      } catch (error) {
+        await rm(lock, { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      }
+
+      // Released clients use the directory heartbeat instead of the SQLite lock.
+      const heartbeat = setInterval(async () => {
+        try {
+          const now = new Date();
+          await utimes(lock, now, now);
+        } catch {}
+      }, CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS);
+      heartbeat.unref();
+
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        try {
+          await requireSecureCredentialHome(codexHome, {
+            ...securityOptions,
+            expectedDevice,
+            expectedInode,
+          });
+          const owner = JSON.parse(await readFile(ownerPath, "utf8")) as {
+            token?: unknown;
+          };
+          if (owner.token !== token) {
+            throw new PluginBootstrapError(
+              "The Codex Security credential-home lock is no longer owned by this scan.",
+            );
+          }
+          await rm(lock, { recursive: true, force: true });
+        } finally {
+          clearInterval(heartbeat);
+          database.close();
+        }
+      };
+    }
+  } catch (error) {
+    database.close();
+    throw error;
   }
+}
+
+function requireCredentialLockDatabaseFile(
+  metadata: Stats,
+  path: string,
+): void {
+  if (!metadata.isFile() || metadata.nlink !== 1) {
+    throw new OutputDirectoryError(
+      `Codex Security credential-home lock must be a regular file, not a symlink or hard link: ${path}`,
+    );
+  }
+}
+
+interface CredentialLockDatabaseConstructor {
+  new (path: string): {
+    exec(sql: string): unknown;
+    close(): void;
+  };
 }
 
 async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
@@ -1135,37 +1300,33 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
     if (nodeErrorCode(error) !== "ENOENT" && !(error instanceof SyntaxError)) {
       throw error;
     }
+  }
+
+  // We hold the SQLite transaction, so a record from that protocol is orphaned.
+  // Older clients only record a PID: a live one must be respected at any age.
+  if (!isRecord(owner) || owner["protocol"] !== "sqlite") {
+    // Only positive signed-32-bit PIDs identify an owner. Other values can name
+    // process groups or fail argument validation, so use the stale-age check.
+    const ownerPid = isRecord(owner) ? owner["pid"] : undefined;
     if (
+      typeof ownerPid === "number" &&
+      Number.isInteger(ownerPid) &&
+      ownerPid > 0 &&
+      ownerPid <= MAX_PROCESS_ID
+    ) {
+      try {
+        process.kill(ownerPid, 0);
+        return false;
+      } catch (error) {
+        if (nodeErrorCode(error) === "EPERM") return false;
+        if (nodeErrorCode(error) !== "ESRCH") throw error;
+      }
+    } else if (
       Date.now() - metadata.mtimeMs <
       INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS
     ) {
       return false;
     }
-  }
-
-  // Only positive signed-32-bit PIDs identify an owner. Other values can name
-  // process groups or fail argument validation, so use the stale-age check.
-  const ownerPid = isRecord(owner) ? owner["pid"] : undefined;
-  if (
-    typeof ownerPid === "number" &&
-    Number.isInteger(ownerPid) &&
-    ownerPid > 0 &&
-    ownerPid <= MAX_PROCESS_ID
-  ) {
-    try {
-      process.kill(ownerPid, 0);
-      return false;
-    } catch (error) {
-      if (nodeErrorCode(error) !== "ESRCH") {
-        if (nodeErrorCode(error) === "EPERM") return false;
-        throw error;
-      }
-    }
-  } else if (
-    Date.now() - metadata.mtimeMs <
-    INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS
-  ) {
-    return false;
   }
 
   const quarantine = `${lock}.stale-${randomUUID()}`;
@@ -1350,7 +1511,7 @@ export function requireOutputOutsideRepositories(
 
 export async function preparePersistentOutputRoot(
   stateDirectory: string,
-  category: "scans" | "policies",
+  category: "scans" | "policies" | "validations",
   repositoryName: string,
 ): Promise<string> {
   requireModelSafeOutputDir(stateDirectory);
@@ -1361,7 +1522,7 @@ export async function preparePersistentOutputRoot(
     await mkdir(root, { recursive: true, mode: 0o700 });
     if (!(await lstat(root)).isDirectory()) {
       throw new OutputDirectoryError(
-        `Persistent ${category === "scans" ? "scan" : "policy"} output must use real directories: ${root}`,
+        `Persistent ${category === "scans" ? "scan" : category === "policies" ? "policy" : "validation"} output must use real directories: ${root}`,
       );
     }
   }
@@ -1375,15 +1536,6 @@ export async function runWorkbench(
 ): Promise<JsonObject> {
   let stdout: string;
   try {
-    const environment = Object.fromEntries(
-      Object.entries(options.environment).filter(
-        ([name]) =>
-          name.toUpperCase() !== "OPENAI_API_KEY" &&
-          name.toUpperCase() !== "CODEX_API_KEY" &&
-          name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-          name.toUpperCase() !== "FIREWORKS_API_KEY",
-      ),
-    );
     const result = await runCodexCommand(
       { command: options.python },
       [
@@ -1394,7 +1546,7 @@ export async function runWorkbench(
         join(options.pluginRoot, "scripts", "workbench_db.py"),
         ...args,
       ],
-      pythonUtf8Environment(environment),
+      pluginHelperEnvironment(options.environment),
       input,
       options.signal,
     );
@@ -1443,16 +1595,10 @@ export async function runWorkbench(
 }
 
 export function bundledPluginCandidates(moduleDirectory: string): string[] {
-  const packageCandidates = [
+  return [
     resolve(moduleDirectory, "_bundled_plugin"),
     resolve(moduleDirectory, "../_bundled_plugin"),
   ];
-  return basename(moduleDirectory) === "src"
-    ? [
-        resolve(moduleDirectory, "../../../plugins/codex-security"),
-        ...packageCandidates,
-      ]
-    : packageCandidates;
 }
 
 export async function bundledPluginRoot(): Promise<string> {
@@ -1527,6 +1673,107 @@ export async function validateOutputDir(
       { cause: error },
     );
   }
+}
+
+export async function prepareScanArtifactRestorer(
+  options: WorkbenchCommandOptions,
+  scanDirectory: string,
+): Promise<ScanArtifactRestorer> {
+  let helperPath: string;
+  let canonicalPath: string;
+  let dev: string;
+  let ino: string;
+  try {
+    // Recovery uses the SDK-owned writer, even if the scan selected a custom plugin.
+    helperPath = join(
+      await bundledPluginRoot(),
+      "scripts",
+      "finalize_scan_contract.py",
+    );
+    const result = await runCodexCommand(
+      { command: options.python },
+      [
+        "-I",
+        "-X",
+        "utf8",
+        "-B",
+        "-c",
+        PREPARE_SCAN_ARTIFACT_RESTORER_PROGRAM,
+        helperPath,
+        scanDirectory,
+      ],
+      pluginHelperEnvironment(options.environment),
+      undefined,
+      options.signal,
+    );
+    if (!result.success) {
+      throw new Error(
+        result.stderr.trim() ||
+          result.stdout.trim() ||
+          `Artifact restoration setup exited with status ${result.exitCode}.`,
+      );
+    }
+    const prepared: unknown = JSON.parse(result.stdout);
+    if (
+      !isRecord(prepared) ||
+      typeof prepared["canonicalPath"] !== "string" ||
+      prepared["canonicalPath"].length === 0 ||
+      typeof prepared["dev"] !== "string" ||
+      !/^(?:0|[1-9]\d*)$/u.test(prepared["dev"]) ||
+      typeof prepared["ino"] !== "string" ||
+      !/^(?:0|[1-9]\d*)$/u.test(prepared["ino"])
+    ) {
+      throw new Error("Artifact restoration setup returned invalid output.");
+    }
+    canonicalPath = prepared["canonicalPath"];
+    dev = prepared["dev"];
+    ino = prepared["ino"];
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    throw new OutputDirectoryError(
+      "Could not securely prepare completed scan artifact restoration.",
+      { cause: error },
+    );
+  }
+
+  return {
+    async restore(relativePath, contents) {
+      try {
+        const result = await runCodexCommand(
+          { command: options.python },
+          [
+            "-I",
+            "-X",
+            "utf8",
+            "-B",
+            "-c",
+            RESTORE_SCAN_ARTIFACT_PROGRAM,
+            helperPath,
+            canonicalPath,
+            relativePath,
+            dev,
+            ino,
+          ],
+          pluginHelperEnvironment(options.environment),
+          contents,
+          options.signal,
+        );
+        if (!result.success) {
+          throw new Error(
+            result.stderr.trim() ||
+              result.stdout.trim() ||
+              `Artifact restoration exited with status ${result.exitCode}.`,
+          );
+        }
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        throw new OutputDirectoryError(
+          "Could not safely restore a completed scan artifact.",
+          { cause: error },
+        );
+      }
+    },
+  };
 }
 
 export async function planOutputArchive(
@@ -2133,6 +2380,16 @@ export function resolveCodexCommand(
   return { command };
 }
 
+export function executablePathForSpawn(command: string): string {
+  if (process.platform !== "win32" || !win32.isAbsolute(command))
+    return command;
+  // Root-relative paths still depend on the child's drive and working directory.
+  const root = win32.parse(command).root;
+  return root === "\\" || root === "/"
+    ? command
+    : win32.toNamespacedPath(command);
+}
+
 export async function bootstrapPlugin(
   codexHome: string,
   pluginRoot: string,
@@ -2360,6 +2617,19 @@ export function pythonUtf8Environment(
   return normalized;
 }
 
+function pluginHelperEnvironment(
+  environment: ProcessEnvironment,
+): ProcessEnvironment {
+  return pythonUtf8Environment(
+    Object.fromEntries(
+      Object.entries(environment).filter(
+        ([name]) =>
+          !PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES.has(name.toUpperCase()),
+      ),
+    ),
+  );
+}
+
 export async function cleanupSdkDirectory(path: string): Promise<void> {
   await rm(path, { recursive: true, force: true });
 }
@@ -2368,10 +2638,10 @@ export async function runCodexCommand(
   command: CodexCommand,
   args: readonly string[],
   environment: ProcessEnvironment,
-  input?: string,
+  input?: string | Uint8Array,
   signal?: AbortSignal,
 ): Promise<CodexCommandResult> {
-  const child = spawn(command.command, [...args], {
+  const child = spawn(executablePathForSpawn(command.command), [...args], {
     env: environment,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,

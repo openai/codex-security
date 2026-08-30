@@ -90,8 +90,6 @@ describe("CodexSecurity orchestration", () => {
                     filesystem: {
                       ":root": "read",
                       ":workspace_roots": "write",
-                      [join(ambientHome, "state", "plugins", "codex-security")]:
-                        "write",
                       [join(
                         ambientHome,
                         "state",
@@ -313,12 +311,14 @@ describe("CodexSecurity orchestration", () => {
                 startThread: () => ({
                   id: null,
                   async runStreamed() {
-                    expect(
-                      existsSync(
-                        join(credentialHome, ".codex-security-scan.lock"),
-                      ),
-                    ).toBe(false);
-                    if (++scansStarted === 2) releaseScans();
+                    if (++scansStarted === 2) {
+                      expect(
+                        existsSync(
+                          join(credentialHome, ".codex-security-scan.lock"),
+                        ),
+                      ).toBe(false);
+                      releaseScans();
+                    }
                     const credentialConfig = parseToml(
                       await readFile(
                         join(credentialHome, "config.toml"),

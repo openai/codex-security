@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
+import type { ComponentReceipt } from "../src/component-scan.js";
 import { ScanDashboard } from "../src/scan-dashboard.js";
 import { capture, fakeResult } from "./cli-fixtures.js";
 
@@ -40,6 +41,190 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("shows concurrent components and keeps their activity and costs separate", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    let timers = 0;
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 110, rows: 20 },
+      {
+        repository: "/synthetic/project",
+        presentation: "components",
+        input,
+        clock: {
+          ...fakeClock(),
+          setInterval: () => {
+            timers++;
+            return {} as NodeJS.Timeout;
+          },
+          clearInterval: () => {
+            timers--;
+          },
+        },
+      },
+    );
+    const receipts: ComponentReceipt[] = ["API", "Web", "Shared"].map(
+      (name, index) => ({
+        id: `component-${index + 1}`,
+        name,
+        paths: [`src/${name.toLowerCase()}`],
+        status: "pending",
+        outputDir: `/synthetic/results/${index + 1}`,
+      }),
+    );
+    const frame = () =>
+      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!);
+    dashboard.start();
+    dashboard.setComponents(receipts);
+    for (const receipt of receipts.slice(0, 2))
+      dashboard.updateComponent({ ...receipt, status: "started" });
+    const cost = fakeResult([], "complete", {
+      input_tokens: 100,
+      output_tokens: 10,
+    }).cost!;
+    for (const [index, receipt] of receipts.slice(0, 2).entries()) {
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "progress",
+        value: {
+          phase: index === 0 ? "validation" : "discovery",
+          filesCompleted: index + 1,
+          filesTotal: 10,
+        },
+      });
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "cost",
+        value: { ...cost, estimatedUsd: index + 1 },
+      });
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "activity",
+        value: {
+          id: "same-activity-id",
+          kind: "message",
+          status: "completed",
+          description: `${receipt.name} only activity`,
+          paths: [],
+        },
+      });
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "session",
+        value: {
+          threadId: receipt.id,
+          parentThreadId: null,
+          event: {
+            type: "event_msg",
+            payload: {
+              type: "agent_message",
+              message: `${receipt.name} session detail`,
+            },
+          },
+        },
+      });
+    }
+    expect(frame()).toContain("2 running · 1 queued");
+    expect(frame()).toContain("validating findings");
+    expect(frame()).toContain("1/10");
+    expect(frame()).toContain("2/10");
+    expect(frame()).toContain("$3.00 · component scans only");
+    expect(frame()).toContain("before deduplication");
+    expect(frame().split("\n")).toHaveLength(20);
+    input.emit("data", "\r");
+    expect(frame()).toContain("API only activity");
+    expect(frame()).not.toContain("Web only activity");
+    expect(frame()).toContain("$1.00");
+    input.emit("data", "d");
+    expect(frame()).toContain("API session detail");
+    expect(frame()).not.toContain("Web session detail");
+    input.emit("data", "\u001B");
+    input.emit("data", "\u001B[B\r");
+    expect(frame()).toContain("Web only activity");
+    expect(frame()).not.toContain("API only activity");
+    dashboard.updateComponent({
+      ...receipts[0]!,
+      status: "completed",
+      findingCount: 3,
+      scanId: "scan-api",
+    });
+    dashboard.showComponents("Combining duplicate findings");
+    expect(frame()).toContain("1 complete · 1 running · 1 queued");
+    expect(frame()).toContain("3 findings before deduplication");
+    dashboard.finishComponents({
+      total: 3,
+      completed: 1,
+      incomplete: 1,
+      failed: 1,
+      planPath: "/synthetic/plan.json",
+      sourceFindingCount: 3,
+      findingCount: 2,
+      deduplication: {
+        status: "incomplete",
+        confirmedGroups: 1,
+        uncertainPairs: 0,
+      },
+    });
+    expect(frame()).toContain("3 findings → 2 groups · matching incomplete");
+    expect(frame()).toContain("partial results");
+    expect(timers).toBe(1);
+    dashboard.stop();
+    expect(timers).toBe(0);
+    expect(input.isRaw).toBe(false);
+    expect(input.listenerCount("data")).toBe(0);
+    expect(stderr.text().split("\u001B[?1049h")).toHaveLength(2);
+  });
+
+  test("navigates a long component list and shows sanitized failure details", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    let interrupted = false;
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 80, rows: 14 },
+      {
+        repository: "/synthetic/project",
+        presentation: "components",
+        input,
+        clock: fakeClock(),
+        sanitize: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
+        onInterrupt: () => {
+          interrupted = true;
+        },
+      },
+    );
+    const receipts: ComponentReceipt[] = Array.from(
+      { length: 20 },
+      (_, index) => ({
+        id: `c${index}`,
+        name: `Component ${index}`,
+        paths: [`src/${index}`],
+        status: "pending",
+        outputDir: `/synthetic/${index}`,
+      }),
+    );
+    const frame = () =>
+      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!);
+    dashboard.start();
+    dashboard.setComponents(receipts);
+    dashboard.updateComponent({
+      ...receipts[19]!,
+      status: "failed",
+      error: "synthetic-secret unavailable",
+    });
+    input.emit("data", "\u001B[F");
+    expect(frame()).toContain("Component 19");
+    expect(frame()).not.toContain("Component 0 ");
+    expect(frame()).toContain("[redacted] unavailable");
+    expect(
+      frame()
+        .split("\n")
+        .every((line) => line.length <= 80),
+    ).toBe(true);
+    input.emit("data", "\r\u0003");
+    expect(interrupted).toBe(true);
+    dashboard.stop();
+  });
+
   test("renders publication progress without scan-only inventory and cost fields", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();

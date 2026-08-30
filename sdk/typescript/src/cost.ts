@@ -767,6 +767,13 @@ function addTokenUsage(
   };
 }
 
+/** @internal Sum complete turn receipts when session usage is unavailable. */
+export function sumTokenUsage(first: unknown, second: unknown): unknown {
+  const left = tokenUsage(first);
+  const right = tokenUsage(second);
+  return left === null || right === null ? null : addTokenUsage(left, right);
+}
+
 function subtractTokenUsage(
   usage: ScanTokenUsage,
   inherited: ScanTokenUsage,
