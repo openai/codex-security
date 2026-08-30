@@ -3,13 +3,16 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
+  rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import type { ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
@@ -26,6 +29,7 @@ import {
 } from "../src/component-scan.js";
 import type { Finding, SeverityLevel } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
+import { normalizeTarget } from "../src/targets.js";
 import {
   matchScanFindings,
   type ScanComparisonInput,
@@ -39,6 +43,7 @@ import {
   fakeResult,
   FakeSignals,
 } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const temporary: string[] = [];
 const components: ComponentPlan["components"] = [
@@ -179,6 +184,55 @@ function fakeCodex(
     startThread: () => ({
       run: async () => ({ finalResponse: JSON.stringify(await response()) }),
     }),
+  };
+}
+
+async function scopedInventory(paths: Fixture, scope: string) {
+  const python =
+    process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const scopesFile = join(paths.root, "scopes.json");
+  const output = join(paths.root, "scoped-source-input.jsonl");
+  await writeFile(scopesFile, JSON.stringify([scope]));
+  const stdout = execFileSync(
+    python!,
+    [
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import json, sys",
+        "from argparse import Namespace",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "import workbench_target as target",
+        "from generate_rank_input import make_repo_scope_input",
+        "queries = []",
+        "git_bytes = target.git_bytes",
+        "def record_query(repository, *args, **kwargs):",
+        "    data = git_bytes(repository, *args, **kwargs)",
+        "    if 'ls-files' in args:",
+        "        queries.append({'pathspec': args[-1], 'count': len([path for path in (data or b'').split(b'\\0') if path])})",
+        "    return data",
+        "target.git_bytes = record_query",
+        "repo, scope, scopes, output = sys.argv[2:]",
+        "make_repo_scope_input(Namespace(repo=repo, scopes_file=scopes, out=output))",
+        "rows = [json.loads(line)['path'] for line in Path(output).read_text().splitlines()]",
+        "count = target.directory_snapshot_regular_file_count((Path(repo) / scope).resolve())",
+        "print(json.dumps({'paths': rows, 'count': count, 'queries': queries}))",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      paths.repository,
+      scope,
+      scopesFile,
+      output,
+    ],
+    { encoding: "utf8", stdio: "pipe" },
+  );
+  return JSON.parse(stdout.trim().split("\n").at(-1)!) as {
+    paths: string[];
+    count: number;
+    queries: Array<{ pathspec: string; count: number }>;
   };
 }
 
@@ -732,6 +786,16 @@ test("plans from a Git inventory without tools or ignored files", async () => {
       paths: [".gitignore", "apps/web", "package.json", "shared"],
     },
   ]);
+  await mkdir(join(paths.repository, "~"));
+  await writeFile(join(paths.repository, "~", "app.ts"), "export {};\n");
+  const wholeRepository = {
+    components: [{ name: "Repository", paths: ["."] }],
+  };
+  expect(
+    await planComponents(paths.repository, {
+      codex: fakeCodex(() => wholeRepository),
+    }),
+  ).toEqual(wholeRepository);
   for (const path of ["ignored", "ignored/secret.txt"]) {
     const proposed = { components: [{ name: "Ignored", paths: [path] }] };
     await expect(
@@ -741,6 +805,242 @@ test("plans from a Git inventory without tools or ignored files", async () => {
       proposed,
     );
   }
+});
+
+test("keeps scoped inventories and plans aligned after a case-only Git rename", async () => {
+  const paths = await fixture();
+  const source = "src";
+  const uppercase = source.toUpperCase();
+  const git = (...args: string[]) =>
+    execFileSync(
+      "git",
+      [
+        "-C",
+        paths.repository,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgSign=false",
+        "-c",
+        "core.hooksPath=" + join(paths.root, "hooks"),
+        ...args,
+      ],
+      {
+        encoding: "utf8",
+        stdio: "pipe",
+        env: {
+          ...process.env,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: join(paths.root, "gitconfig"),
+        },
+      },
+    ).trim();
+  await mkdir(join(paths.repository, source, "nested"), { recursive: true });
+  await writeFile(join(paths.repository, source, "app.ts"), "export {};\n");
+  await writeFile(
+    join(paths.repository, source, "nested", "util.ts"),
+    "export {};\n",
+  );
+  await mkdir(join(paths.repository, source, "build"));
+  await writeFile(
+    join(paths.repository, source, "build", "tracked.ts"),
+    "export {};\n",
+  );
+  await writeFile(join(paths.repository, ".gitignore"), "build/\n");
+  git("init", "-q", "-b", "main");
+  git("add", ".");
+  git("add", "--force", source + "/build/tracked.ts");
+  git("commit", "-qm", "Initial fixture");
+  const ordinaryPaths = [
+    source + "/app.ts",
+    source + "/build/tracked.ts",
+    source + "/nested/util.ts",
+  ];
+  expect(await scopedInventory(paths, source)).toEqual({
+    paths: ordinaryPaths,
+    count: 3,
+    queries: [
+      { pathspec: ":(icase,literal)" + source, count: 3 },
+      { pathspec: ":(icase,literal)" + source, count: 3 },
+    ],
+  });
+  git("switch", "-c", "case-rename");
+  git("mv", source, "renaming");
+  git("mv", "renaming", uppercase);
+  git("commit", "-qm", "Rename source directory");
+  await writeFile(
+    join(paths.repository, uppercase, "build", "cache.tmp"),
+    "ignored build output\n",
+  );
+  git("switch", "main");
+  expect(git("status", "--porcelain")).toBe("");
+  expect(
+    git("ls-files", "-z", "--", source).split("\0").filter(Boolean),
+  ).toEqual(ordinaryPaths);
+  const entries = await readdir(paths.repository);
+  expect(entries).toContain(uppercase);
+
+  const inventory = async (scope: string) => {
+    const { queries, ...selected } = await scopedInventory(paths, scope);
+    const pathspec = scope === "." ? "." : ":(icase,literal)" + scope;
+    expect(queries.map((query) => query.pathspec)).toEqual([
+      pathspec,
+      pathspec,
+    ]);
+    if (scope === ".") {
+      selected.paths = (
+        await Promise.all(
+          selected.paths.map(async (path) =>
+            relative(
+              paths.repository,
+              await realpath(join(paths.repository, path)),
+            )
+              .split(sep)
+              .join("/"),
+          ),
+        )
+      ).sort();
+    }
+    return selected;
+  };
+
+  const target = await normalizeTarget(paths.repository, [source]);
+  const scope = target.paths[0]!;
+  const expectedInventory = {
+    paths: [
+      scope + "/app.ts",
+      scope + "/build/tracked.ts",
+      scope + "/nested/util.ts",
+    ],
+    count: 3,
+  };
+  expect(await inventory(scope)).toEqual(expectedInventory);
+  await writeFile(
+    join(paths.repository, scope, "untracked.ts"),
+    "export {};\n",
+  );
+  const mixedInventory = {
+    paths: [...expectedInventory.paths, scope + "/untracked.ts"].sort(),
+    count: 4,
+  };
+  expect(await scopedInventory(paths, scope)).toEqual({
+    ...mixedInventory,
+    queries: [
+      { pathspec: ":(icase,literal)" + scope, count: 4 },
+      { pathspec: ":(icase,literal)" + scope, count: 4 },
+    ],
+  });
+  const repositoryInventory = {
+    paths: [
+      ".gitignore",
+      "apps/api/app.ts",
+      "apps/web/app.ts",
+      "package.json",
+      "shared/util.ts",
+      ...mixedInventory.paths,
+    ].sort(),
+    count: 9,
+  };
+  expect(await inventory(".")).toEqual(repositoryInventory);
+  const proposed = { components: [{ name: "Source", paths: [source] }] };
+  const other = {
+    name: "Other files",
+    paths: [".gitignore", "apps", "package.json", "shared"],
+  };
+  expect(
+    await planComponents(paths.repository, {
+      codex: fakeCodex(() => proposed),
+    }),
+  ).toEqual({
+    components: [{ name: "Source", paths: [scope] }, other],
+  });
+
+  if (entries.includes(source)) {
+    await writeFile(
+      join(paths.repository, uppercase, "app.ts"),
+      "export {};\n",
+    );
+    expect(await inventory(source)).toEqual(mixedInventory);
+    expect(await inventory(uppercase)).toEqual({
+      paths: [uppercase + "/app.ts"],
+      count: 1,
+    });
+    expect(await inventory(".")).toEqual({
+      paths: [...repositoryInventory.paths, uppercase + "/app.ts"].sort(),
+      count: 10,
+    });
+    const separate = { name: "Separate source", paths: [uppercase] };
+    expect(
+      await planComponents(paths.repository, {
+        codex: fakeCodex(() => ({
+          components: [...proposed.components, separate],
+        })),
+      }),
+    ).toEqual({ components: [...proposed.components, separate, other] });
+  }
+});
+
+test("retains tracked Unicode aliases when scoped Git matching is incomplete", async () => {
+  const paths = await fixture();
+  const source = "sourcé";
+  const uppercase = source.toUpperCase();
+  await mkdir(join(paths.repository, source, "build"), { recursive: true });
+  await writeFile(join(paths.repository, source, "app.ts"), "export {};\n");
+  await writeFile(
+    join(paths.repository, source, "build", "tracked.ts"),
+    "export {};\n",
+  );
+  await writeFile(join(paths.repository, ".gitignore"), "build/\n");
+  const nonCased = "项目api";
+  await mkdir(join(paths.repository, nonCased));
+  await writeFile(join(paths.repository, nonCased, "app.ts"), "export {};\n");
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  execFileSync("git", ["-C", paths.repository, "add", "--force", "."]);
+  expect((await scopedInventory(paths, nonCased)).queries).toEqual([
+    { pathspec: ":(icase,literal)" + nonCased, count: 1 },
+    { pathspec: ":(icase,literal)" + nonCased, count: 1 },
+  ]);
+  await rename(
+    join(paths.repository, source),
+    join(paths.repository, "renaming"),
+  );
+  await rename(
+    join(paths.repository, "renaming"),
+    join(paths.repository, uppercase),
+  );
+  const aliases =
+    (await realpath(join(paths.repository, source)).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      },
+    )) !== null;
+  await writeFile(
+    join(paths.repository, uppercase, "untracked.ts"),
+    "export {};\n",
+  );
+  const selected = [
+    uppercase + "/app.ts",
+    uppercase + "/untracked.ts",
+    ...(aliases ? [uppercase + "/build/tracked.ts"] : []),
+  ].sort();
+  const inventory = await scopedInventory(paths, uppercase);
+  const identities = async (files: string[]) =>
+    (
+      await Promise.all(
+        files.map(async (file) => {
+          const { dev, ino } = await stat(join(paths.repository, file), {
+            bigint: true,
+          });
+          return `${dev}:${ino}`;
+        }),
+      )
+    ).sort();
+  expect(await identities(inventory.paths)).toEqual(await identities(selected));
+  expect(inventory.count).toBe(selected.length);
+  expect(inventory.queries.map((query) => query.pathspec)).toEqual([".", "."]);
 });
 
 test("plans plain directories and rejects unsafe or overlapping model scopes", async () => {
