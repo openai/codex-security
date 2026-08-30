@@ -1167,8 +1167,13 @@ describe("security policy review and application", () => {
     }
   });
 
-  for (const change of ["content", "permissions"] as const) {
-    const name = `detects recovery ${change} changed during the final policy traversal`;
+  for (const [file, change] of [
+    ["recovery", "content"],
+    ["recovery", "permissions"],
+    ["target", "permissions"],
+    ["target", "inode"],
+  ] as const) {
+    const name = `detects ${file} ${change} changed during the final policy traversal`;
     test(name, async () => {
       if (runTestInSubprocess(import.meta.path, name)) return;
       const f = await fixture();
@@ -1189,7 +1194,12 @@ describe("security policy review and application", () => {
           // Skip the initial checks and recovery lookup; edit during the final alias walk.
           if (args[0] === f.repository && ++traversals === 4) {
             changed = true;
-            if (change === "content") {
+            if (change === "inode") {
+              await rename(target, join(f.root, "replaced-policy"));
+              await writeFile(target, draft.content, { flag: "wx" });
+            } else if (file === "target") {
+              await chmod(target, 0o444);
+            } else if (change === "content") {
               await writer.truncate(0);
               await writer.writeFile("# Late recovery edit\n");
             } else await writer.chmod(0o444);
@@ -1213,6 +1223,7 @@ describe("security policy review and application", () => {
       } finally {
         await writer.close();
         await chmod(recovery, 0o644);
+        await chmod(target, 0o644);
         mock.module("node:fs/promises", () => ({
           ...fsPromises,
           readdir: originalReaddir,

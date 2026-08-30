@@ -1316,10 +1316,13 @@ export async function applySecurityPolicy(
       );
     }
     const permissionsReference = recoveryPath ?? verificationRecoveryPath;
+    const installedGeneration = await securityPolicyFileGeneration(
+      target.targetPath,
+    );
     const recoveryGeneration =
       permissionsReference === null
         ? null
-        : await securityPolicyRecoveryGeneration(permissionsReference);
+        : await securityPolicyFileGeneration(permissionsReference);
     if (
       permissionsReference !== null &&
       (await readSecurityPolicy(permissionsReference)) !== draft.previousContent
@@ -1381,7 +1384,7 @@ export async function applySecurityPolicy(
     await validatePolicyLinks(target);
     if (
       permissionsReference !== null &&
-      (await securityPolicyRecoveryGeneration(permissionsReference)) !==
+      (await securityPolicyFileGeneration(permissionsReference)) !==
         recoveryGeneration
     ) {
       throw new CodexSecurityError(
@@ -1391,6 +1394,14 @@ export async function applySecurityPolicy(
     if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
       throw new CodexSecurityError(
         "The written policy contents changed during final permission verification.",
+      );
+    }
+    if (
+      (await securityPolicyFileGeneration(target.targetPath)) !==
+      installedGeneration
+    ) {
+      throw new CodexSecurityError(
+        "The written policy metadata changed during final verification.",
       );
     }
     return {
@@ -1946,7 +1957,7 @@ async function verifyUnixSecurityMetadata(
   }
 }
 
-async function securityPolicyRecoveryGeneration(path: string): Promise<string> {
+async function securityPolicyFileGeneration(path: string): Promise<string> {
   const metadata = await stat(path, { bigint: true });
   return [
     metadata.dev,
@@ -2044,9 +2055,9 @@ async function replaceExistingPolicy(
           } else
             await copyUnixPolicyFile(recoveryPath, restoreTemporary, python);
           const recoveryGeneration =
-            await securityPolicyRecoveryGeneration(recoveryPath);
+            await securityPolicyFileGeneration(recoveryPath);
           const restoreGeneration =
-            await securityPolicyRecoveryGeneration(restoreTemporary);
+            await securityPolicyFileGeneration(restoreTemporary);
           if (windows)
             await copyWindowsSecurityDescriptor(
               recoveryPath,
@@ -2068,9 +2079,9 @@ async function replaceExistingPolicy(
                   recoveryMode)) ||
             (await readSecurityPolicy(restoreTemporary)) !== recoveryContent ||
             (await readSecurityPolicy(recoveryPath)) !== recoveryContent ||
-            (await securityPolicyRecoveryGeneration(restoreTemporary)) !==
+            (await securityPolicyFileGeneration(restoreTemporary)) !==
               restoreGeneration ||
-            (await securityPolicyRecoveryGeneration(recoveryPath)) !==
+            (await securityPolicyFileGeneration(recoveryPath)) !==
               recoveryGeneration
           ) {
             throw new CodexSecurityError(
