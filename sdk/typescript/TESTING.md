@@ -1,14 +1,12 @@
 # Testing the SDK and CLI
 
-Use Bun 1.3.14, pinned in `package.json` and required CI, with a supported Node.js version. Bun manages dependencies, scripts, and packing; the CLI, SDK, and build tools continue to run on Node.js.
-Repository tests also need Python 3.12+, the pinned `plugins/codex-security[test]` dependencies, and ripgrep (`rg`). Follow the [local development setup](../../CONTRIBUTING.md#local-development) first. The published CLI's Python 3.10+ runtime support does not lower the test environment's Python requirement.
-Install both the SDK and MCP app dependencies before building or testing.
-Run these commands from `sdk/typescript`:
+Complete the [local development setup](../../CONTRIBUTING.md#local-development)
+first, including both SDK and MCP dependencies. Run these commands from
+`sdk/typescript`:
 
 ```sh
-bun install --frozen-lockfile
-bun install --cwd ../../plugins/codex-security/mcp-app --frozen-lockfile
 bun run check:plugin-source
+bun run build:plugin
 bun test --timeout 30000 ./tests-ts/worker-progress.test.ts
 bun run types
 bun run test:mcp
@@ -25,7 +23,8 @@ bun pm pack --destination ../../dist
 bun run test:package
 ```
 
-Each package owns its lockfile and uses isolated installs. The SDK and MCP app keep the one-day minimum release age and disable dependency lifecycle scripts with `trustedDependencies: []`. The separate triage eval environment keeps a seven-day minimum and trusts only the native `better-sqlite3` build. These policies do not disable the package's own `prepack` build.
+SDK and MCP dependency lifecycle scripts are disabled with
+`trustedDependencies: []`. This does not disable the package's own `prepack` build.
 
 The authored plugin lives in `plugins/codex-security`. `bun pm pack` generates
 the ignored `_bundled_plugin` runtime payload from `plugins/codex-security/plugin-files.json` during

@@ -6,9 +6,7 @@ in separate containers with separate state. `compose.findings.yaml` supplies
 the Node server command, working directory, and service environment; the image's
 default command remains the scanner CLI.
 
-The Docker build installs Bun in its build stage to install dependencies and
-pack the npm archive. The runtime image installs that archive with npm and
-runs on Node.js; Bun is not needed in the runtime image or on the Docker host.
+The runtime image uses Node.js. Bun is used only during the image build.
 
 Releases use the SDK package version, native Linux `amd64`/`arm64` builds,
 BuildKit SBOMs and maximum-mode provenance, and a GitHub provenance attestation.
