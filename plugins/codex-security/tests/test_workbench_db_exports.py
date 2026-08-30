@@ -888,66 +888,88 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
     assert completed["findingsTruncated"] is True
     assert len(completed["findings"]) == 20
     embedded_occurrence_ids = {finding["occurrenceId"] for finding in completed["findings"]}
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        rows = connection.execute(
-            "SELECT id, details_json FROM finding_occurrences WHERE scan_id = ?", (scan_id,)
-        ).fetchall()
-        off_prefix_occurrence_id = next(
-            occurrence_id
-            for occurrence_id, _ in rows
-            if occurrence_id not in embedded_occurrence_ids
-        )
-        for index, (occurrence_id, details_json) in enumerate(rows):
-            details = json.loads(details_json)
-            details["evidenceExcerpt"] = "x" * 300_000
-            if index == 0:
-                details["attackPath"] = {
-                    f"outer-{outer:02d}-{'x' * 120}": {
-                        f"middle-{middle:02d}-{'x' * 120}": {
-                            f"inner-{inner:02d}-{'x' * 120}": {
-                                f"leaf-{leaf:02d}-{'x' * 120}": leaf for leaf in range(20)
-                            }
-                            for inner in range(20)
-                        }
-                        for middle in range(20)
-                    }
-                    for outer in range(20)
-                }
-            connection.execute(
-                """
-                UPDATE finding_occurrences
-                SET details_json = ?, title = ?, summary = ?, remediation = ?,
-                    severity = ?, confidence = ?
-                WHERE id = ?
-                """,
-                (
-                    json.dumps(details),
-                    "t" * 100_000,
-                    "s" * 100_000,
-                    "r" * 100_000,
-                    "v" * 100_000,
-                    "c" * 100_000,
-                    occurrence_id,
-                ),
-            )
-            connection.execute(
-                "UPDATE finding_locations SET relative_path = ?, role = ? WHERE occurrence_id = ?",
-                ("p" * 100_000, "o" * 100_000, occurrence_id),
-            )
-    selected = run_workbench(
+    second_page = run_workbench(
         state_dir,
-        "get-scan",
+        "list-findings",
         "--scan-id",
         scan_id,
-        "--occurrence-id",
-        off_prefix_occurrence_id,
+        "--offset",
+        "20",
+        "--limit",
+        "50",
+    )["findingsPage"]
+    assert second_page["offset"] == 20
+    assert second_page["nextOffset"] == 40
+    assert second_page["total"] == 75
+    assert len(second_page["findings"]) == 20
+    assert embedded_occurrence_ids.isdisjoint(
+        finding["occurrenceId"] for finding in second_page["findings"]
+    )
+    off_prefix_occurrence_id = second_page["findings"][0]["occurrenceId"]
+    selected = run_workbench(
+        state_dir, "get-scan", "--scan-id", scan_id, "--occurrence-id", off_prefix_occurrence_id
     )["scan"]
     assert any(
         finding["occurrenceId"] == off_prefix_occurrence_id for finding in selected["findings"]
     )
-    refreshed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
-    assert len(json.dumps(refreshed)) < 4 * 1024 * 1024
-    finding = refreshed["scan"]["findings"][0]
+
+
+def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target)
+    started = run_workbench(
+        state_dir,
+        "start-scan",
+        "--workspace-id",
+        str(saved["id"]),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )
+    scan_id = str(started["results"]["scanId"])
+    scan_dir = Path(str(started["results"]["scanDir"]))
+    write_completed_contract(scan_dir, scan_id, target)
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    occurrence_id = completed["findings"][0]["occurrenceId"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        details = json.loads(
+            connection.execute(
+                "SELECT details_json FROM finding_occurrences WHERE id = ?", (occurrence_id,)
+            ).fetchone()[0]
+        )
+        details["evidenceExcerpt"] = "x" * 300_000
+        details["attackPath"] = {"nested": {"value": "\n😀" * 1_000}}
+        connection.execute(
+            """
+            UPDATE finding_occurrences
+            SET details_json = ?, title = ?, summary = ?, remediation = ?,
+                severity = ?, confidence = ?
+            WHERE id = ?
+            """,
+            (
+                json.dumps(details),
+                "t" * 100_000,
+                "s" * 100_000,
+                "r" * 100_000,
+                "v" * 100_000,
+                "c" * 100_000,
+                occurrence_id,
+            ),
+        )
+        connection.execute(
+            "UPDATE finding_locations SET relative_path = ?, role = ? WHERE occurrence_id = ?",
+            ("p" * 100_000, "o" * 100_000, occurrence_id),
+        )
+    embedded = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+    paged = run_workbench(state_dir, "list-findings", "--scan-id", scan_id)["findingsPage"][
+        "findings"
+    ]
+    assert embedded == paged
+    assert len(embedded) == 1
+    finding = embedded[0]
+    assert finding["attackPath"]["nested"]["value"]
+    assert len(json.dumps(finding["attackPath"], separators=(",", ":")).encode()) <= 4_000
     assert len(finding["evidenceExcerpt"].encode()) <= 8_000
     assert len(finding["title"].encode()) <= 512
     assert len(finding["summary"].encode()) <= 2_000
@@ -959,26 +981,10 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
     assert len(finding["locations"][0]["absolutePath"].encode()) <= 4_096
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
-            "UPDATE finding_locations SET role = NULL WHERE occurrence_id = ?",
-            (finding["occurrenceId"],),
+            "UPDATE finding_locations SET role = NULL WHERE occurrence_id = ?", (occurrence_id,)
         )
     roleless = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
     assert roleless["scan"]["findings"][0]["locations"][0]["role"] is None
-    second_page = run_workbench(
-        state_dir,
-        "list-findings",
-        "--scan-id",
-        scan_id,
-        "--offset",
-        "20",
-        "--limit",
-        "50",
-    )["findingsPage"]
-    assert len(json.dumps(second_page)) < 4 * 1024 * 1024
-    assert second_page["offset"] == 20
-    assert second_page["nextOffset"] == 40
-    assert second_page["total"] == 75
-    assert len(second_page["findings"]) == 20
 
 
 def test_embedded_and_paged_findings_normalize_scalar_attack_path_assessments(

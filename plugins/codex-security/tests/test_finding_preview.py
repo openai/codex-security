@@ -7,6 +7,20 @@ from pathlib import Path
 FINDING_PREVIEW_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "finding_preview.py"
 
 
+def test_nested_attack_path_stays_within_its_preview_budget() -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    attack_path = {
+        f"branch-{branch}": {f"node-{node}": "\n😀" * 1_000 for node in range(3)}
+        for branch in range(3)
+    }
+
+    bounded = preview["bounded_finding_details"]({"attackPath": attack_path})["attackPath"]
+
+    assert bounded["branch-0"]["node-0"]
+    assert len(json.dumps(bounded, separators=(",", ":")).encode()) <= 4_000
+    assert attack_path["branch-0"]["node-0"] == "\n😀" * 1_000
+
+
 def test_bounded_finding_details_normalizes_scalar_attack_path_assessments() -> None:
     preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     scalar_finding = {
@@ -149,6 +163,7 @@ def test_bounded_finding_details_reserves_core_sections() -> None:
                 "reportPath": "findings/archive-traversal/archive-traversal.md",
                 "untrustedExtra": "x" * 20_000,
             },
+            "evidenceExcerpt": "x" * 20_000,
         }
     )
 
