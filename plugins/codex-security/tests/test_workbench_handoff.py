@@ -600,7 +600,10 @@ def test_released_pending_handoff_rejects_tokenless_mutations(
         scan_id,
         *arguments,
         check=False,
-        deliver_unclaimed_scan_before_mutation=False,
     )
 
     assert "owned by another continuation" in str(rejected["stderr"])
+    assert (
+        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["handoffStatus"]
+        == "pending"
+    )

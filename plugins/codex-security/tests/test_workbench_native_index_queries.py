@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ntpath
 from argparse import Namespace
+from types import SimpleNamespace
 
 import pytest
 from workbench_test_support import stable_target_id
@@ -188,3 +190,70 @@ def test_collection_filters_apply_before_pagination(
     if command == "list-repositories":
         assert query(connection, query_args(status="not_scanned"))[collection] == []
         assert query(connection, query_args(status="open_findings"))[collection]
+
+
+def test_scan_list_returns_lightweight_running_first_summaries(workbench_api, indexed_collections):
+    connection, targets = indexed_collections
+    connection.execute(
+        "UPDATE scans SET status = 'running', phase = 'preflight' WHERE id = ?",
+        (SCAN_IDS[1],),
+    )
+    connection.execute(
+        "UPDATE scans SET status = 'failed', canceled_at = updated_at WHERE id = ?", (SCAN_IDS[0],)
+    )
+    scans = workbench_api["scan_history"].list_scans(connection)["scans"]
+
+    assert [scan["scanId"] for scan in scans] == [SCAN_IDS[1], SCAN_IDS[0], SCAN_IDS[2]]
+    assert scans[0]["targetPath"] == str(targets[1])
+    assert scans[0]["targetRevision"] == "synthetic-revision"
+    assert scans[0]["progress"]["status"] == "running"
+    assert scans[0]["progress"]["phase"] == "preflight"
+    assert scans[1]["progress"]["status"] == "canceled"
+    assert "artifacts" not in scans[0]
+    assert "findings" not in scans[0]
+
+
+def test_scan_root_filter_matches_windows_path_aliases(
+    workbench_api, indexed_collections, tmp_path, monkeypatch
+):
+    connection, _ = indexed_collections
+    root = tmp_path / "Scan Results"
+    for scan_id, directory in zip(
+        SCAN_IDS, (root / "first", tmp_path / "Scan Results Other", tmp_path / "unrelated")
+    ):
+        connection.execute("UPDATE scans SET scan_dir = ? WHERE id = ?", (str(directory), scan_id))
+    history = workbench_api["scan_history"]
+    monkeypatch.setattr(history, "os", SimpleNamespace(name="nt", path=ntpath, sep="\\"))
+    args = query_args(scan_root=str(root).upper(), limit=None)
+
+    assert [scan["scanId"] for scan in history.list_scans(connection, args)["scans"]] == [
+        SCAN_IDS[0]
+    ]
+    connection.execute(
+        "UPDATE scans SET scan_dir = ? WHERE id = ?", (ntpath.normpath(str(root)), SCAN_IDS[0])
+    )
+    assert [scan["scanId"] for scan in history.list_scans(connection, args)["scans"]] == [
+        SCAN_IDS[0]
+    ]
+
+
+def test_scan_list_probes_requested_repository_once(
+    workbench_api, indexed_collections, monkeypatch
+):
+    connection, targets = indexed_collections
+    history = workbench_api["scan_history"]
+    probes = []
+    git_output = history.git_output
+
+    def record_git_output(target, *arguments):
+        probes.append((target, arguments))
+        return git_output(target, *arguments)
+
+    monkeypatch.setattr(history, "git_output", record_git_output)
+    result = history.list_scans(connection, query_args(repository=str(targets[0]), limit=1))
+
+    assert [scan["scanId"] for scan in result["scans"]] == [SCAN_IDS[0]]
+    assert [arguments for target, arguments in probes if target == targets[0]] == [
+        ("rev-parse", "--path-format=absolute", "--git-common-dir"),
+        ("remote", "get-url", "origin"),
+    ]

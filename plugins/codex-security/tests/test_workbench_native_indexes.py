@@ -9,6 +9,7 @@ from workbench_test_support import (
     create_saved_workspace,
     run_workbench,
     stable_target_id,
+    start_delivered_scan,
     write_completed_contract,
 )
 
@@ -37,7 +38,7 @@ def complete_scan(
             "--mode",
             "standard",
         )
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(workspace["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(
@@ -258,9 +259,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
         "Fixture close decision.",
     )
     running_workspace = create_saved_workspace(state_dir, first_target)
-    older_running = run_workbench(
-        state_dir, "start-scan", "--workspace-id", str(running_workspace["id"])
-    )
+    older_running = start_delivered_scan(state_dir, "--workspace-id", str(running_workspace["id"]))
     complete_scan(state_dir, first_target, identity_anchor="first-finding")
     distinct_first = complete_scan(
         state_dir,
