@@ -359,7 +359,7 @@ async function branchHead(github, branch) {
 
 function assertReleasePull(pull, plan) {
   if (
-    pull.state !== "open" ||
+    pull?.state !== "open" ||
     pull.head.ref !== plan.branch ||
     pull.base.ref !== "main"
   ) {
@@ -367,19 +367,33 @@ function assertReleasePull(pull, plan) {
       "The release PR was closed or retargeted during the update. Review it before continuing.",
     );
   }
+  if (!pull.draft) {
+    throw new Error(
+      "The release PR is no longer a draft. Convert it back to a draft to resume automatic updates.",
+    );
+  }
+}
+
+function releaseHoldReason(openPulls, pullNumber) {
+  const other = openPulls.find(
+    (candidate) => candidate.number !== pullNumber && isReleasePull(candidate),
+  );
+  if (other)
+    return `Another release PR is open: #${other.number}. It has not been changed.`;
+  const current = openPulls.find(
+    (candidate) => candidate.number === pullNumber,
+  );
+  if (current && !current.draft)
+    return `Release PR #${current.number} is ready for review. Convert it back to a draft to resume automatic updates.`;
+  return null;
 }
 
 async function ensurePullRequest(github, plan, pull, template, headSha) {
-  if (!pull) {
-    const other = (
-      await github.list("pulls?state=open&base=main&per_page=100")
-    ).find(isReleasePull);
-    if (other) {
-      throw new Error(
-        `Another release PR opened during the update: #${other.number}. No second PR was created.`,
-      );
-    }
-  }
+  const holdReason = releaseHoldReason(
+    await github.list("pulls?state=open&base=main&per_page=100"),
+    pull?.number,
+  );
+  if (holdReason) throw new Error(holdReason);
   if (pull) {
     pull = await github.request("GET", `pulls/${pull.number}`);
     assertReleasePull(pull, plan);
@@ -433,14 +447,11 @@ export async function reconcileReleasePullRequest({
         candidate.head.ref === plan.branch &&
         candidate.head.repo?.full_name === github.repository,
     );
-    const other = openPulls.find(
-      (candidate) =>
-        candidate.number !== pull?.number && isReleasePull(candidate),
-    );
-    if (other)
+    const holdReason = releaseHoldReason(openPulls, pull?.number);
+    if (holdReason)
       return {
         action: "held",
-        reason: `Another release PR is open: #${other.number}. It has not been changed.`,
+        reason: holdReason,
         dryRun,
         plan,
       };
@@ -495,6 +506,17 @@ export async function reconcileReleasePullRequest({
         parents: [...new Set([headSha, mainSha].filter(Boolean))],
       });
       if ((await branchHead(github, "main")) !== mainSha) continue;
+      const currentPulls = await github.list(
+        "pulls?state=open&base=main&per_page=100",
+      );
+      const holdReason = releaseHoldReason(currentPulls, pull?.number);
+      if (holdReason)
+        return { action: "held", reason: holdReason, dryRun, plan };
+      if (pull)
+        assertReleasePull(
+          currentPulls.find((candidate) => candidate.number === pull.number),
+          plan,
+        );
       try {
         if (headSha) {
           await github.request("PATCH", `git/refs/heads/${plan.branch}`, {

@@ -64,7 +64,9 @@ the existing publication gates.
 
 The updater keeps one draft proposal on `release/next-<base-version>` and
 recomputes its version from all changes since the current package version
-first reached `main`. A later breaking change changes the version on the
+first reached `main`. Squash-merge release PRs, as required by this
+repository's enabled merge method, so the whole proposal lands as one
+release boundary commit. A later breaking change changes the version on the
 same PR. Each update incorporates the latest `main` and appends a commit;
 the updater never force-pushes. A concurrent commit causes it to reread and
 retry. It requests Codex review on each updated head.
@@ -78,7 +80,10 @@ and pass the verification steps below.
 The updater leaves another open `release:` PR, including a manually prepared
 release, untouched and does not open a duplicate. Finish or close that PR
 before enabling the new flow. Closing an automated proposal pauses its
-cycle; reopen it to resume. Changes to other files on the release branch,
+cycle; reopen it to resume. Marking the proposal ready also pauses updates,
+preserving the reviewed version and notes. To resume, convert it back to a
+draft and rerun the updater. The updater rechecks these conditions before
+advancing the branch. Changes to other files on the release branch,
 or changes to package fields other than the version, also pause the updater
 so those edits cannot be lost.
 

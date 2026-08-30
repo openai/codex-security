@@ -858,7 +858,7 @@ describe("rolling release reconciliation", () => {
     ).toHaveLength(1);
   });
 
-  test.each(["closed", "retargeted"])(
+  test.each(["closed", "retargeted", "ready"])(
     "does not request review after a PR is %s during its final checks",
     async (change) => {
       const fixture = new Fixture();
@@ -879,25 +879,31 @@ describe("rolling release reconciliation", () => {
           ++reads === 1
         ) {
           if (change === "closed") pull.state = "closed";
-          else pull.base.ref = "maintenance";
+          else if (change === "retargeted") pull.base.ref = "maintenance";
+          else pull.draft = false;
         }
         return result;
       };
-      await expect(fixture.run()).rejects.toThrow("closed or retargeted");
+      await expect(fixture.run()).rejects.toThrow(
+        change === "ready" ? "draft" : "closed or retargeted",
+      );
       expect(fixture.github.comments.get(pull.number)).toHaveLength(
         commentCount,
       );
     },
   );
 
-  test("opens the next empty draft as soon as a version bump merges, without waiting for publication", async () => {
+  test("opens the next empty draft after repeated updates are squash-merged, without waiting for publication", async () => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
     const first = await fixture.run();
     const pull = fixture.github.pulls.find(
       (candidate) => candidate.number === first.pull,
     )!;
-    fixture.merge(first.plan.title, first.plan.files);
+    fixture.merge("fix: another change before release");
+    const updated = await fixture.run();
+    expect(updated.headSha).not.toBe(first.headSha);
+    fixture.merge(updated.plan.title, updated.plan.files);
     pull.state = "closed";
     pull.merged_at = "2026-01-01T00:00:00Z";
     const second = await fixture.run();
@@ -1065,4 +1071,77 @@ describe("rolling release reconciliation", () => {
       nextReleaseVersion(releaseHistory.baseVersion, releaseHistory.changes),
     ).toBe("0.1.25");
   });
+});
+
+describe("release proposal pauses", () => {
+  test("keeps a ready release proposal frozen until it returns to draft", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    const first = await fixture.run();
+    const pull = fixture.github.pulls.find(
+      (candidate) => candidate.number === first.pull,
+    )!;
+    pull.draft = false;
+    pull.body += "\nMaintainer completed the final review.\n";
+    const reviewedBody = pull.body;
+    const reviewedTitle = pull.title;
+    const reviewedHead = fixture.head(first.plan.branch);
+    fixture.merge("feat!: later breaking change");
+    const writes = fixture.github.writes.length;
+    const held = await fixture.run();
+    expect(held.action).toBe("held");
+    expect(held.reason).toContain("draft");
+    expect(fixture.head(first.plan.branch)).toBe(reviewedHead);
+    expect(fixture.github.writes).toHaveLength(writes);
+    expect(pull.title).toBe(reviewedTitle);
+    expect(pull.body).toBe(reviewedBody);
+    pull.draft = true;
+    const resumed = await fixture.run();
+    expect(resumed.action).toBe("updated");
+    expect(resumed.pull).toBe(first.pull);
+    expect(resumed.plan.version).toBe("0.2.0");
+  });
+
+  test("does not advance a proposal marked ready during preparation", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    const first = await fixture.run();
+    const pull = fixture.github.pulls.find(
+      (candidate) => candidate.number === first.pull,
+    )!;
+    fixture.merge("fix: later fix");
+    fixture.github.afterCommit = () => {
+      pull.draft = false;
+    };
+    const held = await fixture.run();
+    expect(held.action).toBe("held");
+    expect(fixture.head(first.plan.branch)).toBe(first.headSha!);
+  });
+
+  test.each(["new", "existing"])(
+    "pauses before writing a %s release branch when another release opens",
+    async (proposal) => {
+      const hasPull = proposal === "existing";
+      const fixture = new Fixture();
+      fixture.merge("feat: initial feature");
+      const first = hasPull ? await fixture.run() : null;
+      if (first) fixture.merge("fix: later fix");
+      const branch = first?.plan.branch ?? "release/next-0.1.23";
+      const previousHead = fixture.head(branch);
+      fixture.github.afterCommit = () => {
+        fixture.github.addPull(
+          "manual-release",
+          "release: prepare a manual release",
+          fixture.head()!,
+        );
+      };
+      const held = await fixture.run();
+      expect(held.action).toBe("held");
+      expect(held.reason).toContain("Another release PR");
+      expect(fixture.head(branch)).toBe(previousHead);
+      expect(
+        fixture.github.pulls.filter((candidate) => candidate.state === "open"),
+      ).toHaveLength(hasPull ? 2 : 1);
+    },
+  );
 });
