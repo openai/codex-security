@@ -22,14 +22,15 @@ For CI, set `OPENAI_API_KEY` instead of signing in.
 
 ## Generate SECURITY.md
 
-Draft a repository-wide or component-scoped security policy without changing the checkout:
+Draft repository-wide or component-scoped `SECURITY.md` guidance for future scans:
 
 ```bash
 codex-security policy .
 codex-security policy . --path services/api --knowledge-base architecture.md
 ```
 
-Review the proposed diff before copying the policy. Supporting architecture,
+The command saves a draft outside the checkout; it does not install it or run a
+vulnerability scan. Review the proposed diff before copying the policy. Supporting architecture,
 threat-model, and review documents stay outside the repository and may contain
 sensitive details. See the [SDK policy guide](sdk/typescript/README.md#generate-a-security-policy)
 for headless generation, saved artifacts, and SDK usage.

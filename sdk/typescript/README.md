@@ -253,11 +253,17 @@ Cyber approval. Apply or check your access at
 
 ## Generate a security policy
 
-`policy` drafts a source-backed `SECURITY.md` without changing the checkout or
-creating a scan record. It uses the scan runtime and authentication, with
-read-only access to the selected repository and required tools. Network access,
+`policy` drafts `SECURITY.md` guidance for future scans. It does not run a
+vulnerability scan, change application settings, or install the draft in the
+checkout. It uses the scan runtime and authentication, requesting read-only
+access to the selected repository and required tools. Network access,
 web search, apps, and MCP servers are disabled. Drafts stay outside the checkout.
 Git metadata outside the selected checkout is inspected only by the host.
+
+On macOS, the pinned Codex runtime does not fully enforce write restrictions
+under `/tmp` (including `/private/tmp`). Keep the repository and artifacts outside
+that tree when read-only enforcement is required. See the
+[upstream sandbox limitation](https://github.com/openai/codex/issues/32395).
 
 ```bash
 npx @openai/codex-security policy .
@@ -275,10 +281,22 @@ metadata; ancestor links cannot widen a component policy's scope.
 For an intentional separate Git directory, set `core.worktree` to the checkout's
 absolute path. Use `git worktree repair` for moved linked worktrees.
 
-Generation describes the system, builds a threat model, then drafts the policy.
+Generation uses three Codex stages: describe the system, build a threat model,
+then draft the policy. The first two documents support review; they are not
+additional approval steps or policies to install.
 In a terminal, it asks about facts the source cannot establish and shows the
 exact diff. If both ChatGPT and API-key credentials are available, it asks which
 to use; `--auth chatgpt` or `--auth api-key` selects one explicitly.
+
+| Invocation                   | Calls Codex? | Result                                                                  |
+| ---------------------------- | ------------ | ----------------------------------------------------------------------- |
+| `policy .`                   | Yes          | Ask owner questions, save documents, and preview the draft.             |
+| `policy . --headless --json` | Yes          | Save documents without prompts and return their paths and review notes. |
+| `policy . --format md`       | Yes          | Generate a draft and write its Markdown to stdout.                      |
+| `policy . --dry-run --json`  | No           | Check local inputs and show the resolved target and settings.           |
+
+None of these commands installs `SECURITY.md` in the repository. Output formats
+change presentation; they do not turn generation into a saved-draft read.
 
 ### Review the draft
 
@@ -341,8 +359,9 @@ try {
 ```
 
 `preflightPolicy()` checks local inputs without starting Codex.
-`previewPolicy()` uses the client's Python setting and makes terminal control
-characters visible. The standalone `securityPolicyDiff()` returns a raw diff
+`previewPolicy()` previews the supplied in-memory draft, uses the client's Python
+setting, and makes terminal control characters visible. Editing the saved file
+does not change that object. The standalone `securityPolicyDiff()` returns a raw diff
 for files or other non-terminal uses; pass an interpreter explicitly if needed.
 `generatePolicy()` accepts `auth`, `path`, `knowledgeBasePaths`, `outputDir`,
 `maxCostUsd`, `signal`, and progress and cost callbacks. An optional

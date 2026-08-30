@@ -186,6 +186,7 @@ export async function runPolicyCommand(
     const status = changed ? "draft" : "unchanged";
     if (humanOutput) {
       write(`\nDraft: ${display(draft.draftPath)}`);
+      write(`Architecture: ${display(draft.specificationPath)}`);
       write(`Threat model: ${display(draft.threatModelPath)}`);
       if (changed)
         write(
