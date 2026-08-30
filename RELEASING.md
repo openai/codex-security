@@ -41,6 +41,102 @@ Use `release` and `test` only for changes that do not affect package users. A
 maintainer can apply `skip-release-notes` to exclude another internal change.
 That manual label takes precedence over the title category.
 
+## Version policy before 1.0
+
+While the package is on `0.x`, ordinary changes, including features, use a
+patch release. Breaking changes use a minor release and reset the patch to
+zero. For example, changes after `0.1.23` propose `0.1.24`, or `0.2.0` if any
+included change is breaking. The category of a feature remains **Features**;
+the category does not imply a minor version bump.
+
+The release PR updater recognizes breaking changes from a `!` in a
+Conventional Commit title, a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer,
+or the `breaking-change` label. `skip-release-notes` affects visibility, not
+version impact. All merges and direct commits after the release boundary
+count toward the next version, including documentation and internal changes.
+Review this policy before enabling automation for `1.x`.
+
+## Rolling release PRs
+
+`node-release-pr` runs after pushes to `main` and can be dispatched manually.
+It defaults to a read-only preview. It does not merge, tag, publish, or change
+the existing publication gates.
+
+The updater keeps one draft proposal on `release/next-<base-version>` and
+recomputes its version from all changes since the current package version
+first reached `main`. A later breaking change changes the version on the
+same PR. Each update incorporates the latest `main` and appends a commit;
+the updater never force-pushes. A concurrent commit causes it to reread and
+retry. It requests Codex review on each updated head.
+
+When the release version merges, the next draft can open immediately, even
+while publication is still running. Until another change reaches `main`,
+that draft leaves the package version unchanged. Do not mark an empty draft
+ready or merge it. Publication of the previous version still has to complete
+and pass the verification steps below.
+
+The updater leaves another open `release:` PR, including a manually prepared
+release, untouched and does not open a duplicate. Finish or close that PR
+before enabling the new flow. Closing an automated proposal pauses its
+cycle; reopen it to resume. Changes to other files on the release branch,
+or changes to package fields other than the version, also pause the updater
+so those edits cannot be lost.
+
+### Editing the draft notes
+
+The committed `.github/release-notes.md` is authoritative. The updater
+drafts highlights from merged titles and lists marked breaking changes for
+migration review; it does not infer migration instructions from source code.
+Review and refine these suggestions before releasing.
+
+- Edit the highlights or upgrade notes on the release PR branch. Keep the
+  surrounding `release-section` comments if you want to retain section
+  boundaries. The bot refreshes a section only while it matches the last
+  generated draft. An edit or deletion makes that section human-owned, and
+  later updates preserve it. Custom prose outside the sections is preserved.
+- Later suggestions appear in a new bot comment on the same PR. They do not
+  replace human-owned notes. The bot updates the version header and PR title
+  but never rewrites the PR description. Review version-specific links in
+  human-owned prose when the proposed version changes.
+- `.github/release-pr-state.json` records the cycle and section ownership.
+  To explicitly regenerate a section, add `"reset": true` to that section's
+  state entry. The next run consumes the reset and resumes automatic updates.
+  Restore any damaged section markers before resetting. Do not delete the
+  state file to reset ownership.
+- Deleting the notes file is preserved too. Restore reviewed notes, or
+  explicitly reset the sections, before merging; publication requires the
+  versioned notes file.
+
+### Preview and enable
+
+With an authenticated `gh` CLI, a local checkout can preview the plan with:
+
+```bash
+RELEASE_PR_DRY_RUN=true node sdk/typescript/scripts/release-pr.mjs
+```
+
+The preview may fetch missing Git objects locally, but performs no GitHub
+writes. Its JSON output includes the proposed files and any reason the
+updater would pause. After the workflow is on `main`, use its **Run workflow**
+form with **dry_run** enabled to test the hosted read-only path.
+
+To test writes, configure a GitHub App installed on this repository
+with **Contents: write** and **Pull requests: write**, set the
+`RELEASE_APP_CLIENT_ID` repository variable and `RELEASE_APP_PRIVATE_KEY`
+secret, then manually dispatch the workflow with **dry_run** disabled.
+This permits a single write run while automatic updates remain disabled.
+Review the resulting draft, its hosted CI, and the Codex review request.
+The workflow requests an App token scoped to this repository so CI on the
+bot's PR does not need the approval required for PR events created by
+`GITHUB_TOKEN`. See [GitHub's token documentation](https://docs.github.com/en/actions/concepts/security/github_token).
+
+After the manual write run is verified, set the `RELEASE_PR_ENABLED`
+repository variable to `true` to allow updates after pushes to `main`.
+Remove it or set it to `false` to return push-triggered runs to previews.
+Manual runs always honor their **dry_run** input, which defaults to a preview;
+disabling automatic updates does not prevent an explicit manual write run.
+Generated PRs leave the disclosure attestations unchecked for maintainer review.
+
 ## Prepare a release
 
 1. Choose the next stable version and update `sdk/typescript/package.json`.
