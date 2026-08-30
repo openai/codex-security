@@ -97,7 +97,7 @@ export async function readProjectConfig(
     } else {
       const document = parseDocument(text, { prettyErrors: false });
       if (document.errors.length > 0) throw document.errors[0];
-      value = document.toJS();
+      value = document.toJS({ maxAliasCount: -1 });
     }
   } catch (error) {
     throw new ConfigurationError(

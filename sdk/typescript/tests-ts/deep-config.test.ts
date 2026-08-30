@@ -45,6 +45,26 @@ test("resolves all six defaults without creating an ambient file", async () => {
   });
 });
 
+test.each(["missing file", "missing directory"])(
+  "preserves absent ambient configuration through a directory link with a %s",
+  async (state) => {
+    const input = await fixture();
+    if (state === "missing directory")
+      await rm(dirname(input.source), { recursive: true });
+    const home = dirname(dirname(input.source));
+    const linkedHome = join(input.root, "linked-home");
+    await symlink(home, linkedHome, "junction");
+    const source = join(linkedHome, "codex-security", "config.toml");
+    await writeDeepScanConfig(
+      input.source,
+      await resolveDeepScanConfig({}, source),
+    );
+    await expect(readFile(input.source)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  },
+);
+
 test("normalizes legacy auto and preserves explicit zero while merging", async () => {
   const input = await fixture(
     '[deep_scan]\nworkers = "auto"\nsubagents = 2\nstop_after_no_new = 6\nstop_after_consecutive_errors = 5\nmax_time_hours = 1.5\n',

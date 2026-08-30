@@ -2995,9 +2995,15 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.skipIf(process.platform !== "win32")(
-    "preserves ambient configuration when the same Windows home uses different casing",
-    async () => {
+  test
+    .skipIf(process.platform !== "win32")
+    .each([
+      "existing configuration",
+      "missing configuration",
+      "missing configuration directory",
+    ])(
+    "preserves ambient configuration when the same Windows home uses different casing with %s",
+    async (state) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -3005,11 +3011,14 @@ describe("CodexSecurity orchestration", () => {
       const configPath = join(codexHome, "codex-security", "config.toml");
       const originalConfiguration = "[other]\nenabled = true\n";
       await mkdir(repository);
-      await mkdir(join(codexHome, "codex-security"), { recursive: true });
-      await writeFile(configPath, originalConfiguration);
+      await mkdir(codexHome);
+      if (state !== "missing configuration directory")
+        await mkdir(join(codexHome, "codex-security"));
+      if (state === "existing configuration")
+        await writeFile(configPath, originalConfiguration);
       await mkdir(scanDir, { mode: 0o700 });
 
-      const client = new TestClient(
+      await using client = new TestClient(
         {},
         {
           environment: { CODEX_HOME: codexHome.toUpperCase() },
@@ -3031,8 +3040,13 @@ describe("CodexSecurity orchestration", () => {
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "deep scan settings captured",
       );
-      expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
-      await client.close();
+      if (state === "existing configuration") {
+        expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
+      } else {
+        await expect(readFile(configPath)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
     },
   );
 

@@ -187,6 +187,30 @@ describe("project configuration input contract", () => {
     expect((await readProjectConfig(json)).input).toEqual(input);
   });
 
+  test("loads YAML profiles that reuse an anchored table many times", async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, "profiles.yaml");
+    const profile = { model: "synthetic-model" };
+    const names = Array.from({ length: 150 }, (_, index) => `profile_${index}`);
+    await writeFile(
+      path,
+      [
+        "codex:",
+        "  profiles:",
+        "    shared: &shared",
+        "      model: synthetic-model",
+        ...names.map((name) => `    ${name}: *shared`),
+      ].join("\n"),
+    );
+    const project = await readProjectConfig(path);
+    expect(
+      resolveScanSettings(project, {}, root).config.codexOverrides["profiles"],
+    ).toEqual({
+      shared: profile,
+      ...Object.fromEntries(names.map((name) => [name, profile])),
+    });
+  });
+
   test.each([
     ["invalid.yaml", "scan: [\n"],
     ["duplicate.yaml", "scan: {}\nscan: {}\n"],

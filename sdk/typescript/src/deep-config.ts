@@ -1,5 +1,5 @@
 import { readFile, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
 import { writeCodexConfig, type JsonObject } from "./config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
@@ -111,14 +111,9 @@ export async function writeDeepScanConfig(
   destination: string,
   resolved: ResolvedDeepScanConfig,
 ): Promise<void> {
-  if (
-    !resolved.hasOverrides &&
-    resolve(destination) === resolve(resolved.source)
-  )
-    return;
   const [source, target] = await Promise.all([
-    realpath(resolved.source).catch(() => null),
-    realpath(destination).catch(() => null),
+    canonicalConfigPath(resolved.source).catch(() => null),
+    canonicalConfigPath(destination).catch(() => null),
   ]);
   let document = resolved.document;
   if (source !== null && source === target) {
@@ -131,6 +126,17 @@ export async function writeDeepScanConfig(
       DEEP_SCAN_SETTINGS.map(([name, key]) => [key, resolved.settings[name]]),
     ),
   } as JsonObject);
+}
+
+async function canonicalConfigPath(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    const parent = dirname(path);
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || parent === path)
+      throw error;
+    return join(await canonicalConfigPath(parent), basename(path));
+  }
 }
 
 async function readDeepScanDocument(
