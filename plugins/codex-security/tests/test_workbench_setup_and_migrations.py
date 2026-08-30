@@ -22,6 +22,7 @@ from workbench_test_support import (
     create_saved_workspace,
     initialize_git_repository,
     run_workbench,
+    start_delivered_scan,
     write_completed_contract,
 )
 
@@ -356,9 +357,8 @@ def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
         "--mode",
         "standard",
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -1830,9 +1830,8 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
     current_workspace = create_saved_workspace(state_dir, target)
-    current_scan = run_workbench(
+    current_scan = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(current_workspace["id"]),
         "--scan-root",
@@ -2498,9 +2497,8 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
     current_workspace = create_saved_workspace(state_dir, target)
-    current_scan = run_workbench(
+    current_scan = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(current_workspace["id"]),
         "--scan-root",

@@ -18,6 +18,7 @@ from workbench_test_support import (
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     run_workbench,
+    start_delivered_scan,
     write_checkpoint,
     write_completed_contract,
 )
@@ -29,9 +30,8 @@ def test_stopped_scan_keeps_saved_findings_and_exports(tmp_path: Path, terminati
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -92,9 +92,8 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -202,9 +201,8 @@ def test_stopped_clean_git_checkpoint_uses_revision_target(tmp_path: Path) -> No
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     saved = create_saved_git_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -246,9 +244,8 @@ def test_stopped_diff_checkpoint_uses_canonical_snapshot_digest(
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -301,9 +298,8 @@ def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) 
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -387,9 +383,8 @@ def test_frozen_stopped_results_skip_late_checkpoint_reindexing(tmp_path: Path) 
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -468,9 +463,8 @@ def test_frozen_stopped_results_ignore_late_foreign_checkpoint_warning(tmp_path:
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -506,9 +500,8 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -557,9 +550,8 @@ def test_incomplete_parent_checkpoint_cannot_complete_scan(tmp_path: Path) -> No
     state_dir, target = tmp_path / "state", tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -587,9 +579,8 @@ def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None
     source.parent.mkdir()
     source.write_text("".join(f"line {line}\n" for line in range(1, 46)))
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -744,9 +735,8 @@ def test_deep_csv_export_adds_only_candidate_id_column(
         "--mode",
         "deep",
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -819,9 +809,8 @@ def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Pa
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -860,9 +849,8 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -988,9 +976,8 @@ def test_embedded_and_paged_findings_normalize_scalar_attack_path_assessments(
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1112,9 +1099,8 @@ def test_primary_location_prefers_root_control_in_bounded_and_csv_results(
         (target / f"support-{index}.py").write_text("support\n")
     (target / "root.py").write_text("vulnerable\n")
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1158,9 +1144,8 @@ def test_csv_export_rejects_symlinked_exports_directory(tmp_path: Path) -> None:
     target.mkdir()
     outside.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1193,9 +1178,8 @@ def test_export_rejects_replaced_scan_directory(tmp_path: Path) -> None:
     target.mkdir()
     outside.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1226,9 +1210,8 @@ def test_csv_export_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> 
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1263,9 +1246,8 @@ def test_completion_rejects_replaced_scan_directory(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1287,9 +1269,8 @@ def test_completion_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> 
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1315,9 +1296,8 @@ def test_remediation_apply_rejects_replaced_scan_directory_ancestor(tmp_path: Pa
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
