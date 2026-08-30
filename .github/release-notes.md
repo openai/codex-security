@@ -1,43 +1,32 @@
-<!-- release-version: 0.1.24 -->
+<!-- release-version: 0.1.25 -->
 
 ## Highlights
 
-- Start the preview findings service directly with
-  `codex-security serve [--port PORT]`, without Docker or an internal package
-  path. The command reuses the existing service, state, and shutdown behavior;
-  `--port` overrides `PORT`, and port `0` selects a free port. See
-  [running without Docker](https://github.com/openai/codex-security/blob/npm-v0.1.24/sdk/typescript/README.md#running-without-docker).
-- Observe durable Deep Scan progress from the SDK with the optional
-  `onDeepProgress({ completed, active, maximum })` callback. Updates report
-  changed completed and active independent-review counts without blocking the
-  scan. See
-  [SDK scan options](https://github.com/openai/codex-security/blob/npm-v0.1.24/sdk/typescript/README.md#sdk-configuration-and-scan-options).
-- Make stopped-result handling explicit and stable. Read, list, and export
-  operations no longer publish late retained results as a side effect; the app
-  reports when recovery is needed and can recover validated results on request.
-  See
-  [stopped result recovery](https://github.com/openai/codex-security/blob/npm-v0.1.24/plugins/codex-security/references/scan-contract.md#stopped-result-recovery).
-- Include changed PowerShell `.ps1` files in diff-scan inventories and remove a
-  conflicting reporting rule so valid internal attack paths remain eligible for
-  review. Nested Deep Scan workers now also receive an explicitly configured
-  OpenAI provider credential through the plugin's existing environment boundary.
-- Improve Windows reliability by preserving case-insensitive `CODEX_HOME`
-  entries and repository paths from ordinary PowerShell activity, and by
-  retrying credential snapshots when a descendant file disappears during ACL
-  inspection. Existing path-safety and permission failures remain fatal.
+- Include PowerShell module (`.psm1`) and data (`.psd1`) files in scan
+  inventories, and recognize BOM-marked UTF-16 source files as text.
+- Preserve scoped scan and component-plan inventories after directory renames
+  that change only letter casing on case-insensitive filesystems.
+- Support long Codex executable paths on Windows, including nested Deep Scan
+  workers, and retry credential snapshots for another `Get-Acl` path-not-found
+  race when a descendant disappears during inspection.
+- Honor case-insensitive Windows environment variable names during finding
+  deduplication, so configured API credentials and private configuration paths
+  are used consistently.
+- Include complete OCI metadata in container image labels and multiarchitecture
+  annotations, with documentation pinned to the source commit and image
+  verification commands in the release workflow summary. See
+  [container metadata and verification](https://github.com/openai/codex-security/blob/npm-v0.1.25/docker/README.md#image-metadata-and-verification).
 
 ## Upgrade notes
 
-- The findings API and dashboard still have no built-in authentication.
-  `codex-security serve` binds to loopback by default; keep it local or place it
-  behind an authenticated TLS proxy before sharing access. Python is still
-  required, and nonempty imports still require an embeddings API credential.
-- Stopped-scan recovery is now explicit. App clients should check
-  `resultsRecoveryNeeded` and request recovery when they want validated late
-  results republished. Canceled scans remain immutable and cannot use this
-  recovery path.
-- `onDeepProgress.maximum` is the configured independent-review cap, not a
-  percentage denominator. The SDK polls the durable projection only when the
-  callback is supplied.
+- No new CLI flags, SDK options, or required application migrations are
+  introduced.
+- Source builds now use the repository-pinned pnpm for MCP app dependencies.
+  From the repository root, run
+  `pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile`.
+  See
+  [running without Docker](https://github.com/openai/codex-security/blob/npm-v0.1.25/sdk/typescript/README.md#running-without-docker).
+- Container publication remains separate from npm publication. Existing stable
+  container tags are not updated in place.
 
 The categorized list below contains the individual changes.
