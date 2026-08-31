@@ -2013,8 +2013,10 @@ export class CodexSecurity {
         python,
         withoutCodexHome(
           selectedScanEnvironment(
-            runtime.environment,
-            commandAuth ? "chatgpt" : auth,
+            commandAuth
+              ? withoutOpenAiApiKeys(runtime.environment)
+              : runtime.environment,
+            auth,
             modelProvider,
           ),
         ),
@@ -2048,9 +2050,7 @@ export class CodexSecurity {
       undefined
         ? undefined
         : this.#codexCommand().command;
-    let sdkEnvironment = definedEnvironment(
-      selectedScanEnvironment(environment, "chatgpt"),
-    );
+    let sdkEnvironment = definedEnvironment(withoutOpenAiApiKeys(environment));
     if (process.platform === "win32" && codexPathOverride === undefined) {
       codexPathOverride = environment["CODEX_CLI_PATH"]!;
       sdkEnvironment = bundledCodexSdkEnvironment(
@@ -2125,8 +2125,10 @@ export class CodexSecurity {
         );
       }
       const scanEnvironment = selectedScanEnvironment(
-        this.#dependencies.environment,
-        commandAuth ? "chatgpt" : options.auth,
+        commandAuth
+          ? withoutOpenAiApiKeys(this.#dependencies.environment)
+          : this.#dependencies.environment,
+        options.auth,
         modelProvider,
       );
       if (this.#dependencies.prepareRuntime === undefined) {
@@ -2471,10 +2473,10 @@ export class CodexSecurity {
         ? undefined
         : scanModelProvider(requestedConfig);
     const processEnvironment = selectedScanEnvironment(
-      this.#dependencies.environment,
       requestedConfig !== undefined && hasCommandAuth(requestedConfig)
-        ? "chatgpt"
-        : auth,
+        ? withoutOpenAiApiKeys(this.#dependencies.environment)
+        : this.#dependencies.environment,
+      auth,
       modelProvider,
     );
     const codexHome =
@@ -3390,9 +3392,8 @@ export function selectedScanEnvironment(
     return environment;
   }
   return Object.fromEntries(
-    Object.entries(environment).filter(([name]) => {
+    Object.entries(withoutOpenAiApiKeys(environment)).filter(([name]) => {
       const key = name.toUpperCase();
-      if (key === "OPENAI_API_KEY" || key === "CODEX_API_KEY") return false;
       if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
         return (
           !bedrockProvider &&
@@ -3401,6 +3402,17 @@ export function selectedScanEnvironment(
       }
       return true;
     }),
+  );
+}
+
+function withoutOpenAiApiKeys(
+  environment: ProcessEnvironment,
+): ProcessEnvironment {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+    ),
   );
 }
 
