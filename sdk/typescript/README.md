@@ -472,6 +472,7 @@ restrictions.
 | Variable                                                                    | Effect                                                                               |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; `OPENAI_API_KEY` wins if both are set.                             |
+| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Findings service endpoint; see [Embeddings and storage](#embeddings-and-storage).    |
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default team and project for completed-scan publication.                             |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Personal API key for Linear patching and direct publication.                         |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; `debug` enables verbose diagnostics.                                       |
@@ -1350,6 +1351,18 @@ precedence over `CODEX_API_KEY`; remove the `OPENAI_API_KEY` entry if using
 `CODEX_API_KEY` instead. Listing and empty imports do not require a key.
 A Codex ChatGPT login is not an embedding API credential.
 
+Set `CODEX_SECURITY_EMBEDDINGS_URL` to override the full embeddings endpoint URL,
+including its path and any query parameters. Unset or empty values use
+`https://api.openai.com/v1/embeddings`. Export it before `codex-security serve`,
+or set it in `.env` for Docker Compose, which passes it to the service. For example:
+
+```bash
+CODEX_SECURITY_EMBEDDINGS_URL=https://embeddings.example.com/v1/embeddings codex-security serve
+```
+
+The configured endpoint receives the finding inputs and the API key as a bearer
+token and must support the same OpenAI embeddings request and response format.
+
 The service calls the OpenAI embeddings API with `text-embedding-3-large` and
 1,536 dimensions. The complete finding JSON is tokenized using `js-tiktoken`'s
 bundled `cl100k_base` encoding. Long inputs are split without truncation;
@@ -1379,8 +1392,8 @@ The findings Compose configuration sets `HOST=0.0.0.0`, `PORT=3000`, and
 `CODEX_SECURITY_STATE_DIR=/state`. Keep port and volume mappings aligned if
 changing these settings. Compose binds only to host loopback; the API has no
 authentication. Use an authenticated TLS proxy before sharing access. Finding
-JSON is sent to `api.openai.com` over HTTPS for embeddings; the database and
-generated embeddings stay in the local volume.
+JSON is sent to the configured embeddings endpoint (`api.openai.com` over HTTPS
+by default); the database and generated embeddings stay in the local volume.
 
 ### Upgrades and backups
 

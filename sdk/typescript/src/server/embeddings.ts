@@ -28,6 +28,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
       url: string,
       init: RequestInit,
     ) => Promise<Response> = fetch,
+    private readonly url: string = "https://api.openai.com/v1/embeddings",
   ) {}
 
   async embed(findings: readonly Finding[]): Promise<FindingEmbedding[]> {
@@ -79,7 +80,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
   ): Promise<void> {
     let response: Response;
     try {
-      response = await this.request("https://api.openai.com/v1/embeddings", {
+      response = await this.request(this.url, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.apiKey}`,

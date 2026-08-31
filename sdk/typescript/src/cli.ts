@@ -4375,7 +4375,7 @@ export async function main(
     })
     .command("serve", {
       description:
-        "Start the findings HTTP service (HOST=127.0.0.1, PORT=3000).",
+        "Start the findings HTTP service (HOST=127.0.0.1, PORT=3000). CODEX_SECURITY_EMBEDDINGS_URL overrides the embeddings endpoint (default: https://api.openai.com/v1/embeddings).",
       destructive: true,
       mcp: false,
       options: z.object({
