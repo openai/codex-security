@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -349,3 +350,11 @@ def source_object_for_path(
         if selected is not None:
             entry = existing_tree_path(repository, scope["objectId"], relative, selected)
     return entry[2] if entry is not None and entry[1] == "file" else None
+
+
+def main() -> None:
+    argparse.ArgumentParser(description=__doc__).parse_args()
+
+
+if __name__ == "__main__":
+    main()
