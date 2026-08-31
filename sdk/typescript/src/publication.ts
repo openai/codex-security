@@ -112,7 +112,50 @@ function renderFindingDescription(
 ): string {
   const { coverage } = contract;
   const { scan } = contract.manifest;
-  const lines = [
+  const lines = ["## Summary", "", finding.summary];
+
+  if (finding.attackPath?.summary !== undefined) {
+    lines.push("", "## Reproduction summary", "", finding.attackPath.summary);
+  }
+
+  const rootCause = finding.rootCause;
+  if (typeof rootCause === "string") {
+    lines.push("", "## Root cause", "", rootCause);
+  } else if (rootCause !== undefined) {
+    lines.push("", "## Root cause", "", rootCause.summary);
+    if (rootCause.code !== undefined) {
+      lines.push("", fencedCode(rootCause.code, rootCause.language));
+    }
+  }
+
+  lines.push("", "## Remediation", "", finding.remediation);
+
+  const validation = finding.validation;
+  const limits = [
+    ...new Set([
+      ...(validation?.limitations ?? []),
+      ...(validation?.counterEvidence ?? []),
+      ...(finding.attackPath?.limitations ?? []),
+    ]),
+  ];
+  if (validation?.summary || validation?.method || limits.length > 0) {
+    lines.push("", "## Validation", "");
+    if (validation?.summary) lines.push(validation.summary, "");
+    if (validation?.method) lines.push(`**Method:** ${validation.method}`, "");
+    lines.push(...limits.map((limit) => `- ${limit}`));
+  }
+
+  if (finding.codeEvidence !== undefined && finding.codeEvidence.length > 0) {
+    lines.push("", "## Source-code evidence");
+    for (const evidence of finding.codeEvidence) {
+      lines.push("", ...renderCodeEvidence(scan.target, evidence));
+    }
+  }
+
+  lines.push(
+    "",
+    "---",
+    "",
     "## Codex Security finding",
     "",
     `**Scan ID:** ${scan.id}`,
@@ -148,30 +191,7 @@ function renderFindingDescription(
     ...finding.locations.map((location) =>
       renderLocation(scan.target, location),
     ),
-    "",
-    "## Summary",
-    "",
-    finding.summary,
-  ];
-
-  const rootCause = finding.rootCause;
-  if (typeof rootCause === "string") {
-    lines.push("", "## Root cause", "", rootCause);
-  } else if (rootCause !== undefined) {
-    lines.push("", "## Root cause", "", rootCause.summary);
-    if (rootCause.code !== undefined) {
-      lines.push("", fencedCode(rootCause.code, rootCause.language));
-    }
-  }
-
-  if (finding.codeEvidence !== undefined && finding.codeEvidence.length > 0) {
-    lines.push("", "## Source-code evidence");
-    for (const evidence of finding.codeEvidence) {
-      lines.push("", ...renderCodeEvidence(scan.target, evidence));
-    }
-  }
-
-  lines.push("", "## Remediation", "", finding.remediation);
+  );
   return `${lines.join("\n")}\n`;
 }
 

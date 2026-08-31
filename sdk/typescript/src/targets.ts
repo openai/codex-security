@@ -251,7 +251,7 @@ export async function normalizeTarget(
     );
   }
 
-  const paths: string[] = [];
+  const paths = new Set<string>();
   for (const value of target) {
     throwIfAborted(signal);
     if (typeof value !== "string") {
@@ -298,11 +298,9 @@ export async function normalizeTarget(
       );
     }
     const normalized = relativePath.split(sep).join("/") || ".";
-    if (!paths.includes(normalized)) {
-      paths.push(normalized);
-    }
+    paths.add(normalized);
   }
-  return { kind: "paths", paths };
+  return { kind: "paths", paths: [...paths] };
 }
 
 export async function validateCommittedDiffCheckout(

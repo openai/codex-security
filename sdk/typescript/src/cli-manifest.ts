@@ -79,7 +79,7 @@ function structuredOutputRequested(argv: readonly string[]): boolean {
 
 const COMMAND_RESULT_RULES: readonly CommandResultRule[] = [
   {
-    commands: ["validate", "login", "logout"],
+    commands: ["validate", "login", "logout", "serve"],
     message: (command) =>
       `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`,
     rejects: structuredOutputRequested,

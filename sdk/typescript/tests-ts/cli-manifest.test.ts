@@ -612,6 +612,7 @@ describe("full CLI manifest", () => {
       ["patch", "--format", "jsonl"],
       ["login", "--json"],
       ["logout", "--json"],
+      ["serve", "--json"],
     ]) {
       const stdout = capture();
       const stderr = capture();
@@ -635,6 +636,7 @@ describe("full CLI manifest", () => {
       "patch",
       "login",
       "logout",
+      "serve",
       "export",
       "info",
     ];
@@ -656,6 +658,7 @@ describe("full CLI manifest", () => {
       ["validate", ["validate", "--json"]],
       ["login", ["login", "--json"]],
       ["logout", ["logout", "--json"]],
+      ["serve", ["serve", "--json"]],
       [
         "export",
         ["export", "--json", "--output", "-", "--export-format", "csv"],
