@@ -2309,13 +2309,14 @@ try {
     "duplicate stable instance sources remain collisions for finalization",
   );
 
-  const collisionFindings = ["src/upload.py", "src/import.py"].map((location) => ({
+  const collisionFindings = ["src/upload.py", "src/import.py", "src/restore.py"].map((location) => ({
     ...finding,
     locations: [{ path: location, startLine: 41, endLine: 44 }],
     provenance: { source: "local_plugin" },
     extensions: {},
   }));
   const authoredCollisionIdentity = { anchor: "shared-archive-review" };
+  const reservedCollisionIdentity = { ...authoredCollisionIdentity, instance: "parser" };
   const collisionCases = [
     {
       label: "authored",
@@ -2327,6 +2328,24 @@ try {
       findings: collisionFindings,
       originalIdentity: { anchor: "unsafe-archive-extraction", instance: "unsafe-archive-extraction" },
     },
+    {
+      label: "authored with reserved suffixes",
+      findings: [
+        ...collisionFindings.map((item) => ({ ...item, identity: reservedCollisionIdentity })),
+        ...collisionFindings.slice(0, 2).map((item, index) => ({
+          ...item,
+          identity: { ...reservedCollisionIdentity, instance: `parser-${index + 2}` },
+        })),
+      ],
+      originalIdentity: reservedCollisionIdentity,
+      expectedIdentities: [
+        reservedCollisionIdentity,
+        { ...reservedCollisionIdentity, instance: "parser-4" },
+        { ...reservedCollisionIdentity, instance: "parser-5" },
+        { ...reservedCollisionIdentity, instance: "parser-2" },
+        { ...reservedCollisionIdentity, instance: "parser-3" },
+      ],
+    },
   ];
   for (const collisionCase of collisionCases) {
     const collisionInput = { ...input, findings: collisionCase.findings };
@@ -2334,7 +2353,7 @@ try {
     const standardFindings = (await readJson(root, "findings.json")).findings;
     assert.deepEqual(
       standardFindings.map((item) => item.identity),
-      [collisionCase.originalIdentity, collisionCase.originalIdentity],
+      collisionCase.findings.map((item) => item.identity ?? collisionCase.originalIdentity),
       `${collisionCase.label} identity collisions retain the existing Standard shape`,
     );
     assert.deepEqual(
@@ -2346,14 +2365,25 @@ try {
     await recordFreshScanDraft(deepIdentityContext, collisionInput);
     const deepFindings = (await readJson(root, "findings.json")).findings;
     const deepIdentities = deepFindings.map((item) => item.identity);
-    assert.equal(deepFindings.length, 2, `${collisionCase.label} identity collisions must retain both Deep findings`);
-    assert.equal(new Set(deepIdentities.map((identity) => JSON.stringify(identity))).size, 2);
-    assert.deepEqual(deepFindings[0].identity, collisionCase.originalIdentity);
-    assert.deepEqual(deepFindings[0].provenance, collisionCase.findings[0].provenance);
-    assert.deepEqual(deepFindings[1].provenance, {
-      ...collisionCase.findings[1].provenance,
-      preservedIdentity: collisionCase.originalIdentity,
-    });
+    assert.equal(deepFindings.length, collisionCase.findings.length, `${collisionCase.label} identity collisions must retain every Deep finding`);
+    assert.deepEqual(
+      deepIdentities,
+      collisionCase.expectedIdentities ?? collisionCase.findings.map((_, index) => (
+        index === 0 ? collisionCase.originalIdentity : {
+          ...collisionCase.originalIdentity,
+          instance: `${collisionCase.originalIdentity.instance ?? "saved"}-${index + 1}`,
+        }
+      )),
+      `${collisionCase.label} collisions receive successive numeric suffixes without replacing authored identities`,
+    );
+    assert.deepEqual(
+      deepFindings.map((item) => item.provenance),
+      collisionCase.findings.map((item, index) => (
+        index === 1 || index === 2 ? {
+          ...item.provenance, preservedIdentity: collisionCase.originalIdentity,
+        } : item.provenance
+      )),
+    );
     assert.deepEqual(
       deepFindings.map((item) => item.locations),
       collisionCase.findings.map((item) => item.locations),

@@ -1459,21 +1459,15 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       return finding;
     }
     const identity = finding.identity as JsonObject;
-    const locations = (finding.locations as JsonObject[]).map((location) => JSON.stringify([
-      location.path, location.startLine, location.endLine ?? location.startLine,
-    ])).sort();
-    const digest = createHash("sha256")
-      .update(JSON.stringify([finding.ruleId, identity, locations]))
-      .digest("hex").slice(0, 16);
-    const baseInstance = `${identity.instance ?? "saved"}-${digest}`;
+    const baseInstance = identity.instance ?? "saved";
     let suffix = 2;
     const distinct: JsonObject & { identity: JsonObject } = {
-      ...finding, identity: { ...identity, instance: baseInstance },
+      ...finding, identity: { ...identity },
     };
-    while (reserved.has(scanFindingIdentity(distinct)) || used.has(scanFindingIdentity(distinct))) {
+    do {
       distinct.identity.instance = `${baseInstance}-${suffix}`;
       suffix += 1;
-    }
+    } while (reserved.has(scanFindingIdentity(distinct)) || used.has(scanFindingIdentity(distinct)));
     const provenance = finding.provenance as JsonObject;
     distinct.provenance = {
       ...provenance,
