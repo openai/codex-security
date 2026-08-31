@@ -13,6 +13,7 @@ from workbench_test_support import (
     SCRIPT,
     create_saved_workspace,
     run_workbench,
+    start_delivered_scan,
     write_completed_contract,
 )
 
@@ -31,9 +32,8 @@ def test_workbench_completion_and_exports_use_windows_file_backend(tmp_path: Pat
     source.parent.mkdir()
     source.write_text("".join(f"line {line}\n" for line in range(1, 46)))
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -43,9 +43,6 @@ def test_workbench_completion_and_exports_use_windows_file_backend(tmp_path: Pat
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
     (scan_dir / "report.html").write_text("stale report")
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute("UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan_id,))
-
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     finalizer = sys.modules[namespace["finalize_scan"].__module__]
     backend = mock.Mock()

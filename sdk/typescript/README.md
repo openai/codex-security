@@ -356,10 +356,16 @@ original IDs. Uncertain matches stay separate. `summary.json` records coverage
 and matching status; `report.md` links to component reports. Export and publish
 from the individual scan folders, not the combined summary.
 
+Large comparisons use bounded batches that cover every earlier/later finding
+pair. Overlapping confirmed groups are joined in code. Finding text is not
+truncated; pairs above Codex's input limit leave matching incomplete.
+
 Use an empty output directory outside the project. Failed components don't
 stop others, but failures, incomplete coverage, or failed matching exit with
 `2`. Retry failed or incomplete components with
 `--components-file retry-components.json` and a new output directory.
+The retry report covers only those components; it does not update the original
+combined report.
 
 `--max-cost` applies per component, excluding planning and matching.
 `--model` and `--effort` also apply to matching; `--auth` applies throughout.
@@ -1444,7 +1450,7 @@ From a source checkout's `sdk/typescript` directory:
 
 ```bash
 pnpm install --frozen-lockfile
-npm ci --prefix ../../plugins/codex-security/mcp-app
+pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile
 pnpm run build:plugin
 pnpm run build
 node bin/codex-security.mjs serve --port 3000

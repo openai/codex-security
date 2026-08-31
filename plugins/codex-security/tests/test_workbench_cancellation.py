@@ -3,7 +3,12 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from workbench_test_support import create_saved_workspace, run_workbench, write_completed_contract
+from workbench_test_support import (
+    create_saved_workspace,
+    run_workbench,
+    start_delivered_scan,
+    write_completed_contract,
+)
 
 
 def test_workbench_records_scan_failure(tmp_path: Path) -> None:
@@ -112,7 +117,7 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     assert delivered["results"]["progress"]["status"] == "canceled"
     assert delivered["results"]["handoffStatus"] == "delivered"
 
-    restarted = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    restarted = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     restarted_scan_id = str(restarted["results"]["scanId"])
     assert restarted_scan_id != scan_id
     assert restarted["results"]["progress"]["status"] == "running"

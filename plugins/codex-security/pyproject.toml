@@ -8,6 +8,7 @@ test = [
     "jsonschema[format-nongpl]==4.26.0",
     "packaging==26.3",
     "pytest==9.0.3",
+    "pytest-xdist==3.8.0",
     "PyYAML==6.0.3",
     "ruff==0.16.1",
 ]

@@ -1,5 +1,6 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
+import { statSync } from "node:fs";
 import {
   chmod,
   lstat,
@@ -13,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import {
   basename,
+  delimiter,
   dirname,
   isAbsolute,
   join,
@@ -126,6 +128,7 @@ import {
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
+  executablePathForSpawn,
   expandHome,
   importAmbientAuth,
   prepareCodexSecurityCredentialHome,
@@ -1694,6 +1697,7 @@ export class CodexSecurity {
               ((input, comparisonOptions) =>
                 matchScanFindingsInternal(input, comparisonOptions, {
                   surface: this.#surface,
+                  allowBatching: false,
                 })),
             environment,
             model,
@@ -1941,6 +1945,14 @@ export class CodexSecurity {
       }
       const authentication = await this.#authentication();
       this.#requireOpen();
+      const ambientHome =
+        environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
+        join(homedir(), ".codex");
+      await initialCredentialsAvailable(
+        this.#dependencies.environment,
+        ambientHome,
+        authentication.codexHome,
+      );
       return await accountStatus(
         this.#codexCommand(),
         authentication.environment,
@@ -2116,15 +2128,27 @@ export class CodexSecurity {
     )
       ? sdkCodexConfig["responses_api_metadata"]
       : {};
-    const codexPathOverride =
+    let codexPathOverride =
       environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") ===
       undefined
         ? undefined
         : this.#codexCommand().command;
+    let sdkEnvironment = definedEnvironment(
+      selectedScanEnvironment(environment, "chatgpt"),
+    );
+    if (process.platform === "win32" && codexPathOverride === undefined) {
+      codexPathOverride = environment["CODEX_CLI_PATH"]!;
+      sdkEnvironment = bundledCodexSdkEnvironment(
+        codexPathOverride,
+        sdkEnvironment,
+      );
+    }
     const codex = this.#dependencies.createCodex({
-      ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
+      ...(codexPathOverride === undefined
+        ? {}
+        : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      env: definedEnvironment(selectedScanEnvironment(environment, "chatgpt")),
+      env: sdkEnvironment,
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
         responses_api_metadata: {
@@ -3376,6 +3400,22 @@ export function scanAuthentication(
     : { method: "api_key", source: key.source, verified: false };
 }
 
+/** Shell-neutral guidance so PowerShell users are not told to run POSIX `unset`. */
+export function formatEnvironmentVariableRemovalGuidance(
+  names: readonly string[],
+): string {
+  if (names.length === 0) {
+    return "remove OPENAI_API_KEY and CODEX_API_KEY from the environment";
+  }
+  if (names.length === 1) {
+    return `remove ${names[0]} from the environment`;
+  }
+  if (names.length === 2) {
+    return `remove ${names[0]} and ${names[1]} from the environment`;
+  }
+  return `remove ${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]} from the environment`;
+}
+
 async function runtimeScanAuthentication(
   environment: ProcessEnvironment,
   codexHome: string,
@@ -3791,6 +3831,34 @@ function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
     ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";
   throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
+}
+
+function bundledCodexSdkEnvironment(
+  command: string,
+  environment: Record<string, string>,
+): Record<string, string> {
+  // An SDK executable override disables its bundled-tool PATH setup.
+  const toolsDirectory = join(dirname(dirname(command)), "codex-path");
+  try {
+    if (!statSync(toolsDirectory).isDirectory()) return environment;
+  } catch {
+    return environment;
+  }
+  const result = { ...environment };
+  const pathKeys = Object.keys(result).filter(
+    (key) => key.toLowerCase() === "path",
+  );
+  const pathKey = pathKeys.includes("Path")
+    ? "Path"
+    : pathKeys.at(-1) ?? "PATH";
+  for (const key of pathKeys) {
+    if (key !== pathKey) delete result[key];
+  }
+  const entries = (result[pathKey] ?? "")
+    .split(delimiter)
+    .filter((entry) => entry.length > 0 && entry !== toolsDirectory);
+  result[pathKey] = [toolsDirectory, ...entries].join(delimiter);
+  return result;
 }
 
 function definedEnvironment(
