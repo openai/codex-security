@@ -117,6 +117,20 @@ export function scanActivityFromEvent(
 
 function displayCommand(command: string): string {
   const normalized = command.replaceAll(/\s+/gu, " ").trim();
+  const powershell =
+    process.platform === "win32"
+      ? /^(?:"([^"]+)"|([^\s"'|;&<>]+))\s+(?:-NoProfile\s+)?-Command\s+(['"])(.*)\3$/iu.exec(
+          normalized,
+        )
+      : null;
+  if (
+    powershell !== null &&
+    /(?:^|[\\/])(?:powershell|pwsh)(?:\.exe)?$/iu.test(
+      powershell[1] ?? powershell[2]!,
+    )
+  ) {
+    return powershell[4]!;
+  }
   const match =
     /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/u.exec(
       normalized,
@@ -358,13 +372,17 @@ function commandRepositoryPaths(command: string, repository: string): string[] {
   const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
   for (const token of command.match(SHELL_TOKEN) ?? []) {
     let value = token;
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
+    const singleQuoted = value.startsWith("'") && value.endsWith("'");
+    if ((value.startsWith('"') && value.endsWith('"')) || singleQuoted) {
       value = value.slice(1, -1);
     }
     value = value.replaceAll('\\"', '"').replaceAll("\\", "/");
+    if (process.platform === "win32" && !singleQuoted) {
+      value = value.replace(
+        /^\$(?:env:CODEX_SECURITY_REPOSITORY|\{env:CODEX_SECURITY_REPOSITORY\})\//iu,
+        "$CODEX_SECURITY_REPOSITORY/",
+      );
+    }
     for (const prefix of [
       "$CODEX_SECURITY_REPOSITORY/",
       "${CODEX_SECURITY_REPOSITORY}/",

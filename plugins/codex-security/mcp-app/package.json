@@ -1,0 +1,22 @@
+{
+  "name": "codex-security-mcp-app",
+  "version": "0.1.158",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc --noEmit",
+    "build:mcp": "node scripts/build_mcp_app.mjs --output .preview/mcp",
+    "test:mcp": "node --test --test-concurrency=2 --test-reporter=./scripts/test_reporter.mjs \"tests/test_*.mjs\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openai/codex-sdk": "0.149.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "esbuild": "^0.27.2",
+    "typescript": "^6.0.3"
+  }
+}
