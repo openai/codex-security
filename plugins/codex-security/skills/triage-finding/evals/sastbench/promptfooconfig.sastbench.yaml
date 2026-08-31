@@ -1,0 +1,118 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+description: "Codex Security triage-finding SastBench v0.1 eval"
+tags:
+  suite: sastbench-v0.1
+
+prompts:
+  - file://./prompts/sastbench-triage-request.txt
+
+providers:
+  - id: openai:codex-sdk:gpt-5.5
+    label: "Codex SDK triage-finding SastBench (gpt-5.5)"
+    config:
+      # The runner stages only the skill runtime here. The label-bearing
+      # dataset and Promptfoo harness stay outside this tree.
+      working_dir: "{{env.SASTBENCH_RUNTIME_ROOT}}"
+      # Target worktrees and their label-free Git cache are the only
+      # additional readable workspace roots.
+      additional_directories:
+        - "{{env.SASTBENCH_TARGET_ROOT}}"
+        - "{{env.SASTBENCH_GIT_CACHE_ROOT}}"
+      skip_git_repo_check: true
+      approval_policy: never
+      # Pin a value supported by the eval's Codex SDK instead of inheriting a
+      # potentially newer user-level setting from ~/.codex/config.toml.
+      model_reasoning_effort: xhigh
+      # Do not set the legacy sandbox option here: it grants full-disk
+      # read access and overrides this named, deny-by-default profile.
+      cli_config:
+        default_permissions: sastbench_runtime_only
+        permissions:
+          sastbench_runtime_only:
+            filesystem:
+              # :minimal keeps Codex's own runtime usable. :workspace_roots
+              # resolves to working_dir plus target Git roots; all else is denied.
+              ":minimal": read
+              ":workspace_roots": read
+            network:
+              enabled: false
+        # The source skill is loaded explicitly from the staged runtime.
+        # Global plugin and memory state would add machine-specific context.
+        features:
+          memories: false
+          plugins: false
+
+extensions:
+  - file://./assertions/sastbench-metrics.js:afterEach
+
+defaultTest:
+  assert:
+    - type: contains-json
+      value: file://../schemas/triage-result-v0.schema.json
+      metric: schema_valid
+    - type: javascript
+      value: file://./assertions/sastbench-verdict.js
+      metric: strict_case_correct
+
+# The afterEach extension emits additive counters for every row. Representative
+# sample rows scale those counters by their population weight.
+# Promptfoo recalculates these aggregate metrics as rows complete.
+derivedMetrics:
+  - name: strict_precision
+    value: "strict_tp / max(strict_tp + strict_fp, 1)"
+  - name: strict_recall
+    value: "strict_tp / max(strict_tp + strict_fn, 1)"
+  - name: strict_f1
+    value: "2 * strict_tp / max(2 * strict_tp + strict_fp + strict_fn, 1)"
+  - name: strict_f2
+    value: "5 * strict_tp / max(5 * strict_tp + strict_fp + 4 * strict_fn, 1)"
+  - name: strict_accuracy
+    value: "(strict_tp + strict_tn) / max(positive_cases + negative_cases, 1)"
+  - name: strict_mcc
+    value: >-
+      (strict_tp * strict_tn - strict_fp * strict_fn) /
+      max(sqrt(
+        (strict_tp + strict_fp) *
+        (strict_tp + strict_fn) *
+        (strict_tn + strict_fp) *
+        (strict_tn + strict_fn)
+      ), 1)
+  - name: decided_precision
+    value: "decided_tp / max(decided_tp + decided_fp, 1)"
+  - name: decided_recall
+    value: "decided_tp / max(decided_tp + decided_fn, 1)"
+  - name: decided_f1
+    value: "2 * decided_tp / max(2 * decided_tp + decided_fp + decided_fn, 1)"
+  - name: decided_f2
+    value: "5 * decided_tp / max(5 * decided_tp + decided_fp + 4 * decided_fn, 1)"
+  - name: decided_accuracy
+    value: "(decided_tp + decided_tn) / max(decided_cases, 1)"
+  - name: decided_mcc
+    value: >-
+      (decided_tp * decided_tn - decided_fp * decided_fn) /
+      max(sqrt(
+        (decided_tp + decided_fp) *
+        (decided_tp + decided_fn) *
+        (decided_tn + decided_fp) *
+        (decided_tn + decided_fn)
+      ), 1)
+  - name: decided_coverage
+    value: "decided_cases / max(positive_cases + negative_cases, 1)"
+  - name: true_positive_retention
+    value: "retained_positive / max(positive_cases, 1)"
+  - name: unsafe_closure_rate
+    value: "unsafe_closure / max(positive_cases, 1)"
+  - name: false_alert_auto_closure_rate
+    value: "false_alert_auto_closure / max(negative_cases, 1)"
+  - name: false_alert_escalation_rate
+    value: "false_alert_escalation / max(negative_cases, 1)"
+  - name: confirmed_precision
+    value: "confirmed_true / max(confirmed_total, 1)"
+  - name: abstention_rate
+    value: "abstention / max(positive_cases + negative_cases, 1)"
+  - name: remaining_analyst_workload
+    value: "remaining_analyst_work / max(positive_cases + negative_cases, 1)"
+  - name: execution_or_parse_error_rate
+    value: "execution_or_parse_error / max(positive_cases + negative_cases, 1)"
+
+tests: file://./scripts/generate-sastbench-tests.js:generateTests

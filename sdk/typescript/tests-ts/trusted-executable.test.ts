@@ -114,6 +114,33 @@ describe("trusted executable resolution", () => {
   });
 
   test.skipIf(process.platform === "win32")(
+    "prefers the exact POSIX PATH variable over a lowercase path variable",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const decoy = join(root, "decoy");
+      const trusted = join(root, "trusted");
+      await Promise.all([mkdir(repository), mkdir(decoy), mkdir(trusted)]);
+      await Promise.all([
+        writeFile(join(decoy, "git"), "decoy executable"),
+        writeFile(join(trusted, "git"), "trusted executable"),
+      ]);
+      await chmod(join(trusted, "git"), 0o700);
+
+      await expect(
+        resolveTrustedExecutable(
+          "git",
+          { path: decoy, PATH: trusted },
+          repository,
+        ),
+      ).resolves.toEqual({
+        executable: join(trusted, "git"),
+        environment: { PATH: trusted },
+      });
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "preserves the invocation name of a trusted symlinked executable",
     async () => {
       const root = await temporaryDirectory();

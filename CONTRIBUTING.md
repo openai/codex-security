@@ -6,13 +6,17 @@ maintainers.
 
 ## How this repository works
 
-Codex Security is developed in OpenAI's canonical repository and published
-here through a one-way mirror. We can't import pull requests from this
-repository into the canonical source.
+`plugins/codex-security/` is the canonical source for the Codex Security
+plugin. Make plugin changes there.
+
+The npm runtime under `sdk/typescript/_bundled_plugin/` is generated from the
+plugin source by `pnpm run build:plugin` and automatically during `prepack` for
+packages and releases. Do not edit or commit files in that directory. See the
+[SDK testing guide](sdk/typescript/TESTING.md) for the generation and validation
+commands.
 
 Search [existing issues](https://github.com/openai/codex-security/issues)
-before opening a new one. Maintainers can carry accepted changes into the
-canonical source or invite a focused pull request for this public repository.
+before opening a new one.
 
 ## Support for open-source projects
 
@@ -43,8 +47,8 @@ project's maintainers through their security policy.
 
 ## Dependency and release maintenance
 
-Maintainers update package dependencies and the committed lockfile in the
-canonical repository. The public release workflow installs that locked graph,
+Maintainers update package dependencies and committed lockfiles with the
+affected source. The public release workflow installs those locked graphs,
 tests the package, and publishes a verified artifact with npm provenance.
 GitHub Actions dependencies are maintained separately in this repository.
 

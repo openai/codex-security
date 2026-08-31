@@ -559,7 +559,7 @@ describe("publish scan to Cloud", () => {
   });
 
   test.each([false, true])(
-    "preserves batch receipts on cancellation with a confirmed response: %s",
+    "preserves batch receipts on cancellation with a confirmed response: %j",
     async (confirmed) => {
       for (const [signal, code] of [
         ["SIGINT", 130],
