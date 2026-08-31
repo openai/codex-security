@@ -2,24 +2,32 @@
 
 FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS package
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes python3 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /build/sdk/typescript
 
-COPY sdk/typescript/package.json sdk/typescript/pnpm-lock.yaml ./
+COPY package.json /build/package.json
+COPY sdk/typescript/package.json sdk/typescript/pnpm-lock.yaml sdk/typescript/pnpm-workspace.yaml ./
+COPY plugins/codex-security/mcp-app/package.json plugins/codex-security/mcp-app/pnpm-lock.yaml plugins/codex-security/mcp-app/pnpm-workspace.yaml /build/plugins/codex-security/mcp-app/
 
 RUN corepack enable \
-    && corepack prepare "$(node --print 'require("./package.json").packageManager')" --activate \
-    && pnpm install --frozen-lockfile
+    && corepack prepare "$(node --print 'require("/build/package.json").packageManager')" --activate \
+    && pnpm install --frozen-lockfile \
+    && pnpm --dir /build/plugins/codex-security/mcp-app install --frozen-lockfile
 
 COPY sdk/typescript/ ./
+COPY plugins/codex-security/ /build/plugins/codex-security/
 
 RUN pnpm run types \
     && pnpm pack --pack-destination /build/package \
     && node scripts/check-package.mjs /build/package/*.tgz
 
-FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
+FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS scanner
 
 LABEL org.opencontainers.image.title="Codex Security" \
-      org.opencontainers.image.description="Noninteractive, resumable Codex Security CSV repository scans" \
+      org.opencontainers.image.description="Codex Security scanner and findings API" \
       org.opencontainers.image.source="https://github.com/openai/codex-security"
 
 RUN apt-get update \
