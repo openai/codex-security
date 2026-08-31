@@ -924,7 +924,7 @@ def migration(_: Path) -> dict:
     from workbench_schema import MIGRATIONS, apply_migrations
 
     timestamp = "2026-08-01T00:00:00Z"
-    historical = tuple(item for item in MIGRATIONS if item[0] <= 30)
+    historical = tuple(item for item in MIGRATIONS if item[0] < 40)
     for conflict in (False, True):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
@@ -932,13 +932,6 @@ def migration(_: Path) -> dict:
             apply_migrations(connection, migrations, lambda: timestamp, lambda _: None)
 
         apply(historical)
-        connection.executemany(
-            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
-            [
-                (number, f"synthetic migration {number}", timestamp)
-                for number in (31, 32, 33)
-            ],
-        )
         connection.execute(
             "INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -958,7 +951,7 @@ def migration(_: Path) -> dict:
         )
         if conflict:
             connection.execute(
-                "INSERT INTO schema_migrations VALUES (34, ?, ?)",
+                "INSERT INTO schema_migrations VALUES (40, ?, ?)",
                 ("unrelated migration", timestamp),
             )
         connection.commit()
@@ -992,15 +985,12 @@ def migration(_: Path) -> dict:
             assert [
                 tuple(row)
                 for row in connection.execute(
-                    "SELECT * FROM schema_migrations WHERE version IN (31, 32, 33) ORDER BY version"
+                    "SELECT * FROM schema_migrations WHERE version < 40 ORDER BY version"
                 )
-            ] == [
-                (number, f"synthetic migration {number}", timestamp)
-                for number in (31, 32, 33)
-            ]
+            ] == before
             assert (
                 connection.execute(
-                    "SELECT name FROM schema_migrations WHERE version=34"
+                    "SELECT name FROM schema_migrations WHERE version=40"
                 ).fetchone()[0]
                 == "persist authorized source excerpt scopes"
             )
