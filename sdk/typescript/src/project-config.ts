@@ -1,5 +1,13 @@
 import { readFile } from "node:fs/promises";
-import { dirname, extname, resolve } from "node:path";
+import {
+  dirname,
+  extname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
+import { pathToFileURL } from "node:url";
 import Ajv from "ajv";
 import { parseDocument } from "yaml";
 import {
@@ -165,9 +173,23 @@ function projectConfigExtension(path: string): string {
   return extension;
 }
 
-export function projectConfigStarter(path: string): string {
-  const schema =
-    "./node_modules/@openai/codex-security/schemas/project-config.schema.json";
+export function projectConfigStarter(
+  path: string,
+  directory = process.cwd(),
+): string {
+  const schemaPath = resolve(
+    directory,
+    "node_modules/@openai/codex-security/schemas/project-config.schema.json",
+  );
+  const relativeSchema = relative(
+    dirname(resolve(directory, path)),
+    schemaPath,
+  );
+  const schema = isAbsolute(relativeSchema)
+    ? pathToFileURL(schemaPath).href
+    : `${relativeSchema.startsWith(".") ? "" : "./"}${relativeSchema
+        .split(sep)
+        .join("/")}`;
   if (projectConfigExtension(path) === ".json")
     return `${JSON.stringify({ $schema: schema }, null, 2)}\n`;
   return [

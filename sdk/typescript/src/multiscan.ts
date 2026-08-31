@@ -24,7 +24,7 @@ import type { ScanCost } from "./cost.js";
 import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
 import { requireSecureOutputAncestry } from "./runtime.js";
-import type { ScanMode } from "./targets.js";
+import { DiffTarget, type ScanMode } from "./targets.js";
 import type { ScanSettings } from "./scan-settings.js";
 import { workflowDigest } from "./finding-workflow.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -117,6 +117,17 @@ export async function runMultiscan(
     dirname(resolve(options.inputPath)),
     options.mode,
   );
+  if (
+    tasks.some(
+      (task) =>
+        task.scope === undefined &&
+        options.scanOptionsByMode?.[task.mode]?.target instanceof DiffTarget,
+    )
+  ) {
+    throw new Error(
+      "Bulk scans do not support diff or working-tree scopes because their checkouts are clean, shallow snapshots. Use repository or path scopes instead.",
+    );
+  }
   if (
     options.validationPrompt !== undefined &&
     tasks.some((task) => task.mode === "deep")

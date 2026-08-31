@@ -25,7 +25,7 @@ type ResolvedScanPrompts = Pick<
 /** Resolve selected files once; an inline SDK prompt overrides its file. */
 export async function resolveScanPrompts(
   options: ScanPromptSettings,
-  repository: string,
+  repository: string | undefined,
   directory = process.cwd(),
 ): Promise<ResolvedScanPrompts> {
   const read = async (inline: string | undefined, file: string | undefined) =>
@@ -67,25 +67,29 @@ export async function resolveScanPrompts(
 
 export async function readRegularInputFile(
   path: string,
-  repository: string,
+  repository: string | undefined,
   metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
 ): Promise<string> {
   const selected = metadata ?? (await lstat(path, { bigint: true }));
   if (!selected.isFile()) {
     throw new CodexSecurityError("Input files must be regular files.");
   }
-  const canonicalRepository = await realpath(repository);
   const canonicalParent = await realpath(dirname(path));
-  if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
-    for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
-      if (
-        !isOutsidePath(relative(canonicalRepository, await realpath(ancestor)))
-      ) {
-        throw new CodexSecurityError(
-          "Input files must not follow repository directory links outside the selected repository.",
-        );
+  if (repository !== undefined) {
+    const canonicalRepository = await realpath(repository);
+    if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
+      for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
+        if (
+          !isOutsidePath(
+            relative(canonicalRepository, await realpath(ancestor)),
+          )
+        ) {
+          throw new CodexSecurityError(
+            "Input files must not follow repository directory links outside the selected repository.",
+          );
+        }
+        if (dirname(ancestor) === ancestor) break;
       }
-      if (dirname(ancestor) === ancestor) break;
     }
   }
   const file = await open(

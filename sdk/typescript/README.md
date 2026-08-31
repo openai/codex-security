@@ -334,7 +334,8 @@ CI scanner configuration outside the checkout being assessed.
 
 `init [file]` writes `codex-security.yaml` by default and never overwrites an
 existing file. YAML starters show defaults as comments; JSON starters contain the
-editor schema hint. `info` reports effective model details and native key sources
+editor schema hint, relative to the chosen file and the invocation directory's
+local package installation. `info` reports effective model details and native key sources
 without dumping raw native values.
 
 ```yaml
@@ -379,6 +380,10 @@ remain unchanged.
 `--path` scopes a scan to one or more paths, `--diff` scans committed changes,
 and `--working-tree` scans staged and unstaged changes. Deep scans support
 repository and path targets.
+
+Bulk scans use clean, shallow checkouts and support repository or path scopes.
+They reject configured diff or working-tree scopes before starting unless each
+affected CSV row supplies its own path scope.
 
 Working-tree snapshots include files from untracked nested Git repositories.
 Initialized submodules must be clean and checked out at the commit recorded by

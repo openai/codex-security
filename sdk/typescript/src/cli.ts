@@ -3533,9 +3533,11 @@ export async function main(
             currentDirectory,
           );
           const settings = resolved.options;
+          // These shared operator inputs precede the CSV repository checkouts;
+          // the invocation directory is not a scan-repository boundary.
           const prompts = await resolveScanPrompts(
             settings,
-            currentDirectory,
+            undefined,
             currentDirectory,
           );
           // A CSV row may choose a different mode; resolve the same file for both
@@ -4396,11 +4398,12 @@ export async function main(
       output: z.object({ path: z.string() }).optional(),
       async run({ args }) {
         try {
+          const directory = dependencies.currentDirectory();
           const path = resolveCliPath(
-            dependencies.currentDirectory(),
+            directory,
             args.file ?? "codex-security.yaml",
           );
-          await writeFile(path, projectConfigStarter(path), {
+          await writeFile(path, projectConfigStarter(path, directory), {
             flag: "wx",
             mode: 0o600,
           });

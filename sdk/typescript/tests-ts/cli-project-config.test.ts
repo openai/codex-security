@@ -4,6 +4,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
@@ -53,9 +54,14 @@ async function fixture(input: ProjectConfigInput | string) {
   return { root, repository, configDirectory, config };
 }
 
-test.each([undefined, "starter.json"])(
+test.each([
+  [undefined, "./node_modules"],
+  ["starter.json", "./node_modules"],
+  ["settings/starter.yaml", "../node_modules"],
+  ["settings/starter.json", "../node_modules"],
+])(
   "init writes a valid unpinned starter and refuses overwrites: %s",
-  async (file) => {
+  async (file, modules) => {
     const input = await fixture({});
     const args = ["init", ...(file === undefined ? [] : [file]), "--json"];
     const output = capture();
@@ -70,8 +76,7 @@ test.each([undefined, "starter.json"])(
     expect(JSON.parse(output.text())).toEqual({ path });
     const selected = await readProjectConfig(path);
     expect(selected.input).toEqual({
-      $schema:
-        "./node_modules/@openai/codex-security/schemas/project-config.schema.json",
+      $schema: `${modules}/@openai/codex-security/schemas/project-config.schema.json`,
     });
     const contents = await readFile(path, "utf8");
     expect(await main(args, capture().stream, capture().stream, deps)).toBe(2);
@@ -273,13 +278,13 @@ test("rerun rejects a blank replacement when scan instructions are required", as
   expect(initialized).toBe(false);
 });
 
-test("bulk scans apply config per CSV mode, preserve scope overrides, and retain the policy on resume", async () => {
+test("bulk scans apply config and linked operator prompts, preserve CSV scope overrides, and retain the policy on resume", async () => {
   const config: ProjectConfigInput = {
     auth: "api-key",
     scan: {
       scope: { paths: ["src"] },
       knowledge_base: ["context.md"],
-      instructions_file: "instructions.md",
+      instructions_file: "linked/instructions.md",
       deep: { workers: 2, subagents_per_worker: 0 },
     },
     codex: { model: "gpt-5.6-terra" },
@@ -288,12 +293,21 @@ test("bulk scans apply config per CSV mode, preserve scope overrides, and retain
     output: { directory: "../batch-results" },
   };
   const input = await fixture(config);
+  const promptDirectory = await realpath(
+    await mkdtemp(join(tmpdir(), "bulk-operator-prompts-")),
+  );
+  directories.push(promptDirectory);
+  await symlink(
+    promptDirectory,
+    join(input.configDirectory, "linked"),
+    "junction",
+  );
   await writeFile(
     join(input.configDirectory, "context.md"),
     "Synthetic context.",
   );
   await writeFile(
-    join(input.configDirectory, "instructions.md"),
+    join(promptDirectory, "instructions.md"),
     "Review synthetic boundaries.",
   );
   await writeFile(

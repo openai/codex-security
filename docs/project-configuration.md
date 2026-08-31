@@ -32,7 +32,8 @@ codex-security info -c codex-security.yaml --json
 `init [file]` defaults to `codex-security.yaml`, refuses to overwrite an existing
 file, and accepts `.yaml`, `.yml`, or `.json`. YAML starters show current defaults
 as comments so future releases can still update defaults you have not overridden.
-The editor hint expects the package to be installed locally in `node_modules`.
+The editor hint is relative to the chosen file and expects the package to be
+installed in the invocation directory's `node_modules`.
 
 For a project with a `src` directory:
 
@@ -262,7 +263,10 @@ Both commands use the same config precedence, path anchoring, native settings,
 context, prompts, per-attempt cost limit, and severity policy as `scan`.
 
 A bulk CSV row's mode and scope override the file's defaults for that repository.
-Deep settings apply only to deep rows. Component plans select each component's
+Bulk checkouts are clean, shallow snapshots, so bulk scans accept repository or
+path scopes. A configured diff or working-tree scope is rejected before work
+starts unless every affected row supplies its own CSV path scope. Deep settings
+apply only to deep rows. Component plans select each component's
 scope, overriding `scan.scope`; `scan.mode` selects standard or deep component
 scans. Batch `--workers` controls concurrent repositories or components, while
 `scan.deep.workers` controls discovery workers within each deep scan.

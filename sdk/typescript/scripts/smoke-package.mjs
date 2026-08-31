@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -492,7 +493,8 @@ try {
   assert.match(help, /\bpublish\b/u);
   assert.match(help, /\bdedupe\b/u);
 
-  const starterPath = join(consumer, "codex-security.yaml");
+  // The CLI's working directory is canonical even when tmpdir() is an alias.
+  const starterPath = join(await realpath(consumer), "codex-security.yaml");
   const starter = JSON.parse(
     run(process.execPath, [launcher, "init", "--json"], {
       cwd: consumer,
@@ -512,6 +514,21 @@ try {
     assert.equal(info.configuration.settings.mode, "standard");
     assert.equal(info.configuration.sources["scan.mode"], "default");
   }
+
+  const nestedDirectory = join(consumer, "settings");
+  await mkdir(nestedDirectory);
+  const nestedPath = join(nestedDirectory, "security.json");
+  run(process.execPath, [launcher, "init", nestedPath, "--json"], {
+    cwd: consumer,
+    capture: true,
+  });
+  const nestedConfig = JSON.parse(await readFile(nestedPath, "utf8"));
+  assert.equal(
+    await realpath(resolve(nestedDirectory, nestedConfig.$schema)),
+    await realpath(
+      join(installedRoot, "schemas", "project-config.schema.json"),
+    ),
+  );
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(

@@ -820,6 +820,7 @@ describe("CLI workbench", () => {
     let config: CodexSecurityConfig | undefined;
     let repository: string | undefined;
     let options: Record<string, unknown> | undefined;
+    const knowledgeBasePath = resolve("/original/security.md");
     const savedConfig = {
       approval_policy: "on-request",
       model: "gpt-original",
@@ -847,7 +848,7 @@ describe("CLI workbench", () => {
               mode: "deep",
               pluginVersion: "1.2.3",
               failOnSeverity: "high",
-              knowledgeBasePaths: ["/original/security.md"],
+              knowledgeBasePaths: [knowledgeBasePath],
               deepScan: {
                 workers: 2,
                 subagents: 0,
@@ -869,7 +870,7 @@ describe("CLI workbench", () => {
       parentScanId: "scan-original",
       expectedPluginVersion: "1.2.3",
       failureSeverity: "high",
-      knowledgeBasePaths: ["/original/security.md"],
+      knowledgeBasePaths: [knowledgeBasePath],
       workers: 2,
       subagents: 0,
       stopAfterNoNew: 3,

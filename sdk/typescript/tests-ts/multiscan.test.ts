@@ -25,6 +25,7 @@ import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
+import { DiffTarget } from "../src/targets.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
@@ -135,6 +136,39 @@ async function results(path: string): Promise<Record<string, unknown>[]> {
 }
 
 describe("multiscan", () => {
+  test.each([DiffTarget.refs({ base: "HEAD~1" }), DiffTarget.workingTree()])(
+    "rejects unsupported bulk diff scopes before preparing a campaign: %j",
+    async (target) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "configured-scope");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nexample,${source.path},${source.revision}\n`,
+      );
+      let initialized = false;
+      const security = client(async () => {
+        throw new Error("The unsupported target must not reach a scan.");
+      });
+      await expect(
+        runMultiscan(
+          options(paths, security, {
+            scanOptionsByMode: { standard: { target } },
+            createSecurity: () => {
+              initialized = true;
+              return security;
+            },
+          }),
+        ),
+      ).rejects.toThrow(
+        "Bulk scans do not support diff or working-tree scopes",
+      );
+      expect(initialized).toBe(false);
+      await expect(access(paths.output)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    },
+  );
+
   test("scopes GitHub CLI credentials to the discovered GitHub host", () => {
     expect(buildGitHubCredentialArgs(undefined)).toEqual([]);
     expect(buildGitHubCredentialArgs("github.com")).toEqual([
@@ -219,6 +253,9 @@ describe("multiscan", () => {
           scanPrompt: "Review boundaries.",
           postScanPrompt: "Draft confirmed fixes.",
           maxCostUsd: 12.5,
+          scanOptionsByMode: {
+            deep: { target: DiffTarget.workingTree() },
+          },
         },
       ),
     );
