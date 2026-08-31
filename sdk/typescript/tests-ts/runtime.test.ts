@@ -294,9 +294,10 @@ describe("plugin runtime preparation", () => {
       ),
     );
     const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
-    const source = /function buildFindings\(findings\) \{[\s\S]*?\n\}/u.exec(
-      runtime,
-    )?.[0];
+    const source =
+      /function buildFindings\(findings, mode\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
     expect(source).toBeDefined();
     const buildFindings = new Function(
       "semanticIdentifier",
