@@ -412,18 +412,27 @@ describe("CLI", () => {
           expect(run.properties.codexSecurityCoverageCompleteness).toBe(
             completeness,
           );
+          expect(run.invocations).toHaveLength(1);
+          const invocation = run.invocations[0];
+          expect(invocation.executionSuccessful).toBe(
+            completeness === "complete",
+          );
           if (completeness === "complete") {
-            expect(run.invocations).toBeUndefined();
-          } else {
-            expect(run.invocations).toHaveLength(1);
-            const invocation = run.invocations[0];
-            expect(invocation.executionSuccessful).toBe(true);
+            expect(invocation.toolExecutionNotifications).toBeUndefined();
+          } else if (hasDeferred) {
             expect(invocation.toolExecutionNotifications).toEqual(
               coverage.deferred.map(({ reason: text }) => ({
                 level: "warning",
                 message: { text },
               })),
             );
+          } else {
+            expect(invocation.toolExecutionNotifications).toEqual([
+              {
+                level: "warning",
+                message: { text: expect.stringContaining(completeness) },
+              },
+            ]);
           }
           expect(run.tool.driver.rules[0]).toMatchObject({
             id: source.ruleId,

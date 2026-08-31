@@ -2456,7 +2456,7 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
         }
     ]
     sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
-    assert sarif["runs"][0]["invocations"][0]["executionSuccessful"] is True
+    assert sarif["runs"][0]["invocations"][0]["executionSuccessful"] is False
     assert not (scan_dir / "artifacts" / "02_discovery").exists()
 
 
