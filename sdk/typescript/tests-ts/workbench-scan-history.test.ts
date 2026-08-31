@@ -646,7 +646,7 @@ print(json.dumps({
   expect(observed["batchedQueries"]).toBe(observed["expectedBatchedQueries"]);
 });
 
-test("returns every linked finding in a confirmed history chain", async () => {
+test("includes recurring stable identities in confirmed finding history", async () => {
   const observed = await runPythonProbe(`
 import json, sqlite3, sys
 sys.path.insert(0, sys.argv[1])
@@ -660,28 +660,65 @@ CREATE TABLE scan_comparison_matches (
     before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT
 );
 ''')
-for index, scan in enumerate(('a', 'b', 'c', 'unlinked')):
+scans = [('a', 'a'), ('b', 'b'), ('c', 'c'), ('a-repeat', 'a'), ('c-repeat', 'c'), ('unlinked', 'unlinked')]
+for index, (scan, finding) in enumerate(scans):
     connection.execute('INSERT INTO scans VALUES (?, ?)', (scan, str(index)))
-    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', (scan, scan, scan, scan))
+    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', (scan, finding, scan, scan))
 connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, ?)', [
     ('a', 'b', 'a', 'b', 'First confirmed link.'),
     ('b', 'c', 'b', 'c', 'Second confirmed link.')
 ])
-result = {}
-for index, scan in enumerate(('a', 'b', 'c', 'unlinked')):
-    matches, first, bounds = finding_matches(connection, scan, scan, str(index))
-    result[scan] = {'linked': [match['occurrenceId'] for match in matches], 'first': first, 'bounds': bounds}
-    for match in matches:
-        assert match['reason']
-        if scan == 'a' and match['occurrenceId'] == 'b':
-            assert match['reason'] == 'First confirmed link.'
-print(json.dumps(result))
+def collect_history():
+    result = {}
+    for index, (scan, finding) in enumerate(scans):
+        matches, first, bounds = finding_matches(connection, scan, scan, str(index))
+        result[scan] = {'linked': [match['occurrenceId'] for match in matches], 'first': first, 'bounds': bounds}
+        for match in matches:
+            assert match['reason']
+            if scan == 'a' and match['occurrenceId'] == 'b':
+                assert match['reason'] == 'First confirmed link.'
+    return result
+with_links = collect_history()
+connection.execute('DELETE FROM scan_comparison_matches')
+print(json.dumps({'withLinks': with_links, 'withoutLinks': collect_history()}))
 `);
   expect(observed).toEqual({
-    a: { linked: ["b", "c"], first: "0", bounds: ["a", "c"] },
-    b: { linked: ["a", "c"], first: "0", bounds: ["a", "c"] },
-    c: { linked: ["a", "b"], first: "0", bounds: ["a", "c"] },
-    unlinked: { linked: [], first: "3", bounds: ["unlinked"] },
+    withLinks: {
+      a: {
+        linked: ["a-repeat", "b", "c", "c-repeat"],
+        first: "0",
+        bounds: ["a", "c-repeat"],
+      },
+      b: {
+        linked: ["a", "a-repeat", "c", "c-repeat"],
+        first: "0",
+        bounds: ["a", "c-repeat"],
+      },
+      c: {
+        linked: ["a", "a-repeat", "b", "c-repeat"],
+        first: "0",
+        bounds: ["a", "c-repeat"],
+      },
+      "a-repeat": {
+        linked: ["a", "b", "c", "c-repeat"],
+        first: "0",
+        bounds: ["a", "c-repeat"],
+      },
+      "c-repeat": {
+        linked: ["a", "a-repeat", "b", "c"],
+        first: "0",
+        bounds: ["a", "c-repeat"],
+      },
+      unlinked: { linked: [], first: "5", bounds: ["unlinked"] },
+    },
+    withoutLinks: {
+      a: { linked: ["a-repeat"], first: "0", bounds: ["a", "a-repeat"] },
+      "a-repeat": { linked: ["a"], first: "0", bounds: ["a", "a-repeat"] },
+      b: { linked: [], first: "1", bounds: ["b"] },
+      c: { linked: ["c-repeat"], first: "2", bounds: ["c", "c-repeat"] },
+      "c-repeat": { linked: ["c"], first: "2", bounds: ["c", "c-repeat"] },
+      unlinked: { linked: [], first: "5", bounds: ["unlinked"] },
+    },
   });
 });
 

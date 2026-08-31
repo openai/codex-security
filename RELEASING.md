@@ -73,6 +73,11 @@ for that exact commit:
    archive before publishing the GitHub release. It prepends the reviewed
    summary to GitHub's categorized notes.
 
+`node-release` generates the npm plugin payload from the canonical source under
+`plugins/codex-security/` during `prepack`. The generated
+`sdk/typescript/_bundled_plugin/` directory is not a committed release input;
+do not prepare a release by editing or committing files there.
+
 Monitor all three workflows. A version bump is not a completed release until
 the npm package and GitHub release both exist and match the tag.
 

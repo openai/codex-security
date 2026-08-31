@@ -209,10 +209,12 @@ describe("read-only publication history", () => {
         "-c",
         [
           "import sys",
+          "from dataclasses import replace",
           "from pathlib import PureWindowsPath",
           "from urllib.parse import unquote, urlsplit",
           "sys.path.insert(0, sys.argv[1])",
           "import workbench_db as workbench",
+          "import workbench_publication as publication",
           "class Captured(Exception): pass",
           "def capture(filename, **options):",
           "    parsed = urlsplit(filename)",
@@ -220,12 +222,12 @@ describe("read-only publication history", () => {
           "    assert unquote(parsed.path) == str(path)",
           "    assert parsed.query == 'mode=ro' and options == {'uri': True, 'timeout': 5}",
           "    raise Captured",
-          "workbench.sqlite3.connect = capture",
-          "workbench.linear_publication_input = lambda *_args, **_options: ({}, {}, [])",
+          "publication.sqlite3.connect = capture",
+          "publication.linear_publication_input = lambda *_args, **_options: ({}, {}, [])",
           "for value in ['C:/state/history.sqlite3', '//server/share/state/history.sqlite3', '//?/C:/state/history.sqlite3', '//?/UNC/server/share/history.sqlite3']:",
           "    path = PureWindowsPath(value)",
-          "    workbench.database_path = lambda: path",
-          "    try: workbench.inspect_linear_publication(None)",
+          "    context = replace(workbench._WORKBENCH_PUBLICATION_CONTEXT, database_path=lambda path=path: path)",
+          "    try: publication.inspect_linear_publication(context, None)",
           "    except Captured: pass",
           "    else: raise AssertionError('SQLite connection was not attempted')",
         ].join("\n"),
@@ -679,11 +681,11 @@ connection.close()
       fixture,
       "ALTER TABLE deep_scan_runs DROP COLUMN publication_error_message",
     );
-    databaseRows(fixture, "DROP INDEX finding_occurrences_by_finding");
-    databaseRows(fixture, "DROP INDEX scan_comparisons_by_after_scan");
-    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version >= ?", [
-      31,
-    ]);
+    databaseRows(
+      fixture,
+      "DELETE FROM schema_migrations WHERE version BETWEEN ? AND ?",
+      [31, 32],
+    );
 
     await expect(
       preparePublicationStore(fixture.publication, fixture.environment),
@@ -692,13 +694,12 @@ connection.close()
     expect(
       databaseRows(
         fixture,
-        "SELECT version, name FROM schema_migrations WHERE version >= ? ORDER BY version",
-        [31],
+        "SELECT version, name FROM schema_migrations WHERE version BETWEEN ? AND ? ORDER BY version",
+        [31, 32],
       ),
     ).toEqual([
       { version: 31, name: "freeze stopped scan source digests" },
       { version: 32, name: "separate deep scan publication failures" },
-      { version: 33, name: "index finding identity and comparison history" },
     ]);
     expect(
       databaseRows(

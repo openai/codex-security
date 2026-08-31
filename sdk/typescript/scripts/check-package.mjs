@@ -14,7 +14,10 @@ const args = process.argv.slice(2);
 if (args[0] === "--") args.shift();
 const [
   archive,
-  contractPath = new URL("../plugin-files.json", import.meta.url),
+  contractPath = new URL(
+    "../../../plugins/codex-security/plugin-files.json",
+    import.meta.url,
+  ),
 ] = args;
 if (archive === undefined || args.length > 2) {
   throw new Error(
@@ -175,6 +178,8 @@ const distFiles = new Set(
     "cost-model",
     "custom-validation",
     "custom-validation-prompt",
+    "custom-publish",
+    "deep-progress",
     "errors",
     "finding-catalogue",
     "github",
@@ -196,6 +201,29 @@ const distFiles = new Set(
     "scan-history-renderer",
     "scan-logs",
     "scan-sessions",
+    "server/index",
+    "deduplication/codex-review",
+    "deduplication/checkpointed-review",
+    "deduplication/deduplication",
+    "finding-retrieval",
+    "finding-workflow",
+    "findings-client",
+    "finding-dedupe-groups",
+    "deduplication/deduplication-prompts",
+    "deduplication/deduplication-reviewer",
+    "deduplication/scan",
+    "saved-scan",
+    "server/embeddings",
+    "server/dashboard",
+    "server/dashboard-types",
+    "server/errors",
+    "server/findings-service",
+    "server/routes",
+    "server/server",
+    "server/serve",
+    "server/sqlite-store",
+    "server/storage",
+    "server/validation",
     "targets",
     "thread-source",
     "trusted-executable",
@@ -208,6 +236,15 @@ const distFiles = new Set(
     ),
   ),
 );
+const dashboardFiles = new Set([
+  "package/dist/server/dashboard/index.html",
+  "package/dist/server/dashboard/app.js",
+  "package/dist/server/dashboard/app.css",
+  "package/dist/server/dashboard/THIRD_PARTY_NOTICES.txt",
+]);
+for (const file of dashboardFiles) {
+  if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+}
 for (const file of distFiles) {
   if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
 }
@@ -218,9 +255,13 @@ for (const file of files) {
     ? normalized === "package" ||
       normalized === "package/bin" ||
       normalized === "package/dist" ||
+      normalized === "package/dist/server" ||
+      normalized === "package/dist/server/dashboard" ||
+      normalized === "package/dist/deduplication" ||
       pluginDirectories.has(normalized)
     : allowedRoot.has(normalized) ||
       distFiles.has(normalized) ||
+      dashboardFiles.has(normalized) ||
       pluginEntries.has(normalized);
   if (!allowed || unsafePath.test(file) || file.includes("\\")) {
     throw new Error(`npm tarball contains an unexpected file: ${file}.`);

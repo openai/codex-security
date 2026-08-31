@@ -14,6 +14,7 @@ export type {
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost, ScanSessionEvent } from "./cost.js";
+export type { DeepScanProgress } from "./deep-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export { matchScanFindings } from "./scan-comparison.js";
@@ -71,6 +72,16 @@ export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
 export { checkScanPublication, publishScan } from "./publish.js";
+export { publishScanToCustom } from "./custom-publish.js";
+export type {
+  PublishScanToCustomOptions,
+  CustomPublicationResult,
+} from "./custom-publish.js";
+export { deduplicateScan } from "./deduplication/scan.js";
+export type {
+  DeduplicateScanOptions,
+  DeduplicateScanResult,
+} from "./deduplication/scan.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,
