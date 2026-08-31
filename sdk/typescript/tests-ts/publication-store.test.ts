@@ -700,7 +700,6 @@ connection.close()
     ).toEqual([
       { version: 31, name: "freeze stopped scan source digests" },
       { version: 32, name: "separate deep scan publication failures" },
-      { version: 33, name: "persist repository identities" },
     ]);
     expect(
       databaseRows(
