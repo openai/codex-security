@@ -38,6 +38,7 @@ import {
   relative,
   resolve,
   sep,
+  win32,
 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -81,6 +82,42 @@ const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
 const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
+const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
+  "OPENAI_API_KEY",
+  "CODEX_API_KEY",
+  "OPENROUTER_API_KEY",
+  "FIREWORKS_API_KEY",
+]);
+const PREPARE_SCAN_ARTIFACT_RESTORER_PROGRAM = `
+from pathlib import Path
+from runpy import run_path
+import json
+import sys
+
+module = run_path(sys.argv[1])
+canonical_path, root_identity = module["scan_root_identity"](Path(sys.argv[2]))
+print(json.dumps({
+    "canonicalPath": str(canonical_path),
+    "dev": str(root_identity[0]),
+    "ino": str(root_identity[1]),
+}, ensure_ascii=False))
+`.trim();
+const RESTORE_SCAN_ARTIFACT_PROGRAM = `
+from pathlib import Path
+from runpy import run_path
+import sys
+
+module = run_path(sys.argv[1])
+try:
+    module["write_scan_local_bytes"](
+        Path(sys.argv[2]),
+        sys.argv[3],
+        sys.stdin.buffer.read(),
+        expected_root_identity=(int(sys.argv[4]), int(sys.argv[5])),
+    )
+except (module["ContractError"], OSError) as error:
+    raise SystemExit(str(error))
+`.trim();
 const WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX = "CODEX_SECURITY_ACL_COMPLETE:";
 const WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE = 2;
 
@@ -121,6 +158,10 @@ export interface WorkbenchCommandOptions {
   environment: ProcessEnvironment;
   signal?: AbortSignal;
   failureMessage?: string;
+}
+
+export interface ScanArtifactRestorer {
+  restore(relativePath: string, contents: Uint8Array): Promise<void>;
 }
 
 function environmentValue(
@@ -866,7 +907,12 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "  foreach ($entry in $entries) {",
     "    if (($entry.Attributes -band 1024) -and ($entry.LinkType -in @('SymbolicLink', 'Junction'))) { throw 'Windows credential home contains a symbolic link or junction' }",
     "    if ($entry.PSObject.TypeNames -notcontains 'System.IO.DirectoryInfo' -and $entry.PSObject.TypeNames -notcontains 'System.IO.FileInfo') { throw 'Windows credential home contains an unsafe entry' }",
-    "    try { Write-CredentialAcl $entry.FullName } catch { if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { continue }; throw }",
+    "    try { Write-CredentialAcl $entry.FullName } catch {",
+    // A descendant can disappear inside Get-Acl after it was enumerated.
+    `      if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand' -or $_.FullyQualifiedErrorId -eq 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
+    "      if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { continue }",
+    "      throw",
+    "    }",
     "    if ($entry.PSIsContainer) { Read-CredentialDescendants $entry.FullName }",
     "  }",
     "}",
@@ -1483,18 +1529,6 @@ export async function preparePersistentOutputRoot(
   return root;
 }
 
-function workbenchEnvironment(options: WorkbenchCommandOptions) {
-  return Object.fromEntries(
-    Object.entries(options.environment).filter(
-      ([name]) =>
-        name.toUpperCase() !== "OPENAI_API_KEY" &&
-        name.toUpperCase() !== "CODEX_API_KEY" &&
-        name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-        name.toUpperCase() !== "FIREWORKS_API_KEY",
-    ),
-  );
-}
-
 /** @internal */
 export async function resolveScanSessionPaths(
   options: WorkbenchCommandOptions,
@@ -1537,7 +1571,7 @@ export async function resolveScanSessionPaths(
         rootThreadId,
       ],
       {
-        env: workbenchEnvironment(options),
+        env: pluginHelperEnvironment(options.environment),
         encoding: "utf8",
         maxBuffer: Infinity,
         windowsHide: true,
@@ -1578,7 +1612,7 @@ export async function runWorkbench(
         join(options.pluginRoot, "scripts", "workbench_db.py"),
         ...args,
       ],
-      pythonUtf8Environment(workbenchEnvironment(options)),
+      pluginHelperEnvironment(options.environment),
       input,
       options.signal,
     );
@@ -1627,16 +1661,10 @@ export async function runWorkbench(
 }
 
 export function bundledPluginCandidates(moduleDirectory: string): string[] {
-  const packageCandidates = [
+  return [
     resolve(moduleDirectory, "_bundled_plugin"),
     resolve(moduleDirectory, "../_bundled_plugin"),
   ];
-  return basename(moduleDirectory) === "src"
-    ? [
-        resolve(moduleDirectory, "../../../plugins/codex-security"),
-        ...packageCandidates,
-      ]
-    : packageCandidates;
 }
 
 export async function bundledPluginRoot(): Promise<string> {
@@ -1711,6 +1739,107 @@ export async function validateOutputDir(
       { cause: error },
     );
   }
+}
+
+export async function prepareScanArtifactRestorer(
+  options: WorkbenchCommandOptions,
+  scanDirectory: string,
+): Promise<ScanArtifactRestorer> {
+  let helperPath: string;
+  let canonicalPath: string;
+  let dev: string;
+  let ino: string;
+  try {
+    // Recovery uses the SDK-owned writer, even if the scan selected a custom plugin.
+    helperPath = join(
+      await bundledPluginRoot(),
+      "scripts",
+      "finalize_scan_contract.py",
+    );
+    const result = await runCodexCommand(
+      { command: options.python },
+      [
+        "-I",
+        "-X",
+        "utf8",
+        "-B",
+        "-c",
+        PREPARE_SCAN_ARTIFACT_RESTORER_PROGRAM,
+        helperPath,
+        scanDirectory,
+      ],
+      pluginHelperEnvironment(options.environment),
+      undefined,
+      options.signal,
+    );
+    if (!result.success) {
+      throw new Error(
+        result.stderr.trim() ||
+          result.stdout.trim() ||
+          `Artifact restoration setup exited with status ${result.exitCode}.`,
+      );
+    }
+    const prepared: unknown = JSON.parse(result.stdout);
+    if (
+      !isRecord(prepared) ||
+      typeof prepared["canonicalPath"] !== "string" ||
+      prepared["canonicalPath"].length === 0 ||
+      typeof prepared["dev"] !== "string" ||
+      !/^(?:0|[1-9]\d*)$/u.test(prepared["dev"]) ||
+      typeof prepared["ino"] !== "string" ||
+      !/^(?:0|[1-9]\d*)$/u.test(prepared["ino"])
+    ) {
+      throw new Error("Artifact restoration setup returned invalid output.");
+    }
+    canonicalPath = prepared["canonicalPath"];
+    dev = prepared["dev"];
+    ino = prepared["ino"];
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    throw new OutputDirectoryError(
+      "Could not securely prepare completed scan artifact restoration.",
+      { cause: error },
+    );
+  }
+
+  return {
+    async restore(relativePath, contents) {
+      try {
+        const result = await runCodexCommand(
+          { command: options.python },
+          [
+            "-I",
+            "-X",
+            "utf8",
+            "-B",
+            "-c",
+            RESTORE_SCAN_ARTIFACT_PROGRAM,
+            helperPath,
+            canonicalPath,
+            relativePath,
+            dev,
+            ino,
+          ],
+          pluginHelperEnvironment(options.environment),
+          contents,
+          options.signal,
+        );
+        if (!result.success) {
+          throw new Error(
+            result.stderr.trim() ||
+              result.stdout.trim() ||
+              `Artifact restoration exited with status ${result.exitCode}.`,
+          );
+        }
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        throw new OutputDirectoryError(
+          "Could not safely restore a completed scan artifact.",
+          { cause: error },
+        );
+      }
+    },
+  };
 }
 
 export async function planOutputArchive(
@@ -2317,6 +2446,16 @@ export function resolveCodexCommand(
   return { command };
 }
 
+export function executablePathForSpawn(command: string): string {
+  if (process.platform !== "win32" || !win32.isAbsolute(command))
+    return command;
+  // Root-relative paths still depend on the child's drive and working directory.
+  const root = win32.parse(command).root;
+  return root === "\\" || root === "/"
+    ? command
+    : win32.toNamespacedPath(command);
+}
+
 export async function bootstrapPlugin(
   codexHome: string,
   pluginRoot: string,
@@ -2544,6 +2683,19 @@ export function pythonUtf8Environment(
   return normalized;
 }
 
+function pluginHelperEnvironment(
+  environment: ProcessEnvironment,
+): ProcessEnvironment {
+  return pythonUtf8Environment(
+    Object.fromEntries(
+      Object.entries(environment).filter(
+        ([name]) =>
+          !PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES.has(name.toUpperCase()),
+      ),
+    ),
+  );
+}
+
 export async function cleanupSdkDirectory(path: string): Promise<void> {
   await rm(path, { recursive: true, force: true });
 }
@@ -2552,10 +2704,10 @@ export async function runCodexCommand(
   command: CodexCommand,
   args: readonly string[],
   environment: ProcessEnvironment,
-  input?: string,
+  input?: string | Uint8Array,
   signal?: AbortSignal,
 ): Promise<CodexCommandResult> {
-  const child = spawn(command.command, [...args], {
+  const child = spawn(executablePathForSpawn(command.command), [...args], {
     env: environment,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,

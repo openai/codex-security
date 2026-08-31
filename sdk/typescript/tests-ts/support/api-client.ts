@@ -69,6 +69,9 @@ export class TestClient extends CodexSecurity {
         },
         environment: {},
         resolveScanSessionPaths: async () => new Set<string>(),
+        prepareScanArtifactRestorer: async () => ({
+          restore: async () => {},
+        }),
         runWorkbench: async (_options, args, input) =>
           mockWorkbench(args, input),
         ...dependencies,

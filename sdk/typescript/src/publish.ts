@@ -58,6 +58,7 @@ import {
 } from "./publication-store.js";
 import {
   codexSecurityStateDirectory,
+  executablePathForSpawn,
   resolveCodexCommand,
   type CodexCommand,
 } from "./runtime.js";
@@ -1527,7 +1528,7 @@ async function runPublicationCodex(
 ): Promise<PublicationCodexResult> {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(command.command, [...args], {
+    const child = spawn(executablePathForSpawn(command.command), [...args], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
