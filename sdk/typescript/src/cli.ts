@@ -50,6 +50,7 @@ import {
   createSecurityInternal,
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
+  initialCredentialsAvailable,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
@@ -4249,6 +4250,16 @@ export async function main(
             : await prepareCodexSecurityCredentialHome(
                 dependencies.environment,
               );
+        if (args.action === "status" && existsSync(credentialHome)) {
+          const ambientHome =
+            environmentValue(dependencies.environment, "CODEX_HOME") ??
+            join(homedir(), ".codex");
+          await initialCredentialsAvailable(
+            dependencies.environment,
+            ambientHome,
+            credentialHome,
+          );
+        }
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
@@ -4346,7 +4357,7 @@ export async function main(
     })
     .command("serve", {
       description:
-        "Start the findings HTTP service (HOST=127.0.0.1, PORT=3000).",
+        "Start the findings HTTP service (HOST=127.0.0.1, PORT=3000). CODEX_SECURITY_EMBEDDINGS_URL overrides the embeddings endpoint (default: https://api.openai.com/v1/embeddings).",
       destructive: true,
       mcp: false,
       options: z.object({

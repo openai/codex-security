@@ -91,7 +91,7 @@ jobs:
         if: steps.scope.outputs.check-markdown == 'true'
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
-          package_json_file: sdk/typescript/package.json
+          package_json_file: package.json
           cache: true
           cache_dependency_path: sdk/typescript/pnpm-lock.yaml
 
@@ -134,7 +134,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
-          package_json_file: sdk/typescript/package.json
+          package_json_file: package.json
           cache: true
           cache_dependency_path: |
             sdk/typescript/pnpm-lock.yaml
@@ -168,7 +168,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
-          package_json_file: sdk/typescript/package.json
+          package_json_file: package.json
           cache: true
           cache_dependency_path: |
             sdk/typescript/pnpm-lock.yaml
@@ -218,7 +218,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
-          package_json_file: sdk/typescript/package.json
+          package_json_file: package.json
           cache: true
           cache_dependency_path: |
             sdk/typescript/pnpm-lock.yaml
@@ -318,7 +318,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
-          package_json_file: plugins/codex-security/mcp-app/package.json
+          package_json_file: package.json
           cache: true
           cache_dependency_path: plugins/codex-security/mcp-app/pnpm-lock.yaml
       - name: Set up Node.js
@@ -442,7 +442,9 @@ jobs:
         with:
           node-version: "22.13.0"
       - name: Set up pnpm
-        run: npm install --global pnpm@11.9.0 --no-audit --no-fund
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: package.json
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:

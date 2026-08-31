@@ -17,12 +17,12 @@ const submit = (id, arguments_, overrides = {}) =>
       ...overrides,
     },
   });
-const complete = (status = "completed") =>
+const complete = (status = "completed", error = null) =>
   send({
     method: "turn/completed",
     params: {
       threadId: "review-thread",
-      turn: { id: "review-turn", status },
+      turn: { id: "review-turn", status, error },
     },
   });
 
@@ -37,6 +37,20 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(message.params.apiKey, "synthetic-review-key");
     send({ id: message.id, result: { type: "apiKey" } });
   } else if (message.method === "thread/start") {
+    if (["request-error", "credential-error"].includes(scenario)) {
+      send({
+        id: message.id,
+        error: {
+          code: -32000,
+          message:
+            scenario === "credential-error"
+              ? "Authentication failed: Bearer synthetic-review-key"
+              : "Authentication required",
+          data: "Synthetic private response data",
+        },
+      });
+      continue;
+    }
     assert.equal(message.params.ephemeral, true);
     assert.equal(message.params.permissions, "codex_security_review");
     assert.equal(message.params.approvalPolicy, "on-request");
@@ -65,7 +79,11 @@ for await (const line of createInterface({ input: process.stdin })) {
     });
     send({ id: message.id, result: { turn: { id: "review-turn" } } });
     if (scenario === "exit") process.exit(1);
-    if (scenario === "text-only") {
+    if (scenario === "invalid-json") {
+      process.stdout.write("Synthetic private response data\n");
+    } else if (scenario === "invalid-submission") {
+      submit("invalid", { decision: "UNKNOWN" });
+    } else if (scenario === "text-only") {
       send({
         method: "item/completed",
         params: {
@@ -90,12 +108,17 @@ for await (const line of createInterface({ input: process.stdin })) {
   } else if (message.id === "invalid") {
     assert.equal(message.result.success, false);
     assert.match(message.result.contentItems[0].text, /Resubmit/);
-    submit("valid", { decision: "SAME" });
+    if (scenario === "invalid-submission") complete();
+    else submit("valid", { decision: "SAME" });
   } else if (message.id === "valid") {
     assert.equal(message.result.success, true);
     if (scenario === "failed-turn") {
       process.stderr.write("Synthetic provider failure with private details\n");
-      complete("failed");
+      complete("failed", {
+        message: "Rate limit exceeded",
+        codexErrorInfo: "usageLimitExceeded",
+        additionalDetails: "Synthetic private response data",
+      });
     } else complete();
   }
 }

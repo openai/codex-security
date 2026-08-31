@@ -21,7 +21,7 @@ import {
 } from "../runtime.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../thread-source.js";
 import { VERSION } from "../version.js";
-import { CodexSecurityError } from "../errors.js";
+import { CodexSecurityError, safeErrorMessage } from "../errors.js";
 import {
   reviewSubmissionInstructions,
   sourceReviewInstructions,
@@ -44,7 +44,7 @@ type StartCodex = (
 interface Message {
   id?: string | number;
   method?: string;
-  error?: unknown;
+  error?: { message: string };
   result?: {
     thread?: { id: string; ephemeral: boolean; path: string | null };
     turn?: { id: string };
@@ -52,7 +52,7 @@ interface Message {
   params?: {
     threadId: string;
     turnId?: string;
-    turn?: { id: string; status: string };
+    turn?: { id: string; status: string; error?: { message: string } | null };
     tool?: string;
     namespace?: string | null;
     arguments?: unknown;
@@ -202,6 +202,7 @@ export class CodexReviewRunner {
       let threadId: string | undefined;
       let turnId: string | undefined;
       let accepted: T | undefined;
+      let validationFailure: string | undefined;
       try {
         send({
           id: 1,
@@ -215,7 +216,12 @@ export class CodexReviewRunner {
           input: child.stdout,
           crlfDelay: Infinity,
         })) {
-          const message = JSON.parse(line) as Message;
+          let message: Message;
+          try {
+            message = JSON.parse(line) as Message;
+          } catch {
+            throw new Error("Codex returned malformed JSON");
+          }
           const params = message.params;
           if (message.id !== undefined && message.method !== undefined) {
             if (
@@ -237,6 +243,7 @@ export class CodexReviewRunner {
               } catch (error) {
                 accepted = undefined;
                 if (error instanceof Error) rejection = error.message;
+                validationFailure = rejection;
               }
               send({
                 id: message.id,
@@ -259,7 +266,9 @@ export class CodexReviewRunner {
               });
             }
           } else if (message.error !== undefined) {
-            throw new Error("Codex rejected the review request");
+            throw new Error(
+              message.error?.message ?? "Codex rejected the review request",
+            );
           } else if (message.id === 1) {
             send({ method: "initialized" });
             if (apiKey)
@@ -307,8 +316,18 @@ export class CodexReviewRunner {
             params.threadId === threadId &&
             params.turn?.id === turnId
           ) {
-            if (params.turn?.status !== "completed" || accepted === undefined) {
-              throw new Error("Codex did not complete a validated review");
+            if (params.turn.status !== "completed") {
+              throw new Error(
+                params.turn.error?.message ??
+                  `Codex review turn ${params.turn.status}`,
+              );
+            }
+            if (accepted === undefined) {
+              throw new Error(
+                validationFailure
+                  ? `Review validation failed: ${validationFailure}`
+                  : "Codex did not submit a validated review",
+              );
             }
             return accepted;
           }
@@ -319,10 +338,10 @@ export class CodexReviewRunner {
         if (child.exitCode === null) child.kill();
         await closed;
       }
-    } catch {
+    } catch (error) {
       this.signal?.throwIfAborted();
       throw new CodexSecurityError(
-        "Codex did not complete a validated deduplication review. Findings are unchanged; retry the command.",
+        `Codex did not complete a validated deduplication review. Findings are unchanged; retry the command. Reason: ${safeErrorMessage(error)}`,
       );
     } finally {
       await rm(directory, { recursive: true, force: true });

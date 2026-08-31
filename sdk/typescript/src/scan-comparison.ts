@@ -111,6 +111,8 @@ const comparisonSchema = z
 
 export type ScanComparisonResult = z.infer<typeof comparisonSchema>;
 
+const CODEX_MAX_INPUT_CHARACTERS = 1024 * 1024;
+
 export async function matchScanFindings(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
@@ -121,30 +123,115 @@ export async function matchScanFindings(
 export async function matchScanFindingsInternal(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
-  runtimeOptions: { surface: CodexSecuritySurface },
+  runtimeOptions: { surface: CodexSecuritySurface; allowBatching?: boolean },
 ): Promise<ScanComparisonResult> {
-  const finalResponse = await runReadOnlyCodex(
-    comparisonPrompt(input),
-    z.toJSONSchema(comparisonSchema, { target: "openapi-3.0" }),
-    options,
-    {
-      ...runtimeOptions,
-      threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
-    },
-  );
-  let response: unknown;
-  try {
-    response = JSON.parse(finalResponse);
-  } catch (error) {
-    throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
-      cause: error,
-    });
+  const comparisons: ScanComparisonResult[] = [];
+  const allowHistoricalUncertainty =
+    options.allowHistoricalUncertainty ?? false;
+  const outputSchema = z.toJSONSchema(comparisonSchema, {
+    target: "openapi-3.0",
+  });
+  for (const batch of comparisonBatches(input, runtimeOptions.allowBatching)) {
+    options.signal?.throwIfAborted();
+    const finalResponse = await runReadOnlyCodex(
+      batch.prompt,
+      outputSchema,
+      options,
+      {
+        ...runtimeOptions,
+        threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
+      },
+    );
+    let response: unknown;
+    try {
+      response = JSON.parse(finalResponse);
+    } catch (error) {
+      throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
+        cause: error,
+      });
+    }
+    comparisons.push(
+      validateComparison(batch.input, response, allowHistoricalUncertainty),
+    );
   }
-  return validateComparison(
-    input,
-    response,
-    options.allowHistoricalUncertainty ?? false,
+  return combineComparisons(comparisons, allowHistoricalUncertainty);
+}
+
+function* comparisonBatches(
+  input: ScanComparisonInput,
+  allowBatching = true,
+): Generator<{ input: ScanComparisonInput; prompt: string }> {
+  const prompt = comparisonPrompt(input);
+  if (allowBatching && prompt.length > CODEX_MAX_INPUT_CHARACTERS / 2) {
+    // Splitting one side at a time covers every before/after pair exactly once.
+    const side =
+      input.before.length > 1 &&
+      (input.after.length < 2 ||
+        JSON.stringify(input.before).length >=
+          JSON.stringify(input.after).length)
+        ? "before"
+        : "after";
+    const findings = input[side];
+    if (findings.length > 1) {
+      const middle = Math.ceil(findings.length / 2);
+      yield* comparisonBatches({ ...input, [side]: findings.slice(0, middle) });
+      yield* comparisonBatches({ ...input, [side]: findings.slice(middle) });
+      return;
+    }
+  }
+  if (prompt.length > CODEX_MAX_INPUT_CHARACTERS) {
+    throw new CodexSecurityError(
+      `Finding comparison exceeds Codex's ${CODEX_MAX_INPUT_CHARACTERS}-character input limit.`,
+    );
+  }
+  yield { input, prompt };
+}
+
+function combineComparisons(
+  comparisons: ScanComparisonResult[],
+  allowHistoricalUncertainty: boolean,
+): ScanComparisonResult {
+  let matches: ScanComparisonResult["matches"] = [];
+  for (const match of comparisons.flatMap(({ matches }) => matches)) {
+    const before = new Set(match.beforeOccurrenceIds);
+    const after = new Set(match.afterOccurrenceIds);
+    const overlapping = matches.filter(
+      (group) =>
+        group.beforeOccurrenceIds.some((id) => before.has(id)) ||
+        group.afterOccurrenceIds.some((id) => after.has(id)),
+    );
+    if (overlapping.length === 0) {
+      matches.push(match);
+      continue;
+    }
+    const joined = [...overlapping, match];
+    const merged = {
+      beforeOccurrenceIds: [
+        ...new Set(joined.flatMap((group) => group.beforeOccurrenceIds)),
+      ],
+      afterOccurrenceIds: [
+        ...new Set(joined.flatMap((group) => group.afterOccurrenceIds)),
+      ],
+      confidence: "high" as const,
+      reason: [...new Set(joined.map((group) => group.reason))].join("\n"),
+    };
+    matches.splice(matches.indexOf(overlapping[0]!), 1, merged);
+    matches = matches.filter((group) => !overlapping.includes(group));
+  }
+  const matchedBefore = new Set(
+    matches.flatMap((group) => group.beforeOccurrenceIds),
   );
+  const matchedAfter = new Set(
+    matches.flatMap((group) => group.afterOccurrenceIds),
+  );
+  const uncertain = comparisons
+    .flatMap(({ uncertain }) => uncertain)
+    .filter(
+      ({ beforeOccurrenceId, afterOccurrenceId }) =>
+        !matchedBefore.has(beforeOccurrenceId) &&
+        (allowHistoricalUncertainty || !matchedAfter.has(afterOccurrenceId)),
+    );
+  return { matches, uncertain };
 }
 
 export async function runReadOnlyCodex(

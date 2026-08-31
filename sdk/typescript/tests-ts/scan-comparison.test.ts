@@ -406,7 +406,7 @@ describe("semantic scan comparison", () => {
     },
   );
 
-  test("compares all findings with one restricted structured-output turn", async () => {
+  test("compares small inputs with one restricted structured-output turn", async () => {
     const input: ScanComparisonInput = {
       before: [finding("before-1"), finding("before-2")],
       after: [finding("after-1"), finding("after-2"), finding("after-3")],

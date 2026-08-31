@@ -1631,6 +1631,7 @@ export class CodexSecurity {
               ((input, comparisonOptions) =>
                 matchScanFindingsInternal(input, comparisonOptions, {
                   surface: this.#surface,
+                  allowBatching: false,
                 })),
             environment,
             model,
@@ -1868,6 +1869,14 @@ export class CodexSecurity {
       }
       const authentication = await this.#authentication();
       this.#requireOpen();
+      const ambientHome =
+        environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
+        join(homedir(), ".codex");
+      await initialCredentialsAvailable(
+        this.#dependencies.environment,
+        ambientHome,
+        authentication.codexHome,
+      );
       return await accountStatus(
         this.#codexCommand(),
         authentication.environment,
