@@ -623,6 +623,7 @@
     },
     "scope": {
       "type": "object",
+      "description": "Optional semantic scope metadata (summary, artifactsReviewed, runtimeStatus, validationMode, context, limitations). The workbench derives authoritative target and scope paths; do not include includePaths or excludePaths.",
       "properties": {
         "includePaths": false,
         "excludePaths": false,
@@ -718,6 +719,7 @@
     },
     "coverage": {
       "type": "object",
+      "description": "Semantic audit coverage (surfaces, explicitExclusions, deferred, openQuestions, completeness). The workbench derives authoritative coverage metadata; do not include documentType, schemaVersion, scanId, mode, includePaths, excludePaths, receiptRefs, or inventoryStrategy.",
       "properties": {
         "documentType": false,
         "schemaVersion": false,
