@@ -379,6 +379,9 @@ combined report.
 
 `--max-cost` applies per component, excluding planning and matching.
 `--model` and `--effort` also apply to matching; `--auth` applies throughout.
+Planning and matching reject an ambient command provider that conflicts with
+explicit `--auth chatgpt` or `--auth api-key`. A command provider explicitly
+selected through SDK `codexOverrides` retains its authentication configuration.
 Use `--knowledge-base`, `--scan-prompt-file`, and `--post-scan-prompt-file` as for
 bulk scans.
 

@@ -9,7 +9,7 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
-import type { CodexSecuritySurface } from "./api.js";
+import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import {
   accountStatus,
   configuredCodexHome,
@@ -23,10 +23,11 @@ import {
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
   scanModelConfiguration,
+  scanModelProvider,
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import {
   codexSecurityCredentialHome,
   executablePathForSpawn,
@@ -65,6 +66,8 @@ interface ReadOnlyCodex {
 }
 
 export interface ReadOnlyCodexOptions {
+  /** @internal Authentication already selected by the calling scan. */
+  auth?: ScanAuthMode;
   config?: CodexSecurityConfig;
   codex?: ReadOnlyCodex;
   environment?: NodeJS.ProcessEnv;
@@ -277,6 +280,18 @@ export async function runReadOnlyCodex(
         )
       : {};
   const commandAuth = hasCommandAuth(providerConfig);
+  if (
+    commandAuth &&
+    options.auth !== undefined &&
+    options.auth !== "auto" &&
+    (!hasCommandAuth(config ?? {}) ||
+      scanModelProvider(config ?? {}) !== scanModelProvider(providerConfig))
+  ) {
+    throw new ConfigurationError(
+      `Explicit ${options.auth} authentication conflicts with command authentication in the supplied Codex home. ` +
+        "Remove the conflicting provider configuration or select command authentication through codexOverrides.",
+    );
+  }
   const sdkConfig = { ...config };
   if (commandAuth) delete sdkConfig["model_providers"];
   const environment =

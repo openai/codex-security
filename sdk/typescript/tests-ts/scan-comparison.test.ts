@@ -230,6 +230,79 @@ describe("semantic scan comparison", () => {
     ).toEqual(environment);
   });
 
+  test.each(["chatgpt", "api-key"] as const)(
+    "rejects ambient command auth that conflicts with explicit %s authentication",
+    async (auth) => {
+      const home = await mkdtemp(
+        join(tmpdir(), "codex-security-auth-conflict-"),
+      );
+      temporaryDirectories.push(home);
+      const provider = {
+        name: "Synthetic",
+        base_url: "https://provider.example/v1",
+        wire_api: "responses",
+        auth: { command: "./synthetic-auth" },
+      };
+      const config = {
+        model_provider: "synthetic",
+        model_providers: { synthetic: provider },
+      };
+      await writeFile(join(home, "config.toml"), stringify(config));
+      const options = {
+        auth,
+        config: {},
+        environment: {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          OPENAI_API_KEY: "synthetic-selected-key",
+        },
+        workingDirectory: home,
+      };
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(
+        (options) =>
+          codex.startThread(options!) as ReturnType<Codex["startThread"]>,
+      );
+      try {
+        await expect(
+          matchScanFindings({ before: [], after: [] }, options),
+        ).rejects.toThrow("conflicts with command authentication");
+        expect(startThread).not.toHaveBeenCalled();
+
+        // A complete command provider selected by the caller keeps scan precedence.
+        await matchScanFindings(
+          { before: [], after: [] },
+          { ...options, config: { codexOverrides: config } },
+        );
+        expect(startThread).toHaveBeenCalledTimes(1);
+        startThread.mockClear();
+
+        // An ambient profile must not replace that explicitly selected provider.
+        await writeFile(
+          join(home, "config.toml"),
+          stringify({
+            profile: "ambient",
+            profiles: { ambient: { model_provider: "other" } },
+            model_providers: { other: provider },
+          }),
+        );
+        await expect(
+          matchScanFindings(
+            { before: [], after: [] },
+            { ...options, config: { codexOverrides: config } },
+          ),
+        ).rejects.toThrow("conflicts with command authentication");
+        expect(startThread).not.toHaveBeenCalled();
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
   test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
     const home = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
     temporaryDirectories.push(home);
@@ -357,7 +430,7 @@ describe("semantic scan comparison", () => {
     const provider = {
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       CODEX_SECURITY_SCAN_ID: "scan",
-      CODEX_HOME: "/provider-home",
+      CODEX_HOME: join(root, "provider-home"),
       CODEX_CLI_PATH: "/compatible-codex",
       CODEX_SAFETY_IDENTIFIER: "synthetic-user",
       FIREWORKS_API_KEY: "provider-key",
