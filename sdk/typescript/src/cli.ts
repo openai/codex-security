@@ -3533,13 +3533,6 @@ export async function main(
             currentDirectory,
           );
           const settings = resolved.options;
-          // These shared operator inputs precede the CSV repository checkouts;
-          // the invocation directory is not a scan-repository boundary.
-          const prompts = await resolveScanPrompts(
-            settings,
-            undefined,
-            currentDirectory,
-          );
           // A CSV row may choose a different mode; resolve the same file for both
           // modes so inactive deep defaults remain available to deep rows.
           const scanOptionsByMode =
@@ -3548,14 +3541,11 @@ export async function main(
               : Object.fromEntries(
                   SCAN_MODES.map((mode) => [
                     mode,
-                    {
-                      ...resolveScanSettings(
-                        project,
-                        { ...overrides, mode },
-                        currentDirectory,
-                      ).options,
-                      ...prompts,
-                    },
+                    resolveScanSettings(
+                      project,
+                      { ...overrides, mode },
+                      currentDirectory,
+                    ).options,
                   ]),
                 );
           let inputPath: string;
@@ -3602,7 +3592,9 @@ export async function main(
               : { maxCostUsd: settings.maxCostUsd }),
             knowledgeBasePaths: settings.knowledgeBasePaths,
             scanOptionsByMode,
-            ...prompts,
+            scanPromptFile: settings.scanPromptFile,
+            validationPromptFile: settings.validationPromptFile,
+            postScanPromptFile: settings.postScanPromptFile,
             config: {
               codexOverrides: mergeCodexOverrides(
                 resolved.config.codexOverrides,

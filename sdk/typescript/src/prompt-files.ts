@@ -25,7 +25,7 @@ type ResolvedScanPrompts = Pick<
 /** Resolve selected files once; an inline SDK prompt overrides its file. */
 export async function resolveScanPrompts(
   options: ScanPromptSettings,
-  repository: string | undefined,
+  repository: string | readonly string[],
   directory = process.cwd(),
 ): Promise<ResolvedScanPrompts> {
   const read = async (inline: string | undefined, file: string | undefined) =>
@@ -67,7 +67,7 @@ export async function resolveScanPrompts(
 
 export async function readRegularInputFile(
   path: string,
-  repository: string | undefined,
+  repository: string | readonly string[],
   metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
 ): Promise<string> {
   const selected = metadata ?? (await lstat(path, { bigint: true }));
@@ -75,7 +75,9 @@ export async function readRegularInputFile(
     throw new CodexSecurityError("Input files must be regular files.");
   }
   const canonicalParent = await realpath(dirname(path));
-  if (repository !== undefined) {
+  const repositories =
+    typeof repository === "string" ? [repository] : repository;
+  for (const repository of repositories) {
     const canonicalRepository = await realpath(repository);
     if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
       for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {

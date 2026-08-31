@@ -278,6 +278,44 @@ test("rerun rejects a blank replacement when scan instructions are required", as
   expect(initialized).toBe(false);
 });
 
+test.each(["instructions_file", "validation_file"] as const)(
+  "bulk %s retains directory-link protection for local CSV repositories",
+  async (file) => {
+    const input = await fixture({
+      scan: { [file]: "../repository/linked/prompt.md" },
+      output: { directory: "../batch-results" },
+    });
+    const external = join(input.root, "external");
+    await mkdir(external);
+    await writeFile(join(external, "prompt.md"), "Synthetic external data.");
+    await symlink(external, join(input.repository, "linked"), "junction");
+    const csv = join(input.root, "repositories.csv");
+    await writeFile(
+      csv,
+      `id,repository,revision\nsource,${input.repository},${"a".repeat(40)}\n`,
+    );
+    let initialized = false;
+    const stderr = capture();
+    const exit = await main(
+      ["bulk-scan", csv, "-c", input.config, "--json"],
+      capture().stream,
+      stderr.stream,
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig: () => {
+          initialized = true;
+          throw new Error("Runtime must not start");
+        },
+      }),
+    );
+    expect(exit).toBe(2);
+    expect(stderr.text()).toContain(
+      "Input files must not follow repository directory links",
+    );
+    expect(initialized).toBe(false);
+  },
+);
+
 test("bulk scans apply config and linked operator prompts, preserve CSV scope overrides, and retain the policy on resume", async () => {
   const config: ProjectConfigInput = {
     auth: "api-key",

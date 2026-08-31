@@ -493,15 +493,16 @@ try {
   assert.match(help, /\bpublish\b/u);
   assert.match(help, /\bdedupe\b/u);
 
-  // The CLI's working directory is canonical even when tmpdir() is an alias.
-  const starterPath = join(await realpath(consumer), "codex-security.yaml");
+  const starterPath = join(consumer, "codex-security.yaml");
   const starter = JSON.parse(
     run(process.execPath, [launcher, "init", "--json"], {
       cwd: consumer,
       capture: true,
     }),
   );
-  assert.equal(starter.path, starterPath);
+  // Compare file identities across symlink aliases and Windows short names.
+  const canonicalStarterPath = await realpath(starterPath);
+  assert.equal(await realpath(starter.path), canonicalStarterPath);
   for (const args of [["-c", starterPath], []]) {
     const info = JSON.parse(
       run(process.execPath, [launcher, "info", ...args, "--json"], {
@@ -510,7 +511,7 @@ try {
         env: { ...process.env, CODEX_SECURITY_PROJECT_CONFIG: starterPath },
       }),
     );
-    assert.equal(info.configuration.path, starterPath);
+    assert.equal(await realpath(info.configuration.path), canonicalStarterPath);
     assert.equal(info.configuration.settings.mode, "standard");
     assert.equal(info.configuration.sources["scan.mode"], "default");
   }

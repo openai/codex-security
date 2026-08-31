@@ -23,9 +23,10 @@ import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
 import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
+import { resolveScanPrompts } from "./prompt-files.js";
 import { requireSecureOutputAncestry } from "./runtime.js";
 import { DiffTarget, type ScanMode } from "./targets.js";
-import type { ScanSettings } from "./scan-settings.js";
+import type { ScanPromptSettings, ScanSettings } from "./scan-settings.js";
 import { workflowDigest } from "./finding-workflow.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -61,7 +62,7 @@ interface MultiscanReceipt extends MultiscanTask {
   policyFailed?: boolean;
 }
 
-export interface MultiscanOptions {
+export interface MultiscanOptions extends ScanPromptSettings {
   inputPath: string;
   outputDir: string;
   githubHost?: string;
@@ -70,10 +71,10 @@ export interface MultiscanOptions {
   mode: ScanMode;
   maxAttempts: number;
   maxCostUsd?: number;
-  scanPrompt?: string;
-  validationPrompt?: string;
-  postScanPrompt?: string;
-  scanOptionsByMode?: Partial<Record<ScanMode, ScanSettings>>;
+  // Prompts are shared across modes and prepared from the top-level options.
+  scanOptionsByMode?: Partial<
+    Record<ScanMode, Omit<ScanSettings, keyof ScanPromptSettings>>
+  >;
   config: CodexSecurityConfig;
   createSecurity(
     config: CodexSecurityConfig,
@@ -128,8 +129,43 @@ export async function runMultiscan(
       "Bulk scans do not support diff or working-tree scopes because their checkouts are clean, shallow snapshots. Use repository or path scopes instead.",
     );
   }
+  const repositories: string[] = [];
   if (
-    options.validationPrompt !== undefined &&
+    [
+      [options.scanPrompt, options.scanPromptFile],
+      [options.validationPrompt, options.validationPromptFile],
+      [options.postScanPrompt, options.postScanPromptFile],
+    ].some(([inline, file]) => inline === undefined && file !== undefined)
+  ) {
+    for (const repository of new Set(tasks.map((task) => task.repository))) {
+      if (!isAbsolute(repository)) continue;
+      try {
+        repositories.push(await realpath(repository));
+      } catch (error) {
+        // Missing sources retain the campaign's per-repository failure behavior.
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      }
+    }
+  }
+  // Shared inputs use actual local CSV sources as directory-link boundaries,
+  // not the invocation directory, and are read once before any scan starts.
+  const prompts = await resolveScanPrompts(options, repositories);
+  const resolvedOptions: MultiscanOptions = {
+    ...options,
+    ...prompts,
+    ...(options.scanOptionsByMode === undefined
+      ? {}
+      : {
+          scanOptionsByMode: Object.fromEntries(
+            Object.entries(options.scanOptionsByMode).map(
+              ([mode, settings]) => [mode, { ...settings, ...prompts }],
+            ),
+          ),
+        }),
+  };
+  if (
+    resolvedOptions.validationPrompt !== undefined &&
     tasks.some((task) => task.mode === "deep")
   ) {
     throw new Error("Custom validation is not supported for Deep scans.");
@@ -139,7 +175,7 @@ export async function runMultiscan(
   await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
   try {
-    const result = await runCampaign(options, tasks, output);
+    const result = await runCampaign(resolvedOptions, tasks, output);
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
       : result;
@@ -277,10 +313,7 @@ async function runCampaign(
             }
           }
           const scanSettings = options.scanOptionsByMode?.[task.mode];
-          const scanPrompt = [
-            options.scanPrompt?.trim() ?? scanSettings?.scanPrompt?.trim(),
-            task.prompt,
-          ]
+          const scanPrompt = [options.scanPrompt?.trim(), task.prompt]
             .filter(Boolean)
             .join("\n\n");
           const result = await security.run(checkout, {
