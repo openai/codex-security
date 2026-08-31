@@ -98,7 +98,10 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
         manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
         findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
         coverage = json.loads((scan_dir / "coverage.json").read_text())
-        coverage["openQuestions"] = [{"question": "Which deployment controls apply?"}]
+        if mode == "deep":
+            coverage.update(surfaces=[], explicitExclusions=[], deferred=[])
+        else:
+            coverage["openQuestions"] = [{"question": "Which deployment controls apply?"}]
         for field in ("documentType", "schemaVersion", "scanId"):
             coverage.pop(field)
         # Match the ordinary semantic envelopes written by the host draft writer.
@@ -172,15 +175,25 @@ def assert_published_aggregate(scan):
 
 
 @pytest.mark.parametrize("scope", [".", "subdir"], ids=["repository", "scoped"])
-def test_deep_publication_uses_aggregate_without_worker_coverage(
+def test_deep_publication_keeps_configured_scope_without_worker_observations(
     workbench_api, workbench_db, publication_scan, scope
 ):
     scan = publication_scan(scope=scope)
     result = add_worker(workbench_db, scan)
-    worker_coverage = copy.deepcopy(scan.coverage)
-    worker_coverage["completeness"] = "partial"
-    worker_coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-    worker_coverage["deferred"] = [{"id": "worker-follow-up", "reason": "Review this path again."}]
+    worker_coverage = {
+        "completeness": "partial",
+        "surfaces": [
+            {
+                "id": "worker-surface",
+                "label": "Worker review",
+                "disposition": "needs_follow_up",
+                "receiptRefs": [],
+            }
+        ],
+        "explicitExclusions": [{"pattern": "docs/", "reason": "Worker-local exclusion."}],
+        "deferred": [{"id": "worker-follow-up", "reason": "Review this path again."}],
+        "openQuestions": [{"question": "Which deployment controls apply?"}],
+    }
     result.write_text(
         json.dumps(
             {
@@ -198,6 +211,15 @@ def test_deep_publication_uses_aggregate_without_worker_coverage(
     assert completed["progress"]["status"] == "complete"
     assert_published_aggregate(scan)
     assert result.read_bytes() == source_bytes
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert coverage["mode"] == ("deep_repository" if scope == "." else "scoped_path")
+    assert coverage["includePaths"] == [scope]
+    assert coverage["excludePaths"] == []
+    report = (scan.scan_dir / "report.md").read_text()
+    assert f"- Included paths: {scope}" in report
+    assert "- Excluded paths: none" in report
+    assert "## Reviewed Surfaces" not in report
+    assert "Which deployment controls apply?" not in report
 
 
 def test_deep_publication_ignores_empty_canceled_checkpoint(
@@ -266,35 +288,65 @@ def test_deep_prepare_and_complete_preserve_the_same_aggregate(
     assert_published_aggregate(scan)
 
 
-def test_stopped_deep_scan_still_salvages_checkpoint_findings(
-    workbench_api, workbench_db, publication_scan
+@pytest.mark.parametrize(
+    ("source", "scope", "has_parent"),
+    [
+        ("standard-worker-checkpoint", ".", True),
+        ("deep-reducer-checkpoint", ".", True),
+        ("deep-reducer-result", ".", True),
+        ("deep-reducer-result", "subdir", False),
+    ],
+    ids=[
+        "standard-worker-checkpoint",
+        "deep-reducer-checkpoint",
+        "deep-reducer-result",
+        "scoped-reducer-without-parent",
+    ],
+)
+def test_stopped_deep_scan_still_salvages_saved_findings(
+    workbench_api, workbench_db, publication_scan, source, scope, has_parent
 ):
-    scan = publication_scan()
+    scan = publication_scan(scope=scope)
+    if not has_parent:
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan.scan_dir / name).unlink()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET status = 'running', phase = 'reducing', "
             "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
             (scan.scan_id,),
         )
-    result = add_worker(workbench_db, scan, status="running")
+    result = add_worker(
+        workbench_db, scan, status="succeeded" if source == "deep-reducer-result" else "running"
+    )
+    if source.startswith("deep-reducer"):
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE id = ?",
+                (result.parent.name,),
+            )
     later_finding = copy.deepcopy(scan.findings[0])
     later_finding["identity"]["anchor"] = "later-checkpoint-finding"
     later_finding["summary"] = "Finding saved after the last completed aggregate."
-    checkpoint = write_checkpoint(
-        result.parent / "checkpoints",
-        {
-            "scanId": scan.scan_id,
-            "complete": False,
-            "findings": [later_finding],
-            "coverage": {
-                "completeness": "partial",
-                "surfaces": [],
-                "explicitExclusions": [],
-                "deferred": [],
-            },
-        },
-    )
-    result.write_text("{interrupted worker output")
+    saved = {
+        "scanId": scan.scan_id,
+        "complete": source == "deep-reducer-result",
+        "findings": [later_finding],
+    }
+    if source == "standard-worker-checkpoint":
+        saved["coverage"] = {
+            "completeness": "partial",
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+        }
+    if source == "deep-reducer-result":
+        checkpoint = None
+        result.write_text(json.dumps(saved))
+    else:
+        checkpoint = write_checkpoint(result.parent / "checkpoints", saved)
+        result.write_text("{interrupted worker output")
+    result_bytes = result.read_bytes()
 
     stopped = workbench_api["fail_scan"](
         workbench_db,
@@ -309,12 +361,21 @@ def test_stopped_deep_scan_still_salvages_checkpoint_findings(
     assert manifest["scan"]["status"] == "failed"
     assert coverage["completeness"] == "partial"
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
-    assert {finding["summary"] for finding in findings} == {
-        scan.findings[0]["summary"],
-        later_finding["summary"],
-    }
-    assert checkpoint.is_file()
-    assert result.read_text() == "{interrupted worker output"
+    expected_summaries = {later_finding["summary"]}
+    if has_parent:
+        expected_summaries.add(scan.findings[0]["summary"])
+    assert {finding["summary"] for finding in findings} == expected_summaries
+
+    artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
+    published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
+    recovered = workbench_api["recover_scan_results"](
+        workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+    assert recovered["findingCount"] == len(expected_summaries)
+    assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == published
+    if checkpoint is not None:
+        assert json.loads(checkpoint.read_text()) == saved
+    assert result.read_bytes() == result_bytes
 
 
 def test_standard_publication_preserves_deliberately_partial_coverage(

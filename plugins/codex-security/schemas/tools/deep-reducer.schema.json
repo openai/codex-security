@@ -29,32 +29,11 @@
         },
         "findings": {
           "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanDraftInput/properties/findings"
-        },
-        "coverage": {
-          "type": "object",
-          "description": "Reviewed surfaces, exclusions, and open questions. The host sets coverage completeness.",
-          "properties": {
-            "surfaces": {
-              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/coverage/properties/surfaces"
-            },
-            "explicitExclusions": {
-              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/coverage/properties/explicitExclusions"
-            },
-            "openQuestions": {
-              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/coverage/properties/openQuestions"
-            }
-          },
-          "required": [
-            "surfaces",
-            "explicitExclusions"
-          ],
-          "additionalProperties": true
         }
       },
       "required": [
         "scanId",
-        "findings",
-        "coverage"
+        "findings"
       ],
       "additionalProperties": false
     }

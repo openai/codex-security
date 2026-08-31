@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { build } from "esbuild";
@@ -22,18 +22,19 @@ const {
 );
 
 const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
-const validDraft = draft([], { coverage: { surfaces: [], explicitExclusions: [] } });
+const validReduction = reduction([]);
 
 assert.equal(deepReducerInputsInputSchema.safeParse({}).success, true);
 assert.equal(deepReducerInputsInputSchema.safeParse({ path: "/tmp" }).success, false);
-assert.equal(deepReductionInputSchema.safeParse(validDraft).success, true);
-assert.equal(deepReductionInputSchema.safeParse(draft([])).success, true, "legacy coverage fields remain accepted");
+assert.equal(deepReductionInputSchema.safeParse(validReduction).success, true);
+assert.equal(deepReductionInputSchema.safeParse(workerDraft([])).success, false,
+  "Deep reducer submissions no longer accept coverage");
 assert.equal(
-  deepReductionInputSchema.safeParse({ ...validDraft, resultPath: "/tmp" }).success,
+  deepReductionInputSchema.safeParse({ ...validReduction, resultPath: "/tmp" }).success,
   false
 );
 assert.equal(
-  deepReductionInputSchema.safeParse({ ...validDraft, consumedWorkerIds: ["spoofed"] }).success,
+  deepReductionInputSchema.safeParse({ ...validReduction, consumedWorkerIds: ["spoofed"] }).success,
   false
 );
 assert.equal(
@@ -59,7 +60,7 @@ try {
     workersRoot,
     label: "discovery-0001",
     id: "worker-001",
-    result: draft([shared], {
+    result: workerDraft([shared], {
       threatModel: { summary: "Requests may reach shared code." }
     }),
     completionSequence: 1
@@ -68,7 +69,7 @@ try {
     workersRoot,
     label: "discovery-0002",
     id: "worker-002",
-    result: draft([shared, independent], {
+    result: workerDraft([shared, independent], {
       scope: { summary: "Shared and independent request handling." }
     }),
     completionSequence: 2
@@ -88,19 +89,27 @@ try {
 
   const inputs = await getCodexSecurityDeepReducerInputs(context);
   await assert.rejects(
-    recordCodexSecurityDeepReduction(context, draft([], { complete: false })),
+    recordCodexSecurityDeepReduction(context, reduction([], { complete: false })),
     /only a checkpoint/,
-    "host-owned coverage must not accept an unfinished reducer result",
+    "a reducer submission must contain a complete result",
   );
   await assert.rejects(
-    recordCodexSecurityDeepReduction(context, draft([shared])),
+    recordCodexSecurityDeepReduction(context, reduction([shared])),
     /unaccounted|discarded.*finding/,
     "a successful reduction must account for every fresh finding, not just one",
   );
   await assert.rejects(
-    recordCodexSecurityDeepReduction(context, draft([shared, independent, finding("invented", "src/unreviewed.ts")])),
+    recordCodexSecurityDeepReduction(context, reduction([shared, independent, finding("invented", "src/unreviewed.ts")])),
     /no assigned source finding/,
     "a reducer cannot introduce an unvalidated finding outside its assigned sources",
+  );
+  await assert.rejects(
+    recordCodexSecurityDeepReduction(context, reduction([
+      { ...shared, validation: { evidenceRefs: ["missing-evidence"] } },
+      independent,
+    ], { complete: true })),
+    /evidenceRefs must refer/,
+    "live reducer submissions reject unknown evidence references instead of silently removing them",
   );
   assert.deepEqual(inputs, {
     discoveries: [
@@ -117,19 +126,22 @@ try {
     { code: "ENOENT" }
   );
   await assert.rejects(
-    recordCodexSecurityDeepReduction(context, draft([])),
+    readdir(path.join(outputRoot, "checkpoints")),
+    { code: "ENOENT" },
+    "invalid reducer submissions do not save a checkpoint",
+  );
+  await assert.rejects(
+    recordCodexSecurityDeepReduction(context, reduction([])),
     /discarded every accepted Standard scan finding/
   );
 
-  const merged = draft([shared, independent], {
-    coverage: { surfaces: [], explicitExclusions: [] },
+  const merged = reduction([shared, independent], {
     threatModel: { summary: "Requests reach shared and independent code." },
     scope: { summary: "Shared and independent request handling." }
   });
   const outcome = await recordCodexSecurityDeepReduction(context, merged);
   const mergedWithSources = {
     ...merged,
-    coverage: { ...merged.coverage, completeness: "complete", deferred: [] },
     findings: [
       retainedFinding(shared, [{ id: "worker-001:0", finding: shared }, { id: "worker-002:0", finding: shared }]),
       retainedFinding(independent, [{ id: "worker-002:1", finding: independent }]),
@@ -142,6 +154,13 @@ try {
   assert.deepEqual(
     JSON.parse(await readFile(path.join(outputRoot, "result.json"), "utf8")),
     mergedWithSources
+  );
+  const checkpointNames = await readdir(path.join(outputRoot, "checkpoints"));
+  assert.equal(checkpointNames.length, 1);
+  assert.deepEqual(
+    JSON.parse(await readFile(path.join(outputRoot, "checkpoints", checkpointNames[0]), "utf8")),
+    mergedWithSources,
+    "reducer checkpoints retain the accepted findings and scope without coverage",
   );
 
   const rejectedCoverage = {
@@ -157,11 +176,11 @@ try {
   };
   const coverageWorker = await createWorker({
     workersRoot, label: "discovery-coverage", id: "worker-coverage",
-    result: draft([], { coverage: rejectedCoverage }), completionSequence: 4,
+    result: workerDraft([], { coverage: rejectedCoverage }), completionSequence: 4,
   });
   const unknownCoverageWorker = await createWorker({
     workersRoot, label: "discovery-unknown", id: "worker-unknown",
-    result: draft([], { coverage: { ...draft([]).coverage, completeness: "unknown" } }),
+    result: workerDraft([], { coverage: { ...workerDraft([]).coverage, completeness: "unknown" } }),
     completionSequence: 5,
   });
   const coverageWorkers = [coverageWorker, unknownCoverageWorker];
@@ -177,51 +196,24 @@ try {
   assert.deepEqual(
     (await getCodexSecurityDeepReducerInputs(coverageContext)).discoveries,
     coverageWorkers.map((worker) => ({ workerId: worker.id, result: withSourceRefs(worker) })),
-    "the reducer can still inspect each worker's original coverage evidence",
+    "worker coverage is absent from model-visible reducer inputs",
   );
-  await recordCodexSecurityDeepReduction(coverageContext, draft([]));
+  await recordCodexSecurityDeepReduction(coverageContext, reduction([]));
   assert.deepEqual(
-    JSON.parse(await readFile(path.join(coverageRoot, "result.json"), "utf8")).coverage,
-    draft([]).coverage,
-    "accepted reductions do not inherit worker coverage even when every worker is partial or unknown",
-  );
-
-  const submittedCoverage = {
-    completeness: "complete",
-    surfaces: [
-      { label: "Response rendering", disposition: "no_issue_found", notes: "All outputs use contextual encoding.",
-        receiptRefs: ["artifacts/missing-worker-receipt.md"] },
-      { label: "Upload parsing", disposition: "rejected", notes: "Archive entries are not extracted." },
-      { label: "Alternate handler", disposition: "needs_follow_up", notes: "A worker suggested another review." },
-    ],
-    explicitExclusions: [{ pattern: "generated", reason: "Generated files are outside the requested scope." }],
-    deferred: [{ reason: "Repeat the alternate handler review.", paths: ["src/alternate.ts"] }],
-    openQuestions: ["Should future scans include generated handlers?"],
-  };
-  await recordCodexSecurityDeepReduction(coverageContext, draft([], { coverage: submittedCoverage }));
-  assert.deepEqual(
-    JSON.parse(await readFile(path.join(coverageRoot, "result.json"), "utf8")).coverage,
-    {
-      ...submittedCoverage,
-      completeness: "complete",
-      surfaces: [
-        { label: "Response rendering", disposition: "no_issue_found", notes: "All outputs use contextual encoding." },
-        submittedCoverage.surfaces[1],
-      ],
-      deferred: [],
-    },
-    "the host projects legacy coverage before validation while retaining reviewed descriptions",
+    JSON.parse(await readFile(path.join(coverageRoot, "result.json"), "utf8")),
+    reduction([]),
+    "accepted reductions omit coverage even when every worker is partial or unknown",
   );
   assert.deepEqual(
     await Promise.all(coverageWorkers.map((worker) => readFile(worker.resultPath, "utf8"))),
     originalWorkerArtifacts,
-    "completing aggregate coverage must not rewrite raw worker evidence",
+    "reduction must not rewrite raw Standard worker coverage evidence",
   );
 
   const collision = { ...independent, ruleId: shared.ruleId, identity: shared.identity };
   const collisionWorker = await createWorker({
     workersRoot, label: "discovery-collision", id: "worker-collision",
-    result: draft([shared, collision]), completionSequence: 5,
+    result: workerDraft([shared, collision]), completionSequence: 5,
   });
   const collisionRoot = path.join(dedupRoot, "dedup-collision", "output");
   await mkdir(collisionRoot, { recursive: true });
@@ -229,13 +221,13 @@ try {
     ...context, root: collisionRoot,
     deepReducer: { scanRoot, claimedWorkers: [collisionWorker] },
   };
-  await assert.rejects(recordCodexSecurityDeepReduction(collisionContext, draft([shared])), /ambiguous|unaccounted/);
+  await assert.rejects(recordCodexSecurityDeepReduction(collisionContext, reduction([shared])), /ambiguous|unaccounted/);
   const collisionInputs = await getCodexSecurityDeepReducerInputs(collisionContext);
   const sourceFindingIds = collisionInputs.discoveries[0].result.findings.flatMap(
     finding => finding.provenance.sourceFindingIds,
   );
   assert.deepEqual(sourceFindingIds, ["worker-collision:0", "worker-collision:1"]);
-  await recordCodexSecurityDeepReduction(collisionContext, draft([{
+  await recordCodexSecurityDeepReduction(collisionContext, reduction([{
     ...shared, provenance: { ...shared.provenance, sourceFindingIds },
   }]));
   const collisionOutput = JSON.parse(await readFile(path.join(collisionRoot, "result.json"), "utf8"));
@@ -243,7 +235,7 @@ try {
     { id: "worker-collision:0", finding: shared },
     { id: "worker-collision:1", finding: collision },
   ]);
-  await assert.rejects(recordCodexSecurityDeepReduction(collisionContext, draft([{
+  await assert.rejects(recordCodexSecurityDeepReduction(collisionContext, reduction([{
     ...shared, provenance: { ...shared.provenance, sourceFindingIds: ["unassigned:0"] },
   }])), /unknown source finding/);
   await assert.rejects(
@@ -255,7 +247,7 @@ try {
     workersRoot,
     label: "discovery-0003",
     id: "worker-003",
-    result: draft([shared]),
+    result: workerDraft([shared]),
     completionSequence: 3
   });
   const nextOutputRoot = path.join(dedupRoot, "dedup-0002", "output");
@@ -277,7 +269,7 @@ try {
     previous: mergedWithSources
   });
   await assert.rejects(
-    recordCodexSecurityDeepReduction(nextContext, draft([shared])),
+    recordCodexSecurityDeepReduction(nextContext, reduction([shared])),
     (error) => error.code === "merge_traceability_unstable_candidate_id"
   );
   assert.deepEqual(
@@ -302,21 +294,31 @@ try {
   const enrichedPrevious = structuredClone(mergedWithSources);
   enrichedPrevious.findings[0].summary = "The earlier reduction established an additional reachable output route.";
   enrichedPrevious.findings[0].validation = { summary: "Both output routes bypass the same encoding control." };
-  enrichedPrevious.coverage = { ...rejectedCoverage, completeness: "complete" };
-  const previousArtifact = JSON.stringify(enrichedPrevious);
-  await writeFile(path.join(outputRoot, "result.json"), previousArtifact);
-  const normalizedPrevious = (await getCodexSecurityDeepReducerInputs(nextContext)).previous;
-  assert.equal(normalizedPrevious.coverage.completeness, "complete");
-  assert.deepEqual(normalizedPrevious.coverage.deferred, []);
-  assert.deepEqual(normalizedPrevious.coverage.surfaces, [
-    { label: "SQL route", disposition: "rejected", notes: "Parameterized queries prevent injection." },
-  ]);
+  for (const legacyCoverage of [
+    rejectedCoverage,
+    { completeness: "outdated", surfaces: [null], explicitExclusions: false, deferred: 42 },
+    "legacy coverage is no longer structured",
+  ]) {
+    const previousArtifact = JSON.stringify({ ...enrichedPrevious, coverage: legacyCoverage });
+    await writeFile(path.join(outputRoot, "result.json"), previousArtifact);
+    assert.deepEqual(
+      (await getCodexSecurityDeepReducerInputs(nextContext)).previous,
+      enrichedPrevious,
+      "previous reducer coverage is ignored even when malformed; findings and scope remain intact",
+    );
+    assert.equal(
+      await readFile(path.join(outputRoot, "result.json"), "utf8"),
+      previousArtifact,
+      "reading a previous reduction does not rewrite its legacy coverage",
+    );
+  }
+  const previousArtifact = await readFile(path.join(outputRoot, "result.json"), "utf8");
   await recordCodexSecurityDeepReduction(nextContext, merged);
   const preservedEnrichment = JSON.parse(await readFile(path.join(nextOutputRoot, "result.json"), "utf8"));
-  assert.deepEqual(
-    preservedEnrichment.coverage,
-    mergedWithSources.coverage,
-    "a previous reducer's coverage decision is not inherited by a subsequent accepted reduction",
+  assert.equal(
+    Object.hasOwn(preservedEnrichment, "coverage"),
+    false,
+    "a subsequent accepted reduction omits the previous reducer's legacy coverage",
   );
   assert.equal(
     await readFile(path.join(outputRoot, "result.json"), "utf8"),
@@ -359,8 +361,17 @@ try {
   await assert.rejects(
     getCodexSecurityDeepReducerInputs(context),
     /only a checkpoint/,
-    "host-owned coverage must not admit unfinished Standard worker results",
+    "unfinished Standard worker results are not reducer inputs",
   );
+
+  for (const invalidCoverage of [undefined, { ...workerDraft([]).coverage, completeness: "outdated" }]) {
+    await writeFile(first.resultPath, JSON.stringify({ ...first.result, coverage: invalidCoverage }));
+    await assert.rejects(
+      getCodexSecurityDeepReducerInputs(context),
+      /coverage|completeness/,
+      "Standard worker coverage remains required and validated before projection",
+    );
+  }
 
   await writeFile(first.resultPath, "{invalid Standard scan\n");
   await assert.rejects(
@@ -394,7 +405,11 @@ async function createWorker({ workersRoot, label, id, result, completionSequence
   return { id, resultPath, completionSequence, result };
 }
 
-function draft(findings, extra = {}) {
+function reduction(findings, extra = {}) {
+  return { scanId, findings, ...extra };
+}
+
+function workerDraft(findings, extra = {}) {
   return {
     scanId,
     findings,
@@ -409,8 +424,9 @@ function draft(findings, extra = {}) {
 }
 
 function withSourceRefs(worker) {
+  const { coverage: _coverage, ...result } = worker.result;
   return {
-    ...worker.result,
+    ...result,
     findings: worker.result.findings.map((finding, index) => ({
       ...finding,
       provenance: { ...finding.provenance, sourceFindingIds: [`${worker.id}:${index}`] },

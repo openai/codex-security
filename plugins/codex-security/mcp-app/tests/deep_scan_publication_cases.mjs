@@ -88,7 +88,7 @@ export async function testDeepScanPublication({
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     assert.equal(completed.length, 1);
     assert.deepEqual(completed[0].coverage, {
-      completeness: "complete", surfaces: [reviewed], explicitExclusions: [], deferred: [],
+      completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [],
     });
     for (const worker of store.workers.values()) {
       if (worker.kind !== "discovery") continue;
@@ -140,8 +140,9 @@ export async function testDeepScanPublication({
     const acceptedReducer = [...store.workers.values()].find((worker) => (
       worker.kind === "dedup" && worker.status === "succeeded"
     ));
+    const { coverage, ...publishedReduction } = completed[0];
     assert.deepEqual(
-      completed[0],
+      publishedReduction,
       JSON.parse(await readFile(acceptedReducer.resultManifestPath, "utf8")),
       "the accepted aggregate still reaches publication when redundant cancellation writes fail",
     );

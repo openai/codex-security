@@ -273,7 +273,7 @@ export async function recordCodexSecurityWorkerScanDraft(
 /** Keep the semantic input before any replaceable worker or canonical artifact. */
 export async function saveScanDraftCheckpoint(
   context: ArtifactContext,
-  input: ScanDraftInput,
+  input: Omit<ScanDraftInput, "coverage">,
   updateHead = true,
 ): Promise<void> {
   const { handoffClaimToken: _claim, ...snapshot } = input;
@@ -519,7 +519,7 @@ async function readCurrentCheckpoints(
   return checkpoints.map(({ input }) => input);
 }
 
-function scanDraftCheckpointName(input: ScanDraftInput): string {
+function scanDraftCheckpointName(input: Omit<ScanDraftInput, "coverage">): string {
   const { handoffClaimToken: _claim, ...snapshot } = input;
   return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") + ".json";
 }

@@ -5,7 +5,7 @@ import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories
 } from "./artifacts.js";
-import { validateDiscoveryArtifacts, validateReducerArtifacts } from "./artifact-validation.js";
+import { validateDiscoveryArtifacts, validateReducerArtifacts, type DeepReductionInput } from "./artifact-validation.js";
 import {
   scanDraftInputSchema,
   type ScanDraftInput
@@ -57,7 +57,7 @@ interface SchedulerResult {
   accepted: AcceptedDiscovery[];
   mergedWorkerIds: string[];
   reducers: AcceptedReducer[];
-  result?: ScanDraftInput;
+  result?: DeepReductionInput;
 }
 
 type CoordinatorPhase = "setup" | "discovery" | "terminal";
@@ -293,7 +293,17 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) return;
       this.phase = "terminal";
       const draft = schedulerResult.result
-        ? structuredClone(schedulerResult.result)
+        ? {
+            ...structuredClone(schedulerResult.result),
+            // Keep the saved coverage contract for existing readers. Deep
+            // completion comes from the coordinator, not worker observations.
+            coverage: {
+              completeness: "complete",
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: []
+            }
+          }
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
@@ -989,11 +999,11 @@ export class DeepScanCoordinator {
 
   private async recoverCompletedReducers(
     discoveries: AcceptedDiscovery[]
-  ): Promise<{ reducers: AcceptedReducer[]; result?: ScanDraftInput }> {
+  ): Promise<{ reducers: AcceptedReducer[]; result?: DeepReductionInput }> {
     const discoveriesById = new Map(discoveries.map((worker) => [worker.id, worker]));
     const inputs = this.state.persistedDedupInputs ?? [];
     const outcomes: AcceptedReducer[] = [];
-    let latestResult: ScanDraftInput | undefined;
+    let latestResult: DeepReductionInput | undefined;
     const completedReducers = (this.state.persistedWorkers ?? [])
       .filter((worker) => worker.kind === "dedup" && worker.status === "succeeded")
       .sort((left, right) => (

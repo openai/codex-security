@@ -1747,7 +1747,7 @@ async function testMissingReducerResultResumesExistingThread() {
   assert.equal(new Set(executor.dedupThreadIds).size, 1);
   assert.match(
     executor.dedupContinuationPrompts[1] ?? "",
-    /record_codex_security_deep_reduction\(\{ scanId, findings, coverage: \{ surfaces, explicitExclusions, openQuestions\? \}, threatModel\?, scope\? \}\)/
+    /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/
   );
   assert.doesNotMatch(executor.dedupContinuationPrompts[1] ?? "", /\{ candidates, merges \}/);
   assert.match(executor.dedupContinuationPrompts[1] ?? "", /retry the call until it succeeds/);
@@ -2161,7 +2161,7 @@ async function testReducerTraceabilityRetryNamesExactMissingSource() {
   ]);
   assert.doesNotMatch(basePrompt, /artifact_validation_failed/);
   assert.match(retryPrompt, /artifact_validation_failed/);
-  assert.match(retryPrompt, /coverage.*completeness/s);
+  assert.match(retryPrompt, /findings/s);
   assert.equal(context.claimedWorkerIds.includes(missingWorkerId), true);
 }
 
@@ -3852,7 +3852,8 @@ async function writeDedupArtifacts(request, consumedOverride, options = {}) {
   if (options.canonicalCandidateId && draft.findings.length > 0) {
     draft.findings[0].provenance.candidateId = options.canonicalCandidateId;
   }
-  if (consumedOverride || options.omitLastWorkerSource) draft.coverage.surfaces = "invalid";
+  delete draft.coverage;
+  if (consumedOverride || options.omitLastWorkerSource) draft.findings = "invalid";
   if (options.dropLastFinding) draft.findings.pop();
   const resultPath = path.join(artifactContext.root, "result.json");
   await mkdir(path.dirname(resultPath), { recursive: true });

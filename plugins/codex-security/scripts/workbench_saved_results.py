@@ -155,8 +155,10 @@ def _read_saved_result(scan_dir: Path, relative: str, scan_id: str) -> tuple[dic
     draft = _read_scan_local_json(scan_dir, relative, "Saved scan checkpoint")
     if draft.get("scanId") != scan_id:
         raise ContractError("checkpoint belongs to a different scan")
-    if not isinstance(draft.get("findings"), list) or not isinstance(draft.get("coverage"), dict):
-        raise ContractError("checkpoint has no semantic findings or coverage")
+    if not isinstance(draft.get("findings"), list) or (
+        "coverage" in draft and not isinstance(draft["coverage"], dict)
+    ):
+        raise ContractError("checkpoint has no semantic findings or has invalid coverage")
     return draft, _digest(draft)
 
 
@@ -574,7 +576,9 @@ def merge_saved_results(
             if frozen_source_digests is not None and frozen_source_digests[relative] != digest:
                 raise ContractError("checkpoint changed after the scan stopped")
             source_digests[relative] = digest
-            sources.append((relative, draft, worker_id))
+            # Deep reducers save findings without coverage. Keep their original
+            # digest while supplying empty observations to the recovery union.
+            sources.append((relative, {"coverage": {}, **draft}, worker_id))
         except (ContractError, OSError, ValueError) as exc:
             if (scan_dir / relative).exists():
                 warnings.append(f"Preserved unreadable checkpoint {relative}: {exc}")
@@ -645,7 +649,7 @@ def merge_saved_results(
     manifest["scan"]["preservedSources"] = source_digests
     coverage = (
         copy.deepcopy(parent["coverage"])
-        if parent
+        if parent and parent["coverage"]
         else {
             "completeness": "partial",
             "mode": binding["coverageMode"],

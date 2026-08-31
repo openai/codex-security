@@ -2,12 +2,11 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
-import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import {
   validateDiscoveryArtifacts,
   validateReducerArtifacts
 } from "./artifact-validation.js";
-import type { ReducerArtifactValidation } from "./artifact-validation.js";
+import type { DeepReductionInput, ReducerArtifactValidation } from "./artifact-validation.js";
 import {
   archiveDirectory,
   discoveryArtifacts,
@@ -63,7 +62,7 @@ export interface SuccessfulDedupOutcome {
   id: string;
   consumed: AcceptedDiscovery[];
   resultPath: string;
-  result: ScanDraftInput;
+  result: DeepReductionInput;
   newFindings: number;
   attempt: number;
   threadId?: string;
@@ -799,7 +798,7 @@ function standardScanCompletionContinuation(attempt: number): string {
 function reducerCompletionContinuation(attempt: number): string {
   return [
     `Continue the existing Deep Scan reducer after attempt ${attempt} ended without its required result.`,
-    "Submit the aggregate with record_codex_security_deep_reduction({ scanId, findings, coverage: { surfaces, explicitExclusions, openQuestions? }, threatModel?, scope? }).",
+    "Submit the aggregate with record_codex_security_deep_reduction({ scanId, findings, threatModel?, scope? }).",
     "If the tool rejects the arguments, use its error to correct them and retry the call until it succeeds.",
     "Do not end your turn, write the result directly, or call the tool again after it succeeds."
   ].join("\n");

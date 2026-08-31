@@ -1151,17 +1151,13 @@ async function testReducerWorkerToolList(bundle) {
       assert.equal(
         Object.hasOwn(tool.inputSchema.properties ?? {}, "scanId"),
         tool.name === "record_codex_security_deep_reduction",
-        `${tool.name} must expose scanId only when submitting its complete Standard draft.`
+        `${tool.name} must expose scanId only when submitting its complete reduction.`
       );
       if (tool.name === "record_codex_security_deep_reduction") {
-        assert.equal(tool.inputSchema.required?.includes("scanId"), true);
-        const coverage = tool.inputSchema.properties.coverage;
-        assert.deepEqual(coverage.required, ["surfaces", "explicitExclusions"]);
-        assert.equal(Object.hasOwn(coverage.properties, "openQuestions"), true);
-        for (const field of ["completeness", "deferred"]) {
-          assert.equal(Object.hasOwn(coverage.properties, field), false,
-            `The reducer must not be asked to choose coverage.${field}.`);
-        }
+        assert.deepEqual(tool.inputSchema.required, ["scanId", "findings"]);
+        assert.equal(tool.inputSchema.additionalProperties, false);
+        assert.equal(Object.hasOwn(tool.inputSchema.properties, "coverage"), false,
+          "The reducer must not be asked to submit coverage.");
       }
       for (const forbidden of [
         "path",

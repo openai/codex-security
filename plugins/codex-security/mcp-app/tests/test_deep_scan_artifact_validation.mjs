@@ -231,6 +231,7 @@ async function testReducerValidation(root) {
     admitted,
     "validation returns the same reconciled result that was accepted on disk",
   );
+  assert.equal(Object.hasOwn(admitted, "coverage"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, ["worker-001:1"]);
   sources.previous = structuredClone(admitted);
   sources.previous.findings[0].summary = "Additional proof established by the previous reducer.";
@@ -307,13 +308,9 @@ async function testReducerValidation(root) {
   };
   await writeResult(resultPath, draft([firstFinding], {
     coverage: {
-      completeness: "complete",
-      surfaces: [
-        resolvedCoverageSurface,
-        { label: "Legacy reducer follow-up", disposition: "needs_follow_up" },
-      ],
-      explicitExclusions: [],
-      deferred: [{ reason: "A legacy reducer copied pending worker review work." }],
+      completeness: "invalid legacy value",
+      surfaces: null,
+      deferred: "invalid legacy collection",
     },
   }));
   const validatedCoverage = await validateReducerArtifacts({
@@ -344,18 +341,14 @@ async function testReducerValidation(root) {
       previous: null,
     },
   }, scanId);
-  const reconciledCoverage = JSON.parse(await readFile(resultPath, "utf8")).coverage;
+  const reconciledResult = JSON.parse(await readFile(resultPath, "utf8"));
+  assert.equal(Object.hasOwn(reconciledResult, "coverage"), false);
   assert.deepEqual(
-    reconciledCoverage,
-    {
-      completeness: "complete",
-      surfaces: [resolvedCoverageSurface],
-      explicitExclusions: [],
-      deferred: [],
-    },
-    "the accepted aggregate retains its own coverage without inheriting worker review work",
+    validatedCoverage.result,
+    reconciledResult,
+    "accepted reducer results omit both malformed legacy coverage and worker coverage",
   );
-  assert.deepEqual(validatedCoverage.result.coverage, reconciledCoverage);
+  assert.deepEqual(reconciledResult.findings[0].provenance.sourceFindingIds, ["worker-001:0"]);
 
   await writeResult(resultPath, draft([]));
   await assert.rejects(
@@ -455,28 +448,24 @@ async function testReducerValidation(root) {
       openQuestions: ["Should a future review include generated handlers?"],
     },
   });
-  for (const completeness of ["partial", "complete"]) {
+  for (const [label, legacyCoverage] of [
+    ["partial", legacyPartial.coverage],
+    ["complete with pending work", { ...legacyPartial.coverage, completeness: "complete" }],
+    ["malformed", null],
+  ]) {
     const legacyReducer = {
       ...legacyPartial,
-      coverage: { ...legacyPartial.coverage, completeness },
+      coverage: legacyCoverage,
     };
     await writeResult(resultPath, legacyReducer);
     const legacyArtifact = await readFile(resultPath, "utf8");
     const resumed = await validate();
     assert.equal(resumed.newFindings, 1);
-    assert.deepEqual(resumed.result, {
-      ...legacyReducer,
-      coverage: {
-        ...legacyReducer.coverage,
-        completeness: "complete",
-        surfaces: [resolvedCoverageSurface],
-        deferred: [],
-      },
-    });
+    assert.deepEqual(resumed.result, { scanId, findings: [firstFinding] });
     assert.equal(
       await readFile(resultPath, "utf8"),
       legacyArtifact,
-      `resuming legacy ${completeness} reducer coverage normalizes pending work without rewriting its original artifact`,
+      `resuming a reducer with ${label} coverage ignores it without rewriting the original artifact`,
     );
   }
   await writeResult(resultPath, { ...legacyPartial, complete: false });
@@ -486,7 +475,7 @@ async function testReducerValidation(root) {
   assert.equal((await validate()).newFindings, 0);
 
   await writeResult(resultPath, { ...draft([firstFinding]), resultPath: "/tmp/result.json" });
-  await assert.rejects(validate(), /invalid Standard scan result/);
+  await assert.rejects(validate(), /resultPath/);
 
   await writeResult(resultPath, draft([firstFinding, secondFinding]));
   assert.equal((await validate()).newFindings, 2);
@@ -500,13 +489,13 @@ async function testReducerValidation(root) {
   await mkdir(path.dirname(previousReducerResultPath), { recursive: true });
   await writeResult(previousReducerResultPath, {
     ...legacyPartial,
-    coverage: { ...legacyPartial.coverage, completeness: "complete" },
+    coverage: "malformed legacy coverage",
   });
   const previousArtifact = await readFile(previousReducerResultPath, "utf8");
   assert.equal(
     (await validate(previousReducerResultPath)).newFindings,
     1,
-    "previous reducer coverage is normalized before validation and does not change finding novelty",
+    "malformed previous reducer coverage is ignored and does not change finding novelty",
   );
   assert.equal(
     await readFile(previousReducerResultPath, "utf8"),
@@ -612,9 +601,7 @@ async function testEmptyDiscoveryAndReduction(root) {
   const artifactDir = path.join(artifacts.dedupRoot, "dedup-empty", "output");
   const resultPath = path.join(artifactDir, "result.json");
   await mkdir(artifactDir, { recursive: true });
-  await writeResult(resultPath, draft([], {
-    coverage: { surfaces: [], explicitExclusions: [] },
-  }));
+  await writeResult(resultPath, { scanId, findings: [] });
   const result = await validateReducerArtifacts({
     artifacts,
     artifactDir,
@@ -624,8 +611,8 @@ async function testEmptyDiscoveryAndReduction(root) {
   assert.equal(result.newFindings, 0);
   assert.deepEqual(
     result.result,
-    draft([]),
-    "reducers can omit coverage completion fields owned by the host",
+    { scanId, findings: [] },
+    "reducers submit and return results without coverage",
   );
 }
 

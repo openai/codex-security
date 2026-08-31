@@ -106,7 +106,9 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 `coverage.json` prevents downstream consumers from confusing `not observed` with `not scanned`.
 
-Record:
+Deep parent scans keep this file for compatibility. The host copies the configured include and exclude paths and derives completeness from the coordinator's outcome. An accepted aggregate uses `complete` with empty `surfaces`, `explicitExclusions`, and `deferred` arrays and no `openQuestions`. Deep reducer inputs and outputs contain no coverage. A time limit reached before any review completes retains the host's partial outcome and diagnostic; stopped scans retain their existing recovery behavior. Standard workers keep their own coverage in their saved results.
+
+For Standard and diff scans, record:
 
 - scan mode and inventory strategy
 - included and excluded paths
@@ -140,7 +142,7 @@ For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repe
 | `directory` | Deterministic non-Git directory inventory |
 | `custom` | Producer-defined inventory described by detailed receipts |
 
-Use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
+For Standard and diff scans, use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
 
 Map detailed ledger closure into completed surface summaries in this order:
 

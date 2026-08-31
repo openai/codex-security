@@ -54,15 +54,14 @@ class ScanContractExamplesTest(unittest.TestCase):
             with self.subTest(schema=schema_path.name):
                 Draft202012Validator.check_schema(read_json(schema_path))
 
-    def test_deep_reducer_schema_accepts_factual_coverage_and_standard_findings(self) -> None:
+    def test_deep_reducer_schema_accepts_standard_findings_without_coverage(self) -> None:
         common_schema = read_json(SCHEMA_DIR / "definitions" / "artifact-common.schema.json")
         scan_draft_schema = read_json(SCHEMA_DIR / "tools" / "scan-draft.schema.json")
         reducer_schema = read_json(SCHEMA_DIR / "tools" / "deep-reducer.schema.json")
-        reducer_coverage = reducer_schema["$defs"]["reductionInput"]["properties"]["coverage"]
-        for field in ("completeness", "deferred"):
-            self.assertNotIn(field, reducer_coverage["properties"])
-            self.assertNotIn(field, reducer_coverage["required"])
-        self.assertEqual(set(reducer_coverage["required"]), {"surfaces", "explicitExclusions"})
+        reduction_input = reducer_schema["$defs"]["reductionInput"]
+        self.assertNotIn("coverage", reduction_input["properties"])
+        self.assertEqual(set(reduction_input["required"]), {"scanId", "findings"})
+        self.assertFalse(reduction_input["additionalProperties"])
         registry = Registry().with_resources(
             (schema["$id"], Resource.from_contents(schema))
             for schema in (common_schema, scan_draft_schema)
@@ -96,39 +95,20 @@ class ScanContractExamplesTest(unittest.TestCase):
         request = {
             "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
             "findings": [finding],
-            "coverage": coverage,
         }
 
         validator.validate(request)
         validator.validate(
             {
                 **request,
+                "complete": True,
+                "handoffClaimToken": "2ea75b4f-f9b2-49b4-a5a9-2a8de8ca9047",
                 "scope": {"summary": "HTTP responses"},
                 "threatModel": {"summary": "Untrusted requests reach responses."},
             }
         )
         validator.validate({**request, "findings": []})
-        validator.validate(
-            {
-                **request,
-                "coverage": {
-                    **coverage,
-                    "openQuestions": [{"question": "Which deployments expose this route?"}],
-                },
-            }
-        )
-        for completeness in ("complete", "partial", "unknown"):
-            with self.subTest(legacy_completeness=completeness):
-                validator.validate(
-                    {
-                        **request,
-                        "coverage": {
-                            **coverage,
-                            "completeness": completeness,
-                            "deferred": [{"id": "old-follow-up", "reason": "Legacy review note."}],
-                        },
-                    }
-                )
+        self.assertFalse(validator.is_valid({**request, "coverage": coverage}))
 
         standard_validator = Draft202012Validator(
             scan_draft_schema, registry=registry, format_checker=FormatChecker()
@@ -139,7 +119,27 @@ class ScanContractExamplesTest(unittest.TestCase):
         }
         standard_validator.validate(standard_request)
         self.assertFalse(standard_validator.is_valid(request))
-        for missing_field in ("completeness", "deferred"):
+        self.assertFalse(standard_validator.is_valid({**request, "coverage": coverage}))
+        for completeness in ("complete", "partial", "unknown"):
+            with self.subTest(standard_completeness=completeness):
+                standard_coverage_request = {
+                    **standard_request,
+                    "coverage": {
+                        **standard_request["coverage"],
+                        "completeness": completeness,
+                    },
+                }
+                standard_validator.validate(standard_coverage_request)
+                self.assertFalse(validator.is_valid(standard_coverage_request))
+        self.assertFalse(
+            standard_validator.is_valid(
+                {
+                    **standard_request,
+                    "coverage": {**standard_request["coverage"], "completeness": "invalid"},
+                }
+            )
+        )
+        for missing_field in ("completeness", "surfaces", "explicitExclusions", "deferred"):
             with self.subTest(standard_missing_coverage_field=missing_field):
                 self.assertFalse(
                     standard_validator.is_valid(
@@ -153,21 +153,6 @@ class ScanContractExamplesTest(unittest.TestCase):
                         }
                     )
                 )
-        for missing_field in ("surfaces", "explicitExclusions"):
-            with self.subTest(deep_missing_coverage_field=missing_field):
-                self.assertFalse(
-                    validator.is_valid(
-                        {
-                            **request,
-                            "coverage": {
-                                field: value
-                                for field, value in coverage.items()
-                                if field != missing_field
-                            },
-                        }
-                    )
-                )
-
         for extra_field in (
             "source_worker_id",
             "unknown_field",
@@ -200,7 +185,7 @@ class ScanContractExamplesTest(unittest.TestCase):
                     )
                 )
 
-        for missing_field in ("scanId", "findings", "coverage"):
+        for missing_field in ("scanId", "findings"):
             with self.subTest(missing_field=missing_field):
                 self.assertFalse(
                     validator.is_valid(
