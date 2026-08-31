@@ -57,7 +57,7 @@ interface PreparedScanDraft {
 
 type PublishScanDraft = (
   draft: PreparedScanDraft,
-  expectedDigest: string,
+  expectedDigest: string | undefined,
   checkpoint: ScanDraftInput,
 ) => Promise<void>;
 
@@ -88,7 +88,11 @@ export async function recordCodexSecurityScanDraft(
 
   for (;;) {
     signal?.throwIfAborted();
-    const preserved = await preserveScanDraft(context, parsed, false);
+    // The coordinator has already accepted and reconciled a terminal Deep
+    // aggregate. Publishing it must not reopen checkpoints or prior drafts.
+    const preserved = context.mode === "deep" && parsed.complete !== false
+      ? { input: parsed, previousDigest: undefined }
+      : await preserveScanDraft(context, parsed, false);
     const reconciled = preserved.input;
     const contract = requireObject(
       context.targetContract,
@@ -104,7 +108,7 @@ export async function recordCodexSecurityScanDraft(
     );
     const target = buildTarget(context, contract, trustedTarget);
     const scope = buildScope(context, trustedScope, reconciled.scope);
-    const findings = buildFindings(reconciled.findings);
+    const findings = buildFindings(reconciled.findings, context.mode);
     const coverage = buildCoverage(
       context,
       contract,
@@ -190,9 +194,10 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
           draftPath,
           "--checkpoint-path",
           checkpointPath,
-          "--expected-draft-digest",
-          expectedDigest,
         ];
+        if (expectedDigest !== undefined) {
+          arguments_.push("--expected-draft-digest", expectedDigest);
+        }
         if (context.handoffClaimToken) {
           arguments_.push("--claim-token", context.handoffClaimToken);
         }
@@ -1388,7 +1393,7 @@ function buildScope(
   };
 }
 
-function buildFindings(findings: JsonObject[]): JsonObject[] {
+function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   const generatedIdentities = findings.map((finding, index) => {
     if (finding.identity !== undefined) return undefined;
     const candidateId = (finding.extensions as JsonObject | undefined)
@@ -1421,7 +1426,7 @@ function buildFindings(findings: JsonObject[]): JsonObject[] {
     );
   }
 
-  return findings.map((finding, index) => {
+  const identified: JsonObject[] = findings.map((finding, index) => {
     const generatedIdentity = generatedIdentities[index];
     if (generatedIdentity === undefined) return { ...finding };
     const identity: JsonObject = { anchor: generatedIdentity.anchor };
@@ -1440,6 +1445,42 @@ function buildFindings(findings: JsonObject[]): JsonObject[] {
       ...finding,
       identity,
     };
+  });
+  if (mode !== "deep") return identified;
+
+  // Independent workers can choose the same semantic identity for different
+  // findings. Assign distinct canonical instances without discarding evidence.
+  const reserved = new Set(identified.map(scanFindingIdentity));
+  const used = new Set<string>();
+  return identified.map((finding) => {
+    const key = scanFindingIdentity(finding);
+    if (!used.has(key)) {
+      used.add(key);
+      return finding;
+    }
+    const identity = finding.identity as JsonObject;
+    const locations = (finding.locations as JsonObject[]).map((location) => JSON.stringify([
+      location.path, location.startLine, location.endLine ?? location.startLine,
+    ])).sort();
+    const digest = createHash("sha256")
+      .update(JSON.stringify([finding.ruleId, identity, locations]))
+      .digest("hex").slice(0, 16);
+    const baseInstance = `${identity.instance ?? "saved"}-${digest}`;
+    let suffix = 2;
+    const distinct: JsonObject & { identity: JsonObject } = {
+      ...finding, identity: { ...identity, instance: baseInstance },
+    };
+    while (reserved.has(scanFindingIdentity(distinct)) || used.has(scanFindingIdentity(distinct))) {
+      distinct.identity.instance = `${baseInstance}-${suffix}`;
+      suffix += 1;
+    }
+    const provenance = finding.provenance as JsonObject;
+    distinct.provenance = {
+      ...provenance,
+      preservedIdentity: provenance.preservedIdentity ?? structuredClone(identity),
+    };
+    used.add(scanFindingIdentity(distinct));
+    return distinct;
   });
 }
 

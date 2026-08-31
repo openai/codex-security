@@ -2,7 +2,6 @@ import { isDeepStrictEqual } from "node:util";
 import {
   parsePersistedScanDraft,
   preserveFindingDetails,
-  preserveScanCoverage,
   saveScanDraftCheckpoint,
   scanFindingIdentity,
   type ScanDraftInput,
@@ -17,6 +16,7 @@ export interface DeepReductionSources {
 
 export interface ReducerArtifactValidation {
   newFindings: number;
+  result: ScanDraftInput;
 }
 
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
@@ -76,9 +76,11 @@ export async function validateReducerArtifacts(input: {
     await writeJsonAtomic(resultPath, result);
   } else {
     validateRetainedFindings(result, [], previous);
+    result.coverage = completedDeepScanCoverage(result.coverage);
   }
   const previousFindingIds = new Set((previous?.findings ?? []).map(scanFindingIdentity));
   return {
+    result,
     newFindings: result.findings.filter((finding) => (
       !previousFindingIds.has(scanFindingIdentity(finding))
     )).length
@@ -117,10 +119,9 @@ export function reconcileDeepReduction(
     }
   }
   retainSourceFindings(result, { discoveries, previous });
-  result.coverage = preserveScanCoverage(result.coverage, [
-    ...discoveries.map((discovery) => discovery.result.coverage),
-    ...(previous ? [previous.coverage] : []),
-  ]);
+  // Each worker is an independent review. Its unfinished review observations
+  // remain in its own saved result rather than becoming parent scan work.
+  result.coverage = completedDeepScanCoverage(result.coverage);
   if (result.threatModel === undefined) {
     const sourceModels = [
       ...discoveries.map((discovery) => discovery.result.threatModel),
@@ -152,6 +153,17 @@ export function reconcileDeepReduction(
     }
   }
   return result;
+}
+
+function completedDeepScanCoverage(coverage: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...coverage,
+    completeness: "complete",
+    surfaces: (coverage.surfaces as Record<string, unknown>[]).filter(
+      (surface) => surface.disposition !== "needs_follow_up",
+    ).map(({ receiptRefs: _workerReceipts, ...surface }) => surface),
+    deferred: [],
+  };
 }
 
 function findingSourceIds(finding: Record<string, unknown>): string[] {

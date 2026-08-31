@@ -1,0 +1,330 @@
+from __future__ import annotations
+
+import copy
+import json
+import uuid
+from argparse import Namespace
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from workbench_test_support import write_checkpoint, write_completed_contract
+
+
+@pytest.fixture
+def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    deep = workbench_api["deep_scan"]
+    monkeypatch.setattr(
+        deep,
+        "_dependencies",
+        deep.DeepScanDependencies(
+            **{
+                name: workbench_api[
+                    "preserve_stopped_results_after_transition"
+                    if name == "preserve_stopped_results"
+                    else name
+                ]
+                for name in deep.DeepScanDependencies.__dataclass_fields__
+            }
+        ),
+    )
+
+    def create(*, mode="deep", scope="."):
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "subdir").mkdir()
+        (target / "subdir" / "extract.py").write_text("# Synthetic scan target\n")
+        scan_dir = tmp_path / "scan"
+        scan_dir.mkdir(mode=0o700)
+        registered = workbench_api["register_cli_scan"](
+            workbench_db,
+            Namespace(
+                repository=str(target),
+                scan_dir=str(scan_dir),
+                recipe_json=json.dumps(
+                    {
+                        "config": {},
+                        "mode": mode,
+                        "repository": str(target),
+                        "target": {
+                            "kind": "repository" if scope == "." else "paths",
+                            "paths": [] if scope == "." else [scope],
+                        },
+                    }
+                ),
+                registration_json_stdin=False,
+                recipe_json_stdin=False,
+                parent_scan_id=None,
+                archive_existing=False,
+                archived_scan_dir=None,
+            ),
+        )
+        scan_id = registered["scanId"]
+        timestamp = workbench_db.execute(
+            "SELECT started_at FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0]
+        if mode == "deep":
+            # The coordinator has already accepted and submitted its final aggregate.
+            # Exercise publication independently of the worker execution lifecycle.
+            with workbench_db:
+                workbench_db.execute(
+                    "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, "
+                    "status, phase, workers, subagents, stop_after_no_new, max_discovery_runs, "
+                    "manifest_path, terminal_reason, created_at, updated_at, completed_at) "
+                    "VALUES (?, 1, 'publication-test', 'succeeded', 'terminal', 1, 0, 1, 1, "
+                    "?, 'saturated', ?, ?, ?)",
+                    (
+                        scan_id,
+                        str(scan_dir / "scan-manifest.json"),
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+        coverage_mode = (
+            "scoped_path" if scope != "." else "deep_repository" if mode == "deep" else "repository"
+        )
+        write_completed_contract(
+            scan_dir,
+            scan_id,
+            target,
+            include_paths=[scope],
+            relative_path="subdir/extract.py",
+            coverage_mode=coverage_mode,
+            inventory_strategy="scoped_path" if scope != "." else "repository",
+        )
+        manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+        findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        coverage["openQuestions"] = [{"question": "Which deployment controls apply?"}]
+        for field in ("documentType", "schemaVersion", "scanId"):
+            coverage.pop(field)
+        # Match the ordinary semantic envelopes written by the host draft writer.
+        manifest = {"scan": {key: manifest["scan"][key] for key in ("target", "scope")}}
+        findings[0]["severity"]["changeConditions"] = "Reassess if the upload route is removed."
+        findings[0]["provenance"]["sourceFindings"] = [
+            {"id": "review-1:candidate-1", "finding": {"summary": "Retained original wording."}}
+        ]
+        for name, value in (
+            ("scan-manifest.json", manifest),
+            ("findings.json", {"findings": findings}),
+            ("coverage.json", coverage),
+        ):
+            (scan_dir / name).write_text(json.dumps(value))
+        return SimpleNamespace(
+            scan_id=scan_id,
+            scan_dir=scan_dir,
+            timestamp=timestamp,
+            findings=findings,
+            coverage=coverage,
+        )
+
+    return create
+
+
+def add_worker(connection, scan, *, status="succeeded") -> Path:
+    worker_id = str(uuid.uuid4())
+    output = scan.scan_dir / "workers" / worker_id
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with connection:
+        connection.execute(
+            "INSERT INTO deep_scan_workers (id, scan_id, kind, status, merge_state, "
+            "prompt_path, artifact_dir, result_manifest_path, attempt, created_at, "
+            "updated_at, completed_at) VALUES (?, ?, 'discovery', ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+            (
+                worker_id,
+                scan.scan_id,
+                status,
+                "merged" if status == "succeeded" else "none",
+                str(output / "prompt.md"),
+                str(output),
+                str(result),
+                scan.timestamp,
+                scan.timestamp,
+                scan.timestamp,
+            ),
+        )
+    return result
+
+
+def complete(workbench_api, connection, scan, *, prepare_only=False):
+    return workbench_api["complete_scan"](
+        connection,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None),
+        prepare_only=prepare_only,
+    )["scan"]
+
+
+def assert_published_aggregate(scan):
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    for finding in findings:
+        for field in ("findingId", "occurrenceId", "fingerprints"):
+            assert finding.pop(field)
+    assert findings == scan.findings
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    for field in ("documentType", "schemaVersion", "scanId"):
+        coverage.pop(field)
+    assert coverage == scan.coverage
+    assert (scan.scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("scope", [".", "subdir"], ids=["repository", "scoped"])
+def test_deep_publication_uses_aggregate_without_worker_coverage(
+    workbench_api, workbench_db, publication_scan, scope
+):
+    scan = publication_scan(scope=scope)
+    result = add_worker(workbench_db, scan)
+    worker_coverage = copy.deepcopy(scan.coverage)
+    worker_coverage["completeness"] = "partial"
+    worker_coverage["surfaces"][0]["disposition"] = "needs_follow_up"
+    worker_coverage["deferred"] = [{"id": "worker-follow-up", "reason": "Review this path again."}]
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": worker_coverage,
+            }
+        )
+    )
+    source_bytes = result.read_bytes()
+
+    completed = complete(workbench_api, workbench_db, scan)
+
+    assert completed["progress"]["status"] == "complete"
+    assert_published_aggregate(scan)
+    assert result.read_bytes() == source_bytes
+
+
+def test_deep_publication_ignores_empty_canceled_checkpoint(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan, status="canceled")
+    checkpoint = write_checkpoint(
+        result.parent / "checkpoints",
+        {
+            "scanId": scan.scan_id,
+            "complete": False,
+            "findings": [],
+            "coverage": {
+                "completeness": "partial",
+                "surfaces": [],
+                "explicitExclusions": [],
+                "deferred": [],
+            },
+        },
+    )
+    source_bytes = checkpoint.read_bytes()
+
+    complete(workbench_api, workbench_db, scan)
+
+    assert_published_aggregate(scan)
+    assert checkpoint.read_bytes() == source_bytes
+    assert not result.exists()
+
+
+@pytest.mark.parametrize("old_result", ["unreadable", "removed"])
+def test_deep_publication_does_not_require_old_worker_files(
+    workbench_api, workbench_db, publication_scan, old_result
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    result.write_text("{old worker output is unavailable")
+    if old_result == "removed":
+        result.unlink()
+
+    completed = complete(workbench_api, workbench_db, scan)
+
+    assert completed["warnings"] == []
+    assert_published_aggregate(scan)
+    if old_result == "removed":
+        assert not result.exists()
+    else:
+        assert result.read_text() == "{old worker output is unavailable"
+
+
+def test_deep_prepare_and_complete_preserve_the_same_aggregate(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    prepared = complete(workbench_api, workbench_db, scan, prepare_only=True)
+    assert prepared["progress"]["status"] == "running"
+    names = ("scan-manifest.json", "findings.json", "coverage.json")
+    published = {name: (scan.scan_dir / name).read_bytes() for name in names}
+
+    complete(workbench_api, workbench_db, scan, prepare_only=True)
+    complete(workbench_api, workbench_db, scan)
+    repeated = complete(workbench_api, workbench_db, scan)
+
+    assert repeated["progress"]["status"] == "complete"
+    assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
+    assert_published_aggregate(scan)
+
+
+def test_stopped_deep_scan_still_salvages_checkpoint_findings(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'reducing', "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    result = add_worker(workbench_db, scan, status="running")
+    later_finding = copy.deepcopy(scan.findings[0])
+    later_finding["identity"]["anchor"] = "later-checkpoint-finding"
+    later_finding["summary"] = "Finding saved after the last completed aggregate."
+    checkpoint = write_checkpoint(
+        result.parent / "checkpoints",
+        {
+            "scanId": scan.scan_id,
+            "complete": False,
+            "findings": [later_finding],
+            "coverage": {
+                "completeness": "partial",
+                "surfaces": [],
+                "explicitExclusions": [],
+                "deferred": [],
+            },
+        },
+    )
+    result.write_text("{interrupted worker output")
+
+    stopped = workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Scan interrupted."
+        ),
+    )["scan"]
+
+    assert stopped["progress"]["status"] == "failed"
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert manifest["scan"]["status"] == "failed"
+    assert coverage["completeness"] == "partial"
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert {finding["summary"] for finding in findings} == {
+        scan.findings[0]["summary"],
+        later_finding["summary"],
+    }
+    assert checkpoint.is_file()
+    assert result.read_text() == "{interrupted worker output"
+
+
+def test_standard_publication_preserves_deliberately_partial_coverage(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan(mode="standard")
+    scan.coverage["completeness"] = "partial"
+    scan.coverage["deferred"] = [{"id": "remaining-review", "reason": "Another surface remains."}]
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+
+    complete(workbench_api, workbench_db, scan)
+
+    assert_published_aggregate(scan)

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } fr
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { build } from "esbuild";
+import { testDeepScanPublication } from "./deep_scan_publication_cases.mjs";
 
 const bundle = await build({
   bundle: true,
@@ -3962,6 +3963,10 @@ try {
   await testSandboxDiagnosticSurvivesArtifactRetries();
   await testCompletionOrdering();
   await testSaturationPreservesFindingAlreadyBuffered();
+  await testDeepScanPublication({
+    fixtureRun, FakeStore, FakeExecutor, DeepScanCoordinator, deferred,
+    immediateClock, eventually, standardScanDraft,
+  });
   await testDirectReducerCannotDropAcceptedFinding();
   await testSaturationDrainsBufferedAndCancelsInflight();
   await testDiscoveryDeadlineDrainsActiveReducerAndPreservesFindings();

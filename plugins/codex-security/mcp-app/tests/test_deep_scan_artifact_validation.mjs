@@ -210,13 +210,19 @@ async function testReducerValidation(root) {
   await assert.rejects(validateSnapshot(), /unaccounted source findings/);
   await writeResult(resultPath, draft([firstFinding, secondFinding]));
   await writeFile(first.resultPath, "{source changed after dispatch");
-  assert.deepEqual(await validateSnapshot(), { newFindings: 2 });
+  const validatedSnapshot = await validateSnapshot();
+  assert.equal(validatedSnapshot.newFindings, 2);
   const admitted = JSON.parse(await readFile(resultPath, "utf8"));
+  assert.deepEqual(
+    validatedSnapshot.result,
+    admitted,
+    "validation returns the same reconciled result that was accepted on disk",
+  );
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, ["worker-001:1"]);
   sources.previous = structuredClone(admitted);
   sources.previous.findings[0].summary = "Additional proof established by the previous reducer.";
   await writeResult(resultPath, draft([firstFinding, secondFinding]));
-  assert.deepEqual(await validateSnapshot(), { newFindings: 0 });
+  assert.equal((await validateSnapshot()).newFindings, 0);
   assert.equal(
     JSON.parse(await readFile(resultPath, "utf8")).findings[0].provenance.previousFindings[0].summary,
     sources.previous.findings[0].summary,
@@ -294,7 +300,7 @@ async function testReducerValidation(root) {
       deferred: [],
     },
   }));
-  await validateReducerArtifacts({
+  const validatedCoverage = await validateReducerArtifacts({
     artifacts,
     artifactDir,
     resultPath,
@@ -305,14 +311,17 @@ async function testReducerValidation(root) {
         result: draft([firstFinding], {
           coverage: {
             completeness: "partial",
-            surfaces: [{
-              riskArea: "filesystem",
-              notes: "The discovery worker still needed runtime validation.",
-              disposition: "needs_follow_up",
-              label: "Archive extraction",
-            }],
+            surfaces: [
+              {
+                riskArea: "filesystem",
+                notes: "The discovery worker still needed runtime validation.",
+                disposition: "needs_follow_up",
+                label: "Archive extraction",
+              },
+              { label: "Worker-only handler", disposition: "needs_follow_up" },
+            ],
             explicitExclusions: [],
-            deferred: [],
+            deferred: [{ reason: "An independent worker suggested another review." }],
           },
         }),
       }],
@@ -321,11 +330,16 @@ async function testReducerValidation(root) {
   }, scanId);
   const reconciledCoverage = JSON.parse(await readFile(resultPath, "utf8")).coverage;
   assert.deepEqual(
-    reconciledCoverage.surfaces,
-    [resolvedCoverageSurface],
-    "the reducer's updated semantic surface must supersede stale source coverage",
+    reconciledCoverage,
+    {
+      completeness: "complete",
+      surfaces: [resolvedCoverageSurface],
+      explicitExclusions: [],
+      deferred: [],
+    },
+    "the accepted aggregate retains its own coverage without inheriting worker review work",
   );
-  assert.equal(reconciledCoverage.completeness, "complete");
+  assert.deepEqual(validatedCoverage.result.coverage, reconciledCoverage);
 
   await writeResult(resultPath, draft([]));
   await assert.rejects(
@@ -411,16 +425,49 @@ async function testReducerValidation(root) {
     ...(previousReducerResultPath ? { previousReducerResultPath } : {})
   }, scanId);
 
-  assert.deepEqual(await validate(), { newFindings: 1 });
+  assert.equal((await validate()).newFindings, 1);
+
+  const legacyPartial = draft([firstFinding], {
+    coverage: {
+      completeness: "partial",
+      surfaces: [
+        { ...resolvedCoverageSurface, receiptRefs: ["artifacts/missing-worker-receipt.md"] },
+        { label: "Legacy follow-up", disposition: "needs_follow_up" },
+      ],
+      explicitExclusions: [{ pattern: "vendor", reason: "Outside the requested source scope." }],
+      deferred: [{ reason: "A previous reducer retained worker follow-up work." }],
+      openQuestions: ["Should a future review include generated handlers?"],
+    },
+  });
+  await writeResult(resultPath, legacyPartial);
+  const legacyArtifact = await readFile(resultPath, "utf8");
+  const resumed = await validate();
+  assert.equal(resumed.newFindings, 1);
+  assert.deepEqual(resumed.result, {
+    ...legacyPartial,
+    coverage: {
+      ...legacyPartial.coverage,
+      completeness: "complete",
+      surfaces: [resolvedCoverageSurface],
+      deferred: [],
+    },
+  });
+  assert.equal(
+    await readFile(resultPath, "utf8"),
+    legacyArtifact,
+    "resuming a legacy partial reducer returns normalized coverage without rewriting its original artifact",
+  );
+  await writeResult(resultPath, { ...legacyPartial, complete: false });
+  await assert.rejects(validate(), /only a checkpoint|not complete/);
 
   await writeResult(resultPath, draft([]));
-  assert.deepEqual(await validate(), { newFindings: 0 });
+  assert.equal((await validate()).newFindings, 0);
 
   await writeResult(resultPath, { ...draft([firstFinding]), resultPath: "/tmp/result.json" });
   await assert.rejects(validate(), /invalid Standard scan result/);
 
   await writeResult(resultPath, draft([firstFinding, secondFinding]));
-  assert.deepEqual(await validate(), { newFindings: 2 });
+  assert.equal((await validate()).newFindings, 2);
 
   const previousReducerResultPath = path.join(
     artifacts.dedupRoot,
@@ -430,16 +477,16 @@ async function testReducerValidation(root) {
   );
   await mkdir(path.dirname(previousReducerResultPath), { recursive: true });
   await writeResult(previousReducerResultPath, draft([firstFinding]));
-  assert.deepEqual(
-    await validate(previousReducerResultPath),
-    { newFindings: 1 }
+  assert.equal(
+    (await validate(previousReducerResultPath)).newFindings,
+    1
   );
 
   const renamedTitle = { ...firstFinding, title: "Stronger explanation of the same finding." };
   await writeResult(resultPath, draft([renamedTitle, secondFinding]));
-  assert.deepEqual(
-    await validate(previousReducerResultPath),
-    { newFindings: 1 }
+  assert.equal(
+    (await validate(previousReducerResultPath)).newFindings,
+    1
   );
 
   await writeResult(previousReducerResultPath, draft([firstFinding, secondFinding]));
@@ -451,9 +498,9 @@ async function testReducerValidation(root) {
 
   const replacement = finding("replacement", "src/c.js");
   await writeResult(resultPath, draft([firstFinding, secondFinding, replacement]));
-  assert.deepEqual(
-    await validate(previousReducerResultPath),
-    { newFindings: 1 }
+  assert.equal(
+    (await validate(previousReducerResultPath)).newFindings,
+    1
   );
 
   const implicitFirst = { ...firstFinding };
@@ -461,9 +508,9 @@ async function testReducerValidation(root) {
   const implicitRenamed = { ...implicitFirst, summary: "More complete evidence." };
   await writeResult(previousReducerResultPath, draft([implicitFirst]));
   await writeResult(resultPath, draft([implicitRenamed]));
-  assert.deepEqual(
-    await validate(previousReducerResultPath),
-    { newFindings: 0 }
+  assert.equal(
+    (await validate(previousReducerResultPath)).newFindings,
+    0
   );
   await writeResult(resultPath, draft([{
     ...implicitRenamed,
@@ -472,9 +519,9 @@ async function testReducerValidation(root) {
       { path: "src/another-affected-location.js", startLine: 4 }
     ]
   }]));
-  assert.deepEqual(
-    await validate(previousReducerResultPath),
-    { newFindings: 0 },
+  assert.equal(
+    (await validate(previousReducerResultPath)).newFindings,
+    0,
     "An existing finding without an explicit identity may gain affected locations."
   );
 
@@ -487,15 +534,15 @@ async function testReducerValidation(root) {
 
   await writeResult(resultPath, draft([firstFinding]));
   await writeResult(first.resultPath, { ...draft([firstFinding]), scanId: otherScanId });
-  assert.deepEqual(
-    await validate(),
-    { newFindings: 1 },
+  assert.equal(
+    (await validate()).newFindings,
+    1,
     "A completed aggregate must not reread already-consumed Standard results."
   );
   await writeFile(first.resultPath, "{invalid Standard scan\n");
-  assert.deepEqual(
-    await validate(),
-    { newFindings: 1 },
+  assert.equal(
+    (await validate()).newFindings,
+    1,
     "Accepted Standard inputs were already validated by the reducer writer."
   );
   await writeResult(first.resultPath, draft([firstFinding]));

@@ -3,13 +3,10 @@ import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import {
   createDeepScanArtifacts,
-  ensureDeepScanDirectories,
-  readJsonObject,
-  requireRegularFile
+  ensureDeepScanDirectories
 } from "./artifacts.js";
 import { validateDiscoveryArtifacts, validateReducerArtifacts } from "./artifact-validation.js";
 import {
-  parsePersistedScanDraft,
   scanDraftInputSchema,
   type ScanDraftInput
 } from "../artifact-scan-draft.js";
@@ -51,13 +48,16 @@ type SchedulerSettlement =
   | { status: "fulfilled"; outcome: SchedulerOutcome }
   | { status: "rejected"; error: unknown };
 
+type AcceptedReducer = Omit<SuccessfulDedupOutcome, "result">;
+
 interface SchedulerResult {
   reason: DeepScanTerminalReason;
   omittedWorkerIds: string[];
   canceledWorkerIds: string[];
   accepted: AcceptedDiscovery[];
   mergedWorkerIds: string[];
-  reducers: SuccessfulDedupOutcome[];
+  reducers: AcceptedReducer[];
+  result?: ScanDraftInput;
 }
 
 type CoordinatorPhase = "setup" | "discovery" | "terminal";
@@ -68,7 +68,7 @@ interface SchedulerAudit {
   omittedWorkerIds: string[];
   canceledWorkerIds: string[];
   bufferedWorkerIds: string[];
-  reducers: SuccessfulDedupOutcome[];
+  reducers: AcceptedReducer[];
   executions: WorkerExecutionAudit[];
 }
 
@@ -292,9 +292,8 @@ export class DeepScanCoordinator {
       const schedulerResult = await this.runScheduler();
       if (this.canceled || this.externallyFailed) return;
       this.phase = "terminal";
-      const latestReducer = schedulerResult.reducers.at(-1);
-      const draft = latestReducer
-        ? parsePersistedScanDraft(await readJsonObject(latestReducer.resultPath))
+      const draft = schedulerResult.result
+        ? structuredClone(schedulerResult.result)
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
@@ -309,6 +308,26 @@ export class DeepScanCoordinator {
           });
       if (draft.scanId !== this.state.scanId) {
         throw new Error("Deep Scan aggregate does not match its authoritative scan identity.");
+      }
+      // Saturation can race with a worker's durable acceptance. Keep those
+      // already-validated findings without restarting discovery or reducing
+      // them again, and without reopening worker files during publication.
+      const omitted = new Set(schedulerResult.omittedWorkerIds);
+      for (const worker of schedulerResult.accepted) {
+        if (!omitted.has(worker.id)) continue;
+        for (const [index, finding] of worker.result.findings.entries()) {
+          const original = structuredClone(finding);
+          delete (original.provenance as Record<string, unknown>).sourceFindingIds;
+          const sourceId = `${worker.id}:${index}`;
+          draft.findings.push({
+            ...structuredClone(finding),
+            provenance: {
+              ...finding.provenance as Record<string, unknown>,
+              sourceFindingIds: [sourceId],
+              sourceFindings: [{ id: sourceId, finding: original }],
+            },
+          });
+        }
       }
       await this.options.onComplete?.(draft, this.publicationAbortController.signal);
       if (this.canceled || this.externallyFailed) return;
@@ -605,7 +624,9 @@ export class DeepScanCoordinator {
     this.audit.mergedWorkerIds = mergedDiscoveries.map((worker) => worker.id);
     this.audit.canceledWorkerIds = [...canceledWorkerIds];
     this.audit.executions = await this.recoverPersistedExecutions();
-    const reducerOutcomes = await this.recoverCompletedReducers(recovered);
+    const recoveredReducers = await this.recoverCompletedReducers(recovered);
+    const reducerOutcomes = recoveredReducers.reducers;
+    let latestResult = recoveredReducers.result;
     let buffer: AcceptedDiscovery[] = recovered.filter((worker) => !mergedIds.has(worker.id));
     let reducer: Promise<DedupOutcome> | undefined;
     let previousReducerResultPath = reducerOutcomes.at(-1)?.resultPath;
@@ -745,7 +766,9 @@ export class DeepScanCoordinator {
       this.state = outcome.run;
       previousReducerResultPath = outcome.resultPath;
       mergedDiscoveries.push(...outcome.consumed);
-      reducerOutcomes.push(outcome);
+      const { result: acceptedResult, ...metadata } = outcome;
+      latestResult = acceptedResult;
+      reducerOutcomes.push(metadata);
       this.audit.reducers = [...reducerOutcomes];
       this.audit.mergedWorkerIds = unique(mergedDiscoveries.map((worker) => worker.id));
       this.audit.bufferedWorkerIds = buffer.map((worker) => worker.id);
@@ -907,7 +930,9 @@ export class DeepScanCoordinator {
       this.state = outcome.run;
       previousReducerResultPath = outcome.resultPath;
       mergedDiscoveries.push(...outcome.consumed);
-      reducerOutcomes.push(outcome);
+      const { result: acceptedResult, ...metadata } = outcome;
+      latestResult = acceptedResult;
+      reducerOutcomes.push(metadata);
       this.audit.reducers = [...reducerOutcomes];
       this.audit.mergedWorkerIds = unique(mergedDiscoveries.map((worker) => worker.id));
       this.audit.bufferedWorkerIds = buffer.map((worker) => worker.id);
@@ -948,7 +973,8 @@ export class DeepScanCoordinator {
       canceledWorkerIds: unique(canceledWorkerIds),
       accepted,
       mergedWorkerIds: unique(mergedDiscoveries.map((worker) => worker.id)),
-      reducers: reducerOutcomes
+      reducers: reducerOutcomes,
+      result: latestResult,
     };
   }
 
@@ -959,7 +985,7 @@ export class DeepScanCoordinator {
       if (!worker.resultManifestPath || !worker.completionSequence) {
         throw new Error(`Accepted discovery ${worker.id} has incomplete persisted evidence.`);
       }
-      await validateDiscoveryArtifacts(
+      const result = await validateDiscoveryArtifacts(
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId
@@ -970,6 +996,7 @@ export class DeepScanCoordinator {
         label: basename(dirname(worker.promptPath)),
         artifactDir: worker.artifactDir,
         resultPath: worker.resultManifestPath,
+        result,
         completionSequence: worker.completionSequence,
         attempt: worker.attempt,
         ...(worker.threadId ? { threadId: worker.threadId } : {}),
@@ -981,10 +1008,11 @@ export class DeepScanCoordinator {
 
   private async recoverCompletedReducers(
     discoveries: AcceptedDiscovery[]
-  ): Promise<SuccessfulDedupOutcome[]> {
+  ): Promise<{ reducers: AcceptedReducer[]; result?: ScanDraftInput }> {
     const discoveriesById = new Map(discoveries.map((worker) => [worker.id, worker]));
     const inputs = this.state.persistedDedupInputs ?? [];
-    const outcomes: SuccessfulDedupOutcome[] = [];
+    const outcomes: AcceptedReducer[] = [];
+    let latestResult: ScanDraftInput | undefined;
     const completedReducers = (this.state.persistedWorkers ?? [])
       .filter((worker) => worker.kind === "dedup" && worker.status === "succeeded")
       .sort((left, right) => (
@@ -1004,13 +1032,14 @@ export class DeepScanCoordinator {
         throw new Error(`Completed reducer ${worker.id} has incomplete persisted inputs.`);
       }
       const accepted = consumed as AcceptedDiscovery[];
-      const { newFindings } = await validateReducerArtifacts({
+      const { newFindings, result } = await validateReducerArtifacts({
         artifacts: this.artifacts,
         artifactDir: worker.artifactDir,
         resultPath: worker.resultManifestPath,
         reducerId: worker.id,
         previousReducerResultPath: outcomes.at(-1)?.resultPath
       }, this.state.scanId);
+      latestResult = result;
       noNewStreak = newFindings > 0 ? 0 : noNewStreak + accepted.length;
       const evidence = await persistedWorkerEvidence(worker);
       outcomes.push({
@@ -1025,7 +1054,7 @@ export class DeepScanCoordinator {
         run: { ...this.state, noNewStreak }
       });
     }
-    return outcomes;
+    return { reducers: outcomes, result: latestResult };
   }
 
   private async recoverPersistedExecutions(): Promise<WorkerExecutionAudit[]> {

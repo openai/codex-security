@@ -87,6 +87,11 @@ try {
 
   const inputs = await getCodexSecurityDeepReducerInputs(context);
   await assert.rejects(
+    recordCodexSecurityDeepReduction(context, draft([], { complete: false })),
+    /only a checkpoint/,
+    "host-owned coverage must not accept an unfinished reducer result",
+  );
+  await assert.rejects(
     recordCodexSecurityDeepReduction(context, draft([shared])),
     /unaccounted|discarded.*finding/,
     "a successful reduction must account for every fresh finding, not just one",
@@ -150,7 +155,8 @@ try {
   const rejectedCoverage = {
     completeness: "partial",
     surfaces: [
-      { label: "SQL route", disposition: "rejected", notes: "Parameterized queries prevent injection." },
+      { label: "SQL route", disposition: "rejected", notes: "Parameterized queries prevent injection.",
+        receiptRefs: ["artifacts/missing-worker-receipt.md"] },
       { label: "Archive upload", disposition: "needs_follow_up", notes: "The guard still needs review." },
     ],
     explicitExclusions: [{ pattern: "vendor", reason: "Outside the requested source scope." }],
@@ -161,17 +167,63 @@ try {
     workersRoot, label: "discovery-coverage", id: "worker-coverage",
     result: draft([], { coverage: rejectedCoverage }), completionSequence: 4,
   });
+  const unknownCoverageWorker = await createWorker({
+    workersRoot, label: "discovery-unknown", id: "worker-unknown",
+    result: draft([], { coverage: { ...draft([]).coverage, completeness: "unknown" } }),
+    completionSequence: 5,
+  });
+  const coverageWorkers = [coverageWorker, unknownCoverageWorker];
+  const originalWorkerArtifacts = await Promise.all(
+    coverageWorkers.map((worker) => readFile(worker.resultPath, "utf8")),
+  );
   const coverageRoot = path.join(dedupRoot, "dedup-coverage", "output");
   await mkdir(coverageRoot, { recursive: true });
   const coverageContext = {
     ...context, root: coverageRoot,
-    deepReducer: { scanRoot, claimedWorkers: [coverageWorker] },
+    deepReducer: { scanRoot, claimedWorkers: coverageWorkers },
   };
+  assert.deepEqual(
+    (await getCodexSecurityDeepReducerInputs(coverageContext)).discoveries,
+    coverageWorkers.map((worker) => ({ workerId: worker.id, result: withSourceRefs(worker) })),
+    "the reducer can still inspect each worker's original coverage evidence",
+  );
   await recordCodexSecurityDeepReduction(coverageContext, draft([]));
   assert.deepEqual(
     JSON.parse(await readFile(path.join(coverageRoot, "result.json"), "utf8")).coverage,
-    rejectedCoverage,
-    "reduction preserves rejection reasons and unfinished review even when the model omits them",
+    draft([]).coverage,
+    "accepted reductions do not inherit worker coverage even when every worker is partial or unknown",
+  );
+
+  const submittedCoverage = {
+    completeness: "partial",
+    surfaces: [
+      { label: "Response rendering", disposition: "no_issue_found", notes: "All outputs use contextual encoding.",
+        receiptRefs: ["artifacts/missing-worker-receipt.md"] },
+      { label: "Upload parsing", disposition: "rejected", notes: "Archive entries are not extracted." },
+      { label: "Alternate handler", disposition: "needs_follow_up", notes: "A worker suggested another review." },
+    ],
+    explicitExclusions: [{ pattern: "generated", reason: "Generated files are outside the requested scope." }],
+    deferred: [{ reason: "Repeat the alternate handler review.", paths: ["src/alternate.ts"] }],
+    openQuestions: ["Should future scans include generated handlers?"],
+  };
+  await recordCodexSecurityDeepReduction(coverageContext, draft([], { coverage: submittedCoverage }));
+  assert.deepEqual(
+    JSON.parse(await readFile(path.join(coverageRoot, "result.json"), "utf8")).coverage,
+    {
+      ...submittedCoverage,
+      completeness: "complete",
+      surfaces: [
+        { label: "Response rendering", disposition: "no_issue_found", notes: "All outputs use contextual encoding." },
+        submittedCoverage.surfaces[1],
+      ],
+      deferred: [],
+    },
+    "the host retains reviewed descriptions without linking missing optional worker receipts",
+  );
+  assert.deepEqual(
+    await Promise.all(coverageWorkers.map((worker) => readFile(worker.resultPath, "utf8"))),
+    originalWorkerArtifacts,
+    "completing aggregate coverage must not rewrite raw worker evidence",
   );
 
   const collision = { ...independent, ruleId: shared.ruleId, identity: shared.identity };
@@ -258,9 +310,21 @@ try {
   const enrichedPrevious = structuredClone(mergedWithSources);
   enrichedPrevious.findings[0].summary = "The earlier reduction established an additional reachable output route.";
   enrichedPrevious.findings[0].validation = { summary: "Both output routes bypass the same encoding control." };
-  await writeFile(path.join(outputRoot, "result.json"), JSON.stringify(enrichedPrevious));
+  enrichedPrevious.coverage = rejectedCoverage;
+  const previousArtifact = JSON.stringify(enrichedPrevious);
+  await writeFile(path.join(outputRoot, "result.json"), previousArtifact);
   await recordCodexSecurityDeepReduction(nextContext, merged);
   const preservedEnrichment = JSON.parse(await readFile(path.join(nextOutputRoot, "result.json"), "utf8"));
+  assert.deepEqual(
+    preservedEnrichment.coverage,
+    merged.coverage,
+    "a previous reducer's partial coverage is not inherited by a subsequent accepted reduction",
+  );
+  assert.equal(
+    await readFile(path.join(outputRoot, "result.json"), "utf8"),
+    previousArtifact,
+    "the original previous reduction remains available without rewriting its coverage",
+  );
   assert.equal(
     preservedEnrichment.findings[0].provenance.previousFindings[0].summary,
     enrichedPrevious.findings[0].summary,
@@ -291,6 +355,13 @@ try {
       deepReducer: { ...context.deepReducer, claimedWorkers: [first, first] }
     }),
     /repeats assigned Standard scan worker/
+  );
+
+  await writeFile(first.resultPath, JSON.stringify({ ...first.result, complete: false }));
+  await assert.rejects(
+    getCodexSecurityDeepReducerInputs(context),
+    /only a checkpoint/,
+    "host-owned coverage must not admit unfinished Standard worker results",
   );
 
   await writeFile(first.resultPath, "{invalid Standard scan\n");

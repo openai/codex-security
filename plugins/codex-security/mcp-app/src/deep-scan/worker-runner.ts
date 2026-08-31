@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
+import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import {
   validateDiscoveryArtifacts,
   validateReducerArtifacts
@@ -38,6 +39,7 @@ export interface AcceptedDiscovery {
   label: string;
   artifactDir: string;
   resultPath: string;
+  result: ScanDraftInput;
   completionSequence: number;
   attempt: number;
   threadId?: string;
@@ -62,6 +64,7 @@ export interface SuccessfulDedupOutcome {
   id: string;
   consumed: AcceptedDiscovery[];
   resultPath: string;
+  result: ScanDraftInput;
   newFindings: number;
   attempt: number;
   threadId?: string;
@@ -174,7 +177,7 @@ export class DeepScanWorkerRunner {
       artifactDir,
       attempt: 1
     });
-    let discoveryValidated = false;
+    let discoveryResult: ScanDraftInput | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId,
       kind: "discovery",
@@ -184,8 +187,7 @@ export class DeepScanWorkerRunner {
       artifactContext: { root: artifactDir, layout: "worker" },
       subagents: run.config.subagents,
       validate: async () => {
-        await validateDiscoveryArtifacts(artifacts, files.resultPath, run.scanId);
-        discoveryValidated = true;
+        discoveryResult = await validateDiscoveryArtifacts(artifacts, files.resultPath, run.scanId);
       },
       beforeRetry: async (attempt) => {
         await archiveDirectory(
@@ -203,7 +205,7 @@ export class DeepScanWorkerRunner {
       }, outcome.attempt, outcome.threadId);
       outcome = { ...outcome, status: "canceled" };
     }
-    if (!discoveryValidated) {
+    if (!discoveryResult) {
       await fs.rm(files.resultPath, { force: true });
     }
     const basePromptSha256 = sha256(basePrompt);
@@ -280,6 +282,7 @@ export class DeepScanWorkerRunner {
         label: workerLabel,
         artifactDir,
         resultPath: files.resultPath,
+        result: discoveryResult!,
         completionSequence: persisted.completionSequence,
         attempt: outcome.attempt,
         threadId: outcome.threadId,
@@ -442,6 +445,7 @@ export class DeepScanWorkerRunner {
       id: reducerId,
       consumed,
       resultPath,
+      result: reducerValidation.result,
       newFindings: reducerValidation.newFindings,
       attempt: outcome.attempt,
       threadId: outcome.threadId,

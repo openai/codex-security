@@ -1534,7 +1534,9 @@ def complete_scan_locked(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
             completion_binding=completion_binding,
-            completion_warnings=warnings,
+            # Deep has already accepted its aggregate. Publication must not
+            # recover worker-local drafts or revise the aggregate's coverage.
+            completion_warnings=warnings if scan["mode"] != "deep" else None,
             draft_documents=saved_results.merge_saved_results(
                 scan_dir,
                 scan["id"],
@@ -1547,7 +1549,7 @@ def complete_scan_locked(
                 stopped=False,
                 reason="",
             )
-            if current_manifest_path is not None and not already_sealed
+            if scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
             else None,
         )
         add_warning()
