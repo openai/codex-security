@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,15 +41,11 @@ function testcase(name: string, status = "") {
 }
 
 async function compare(baseline: string, ...candidates: string[]) {
-  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-  if (python === null) throw new Error("A Python interpreter is required.");
   const child = Bun.spawn({
     cmd: [
-      python,
-      "-I",
-      "-B",
+      "node",
       fileURLToPath(
-        new URL("../scripts/compare-test-reports.py", import.meta.url),
+        new URL("../scripts/compare-test-reports.mjs", import.meta.url),
       ),
       baseline,
       ...candidates,
@@ -88,7 +84,7 @@ describe("JUnit inventory comparison", () => {
       ),
       "reports/runner-windows-latest-shard-*.xml",
     ];
-    const mock = `python3() {
+    const mock = `node() {
   printf '%s\\n' "$3"
   [[ "$3" != "$CODEX_SECURITY_TEST_FAIL_REPORT" ]]
 }`;
@@ -128,7 +124,143 @@ describe("JUnit inventory comparison", () => {
     await fixture.report("shard-2.xml", [passed]);
     const result = await compare(baseline, join(fixture.root, "shard-*.xml"));
     expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toBe("");
     expect(result.stdout).toContain("combined test time: 2.50s");
+  });
+
+  test("parses XML entities while ignoring comments and CDATA markup", async () => {
+    const fixture = await fixtures();
+    const baseline = await fixture.report("baseline.xml", [
+      testcase("a &amp; &quot; &apos; &lt; &gt;"),
+    ]);
+    const candidate = join(fixture.root, "candidate.xml");
+    await writeFile(
+      candidate,
+      `<?xml version="1.0"?>
+<testsuites tests="1" time="1.25"><testsuite>
+<!-- <testcase name="comment"><failure/></testcase> -->
+<system-out><![CDATA[<testcase name="log"><failure/></testcase>]]></system-out>
+${testcase("&#97; &#38; &#x22; &#39; &#60; &#62;")}
+</testsuite></testsuites>`,
+    );
+    const result = await compare(baseline, candidate);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toBe("");
+  });
+
+  test("normalizes report paths and rejects duplicates across candidate files", async () => {
+    const fixture = await fixtures();
+    const original = testcase("portable");
+    const baseline = await fixture.report("baseline.xml", [original]);
+    const candidate = await fixture.report("candidate.xml", [
+      original.replace(
+        "tests-ts/example.test.ts",
+        "./tests-ts\\example.test.ts",
+      ),
+    ]);
+    expect((await compare(baseline, candidate)).status).toBe(0);
+    const result = await compare(baseline, candidate, candidate);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Extra (1): tests-ts/example.test.ts > example > portable > passed",
+    );
+  });
+
+  test("preserves file, character-class, hidden-file, and nonrecursive glob matching", async () => {
+    const fixture = await fixtures();
+    const cases = [testcase("portable")];
+    const baseline = await fixture.report("baseline.xml", cases);
+    const directory = join(fixture.root, "reports with spaces");
+    await mkdir(directory);
+    await fixture.report("reports with spaces/shard-a.xml", cases);
+    await fixture.report("reports with spaces/.hidden.xml", [
+      testcase("hidden"),
+    ]);
+    await mkdir(join(directory, "nested"));
+    await fixture.report("reports with spaces/nested/shard-b.xml", [
+      testcase("nested"),
+    ]);
+    for (const pattern of [
+      "reports with spaces/shard-?.xml",
+      "reports with spaces/shard-[ab].xml",
+      "reports with spaces/shard-[!b].xml",
+      "reports with spaces/*.xml",
+      "**/shard-*.xml",
+    ]) {
+      const result = await compare(baseline, join(fixture.root, pattern));
+      expect(result.status, `${pattern}: ${result.stderr}`).toBe(0);
+    }
+    const hidden = await fixture.report("hidden-baseline.xml", [
+      testcase("hidden"),
+    ]);
+    expect((await compare(hidden, join(directory, ".*.xml"))).status).toBe(0);
+    for (const name of ["{a,b}.xml", "!report.xml", "@(shard).xml"]) {
+      const path = await fixture.report(name, cases);
+      expect((await compare(baseline, path)).status, name).toBe(0);
+    }
+  });
+
+  test("detects error status and nested summary failures with failure overriding skipped", async () => {
+    const fixture = await fixtures();
+    const baseline = await fixture.report("baseline.xml", [
+      testcase("example"),
+    ]);
+    for (const status of ["<error/><skipped/>", "<skipped/><error/>"]) {
+      const candidate = await fixture.report("error.xml", [
+        testcase("example", status),
+      ]);
+      const result = await compare(baseline, candidate);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("test run failed");
+      expect(result.stderr).toContain("example > example > failed");
+      expect(result.stderr).not.toContain("example > example > skipped");
+    }
+    const nested = join(fixture.root, "nested.xml");
+    await writeFile(
+      nested,
+      `<testsuites tests="1"><testsuite><testsuite errors="1">${testcase("example")}</testsuite></testsuite></testsuites>`,
+    );
+    const result = await compare(baseline, nested);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("test run failed");
+  });
+
+  test("rejects malformed XML and invalid report numbers", async () => {
+    const fixture = await fixtures();
+    const baseline = await fixture.report("baseline.xml", [
+      testcase("example"),
+    ]);
+    for (const xml of [
+      "<testsuite><testcase></testsuite>",
+      "<testsuite><testcase/>",
+      '<testsuite><testcase name="a" name="b"/></testsuite>',
+      '<testsuite><testcase name="&missing;"/></testsuite>',
+      "<testsuite><testcase/></testsuite><extra/>",
+      '<testsuite tests="1.0"><testcase/></testsuite>',
+      '<testsuite failures="invalid"><testcase/></testsuite>',
+      '<testsuite time="1oops"><testcase/></testsuite>',
+    ]) {
+      const candidate = join(fixture.root, "invalid.xml");
+      await writeFile(candidate, xml);
+      const result = await compare(baseline, candidate);
+      expect(result.status, xml).toBe(1);
+      expect(result.stdout).not.toContain("Identical test inventory");
+    }
+  });
+
+  test("uses count and timing defaults and only direct unqualified status children", async () => {
+    const fixture = await fixtures();
+    const baseline = await fixture.report("baseline.xml", [
+      testcase("example"),
+    ]);
+    const candidate = join(fixture.root, "defaults.xml");
+    await writeFile(
+      candidate,
+      `<testsuite xmlns:other="urn:example">${testcase("example", "<properties><failure/></properties><other:error/>")}</testsuite>`,
+    );
+    const result = await compare(baseline, candidate);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("| defaults.xml | 1 | 0 | 0.00 |");
   });
 
   test("rejects ambiguous test identities even when totals match", async () => {

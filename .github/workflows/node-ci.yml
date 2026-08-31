@@ -82,11 +82,6 @@ jobs:
             exit 1
           fi
 
-      - name: Check plugin source compatibility
-        if: steps.scope.outputs.ci-mode == 'markdown'
-        run: |
-          python .github/scripts/check_plugin_source_compatibility.py
-
       - name: Set up pnpm
         if: steps.scope.outputs.check-markdown == 'true'
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -100,6 +95,11 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "22.13.0"
+
+      - name: Check plugin source compatibility
+        if: steps.scope.outputs.ci-mode == 'markdown'
+        run: |
+          node .github/scripts/check_plugin_source_compatibility.mjs
 
       - name: Install dependencies
         if: steps.scope.outputs.check-markdown == 'true'
@@ -362,6 +362,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -376,11 +380,13 @@ jobs:
           sudo apt-get install --yes ripgrep
       - name: Check plugin source compatibility
         run: |
-          python -m ruff check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
-          python -m ruff format --check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
-          python .github/scripts/check_plugin_source_compatibility.py
+          python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
+          python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
+          node .github/scripts/check_plugin_source_compatibility.mjs
+      - name: Test source compatibility checker
+        run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
       - name: Test Python source contracts
-        run: python -m pytest .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security/tests -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
+        run: python -m pytest plugins/codex-security/tests -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
       - name: Upload Python test reports
         if: always()
         continue-on-error: true
@@ -391,10 +397,6 @@ jobs:
           path: reports/python.xml
           if-no-files-found: warn
           retention-days: 14
-      - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: "22.13.0"
       - name: Test deterministic triage eval contracts
         working-directory: plugins/codex-security/skills/triage-finding/evals
         run: node --run test:deterministic

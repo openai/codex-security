@@ -98,9 +98,11 @@
     "fast-check": "4.9.0",
     "ink-testing-library": "4.0.0",
     "json-schema-to-typescript": "15.0.4",
+    "minimatch": "10.2.6",
     "postcss": "8.5.23",
     "prettier": "3.2.5",
     "react-dom": "19.2.4",
+    "saxes": "6.0.0",
     "tailwindcss": "4.3.3",
     "typescript": "5.7.3"
   }
