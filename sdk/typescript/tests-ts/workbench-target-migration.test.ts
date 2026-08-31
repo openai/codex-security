@@ -138,7 +138,7 @@ import sys
 
 sys.path.insert(0, sys.argv[1])
 
-from workbench_schema import MIGRATIONS, apply_migrations
+from workbench_schema import MIGRATIONS, apply_migrations, sql_statements
 from workbench_target_state import backfill_security_targets
 
 scenario = sys.argv[2]
@@ -163,7 +163,10 @@ legacy_identity_migration = (
 historical = tuple(migration for migration in MIGRATIONS if migration[0] <= 28)
 published = tuple(
     migration for migration in MIGRATIONS
-    if migration[0] < (31 if scenario == "pre-release-identity-version31" else identity_version)
+    if migration[0] < (
+        31 if scenario == "pre-release-identity-version31" else
+        33 if scenario == "pre-release-identity-version33" else identity_version
+    )
 )
 apply_migrations(
     connection,
@@ -215,6 +218,16 @@ elif scenario in ("pre-release-identity-version", "pre-release-identity-version3
     connection.execute(
         "UPDATE security_targets SET repository_identity = 'synthetic-identity'"
     )
+elif scenario == "pre-release-identity-version33":
+    for statement in sql_statements(identity_migration[2]):
+        connection.execute(statement)
+    connection.execute(
+        "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+        (33, identity_migration[1], timestamp),
+    )
+    connection.execute(
+        "UPDATE security_targets SET repository_identity = 'synthetic-identity'"
+    )
 apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill)
 apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill)
 
@@ -237,6 +250,10 @@ print(json.dumps({
     "hasRepositoryIdentityColumn": "repository_identity" in columns,
     "hasRepositoryIdentityIndex": "security_targets_by_repository_identity" in indexes,
     "identityVersion": identity_version,
+    "hasCurrentFindingsSchema": (
+        any(row["name"] == "details_json" for row in connection.execute("PRAGMA table_info(findings)"))
+        and connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'finding_embeddings'").fetchone() is not None
+    ),
     "publicationMigrations": {
         str(row["version"]): row["name"]
         for row in connection.execute(
@@ -391,6 +408,10 @@ describe("stable workbench target migration", () => {
       "pre-release-identity-version31",
       "repairs an already-renumbered pre-release identity migration",
     ],
+    [
+      "pre-release-identity-version33",
+      "preserves the previous identity migration and installs the current findings schema",
+    ],
   ] as const)("%s: %s", (scenario) => {
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -417,6 +438,7 @@ describe("stable workbench target migration", () => {
       hasRepositoryIdentityColumn: boolean;
       hasRepositoryIdentityIndex: boolean;
       identityVersion: number;
+      hasCurrentFindingsSchema: boolean;
       migrationName: string;
       publicationMigrations: Record<string, string>;
       repositoryIdentityColumnIsNullable: boolean;
@@ -437,7 +459,8 @@ describe("stable workbench target migration", () => {
         : 1,
       hasRepositoryIdentityColumn: true,
       hasRepositoryIdentityIndex: true,
-      identityVersion: 33,
+      identityVersion: 40,
+      hasCurrentFindingsSchema: true,
       migrationName: "persist repository identities",
       publicationMigrations: {
         "29": "persist finding publication associations",
@@ -454,7 +477,10 @@ describe("stable workbench target migration", () => {
         "scans_assign_inserted_completion_sequence",
         "scans_assign_updated_completion_sequence",
       ],
-      targetIdentity: null,
+      targetIdentity:
+        scenario === "pre-release-identity-version33"
+          ? "synthetic-identity"
+          : null,
       targetId: "target-existing",
       teamOnlyPublicationIndexes: [
         "finding_publications_team_only_external_issue",

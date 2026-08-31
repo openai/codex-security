@@ -1901,7 +1901,7 @@ test.each(["migration", "migration-recorded31"])(
     expect(result["currentScopesDistinct"]).toBe(true);
     expect(result["targetCount"]).toBe(12);
     expect(result["migrations"]).toEqual(
-      Array.from({ length: 33 }, (_, index) => index + 1),
+      Array.from({ length: 40 }, (_, index) => index + 1),
     );
   },
 );
