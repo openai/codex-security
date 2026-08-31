@@ -1448,8 +1448,8 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   });
   if (mode !== "deep") return identified;
 
-  // Independent workers can choose the same semantic identity for different
-  // findings. Assign distinct canonical instances without discarding evidence.
+  // Keep both findings when workers reuse an ID.
+  // Add a numeric suffix to make each ID unique.
   const reserved = new Set(identified.map(scanFindingIdentity));
   const used = new Set<string>();
   return identified.map((finding) => {
