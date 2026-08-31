@@ -799,7 +799,7 @@ function standardScanCompletionContinuation(attempt: number): string {
 function reducerCompletionContinuation(attempt: number): string {
   return [
     `Continue the existing Deep Scan reducer after attempt ${attempt} ended without its required result.`,
-    "Use your existing Standard scan analysis and call record_codex_security_deep_reduction({ scanId, findings, coverage, threatModel?, scope? }).",
+    "Submit the aggregate with record_codex_security_deep_reduction({ scanId, findings, coverage: { surfaces, explicitExclusions, openQuestions? }, threatModel?, scope? }).",
     "If the tool rejects the arguments, use its error to correct them and retry the call until it succeeds.",
     "Do not end your turn, write the result directly, or call the tool again after it succeeds."
   ].join("\n");

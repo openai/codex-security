@@ -280,7 +280,7 @@ export function registerCompactWorkerArtifactTools(
   registerCompactTool(server, {
     name: "record_codex_security_deep_reduction",
     title: "Record Codex Security Deep Reduction",
-    description: "Record this reducer's complete aggregated Standard scan result.",
+    description: "Record the merged findings and review notes for this Deep scan.",
     inputSchema: deepReductionInputSchema,
     readOnly: false,
     handler: async (value) => recordCodexSecurityDeepReduction(

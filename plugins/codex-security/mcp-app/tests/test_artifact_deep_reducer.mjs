@@ -22,11 +22,12 @@ const {
 );
 
 const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
-const validDraft = draft([]);
+const validDraft = draft([], { coverage: { surfaces: [], explicitExclusions: [] } });
 
 assert.equal(deepReducerInputsInputSchema.safeParse({}).success, true);
 assert.equal(deepReducerInputsInputSchema.safeParse({ path: "/tmp" }).success, false);
 assert.equal(deepReductionInputSchema.safeParse(validDraft).success, true);
+assert.equal(deepReductionInputSchema.safeParse(draft([])).success, true, "legacy coverage fields remain accepted");
 assert.equal(
   deepReductionInputSchema.safeParse({ ...validDraft, resultPath: "/tmp" }).success,
   false
@@ -111,17 +112,6 @@ try {
   assert.equal(JSON.stringify(inputs).includes(root), false);
   assert.equal(JSON.stringify(inputs).includes("result.json"), false);
 
-  const invalidCoverage = {
-    ...first.result,
-    coverage: {
-      ...first.result.coverage,
-      deferred: [{ reason: "A related path needs follow-up." }]
-    }
-  };
-  await assert.rejects(
-    recordCodexSecurityDeepReduction(context, invalidCoverage),
-    /complete coverage cannot contain deferred/
-  );
   await assert.rejects(
     readFile(path.join(outputRoot, "result.json"), "utf8"),
     { code: "ENOENT" }
@@ -132,12 +122,14 @@ try {
   );
 
   const merged = draft([shared, independent], {
+    coverage: { surfaces: [], explicitExclusions: [] },
     threatModel: { summary: "Requests reach shared and independent code." },
     scope: { summary: "Shared and independent request handling." }
   });
   const outcome = await recordCodexSecurityDeepReduction(context, merged);
   const mergedWithSources = {
     ...merged,
+    coverage: { ...merged.coverage, completeness: "complete", deferred: [] },
     findings: [
       retainedFinding(shared, [{ id: "worker-001:0", finding: shared }, { id: "worker-002:0", finding: shared }]),
       retainedFinding(independent, [{ id: "worker-002:1", finding: independent }]),
@@ -195,7 +187,7 @@ try {
   );
 
   const submittedCoverage = {
-    completeness: "partial",
+    completeness: "complete",
     surfaces: [
       { label: "Response rendering", disposition: "no_issue_found", notes: "All outputs use contextual encoding.",
         receiptRefs: ["artifacts/missing-worker-receipt.md"] },
@@ -218,7 +210,7 @@ try {
       ],
       deferred: [],
     },
-    "the host retains reviewed descriptions without linking missing optional worker receipts",
+    "the host projects legacy coverage before validation while retaining reviewed descriptions",
   );
   assert.deepEqual(
     await Promise.all(coverageWorkers.map((worker) => readFile(worker.resultPath, "utf8"))),
@@ -310,15 +302,21 @@ try {
   const enrichedPrevious = structuredClone(mergedWithSources);
   enrichedPrevious.findings[0].summary = "The earlier reduction established an additional reachable output route.";
   enrichedPrevious.findings[0].validation = { summary: "Both output routes bypass the same encoding control." };
-  enrichedPrevious.coverage = rejectedCoverage;
+  enrichedPrevious.coverage = { ...rejectedCoverage, completeness: "complete" };
   const previousArtifact = JSON.stringify(enrichedPrevious);
   await writeFile(path.join(outputRoot, "result.json"), previousArtifact);
+  const normalizedPrevious = (await getCodexSecurityDeepReducerInputs(nextContext)).previous;
+  assert.equal(normalizedPrevious.coverage.completeness, "complete");
+  assert.deepEqual(normalizedPrevious.coverage.deferred, []);
+  assert.deepEqual(normalizedPrevious.coverage.surfaces, [
+    { label: "SQL route", disposition: "rejected", notes: "Parameterized queries prevent injection." },
+  ]);
   await recordCodexSecurityDeepReduction(nextContext, merged);
   const preservedEnrichment = JSON.parse(await readFile(path.join(nextOutputRoot, "result.json"), "utf8"));
   assert.deepEqual(
     preservedEnrichment.coverage,
-    merged.coverage,
-    "a previous reducer's partial coverage is not inherited by a subsequent accepted reduction",
+    mergedWithSources.coverage,
+    "a previous reducer's coverage decision is not inherited by a subsequent accepted reduction",
   );
   assert.equal(
     await readFile(path.join(outputRoot, "result.json"), "utf8"),

@@ -148,6 +148,19 @@ async function testDiscoveryValidation(root) {
 
   await writeResult(worker.resultPath, {
     ...result,
+    coverage: {
+      ...result.coverage,
+      surfaces: [{ label: "Unfinished Standard review", disposition: "needs_follow_up" }],
+    },
+  });
+  await assert.rejects(
+    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    /complete coverage cannot contain needs_follow_up/,
+    "reducer coverage normalization must not relax Standard discovery semantics",
+  );
+
+  await writeResult(worker.resultPath, {
+    ...result,
     findings: [{
       ...result.findings[0],
       locations: [{ path: "src/a.js", startLine: 3, endLine: 2 }]
@@ -295,9 +308,12 @@ async function testReducerValidation(root) {
   await writeResult(resultPath, draft([firstFinding], {
     coverage: {
       completeness: "complete",
-      surfaces: [resolvedCoverageSurface],
+      surfaces: [
+        resolvedCoverageSurface,
+        { label: "Legacy reducer follow-up", disposition: "needs_follow_up" },
+      ],
       explicitExclusions: [],
-      deferred: [],
+      deferred: [{ reason: "A legacy reducer copied pending worker review work." }],
     },
   }));
   const validatedCoverage = await validateReducerArtifacts({
@@ -439,24 +455,30 @@ async function testReducerValidation(root) {
       openQuestions: ["Should a future review include generated handlers?"],
     },
   });
-  await writeResult(resultPath, legacyPartial);
-  const legacyArtifact = await readFile(resultPath, "utf8");
-  const resumed = await validate();
-  assert.equal(resumed.newFindings, 1);
-  assert.deepEqual(resumed.result, {
-    ...legacyPartial,
-    coverage: {
-      ...legacyPartial.coverage,
-      completeness: "complete",
-      surfaces: [resolvedCoverageSurface],
-      deferred: [],
-    },
-  });
-  assert.equal(
-    await readFile(resultPath, "utf8"),
-    legacyArtifact,
-    "resuming a legacy partial reducer returns normalized coverage without rewriting its original artifact",
-  );
+  for (const completeness of ["partial", "complete"]) {
+    const legacyReducer = {
+      ...legacyPartial,
+      coverage: { ...legacyPartial.coverage, completeness },
+    };
+    await writeResult(resultPath, legacyReducer);
+    const legacyArtifact = await readFile(resultPath, "utf8");
+    const resumed = await validate();
+    assert.equal(resumed.newFindings, 1);
+    assert.deepEqual(resumed.result, {
+      ...legacyReducer,
+      coverage: {
+        ...legacyReducer.coverage,
+        completeness: "complete",
+        surfaces: [resolvedCoverageSurface],
+        deferred: [],
+      },
+    });
+    assert.equal(
+      await readFile(resultPath, "utf8"),
+      legacyArtifact,
+      `resuming legacy ${completeness} reducer coverage normalizes pending work without rewriting its original artifact`,
+    );
+  }
   await writeResult(resultPath, { ...legacyPartial, complete: false });
   await assert.rejects(validate(), /only a checkpoint|not complete/);
 
@@ -476,10 +498,20 @@ async function testReducerValidation(root) {
     "result.json"
   );
   await mkdir(path.dirname(previousReducerResultPath), { recursive: true });
-  await writeResult(previousReducerResultPath, draft([firstFinding]));
+  await writeResult(previousReducerResultPath, {
+    ...legacyPartial,
+    coverage: { ...legacyPartial.coverage, completeness: "complete" },
+  });
+  const previousArtifact = await readFile(previousReducerResultPath, "utf8");
   assert.equal(
     (await validate(previousReducerResultPath)).newFindings,
-    1
+    1,
+    "previous reducer coverage is normalized before validation and does not change finding novelty",
+  );
+  assert.equal(
+    await readFile(previousReducerResultPath, "utf8"),
+    previousArtifact,
+    "reading a previous reducer must not rewrite its original coverage",
   );
 
   const renamedTitle = { ...firstFinding, title: "Stronger explanation of the same finding." };
@@ -580,7 +612,9 @@ async function testEmptyDiscoveryAndReduction(root) {
   const artifactDir = path.join(artifacts.dedupRoot, "dedup-empty", "output");
   const resultPath = path.join(artifactDir, "result.json");
   await mkdir(artifactDir, { recursive: true });
-  await writeResult(resultPath, draft([]));
+  await writeResult(resultPath, draft([], {
+    coverage: { surfaces: [], explicitExclusions: [] },
+  }));
   const result = await validateReducerArtifacts({
     artifacts,
     artifactDir,
@@ -588,6 +622,11 @@ async function testEmptyDiscoveryAndReduction(root) {
     reducerId: "dedup-empty"
   });
   assert.equal(result.newFindings, 0);
+  assert.deepEqual(
+    result.result,
+    draft([]),
+    "reducers can omit coverage completion fields owned by the host",
+  );
 }
 
 async function createLayout(scanDir) {

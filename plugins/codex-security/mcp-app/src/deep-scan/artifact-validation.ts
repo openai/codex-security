@@ -56,7 +56,8 @@ export async function validateReducerArtifacts(input: {
   let result = parseStoredScanDraft(
     await readJsonObject(resultPath),
     reducerId,
-    expectedScanId
+    expectedScanId,
+    true
   );
   if (result.complete === false) throw new Error("Deep reduction wrote only a checkpoint; its audit is not complete.");
 
@@ -66,7 +67,8 @@ export async function validateReducerArtifacts(input: {
     previous = parseStoredScanDraft(
       await readJsonObject(previousReducerResultPath),
       "Previous successful reducer",
-      result.scanId
+      result.scanId,
+      true
     );
   }
 
@@ -155,13 +157,19 @@ export function reconcileDeepReduction(
   return result;
 }
 
-function completedDeepScanCoverage(coverage: Record<string, unknown>): Record<string, unknown> {
+export function completedDeepScanCoverage(coverage: Record<string, unknown>): Record<string, unknown> {
+  if (!coverage || typeof coverage !== "object" || Array.isArray(coverage)) return coverage;
+  const surfaces = coverage.surfaces;
   return {
     ...coverage,
     completeness: "complete",
-    surfaces: (coverage.surfaces as Record<string, unknown>[]).filter(
-      (surface) => surface.disposition !== "needs_follow_up",
-    ).map(({ receiptRefs: _workerReceipts, ...surface }) => surface),
+    surfaces: Array.isArray(surfaces) ? surfaces.filter(
+      (surface) => surface?.disposition !== "needs_follow_up",
+    ).map((surface) => {
+      if (!surface || typeof surface !== "object" || Array.isArray(surface)) return surface;
+      const { receiptRefs: _workerReceipts, ...reviewed } = surface;
+      return reviewed;
+    }) : surfaces,
     deferred: [],
   };
 }
@@ -253,11 +261,15 @@ export function validateRetainedFindings(
 function parseStoredScanDraft(
   value: Record<string, unknown>,
   label: string,
-  expectedScanId?: string
+  expectedScanId?: string,
+  reducer = false
 ): ScanDraftInput {
   let parsed: ScanDraftInput;
   try {
-    parsed = parsePersistedScanDraft(value);
+    parsed = parsePersistedScanDraft(reducer ? {
+      ...value,
+      coverage: completedDeepScanCoverage(value.coverage as Record<string, unknown>),
+    } : value);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(label + " returned an invalid Standard scan result: " + detail, {

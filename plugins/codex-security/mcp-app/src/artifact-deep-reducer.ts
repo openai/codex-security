@@ -21,7 +21,7 @@ import {
   writeJsonAtomic,
   type DeepScanArtifacts
 } from "./deep-scan/artifacts.js";
-import { reconcileDeepReduction } from "./deep-scan/artifact-validation.js";
+import { completedDeepScanCoverage, reconcileDeepReduction } from "./deep-scan/artifact-validation.js";
 
 const schemaDocuments = [
   commonSchema,
@@ -107,7 +107,11 @@ export async function recordCodexSecurityDeepReduction(
 }> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
-    let reduction = parseScanDraft(input as ScanDraftInput);
+    const submitted = deepReductionInputSchema.parse(input);
+    let reduction = parseScanDraft({
+      ...submitted,
+      coverage: completedDeepScanCoverage(submitted.coverage),
+    });
     if (reduction.complete === false) throw new Error("Deep reduction is only a checkpoint, not a complete result.");
     const inputs = await getCodexSecurityDeepReducerInputs(context);
     const expectedScanId = bound.scanId
@@ -171,18 +175,23 @@ async function readPreviousReduction(
   return parseStoredScanDraft(
     await readJsonObject(previousReducerResultPath),
     "The previous accepted Deep reduction",
-    bound.scanId
+    bound.scanId,
+    true
   );
 }
 
 function parseStoredScanDraft(
   value: Record<string, unknown>,
   label: string,
-  expectedScanId?: string
+  expectedScanId?: string,
+  reducer = false
 ): ScanDraftInput {
   let parsed: ScanDraftInput;
   try {
-    parsed = parsePersistedScanDraft(value);
+    parsed = parsePersistedScanDraft(reducer ? {
+      ...value,
+      coverage: completedDeepScanCoverage(value.coverage as Record<string, unknown>),
+    } : value);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(label + " has an invalid Standard scan result: " + detail, { cause: error });

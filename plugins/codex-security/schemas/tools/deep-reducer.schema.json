@@ -9,7 +9,54 @@
       "additionalProperties": false
     },
     "reductionInput": {
-      "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanDraftInput"
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean",
+          "description": "Omit or set true when submitting the finished aggregate."
+        },
+        "scanId": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanId"
+        },
+        "handoffClaimToken": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/handoffClaimToken"
+        },
+        "scope": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scope"
+        },
+        "threatModel": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/threatModel"
+        },
+        "findings": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanDraftInput/properties/findings"
+        },
+        "coverage": {
+          "type": "object",
+          "description": "Reviewed surfaces, exclusions, and open questions. The host sets coverage completeness.",
+          "properties": {
+            "surfaces": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/coverage/properties/surfaces"
+            },
+            "explicitExclusions": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/coverage/properties/explicitExclusions"
+            },
+            "openQuestions": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/coverage/properties/openQuestions"
+            }
+          },
+          "required": [
+            "surfaces",
+            "explicitExclusions"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "scanId",
+        "findings",
+        "coverage"
+      ],
+      "additionalProperties": false
     }
   }
 }

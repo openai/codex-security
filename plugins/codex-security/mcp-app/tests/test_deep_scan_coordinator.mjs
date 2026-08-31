@@ -1747,7 +1747,7 @@ async function testMissingReducerResultResumesExistingThread() {
   assert.equal(new Set(executor.dedupThreadIds).size, 1);
   assert.match(
     executor.dedupContinuationPrompts[1] ?? "",
-    /record_codex_security_deep_reduction\(\{ scanId, findings, coverage, threatModel\?, scope\? \}\)/
+    /record_codex_security_deep_reduction\(\{ scanId, findings, coverage: \{ surfaces, explicitExclusions, openQuestions\? \}, threatModel\?, scope\? \}\)/
   );
   assert.doesNotMatch(executor.dedupContinuationPrompts[1] ?? "", /\{ candidates, merges \}/);
   assert.match(executor.dedupContinuationPrompts[1] ?? "", /retry the call until it succeeds/);
@@ -3852,7 +3852,7 @@ async function writeDedupArtifacts(request, consumedOverride, options = {}) {
   if (options.canonicalCandidateId && draft.findings.length > 0) {
     draft.findings[0].provenance.candidateId = options.canonicalCandidateId;
   }
-  if (consumedOverride || options.omitLastWorkerSource) draft.coverage.completeness = "invalid";
+  if (consumedOverride || options.omitLastWorkerSource) draft.coverage.surfaces = "invalid";
   if (options.dropLastFinding) draft.findings.pop();
   const resultPath = path.join(artifactContext.root, "result.json");
   await mkdir(path.dirname(resultPath), { recursive: true });
