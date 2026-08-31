@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
 import { PluginBootstrapError } from "./errors.js";
 import {
+  executablePathForSpawn,
   runCodexCommand,
   type CodexCommand,
   type ProcessEnvironment,
@@ -47,7 +48,7 @@ export class CodexLoginHandle {
   ) {
     void this.#urlReady.promise.catch(() => undefined);
     void this.#deviceReady.promise.catch(() => undefined);
-    this.#child = spawn(command.command, [...args], {
+    this.#child = spawn(executablePathForSpawn(command.command), [...args], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
