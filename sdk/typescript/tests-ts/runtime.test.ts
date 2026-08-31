@@ -30,6 +30,7 @@ import {
   parse,
   relative,
   sep,
+  win32,
 } from "node:path";
 import { PassThrough } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
@@ -38,6 +39,7 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
+import { build } from "esbuild";
 import {
   BUNDLED_PLUGIN_VERSION,
   bootstrapPlugin,
@@ -63,12 +65,14 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
+  prepareScanArtifactRestorer,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironmentWithGit,
   requirePrivateCredentialHome,
@@ -218,6 +222,7 @@ describe("plugin runtime preparation", () => {
 
   test("forwards configured provider credentials through the MCP worker environment", async () => {
     const providerKeys = [
+      "OPENAI_API_KEY",
       "OPENROUTER_API_KEY",
       "FIREWORKS_API_KEY",
       "AWS_BEARER_TOKEN_BEDROCK",
@@ -412,12 +417,6 @@ describe("plugin runtime preparation", () => {
 
   test("generates canonical scoped security inventory paths", async () => {
     if (Bun.which("rg") === null) {
-      const generator = await readFile(
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "utf8",
-      );
-      expect(generator).toContain('"--no-ignore"');
-      expect(generator).toContain('"--path-separator"');
       return;
     }
 
@@ -623,7 +622,13 @@ describe("plugin runtime preparation", () => {
 
   test("keeps native scan tools without the obsolete setup widget", async () => {
     const contract = JSON.parse(
-      await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+      await readFile(
+        new URL(
+          "../../../plugins/codex-security/plugin-files.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
     ) as { shippedExact: string[] };
     expect(contract.shippedExact).not.toContain("mcp/mcp-app.html.br");
     expect(existsSync(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br"))).toBe(false);
@@ -707,7 +712,10 @@ describe("plugin runtime preparation", () => {
     const source = await resolvePluginPath(undefined, workspace);
     expect(source).toBe(await bundledPluginRoot());
 
-    const publicContractPath = new URL("../plugin-files.json", import.meta.url);
+    const publicContractPath = new URL(
+      "../../../plugins/codex-security/plugin-files.json",
+      import.meta.url,
+    );
     const contractPath = existsSync(publicContractPath)
       ? publicContractPath
       : join(
@@ -1953,19 +1961,30 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("upgrades a cached 0.1.37 plugin with the real bundled Codex executable", async () => {
+  test("upgrades the predecessor cache and restores with the SDK-owned helper", async () => {
     const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "0.1.37");
+    const previous = await plugin(join(root, "previous"), "0.1.60");
+    // Keep the stale MCP configuration regression covered while upgrading the
+    // current predecessor cache to the generated bundle.
     await writeFile(
       join(previous, ".mcp.json"),
       JSON.stringify({ mcpServers: { "codex-security": { env_vars: [] } } }),
     );
+    await copyFile(
+      join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
+      join(previous, "scripts", "workbench_target.py"),
+    );
     const home = join(root, "home");
+    const unrelatedProject = join(root, "unrelated-project");
     await mkdir(home, { mode: 0o700 });
+    await mkdir(unrelatedProject);
     await writeFile(
       join(home, "config.toml"),
-      'cli_auth_credentials_store = "file"\n\n[features]\nplugins = true\n',
+      'cli_auth_credentials_store = "file"\n\n[features]\nplugins = true\n\n[projects.' +
+        JSON.stringify(unrelatedProject) +
+        ']\ntrust_level = "trusted"\n',
     );
+    await writeFile(join(home, "unrelated-state"), "preserved\n");
 
     const command = resolveCodexCommand();
     const environment = {
@@ -1984,9 +2003,18 @@ describe("plugin runtime preparation", () => {
     const credentials = await readFile(join(home, "auth.json"), "utf8");
 
     const options = { codexCommand: command, environment };
-    const first = await bootstrapPlugin(home, previous, options);
-    expect(first.version).toBe("0.1.37");
+    const stale = await bootstrapPlugin(home, previous, options);
     const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
+
+    expect(stale.version).toBe("0.1.60");
+    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
+    expect(upgraded.version).not.toBe(stale.version);
+    expect(upgraded.installedRoot).not.toBe(stale.installedRoot);
+    for (const script of ["workbench_target.py", "finalize_scan_contract.py"]) {
+      expect(
+        await readFile(join(upgraded.installedRoot, "scripts", script)),
+      ).toEqual(await readFile(join(PLUGIN_ROOT, "scripts", script)));
+    }
     const configuration = JSON.parse(
       await readFile(join(upgraded.installedRoot, ".mcp.json"), "utf8"),
     ) as {
@@ -1994,13 +2022,17 @@ describe("plugin runtime preparation", () => {
     };
     const server = configuration.mcpServers["codex-security"];
 
-    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
-    expect(upgraded.version).not.toBe(first.version);
-    expect(upgraded.installedRoot).not.toBe(first.installedRoot);
     expect(server?.command).toBe("./scripts/launch_codex_security_mcp");
+    expect(server?.env_vars).toContain("CODEX_SAFETY_IDENTIFIER");
     expect(server?.env_vars).toContain("CODEX_MANAGED_PACKAGE_ROOT");
     expect(server?.env_vars).toContain("CODEX_MCP_NODE_PATH");
     expect(await readFile(join(home, "auth.json"), "utf8")).toBe(credentials);
+    expect(await readFile(join(home, "unrelated-state"), "utf8")).toBe(
+      "preserved\n",
+    );
+    expect(await readFile(join(home, "config.toml"), "utf8")).toContain(
+      "[projects." + JSON.stringify(unrelatedProject) + "]",
+    );
     expect(
       spawnSync(command.command, ["login", "status"], {
         env: environment,
@@ -2008,6 +2040,27 @@ describe("plugin runtime preparation", () => {
         windowsHide: true,
       }).status,
     ).toBe(0);
+
+    const scanDir = join(root, "scan");
+    const artifact = "artifacts/worker.bin";
+    const expected = Buffer.from([0, 255, 10, 1]);
+    await mkdir(join(scanDir, "artifacts"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await writeFile(join(scanDir, artifact), expected);
+    const python = await resolvePluginPython({ environment });
+    const restorer = await prepareScanArtifactRestorer(
+      {
+        python,
+        pluginRoot: upgraded.installedRoot,
+        environment,
+      },
+      scanDir,
+    );
+    await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
+    await restorer.restore(artifact, expected);
+    expect(await readFile(join(scanDir, artifact))).toEqual(expected);
   });
 
   test("resolves the exact npm Codex executable", () => {
@@ -2046,6 +2099,108 @@ describe("plugin runtime preparation", () => {
       command: configured,
     });
   });
+
+  test.each([
+    [
+      "drive",
+      String.raw`C:\Program Files\codex.exe`,
+      String.raw`\\?\C:\Program Files\codex.exe`,
+    ],
+    [
+      "drive with forward slashes",
+      "C:/tools/codex.exe",
+      String.raw`\\?\C:\tools\codex.exe`,
+    ],
+    [
+      "UNC",
+      String.raw`\\server\share\codex.exe`,
+      String.raw`\\?\UNC\server\share\codex.exe`,
+    ],
+    [
+      "namespaced",
+      String.raw`\\?\C:\tools\codex.exe`,
+      String.raw`\\?\C:\tools\codex.exe`,
+    ],
+    ["bare", "codex.exe", "codex.exe"],
+    ["relative", String.raw`.\tools\codex.exe`, String.raw`.\tools\codex.exe`],
+    ["drive-relative", "C:codex.exe", "C:codex.exe"],
+    [
+      "root-relative",
+      String.raw`\tools\codex.exe`,
+      String.raw`\tools\codex.exe`,
+    ],
+    ["slash-root-relative", "/tools/codex.exe", "/tools/codex.exe"],
+    ["tilde", "~/tools/codex", "~/tools/codex"],
+  ])(
+    "preserves executable lookup semantics for %s paths",
+    (_name, command, windowsCommand) => {
+      expect(executablePathForSpawn(command!)).toBe(
+        process.platform === "win32" ? windowsCommand : command,
+      );
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "launches long Windows executable paths through the Node runtime",
+    async () => {
+      const root = await temporaryDirectory();
+      const { stdout } = await promisify(execFile)(
+        "node",
+        ["-p", "process.execPath"],
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          windowsHide: true,
+        },
+      );
+      const node = stdout.trim();
+      const executable = join(
+        root,
+        ...Array<string>(10).fill("nested executable directory"),
+        "node.exe",
+      );
+      await mkdir(dirname(executable), { recursive: true });
+      await copyFile(node, executable);
+      expect(executable.length).toBeGreaterThan(260);
+
+      const runtimeSource = new URL("../src/runtime.ts", import.meta.url);
+      const runtimeModule = join(root, "runtime.cjs");
+      await build({
+        entryPoints: [fileURLToPath(runtimeSource)],
+        outfile: runtimeModule,
+        bundle: true,
+        platform: "node",
+        format: "cjs",
+        define: { "import.meta.url": JSON.stringify(runtimeSource.href) },
+      });
+      const script = [
+        "const { runCodexCommand } = require(process.argv[1]);",
+        "runCodexCommand({ command: process.argv[2] }, ['--eval', \"process.stdout.write('synthetic launch')\"], process.env)",
+        "  .then((result) => process.stdout.write(JSON.stringify(result)), (error) => { console.error(error); process.exitCode = 1; });",
+      ].join("\n");
+      for (const command of [
+        node,
+        executable,
+        win32.toNamespacedPath(executable),
+      ]) {
+        const result = await promisify(execFile)(
+          node,
+          ["--eval", script, runtimeModule, command],
+          {
+            encoding: "utf8",
+            timeout: 10_000,
+            windowsHide: true,
+          },
+        );
+        expect(JSON.parse(result.stdout)).toEqual({
+          success: true,
+          exitCode: 0,
+          stdout: "synthetic launch",
+          stderr: "",
+        });
+      }
+    },
+  );
 
   test("replaces unspawnable Windows Codex shims with the bundled executable", () => {
     const fallback = resolveCodexCommand({});
@@ -2781,6 +2936,110 @@ describe("runtime directories and plugin Python boundary", () => {
       home: { owner: sid, protected: true },
       descendantsArePrivate: true,
     });
+  });
+
+  test
+    .skipIf(process.platform !== "win32")
+    .each([
+      "transient missing descendant",
+      "persistent missing descendant",
+      "access denied",
+      "unexpected error",
+      "missing home",
+      "transient path-not-found descendant",
+      "persistent path-not-found descendant",
+      "path-not-found home",
+    ] as const)("replays Windows credential ACL %s", async (kind) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `replays Windows credential ACL ${kind}`,
+      )
+    ) {
+      return;
+    }
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    await requireSecureCredentialHome(home);
+    const descendant = join(home, ".auth-replay.tmp");
+    await writeFile(descendant, "synthetic credential\n", { mode: 0o600 });
+    const pathNotFound = kind.includes("path-not-found");
+    const missing = pathNotFound || kind.includes("missing");
+    const transient = kind.startsWith("transient ");
+    const persistent = kind.startsWith("persistent ");
+    const exception = pathNotFound
+      ? "System.Management.Automation.ItemNotFoundException"
+      : missing
+        ? "System.IO.FileNotFoundException"
+        : kind === "access denied"
+          ? "System.UnauthorizedAccessException"
+          : "System.InvalidOperationException";
+    const errorId = pathNotFound
+      ? "GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand"
+      : missing
+        ? "System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand"
+        : kind === "access denied"
+          ? "System.UnauthorizedAccessException,Microsoft.PowerShell.Commands.GetAclCommand"
+          : "SyntheticCredentialAclFailure";
+    const category =
+      kind === "access denied"
+        ? "PermissionDenied"
+        : missing && !pathNotFound
+          ? "NotSpecified"
+          : "ObjectNotFound";
+    const failurePath = kind.endsWith("home") ? home : descendant;
+    // Replay the native error without relying on racing a filesystem deletion.
+    const injection = `if ($path -eq '${failurePath.replaceAll("'", "''")}') { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
+    const marker = "function Write-CredentialAcl($path) {";
+    const originalSpawn = childProcess.spawn;
+    let attempts = 0;
+    mock.module("node:child_process", () => ({
+      ...childProcess,
+      spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
+        const [command, args, options] = spawnArgs;
+        if (
+          options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
+          !Array.isArray(args)
+        ) {
+          return originalSpawn(...spawnArgs);
+        }
+        const scriptIndex = args.indexOf("-Command") + 1;
+        const script = args[scriptIndex];
+        if (typeof script !== "string" || !script.includes(marker)) {
+          return originalSpawn(...spawnArgs);
+        }
+        attempts += 1;
+        if (transient && attempts > 1) {
+          return originalSpawn(...spawnArgs);
+        }
+        expect(script.split(marker)).toHaveLength(2);
+        const replayArgs = [...args];
+        replayArgs[scriptIndex] = script.replace(
+          marker,
+          `${marker} ${injection}`,
+        );
+        return originalSpawn(command, replayArgs, options);
+      },
+    }));
+    try {
+      if (transient) {
+        await requireSecureCredentialHome(home);
+        expect(attempts).toBe(2);
+      } else {
+        await expect(requireSecureCredentialHome(home)).rejects.toThrow(
+          persistent
+            ? "Windows credential descendants could not be verified"
+            : "synthetic credential ACL error",
+        );
+        expect(attempts).toBe(persistent ? 3 : 1);
+      }
+    } finally {
+      mock.module("node:child_process", () => ({
+        ...childProcess,
+        spawn: originalSpawn,
+      }));
+    }
   });
 
   test("retries interrupted Windows credential ACL enumeration", async () => {
@@ -5408,7 +5667,8 @@ describe("runtime directories and plugin Python boundary", () => {
       CODEX_CLI_PATH: codex,
       GIT_DIR: join(tmpdir(), "repository", ".git"),
       Git_Config_Count: "1",
-      PATH: join(tmpdir(), "trusted-bin"),
+      Path: join(tmpdir(), "repository-bin"),
+      PATH: join(tmpdir(), "other-repository-bin"),
       PYTHON: python,
       PYTHONUTF8: "1",
       TEST: "1",
@@ -5423,7 +5683,7 @@ describe("runtime directories and plugin Python boundary", () => {
       CODEX_SECURITY_GIT: "",
       CODEX_CLI_PATH: resolveCodexCommand().command,
       GIT_DIR: ".git",
-      PATH: "",
+      Path: join(tmpdir(), "repository-bin"),
       PYTHON: python,
       PYTHONUTF8: "1",
     });

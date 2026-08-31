@@ -1,36 +1,43 @@
-<!-- release-version: 0.1.21 -->
+<!-- release-version: 0.1.24 -->
 
 ## Highlights
 
-- Request an advisory assessment of a completed patch with
-  `patch --assess-patch-risk`. Add `--create-pr` to include its concise summary
-  in the draft pull request. The assessment is opt-in and does not approve or
-  merge changes. See
-  [patching and risk assessment](https://github.com/openai/codex-security/blob/npm-v0.1.21/sdk/typescript/README.md#validate-and-patch-findings).
-- Import GitHub code scanning alerts through the CLI or SDK for validation
-  against a local checkout. Imports are read-only and preserve the upstream
-  alert context. See
-  [GitHub alert imports](https://github.com/openai/codex-security/blob/npm-v0.1.21/sdk/typescript/README.md#import-github-code-scanning-alerts).
-- Publish findings from CSV with `publish scan --to cloud --csv PATH`, or
-  preview the upload without signing in or sending data with `--dry-run`.
+- Start the preview findings service directly with
+  `codex-security serve [--port PORT]`, without Docker or an internal package
+  path. The command reuses the existing service, state, and shutdown behavior;
+  `--port` overrides `PORT`, and port `0` selects a free port. See
+  [running without Docker](https://github.com/openai/codex-security/blob/npm-v0.1.24/sdk/typescript/README.md#running-without-docker).
+- Observe durable Deep Scan progress from the SDK with the optional
+  `onDeepProgress({ completed, active, maximum })` callback. Updates report
+  changed completed and active independent-review counts without blocking the
+  scan. See
+  [SDK scan options](https://github.com/openai/codex-security/blob/npm-v0.1.24/sdk/typescript/README.md#sdk-configuration-and-scan-options).
+- Make stopped-result handling explicit and stable. Read, list, and export
+  operations no longer publish late retained results as a side effect; the app
+  reports when recovery is needed and can recover validated results on request.
   See
-  [Cloud publication](https://github.com/openai/codex-security/blob/npm-v0.1.21/sdk/typescript/README.md#publish-findings-to-cloud).
-- Improve repeated-scan credential handling on Windows, sign-in recovery
-  messages, cleanup after interrupted publication, and refreshes of changed
-  bundled plugins.
+  [stopped result recovery](https://github.com/openai/codex-security/blob/npm-v0.1.24/plugins/codex-security/references/scan-contract.md#stopped-result-recovery).
+- Include changed PowerShell `.ps1` files in diff-scan inventories and remove a
+  conflicting reporting rule so valid internal attack paths remain eligible for
+  review. Nested Deep Scan workers now also receive an explicitly configured
+  OpenAI provider credential through the plugin's existing environment boundary.
+- Improve Windows reliability by preserving case-insensitive `CODEX_HOME`
+  entries and repository paths from ordinary PowerShell activity, and by
+  retrying credential snapshots when a descendant file disappears during ACL
+  inspection. Existing path-safety and permission failures remain fatal.
 
 ## Upgrade notes
 
-- Finish operations using older versions before upgrading; credential-home
-  locks now follow the owning process's lifetime. See
-  [authentication](https://github.com/openai/codex-security/blob/npm-v0.1.21/sdk/typescript/README.md#authentication).
-- The bundled Codex runtime and SDK are now `0.149.1`. Custom executables
-  selected with `CODEX_CLI_PATH` need thread-source attribution support for
-  both `exec` and `app-server` (Codex `0.149.1+`). See
-  [runtime configuration](https://github.com/openai/codex-security/blob/npm-v0.1.21/sdk/typescript/README.md#environment-variables).
-- Existing Windows state with invalid ancestor permissions is not repaired
-  automatically. Keep the old reports and select a new private state
-  directory as described in
-  [scan history and recovery](https://github.com/openai/codex-security/blob/npm-v0.1.21/sdk/typescript/README.md#scan-history-and-reruns).
+- The findings API and dashboard still have no built-in authentication.
+  `codex-security serve` binds to loopback by default; keep it local or place it
+  behind an authenticated TLS proxy before sharing access. Python is still
+  required, and nonempty imports still require an embeddings API credential.
+- Stopped-scan recovery is now explicit. App clients should check
+  `resultsRecoveryNeeded` and request recovery when they want validated late
+  results republished. Canceled scans remain immutable and cannot use this
+  recovery path.
+- `onDeepProgress.maximum` is the configured independent-review cap, not a
+  percentage denominator. The SDK polls the durable projection only when the
+  callback is supplied.
 
 The categorized list below contains the individual changes.

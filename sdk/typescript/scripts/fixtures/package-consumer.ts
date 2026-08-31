@@ -1,10 +1,14 @@
 import {
   CodexSecurity,
   DiffTarget,
+  deduplicateScan,
   estimateScanCost,
   planComponents,
+  publishScanToCustom,
   runComponentScans,
   type ComponentScanOptions,
+  type DeduplicateScanResult,
+  type CustomPublicationResult,
   type Finding,
   type ScanCost,
   type ScanOptions,
@@ -14,7 +18,31 @@ import {
   type ValidationResult,
 } from "@openai/codex-security";
 
+export async function publishCustom(
+  scanDir: string,
+  signal: AbortSignal,
+): Promise<CustomPublicationResult> {
+  return await publishScanToCustom(scanDir, {
+    workflowId: "example-workflow",
+    findingsUrl: "http://127.0.0.1:3000",
+    signal,
+  });
+}
+
+export async function dedupe(
+  scanId: string,
+  signal: AbortSignal,
+): Promise<DeduplicateScanResult> {
+  return await deduplicateScan(scanId, {
+    workflowId: "example-workflow",
+    findingsUrl: "http://127.0.0.1:3000",
+    allRepositories: true,
+    signal,
+  });
+}
+
 const options: ScanOptions = {
+  workflowId: "example-workflow",
   target: DiffTarget.refs({ base: "HEAD~1" }),
   onProgress(progress: ScanProgress) {
     progress.filesCompleted satisfies number;
