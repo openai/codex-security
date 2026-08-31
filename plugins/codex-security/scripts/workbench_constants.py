@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -88,8 +89,11 @@ def _protected_repository_root(target: Path) -> Path:
 
 
 def trusted_git_executable(protected_root: Path) -> str | None:
-    """Return the host-selected Git executable without searching ``PATH``."""
+    """Validate host-selected Git, or discover Git for a direct plugin invocation."""
     configured = os.environ.get("CODEX_SECURITY_GIT")
+    if configured is None:
+        discovered = shutil.which("git")
+        configured = os.path.abspath(discovered) if discovered else None
     if not configured:
         return None
 

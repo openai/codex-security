@@ -119,21 +119,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
         if (repository / ".git").exists():
             try:
-                tracked = subprocess.run(
-                    [
-                        "git",
-                        "ls-files",
-                        "--cached",
-                        "--ignored",
-                        "--exclude-standard",
-                        "-z",
-                        "--",
-                        scope,
-                    ],
-                    cwd=repository,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
+                tracked = git_command(
+                    repository,
+                    "ls-files",
+                    "--cached",
+                    "--ignored",
+                    "--exclude-standard",
+                    "-z",
+                    "--",
+                    scope,
+                    text=False,
                 )
             except OSError:
                 tracked = None

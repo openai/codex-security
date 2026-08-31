@@ -1,18 +1,11 @@
 from __future__ import annotations
 
 import runpy
-import shutil
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
 import pytest
-
-
-@pytest.fixture(autouse=True)
-def trusted_git_binding(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Direct Python fixtures supply the binding normally set by the SDK.
-    monkeypatch.setenv("CODEX_SECURITY_GIT", shutil.which("git") or "")
 
 
 @pytest.fixture(scope="session")

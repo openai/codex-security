@@ -14,7 +14,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { build } from "esbuild";
-import { gitExecutable } from "./git-fixture.mjs";
 
 const execFile = promisify(nodeExecFile);
 const temporaryRoots = [];
@@ -29,8 +28,6 @@ const inventory = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
 
-const previousGitBinding = process.env.CODEX_SECURITY_GIT;
-process.env.CODEX_SECURITY_GIT = gitExecutable;
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
@@ -46,8 +43,6 @@ try {
   await testBoundScopeFailurePreservesPreviousInventory();
   await testInvalidDiffTargetPreservesPreviousInventory();
 } finally {
-  if (previousGitBinding === undefined) delete process.env.CODEX_SECURITY_GIT;
-  else process.env.CODEX_SECURITY_GIT = previousGitBinding;
   await Promise.all(temporaryRoots.map((root) => rm(root, { force: true, recursive: true })));
 }
 

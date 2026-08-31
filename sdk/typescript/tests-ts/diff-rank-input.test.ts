@@ -257,8 +257,10 @@ testPosix(
     const repository = join(root, "repository");
     const shimDirectory = join(repository, "tools");
     const shim = join(shimDirectory, "git");
+    const externalBin = join(root, "external-bin");
     const marker = join(root, "shim-ran");
     mkdirSync(shimDirectory, { recursive: true });
+    mkdirSync(externalBin);
     git(repository, "init", "-q");
     writeFileSync(join(repository, "source.py"), "value = 1\n");
     git(repository, "add", ".");
@@ -270,13 +272,14 @@ testPosix(
     const head = git(repository, "rev-parse", "HEAD");
     writeFileSync(shim, '#!/bin/sh\n: > "$GIT_SHIM_MARKER"\nexit 99\n');
     chmodSync(shim, 0o700);
+    symlinkSync(shim, join(externalBin, "git"));
 
     const python = pythonExecutable();
     expect(python).not.toBeNull();
     const rankOutput = join(root, "rank.jsonl");
     const inventoryOutput = join(root, "inventory.txt");
     const environment = {
-      PATH: `${shimDirectory}:${process.env["PATH"] ?? ""}`,
+      PATH: `${externalBin}:${process.env["PATH"] ?? ""}`,
       GIT_SHIM_MARKER: marker,
     };
     const rankArguments = [
@@ -334,6 +337,24 @@ testPosix(
     );
     expect(inventory.status, inventory.stderr).toBe(0);
     expect(readFileSync(inventoryOutput, "utf8")).toBe("source.py\n");
+
+    const codebaseInventory = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        inventoryOutput,
+      ],
+      { encoding: "utf8", env: pythonEnvironment(environment) },
+    );
+    expect(codebaseInventory.status, codebaseInventory.stderr).toBe(0);
+    expect(readFileSync(inventoryOutput, "utf8")).toContain("./source.py\n");
     expect(existsSync(marker)).toBe(false);
   },
 );

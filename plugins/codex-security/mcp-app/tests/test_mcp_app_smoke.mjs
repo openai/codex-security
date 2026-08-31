@@ -13,7 +13,6 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { gitExecutable } from "./git-fixture.mjs";
 
 const sourcePluginRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -253,7 +252,7 @@ function startTestServer({
   cwd,
   env = {},
 }) {
-  const childEnvironment = { ...process.env, CODEX_SECURITY_GIT: gitExecutable };
+  const childEnvironment = { ...process.env };
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) {
       delete childEnvironment[name];
