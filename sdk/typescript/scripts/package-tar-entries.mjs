@@ -44,7 +44,7 @@ export function plainTarEntries(archiveBytes) {
 
     assertNoInternalReference(header);
     if (
-      header[156] !== 0x30 ||
+      (header[156] !== 0 && header[156] !== 0x30) ||
       !header.subarray(257, 263).equals(Buffer.from("ustar\0")) ||
       !header.subarray(263, 265).equals(Buffer.from("00"))
     ) {

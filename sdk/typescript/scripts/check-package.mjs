@@ -26,7 +26,10 @@ const args = process.argv.slice(2);
 if (args[0] === "--") args.shift();
 const [
   archive,
-  contractPath = new URL("../plugin-files.json", import.meta.url),
+  contractPath = new URL(
+    "../../../plugins/codex-security/plugin-files.json",
+    import.meta.url,
+  ),
 ] = args;
 if (archive === undefined || args.length > 2) {
   throw new Error(

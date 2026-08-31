@@ -28,7 +28,11 @@ const pluginContract = {
   shippedExact: ["scripts/launch_codex_security_mcp"],
 };
 
-function packageTar(trailingZeroBytes = 0, sizeTerminator = " "): Buffer {
+function packageTar(
+  trailingZeroBytes = 0,
+  sizeTerminator = " ",
+  type = 0x30,
+): Buffer {
   const executablePaths = [
     "package/bin/codex-security.mjs",
     "package/_bundled_plugin/scripts/launch_codex_security_mcp",
@@ -55,6 +59,7 @@ function packageTar(trailingZeroBytes = 0, sizeTerminator = " "): Buffer {
           : Buffer.from("fixture\n");
     return tarRecord(contents, {
       name: path,
+      type,
       mode: executablePaths.includes(path) ? 0o755 : 0o644,
       sizeField: octal(contents.length, 12, sizeTerminator),
     });
@@ -105,6 +110,7 @@ describe("npm package tar listings", () => {
         ["default", gzipSync(tarBytes)],
         ["level-0", gzipSync(tarBytes, { level: 0 })],
         ["npm-size-field", gzipSync(packageTar(0, " \0"))],
+        ["nul-regular-file", gzipSync(packageTar(0, " ", 0))],
       ] as const;
       expect(archives[0][1].length).toBeLessThan(1024 * 1024);
       expect(archives[1][1].length).toBeGreaterThan(31 * 1024 * 1024);

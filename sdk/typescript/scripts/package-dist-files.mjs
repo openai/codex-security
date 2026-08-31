@@ -13,6 +13,8 @@ const distModules = [
   "cost-model",
   "custom-validation",
   "custom-validation-prompt",
+  "custom-publish",
+  "deep-progress",
   "errors",
   "github",
   "index",
@@ -33,6 +35,29 @@ const distModules = [
   "scan-history-renderer",
   "scan-logs",
   "scan-sessions",
+  "server/index",
+  "deduplication/codex-review",
+  "deduplication/checkpointed-review",
+  "deduplication/deduplication",
+  "finding-retrieval",
+  "finding-workflow",
+  "findings-client",
+  "finding-dedupe-groups",
+  "deduplication/deduplication-prompts",
+  "deduplication/deduplication-reviewer",
+  "deduplication/scan",
+  "saved-scan",
+  "server/embeddings",
+  "server/dashboard",
+  "server/dashboard-types",
+  "server/errors",
+  "server/findings-service",
+  "server/routes",
+  "server/server",
+  "server/serve",
+  "server/sqlite-store",
+  "server/storage",
+  "server/validation",
   "targets",
   "thread-source",
   "trusted-executable",
@@ -41,8 +66,14 @@ const distModules = [
   "worker-progress",
 ];
 
-export const packageDistFiles = distModules.flatMap((module) =>
-  ["js", "js.map", "d.ts", "d.ts.map"].map(
-    (extension) => `package/dist/${module}.${extension}`,
+export const packageDistFiles = [
+  ...distModules.flatMap((module) =>
+    ["js", "js.map", "d.ts", "d.ts.map"].map(
+      (extension) => `package/dist/${module}.${extension}`,
+    ),
   ),
-);
+  "package/dist/server/dashboard/index.html",
+  "package/dist/server/dashboard/app.js",
+  "package/dist/server/dashboard/app.css",
+  "package/dist/server/dashboard/THIRD_PARTY_NOTICES.txt",
+];

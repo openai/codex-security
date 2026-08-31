@@ -39,26 +39,27 @@ describe("plain npm tar entries", () => {
     },
   );
 
-  test("accepts canonical ustar files and prefix paths", () => {
-    const prefix = `package/${"nested/".repeat(13)}deep`;
-    const longPath = `${prefix}/README.md`;
-    expect(longPath.length).toBeGreaterThan(100);
+  test.each([0, 0x30])(
+    "accepts regular typeflag %i and prefix paths",
+    (type) => {
+      const prefix = `package/${"nested/".repeat(13)}deep`;
+      const longPath = `${prefix}/README.md`;
+      expect(longPath.length).toBeGreaterThan(100);
 
-    const bytes = archive(
-      tarRecord(Buffer.from("license"), { name: "package/LICENSE" }),
-      tarRecord(Buffer.from("readme"), { name: "README.md", prefix }),
-    );
+      const bytes = archive(
+        tarRecord(Buffer.from("license"), { name: "package/LICENSE", type }),
+        tarRecord(Buffer.from("readme"), { name: "README.md", prefix, type }),
+      );
 
-    expect(plainTarEntries(bytes)).toEqual([
-      { path: "package/LICENSE", size: 7 },
-      { path: longPath, size: 6 },
-    ]);
-  });
+      expect(plainTarEntries(bytes)).toEqual([
+        { path: "package/LICENSE", size: 7 },
+        { path: longPath, size: 6 },
+      ]);
+    },
+  );
 
   test("rejects every unsupported tar entry type", () => {
-    for (const type of [
-      0, 0x31, 0x32, 0x35, 0x44, 0x4b, 0x4c, 0x53, 0x67, 0x78,
-    ]) {
+    for (const type of [0x31, 0x32, 0x35, 0x44, 0x4b, 0x4c, 0x53, 0x67, 0x78]) {
       expect(() =>
         plainTarEntries(
           archive(
