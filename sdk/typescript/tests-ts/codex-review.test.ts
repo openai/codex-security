@@ -14,6 +14,16 @@ const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
 );
 
+const failureReasons: Record<string, string> = {
+  "text-only": "Codex did not submit a validated review",
+  "failed-turn": "Rate limit exceeded",
+  "request-error": "Authentication required",
+  "credential-error": "[redacted]",
+  "invalid-json": "Codex returned malformed JSON",
+  "invalid-submission": "Review validation failed: Invalid decision",
+  exit: "Codex exited before completing the review",
+};
+
 const transportCases: {
   scenario: string;
   name?: string;
@@ -21,7 +31,7 @@ const transportCases: {
   extraEnvironment?: Record<string, string>;
   windowsOnly?: boolean;
 }[] = [
-  ...["correction", "text-only", "failed-turn", "exit", "cancel"].map(
+  ...["correction", ...Object.keys(failureReasons), "cancel"].map(
     (scenario) => ({ scenario }),
   ),
   {
@@ -138,10 +148,12 @@ for (const {
         await expect(result).rejects.toBe("synthetic cancellation");
       } else {
         await expect(result).rejects.toMatchObject({
-          message:
-            "Codex did not complete a validated deduplication review. Findings are unchanged; retry the command.",
+          name: "CodexSecurityError",
+          message: `Codex did not complete a validated deduplication review. Findings are unchanged; retry the command. Reason: ${failureReasons[scenario]}`,
         });
-        expect(validations).toBe(scenario === "failed-turn" ? 1 : 0);
+        expect(validations).toBe(
+          ["failed-turn", "invalid-submission"].includes(scenario) ? 1 : 0,
+        );
       }
       expect(args).toContain('cli_auth_credentials_store="ephemeral"');
       expect(args.join(" ")).not.toContain("synthetic-review-key");
