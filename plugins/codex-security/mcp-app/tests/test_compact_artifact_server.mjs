@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { build } from "esbuild";
+import { gitExecutable } from "./git-fixture.mjs";
 
 const applicationRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -1211,6 +1212,7 @@ async function startClient(bundle, environment) {
     cwd: applicationRoot,
     env: {
       ...process.env,
+      CODEX_SECURITY_GIT: gitExecutable,
       ...environment
     }
   });

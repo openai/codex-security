@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { gitExecutable } from "./git-fixture.mjs";
 
 const sourcePluginRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -87,6 +88,7 @@ assert.deepEqual(
     "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
     "PYTHON",
     "PYTHONUTF8",
+    "CODEX_SECURITY_GIT",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SECURITY_SCAN_ROOT",
@@ -251,7 +253,7 @@ function startTestServer({
   cwd,
   env = {},
 }) {
-  const childEnvironment = { ...process.env };
+  const childEnvironment = { ...process.env, CODEX_SECURITY_GIT: gitExecutable };
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) {
       delete childEnvironment[name];
