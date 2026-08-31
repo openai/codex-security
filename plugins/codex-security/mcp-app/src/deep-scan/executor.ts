@@ -37,7 +37,24 @@ export interface CodexSdkWorkerArtifactContext {
   pythonCommand?: string;
 }
 
+interface BoundCodexExecutable {
+  readonly path: string;
+  readonly identity: CodexExecutableIdentity;
+}
+
+interface CodexExecutableIdentity {
+  readonly device: bigint;
+  readonly inode: bigint;
+  readonly size: bigint;
+  readonly modifiedAt: bigint;
+  readonly changedAt: bigint;
+}
+
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
+  // A live coordinator owns one executor. Keep its CLI stable even if Desktop
+  // installs a newer cached binary while later workers are still pending.
+  private codexExecutable: Promise<BoundCodexExecutable> | undefined;
+
   constructor(private readonly modelSettings: CodexSdkWorkerModelSettings = {}) {}
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
@@ -52,14 +69,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const configOverrides = workerPermissionProfileConfigOverrides(workerProfile);
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
-      const codexPath = resolveCodexPath(
-        childEnv,
-        process.platform,
-        process.arch,
-        originalCwd
-      );
+      const executable = await this.boundCodexExecutable(childEnv, originalCwd);
+      await verifyBoundCodexExecutable(executable);
       await preflightDeepScanWorkerPermissionProfile({
-        codexPath,
+        codexPath: executable.path,
         cwd: request.workingDirectory,
         profileId: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
         configOverrides,
@@ -69,7 +82,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       });
       const prompt = await fs.readFile(request.promptPath, "utf8");
       const codex = new Codex({
-        codexPathOverride: executablePathForSpawn(codexPath),
+        codexPathOverride: executablePathForSpawn(executable.path),
         env: childEnv,
         config: {
           // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
@@ -110,6 +123,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
 
       try {
+        // Keep the final identity check at the launch boundary. The preflight
+        // and SDK worker must never silently use different CLI installations.
+        await verifyBoundCodexExecutable(executable);
         const { events } = await thread.runStreamed(input, { signal: controller.signal });
         let finalResponse = "";
         let threadId: string | undefined;
@@ -164,6 +180,14 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     } catch (error) {
       throw classifyCodexWorkerError(error);
     }
+  }
+
+  private boundCodexExecutable(
+    env: NodeJS.ProcessEnv,
+    originalCwd: string
+  ): Promise<BoundCodexExecutable> {
+    this.codexExecutable ??= bindCodexExecutable(env, originalCwd);
+    return this.codexExecutable;
   }
 
   private compactArtifactServer(request: CodexWorkerRequest): Record<string, {
@@ -367,6 +391,74 @@ function appendUniqueDiagnostic(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+async function bindCodexExecutable(
+  env: NodeJS.ProcessEnv,
+  originalCwd: string
+): Promise<BoundCodexExecutable> {
+  const path = resolveCodexPath(env, process.platform, process.arch, originalCwd);
+  let identity: CodexExecutableIdentity;
+  try {
+    identity = await codexExecutableIdentity(path);
+  } catch (error) {
+    throw new DeepScanNonRetryableError(
+      "Deep Scan cannot start a worker because the selected Codex executable "
+        + `"${path}" is not an available file. `
+        + "Check CODEX_CLI_PATH/PATH, then retry.",
+      { cause: error }
+    );
+  }
+  return { path, identity };
+}
+
+async function verifyBoundCodexExecutable(
+  executable: BoundCodexExecutable
+): Promise<void> {
+  let identity: CodexExecutableIdentity;
+  try {
+    identity = await codexExecutableIdentity(executable.path);
+  } catch (error) {
+    throw codexExecutableChangedError(executable.path, error);
+  }
+  if (!sameCodexExecutable(executable.identity, identity)) {
+    throw codexExecutableChangedError(executable.path);
+  }
+}
+
+async function codexExecutableIdentity(path: string): Promise<CodexExecutableIdentity> {
+  const metadata = await fs.stat(path, { bigint: true });
+  if (!metadata.isFile() || metadata.size === 0n) {
+    throw new Error("Codex executable is not a non-empty file.");
+  }
+  return {
+    device: metadata.dev,
+    inode: metadata.ino,
+    size: metadata.size,
+    modifiedAt: metadata.mtimeNs,
+    changedAt: metadata.ctimeNs
+  };
+}
+
+function sameCodexExecutable(
+  expected: CodexExecutableIdentity,
+  actual: CodexExecutableIdentity
+): boolean {
+  return expected.device === actual.device
+    && expected.inode === actual.inode
+    && expected.size === actual.size
+    && expected.modifiedAt === actual.modifiedAt
+    && expected.changedAt === actual.changedAt;
+}
+
+function codexExecutableChangedError(path: string, cause?: unknown): Error {
+  return new DeepScanNonRetryableError(
+    "Deep Scan cannot start this worker because the Codex executable "
+      + `"${path}" changed after this Deep Scan started or is no longer available. `
+      + "This usually means Codex updated while the scan was running. Retry after the update "
+      + "finishes; completed work remains in the retained partial scan.",
+    { cause }
+  );
 }
 
 async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
