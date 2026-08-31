@@ -1,5 +1,5 @@
-import { readFile, realpath } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
 import { writeCodexConfig, type JsonObject } from "./config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
@@ -10,7 +10,7 @@ import {
   DeepScanSettingsSchema,
   type DeepScanOptions,
 } from "./scan-settings.js";
-import type { ScanMode } from "./targets.js";
+import type { ScanMode } from "./scan-modes.js";
 
 export type DeepScanSources = Record<
   keyof DeepScanOptions,
@@ -21,32 +21,36 @@ export interface ResolvedDeepScanConfig {
   sources: DeepScanSources;
   source: string;
   document: TomlTable;
-  hasOverrides: boolean;
+  overrides: DeepScanOptions;
 }
 
 export function deepScanOptions(
   options: DeepScanOptions & { mode?: ScanMode },
 ): DeepScanOptions {
   const selected: DeepScanOptions = {};
-  for (const [name, , minimum] of DEEP_SCAN_SETTINGS) {
+  for (const [name] of DEEP_SCAN_SETTINGS) {
     const value = options[name];
     if (value === undefined) continue;
     if ((options.mode ?? DEFAULT_SCAN_MODE) !== "deep") {
       throw new CodexSecurityError("Deep scan settings require deep mode.");
     }
-    if (!DeepScanSettingsSchema.shape[name].safeParse(value).success) {
-      if (name === "maxTimeHours") {
-        throw new CodexSecurityError(
-          "Deep scan maxTimeHours must be a positive number no greater than 96.",
-        );
-      }
-      throw new CodexSecurityError(
-        `Deep scan ${name} must be ${minimum === 0 ? "a non-negative" : "a positive"} integer.`,
-      );
-    }
-    selected[name] = value;
+    selected[name] = requireDeepScanValue(name, value, name);
   }
   return selected;
+}
+
+function requireDeepScanValue(
+  name: keyof DeepScanOptions,
+  value: unknown,
+  label: string,
+): number {
+  const parsed = DeepScanSettingsSchema.shape[name].unwrap().safeParse(value);
+  if (!parsed.success) {
+    throw new CodexSecurityError(
+      `Deep scan ${label} ${parsed.error.issues[0]!.message}.`,
+    );
+  }
+  return parsed.data;
 }
 
 export async function resolveDeepScanConfig(
@@ -80,30 +84,35 @@ export async function resolveDeepScanConfig(
       `Unknown Codex Security Deep Scan configuration ${unknown.join(", ")} in ${source}.`,
     );
   }
-  const values: Record<string, unknown> = { ...DEFAULT_DEEP_SCAN_SETTINGS };
+  const settings = {
+    ...DEFAULT_DEEP_SCAN_SETTINGS,
+  } as Required<DeepScanOptions>;
   const sources = {} as DeepScanSources;
   for (const [name, key] of DEEP_SCAN_SETTINGS) {
-    if (Object.hasOwn(configured, key)) values[name] = configured[key];
-    if (name === "workers" && values[name] === "auto")
-      values[name] = DEFAULT_DEEP_SCAN_SETTINGS.workers;
-    if (explicit[name] !== undefined) values[name] = explicit[name];
+    let value = Object.hasOwn(configured, key)
+      ? configured[key]
+      : DEFAULT_DEEP_SCAN_SETTINGS[name];
+    if (name === "workers" && value === "auto")
+      value = DEFAULT_DEEP_SCAN_SETTINGS.workers;
+    if (explicit[name] !== undefined) value = explicit[name];
     sources[name] =
       explicit[name] !== undefined
         ? "override"
         : Object.hasOwn(configured, key)
           ? "legacy"
           : "default";
+    settings[name] = requireDeepScanValue(
+      name,
+      value,
+      sources[name] === "legacy" ? `${key} in ${source}` : name,
+    );
   }
-  const settings = deepScanOptions({
-    ...values,
-    mode: "deep",
-  } as DeepScanOptions & { mode: ScanMode }) as Required<DeepScanOptions>;
   return {
     settings,
     sources,
     source,
     document,
-    hasOverrides: Object.keys(explicit).length > 0,
+    overrides: explicit,
   };
 }
 
@@ -112,30 +121,67 @@ export async function writeDeepScanConfig(
   resolved: ResolvedDeepScanConfig,
 ): Promise<void> {
   const [source, target] = await Promise.all([
-    canonicalConfigPath(resolved.source).catch(() => null),
-    canonicalConfigPath(destination).catch(() => null),
+    canonicalConfigPath(resolved.source),
+    runtimeConfigPath(destination),
   ]);
   let document = resolved.document;
-  if (source !== null && source === target) {
-    if (!resolved.hasOverrides) return;
+  const sameFile = source === target;
+  if (sameFile) {
+    if (Object.keys(resolved.overrides).length === 0) return;
     document = await readDeepScanDocument(destination);
   }
+  // An isolated runtime needs a complete snapshot. An ambient file keeps
+  // inherited defaults unset so future releases can still update them.
+  const settings = sameFile ? resolved.overrides : resolved.settings;
+  const retainAmbientSettings =
+    sameFile &&
+    DEEP_SCAN_SETTINGS.some(([name]) => settings[name] === undefined);
   await writeCodexConfig(destination, {
     ...document,
-    deep_scan: Object.fromEntries(
-      DEEP_SCAN_SETTINGS.map(([name, key]) => [key, resolved.settings[name]]),
-    ),
+    deep_scan: {
+      ...(retainAmbientSettings
+        ? (document["deep_scan"] as TomlTable | undefined)
+        : {}),
+      ...Object.fromEntries(
+        DEEP_SCAN_SETTINGS.filter(([name]) => settings[name] !== undefined).map(
+          ([name, key]) => [key, settings[name]],
+        ),
+      ),
+    },
   } as JsonObject);
 }
 
-async function canonicalConfigPath(path: string): Promise<string> {
+async function runtimeConfigPath(path: string): Promise<string> {
   try {
-    return await realpath(path);
+    return await canonicalConfigPath(path);
   } catch (error) {
-    const parent = dirname(path);
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || parent === path)
+    if (
+      (error as NodeJS.ErrnoException).code !== "ELOOP" ||
+      !(await lstat(path)).isSymbolicLink()
+    )
       throw error;
-    return join(await canonicalConfigPath(parent), basename(path));
+    // A stale cyclic file link is replaced by writeCodexConfig's atomic rename.
+    // Errors resolving its parent (or the ambient source) still fail the write.
+    return join(await canonicalConfigPath(dirname(path)), basename(path));
+  }
+}
+
+async function canonicalConfigPath(path: string): Promise<string> {
+  let existing = resolve(path);
+  const missing: string[] = [];
+  while (true) {
+    try {
+      return join(await realpath(existing), ...missing);
+    } catch (error) {
+      const parent = dirname(existing);
+      if (
+        (error as NodeJS.ErrnoException).code !== "ENOENT" ||
+        parent === existing
+      )
+        throw error;
+      missing.unshift(basename(existing));
+      existing = parent;
+    }
   }
 }
 

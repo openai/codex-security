@@ -106,7 +106,7 @@ test.each(["standard", "deep"] as const)(
     }
     for (const configuration of configurations) {
       expect(configuration.config).toEqual({ codexOverrides: input.codex });
-      expect(configuration.options).toEqual({
+      expect<ScanOptions>(configuration.options).toEqual({
         ...options,
         validationPromptFile: undefined,
       });

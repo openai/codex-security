@@ -1,4 +1,12 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
@@ -6,7 +14,13 @@ import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
 import type { CodexSecurityConfig, JsonObject } from "../src/config.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
-import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import { readProjectConfig } from "../src/project-config.js";
+import {
+  capture,
+  dependencies,
+  fakePreflight,
+  fakeResult,
+} from "./cli-fixtures.js";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -38,6 +52,431 @@ async function fixture(input: ProjectConfigInput | string) {
   );
   return { root, repository, configDirectory, config };
 }
+
+test.each([undefined, "starter.json"])(
+  "init writes a valid unpinned starter and refuses overwrites: %s",
+  async (file) => {
+    const input = await fixture({});
+    const args = ["init", ...(file === undefined ? [] : [file]), "--json"];
+    const output = capture();
+    const deps = dependencies({
+      currentDirectory: input.root,
+      onConfig: () => {
+        throw new Error("No runtime for init");
+      },
+    });
+    expect(await main(args, output.stream, capture().stream, deps)).toBe(0);
+    const path = join(input.root, file ?? "codex-security.yaml");
+    expect(JSON.parse(output.text())).toEqual({ path });
+    const selected = await readProjectConfig(path);
+    expect(selected.input).toEqual({
+      $schema:
+        "./node_modules/@openai/codex-security/schemas/project-config.schema.json",
+    });
+    const contents = await readFile(path, "utf8");
+    expect(await main(args, capture().stream, capture().stream, deps)).toBe(2);
+    expect(await readFile(path, "utf8")).toBe(contents);
+  },
+);
+
+test("info resolves a config and its sources without a target, prompt reads, or runtime", async () => {
+  const input = await fixture({
+    scan: {
+      mode: "deep",
+      instructions_file: "not-read.md",
+      deep: { workers: 2 },
+    },
+    codex: {
+      model: "gpt-5.6-terra",
+      synthetic_private_setting: "synthetic-private-value",
+    },
+  });
+  const home = join(input.root, "home");
+  await mkdir(join(home, "codex-security"), { recursive: true });
+  await writeFile(
+    join(home, "codex-security", "config.toml"),
+    "[deep_scan]\nsubagents = 1\n",
+  );
+  const stdout = capture();
+  expect(
+    await main(
+      ["info", "-c", input.config, "--json"],
+      stdout.stream,
+      capture().stream,
+      dependencies({
+        currentDirectory: input.configDirectory,
+        environment: { CODEX_HOME: home },
+        onConfig: () => {
+          throw new Error("No runtime for info");
+        },
+      }),
+    ),
+  ).toBe(0);
+  expect(stdout.text()).not.toContain("synthetic-private-value");
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    model: "gpt-5.6-terra",
+    configuration: {
+      path: input.config,
+      settings: {
+        mode: "deep",
+        workers: 2,
+        subagents: 1,
+        scanPromptFile: join(input.configDirectory, "not-read.md"),
+      },
+      sources: {
+        "scan.deep.workers": "project",
+        "scan.deep.subagents_per_worker": "legacy",
+        "scan.deep.max_time_hours": "default",
+        "policy.fail_on_severity": "default",
+      },
+    },
+  });
+});
+
+test("info without a file reports default sources, including unset settings", async () => {
+  const input = await fixture({});
+  const stdout = capture();
+  expect(
+    await main(
+      ["info", "--json", "--filter-output", "configuration"],
+      stdout.stream,
+      capture().stream,
+      dependencies({ currentDirectory: input.root }),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    configuration: {
+      sources: {
+        auth: "default",
+        "scan.mode": "default",
+        "scan.scope": "default",
+        "scan.knowledge_base": "default",
+        "scan.instructions_file": "default",
+        "scan.validation_file": "default",
+        "output.directory": "default",
+        "policy.fail_on_severity": "default",
+        "limits.max_cost_usd_per_scan": "default",
+      },
+    },
+  });
+});
+
+test("an explicit config flag overrides the operator-selected environment file", async () => {
+  const input = await fixture({ codex: { model: "gpt-5.6-terra" } });
+  const override = join(input.root, "override.json");
+  await writeFile(
+    override,
+    JSON.stringify({ codex: { model: "gpt-5.6-sol" } }),
+  );
+  for (const [flags, expected] of [
+    [[], "gpt-5.6-terra"],
+    [["-c", override], "gpt-5.6-sol"],
+  ] as const) {
+    let selected: CodexSecurityConfig | undefined;
+    expect(
+      await main(
+        ["scan", ...flags, "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          currentDirectory: input.repository,
+          environment: { CODEX_SECURITY_PROJECT_CONFIG: input.config },
+          onConfig: (config) => {
+            selected = config;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(selected?.codexOverrides?.["model"]).toBe(expected);
+  }
+});
+
+test("a missing operator-selected environment file fails without falling back", async () => {
+  const input = await fixture({});
+  let initialized = false;
+  expect(
+    await main(
+      ["scan", "--json"],
+      capture().stream,
+      capture().stream,
+      dependencies({
+        currentDirectory: input.repository,
+        environment: {
+          CODEX_SECURITY_PROJECT_CONFIG: join(input.root, "missing.yaml"),
+        },
+        onConfig: () => {
+          initialized = true;
+        },
+      }),
+    ),
+  ).toBe(2);
+  expect(initialized).toBe(false);
+});
+
+test.each([123, "", "   "])(
+  "a selected profile's invalid model is reported at the provider flag: %j",
+  async (model) => {
+    const input = await fixture({
+      codex: { profile: "selected", profiles: { selected: { model } } },
+    });
+    let initialized = false;
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", "-c", input.config, "--provider", "amazon-bedrock", "--json"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          currentDirectory: input.repository,
+          onConfig: () => {
+            initialized = true;
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "--model must be a nonempty string when using --provider amazon-bedrock",
+    );
+    expect(initialized).toBe(false);
+  },
+);
+
+test("rerun rejects a blank replacement when scan instructions are required", async () => {
+  const input = await fixture({});
+  const prompt = join(input.root, "empty.md");
+  await writeFile(prompt, " \n");
+  const stderr = capture();
+  let initialized = false;
+  expect(
+    await main(
+      ["scans", "rerun", "saved", "--scan-prompt-file", prompt, "--json"],
+      capture().stream,
+      stderr.stream,
+      dependencies({
+        currentDirectory: input.root,
+        onWorkbench: async () => ({
+          recipe: {
+            repository: input.repository,
+            target: { kind: "repository", paths: [] },
+            mode: "standard",
+            config: {},
+            requiresScanPrompt: true,
+          },
+        }),
+        onConfig: () => {
+          initialized = true;
+        },
+      }),
+    ),
+  ).toBe(2);
+  expect(stderr.text()).toContain("--scan-prompt-file must not be empty");
+  expect(initialized).toBe(false);
+});
+
+test("bulk scans apply config per CSV mode, preserve scope overrides, and retain the policy on resume", async () => {
+  const config: ProjectConfigInput = {
+    auth: "api-key",
+    scan: {
+      scope: { paths: ["src"] },
+      knowledge_base: ["context.md"],
+      instructions_file: "instructions.md",
+      deep: { workers: 2, subagents_per_worker: 0 },
+    },
+    codex: { model: "gpt-5.6-terra" },
+    limits: { max_cost_usd_per_scan: 5 },
+    policy: { fail_on_severity: "high" },
+    output: { directory: "../batch-results" },
+  };
+  const input = await fixture(config);
+  await writeFile(
+    join(input.configDirectory, "context.md"),
+    "Synthetic context.",
+  );
+  await writeFile(
+    join(input.configDirectory, "instructions.md"),
+    "Review synthetic boundaries.",
+  );
+  await writeFile(
+    join(input.repository, "src", "index.ts"),
+    "export const value = 1;\n",
+  );
+  await writeFile(
+    join(input.repository, "lib", "index.ts"),
+    "export const value = 2;\n",
+  );
+  for (const args of [
+    ["init", "-q", input.repository],
+    ["-C", input.repository, "add", "."],
+    [
+      "-C",
+      input.repository,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.test",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-qm",
+      "fixture",
+    ],
+  ])
+    execFileSync("git", args);
+  const revision = execFileSync(
+    "git",
+    ["-C", input.repository, "rev-parse", "HEAD"],
+    { encoding: "utf8" },
+  ).trim();
+  const csv = join(input.root, "repositories.csv");
+  await writeFile(
+    csv,
+    `id,repository,revision,mode,scope\nstandard,${input.repository},${revision},standard,lib\ndeep,${input.repository},${revision},deep,\n`,
+  );
+  const selected: ScanOptions[] = [];
+  const deps = dependencies({ currentDirectory: input.root });
+  deps.createSecurity = (native) => {
+    expect(native.codexOverrides?.["model"]).toBe("gpt-5.6-terra");
+    return {
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+      run: async (_repository, options = {}) => {
+        selected.push(options);
+        const result = fakeResult(["high"]);
+        await mkdir(options.outputDir!, { recursive: true });
+        for (const [name, content] of Object.entries({
+          "scan-manifest.json": result.manifest,
+          "findings.json": result.findings,
+          "coverage.json": result.coverage,
+          "report.md": "Synthetic report.",
+        }))
+          await writeFile(
+            join(options.outputDir!, name),
+            typeof content === "string" ? content : JSON.stringify(content),
+          );
+        return result;
+      },
+    };
+  };
+  const args = [
+    "bulk-scan",
+    csv,
+    "-c",
+    input.config,
+    "--max-cost",
+    "3",
+    "--json",
+  ];
+  const output = capture();
+  expect(await main(args, output.stream, capture().stream, deps)).toBe(1);
+  expect(JSON.parse(output.text())).toMatchObject({
+    completed: 2,
+    failed: 0,
+    policyFailed: true,
+  });
+  expect(selected.find((options) => options.mode === "standard")).toMatchObject(
+    {
+      target: ["lib"],
+      auth: "api-key",
+      maxCostUsd: 3,
+      failureSeverity: "high",
+      knowledgeBasePaths: [join(input.configDirectory, "context.md")],
+      scanPrompt: "Review synthetic boundaries.",
+    },
+  );
+  expect(
+    selected.find((options) => options.mode === "standard")?.workers,
+  ).toBeUndefined();
+  expect(selected.find((options) => options.mode === "deep")).toMatchObject({
+    target: ["src"],
+    workers: 2,
+    subagents: 0,
+  });
+  const resumed = capture();
+  expect(await main(args, resumed.stream, capture().stream, deps)).toBe(1);
+  expect(JSON.parse(resumed.text())).toMatchObject({
+    skipped: 2,
+    policyFailed: true,
+  });
+  expect(selected).toHaveLength(2);
+  await writeFile(
+    input.config,
+    JSON.stringify({ ...config, policy: { fail_on_severity: "low" } }),
+  );
+  const stderr = capture();
+  expect(await main(args, capture().stream, stderr.stream, deps)).toBe(2);
+  expect(stderr.text()).toContain("manifest does not match");
+  expect(selected).toHaveLength(2);
+});
+
+test.each(["standard", "deep"] as const)(
+  "component scans honor shared %s settings and severity policy",
+  async (mode) => {
+    const input = await fixture({
+      scan: {
+        mode,
+        scope: { paths: ["src"] },
+        instructions_file: "instructions.md",
+        ...(mode === "standard" ? { validation_file: "validation.md" } : {}),
+        deep: { workers: 2, subagents_per_worker: 0 },
+      },
+      codex: { model: "gpt-5.6-terra" },
+      policy: { fail_on_severity: "high" },
+      output: { directory: "../component-results" },
+    });
+    await writeFile(
+      join(input.repository, "lib", "index.ts"),
+      "export const value = 1;\n",
+    );
+    await writeFile(
+      join(input.configDirectory, "instructions.md"),
+      "Review synthetic boundaries.",
+    );
+    await writeFile(
+      join(input.configDirectory, "validation.md"),
+      "Validate synthetic boundaries.",
+    );
+    let selected: ScanOptions | undefined;
+    const stdout = capture();
+    expect(
+      await main(
+        [
+          "scan-components",
+          input.repository,
+          "-c",
+          input.config,
+          "--component",
+          "lib",
+          "--headless",
+          "--json",
+        ],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          currentDirectory: input.root,
+          result: fakeResult(["high"]),
+          onTurn: (_repository, options) => {
+            selected = options as ScanOptions;
+          },
+        }),
+      ),
+    ).toBe(1);
+    expect(selected).toMatchObject({
+      mode,
+      target: ["lib"],
+      scanPrompt: "Review synthetic boundaries.",
+      failureSeverity: "high",
+    });
+    if (mode === "deep")
+      expect(selected).toMatchObject({ workers: 2, subagents: 0 });
+    else
+      expect(selected?.validationPrompt).toBe("Validate synthetic boundaries.");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      completed: 1,
+      failed: 0,
+      policyFailed: true,
+    });
+  },
+);
 
 test("actual CLI parsing preserves file values when flags are absent", async () => {
   const input = await fixture({
@@ -174,6 +613,56 @@ test("CLI values override matching file values, including native objects and lis
   });
 });
 
+test("rerun accepts replacement scan and validation files relative to the invocation directory", async () => {
+  const input = await fixture({});
+  await writeFile(
+    join(input.configDirectory, "instructions.md"),
+    "Review the synthetic boundary.",
+  );
+  await writeFile(
+    join(input.configDirectory, "validation.md"),
+    "Validate the synthetic boundary.",
+  );
+  const recipe: JsonObject = {
+    repository: input.repository,
+    target: { kind: "repository", paths: [] },
+    mode: "standard",
+    config: {},
+    requiresScanPrompt: true,
+    validationMode: "custom",
+  };
+  let selected: ScanOptions | undefined;
+  const stderr = capture();
+  expect(
+    await main(
+      [
+        "scans",
+        "rerun",
+        "saved",
+        "--scan-prompt-file",
+        "instructions.md",
+        "--validation-prompt-file",
+        "validation.md",
+        "--json",
+      ],
+      capture().stream,
+      stderr.stream,
+      dependencies({
+        currentDirectory: input.configDirectory,
+        onWorkbench: async () => ({ recipe }),
+        onTurn: (_target, options) => {
+          selected = options as ScanOptions;
+        },
+      }),
+    ),
+  ).toBe(0);
+  expect(selected).toMatchObject({
+    scanPrompt: "Review the synthetic boundary.",
+    validationPrompt: "Validate the synthetic boundary.",
+    parentScanId: "saved",
+  });
+});
+
 test.each([
   [
     { paths: ["src"] },
@@ -223,7 +712,7 @@ test.each([
   [["--path", "src", "--diff", "HEAD"], "mutually exclusive"],
   [["--head", "HEAD"], "--head requires --diff"],
   [["--base", "HEAD"], "--base requires --working-tree"],
-  [["--workers", "2", "--mode", "standard"], "require --mode deep"],
+  [["--workers", "2", "--mode", "standard"], "require deep mode"],
   [
     ["--model", "gpt-5.6-terra", "--codex", 'model="gpt-5.6-sol"'],
     "--model conflicts",
@@ -656,7 +1145,10 @@ test("rerun restores all saved deep settings and authentication without loading 
       capture().stream,
       dependencies({
         currentDirectory: input.repository,
-        environment: { OPENAI_API_KEY: "synthetic-test-key" },
+        environment: {
+          OPENAI_API_KEY: "synthetic-test-key",
+          CODEX_SECURITY_PROJECT_CONFIG: input.config,
+        },
         onWorkbench: async () => ({ recipe }),
         onTurn: (_target, value) => {
           selected = value as ScanOptions;

@@ -188,7 +188,8 @@ if (
 
 `resolveProjectConfig(input, directory?)` accepts a typed `ProjectConfigInput`
 object with the same `snake_case` keys as YAML/JSON and returns the same `{ config,
-options }` pair. `loadProjectConfig(file, directory?)` resolves the selected file
+options }` pair and an immutable `sources` map. Resolved context, prompt, and output
+paths have the `AbsolutePath` type. `loadProjectConfig(file, directory?)` resolves the selected file
 from `directory`, which defaults to the current directory; paths inside the file
 are relative to that file. Object paths are relative to the supplied directory.
 Scope paths remain relative to the selected repository. Neither helper starts a
@@ -306,7 +307,8 @@ npx @openai/codex-security scan /path/to/repository --dry-run
 
 Use `scan --help` for options, `--version` for the installed version, and
 `info --json` for package, plugin, runtime, and model details. `--dry-run`
-runs local preflight checks.
+runs local preflight checks. `info -c FILE --json` inspects resolved configuration
+and its sources without a repository or runtime.
 
 ### Project files
 
@@ -315,12 +317,25 @@ Use `scan -c FILE` / `scan --config FILE` to load reusable scan settings:
 ```bash
 codex-security scan . -c codex-security.yaml --dry-run --json
 codex-security scan . -c codex-security.json --model gpt-5.6-terra
+codex-security init
+codex-security info -c codex-security.yaml --json
 ```
 
-Select one `.yaml`, `.yml`, or `.json` file. Omitting `-c` preserves existing scan
-defaults without discovering files. The repository still comes from the positional
-argument or invocation directory. Other commands and SDK `run()` calls do not
-load project files automatically.
+Select one `.yaml`, `.yml`, or `.json` file. `scan`, `bulk-scan`, `scan-components`,
+and `info` accept `-c`. They also accept an operator-set
+`CODEX_SECURITY_PROJECT_CONFIG`; an explicit `-c` wins. Without either, no file is
+loaded or discovered. The repository still comes from the command's target
+selection. SDK `run()` and saved reruns do not load project files automatically.
+
+The selected file is trusted like CLI options and SDK `codexOverrides`. Native
+settings can start configured MCP server processes and select model-service destinations. Do not
+select configuration controlled by an untrusted repository or pull request; keep
+CI scanner configuration outside the checkout being assessed.
+
+`init [file]` writes `codex-security.yaml` by default and never overwrites an
+existing file. YAML starters show defaults as comments; JSON starters contain the
+editor schema hint. `info` reports effective model details and native key sources
+without dumping raw native values.
 
 ```yaml
 # yaml-language-server: $schema=./node_modules/@openai/codex-security/schemas/project-config.schema.json
@@ -350,8 +365,8 @@ and the behavior of `--provider openai` are unchanged.
 File context, instruction, validation, and output paths resolve from the file's
 directory. CLI file paths resolve from the invocation directory; scope paths
 resolve from the repository. The file cannot select a different repository or
-enable automatic patching/publication. It does not support executable configs,
-environment interpolation, remote includes, or multiple-file merging.
+enable automatic patching/publication. The loader does not evaluate code,
+interpolate environment values, include remote files, or merge multiple files.
 
 Dry-run output adds `projectConfig.path` and `projectConfig.sources`, selected
 prompt paths, and the finding policy without dumping raw native configuration.
@@ -410,13 +425,19 @@ runtime or plugin compatibility. Older versions may omit the ID.
 ### Scan project components
 
 `scan --path` runs one scan across selected paths. To scan each local project
-component separately in standard mode, use `scan-components`:
+component separately (standard mode by default), use `scan-components`:
 
 ```bash
 npx @openai/codex-security scan-components /path/to/project \
   --component apps/api --component apps/web --component packages/shared \
   --workers 4 --output-dir /path/outside/project/results
 ```
+
+Use `-c FILE` to share settings, including `scan.mode: deep`, context and prompt
+files, per-scan deep workers, cost limits, and severity policy. Component plans
+override the file's scope. `output.directory` supplies the results directory when
+`--output-dir` is omitted. A configured severity threshold returns exit `1` after
+completed scans; failures or incomplete results return `2`.
 
 Use `--auto` instead of `--component` for a proposed split. Save a plan to
 review or edit, then run it with a new output directory:
@@ -572,22 +593,23 @@ restrictions.
 
 ### Environment variables
 
-| Variable                                                                    | Effect                                                                               |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; `OPENAI_API_KEY` wins if both are set.                             |
-| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default team and project for completed-scan publication.                             |
-| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Personal API key for Linear patching and direct publication.                         |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; `debug` enables verbose diagnostics.                                       |
-| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                          |
-| `CODEX_SECURITY_STATE_DIR`                                                  | Private scan-history, workbench, and default artifact directory.                     |
-| `CODEX_HOME`                                                                | Ambient Codex home for file-based sign-in and default state; defaults to `~/.codex`. |
-| `CODEX_CLI_PATH`                                                            | Codex executable for authentication, plugin setup, scans, and workers.               |
-| `PYTHON`                                                                    | Python interpreter when `--python` or SDK `pythonPath` is unset.                     |
-| `GH_HOST`                                                                   | GitHub Enterprise host for interactive `bulk-scan` discovery.                        |
-| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Either variable disables interactive update notices.                                 |
-| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update-check registry, in precedence order.                                          |
-| `CI`                                                                        | Disables interactive update notices.                                                 |
-| `NO_COLOR`, `TERM`                                                          | Disables colored scan history when `NO_COLOR` is defined or `TERM=dumb`.             |
+| Variable                                                                    | Effect                                                                                                    |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; `OPENAI_API_KEY` wins if both are set.                                                  |
+| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default team and project for completed-scan publication.                                                  |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Personal API key for Linear patching and direct publication.                                              |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; `debug` enables verbose diagnostics.                                                            |
+| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                               |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Private scan-history, workbench, and default artifact directory.                                          |
+| `CODEX_SECURITY_PROJECT_CONFIG`                                             | Trusted project file for `scan`, `bulk-scan`, `scan-components`, and `info`; `-c` wins. Unset by default. |
+| `CODEX_HOME`                                                                | Ambient Codex home for file-based sign-in and default state; defaults to `~/.codex`.                      |
+| `CODEX_CLI_PATH`                                                            | Codex executable for authentication, plugin setup, scans, and workers.                                    |
+| `PYTHON`                                                                    | Python interpreter when `--python` or SDK `pythonPath` is unset.                                          |
+| `GH_HOST`                                                                   | GitHub Enterprise host for interactive `bulk-scan` discovery.                                             |
+| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Either variable disables interactive update notices.                                                      |
+| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update-check registry, in precedence order.                                                               |
+| `CI`                                                                        | Disables interactive update notices.                                                                      |
+| `NO_COLOR`, `TERM`                                                          | Disables colored scan history when `NO_COLOR` is defined or `TERM=dumb`.                                  |
 
 Custom Codex executables need thread source attribution for `exec` and
 `app-server` (Codex 0.149.1+). On Windows, use a native `.exe` or `.com`;
@@ -640,6 +662,11 @@ npx @openai/codex-security bulk-scan repositories.csv \
 
 `--scan-prompt-file PATH` adds instructions to a scan or all bulk scans. Each
 repository's CSV `prompt` follows the shared instructions.
+`-c FILE` shares config with single scans: CSV mode/scope override file defaults,
+and deep settings apply only to deep rows. `output.directory` can supply the
+results directory. `fail_on_severity` returns exit `1` without retrying completed
+scans, including when resuming saved results. A changed project configuration
+requires a new campaign output directory.
 `--post-scan-prompt-file PATH` runs a follow-up in the same authenticated session,
 even after a failed or incomplete scan, but not after cancellation or a
 cost-limit stop.
@@ -866,8 +893,9 @@ fallback behavior. Context paths and the current checkout are not immutable inpu
 snapshots.
 
 Additional scan instructions are not saved. New recipes mark this requirement,
-and `scans rerun` refuses to omit them silently; use a new `scan --scan-prompt-file`
-or `scan -c` invocation to supply them again. Custom validation keeps its existing
+and `scans rerun` refuses to omit them silently; use
+`scans rerun [SCAN_ID] --scan-prompt-file FILE` to supply a nonempty replacement.
+Replacement files resolve from the invocation directory. Custom validation keeps its existing
 `scans rerun --validation-prompt-file` requirement.
 
 | Command                                               | Purpose                                                                                                     |

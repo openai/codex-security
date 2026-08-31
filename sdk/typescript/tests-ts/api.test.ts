@@ -69,6 +69,7 @@ import {
 } from "./support/api-events.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
+import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 
 type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
@@ -202,6 +203,60 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
       ).rejects.toThrow("already bound to a different");
     } finally {
       await resumed.close();
+    }
+  },
+);
+
+test.each(["ambient settings", "shipped defaults"])(
+  "a deep workflow can resume after changing %s but rejects a different request",
+  async (change) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const source = join(codexHome, "codex-security", "config.toml");
+    await mkdir(repository);
+    await mkdir(dirname(source), { recursive: true });
+    await writeFile(source, "[deep_scan]\nsubagents = 1\n");
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: codexHome,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        runWorkbench: async (options, args, input) => {
+          if (
+            args[0] === "finding-workflow" &&
+            JSON.parse(input!).action === "begin"
+          ) {
+            throw new Error("Synthetic stop before scan");
+          }
+          return runWorkbench(options, args, input);
+        },
+      },
+    );
+    const defaults = DEFAULT_DEEP_SCAN_SETTINGS as { workers: number };
+    const originalWorkers = defaults.workers;
+    const request = { workflowId: "deep-resume", mode: "deep" } as const;
+    try {
+      await expect(client.run(repository, request)).rejects.toThrow(
+        "Synthetic stop before scan",
+      );
+      if (change === "ambient settings")
+        await writeFile(source, "[deep_scan]\nworkers = 9\nsubagents = 2\n");
+      else defaults.workers = originalWorkers + 1;
+      await expect(client.run(repository, request)).rejects.toThrow(
+        "Synthetic stop before scan",
+      );
+      await expect(
+        client.run(repository, { ...request, workers: 2 }),
+      ).rejects.toThrow("already bound to a different");
+    } finally {
+      defaults.workers = originalWorkers;
+      await client.close();
     }
   },
 );

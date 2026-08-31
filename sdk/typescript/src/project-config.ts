@@ -8,6 +8,9 @@ import {
   type JsonObject,
 } from "./config.js";
 import { ConfigurationError } from "./errors.js";
+import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
+import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
+import { deepScanOptions, type DeepScanSources } from "./deep-config.js";
 import {
   projectConfigJsonSchema,
   type ProjectConfigInput,
@@ -18,7 +21,7 @@ import {
   DEFAULT_SCAN_AUTH,
   DEFAULT_SCAN_MODE,
   DEEP_SCAN_SETTINGS,
-  scanSettings,
+  pickScanSettings,
   type DeepScanOptions,
   type ResolvedScanSettings,
   type ScanSettings,
@@ -38,13 +41,60 @@ export interface ProjectConfigSource {
 export interface ResolvedProjectConfig {
   config: { codexOverrides: JsonObject };
   options: ResolvedScanSettings;
+  sources: ConfigurationSources;
   projectConfig?: ProjectConfigProvenance;
 }
 
 export type ConfigurationSource = "default" | "legacy" | "project" | "cli";
+const PROJECT_SETTING_KEYS = {
+  auth: "auth",
+  mode: "scan.mode",
+  target: "scan.scope",
+  knowledgeBasePaths: "scan.knowledge_base",
+  scanPromptFile: "scan.instructions_file",
+  validationPromptFile: "scan.validation_file",
+  outputDir: "output.directory",
+  failureSeverity: "policy.fail_on_severity",
+  maxCostUsd: "limits.max_cost_usd_per_scan",
+} as const satisfies Partial<Record<keyof ScanSettings, string>>;
+type SettingProvenanceKey =
+  (typeof PROJECT_SETTING_KEYS)[keyof typeof PROJECT_SETTING_KEYS];
+export type ScopeProvenanceKey =
+  | "scan.scope"
+  | "scan.scope.diff.head"
+  | "scan.scope.working_tree.base";
+export type ProvenanceKey =
+  | SettingProvenanceKey
+  | ScopeProvenanceKey
+  | `scan.deep.${(typeof DEEP_SCAN_SETTINGS)[number][2]}`
+  | `codex.${string}`;
+export type ConfigurationSources = Readonly<
+  Record<SettingProvenanceKey, ConfigurationSource> &
+    Partial<Record<ProvenanceKey, ConfigurationSource>>
+>;
 export interface ProjectConfigProvenance {
   path: string;
-  sources: Record<string, ConfigurationSource>;
+  sources: ConfigurationSources;
+}
+
+/** Build a complete, immutable source map after layer and preflight resolution. */
+export function configurationSources(
+  values: Partial<Record<ProvenanceKey, ConfigurationSource>> = {},
+  deepSources?: DeepScanSources,
+): ConfigurationSources {
+  const sources = {
+    ...Object.fromEntries(
+      Object.values(PROJECT_SETTING_KEYS).map((key) => [key, "default"]),
+    ),
+    ...values,
+  } as Record<SettingProvenanceKey, ConfigurationSource> &
+    Partial<Record<ProvenanceKey, ConfigurationSource>>;
+  for (const [name, , key] of DEEP_SCAN_SETTINGS) {
+    const source = deepSources?.[name];
+    if (source !== undefined && source !== "override")
+      sources[`scan.deep.${key}`] = source;
+  }
+  return Object.freeze(sources);
 }
 
 export async function loadProjectConfig(
@@ -75,12 +125,7 @@ export async function readProjectConfig(
   directory = process.cwd(),
 ): Promise<ProjectConfigSource> {
   const path = resolve(directory, expandHome(file));
-  const extension = extname(path).toLowerCase();
-  if (![".yaml", ".yml", ".json"].includes(extension)) {
-    throw new ConfigurationError(
-      "Project configuration must be a .yaml, .yml, or .json file.",
-    );
-  }
+  const extension = projectConfigExtension(path);
   let text: string;
   try {
     text = await readFile(path, "utf8");
@@ -97,7 +142,8 @@ export async function readProjectConfig(
     } else {
       const document = parseDocument(text, { prettyErrors: false });
       if (document.errors.length > 0) throw document.errors[0];
-      value = document.toJS({ maxAliasCount: -1 });
+      // Keep YAML's expansion guard while allowing repeated native profiles.
+      value = document.toJS({ maxAliasCount: 10_000 });
     }
   } catch (error) {
     throw new ConfigurationError(
@@ -107,6 +153,51 @@ export async function readProjectConfig(
   }
   requireProjectConfig(value, path);
   return { path, directory: dirname(path), input: value };
+}
+
+function projectConfigExtension(path: string): string {
+  const extension = extname(path).toLowerCase();
+  if (![".yaml", ".yml", ".json"].includes(extension)) {
+    throw new ConfigurationError(
+      "Project configuration must be a .yaml, .yml, or .json file.",
+    );
+  }
+  return extension;
+}
+
+export function projectConfigStarter(path: string): string {
+  const schema =
+    "./node_modules/@openai/codex-security/schemas/project-config.schema.json";
+  if (projectConfigExtension(path) === ".json")
+    return `${JSON.stringify({ $schema: schema }, null, 2)}\n`;
+  return [
+    "# This file is trusted like CLI options. Keep it outside untrusted inputs.",
+    `$schema: ${schema}`,
+    "",
+    "# Uncomment the settings you want to override. Defaults remain unpinned.",
+    `# auth: ${DEFAULT_SCAN_AUTH}`,
+    "# scan:",
+    `#   mode: ${DEFAULT_SCAN_MODE}`,
+    "#   scope:",
+    "#     paths: [src] # Relative to each selected repository.",
+    "#   knowledge_base: [] # Paths relative to this file.",
+    "#   instructions_file: instructions.md",
+    "#   validation_file: validation.md # Standard mode only.",
+    "#   deep: # Used when mode is deep.",
+    ...DEEP_SCAN_SETTINGS.map(
+      ([name, , key]) => `#     ${key}: ${DEFAULT_DEEP_SCAN_SETTINGS[name]}`,
+    ),
+    "# codex:",
+    `#   model: ${DEFAULT_CODEX_CONFIG["model"]}`,
+    `#   model_reasoning_effort: ${DEFAULT_CODEX_CONFIG["model_reasoning_effort"]}`,
+    "# limits:",
+    "#   max_cost_usd_per_scan: 10 # Optional limit per scan attempt.",
+    "# policy:",
+    "#   fail_on_severity: high # Omitted by default (report only).",
+    "# output:",
+    "#   directory: ../scan-results # Outside the selected repositories.",
+    "",
+  ].join("\n");
 }
 
 function requireProjectConfig(
@@ -133,16 +224,12 @@ export function resolveScanSettings(
   project: ProjectConfigSource | undefined,
   overrides: Partial<ScanSettings> & { codexOverrides?: JsonObject },
   directory: string,
+  scopeSources: Partial<Record<ScopeProvenanceKey, ConfigurationSource>> = {},
 ): ResolvedProjectConfig {
   const file = project?.input;
-  const sources: Record<string, ConfigurationSource> = {
-    auth: "default",
-    "scan.mode": "default",
-    "scan.scope": "default",
-    "scan.knowledge_base": "default",
-  };
+  const sources: Partial<Record<ProvenanceKey, ConfigurationSource>> = {};
   const choose = <T>(
-    key: string,
+    key: ProvenanceKey,
     configured: T | undefined,
     explicit: T | undefined,
   ): T | undefined => {
@@ -156,21 +243,17 @@ export function resolveScanSettings(
     }
     return undefined;
   };
-  const filePath = (value: string | undefined): string | undefined =>
+  const projectDirectory = project?.directory ?? directory;
+  const filePath = (value: string | undefined): AbsolutePath | undefined =>
     value === undefined
       ? undefined
-      : resolve(project!.directory, expandHome(value));
-  const cliPath = (value: string | undefined): string | undefined =>
-    value === undefined ? undefined : resolve(directory, expandHome(value));
+      : resolveConfigPath(projectDirectory, value);
+  const cliPath = (value: string | undefined): AbsolutePath | undefined =>
+    value === undefined ? undefined : resolveConfigPath(directory, value);
 
   const mode =
     choose("scan.mode", file?.scan?.mode, overrides.mode) ?? DEFAULT_SCAN_MODE;
-  if (
-    mode !== "deep" &&
-    DEEP_SCAN_SETTINGS.some(([name]) => overrides[name] !== undefined)
-  ) {
-    throw new ConfigurationError("Deep scan settings require --mode deep.");
-  }
+  const explicitDeep = deepScanOptions({ ...overrides, mode });
   const target =
     choose(
       "scan.scope",
@@ -180,12 +263,11 @@ export function resolveScanSettings(
   const configuredDeep = file?.scan?.deep;
   const deep: DeepScanOptions = {};
   if (mode === "deep") {
-    for (const [name, key] of DEEP_SCAN_SETTINGS) {
-      const field = name === "subagents" ? "subagents_per_worker" : key;
+    for (const [name, , field] of DEEP_SCAN_SETTINGS) {
       const value = choose(
         `scan.deep.${field}`,
         configuredDeep?.[field],
-        overrides[name],
+        explicitDeep[name],
       );
       if (value !== undefined) deep[name] = value;
     }
@@ -198,15 +280,15 @@ export function resolveScanSettings(
   const recordNativeSources = (
     value: JsonObject,
     source: ConfigurationSource,
-    prefix = "codex",
+    prefix: "codex" | `codex.${string}` = "codex",
   ) => {
     for (const [key, item] of Object.entries(value)) {
-      const path = `${prefix}.${key}`;
+      const path: `codex.${string}` = `${prefix}.${key}`;
       if (item !== null && typeof item === "object" && !Array.isArray(item)) {
         delete sources[path];
         recordNativeSources(item, source, path);
       } else {
-        for (const existing of Object.keys(sources)) {
+        for (const existing of Object.keys(sources) as ProvenanceKey[]) {
           if (existing.startsWith(`${path}.`)) delete sources[existing];
         }
         sources[path] = source;
@@ -219,11 +301,15 @@ export function resolveScanSettings(
   const knowledgeBasePaths =
     choose(
       "scan.knowledge_base",
-      file?.scan?.knowledge_base?.map((value) => filePath(value)!),
-      overrides.knowledgeBasePaths?.map((value) => cliPath(value)!),
+      file?.scan?.knowledge_base?.map((value) =>
+        resolveConfigPath(projectDirectory, value),
+      ),
+      overrides.knowledgeBasePaths?.map((value) =>
+        resolveConfigPath(directory, value),
+      ),
     ) ?? [];
   const settings: ResolvedScanSettings = {
-    ...scanSettings(overrides),
+    ...pickScanSettings(overrides),
     auth: choose("auth", file?.auth, overrides.auth) ?? DEFAULT_SCAN_AUTH,
     mode,
     target,
@@ -238,6 +324,7 @@ export function resolveScanSettings(
       filePath(file?.scan?.validation_file),
       cliPath(overrides.validationPromptFile),
     ),
+    postScanPromptFile: cliPath(overrides.postScanPromptFile),
     outputDir: choose(
       "output.directory",
       filePath(file?.output?.directory),
@@ -255,12 +342,14 @@ export function resolveScanSettings(
     ),
     ...deep,
   };
+  const resolvedSources = configurationSources({ ...sources, ...scopeSources });
   return {
     config: { codexOverrides },
     options: settings,
+    sources: resolvedSources,
     ...(project?.path === undefined
       ? {}
-      : { projectConfig: { path: project.path, sources } }),
+      : { projectConfig: { path: project.path, sources: resolvedSources } }),
   };
 }
 

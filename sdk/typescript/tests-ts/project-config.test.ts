@@ -187,28 +187,66 @@ describe("project configuration input contract", () => {
     expect((await readProjectConfig(json)).input).toEqual(input);
   });
 
-  test("loads YAML profiles that reuse an anchored table many times", async () => {
+  test.each([
+    [150, 1],
+    [500, 20],
+  ])(
+    "loads %i YAML profiles reusing a %i-field table",
+    async (count, fields) => {
+      const root = await temporaryDirectory();
+      const path = join(root, "profiles.yaml");
+      const profile = {
+        model: "synthetic-model",
+        ...Object.fromEntries(
+          Array.from({ length: fields - 1 }, (_, index) => [
+            `setting_${index}`,
+            index,
+          ]),
+        ),
+      };
+      const names = Array.from(
+        { length: count },
+        (_, index) => `profile_${index}`,
+      );
+      await writeFile(
+        path,
+        [
+          "codex:",
+          "  profiles:",
+          `    shared: &shared ${JSON.stringify(profile)}`,
+          ...names.map((name) => `    ${name}: *shared`),
+        ].join("\n"),
+      );
+      const project = await readProjectConfig(path);
+      expect(
+        resolveScanSettings(project, {}, root).config.codexOverrides[
+          "profiles"
+        ],
+      ).toEqual({
+        shared: profile,
+        ...Object.fromEntries(names.map((name) => [name, profile])),
+      });
+    },
+  );
+
+  test("rejects excessive nested YAML alias expansion before resolving settings", async () => {
     const root = await temporaryDirectory();
-    const path = join(root, "profiles.yaml");
-    const profile = { model: "synthetic-model" };
-    const names = Array.from({ length: 150 }, (_, index) => `profile_${index}`);
+    const path = join(root, "nested-aliases.yaml");
     await writeFile(
       path,
       [
         "codex:",
-        "  profiles:",
-        "    shared: &shared",
-        "      model: synthetic-model",
-        ...names.map((name) => `    ${name}: *shared`),
+        "  shared_0: &shared_0 [value, value, value, value, value]",
+        ...Array.from(
+          { length: 6 },
+          (_, index) =>
+            `  shared_${index + 1}: &shared_${index + 1} [${Array(10).fill(`*shared_${index}`).join(", ")}]`,
+        ),
       ].join("\n"),
     );
-    const project = await readProjectConfig(path);
-    expect(
-      resolveScanSettings(project, {}, root).config.codexOverrides["profiles"],
-    ).toEqual({
-      shared: profile,
-      ...Object.fromEntries(names.map((name) => [name, profile])),
-    });
+    await expect(readProjectConfig(path)).rejects.toThrow(
+      "Cannot parse project configuration",
+    );
   });
 
   test.each([
@@ -342,7 +380,7 @@ describe("project configuration resolution", () => {
     ).toBeUndefined();
     expect(() =>
       resolveScanSettings(project, { mode: "standard", workers: 2 }, root),
-    ).toThrow("require --mode deep");
+    ).toThrow("require deep mode");
   });
 
   test("keeps existing unsafe native-key protections before merging", async () => {

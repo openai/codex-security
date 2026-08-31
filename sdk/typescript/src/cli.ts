@@ -25,7 +25,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -188,9 +188,16 @@ import {
   readProjectConfig,
   resolveScanSettings,
   projectScopeTarget,
+  configurationSources,
+  projectConfigStarter,
+  type ConfigurationSource,
+  type ScopeProvenanceKey,
   type ProjectConfigProvenance,
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
+import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
+import { resolveDeepScanConfig } from "./deep-config.js";
+import { SCAN_MODES } from "./scan-modes.js";
 import {
   DEEP_SCAN_SETTINGS,
   DeepScanSettingsSchema,
@@ -199,7 +206,7 @@ import {
   REPORTABLE_SEVERITIES,
   SCAN_SEVERITIES,
   ScanSettingsSchema,
-  scanSettings,
+  pickScanSettings,
   meetsSeverity,
   type FailureSeverity,
   type ResolvedScanSettings,
@@ -246,6 +253,11 @@ const PLUGIN_PATH_DESCRIPTION =
   "Codex Security plugin directory or ZIP (default: bundled plugin).";
 const PYTHON_PATH_DESCRIPTION =
   "Python interpreter (default: PYTHON or automatic discovery).";
+const PROJECT_CONFIG_OPTION = optionValue("--config")
+  .optional()
+  .describe(
+    "Load a trusted YAML/JSON file (default: CODEX_SECURITY_PROJECT_CONFIG, otherwise no file).",
+  );
 const EXPORT_DEFAULT_OUTPUTS = {
   csv: "findings.csv",
   json: "findings.json",
@@ -863,16 +875,19 @@ function effortOption() {
     );
 }
 
-const DEEP_SCAN_OPTION_SCHEMAS = {
-  workers: DeepScanSettingsSchema.shape.workers,
-  subagents: DeepScanSettingsSchema.shape.subagents,
-  stopAfterNoNew: DeepScanSettingsSchema.shape.stopAfterNoNew,
-  maxDiscoveryRuns: DeepScanSettingsSchema.shape.maxDiscoveryRuns,
-  maxTimeHours: DeepScanSettingsSchema.shape.maxTimeHours,
-};
+type DeepCliOptionName = Extract<
+  (typeof DEEP_SCAN_SETTINGS)[number],
+  readonly [string, string, string, string]
+>[0];
+const DEEP_SCAN_OPTION_SCHEMAS = Object.fromEntries(
+  DEEP_SCAN_SETTINGS.filter(([, , , flag]) => flag !== null).map(([name]) => [
+    name,
+    DeepScanSettingsSchema.shape[name],
+  ]),
+) as Pick<typeof DeepScanSettingsSchema.shape, DeepCliOptionName>;
 
-export function resolveCliPath(directory: string, value: string): string {
-  return resolve(directory, expandHome(value));
+export function resolveCliPath(directory: string, value: string): AbsolutePath {
+  return resolveConfigPath(directory, value);
 }
 
 interface ScanArguments extends ResolvedScanSettings {
@@ -1814,6 +1829,11 @@ export async function main(
           .describe("Saved scan identifier (default: latest completed scan)."),
       }),
       options: z.object({
+        scanPromptFile: optionValue("--scan-prompt-file")
+          .optional()
+          .describe(
+            "Supply additional scan instructions; required when the saved scan used them.",
+          ),
         validationPromptFile: optionValue("--validation-prompt-file")
           .optional()
           .describe(
@@ -1835,10 +1855,26 @@ export async function main(
             "--scan-id",
             scanId,
           ]);
-          scanArguments = scanArgumentsFromRecipe(
+          scanArguments = await prepareScanArgumentsFromRecipe(
             recipe,
             scanId,
-            options.validationPromptFile,
+            {
+              scanPromptFile:
+                options.scanPromptFile === undefined
+                  ? undefined
+                  : resolveCliPath(
+                      dependencies.currentDirectory(),
+                      options.scanPromptFile,
+                    ),
+              validationPromptFile:
+                options.validationPromptFile === undefined
+                  ? undefined
+                  : resolveCliPath(
+                      dependencies.currentDirectory(),
+                      options.validationPromptFile,
+                    ),
+            },
+            dependencies.currentDirectory(),
           );
           scanArguments.verbose = options.verbose;
         } catch (error) {
@@ -2690,11 +2726,7 @@ export async function main(
       }),
       options: z
         .object({
-          config: optionValue("--config")
-            .optional()
-            .describe(
-              "Load one YAML or JSON project file. No file is loaded by default.",
-            ),
+          config: PROJECT_CONFIG_OPTION,
           workflowId: optionValue("--workflow-id")
             .optional()
             .describe(
@@ -2808,17 +2840,6 @@ export async function main(
             .describe("Validate local scan inputs without starting a scan."),
         })
         .refine(
-          (options) =>
-            Number((options.path?.length ?? 0) > 0) +
-              Number(options.diff !== undefined) +
-              Number(options.workingTree === true) <=
-            1,
-          {
-            message:
-              "--path, --diff, and --working-tree are mutually exclusive.",
-          },
-        )
-        .refine(
           (options) => options.patchSeverity === undefined || options.patch,
           {
             message: "--patch-severity requires --patch.",
@@ -2864,10 +2885,10 @@ export async function main(
         let outcome: ScanOutcome;
         try {
           const directory = dependencies.currentDirectory();
-          const project =
-            options.config === undefined
-              ? undefined
-              : await readProjectConfig(options.config, directory);
+          const project = await selectedProjectConfig(
+            options.config,
+            dependencies,
+          );
           const scope = resolveCliScope(project?.input.scan?.scope, {
             paths: options.path,
             diff: options.diff,
@@ -2887,6 +2908,7 @@ export async function main(
               knowledgeBasePaths: options.knowledgeBase,
               scanPromptFile: options.scanPromptFile,
               validationPromptFile: options.validationPromptFile,
+              postScanPromptFile: options.postScanPromptFile,
               mode: options.mode,
               workers: options.workers,
               subagents: options.subagents,
@@ -2905,9 +2927,8 @@ export async function main(
               ),
             },
             directory,
+            scope.sources,
           );
-          if (provenance !== undefined)
-            Object.assign(provenance.sources, scope.sources);
           if (options.archiveExisting && settings.outputDir === undefined) {
             throw new CodexSecurityError(
               "--archive-existing requires --output-dir.",
@@ -2922,7 +2943,6 @@ export async function main(
               safetyIdentifier: options.safetyIdentifier,
               verbose: options.verbose,
               repository: args.repository,
-              postScanPromptFile: options.postScanPromptFile,
               archiveExisting: options.archiveExisting,
               pluginPath: options.pluginPath,
               pythonPath: options.python,
@@ -3127,6 +3147,7 @@ export async function main(
         "Run standard scans for project components and combine the results.",
       destructive: true,
       mcp: false,
+      alias: { config: "c" },
       args: z.object({
         repository: z
           .string()
@@ -3136,12 +3157,10 @@ export async function main(
       }),
       options: z
         .object({
-          auth: z
-            .enum(SCAN_AUTH_MODES)
-            .default("auto")
-            .describe(
-              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
-            ),
+          config: PROJECT_CONFIG_OPTION,
+          auth: ScanSettingsSchema.shape.auth.describe(
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+          ),
           component: z
             .array(optionValue("--component"))
             .default([])
@@ -3165,18 +3184,21 @@ export async function main(
             .describe(
               "Print status lines instead of the interactive dashboard.",
             ),
-          outputDir: optionValue("--output-dir").describe(
-            "Empty results directory outside the repository.",
-          ),
+          outputDir: optionValue("--output-dir")
+            .optional()
+            .describe("Empty results directory outside the repository."),
           workers: z
             .number()
             .int()
             .positive()
             .default(4)
-            .describe("Concurrent standard component scans."),
+            .describe(
+              "Concurrent component scans; deep workers are configured per scan.",
+            ),
           knowledgeBase: z
             .array(optionValue("--knowledge-base"))
-            .default([])
+            .optional()
+            .meta({ default: [] })
             .describe("Read shared security docs for every component."),
           scanPromptFile: optionValue("--scan-prompt-file")
             .optional()
@@ -3240,15 +3262,38 @@ export async function main(
         try {
           const directory = dependencies.currentDirectory();
           const repository = resolveCliPath(directory, args.repository ?? ".");
+          const project = await selectedProjectConfig(
+            options.config,
+            dependencies,
+          );
+          const resolved = resolveScanSettings(
+            project,
+            {
+              auth: options.auth,
+              outputDir: options.outputDir,
+              knowledgeBasePaths: options.knowledgeBase,
+              scanPromptFile: options.scanPromptFile,
+              postScanPromptFile: options.postScanPromptFile,
+              maxCostUsd: options.maxCost,
+              codexOverrides: parseCodexOverrides(
+                options.codex,
+                options.model,
+                options.effort,
+                options.provider,
+                project?.input.codex,
+              ),
+            },
+            directory,
+          );
+          const settings = resolved.options;
+          if (settings.outputDir === undefined)
+            throw new ConfigurationError(
+              "--output-dir or output.directory is required for component scans.",
+            );
           const config: CodexSecurityConfig = {
+            ...resolved.config,
             pluginPath: options.pluginPath,
             pythonPath: options.python,
-            codexOverrides: parseCodexOverrides(
-              options.codex,
-              options.model,
-              options.effort,
-              options.provider,
-            ),
           };
           const components =
             options.componentsFile === undefined
@@ -3272,7 +3317,8 @@ export async function main(
               repository,
               presentation: "components",
               model: scanModelConfiguration(await mergedCodexConfig(config)),
-              maxCostUsd: options.maxCost,
+              mode: settings.mode,
+              maxCostUsd: settings.maxCostUsd,
               clock: dependencies,
               color: dependencies.environment["NO_COLOR"] === undefined,
               sanitize: safeErrorMessage,
@@ -3293,27 +3339,14 @@ export async function main(
           }
           const result = await runComponentScans({
             repository,
-            outputDir: resolveCliPath(directory, options.outputDir),
+            outputDir: settings.outputDir,
             ...(options.auto ? { auto: true } : { components }),
             planOnly: options.planOnly,
             workers: options.workers,
             config,
             scanOptions: {
-              auth: options.auth,
-              knowledgeBasePaths: options.knowledgeBase.map((path) =>
-                resolveCliPath(directory, path),
-              ),
-              ...(await resolveScanPrompts(
-                {
-                  scanPromptFile: options.scanPromptFile,
-                  postScanPromptFile: options.postScanPromptFile,
-                },
-                repository,
-                directory,
-              )),
-              ...(options.maxCost === undefined
-                ? {}
-                : { maxCostUsd: options.maxCost }),
+              ...settings,
+              ...(await resolveScanPrompts(settings, repository, directory)),
             },
             createSecurity: dependencies.createSecurity,
             planComponents: dependencies.planComponents,
@@ -3358,7 +3391,9 @@ export async function main(
             result.incomplete ||
             result.deduplication?.status === "incomplete"
               ? 2
-              : 0);
+              : result.policyFailed
+                ? 1
+                : 0);
           return { ...result };
         } catch (error) {
           stopDashboard();
@@ -3376,6 +3411,7 @@ export async function main(
         "Discover repositories and run resumable bulk security scans.",
       destructive: true,
       mcp: false,
+      alias: { config: "c" },
       args: z.object({
         input: z
           .string()
@@ -3386,6 +3422,7 @@ export async function main(
           ),
       }),
       options: z.object({
+        config: PROJECT_CONFIG_OPTION,
         outputDir: z
           .string()
           .min(1, "--output-dir must not be empty.")
@@ -3395,7 +3432,8 @@ export async function main(
           ),
         knowledgeBase: z
           .array(optionValue("--knowledge-base"))
-          .default([])
+          .optional()
+          .meta({ default: [] })
           .describe("Read shared security docs for every repository."),
         workers: z
           .number()
@@ -3405,10 +3443,9 @@ export async function main(
           .describe(
             "Concurrent repository scans. Per-scan Codex workers are separate.",
           ),
-        mode: z
-          .enum(["standard", "deep"])
-          .default("standard")
-          .describe("Default scan mode for repositories without a CSV mode."),
+        mode: ScanSettingsSchema.shape.mode.describe(
+          "Default scan mode for repositories without a CSV mode.",
+        ),
         scanPromptFile: optionValue("--scan-prompt-file")
           .optional()
           .describe("Append instructions from FILE to every scan."),
@@ -3477,15 +3514,48 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
+          const project = await selectedProjectConfig(
+            options.config,
+            dependencies,
+          );
+          const overrides = {
+            mode: options.mode,
+            outputDir: options.outputDir,
+            knowledgeBasePaths: options.knowledgeBase,
+            scanPromptFile: options.scanPromptFile,
+            validationPromptFile: options.validationPromptFile,
+            postScanPromptFile: options.postScanPromptFile,
+            maxCostUsd: options.maxCost,
+          };
+          const resolved = resolveScanSettings(
+            project,
+            overrides,
+            currentDirectory,
+          );
+          const settings = resolved.options;
           const prompts = await resolveScanPrompts(
-            {
-              scanPromptFile: options.scanPromptFile,
-              postScanPromptFile: options.postScanPromptFile,
-              validationPromptFile: options.validationPromptFile,
-            },
+            settings,
             currentDirectory,
             currentDirectory,
           );
+          // A CSV row may choose a different mode; resolve the same file for both
+          // modes so inactive deep defaults remain available to deep rows.
+          const scanOptionsByMode =
+            project === undefined
+              ? undefined
+              : Object.fromEntries(
+                  SCAN_MODES.map((mode) => [
+                    mode,
+                    {
+                      ...resolveScanSettings(
+                        project,
+                        { ...overrides, mode },
+                        currentDirectory,
+                      ).options,
+                      ...prompts,
+                    },
+                  ]),
+                );
           let inputPath: string;
           let outputDir: string;
           let githubHost: string | undefined;
@@ -3503,41 +3573,47 @@ export async function main(
                   currentDirectory: dependencies.currentDirectory,
                 }),
               controller.signal,
+              settings.outputDir,
             );
             if (wizard === null) return;
             inputPath = wizard.inputPath;
             outputDir = wizard.outputDir;
             githubHost = wizard.githubHost;
           } else {
-            if (options.outputDir === undefined) {
+            if (settings.outputDir === undefined) {
               throw new Error(
                 "--output-dir is required with a repository CSV.",
               );
             }
             inputPath = resolveCliPath(currentDirectory, args.input);
-            outputDir = resolveCliPath(currentDirectory, options.outputDir);
+            outputDir = settings.outputDir;
           }
           const result = await runMultiscan({
             inputPath,
             outputDir,
             ...(githubHost === undefined ? {} : { githubHost }),
             workers: options.workers,
-            mode: options.mode,
+            mode: settings.mode,
             maxAttempts: options.maxAttempts,
-            ...(options.maxCost === undefined
+            ...(settings.maxCostUsd === undefined
               ? {}
-              : { maxCostUsd: options.maxCost }),
-            knowledgeBasePaths: options.knowledgeBase,
+              : { maxCostUsd: settings.maxCostUsd }),
+            knowledgeBasePaths: settings.knowledgeBasePaths,
+            scanOptionsByMode,
             ...prompts,
             config: {
+              codexOverrides: mergeCodexOverrides(
+                resolved.config.codexOverrides,
+                parseCodexOverrides(
+                  options.codex,
+                  options.model,
+                  options.effort,
+                  options.provider,
+                  project?.input.codex,
+                ),
+              ),
               pluginPath: options.pluginPath,
               pythonPath: options.python,
-              codexOverrides: parseCodexOverrides(
-                options.codex,
-                options.model,
-                options.effort,
-                options.provider,
-              ),
             },
             createSecurity: dependencies.createSecurity,
             signal: controller.signal,
@@ -3550,7 +3626,11 @@ export async function main(
           });
           exitCode =
             interruptedExitCode() ??
-            (result.failed > 0 || result.incomplete > 0 ? 2 : 0);
+            (result.failed > 0 || result.incomplete > 0
+              ? 2
+              : result.policyFailed
+                ? 1
+                : 0);
           return { ...result };
         } catch (error) {
           exitCode =
@@ -4301,8 +4381,41 @@ export async function main(
         }
       },
     })
+    .command("init", {
+      description:
+        "Write a starter project configuration without overwriting an existing file.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        file: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("YAML or JSON destination (default: codex-security.yaml)."),
+      }),
+      output: z.object({ path: z.string() }).optional(),
+      async run({ args }) {
+        try {
+          const path = resolveCliPath(
+            dependencies.currentDirectory(),
+            args.file ?? "codex-security.yaml",
+          );
+          await writeFile(path, projectConfigStarter(path), {
+            flag: "wx",
+            mode: 0o600,
+          });
+          return { path };
+        } catch (error) {
+          exitCode = 2;
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+        }
+      },
+    })
     .command("info", {
-      description: "Show read-only SDK and bundled-plugin metadata.",
+      description:
+        "Show SDK metadata and resolved configuration without preparing a scan.",
+      alias: { config: "c" },
+      options: z.object({ config: PROJECT_CONFIG_OPTION }),
       mcp: {
         annotations: {
           readOnlyHint: true,
@@ -4322,8 +4435,31 @@ export async function main(
         model: z.string(),
         reasoningEffort: z.string(),
         nextStep: z.string(),
+        configuration: z.record(z.string(), z.unknown()),
       }),
-      run() {
+      async run({ options }) {
+        const directory = dependencies.currentDirectory();
+        const project = await selectedProjectConfig(
+          options.config,
+          dependencies,
+        );
+        const resolved = resolveScanSettings(project, {}, directory);
+        const codex = await mergedCodexConfig(resolved.config);
+        const deep =
+          resolved.options.mode === "deep"
+            ? await resolveDeepScanConfig(
+                resolved.options,
+                join(
+                  expandHome(
+                    environmentValue(dependencies.environment, "CODEX_HOME") ??
+                      join(homedir(), ".codex"),
+                    dependencies.environment,
+                  ),
+                  "codex-security",
+                  "config.toml",
+                ),
+              )
+            : undefined;
         return {
           sdkVersion: VERSION,
           bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
@@ -4333,8 +4469,13 @@ export async function main(
           cliVersion: VERSION,
           codexVersion: CODEX_EXECUTABLE_VERSION,
           codexSdkVersion: CODEX_SDK_VERSION,
-          ...scanModelConfiguration(DEFAULT_CODEX_CONFIG),
+          ...scanModelConfiguration(codex),
           nextStep: "codex-security scan . --dry-run",
+          configuration: {
+            ...(project?.path === undefined ? {} : { path: project.path }),
+            settings: { ...resolved.options, ...deep?.settings },
+            sources: configurationSources(resolved.sources, deep?.sources),
+          },
         };
       },
     });
@@ -4405,19 +4546,23 @@ function defaultListCommand(argv: readonly string[]): readonly string[] {
   ];
 }
 
-function scanArgumentsFromRecipe(
+async function prepareScanArgumentsFromRecipe(
   recipe: JsonValue | undefined,
   parentScanId: string,
-  validationPromptFile?: string,
-): ScanArguments {
+  {
+    scanPromptFile,
+    validationPromptFile,
+  }: Pick<ScanArguments, "scanPromptFile" | "validationPromptFile">,
+  directory: string,
+): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
       "This scan does not have a saved launch recipe.",
     );
   }
-  if (recipe["requiresScanPrompt"] === true) {
+  if (recipe["requiresScanPrompt"] === true && scanPromptFile === undefined) {
     throw new CodexSecurityError(
-      "This scan used additional instructions that are not retained. Start a new scan with --scan-prompt-file or --config to supply them again.",
+      "This scan used additional instructions that are not retained. Supply --scan-prompt-file to rerun it.",
     );
   }
   if (
@@ -4549,6 +4694,16 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains deep scan settings for a standard scan.",
     );
   }
+  const prompts = await resolveScanPrompts(
+    { scanPromptFile, validationPromptFile },
+    repository,
+    directory,
+  );
+  if (recipe["requiresScanPrompt"] === true && !prompts.scanPrompt?.trim()) {
+    throw new CodexSecurityError(
+      "This scan used additional instructions. The --scan-prompt-file must not be empty.",
+    );
+  }
   return {
     repository,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
@@ -4560,8 +4715,10 @@ function scanArgumentsFromRecipe(
           : kind === "working_tree"
             ? DiffTarget.workingTree({ base: reference ?? "HEAD" })
             : "repository",
-    knowledgeBasePaths,
-    validationPromptFile,
+    knowledgeBasePaths: knowledgeBasePaths.map((path) =>
+      resolveCliPath(directory, path),
+    ),
+    ...prompts,
     mode,
     ...deepScan.data,
     archiveExisting: false,
@@ -4602,6 +4759,7 @@ function validateCliArguments(
       "logout",
       "serve",
       "info",
+      "init",
     ].includes(value),
   );
   if (commandIndex < 0) return undefined;
@@ -4677,6 +4835,7 @@ function validateCliArguments(
       "model",
       "reasoningEffort",
       "nextStep",
+      "configuration",
     ]);
     for (let index = 0; index < argv.length; index += 1) {
       const argument = argv[index]!;
@@ -6456,7 +6615,7 @@ async function executeScan(
     }
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
-      ...scanSettings(arguments_),
+      ...pickScanSettings(arguments_),
       ...(arguments_.workflowId === undefined
         ? {}
         : { workflowId: arguments_.workflowId }),
@@ -6784,14 +6943,6 @@ async function executeScan(
       verified: effectivePreflight.authentication.verified,
     });
     progress?.stopTimer();
-    if (arguments_.projectConfig !== undefined) {
-      for (const [name, key] of DEEP_SCAN_SETTINGS) {
-        const source = preflight.deepScanSources?.[name];
-        if (source === undefined || source === "override") continue;
-        const field = name === "subagents" ? "subagents_per_worker" : key;
-        arguments_.projectConfig.sources[`scan.deep.${field}`] = source;
-      }
-    }
     return {
       exitCode: 0,
       data: {
@@ -6800,7 +6951,13 @@ async function executeScan(
         ...(arguments_.projectConfig === undefined
           ? {}
           : {
-              projectConfig: arguments_.projectConfig,
+              projectConfig: {
+                ...arguments_.projectConfig,
+                sources: configurationSources(
+                  arguments_.projectConfig.sources,
+                  preflight.deepScanSources,
+                ),
+              },
               scanPromptFile: arguments_.scanPromptFile,
               validationPromptFile: arguments_.validationPromptFile,
               failOnSeverity: arguments_.failureSeverity,
@@ -7357,6 +7514,18 @@ function quoteCliPath(path: string): string {
     : `'${path.replaceAll("'", `'"'"'`)}'`;
 }
 
+async function selectedProjectConfig(
+  file: string | undefined,
+  dependencies: Pick<CliDependencies, "environment" | "currentDirectory">,
+) {
+  const selected =
+    file ??
+    environmentValue(dependencies.environment, "CODEX_SECURITY_PROJECT_CONFIG");
+  return selected === undefined
+    ? undefined
+    : readProjectConfig(selected, dependencies.currentDirectory());
+}
+
 function resolveCliScope(
   configured: ProjectScope | undefined,
   overrides: {
@@ -7366,8 +7535,11 @@ function resolveCliScope(
     head?: string;
     base?: string;
   },
-): { target?: ScanTarget; sources: ProjectConfigProvenance["sources"] } {
-  const sources: ProjectConfigProvenance["sources"] = {};
+): {
+  target?: ScanTarget;
+  sources: Partial<Record<ScopeProvenanceKey, ConfigurationSource>>;
+} {
+  const sources: Partial<Record<ScopeProvenanceKey, ConfigurationSource>> = {};
   const explicitScopes =
     Number(!!overrides.paths?.length) +
     Number(overrides.diff !== undefined) +
@@ -7376,6 +7548,14 @@ function resolveCliScope(
     throw new ConfigurationError(
       "--path, --diff, and --working-tree are mutually exclusive.",
     );
+  if (
+    explicitScopes === 0 &&
+    overrides.workingTree !== false &&
+    overrides.head === undefined &&
+    overrides.base === undefined
+  ) {
+    return { sources };
+  }
   let scope = configured;
   let changed = false;
   sources["scan.scope"] = scope === undefined ? "default" : "project";
@@ -7395,6 +7575,8 @@ function resolveCliScope(
     changed = true;
     sources["scan.scope"] = "cli";
   }
+  // A ref-only override refines the selected project scope; it does not take
+  // ownership of the whole scope variant.
   if (overrides.head !== undefined) {
     if (scope === undefined || !("diff" in scope))
       throw new ConfigurationError("--head requires --diff.");
@@ -7493,13 +7675,17 @@ export function parseCodexOverrides(
     }
     cursor[final] = parsed;
   }
-  if (
-    (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
-    scanModel(mergeCodexOverrides(defaults ?? {}, result)) === undefined
-  ) {
-    throw new CodexSecurityError(
-      `--model is required when using --provider ${provider}`,
+  if (isExternalModelProvider(provider) || provider === "amazon-bedrock") {
+    const selectedModel = scanModel(
+      mergeCodexOverrides(defaults ?? {}, result),
     );
+    if (typeof selectedModel !== "string" || !selectedModel.trim()) {
+      throw new CodexSecurityError(
+        selectedModel === undefined
+          ? `--model is required when using --provider ${provider}`
+          : `--model must be a nonempty string when using --provider ${provider}`,
+      );
+    }
   }
   return result;
 }

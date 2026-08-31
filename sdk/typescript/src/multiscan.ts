@@ -25,6 +25,8 @@ import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
 import { requireSecureOutputAncestry } from "./runtime.js";
 import type { ScanMode } from "./targets.js";
+import type { ScanSettings } from "./scan-settings.js";
+import { workflowDigest } from "./finding-workflow.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -56,6 +58,7 @@ interface MultiscanReceipt extends MultiscanTask {
   cost?: ScanCost;
   error?: string;
   warning?: string;
+  policyFailed?: boolean;
 }
 
 export interface MultiscanOptions {
@@ -70,6 +73,7 @@ export interface MultiscanOptions {
   scanPrompt?: string;
   validationPrompt?: string;
   postScanPrompt?: string;
+  scanOptionsByMode?: Partial<Record<ScanMode, ScanSettings>>;
   config: CodexSecurityConfig;
   createSecurity(
     config: CodexSecurityConfig,
@@ -95,6 +99,7 @@ export interface MultiscanResult {
   failed: number;
   skipped: number;
   resultsPath: string;
+  policyFailed?: boolean;
 }
 
 export async function runMultiscan(
@@ -145,6 +150,10 @@ async function runCampaign(
   const pending: MultiscanTask[] = [];
   let completed = 0;
   let incomplete = 0;
+  let policyFailed = false;
+  const hasPolicy = Object.values(options.scanOptionsByMode ?? {}).some(
+    (settings) => settings.failureSeverity !== undefined,
+  );
   for (const task of tasks) {
     const receipt = receipts.get(task.id.toLowerCase());
     if (receipt === undefined) {
@@ -167,6 +176,7 @@ async function runCampaign(
       (await hasArtifacts(artifactOutput))
     ) {
       if (receipt.status === "completed") {
+        policyFailed ||= receipt.policyFailed === true;
         completed += 1;
         continue;
       }
@@ -178,6 +188,7 @@ async function runCampaign(
               outputDir: artifactOutput,
             });
       if (coverage !== undefined) {
+        policyFailed ||= receipt.policyFailed === true;
         incomplete += 1;
         notifyProgress(options, {
           repository: task.id,
@@ -201,6 +212,7 @@ async function runCampaign(
       failed: 0,
       skipped,
       resultsPath: ledger,
+      ...(hasPolicy ? { policyFailed } : {}),
     };
   }
 
@@ -228,6 +240,7 @@ async function runCampaign(
         notifyProgress(options, { ...progress, status: "started" });
         let failure: string | undefined;
         let warning: string | undefined;
+        let attemptPolicyFailed: boolean | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
         let exhaustedBudget = false;
@@ -252,10 +265,15 @@ async function runCampaign(
               throw new Error("Multiscan scope escapes its repository.");
             }
           }
-          const scanPrompt = [options.scanPrompt?.trim(), task.prompt]
+          const scanSettings = options.scanOptionsByMode?.[task.mode];
+          const scanPrompt = [
+            options.scanPrompt?.trim() ?? scanSettings?.scanPrompt?.trim(),
+            task.prompt,
+          ]
             .filter(Boolean)
             .join("\n\n");
           const result = await security.run(checkout, {
+            ...scanSettings,
             ...(task.scope === undefined ? {} : { target: [task.scope] }),
             ...(options.knowledgeBasePaths?.length
               ? { knowledgeBasePaths: options.knowledgeBasePaths }
@@ -281,6 +299,11 @@ async function runCampaign(
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
+          if (scanSettings?.failureSeverity !== undefined) {
+            attemptPolicyFailed = result.hasFindingsAtOrAbove(
+              scanSettings.failureSeverity,
+            );
+          }
           coverage = result.coverage.completeness;
           if (coverage !== "complete") {
             if (!(await hasArtifacts(scanDir))) {
@@ -317,6 +340,9 @@ async function runCampaign(
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
             ...(warning === undefined ? {} : { warning }),
+            ...(attemptPolicyFailed === undefined
+              ? {}
+              : { policyFailed: attemptPolicyFailed }),
           })}\n`,
         );
         notifyProgress(options, {
@@ -326,6 +352,7 @@ async function runCampaign(
           ...(warning === undefined ? {} : { warning }),
         });
         if (failure === undefined) {
+          policyFailed ||= attemptPolicyFailed === true;
           if (warning === undefined) completed += 1;
           else incomplete += 1;
           break;
@@ -360,6 +387,7 @@ async function runCampaign(
     failed,
     skipped,
     resultsPath: ledger,
+    ...(hasPolicy ? { policyFailed } : {}),
   };
 }
 
@@ -631,7 +659,12 @@ async function ensureManifest(
   tasks: MultiscanTask[],
   options: Pick<
     MultiscanOptions,
-    "scanPrompt" | "validationPrompt" | "postScanPrompt" | "maxCostUsd"
+    | "scanPrompt"
+    | "validationPrompt"
+    | "postScanPrompt"
+    | "maxCostUsd"
+    | "scanOptionsByMode"
+    | "config"
   >,
 ): Promise<void> {
   const expected = `${JSON.stringify(
@@ -650,6 +683,14 @@ async function ensureManifest(
       ...(options.maxCostUsd === undefined
         ? {}
         : { maxCostUsd: options.maxCostUsd }),
+      ...(options.scanOptionsByMode === undefined
+        ? {}
+        : {
+            configurationDigest: workflowDigest({
+              scanOptions: options.scanOptionsByMode,
+              codex: options.config.codexOverrides,
+            }),
+          }),
     },
     null,
     2,

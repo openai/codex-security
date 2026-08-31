@@ -358,6 +358,10 @@ describe("TypeScript package skeleton", () => {
     );
 
     expect(packageJson.scripts.build).not.toMatch(/\b(?:pnpm|npm|bun)\b/u);
+    expect(packageJson.scripts.build).toMatch(/^node --run clean &&/u);
+    expect(packageJson.scripts.build).toContain(
+      "node scripts/build-dashboard.mjs",
+    );
     expect(packageJson.scripts["build:plugin"]).toBe(
       "node scripts/build-plugin.mjs",
     );

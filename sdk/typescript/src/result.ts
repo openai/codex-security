@@ -8,7 +8,7 @@ import type {
   SeverityLevel,
 } from "./models.js";
 import { estimateScanCost, type ScanCost } from "./cost.js";
-import { meetsSeverity } from "./scan-settings.js";
+import { meetsSeverity, severityThresholdRank } from "./scan-settings.js";
 
 export interface TurnResultMetadata {
   id?: string;
@@ -114,6 +114,7 @@ export class ScanResult {
   }
 
   public hasFindingsAtOrAbove(threshold: SeverityLevel): boolean {
+    severityThresholdRank(threshold);
     return this.findings.findings.some((finding) =>
       meetsSeverity(finding, threshold),
     );

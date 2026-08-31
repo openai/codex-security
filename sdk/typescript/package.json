@@ -61,7 +61,7 @@
     "test:mcp": "node --run build:plugin && pnpm --dir ../../plugins/codex-security/mcp-app run test:mcp",
     "test:mutation": "stryker run",
     "test:package": "node scripts/smoke-package.mjs",
-    "types": "node scripts/generate-deep-defaults.mjs --check && pnpm run generate:models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
+    "types": "node scripts/generate-deep-defaults.mjs --check && node scripts/generate-project-config-schema.mjs --check && pnpm run generate:models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
   },
   "dependencies": {
     "@inquirer/prompts": "8.3.0",

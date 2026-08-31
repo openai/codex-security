@@ -1,5 +1,5 @@
 {
-  "$schema": "../../sdk/typescript/schemas/project-config.schema.json",
+  "$schema": "./node_modules/@openai/codex-security/schemas/project-config.schema.json",
   "scan": {
     "mode": "standard",
     "scope": { "paths": ["sdk/typescript/src"] }

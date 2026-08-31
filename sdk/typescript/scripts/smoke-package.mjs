@@ -409,7 +409,10 @@ try {
        assert.deepEqual(loaded.config, resolved.config);
        assert.deepEqual(loaded.options, resolved.options);
        assert.equal(loaded.options.subagents, 0);
-       assert.equal(loaded.options.failureSeverity, "high");`,
+       assert.equal(loaded.options.failureSeverity, "high");
+       assert.equal(loaded.sources["scan.deep.subagents_per_worker"], "project");
+       assert.equal(loaded.sources["output.directory"], "default");
+       assert.equal(Object.isFrozen(loaded.sources), true);`,
     ],
     { cwd: consumer },
   );
@@ -488,6 +491,27 @@ try {
   assert.match(help, /Usage: codex-security\b/u);
   assert.match(help, /\bpublish\b/u);
   assert.match(help, /\bdedupe\b/u);
+
+  const starterPath = join(consumer, "codex-security.yaml");
+  const starter = JSON.parse(
+    run(process.execPath, [launcher, "init", "--json"], {
+      cwd: consumer,
+      capture: true,
+    }),
+  );
+  assert.equal(starter.path, starterPath);
+  for (const args of [["-c", starterPath], []]) {
+    const info = JSON.parse(
+      run(process.execPath, [launcher, "info", ...args, "--json"], {
+        cwd: consumer,
+        capture: true,
+        env: { ...process.env, CODEX_SECURITY_PROJECT_CONFIG: starterPath },
+      }),
+    );
+    assert.equal(info.configuration.path, starterPath);
+    assert.equal(info.configuration.settings.mode, "standard");
+    assert.equal(info.configuration.sources["scan.mode"], "default");
+  }
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(

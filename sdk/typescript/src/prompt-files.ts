@@ -13,12 +13,21 @@ import { CodexSecurityError } from "./errors.js";
 import { expandHome } from "./runtime.js";
 import type { ScanPromptSettings } from "./scan-settings.js";
 
+type ResolvedScanPrompts = Pick<
+  ScanPromptSettings,
+  "scanPrompt" | "validationPrompt" | "postScanPrompt"
+> & {
+  scanPromptFile: undefined;
+  validationPromptFile: undefined;
+  postScanPromptFile: undefined;
+};
+
 /** Resolve selected files once; an inline SDK prompt overrides its file. */
 export async function resolveScanPrompts(
   options: ScanPromptSettings,
   repository: string,
   directory = process.cwd(),
-): Promise<ScanPromptSettings> {
+): Promise<ResolvedScanPrompts> {
   const read = async (inline: string | undefined, file: string | undefined) =>
     inline !== undefined || file === undefined
       ? inline
@@ -48,6 +57,8 @@ export async function resolveScanPrompts(
       options.postScanPrompt !== undefined || postScanPrompt?.trim()
         ? postScanPrompt
         : undefined,
+    // Spreading the resolved prompts back into options must clear file inputs,
+    // including blank files, so later preparation does not read them again.
     scanPromptFile: undefined,
     validationPromptFile: undefined,
     postScanPromptFile: undefined,

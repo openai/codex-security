@@ -7,8 +7,9 @@ import { promisify } from "node:util";
 import { InvalidTargetError } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { windowsUnsafePathComponent } from "./windows-path.js";
-import type { ScanMode } from "./scan-settings.js";
-export type { ScanMode } from "./scan-settings.js";
+
+import type { ScanMode } from "./scan-modes.js";
+export type { ScanMode } from "./scan-modes.js";
 
 const execFile = promisify(execFileCallback);
 const UNSUPPORTED_GIT_ENVIRONMENT = new Set([

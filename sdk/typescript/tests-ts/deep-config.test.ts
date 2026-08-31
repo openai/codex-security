@@ -102,6 +102,51 @@ test("validates legacy values after matching explicit overrides", async () => {
   ).toBe(2);
 });
 
+test("reports the TOML key and source file for an invalid ambient value", async () => {
+  const input = await fixture("[deep_scan]\nstop_after_no_new = 0\n");
+  await expect(resolveDeepScanConfig({}, input.source)).rejects.toThrow(
+    `Deep scan stop_after_no_new in ${input.source} must be a positive integer`,
+  );
+});
+
+test.each(["same path", "directory link"])(
+  "updating ambient overrides through the %s does not pin inherited defaults",
+  async (kind) => {
+    const input = await fixture(
+      "[deep_scan]\nworkers = 7\n[other]\nkeep = true\n",
+    );
+    let destination = input.source;
+    if (kind === "directory link") {
+      const link = join(input.root, "linked");
+      await symlink(dirname(input.source), link, "junction");
+      destination = join(link, "config.toml");
+    }
+    await writeDeepScanConfig(
+      destination,
+      await resolveDeepScanConfig({ workers: 8 }, input.source),
+    );
+    expect(parseToml(await readFile(input.source, "utf8"))).toEqual({
+      deep_scan: { workers: 8 },
+      other: { keep: true },
+    });
+  },
+);
+
+test("does not write a snapshot when source path resolution fails", async () => {
+  const input = await fixture();
+  const resolved = await resolveDeepScanConfig({}, input.source);
+  const loop = join(input.root, "loop");
+  await symlink(loop, loop, "junction");
+  const destination = join(input.root, "runtime", "config.toml");
+  await expect(
+    writeDeepScanConfig(destination, {
+      ...resolved,
+      source: join(loop, "config.toml"),
+    }),
+  ).rejects.toThrow();
+  await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 test.each([
   ["deep_scan = []\n", "TOML table"],
   ["deep_scan = 2026-01-01\n", "TOML table"],
@@ -182,6 +227,26 @@ test("complete settings do not overwrite an invalid ambient destination", async 
     "Cannot read Codex Security configuration",
   );
   expect(await readFile(input.source, "utf8")).toBe(contents);
+});
+
+test("a complete snapshot replaces stale deep keys but preserves other ambient sections", async () => {
+  const input = await fixture(
+    "[deep_scan]\nobsolete_setting = true\n[other]\nkeep = true\n",
+  );
+  await writeDeepScanConfig(
+    input.source,
+    await resolveDeepScanConfig(DEFAULT_DEEP_SCAN_SETTINGS, input.source),
+  );
+  const document = parseToml(await readFile(input.source, "utf8"));
+  expect(document["other"]).toEqual({ keep: true });
+  expect(document["deep_scan"]).toEqual({
+    workers: 4,
+    subagents: 3,
+    stop_after_no_new: 4,
+    stop_after_consecutive_errors: 3,
+    max_discovery_runs: 40,
+    max_time_hours: 96,
+  });
 });
 
 test("runtime preparation writes the snapshot even if the ambient file changes", async () => {

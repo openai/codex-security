@@ -8,10 +8,31 @@ codex-security scan . -c codex-security.yaml --dry-run --json
 codex-security scan . -c codex-security.json --model gpt-5.6-terra
 ```
 
-The supported extensions are `.yaml`, `.yml`, and `.json`. Without `-c`, no file
-is loaded, even if `codex-security.yaml` exists. Other commands and SDK `run()`
-calls do not discover project files. The repository comes from the positional
-argument or invocation directory; the file cannot select a different target.
+The supported extensions are `.yaml`, `.yml`, and `.json`. `scan`, `bulk-scan`,
+`scan-components`, and `info` accept `-c` / `--config`. An operator can set
+`CODEX_SECURITY_PROJECT_CONFIG` instead; an explicit `-c` takes precedence. With
+neither, no file is loaded, even if `codex-security.yaml` exists. SDK `run()` calls
+and saved reruns do not read this environment variable or discover project files.
+The repository comes from the command's target selection, not the config file.
+
+**Treat the selected file as trusted operator configuration, with the same
+authority as CLI options and SDK `codexOverrides`.** Native Codex settings can
+start configured MCP server processes and select model-service destinations. Do not select a
+file controlled by an untrusted repository or pull request. In CI, keep the
+scanner configuration in an operator-controlled location outside the checkout
+being assessed. Explicit selection does not make a file safe to trust.
+
+Create a starter and inspect its settings without a repository or runtime:
+
+```sh
+codex-security init
+codex-security info -c codex-security.yaml --json
+```
+
+`init [file]` defaults to `codex-security.yaml`, refuses to overwrite an existing
+file, and accepts `.yaml`, `.yml`, or `.json`. YAML starters show current defaults
+as comments so future releases can still update defaults you have not overridden.
+The editor hint expects the package to be installed locally in `node_modules`.
 
 For a project with a `src` directory:
 
@@ -29,10 +50,12 @@ policy:
 
 All settings are optional; `{}` uses the existing defaults. No `version` field
 is needed. Unknown wrapper keys and invalid types are errors. Values are literal:
-there is no executable configuration, environment interpolation, remote include,
-or multiple-file merge. Wrapper `null` values do not reset settings. Project-file
+the loader does not evaluate JavaScript, interpolate environment values, include remote files,
+or merge multiple files. Wrapper `null` values do not reset settings. Project-file
 keys use `snake_case`, matching native Codex configuration. Keys inside `codex`
 keep their native spelling; names and values are not converted.
+YAML anchors are supported; the parser retains its guard against excessive nested
+alias expansion.
 
 The [YAML example](examples/codex-security.yaml) and equivalent
 [JSON example](examples/codex-security.json) select this repository's TypeScript
@@ -126,11 +149,14 @@ const input = {
 const { config, options } = resolveProjectConfig(input, process.cwd());
 ```
 
-Both return constructor `config` and scan `options`; the file loader also returns
+Both return constructor `config`, scan `options`, and an immutable `sources` map;
+the file loader also returns
 `projectConfig` path and source metadata. The optional directory argument defaults
 to the current directory. It locates a selected file or anchors an in-memory
 object's context, prompt, and output paths. Files anchor those paths to their own
 directory. Neither helper reads prompt contents or prepares a runtime.
+Resolved context, prompt, and output paths have the SDK's `AbsolutePath` type;
+scope paths remain relative to the selected repository.
 
 Use `security.preflight(repository, options)` for the same local checks as CLI
 `--dry-run`, including active-mode compatibility and remaining legacy deep
@@ -147,7 +173,8 @@ SDK/CLI options and are not part of project files.
 set process status when the threshold is met; call `hasFindingsAtOrAbove()` and
 choose the caller's response. The method uses the same ordering as the CLI and
 does not filter findings. The CLI/file contract keeps its four reportable levels;
-existing SDK calls also accept `informational`.
+existing SDK calls also accept `informational`. An unknown threshold throws,
+including when the result has no findings.
 
 ## Overrides and paths
 
@@ -163,6 +190,10 @@ hints; parsing does not insert them. Lists are replaced, not concatenated.
 | CLI context, prompt, and output paths                   | Invocation directory           |
 | Native values under `codex`                             | Existing native Codex rules    |
 
+Scope paths follow `scan --path`: the same config can select `src` in each target
+repository. Context, instruction, validation, and output paths belong to the config
+file and therefore stay anchored to its directory when the invocation moves.
+
 For example, `--knowledge-base context.md` replaces the file's entire context list
 and resolves from the invocation directory. Existing regular-file, protected-path,
 credential, and outside-worktree output checks still apply.
@@ -174,7 +205,8 @@ selectors fail. `--no-working-tree` disables a configured working-tree scope but
 does not clear a path or committed-diff scope.
 
 There is no general CLI reset for configured context, policy, cost limit, or scope.
-Edit the file, select another file, or omit `-c`. An empty context list is valid.
+Edit the file, select another file, or omit `-c` and unset
+`CODEX_SECURITY_PROJECT_CONFIG`. An empty context list is valid.
 
 Native objects merge using the existing configuration code. Duplicate native CLI
 assignments remain errors; overriding a file value is valid. Selected native
@@ -203,6 +235,9 @@ The cost limit is illustrative. Legacy user `[deep_scan]` TOML remains supported
 including `workers = "auto"`. File and CLI values override individual settings.
 All six effective values are resolved before runtime preparation and saved in new
 recipes.
+If a runtime aliases the ambient TOML file, only explicit overrides are written
+back; unrelated sections and inherited defaults remain untouched. Isolated runtime
+files still receive a complete snapshot.
 
 A valid deep block can stay inactive in standard mode. Explicit deep CLI options
 still require deep mode. Deep diff scans and custom validation remain unsupported.
@@ -214,7 +249,37 @@ scan attempt. In-flight work may exceed it. It is not a total budget for a batch
 follow-up actions. `fail_on_severity` changes the exit status without filtering the
 retained findings.
 
+## Batch and component scans
+
+```sh
+codex-security bulk-scan repositories.csv -c codex-security.yaml --output-dir ../batch-results
+codex-security scan-components . --component src -c codex-security.yaml --output-dir ../component-results
+```
+
+`output.directory` can supply the batch output directory; `--output-dir` overrides
+it. In the interactive bulk wizard, it supplies the proposed output directory.
+Both commands use the same config precedence, path anchoring, native settings,
+context, prompts, per-attempt cost limit, and severity policy as `scan`.
+
+A bulk CSV row's mode and scope override the file's defaults for that repository.
+Deep settings apply only to deep rows. Component plans select each component's
+scope, overriding `scan.scope`; `scan.mode` selects standard or deep component
+scans. Batch `--workers` controls concurrent repositories or components, while
+`scan.deep.workers` controls discovery workers within each deep scan.
+
+The severity policy returns exit `1` without discarding completed results or
+retrying a scan just because it found issues. Errors or incomplete results take
+precedence with exit `2`. Bulk resume retains the saved policy outcome and checks
+that the selected scan configuration still matches the campaign.
+
 ## Dry run and editor support
+
+`info [-c FILE] --json` reports resolved settings and their sources without a scan
+target, prompt-file reads, credentials checks, or runtime initialization. With no
+file, it shows defaults. Active deep mode also resolves legacy TOML. It reports
+effective model details and native key sources without dumping raw native values.
+This is configuration inspection,
+not a filesystem, target, or model-availability check.
 
 `scan ... --dry-run --json` checks local inputs without starting Codex, verifying
 credentials, or establishing model availability. Removing `--dry-run` starts a
@@ -229,11 +294,14 @@ effective model and effort. Raw native configuration and credentials are not dum
 Source paths use the project-file spelling, such as
 `scan.deep.stop_after_no_new`; existing output properties such as `deepScanSources`
 keep their names.
+The source map includes all wrapper settings, including unset values attributed
+to `default`; resolving preflight sources does not mutate previously returned maps.
 
 Help, version, and command schema output do not load project files. Missing,
 malformed, or invalid selected files exit `2`. Scan exit codes remain `0` for
 completion without a policy failure, `1` for the finding threshold, and `2` for
-failed, invalid, incomplete, or interrupted scans.
+failed, invalid, or incomplete scans. Signal cancellation retains `130` for
+`SIGINT` and `143` for `SIGTERM`.
 
 The generated [project schema](../sdk/typescript/schemas/project-config.schema.json)
 is self-contained Draft-07 and ships in the npm package. A project-root YAML file
@@ -261,6 +329,11 @@ file; older partial recipes continue using applicable defaults for missing value
 Recipes do not snapshot source or context contents. Reruns use the current checkout
 and current context files. Additional scan instructions are not retained: a new
 recipe records that requirement, and `scans rerun` refuses to omit them silently.
-Start a new `scan -c FILE` or `scan --scan-prompt-file FILE` to supply them again.
+Use `scans rerun [SCAN_ID] --scan-prompt-file FILE` to supply them again. A required
+replacement must not be empty. The file resolves from the invocation directory.
 Custom validation keeps its existing `scans rerun --validation-prompt-file FILE`
 requirement.
+
+Workflow identity records explicitly requested deep settings, not ambient values
+or shipped defaults, so changing those defaults does not prevent resumption.
+Changing the explicit request still requires a different workflow ID.

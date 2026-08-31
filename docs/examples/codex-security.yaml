@@ -1,4 +1,5 @@
-# yaml-language-server: $schema=../../sdk/typescript/schemas/project-config.schema.json
+# yaml-language-server: $schema=./node_modules/@openai/codex-security/schemas/project-config.schema.json
+# Schema path assumes this file is copied to the root of your project.
 scan:
   mode: standard
   scope:
