@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --experimental-strip-types --disable-warning=ExperimentalWarning
 // Check that tracked plugin source stays portable across repository imports.
 
 import { spawnSync } from "node:child_process";
@@ -22,7 +22,7 @@ const HTML_BLOCK = /^\s*<\/?[A-Za-z][^>]*>\s*$/u;
 const NATURAL_LINE_ENDINGS = new Set("\\.?!:;。！？：；)]}'\"`>");
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
-function trackedFiles(pluginRoot) {
+function trackedFiles(pluginRoot: string): string[] {
   const result = spawnSync(
     "git",
     ["-C", pluginRoot, "ls-files", "-z", "--", "."],
@@ -37,7 +37,7 @@ function trackedFiles(pluginRoot) {
   return utf8.decode(result.stdout).split("\0").filter(Boolean);
 }
 
-function isMarkdownStructure(line) {
+function isMarkdownStructure(line: string): boolean {
   const stripped = line.trim();
   return (
     !stripped ||
@@ -51,24 +51,24 @@ function isMarkdownStructure(line) {
   );
 }
 
-function lineEndsNaturally(line) {
+function lineEndsNaturally(line: string): boolean {
   const stripped = line.trimEnd();
   return (
     line.endsWith("  ") ||
-    NATURAL_LINE_ENDINGS.has(stripped.at(-1)) ||
+    NATURAL_LINE_ENDINGS.has(stripped.slice(-1)) ||
     /https?:\/\/\S+$/u.test(stripped)
   );
 }
 
-function hardWrappedLines(content) {
+function hardWrappedLines(content: string): number[] {
   const lines = content.split(
     /\r\n|[\n\r\v\f\u001c-\u001e\u0085\u2028\u2029]/u,
   );
-  const offenders = [];
+  const offenders: number[] = [];
   let inFence = false;
   let inFrontmatter = content.startsWith("---\n");
   for (let index = 0; index < lines.length - 1; index++) {
-    const line = lines[index];
+    const line = lines[index]!;
     const stripped = line.trim();
     if (stripped.startsWith("```") || stripped.startsWith("~~~")) {
       inFence = !inFence;
@@ -79,7 +79,7 @@ function hardWrappedLines(content) {
       continue;
     }
     if (inFence || inFrontmatter) continue;
-    const followingLine = lines[index + 1];
+    const followingLine = lines[index + 1]!;
     if (isMarkdownStructure(line) || isMarkdownStructure(followingLine))
       continue;
     if (LIST_ITEM.test(followingLine) || lineEndsNaturally(line)) continue;
@@ -90,8 +90,8 @@ function hardWrappedLines(content) {
   return offenders;
 }
 
-function sourceCompatibilityErrors(pluginRoot) {
-  const errors = [];
+function sourceCompatibilityErrors(pluginRoot: string): string[] {
+  const errors: string[] = [];
   for (const relativePath of trackedFiles(pluginRoot)) {
     const path = join(pluginRoot, relativePath);
     const stat = lstatSync(path);
@@ -116,8 +116,8 @@ function sourceCompatibilityErrors(pluginRoot) {
   return errors.sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
 }
 
-function main() {
-  let values;
+function main(): number {
+  let values: { "plugin-root": string; help?: boolean };
   try {
     ({ values } = parseArgs({
       options: {
@@ -131,7 +131,7 @@ function main() {
       },
     }));
   } catch (error) {
-    console.error(error.message);
+    console.error((error as Error).message);
     return 2;
   }
   if (values.help) {
@@ -139,7 +139,7 @@ function main() {
       "Check tracked plugin source for deterministic import compatibility.\n",
     );
     console.log(
-      "Usage: node check_plugin_source_compatibility.mjs [--plugin-root PATH]",
+      "Usage: node --experimental-strip-types --disable-warning=ExperimentalWarning check_plugin_source_compatibility.mts [--plugin-root PATH]",
     );
     console.log(
       "\n--plugin-root PATH  plugin source root (default: plugins/codex-security in this repository)",
@@ -153,7 +153,9 @@ function main() {
       return 1;
     }
   } catch (error) {
-    console.error(`source compatibility check failed: ${error.message}`);
+    console.error(
+      `source compatibility check failed: ${(error as Error).message}`,
+    );
     return 2;
   }
   console.log("Plugin source compatibility checks passed.");

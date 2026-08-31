@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
   copyFileSync,
   mkdtempSync,
@@ -15,20 +15,20 @@ import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const checker = fileURLToPath(
-  new URL("./check_plugin_source_compatibility.mjs", import.meta.url),
+  new URL("./check_plugin_source_compatibility.mts", import.meta.url),
 );
-const directories = [];
+const directories: string[] = [];
 afterEach(() => {
   for (const root of directories.splice(0))
     rmSync(root, { recursive: true, force: true });
 });
 
-function git(root, ...args) {
+function git(root: string, ...args: string[]): void {
   const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
 }
 
-function fixture(files = {}) {
+function fixture(files: Record<string, string | Buffer> = {}): string {
   const root = mkdtempSync(join(tmpdir(), "plugin-source-check-"));
   directories.push(root);
   git(root, "init", "--quiet");
@@ -38,8 +38,17 @@ function fixture(files = {}) {
   return root;
 }
 
-function runChecker(...args) {
-  return spawnSync(process.execPath, [checker, ...args], { encoding: "utf8" });
+function runChecker(...args: string[]): SpawnSyncReturns<string> {
+  return spawnSync(
+    process.execPath,
+    [
+      "--experimental-strip-types",
+      "--disable-warning=ExperimentalWarning",
+      checker,
+      ...args,
+    ],
+    { encoding: "utf8" },
+  );
 }
 
 test("reports tracked source violations in stable order", () => {
@@ -81,16 +90,21 @@ test("checkout preserves source size with autocrlf", () => {
     new URL("../../.gitattributes", import.meta.url),
     join(root, ".gitattributes"),
   );
-  const source = join(root, "module.py");
-  const content = Buffer.from("pass\n".repeat(30_000));
-  writeFileSync(source, content);
   git(root, "config", "--local", "core.autocrlf", "true");
-  git(root, "add", "--", ".gitattributes", "module.py");
-  unlinkSync(source);
-  git(root, "checkout-index", "--", "module.py");
-  const result = runChecker("--plugin-root", root);
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(readFileSync(source), content);
+  for (const [name, line] of [
+    ["module.py", "pass\n"],
+    ["module.mts", "null\n"],
+  ] as const) {
+    const source = join(root, name);
+    const content = Buffer.from(line.repeat(30_000));
+    writeFileSync(source, content);
+    git(root, "add", "--", ".gitattributes", name);
+    unlinkSync(source);
+    git(root, "checkout-index", "--", name);
+    const result = runChecker("--plugin-root", root);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(readFileSync(source), content);
+  }
 });
 
 test("accepts Markdown structures, natural line endings, and inline markup", () => {

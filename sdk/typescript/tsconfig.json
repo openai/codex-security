@@ -5,6 +5,8 @@
     "dashboard/**/*.ts",
     "dashboard/**/*.tsx",
     "tests-ts/**/*.ts",
+    "../../.github/scripts/*.mts",
+    "scripts/compare-test-reports.mts",
     "scripts/smoke-findings-service.ts",
     "scripts/fixtures/findings-service-sqlite.ts",
     "scripts/fixtures/prepare-runner-scan.ts"

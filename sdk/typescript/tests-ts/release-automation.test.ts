@@ -4173,10 +4173,10 @@ describe("GitHub release workflow safeguards", () => {
       mkdirSync(scripts, { recursive: true });
       mkdirSync(pluginRoot, { recursive: true });
       writeFileSync(
-        join(scripts, "check_plugin_source_compatibility.mjs"),
+        join(scripts, "check_plugin_source_compatibility.mts"),
         readFileSync(
           new URL(
-            "../../../.github/scripts/check_plugin_source_compatibility.mjs",
+            "../../../.github/scripts/check_plugin_source_compatibility.mts",
             import.meta.url,
           ),
         ),
@@ -4188,7 +4188,7 @@ describe("GitHub release workflow safeguards", () => {
         workspace,
         "add",
         "--",
-        ".github/scripts/check_plugin_source_compatibility.mjs",
+        ".github/scripts/check_plugin_source_compatibility.mts",
         "plugins/codex-security/README.md",
       ]);
       try {

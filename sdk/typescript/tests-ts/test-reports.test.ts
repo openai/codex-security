@@ -44,8 +44,10 @@ async function compare(baseline: string, ...candidates: string[]) {
   const child = Bun.spawn({
     cmd: [
       "node",
+      "--experimental-strip-types",
+      "--disable-warning=ExperimentalWarning",
       fileURLToPath(
-        new URL("../scripts/compare-test-reports.mjs", import.meta.url),
+        new URL("../scripts/compare-test-reports.mts", import.meta.url),
       ),
       baseline,
       ...candidates,
@@ -85,8 +87,8 @@ describe("JUnit inventory comparison", () => {
       "reports/runner-windows-latest-shard-*.xml",
     ];
     const mock = `node() {
-  printf '%s\\n' "$3"
-  [[ "$3" != "$CODEX_SECURITY_TEST_FAIL_REPORT" ]]
+  printf '%s\\n' "$5"
+  [[ "$5" != "$CODEX_SECURITY_TEST_FAIL_REPORT" ]]
 }`;
     const summary = join(fixture.root, "summary.md");
     for (const failedReport of ["", expected[0]!]) {
@@ -125,7 +127,14 @@ describe("JUnit inventory comparison", () => {
     const result = await compare(baseline, join(fixture.root, "shard-*.xml"));
     expect(result.status, result.stderr).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toContain("combined test time: 2.50s");
+    expect(result.stdout).toBe(
+      "| Report | Cases | Skipped | Seconds |\n" +
+        "| --- | ---: | ---: | ---: |\n" +
+        "| baseline.xml | 2 | 1 | 1.25 |\n" +
+        "| shard-1.xml | 1 | 1 | 1.25 |\n" +
+        "| shard-2.xml | 1 | 0 | 1.25 |\n" +
+        "\nIdentical test inventory and outcomes. Slowest candidate: 1.25s; combined test time: 2.50s.\n\n",
+    );
   });
 
   test("parses XML entities while ignoring comments and CDATA markup", async () => {

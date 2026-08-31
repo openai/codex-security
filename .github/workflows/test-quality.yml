@@ -134,10 +134,10 @@ jobs:
           comparison_status=0
           for os in ubuntu-latest windows-latest; do
             for mode in isolated parallel; do
-              node sdk/typescript/scripts/compare-test-reports.mjs "reports/runner-$os-baseline.xml" "reports/runner-$os-$mode.xml" >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
+              node --experimental-strip-types --disable-warning=ExperimentalWarning sdk/typescript/scripts/compare-test-reports.mts "reports/runner-$os-baseline.xml" "reports/runner-$os-$mode.xml" >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
             done
           done
-          node sdk/typescript/scripts/compare-test-reports.mjs reports/runner-windows-latest-baseline.xml 'reports/runner-windows-latest-shard-*.xml' >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
+          node --experimental-strip-types --disable-warning=ExperimentalWarning sdk/typescript/scripts/compare-test-reports.mts reports/runner-windows-latest-baseline.xml 'reports/runner-windows-latest-shard-*.xml' >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
           exit "$comparison_status"
 
   mutation:

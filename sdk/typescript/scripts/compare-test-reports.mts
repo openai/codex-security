@@ -3,9 +3,22 @@ import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { minimatch } from "minimatch";
-import { SaxesParser } from "saxes";
+import { SaxesParser, type SaxesTagNS } from "saxes";
 
-function matchingReports(pattern) {
+type TestStatus = "passed" | "skipped" | "failed";
+type TestIdentity = [file: string, classname: string, name: string];
+type TestOutcome = [...TestIdentity, status: TestStatus];
+type TestRecord = {
+  attributes: SaxesTagNS["attributes"];
+  status: TestStatus;
+};
+type TestReport = {
+  cases: Map<string, number>;
+  duration: number;
+  failed: boolean;
+};
+
+function matchingReports(pattern: string): string[] {
   // Python glob treats ** as one component and does not expand braces/extglobs.
   const directoriesOnly =
     pattern.endsWith(sep) ||
@@ -24,7 +37,7 @@ function matchingReports(pattern) {
     ? matchingReports(parent)
     : [parent];
   return directories.flatMap((directory) => {
-    let names;
+    let names: string[];
     try {
       names = readdirSync(directory);
     } catch {
@@ -60,14 +73,14 @@ function matchingReports(pattern) {
   });
 }
 
-function integer(value) {
+function integer(value: string): bigint {
   if (!/^[+-]?\d(?:_?\d)*$/u.test(value.trim())) {
     throw new Error(`invalid integer: ${value}`);
   }
   return BigInt(value.replaceAll("_", "").trim());
 }
 
-function seconds(value) {
+function seconds(value: string): number {
   const number = value.trim().replaceAll(/(?<=\d)_(?=\d)/gu, "");
   if (
     !/^[+-]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|inf(?:inity)?|nan)$/iu.test(
@@ -79,12 +92,12 @@ function seconds(value) {
   return Number(number.replace(/inf(?:inity)?/iu, "Infinity"));
 }
 
-function readReport(path) {
+function readReport(path: string): TestReport {
   const parser = new SaxesParser({ xmlns: true, fileName: path });
-  let root;
-  const stack = [];
-  const records = [];
-  const suites = [];
+  let root: SaxesTagNS | undefined;
+  const stack: Array<{ record: TestRecord | undefined }> = [];
+  const records: TestRecord[] = [];
+  const suites: SaxesTagNS[] = [];
   parser.on("opentag", (node) => {
     root ??= node;
     const name = node.uri ? `{${node.uri}}${node.local}` : node.local;
@@ -95,7 +108,7 @@ function readReport(path) {
       else if (name === "skipped" && parent.record.status === "passed")
         parent.record.status = "skipped";
     }
-    let record;
+    let record: TestRecord | undefined;
     if (name === "testcase") {
       record = { attributes: node.attributes, status: "passed" };
       records.push(record);
@@ -109,14 +122,14 @@ function readReport(path) {
   );
   parser.write(content).close();
 
-  const cases = new Map();
+  const cases = new Map<string, TestStatus>();
   for (const { attributes, status } of records) {
-    const identity = [
-      (attributes.file?.value ?? "")
+    const identity: TestIdentity = [
+      (attributes["file"]?.value ?? "")
         .replaceAll("\\", "/")
         .replace(/^\.\//u, ""),
-      attributes.classname?.value ?? "",
-      attributes.name?.value ?? "",
+      attributes["classname"]?.value ?? "",
+      attributes["name"]?.value ?? "",
     ];
     const key = JSON.stringify(identity);
     if (cases.has(key))
@@ -127,7 +140,7 @@ function readReport(path) {
   }
   if (!cases.size) throw new Error(`${path}: no test cases`);
   if (
-    integer(root.attributes.tests?.value ?? String(cases.size)) !==
+    integer(root!.attributes["tests"]?.value ?? String(cases.size)) !==
     BigInt(cases.size)
   ) {
     throw new Error(`${path}: reported test count does not match test cases`);
@@ -140,7 +153,7 @@ function readReport(path) {
       ),
     );
   if (failed) console.error(`${path}: test run failed`);
-  const duration = seconds(root.attributes.time?.value ?? "0");
+  const duration = seconds(root!.attributes["time"]?.value ?? "0");
   const skipped = [...cases.values()].filter(
     (status) => status === "skipped",
   ).length;
@@ -150,7 +163,7 @@ function readReport(path) {
   return {
     cases: new Map(
       [...cases].map(([identity, status]) => [
-        JSON.stringify([...JSON.parse(identity), status]),
+        JSON.stringify([...(JSON.parse(identity) as TestIdentity), status]),
         1,
       ]),
     ),
@@ -159,8 +172,8 @@ function readReport(path) {
   };
 }
 
-function main() {
-  let args;
+function main(): number {
+  let args: { values: { help?: boolean }; positionals: string[] };
   try {
     args = parseArgs({
       options: { help: { type: "boolean", short: "h" } },
@@ -171,21 +184,21 @@ function main() {
         "a baseline and at least one candidate report are required",
       );
   } catch (error) {
-    console.error(error.message);
+    console.error((error as Error).message);
     return 2;
   }
   if (args.values.help) {
     console.log(
-      "Compare Bun JUnit inventories before changing the required CI runner.\n\nUsage: node compare-test-reports.mjs baseline candidates [candidates ...]\nCandidates are JUnit files or glob patterns.",
+      "Compare Bun JUnit inventories before changing the required CI runner.\n\nUsage: node --experimental-strip-types --disable-warning=ExperimentalWarning compare-test-reports.mts baseline candidates [candidates ...]\nCandidates are JUnit files or glob patterns.",
     );
     return 0;
   }
   console.log("| Report | Cases | Skipped | Seconds |");
   console.log("| --- | ---: | ---: | ---: |");
-  const baseline = readReport(args.positionals[0]);
+  const baseline = readReport(args.positionals[0]!);
   let failed = baseline.failed;
-  const candidates = new Map();
-  const durations = [];
+  const candidates = new Map<string, number>();
+  const durations: number[] = [];
   for (const pattern of args.positionals.slice(1)) {
     const paths = matchingReports(pattern).sort((a, b) =>
       Buffer.compare(Buffer.from(a), Buffer.from(b)),
@@ -202,18 +215,18 @@ function main() {
   for (const [label, left, right] of [
     ["Missing", baseline.cases, candidates],
     ["Extra", candidates, baseline.cases],
-  ]) {
+  ] as const) {
     const differences = [...left]
-      .map(([identity, count]) => [
-        JSON.parse(identity),
+      .map(([identity, count]): [TestOutcome, number] => [
+        JSON.parse(identity) as TestOutcome,
         count - (right.get(identity) ?? 0),
       ])
       .filter(([, count]) => count > 0)
       .sort(([a], [b]) => {
         for (let index = 0; index < a.length; index++) {
           const order = Buffer.compare(
-            Buffer.from(a[index]),
-            Buffer.from(b[index]),
+            Buffer.from(a[index]!),
+            Buffer.from(b[index]!),
           );
           if (order) return order;
         }
@@ -234,6 +247,6 @@ function main() {
 try {
   process.exitCode = main();
 } catch (error) {
-  console.error(error.message);
+  console.error((error as Error).message);
   process.exitCode = 1;
 }

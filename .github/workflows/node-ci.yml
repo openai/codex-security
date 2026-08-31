@@ -99,7 +99,7 @@ jobs:
       - name: Check plugin source compatibility
         if: steps.scope.outputs.ci-mode == 'markdown'
         run: |
-          node .github/scripts/check_plugin_source_compatibility.mjs
+          node --experimental-strip-types --disable-warning=ExperimentalWarning .github/scripts/check_plugin_source_compatibility.mts
 
       - name: Install dependencies
         if: steps.scope.outputs.check-markdown == 'true'
@@ -382,9 +382,9 @@ jobs:
         run: |
           python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
           python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
-          node .github/scripts/check_plugin_source_compatibility.mjs
+          node --experimental-strip-types --disable-warning=ExperimentalWarning .github/scripts/check_plugin_source_compatibility.mts
       - name: Test source compatibility checker
-        run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
+        run: node --experimental-strip-types --disable-warning=ExperimentalWarning --test .github/scripts/test_check_plugin_source_compatibility.mts
       - name: Test Python source contracts
         run: python -m pytest plugins/codex-security/tests -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
       - name: Upload Python test reports
