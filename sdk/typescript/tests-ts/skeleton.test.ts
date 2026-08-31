@@ -22,7 +22,7 @@ interface WorkflowStep {
 
 interface WorkflowJob {
   name?: string;
-  needs?: string[];
+  needs?: string | string[];
   env?: Record<string, unknown>;
   strategy?: { matrix: Record<string, unknown> };
   steps: WorkflowStep[];
@@ -101,27 +101,50 @@ describe("TypeScript package skeleton", () => {
     ).toEqual([]);
   });
 
-  test("pins each Node.js minimum and preserves protected and latest LTS checks", async () => {
+  test("runs Bun once per OS and checks every supported Node runtime with the installed package", async () => {
     const { jobs } = await workflow("node-ci.yml");
-    expect(jobs["test"]?.name).toBe(
-      "${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
-    );
     expect(jobs["test"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest", "macos-latest"],
-      node: ["22.13.0"],
-      include: ["24.0.0", "24", "26.0.0", "26"].map((node) => ({
-        os: "ubuntu-latest",
-        node,
-      })),
+      shard: [1, 2, 3],
     });
-    expect(jobs["windows"]?.name).toBe(
-      "windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
-    );
-    expect(jobs["windows"]?.needs).toEqual(["windows-test", "windows-verify"]);
-    expect(jobs["windows-test"]?.strategy?.matrix["node"]).toEqual([
+    expect(jobs["compatibility"]?.strategy?.matrix).toEqual({
+      os: ["ubuntu-latest"],
+      node: ["22.13.0", "24.0.0", "24", "26.0.0", "26"],
+      include: [{ os: "macos-latest", node: "22.13.0" }],
+    });
+    expect(jobs["windows-test"]?.strategy?.matrix).toEqual({
+      shard: [1, 2, 3, 4, 5, 6, 7],
+    });
+    expect(jobs["windows-verify"]?.strategy?.matrix["node"]).toEqual([
       "22.13.0",
       "24",
     ]);
+    expect(jobs["required-test"]?.name).toBe("${{ matrix.os }} / node-22");
+    expect(jobs["required-test"]?.needs).toEqual([
+      "validate-title",
+      "static-checks",
+      "package",
+      "test",
+      "compatibility",
+      "mcp",
+      "plugin-source",
+    ]);
+    expect(jobs["windows"]?.needs).toEqual([
+      "validate-title",
+      "static-checks",
+      "windows-test",
+      "windows-verify",
+    ]);
+    for (const name of ["compatibility", "windows-verify"]) {
+      expect(jobs[name]?.steps).toContainEqual(
+        expect.objectContaining({
+          run: "node scripts/check-package.mjs ../../dist/*.tgz",
+        }),
+      );
+      expect(jobs[name]?.steps.some(({ name }) => name === "Set up Bun")).toBe(
+        false,
+      );
+    }
   });
 
   test("randomizes tests and keeps the default and Windows CI timeouts", async () => {
@@ -132,44 +155,110 @@ describe("TypeScript package skeleton", () => {
     const bunConfig = parse(
       await readFile(new URL("../bunfig.toml", import.meta.url), "utf8"),
     );
-
     expect(packageJson.scripts.test).toBe(
-      "bun test --timeout 30000 ./tests-ts",
+      "node --run build:plugin && bun test --timeout 30000 ./tests-ts",
     );
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
-        run: "node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
+        run: "node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7",
       }),
     );
   });
 
-  test("runs shared static checks once and keeps report upload non-blocking", async () => {
+  test("checks one archive and restores its plugin before every test shard", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const uploads = jobs["package"]!.steps;
+    const inspection = uploads.findIndex(
+      ({ name }) => name === "Inspect archive contents",
+    );
+    const upload = uploads.findIndex(
+      ({ name }) => name === "Upload package for this commit",
+    );
+    expect(inspection).toBeGreaterThanOrEqual(0);
+    expect(inspection).toBeLessThan(upload);
+    expect(uploads[upload]?.with).toMatchObject({
+      name: "package-${{ github.sha }}",
+      "if-no-files-found": "error",
+    });
+    expect(uploads[upload]).not.toHaveProperty("continue-on-error");
+    for (const name of [
+      "test",
+      "windows-test",
+      "mcp",
+      "compatibility",
+      "windows-verify",
+    ]) {
+      const job = jobs[name]!;
+      expect(job.needs).toContain("package");
+      expect(
+        job.steps.find(
+          ({ name }) => name === "Download package for this commit",
+        )?.with,
+      ).toEqual({ name: "package-${{ github.sha }}", path: "dist" });
+    }
+    for (const name of ["test", "windows-test", "mcp"]) {
+      const steps = jobs[name]!.steps;
+      const restore = steps.findIndex(
+        ({ name }) => name === "Restore bundled plugin",
+      );
+      const testStep = steps.findIndex(
+        ({ name }) =>
+          name === "Test" ||
+          name === "Test shard ${{ matrix.shard }}" ||
+          name === "Test MCP app",
+      );
+      expect(restore).toBeGreaterThanOrEqual(0);
+      expect(restore).toBeLessThan(testStep);
+      expect(steps[restore]?.run).toContain("package/_bundled_plugin");
+      expect(steps[testStep]).not.toHaveProperty("continue-on-error");
+    }
+  });
+
+  test("installs ripgrep before the independent MCP job", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const steps = jobs["mcp"]!.steps;
+    const ripgrep = steps.findIndex(({ name }) => name === "Install ripgrep");
+    const tests = steps.findIndex(({ name }) => name === "Test MCP app");
+    expect(steps[ripgrep]?.run).toContain("apt-get install --yes ripgrep");
+    expect(ripgrep).toBeLessThan(tests);
+    expect(
+      jobs["test"]!.steps.some(({ name }) => name === "Test MCP app"),
+    ).toBe(false);
+  });
+
+  test("runs static checks independently and keeps diagnostic uploads non-blocking", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const steps = Object.values(jobs).flatMap((job) => job.steps);
-    for (const name of ["Typecheck", "Check formatting"]) {
-      expect(steps.filter((step) => step.name === name)).toEqual([
-        expect.objectContaining({
-          if: "matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'",
-        }),
-      ]);
+    expect(jobs["static-checks"]?.needs).toBe("validate-title");
+    expect(jobs["package"]?.needs).toBe("validate-title");
+    for (const [name, job] of [
+      ["Check plugin source boundary", "package"],
+      ["Typecheck", "static-checks"],
+      ["Check formatting", "static-checks"],
+    ] as const) {
+      expect(steps.filter((step) => step.name === name)).toHaveLength(1);
+      expect(jobs[job]!.steps.some((step) => step.name === name)).toBe(true);
     }
-    expect(steps.find((step) => step.name === "Test")).not.toHaveProperty(
-      "continue-on-error",
-    );
+    for (const name of [
+      "Upload test reports",
+      "Upload Windows test reports",
+      "Upload MCP test reports",
+      "Upload Python test reports",
+    ]) {
+      expect(steps.find((step) => step.name === name)).toMatchObject({
+        if: "always()",
+        "continue-on-error": true,
+      });
+    }
     expect(
-      steps.find((step) => step.name === "Upload test reports"),
-    ).toMatchObject({
-      "continue-on-error": true,
-    });
-    for (const name of ["test", "windows-verify"]) {
-      expect(jobs[name]?.steps).toContainEqual(
-        expect.objectContaining({
-          run: "pnpm run check:package ../../dist/*.tgz",
-        }),
-      );
-    }
+      jobs["plugin-source"]!.steps.find(
+        ({ name }) => name === "Test Python source contracts",
+      )?.run,
+    ).toContain(
+      "-n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml",
+    );
   });
 
   test("keeps machine-wide policy changes out of parallel and experimental runs", async () => {
@@ -247,7 +336,6 @@ describe("TypeScript package skeleton", () => {
     const uploads = [...Object.values(ci.jobs), ...Object.values(quality.jobs)]
       .flatMap((job) => job.steps)
       .filter((step) => step.uses?.startsWith("actions/upload-artifact@"));
-    expect(uploads).toHaveLength(3);
     for (const upload of uploads) {
       expect(upload.with?.["overwrite"]).toBe(true);
     }
@@ -270,9 +358,18 @@ describe("TypeScript package skeleton", () => {
     );
 
     expect(packageJson.scripts.build).toBe(
-      "node --run clean && tsc -p tsconfig.build.json",
+      "node --run clean && tsc -p tsconfig.build.json && node scripts/build-dashboard.mjs",
     );
-    expect(packageJson.scripts.prepack).toBe("node --run build");
+    expect(packageJson.scripts["build:plugin"]).toBe(
+      "node scripts/build-plugin.mjs",
+    );
+    expect(packageJson.scripts["check:plugin-source"]).toBe(
+      "node scripts/check-plugin-source.mjs",
+    );
+    expect(packageJson.scripts.prepack).toBe(
+      "node --run build:plugin && node --run build",
+    );
+    expect(packageJson.scripts.types).not.toContain("check:plugin-source");
     expect(packageJson.scripts["audit:prod"]).toBe(
       "pnpm audit --prod --audit-level high",
     );

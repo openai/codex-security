@@ -194,6 +194,7 @@ export function dependencies(
       ...arguments_: Parameters<MainDependencies["runCodex"]>
     ) => number | Promise<number>;
     linearClient?: MainDependencies["linearClient"];
+    importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
     ) => string | Promise<string>;
@@ -263,12 +264,20 @@ export function dependencies(
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
     runCodex: async (...args) => (await options.onCodex?.(...args)) ?? 0,
-    runRepositoryCommand: async (command, args, repository) =>
-      (await options.onRepositoryCommand?.(command, args, repository)) ?? "",
+    runRepositoryCommand: async (command, args, repository, commandOptions) =>
+      (await options.onRepositoryCommand?.(
+        command,
+        args,
+        repository,
+        commandOptions,
+      )) ?? "",
     ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
+    ...(options.importGitHubAlerts === undefined
+      ? {}
+      : { importGitHubAlerts: options.importGitHubAlerts }),
     runWorkbench: async (args, input) =>
       (await options.onWorkbench?.(args, input)) ?? { scans: [] },
     matchFindings: async (input) =>

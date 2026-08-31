@@ -37,7 +37,8 @@ async function bundledWorkerExecutor(
   expect(fileSystemImport).toBeDefined();
 
   class FakeCodex {
-    startThread() {
+    startThread(options: { threadSource: string }) {
+      expect(options.threadSource).toBe("security_scan");
       return {
         id: "fixture-worker-thread",
         async runStreamed(_input: string, options: { signal: AbortSignal }) {
@@ -57,6 +58,7 @@ async function bundledWorkerExecutor(
     "DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID",
     "deepScanPermissionProfileFallbackError",
     "resolveCodexPath",
+    "executablePathForSpawn",
     "workerSubagentConfig",
     "appendSafeItemDiagnostic",
     "classifyCodexWorkerError",
@@ -71,6 +73,7 @@ async function bundledWorkerExecutor(
     "codex_security_deep_scan_worker",
     () => undefined,
     () => "/fixture/codex",
+    (path: string) => path,
     () => ({}),
     () => {},
     (error: unknown) => error,

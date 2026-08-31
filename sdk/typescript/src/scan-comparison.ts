@@ -20,14 +20,24 @@ import {
 import { CodexSecurityError } from "./errors.js";
 import {
   codexSecurityCredentialHome,
+  executablePathForSpawn,
   expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   runCodexCommand,
   type CodexCommand,
 } from "./runtime.js";
+import {
+  CODEX_SECURITY_THREAD_SOURCES,
+  type CodexSecurityThreadSource,
+} from "./thread-source.js";
 
 type Finding = { occurrenceId: string } & Record<string, unknown>;
+type ReadOnlyCodexThreadSource = Extract<
+  CodexSecurityThreadSource,
+  | typeof CODEX_SECURITY_THREAD_SOURCES.scan
+  | typeof CODEX_SECURITY_THREAD_SOURCES.scanComparison
+>;
 
 export interface ScanComparisonInput {
   before: readonly Finding[];
@@ -113,7 +123,7 @@ export async function matchScanFindings(
 export async function matchScanFindingsInternal(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
-  runtimeOptions: { surface: CodexSecuritySurface },
+  runtimeOptions: { surface: CodexSecuritySurface; allowBatching?: boolean },
 ): Promise<ScanComparisonResult> {
   const comparisons: ScanComparisonResult[] = [];
   const allowHistoricalUncertainty =
@@ -121,13 +131,16 @@ export async function matchScanFindingsInternal(
   const outputSchema = z.toJSONSchema(comparisonSchema, {
     target: "openapi-3.0",
   });
-  for (const batch of comparisonBatches(input)) {
+  for (const batch of comparisonBatches(input, runtimeOptions.allowBatching)) {
     options.signal?.throwIfAborted();
     const finalResponse = await runReadOnlyCodex(
       batch.prompt,
       outputSchema,
       options,
-      runtimeOptions,
+      {
+        ...runtimeOptions,
+        threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
+      },
     );
     let response: unknown;
     try {
@@ -146,9 +159,10 @@ export async function matchScanFindingsInternal(
 
 function* comparisonBatches(
   input: ScanComparisonInput,
+  allowBatching = true,
 ): Generator<{ input: ScanComparisonInput; prompt: string }> {
   const prompt = comparisonPrompt(input);
-  if (prompt.length > CODEX_MAX_INPUT_CHARACTERS / 2) {
+  if (allowBatching && prompt.length > CODEX_MAX_INPUT_CHARACTERS / 2) {
     // Splitting one side at a time covers every before/after pair exactly once.
     const side =
       input.before.length > 1 &&
@@ -164,11 +178,11 @@ function* comparisonBatches(
       yield* comparisonBatches({ ...input, [side]: findings.slice(middle) });
       return;
     }
-    if (prompt.length > CODEX_MAX_INPUT_CHARACTERS) {
-      throw new CodexSecurityError(
-        `A finding pair exceeds Codex's ${CODEX_MAX_INPUT_CHARACTERS}-character input limit.`,
-      );
-    }
+  }
+  if (prompt.length > CODEX_MAX_INPUT_CHARACTERS) {
+    throw new CodexSecurityError(
+      `Finding comparison exceeds Codex's ${CODEX_MAX_INPUT_CHARACTERS}-character input limit.`,
+    );
   }
   yield { input, prompt };
 }
@@ -224,7 +238,10 @@ export async function runReadOnlyCodex(
   prompt: string,
   outputSchema: unknown,
   options: ReadOnlyCodexOptions,
-  runtimeOptions: { surface: CodexSecuritySurface },
+  runtimeOptions: {
+    surface: CodexSecuritySurface;
+    threadSource: ReadOnlyCodexThreadSource;
+  },
 ): Promise<string> {
   const config =
     options.config === undefined
@@ -250,7 +267,7 @@ export async function runReadOnlyCodex(
   const codex =
     options.codex ??
     new Codex({
-      codexPathOverride: command!.command,
+      codexPathOverride: executablePathForSpawn(command!.command),
       env: environment,
       config: {
         ...config,
@@ -283,6 +300,7 @@ export async function runReadOnlyCodex(
       } as NonNullable<CodexOptions["config"]>,
     });
   const thread = codex.startThread({
+    threadSource: runtimeOptions.threadSource,
     ...(model === undefined ? {} : { model }),
     modelReasoningEffort: reasoningEffort,
     sandboxMode: "read-only",
@@ -299,7 +317,7 @@ export async function runReadOnlyCodex(
   return turn.finalResponse;
 }
 
-async function disabledMcpServers(
+export async function disabledMcpServers(
   command: CodexCommand,
   config: JsonObject | undefined,
   environment: Record<string, string>,
@@ -529,7 +547,7 @@ export async function comparisonEnvironment(
   return environment;
 }
 
-function environmentEntry(
+export function environmentEntry(
   environment: Record<string, string>,
   requested: string,
 ): string | undefined {

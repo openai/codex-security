@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import {
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   utimes,
@@ -11,7 +12,7 @@ import * as module from "node:module";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { expect, test } from "bun:test";
-import { loadBundledRuntime } from "./plugin-root.js";
+import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 
 async function bundledResolver() {
   const runtime = await loadBundledRuntime();
@@ -98,6 +99,72 @@ test("uses the newest relocated Windows executable when WindowsApps is inaccessi
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.each([
+  ["x64", "x86_64-pc-windows-msvc"],
+  ["arm64", "aarch64-pc-windows-msvc"],
+] as const)(
+  "resolves a managed Windows %s worker through the packaged MCP environment",
+  async (architecture, targetTriple) => {
+    const root = await realpath(
+      await mkdtemp(path.join(tmpdir(), "codex-security-managed-cli-")),
+    );
+    try {
+      const packages = path.join(
+        root,
+        "managed CLI",
+        "node_modules",
+        "@openai",
+      );
+      const packageRoot = path.join(packages, "codex");
+      const platformPackage = path.join(
+        packages,
+        `codex-win32-${architecture}`,
+      );
+      const executable = path.join(
+        platformPackage,
+        "vendor",
+        targetTriple,
+        "bin",
+        "codex.exe",
+      );
+      await mkdir(packageRoot, { recursive: true });
+      await mkdir(path.dirname(executable), { recursive: true });
+      await writeFile(path.join(packageRoot, "package.json"), "{}\n");
+      await writeFile(path.join(platformPackage, "package.json"), "{}\n");
+      await writeFile(executable, "synthetic executable\n");
+
+      const configuration = JSON.parse(
+        await readFile(path.join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
+      ) as { mcpServers: Record<string, { env_vars: string[] }> };
+      const allowed = new Set(
+        configuration.mcpServers["codex-security"]!.env_vars,
+      );
+      const environment = Object.fromEntries(
+        Object.entries({
+          PATH: "",
+          CODEX_MANAGED_PACKAGE_ROOT: ` ${packageRoot} `,
+        }).filter(([name]) => name === "PATH" || allowed.has(name)),
+      );
+      const resolve = await bundledResolver();
+
+      expect(resolve(environment, "win32", architecture)).toBe(executable);
+      const configured = path.join(root, "custom CLI", "codex.exe");
+      expect(
+        resolve(
+          { ...environment, CODEX_CLI_PATH: configured },
+          "win32",
+          architecture,
+        ),
+      ).toBe(configured);
+      expect(resolve(environment, "linux", architecture)).toBe(
+        path.resolve("codex"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("does not retry Windows executable permission failures", async () => {
   const runtime = await loadBundledRuntime();

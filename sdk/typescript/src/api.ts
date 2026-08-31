@@ -1,18 +1,27 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
+import { statSync } from "node:fs";
 import {
   chmod,
   lstat,
   mkdir,
   readFile,
   realpath,
-  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import {
   Codex,
   type CodexOptions,
@@ -56,7 +65,12 @@ import {
   type ScanSessionEvent,
 } from "./cost.js";
 import {
+  DeepScanProgressTracker,
+  type DeepScanProgress,
+} from "./deep-progress.js";
+import {
   loadContract,
+  readScanFile,
   requireScanFile,
   type ScanExpectation,
 } from "./contract.js";
@@ -71,6 +85,7 @@ import {
 import {
   AuthenticationRequiredError,
   CodexSecurityError,
+  ConfigurationError,
   IncompleteScanError,
   OutputDirectoryError,
   errorMessage,
@@ -82,10 +97,12 @@ import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
+import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import {
   ScanResult,
   type RepositoryFinding,
   type TurnResultMetadata,
+  type ScanResultOptions,
 } from "./result.js";
 import type { SeverityLevel } from "./models.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
@@ -100,22 +117,26 @@ import {
   type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
+import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
   acquireCodexSecurityCredentialHomeLock,
   bootstrapPlugin,
+  bundledPluginRoot,
   cleanupSdkDirectory,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
+  executablePathForSpawn,
   expandHome,
   importAmbientAuth,
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
   planOutputArchive,
+  prepareScanArtifactRestorer,
   prepareOutputDir,
   preparePersistentOutputRoot,
   requireModelSafeOutputDir,
@@ -128,6 +149,7 @@ import {
   type CodexCommand,
   type PluginInstall,
   type ProcessEnvironment,
+  type ScanArtifactRestorer,
   type WorkbenchCommandOptions,
   validateOutputDir,
 } from "./runtime.js";
@@ -175,6 +197,7 @@ interface PreparedRuntime {
 }
 
 interface PreparedSession {
+  safetyIdentifier?: string;
   runtime: PreparedRuntime;
   runtimeHome: string;
   effectiveConfig: JsonObject;
@@ -204,7 +227,11 @@ export interface DeepScanOptions {
 }
 
 export interface ScanOptions extends DeepScanOptions {
+  /** Opt into a durable scan -> custom publication -> dedupe workflow. */
+  workflowId?: string;
   auth?: ScanAuthMode;
+  /** Stable, privacy-preserving end-user ID for this scan's model requests. */
+  safetyIdentifier?: string;
   target?: ScanTarget;
   mode?: ScanMode;
   knowledgeBasePaths?: string[];
@@ -231,6 +258,7 @@ export interface ScanOptions extends DeepScanOptions {
   onActivity?: (activity: ScanActivity) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onProgress?: (progress: ScanProgress) => void;
+  onDeepProgress?: (progress: DeepScanProgress) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string, details?: ScanWarningDetails) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
@@ -318,6 +346,7 @@ type ScanObserverName =
   | "onActivity"
   | "onSessionEvent"
   | "onProgress"
+  | "onDeepProgress"
   | "onWorkerStatus"
   | "onWarning";
 
@@ -363,6 +392,7 @@ interface ClientDependencies {
   ) => Promise<PreparedRuntime>;
   resolvePluginPython?: typeof resolvePluginPython;
   prepareOutputDir?: typeof prepareOutputDir;
+  prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
@@ -375,6 +405,7 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 };
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
+const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
   "https://openai.com/form/enterprise-trusted-access-for-cyber/";
@@ -426,7 +457,114 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions = {},
   ): Promise<ScanResult> {
-    return await this.#trackOperation(() => this.#run(repository, options));
+    return await this.#trackOperation(() =>
+      options.workflowId === undefined
+        ? this.#run(repository, { ...options })
+        : this.#runWorkflow(repository, { ...options }, options.workflowId),
+    );
+  }
+
+  async #runWorkflow(
+    repository: string,
+    options: ScanOptions,
+    workflowId: string,
+  ): Promise<ScanResult> {
+    this.#requireOpen();
+    const signal = AbortSignal.any([
+      this.#abortController.signal,
+      ...(options.signal ? [options.signal] : []),
+    ]);
+    const local = await this.#validateLocalInputs(
+      repository,
+      { ...options, outputDir: undefined, archiveExisting: false },
+      signal,
+    );
+    const workflow = new FindingWorkflow(
+      workflowId,
+      this.#dependencies.environment,
+      this.#dependencies.runWorkbench,
+      this.config.pythonPath,
+    );
+    if (options.outputDir !== undefined)
+      await workflow.protectArtifacts(options.outputDir);
+    const state = await workflow.bind({
+      repositoryPath: local.repository,
+      scanRequestDigest: workflowDigest({
+        config: this.config,
+        options: {
+          ...options,
+          target: options.target ?? "repository",
+          mode: options.mode ?? "standard",
+          outputDir:
+            options.outputDir === undefined
+              ? undefined
+              : resolve(expandHome(options.outputDir)),
+          workflowId: undefined,
+          signal: undefined,
+          auth: undefined,
+          archiveExisting: undefined,
+        },
+      }),
+    });
+    type ScanMetadata = Pick<
+      ScanResultOptions,
+      "threadId" | "turnResult" | "sarifPath" | "repositoryFindings"
+    >;
+    if (state.scanId && state.scanDir) {
+      await workflow.protectArtifacts(state.scanDir);
+      let metadata = state.stages.scan.result as ScanMetadata | undefined;
+      let completed = state.stages.scan.status === "completed";
+      if (!completed) {
+        const scan = await workflow.registeredScan(state.scanId);
+        completed =
+          (scan["progress"] as JsonObject | undefined)?.["status"] ===
+          "complete";
+        if (completed)
+          metadata = {
+            threadId: (scan["continuationThreadId"] as string) ?? "",
+            turnResult: { status: "completed" },
+          };
+      }
+      if (completed) {
+        const contract = await loadContract(state.scanDir, {
+          pluginRoot: await bundledPluginRoot(),
+          expectedScanId: state.scanId,
+          signal,
+        });
+        await workflow.bind({ artifactDigest: workflowDigest(contract) });
+        metadata ??= { threadId: "", turnResult: { status: "completed" } };
+        await workflow.complete("scan", metadata);
+        return new ScanResult({
+          ...contract,
+          scanDir: state.scanDir,
+          ...metadata,
+        });
+      }
+    }
+    await workflow.begin("scan");
+    try {
+      const result = await this.#run(repository, options);
+      await workflow.protectArtifacts(result.scanDir);
+      await workflow.bind({
+        scanId: result.manifest.scan.id,
+        scanDir: result.scanDir,
+        artifactDigest: workflowDigest({
+          manifest: result.manifest,
+          findings: result.findings,
+          coverage: result.coverage,
+        }),
+      });
+      await workflow.complete("scan", {
+        threadId: result.threadId,
+        turnResult: result.turnResult,
+        sarifPath: result.sarifPath,
+        repositoryFindings: result.repositoryFindings,
+      } satisfies ScanMetadata);
+      return result;
+    } catch (error) {
+      await workflow.fail("scan", error);
+      throw error;
+    }
   }
 
   public async validate(options: ValidationOptions): Promise<ValidationResult> {
@@ -499,6 +637,7 @@ export class CodexSecurity {
         options.auth,
       );
       const thread = codex.startThread({
+        threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
         workingDirectory: outputDir,
         skipGitRepoCheck: true,
         approvalPolicy,
@@ -616,6 +755,7 @@ export class CodexSecurity {
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
+    let deepProgressTracker: DeepScanProgressTracker | null = null;
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
     let customValidationComplete = false;
@@ -633,6 +773,9 @@ export class CodexSecurity {
       id: string;
       options: WorkbenchCommandOptions;
     } | null = null;
+    const prepareArtifactRestorer =
+      this.#dependencies.prepareScanArtifactRestorer ??
+      prepareScanArtifactRestorer;
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
     try {
       const checkOpen = (): void => {
@@ -672,7 +815,7 @@ export class CodexSecurity {
       checkOpen();
 
       const session = await this.#prepareSession(
-        { protectedRoot, stateDirectory },
+        { protectedRoot },
         options,
         signal,
         temporaryRoot,
@@ -934,7 +1077,13 @@ export class CodexSecurity {
             ? []
             : ["--parent-scan-id", options.parentScanId]),
         ],
-        JSON.stringify({ recipe, userContext: options.scanPrompt }),
+        JSON.stringify({
+          recipe,
+          userContext: options.scanPrompt,
+          ...(options.workflowId === undefined
+            ? {}
+            : { workflowId: options.workflowId }),
+        }),
       );
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];
@@ -1003,6 +1152,37 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      if (mode === "deep" && options.onDeepProgress !== undefined) {
+        let progressWarningReported = false;
+        deepProgressTracker = new DeepScanProgressTracker({
+          read: (progressSignal) =>
+            workbench(
+              {
+                ...workbenchOptions,
+                signal: AbortSignal.any([signal, progressSignal]),
+              },
+              ["get-scan", "--scan-id", scanId],
+            ),
+          onProgress: (progress) =>
+            notifyObserver(
+              "onDeepProgress",
+              options.onDeepProgress,
+              options.onObserverError,
+              progress,
+            ),
+          onError: (error) => {
+            if (progressWarningReported) return;
+            progressWarningReported = true;
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              `Could not track Deep Scan progress: ${errorMessage(error)}`,
+            );
+          },
+        });
+        deepProgressTracker.start();
+      }
       if (options.validationPrompt !== undefined) {
         await writeCustomValidationStatus(
           scanDir,
@@ -1119,6 +1299,7 @@ export class CodexSecurity {
         options.auth,
       );
       const thread = codex.startThread({
+        threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
         approvalPolicy,
@@ -1193,6 +1374,7 @@ export class CodexSecurity {
                     filesTotal: scopeFileCount,
                   });
                 const validationThread = codex.startThread({
+                  threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
                   workingDirectory: join(scanDir, "artifacts"),
                   skipGitRepoCheck: true,
                   approvalPolicy,
@@ -1241,11 +1423,36 @@ export class CodexSecurity {
             );
           }
           completionCost = snapshot.cost;
-          const preparation = await workbench(workbenchOptions, [
-            "prepare-scan-completion",
-            "--scan-id",
-            scanId,
-          ]);
+          let preparation: JsonObject;
+          try {
+            preparation = await workbench(workbenchOptions, [
+              "prepare-scan-completion",
+              "--scan-id",
+              scanId,
+            ]);
+          } catch (error) {
+            const saved = await workbench(workbenchOptions, [
+              "get-scan",
+              "--scan-id",
+              scanId,
+            ]).catch(() => null);
+            const savedScan = isRecord(saved) ? saved["scan"] : undefined;
+            const progress = isRecord(savedScan)
+              ? savedScan["progress"]
+              : undefined;
+            const failureMessage = isRecord(savedScan)
+              ? savedScan["failureMessage"]
+              : undefined;
+            if (
+              isRecord(progress) &&
+              progress["status"] === "failed" &&
+              typeof failureMessage === "string" &&
+              failureMessage.trim() !== ""
+            ) {
+              throw new IncompleteScanError(failureMessage);
+            }
+            throw error;
+          }
           preparedTargetWarnings = Array.isArray(preparation["targetWarnings"])
             ? preparation["targetWarnings"].filter(
                 (warning): warning is string => typeof warning === "string",
@@ -1323,13 +1530,15 @@ export class CodexSecurity {
             ]),
           ].map(async (name) => ({
             name,
-            contents: await readFile(
-              await requireScanFile(scanDir, name, name, signal),
-              { signal },
-            ),
+            contents: await readScanFile(scanDir, name, name, signal),
           })),
         );
+        let artifactRestorer: ScanArtifactRestorer | null = null;
         try {
+          artifactRestorer = await prepareArtifactRestorer(
+            workbenchOptions,
+            scanDir,
+          );
           await runScanEvents({
             thread,
             events: (await followUp()).events,
@@ -1345,28 +1554,20 @@ export class CodexSecurity {
           checkOpen();
         } catch (error) {
           if (signal.aborted || this.#closed) throw error;
-          for (const artifact of completedArtifacts) {
-            const path = join(scanDir, artifact.name);
-            const current = await readFile(path, { signal }).catch(
-              (readError: NodeJS.ErrnoException) => {
-                if (readError.code !== "ENOENT") throw readError;
-                return null;
-              },
-            );
-            if (current?.equals(artifact.contents)) continue;
-            const temporary = join(
-              dirname(path),
-              `.${randomUUID()}.${basename(path)}.restore`,
-            );
-            try {
-              await writeFile(temporary, artifact.contents, {
-                flag: "wx",
-                mode: 0o600,
-                signal,
-              });
-              await rename(temporary, path);
-            } finally {
-              await rm(temporary, { force: true });
+          if (artifactRestorer !== null) {
+            for (const artifact of completedArtifacts) {
+              try {
+                await artifactRestorer.restore(
+                  artifact.name,
+                  artifact.contents,
+                );
+              } catch (cause) {
+                if (signal.aborted || this.#closed) throw cause;
+                throw new OutputDirectoryError(
+                  "Cannot restore an artifact outside the scan directory.",
+                  { cause },
+                );
+              }
             }
           }
           await collectResult(
@@ -1411,6 +1612,7 @@ export class CodexSecurity {
               ((input, comparisonOptions) =>
                 matchScanFindingsInternal(input, comparisonOptions, {
                   surface: this.#surface,
+                  allowBatching: false,
                 })),
             environment,
             model,
@@ -1561,6 +1763,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      deepProgressTracker?.stop();
       // Removing the temporary scan inputs is best effort. A throw here would replace the
       // outcome the try and catch blocks already produced, so these failures are reported
       // as warnings: a scan that failed has to say why it failed, not why its temporary
@@ -1578,15 +1781,8 @@ export class CodexSecurity {
       } catch (error) {
         warnCleanupFailed(options, error);
       } finally {
-        // The startup lock is normally released before workbench registration and Codex
-        // execution. This fallback covers failures during runtime preparation or
-        // authentication. The release only marks itself done once the lock directory is
-        // gone, so a failure leaves an owner.json naming this still-running process;
-        // recoverStaleCredentialHomeLock then refuses to reclaim it because that pid is
-        // alive, and later scans in this process wait on a lock nothing frees. Reporting
-        // success while leaving the client in that state is worse than failing, so the
-        // failure is only downgraded to a warning when the scan already failed and that
-        // error is the one worth keeping.
+        // Release any remaining startup lock, but preserve the scan's error if both
+        // the scan and lock cleanup fail.
         try {
           await releaseCredentialHome?.();
         } catch (error) {
@@ -1652,6 +1848,14 @@ export class CodexSecurity {
       }
       const authentication = await this.#authentication();
       this.#requireOpen();
+      const ambientHome =
+        environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
+        join(homedir(), ".codex");
+      await initialCredentialsAvailable(
+        this.#dependencies.environment,
+        ambientHome,
+        authentication.codexHome,
+      );
       return await accountStatus(
         this.#codexCommand(),
         authentication.environment,
@@ -1797,7 +2001,7 @@ export class CodexSecurity {
       apiKey,
       sessionConfig,
     } = session;
-    const environment = {
+    const environment: ProcessEnvironment = {
       ...pluginExecutionEnvironment(
         python,
         withoutCodexHome(
@@ -1810,6 +2014,13 @@ export class CodexSecurity {
       CODEX_HOME: runtime.codexHome,
       ...runtimePaths,
     };
+    for (const name of Object.keys(environment)) {
+      if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
+        delete environment[name];
+    }
+    if (session.safetyIdentifier !== undefined) {
+      environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
+    }
     const sdkCodexConfig = { ...sessionConfig };
     // Projects and permissions already live in generated TOML files; the SDK
     // cannot safely encode their path and selector keys as dotted overrides.
@@ -1820,15 +2031,27 @@ export class CodexSecurity {
     )
       ? sdkCodexConfig["responses_api_metadata"]
       : {};
-    const codexPathOverride =
+    let codexPathOverride =
       environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") ===
       undefined
         ? undefined
         : this.#codexCommand().command;
+    let sdkEnvironment = definedEnvironment(
+      selectedScanEnvironment(environment, "chatgpt"),
+    );
+    if (process.platform === "win32" && codexPathOverride === undefined) {
+      codexPathOverride = environment["CODEX_CLI_PATH"]!;
+      sdkEnvironment = bundledCodexSdkEnvironment(
+        codexPathOverride,
+        sdkEnvironment,
+      );
+    }
     const codex = this.#dependencies.createCodex({
-      ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
+      ...(codexPathOverride === undefined
+        ? {}
+        : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      env: definedEnvironment(selectedScanEnvironment(environment, "chatgpt")),
+      env: sdkEnvironment,
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
         responses_api_metadata: {
@@ -1841,13 +2064,11 @@ export class CodexSecurity {
   }
 
   async #prepareSession(
-    {
-      protectedRoot,
-      stateDirectory,
-    }: { protectedRoot: string; stateDirectory: string },
+    { protectedRoot }: { protectedRoot: string },
     options: Pick<
       ScanOptions,
       | "auth"
+      | "safetyIdentifier"
       | "expectedPluginVersion"
       | "onAuthentication"
       | "onWarning"
@@ -1928,7 +2149,6 @@ export class CodexSecurity {
       requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
       const sessionConfig = scanRuntimeCodexConfig(
         effectiveConfig,
-        stateDirectory,
         runtimeHome,
       );
       if (
@@ -1993,6 +2213,18 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
+      if (
+        options.safetyIdentifier !== undefined &&
+        authentication.method !== "api_key" &&
+        !(
+          authentication.method === "stored_credentials" &&
+          authentication.credentialType === "api_key"
+        )
+      ) {
+        throw new ConfigurationError(
+          "safetyIdentifier requires API-key authentication.",
+        );
+      }
       notifyObserver(
         "onAuthentication",
         options.onAuthentication,
@@ -2010,6 +2242,7 @@ export class CodexSecurity {
       checkOpen();
       return {
         runtime,
+        safetyIdentifier: options.safetyIdentifier,
         runtimeHome,
         effectiveConfig,
         preflightConfig,
@@ -2091,11 +2324,7 @@ export class CodexSecurity {
     throwIfAborted(signal);
     const config = await preserveCodexSecurityPluginRegistration(
       runtime.codexHome,
-      sharedCredentialCodexConfig(
-        mergedConfig,
-        codexSecurityStateDirectory(environment),
-        runtime.codexHome,
-      ),
+      sharedCredentialCodexConfig(mergedConfig, runtime.codexHome),
     );
     await writeCodexConfig(join(runtime.codexHome, "config.toml"), config);
     runtime.plugin = await bootstrapPlugin(
@@ -2121,6 +2350,18 @@ export class CodexSecurity {
     signal?: AbortSignal,
   ): Promise<LocalScanInputs> {
     deepScanOptions(options);
+    const identifier = options.safetyIdentifier;
+    if (
+      identifier !== undefined &&
+      (typeof identifier !== "string" ||
+        identifier.trim().length === 0 ||
+        identifier.includes("\0") ||
+        [...identifier].length > 64)
+    ) {
+      throw new ConfigurationError(
+        "safetyIdentifier must contain 1 to 64 characters, must not be blank, and must not contain NUL.",
+      );
+    }
     if (
       options.maxCostUsd !== undefined &&
       (!Number.isFinite(options.maxCostUsd) || options.maxCostUsd <= 0)
@@ -2237,11 +2478,7 @@ export class CodexSecurity {
         requestedConfig ?? (await mergedCodexConfig(this.config));
       const codexConfig = await preserveCodexSecurityPluginRegistration(
         codexHome,
-        sharedCredentialCodexConfig(
-          mergedConfig,
-          codexSecurityStateDirectory(processEnvironment),
-          codexHome,
-        ),
+        sharedCredentialCodexConfig(mergedConfig, codexHome),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
@@ -3066,6 +3303,22 @@ export function scanAuthentication(
     : { method: "api_key", source: key.source, verified: false };
 }
 
+/** Shell-neutral guidance so PowerShell users are not told to run POSIX `unset`. */
+export function formatEnvironmentVariableRemovalGuidance(
+  names: readonly string[],
+): string {
+  if (names.length === 0) {
+    return "remove OPENAI_API_KEY and CODEX_API_KEY from the environment";
+  }
+  if (names.length === 1) {
+    return `remove ${names[0]} from the environment`;
+  }
+  if (names.length === 2) {
+    return `remove ${names[0]} and ${names[1]} from the environment`;
+  }
+  return `remove ${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]} from the environment`;
+}
+
 async function runtimeScanAuthentication(
   environment: ProcessEnvironment,
   codexHome: string,
@@ -3259,7 +3512,6 @@ export function classifyConnectionFailure(
 
 export function scanRuntimeCodexConfig(
   config: JsonObject,
-  stateDirectory: string,
   protectedCredentialHome?: string,
 ): JsonObject {
   const approvalPolicy = scanApprovalPolicy(config);
@@ -3292,7 +3544,6 @@ export function scanRuntimeCodexConfig(
         filesystem: {
           ":root": "read",
           ":workspace_roots": "write",
-          [stateDirectory]: "write",
           ...(protectedCredentialHome === undefined
             ? {}
             : { [protectedCredentialHome]: "read" }),
@@ -3304,7 +3555,6 @@ export function scanRuntimeCodexConfig(
 
 function sharedCredentialCodexConfig(
   config: JsonObject,
-  stateDirectory: string,
   credentialHome: string,
 ): JsonObject {
   const shared: JsonObject = {
@@ -3328,7 +3578,7 @@ function sharedCredentialCodexConfig(
       };
     }
   }
-  return scanRuntimeCodexConfig(shared, stateDirectory, credentialHome);
+  return scanRuntimeCodexConfig(shared, credentialHome);
 }
 
 export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
@@ -3484,6 +3734,34 @@ function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
     ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";
   throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
+}
+
+function bundledCodexSdkEnvironment(
+  command: string,
+  environment: Record<string, string>,
+): Record<string, string> {
+  // An SDK executable override disables its bundled-tool PATH setup.
+  const toolsDirectory = join(dirname(dirname(command)), "codex-path");
+  try {
+    if (!statSync(toolsDirectory).isDirectory()) return environment;
+  } catch {
+    return environment;
+  }
+  const result = { ...environment };
+  const pathKeys = Object.keys(result).filter(
+    (key) => key.toLowerCase() === "path",
+  );
+  const pathKey = pathKeys.includes("Path")
+    ? "Path"
+    : pathKeys.at(-1) ?? "PATH";
+  for (const key of pathKeys) {
+    if (key !== pathKey) delete result[key];
+  }
+  const entries = (result[pathKey] ?? "")
+    .split(delimiter)
+    .filter((entry) => entry.length > 0 && entry !== toolsDirectory);
+  result[pathKey] = [toolsDirectory, ...entries].join(delimiter);
+  return result;
 }
 
 function definedEnvironment(

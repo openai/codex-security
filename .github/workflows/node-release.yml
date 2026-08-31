@@ -74,7 +74,7 @@ jobs:
 
       - name: Enable pnpm
         shell: bash
-        run: corepack enable && corepack prepare "$(node -p 'require("./sdk/typescript/package.json").packageManager')" --activate
+        run: corepack enable && corepack prepare "$(node -p 'require("./package.json").packageManager')" --activate
 
       - name: Validate release tag
         id: release
@@ -115,8 +115,33 @@ jobs:
             printf 'mode=%s\n' "$mode"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Validate reviewed release notes
+        if: steps.release.outputs.mode == 'publish'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          release_notes_file="$(mktemp)"
+          trap 'rm -f "$release_notes_file"' EXIT
+          if ! git show "$GITHUB_SHA:.github/release-notes.md" \
+            > "$release_notes_file" 2>/dev/null; then
+            echo "The tagged commit must include .github/release-notes.md." >&2
+            exit 1
+          fi
+          node sdk/typescript/scripts/release-automation.mjs \
+            validate-release-notes "$RELEASE_VERSION" "$release_notes_file" >/dev/null
+
       - name: Install dependencies
-        run: sfw pnpm --dir sdk/typescript install --frozen-lockfile
+        run: |
+          sfw pnpm --dir sdk/typescript install --frozen-lockfile
+          sfw pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
 
       - name: Audit production dependencies
         continue-on-error: true
@@ -126,6 +151,7 @@ jobs:
         run: |
           pnpm --dir sdk/typescript run types
           pnpm --dir sdk/typescript run test
+          pnpm --dir sdk/typescript run test:mcp
           pnpm --dir sdk/typescript run format
 
       - name: Pack

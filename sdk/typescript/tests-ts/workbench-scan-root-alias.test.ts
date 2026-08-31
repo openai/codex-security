@@ -1,20 +1,16 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { expect, test } from "bun:test";
+import { resolvePluginPython } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 test.skipIf(process.platform !== "win32")(
   "matches scan-root filters across Windows path aliases",
-  () => {
-    const python =
-      process.env["PYTHON"] ??
-      Bun.which("python3") ??
-      Bun.which("python") ??
-      Bun.which("py");
-    expect(python).not.toBeNull();
-    if (python === null) throw new Error("A Python interpreter is required.");
+  async () => {
+    const python = await resolvePluginPython();
 
     const root = realpathSync(
       mkdtempSync(join(tmpdir(), "codex-security-scan-root-case-")),
@@ -39,13 +35,12 @@ test.skipIf(process.platform !== "win32")(
         "args = argparse.Namespace(repository=None, scan_root=sys.argv[2].upper(), target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
         "print(json.dumps(history.list_scans(connection, args)))",
       ].join("\n");
-      const result = spawnSync(
+      const result = await promisify(execFile)(
         python,
         ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts"), scanRoot],
-        { encoding: "utf8", timeout: 10_000 },
+        { encoding: "utf8", timeout: 10_000, windowsHide: true },
       );
 
-      expect(result.status, result.stderr).toBe(0);
       expect(result.stderr).toBe("");
       expect(JSON.parse(result.stdout)).toMatchObject({
         scans: [{ scanId: "scan" }],

@@ -16,6 +16,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { prepareScanPublication } from "../src/publication.js";
+import { recordPublishedIssues } from "../src/publication-store.js";
 import type {
   CoverageDocument,
   Finding,
@@ -23,10 +25,13 @@ import type {
   ScanManifest,
 } from "../src/models.js";
 import {
+  checkScanPublicationInternal,
+  forceTerminatePublicationProcesses,
   publishScanInternal,
   type PublishScanDependencies,
   type PublishScanProgress,
   type PublishScanResult,
+  type PublishedScanIssue,
 } from "../src/publish.js";
 import { runWorkbench } from "../src/runtime.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
@@ -39,6 +44,10 @@ const OPTIONS = {
   teamId: "team-example",
   projectId: "project-example",
 } as const;
+
+const NODE_EXECUTABLE = execFileSync("node", ["-p", "process.execPath"], {
+  encoding: "utf8",
+}).trim();
 const temporaryDirectories: string[] = [];
 
 interface PublicationFixture {
@@ -247,6 +256,42 @@ async function artifactDigests(
   );
 }
 
+async function waitForProcessExit(pid: number): Promise<void> {
+  if (!Number.isSafeInteger(pid) || pid < 1) {
+    throw new Error(`Invalid test process ID: ${pid}`);
+  }
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      throw error;
+    }
+    if (process.platform === "linux") {
+      const state = await readFile(`/proc/${pid}/stat`, "utf8").catch(
+        () => undefined,
+      );
+      if (state === undefined || /\) Z /u.test(state)) return;
+    }
+    await Bun.sleep(20);
+  }
+  throw new Error(`Test process ${pid} did not exit.`);
+}
+
+async function readProcessId(path: string): Promise<number> {
+  return Number(await readFile(path, "utf8").catch(() => "0"));
+}
+
+function killTestProcess(pid: number): void {
+  if (!Number.isSafeInteger(pid) || Math.abs(pid) < 2) return;
+  if (process.platform === "win32" && pid < 0) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
 function storedPublications(fixture: PublicationFixture): StoredPublication[] {
   const script = [
     "import json, sqlite3, sys",
@@ -280,6 +325,158 @@ function receiptPath(fixture: PublicationFixture): string {
 }
 
 describe("database-backed Linear publication integration", () => {
+  test("checks and retries a partial publication without duplicating recorded successes", async () => {
+    const completed = await fixture(2);
+    const sealed = await artifactDigests(completed.scanDirectory);
+    const environment = {
+      ...completed.environment,
+      CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_RETRY_KEY",
+    };
+    const cli = dependencies({ environment });
+    type LinearClient = ReturnType<
+      NonNullable<PublishScanDependencies["linearClient"]>
+    >;
+    type IssueInput = Parameters<LinearClient["createIssue"]>[0];
+    const attempted: string[] = [];
+    let failSecond = true;
+    let issueNumber = 500;
+    cli.publishScan = (directory, options) =>
+      publishScanInternal(directory, options, {
+        environment,
+        resolveCodex: () => {
+          throw new Error("Direct publication must not start Codex.");
+        },
+        linearClient: () =>
+          ({
+            users: async () => {
+              throw new Error("Unassigned publication must not look up users.");
+            },
+            createIssue: async (input: IssueInput) => {
+              const index = completed.findings.findIndex(({ findingId }) =>
+                input.description?.includes(findingId),
+              );
+              expect(index).toBeGreaterThanOrEqual(0);
+              attempted.push(completed.findings[index]!.findingId);
+              if (failSecond && index === 1)
+                throw new Error("Synthetic creation failure.");
+              const identifier = `EXAMPLE-${++issueNumber}`;
+              return {
+                success: true,
+                issue: Promise.resolve({
+                  identifier,
+                  url: `https://linear.app/example/issue/${identifier}`,
+                }),
+              };
+            },
+          }) as unknown as LinearClient,
+      });
+    const command = [
+      "publish",
+      "scan",
+      completed.scanDirectory,
+      "--to",
+      "linear",
+      "--linear-team",
+      OPTIONS.teamId,
+      "--project",
+      OPTIONS.projectId,
+      "--json",
+    ];
+    const run = async (flags: string[] = []) => {
+      const stdout = capture();
+      const stderr = capture();
+      const code = await main(
+        [...command, ...flags],
+        stdout.stream,
+        stderr.stream,
+        cli,
+      );
+      return { code, result: JSON.parse(stdout.text()) as PublishScanResult };
+    };
+
+    const initial = await run();
+    expect(initial.code).toBe(2);
+    expect(initial.result.counts).toEqual({
+      findings: 2,
+      created: 1,
+      failed: 1,
+    });
+    expect(storedPublications(completed)).toHaveLength(1);
+
+    const localEnvironment = {
+      ...completed.environment,
+      CODEX_SECURITY_LINEAR_API_KEY: undefined,
+    };
+    const checkCli = dependencies({ environment: localEnvironment });
+    checkCli.checkScanPublication = (directory, options) =>
+      checkScanPublicationInternal(directory, options, {
+        environment: localEnvironment,
+      });
+    const checkOutput = capture();
+    const database = join(completed.stateDirectory, "workbench.sqlite3");
+    const before = sha256(await readFile(database));
+    expect(
+      await main(
+        [
+          "publish",
+          "check",
+          completed.scanDirectory,
+          "--to",
+          "linear",
+          "--linear-team",
+          OPTIONS.teamId,
+          "--project",
+          OPTIONS.projectId,
+          "--json",
+        ],
+        checkOutput.stream,
+        capture().stream,
+        checkCli,
+      ),
+    ).toBe(0);
+    const checked = JSON.parse(checkOutput.text());
+    expect(checked.counts).toEqual({ findings: 2, recorded: 1, pending: 1 });
+    expect(checked.access.issueCreation).toBe("not-tested");
+    expect(checked.recorded).toEqual(initial.result.created);
+    expect(sha256(await readFile(database))).toBe(before);
+
+    failSecond = false;
+    attempted.length = 0;
+    const retry = await run(["--skip-existing"]);
+    expect(retry.code).toBe(0);
+    expect(attempted).toEqual([completed.findings[1]!.findingId]);
+    expect(retry.result.skipped).toEqual(initial.result.created);
+    expect(retry.result.counts).toEqual({
+      findings: 2,
+      created: 1,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(storedPublications(completed)).toHaveLength(2);
+
+    const receipt = await readFile(receiptPath(completed), "utf8");
+    attempted.length = 0;
+    const repeated = await run(["--skip-existing"]);
+    expect(repeated.code).toBe(0);
+    expect(repeated.result.counts).toEqual({
+      findings: 2,
+      created: 0,
+      failed: 0,
+      skipped: 2,
+    });
+    expect(attempted).toEqual([]);
+    expect(await readFile(receiptPath(completed), "utf8")).toBe(receipt);
+    expect(storedPublications(completed)).toHaveLength(2);
+
+    expect((await run()).result.counts).toEqual({
+      findings: 2,
+      created: 2,
+      failed: 0,
+    });
+    expect(storedPublications(completed)).toHaveLength(4);
+    expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+  });
+
   test("persists unassigned direct team-only publication", async () => {
     const completed = await fixture(23);
     const sealed = await artifactDigests(completed.scanDirectory);
@@ -709,6 +906,318 @@ describe("database-backed Linear publication integration", () => {
     ).toBe(null);
     expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
   });
+
+  test.each([false, true])(
+    "keeps conflicting connector identities out of CLI history and retains recovery evidence with skipExisting=%j",
+    async (skipExisting) => {
+      const completed = await fixture(1 + Number(skipExisting));
+      const sealed = await artifactDigests(completed.scanDirectory);
+      const recorded: PublishedScanIssue[] = [];
+      if (skipExisting) {
+        const prepared = await prepareScanPublication(
+          completed.scanDirectory,
+          OPTIONS,
+        );
+        recorded.push({
+          findingId: prepared.issues[0]!.findingId,
+          occurrenceId: prepared.issues[0]!.occurrenceId,
+          issueIdentifier: "SEC-500",
+        });
+        await recordPublishedIssues(prepared, recorded, completed.environment);
+      }
+      const storedBefore = storedPublications(completed);
+      const pending = completed.findings[Number(skipExisting)]!;
+      const stdout = capture();
+      const stderr = capture();
+      const cli = dependencies({ environment: completed.environment });
+      let handoffFile = "";
+      let handoffLine = "";
+      let completedEvent = "";
+
+      cli.publishScan = async (directory, options) =>
+        publishScanInternal(directory, options, {
+          environment: completed.environment,
+          resolveCodex: () => ({ command: "synthetic-codex" }),
+          runCodex: async (_command, _args, prompt) => {
+            const payload = await publicationPayload(prompt);
+            expect(
+              payload.batches.flat().map((finding) => finding.findingId),
+            ).toEqual([pending.findingId]);
+            const finding = payload.batches[0]![0]!;
+            handoffFile = payload.handoffFile;
+            handoffLine = JSON.stringify({
+              scanId: payload.scanId,
+              findingId: finding.findingId,
+              occurrenceId: finding.occurrenceId,
+              issueIdentifier: "SYNTH-A",
+              arguments: finding.arguments,
+            });
+            await appendFile(handoffFile, `${handoffLine}\n`, "utf8");
+            completedEvent = JSON.stringify({
+              type: "item.completed",
+              item: {
+                id: "tool-conflicting-publication",
+                type: "mcp_tool_call",
+                server: "codex_apps",
+                tool: "linear.save_issue",
+                arguments: finding.arguments,
+                status: "completed",
+                result: {
+                  structured_content: { identifier: "SYNTH-A" },
+                  content: [
+                    {
+                      type: "text",
+                      text: JSON.stringify({ identifier: "SYNTH-B" }),
+                    },
+                  ],
+                },
+              },
+            });
+            return { exitCode: 0, stdout: completedEvent, stderr: "" };
+          },
+        });
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            completed.scanDirectory,
+            "--to",
+            "linear",
+            "--linear-team",
+            OPTIONS.teamId,
+            "--project",
+            OPTIONS.projectId,
+            ...(skipExisting ? ["--skip-existing"] : []),
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          cli,
+        ),
+      ).toBe(2);
+
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "could not verify every completed mutation",
+      );
+      expect(stderr.text()).toContain(handoffFile);
+      expect(storedPublications(completed)).toEqual(storedBefore);
+      const receipt = JSON.parse(
+        await readFile(receiptPath(completed), "utf8"),
+      ) as PublishScanResult;
+      expect(receipt.skipped).toEqual(skipExisting ? recorded : undefined);
+      expect(receipt).toMatchObject({
+        indeterminate: true,
+        created: [],
+        failed: [
+          {
+            findingId: pending.findingId,
+            error:
+              "The connected Linear app returned conflicting created issue identifiers or URLs.",
+          },
+        ],
+        counts: {
+          findings: completed.findings.length,
+          created: 0,
+          failed: 1,
+          ...(skipExisting ? { skipped: 1 } : {}),
+        },
+      });
+      expect(await readFile(handoffFile, "utf8")).toBe(`${handoffLine}\n`);
+      const eventFiles = (await readdir(dirname(handoffFile))).filter(
+        (name) => name.startsWith("events-") && name.endsWith(".jsonl"),
+      );
+      expect(eventFiles).toHaveLength(1);
+      expect(
+        await readFile(join(dirname(handoffFile), eventFiles[0]!), "utf8"),
+      ).toBe(`${completedEvent}\n`);
+      expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "keeps no-signal SDK publication in the host process group",
+    async () => {
+      const completed = await fixture(1);
+      const root = dirname(completed.scanDirectory);
+      const preload = join(root, "sdk-publication-child.cjs");
+      const publisherPidFile = join(root, "sdk-publication-child.pid");
+      await writeFile(
+        preload,
+        'const fs = require("node:fs");fs.readFileSync(0, "utf8");fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));const waiter = new Int32Array(new SharedArrayBuffer(4));for (;;) Atomics.wait(waiter, 0, 0, 1000);',
+        { mode: 0o600 },
+      );
+      const publishing = publishScanInternal(completed.scanDirectory, OPTIONS, {
+        environment: {
+          PATH: completed.environment["PATH"],
+          PYTHON: completed.python,
+          CODEX_SECURITY_STATE_DIR: completed.stateDirectory,
+          NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
+          CODEX_PUBLICATION_PARENT_PID: publisherPidFile,
+        },
+        resolveCodex: () => ({ command: NODE_EXECUTABLE }),
+      });
+
+      try {
+        let publisherPid = await readProcessId(publisherPidFile);
+        for (let attempt = 0; publisherPid < 2 && attempt < 250; attempt += 1) {
+          await Bun.sleep(20);
+          publisherPid = await readProcessId(publisherPidFile);
+        }
+        expect(publisherPid).toBeGreaterThan(1);
+        const groups = execFileSync(
+          "ps",
+          ["-o", "pgid=", "-p", `${process.pid},${publisherPid}`],
+          { encoding: "utf8" },
+        )
+          .trim()
+          .split(/\s+/u);
+        expect(groups).toHaveLength(2);
+        expect(new Set(groups).size).toBe(1);
+        forceTerminatePublicationProcesses({
+          platform: "win32",
+          runTaskkill: () => {
+            throw new Error("No-signal publication entered force registry.");
+          },
+        });
+      } finally {
+        const publisherPid = await readProcessId(publisherPidFile);
+        killTestProcess(publisherPid);
+        await publishing.catch(() => undefined);
+      }
+    },
+    30_000,
+  );
+
+  test("applies connected-publication signal escalation without delivery duplicates", async () => {
+    for (const [secondSignal, elapsed, expectedForced] of [
+      ["SIGINT", 0, []],
+      ["SIGTERM", 0, ["1:terminated", "0:SIGTERM"]],
+      ["SIGINT", 500, ["1:terminated", "0:SIGINT"]],
+    ] as const) {
+      const signals = new FakeSignals();
+      const forced: string[] = [];
+      let now = 0;
+      const cli = dependencies({ signals });
+      cli.environment["CODEX_SECURITY_LINEAR_TEAM"] = OPTIONS.teamId;
+      cli.now = () => now;
+      const record = (value: string): number =>
+        forced.push(`${signals.listeners.get("SIGINT")?.size}:${value}`);
+      cli.terminatePublishers = () => record("terminated");
+      cli.forceExit = record;
+      cli.publishScan = async () => {
+        signals.emit("SIGINT");
+        now = elapsed;
+        signals.emit(secondSignal);
+        throw new Error("Synthetic interrupted connected publication.");
+      };
+
+      expect(
+        await main(
+          ["publish", "scan", "completed-scan", "--to", "linear"],
+          capture().stream,
+          capture().stream,
+          cli,
+        ),
+      ).toBe(130);
+      expect(forced).toEqual([...expectedForced]);
+    }
+  });
+
+  test("kills connected publication descendants before a later signal forces exit", async () => {
+    const completed = await fixture(1);
+    const root = dirname(completed.scanDirectory);
+    const preload = join(root, "publisher.cjs");
+    const publisherPidFile = join(root, "publisher.pid");
+    const descendantPidFile = join(root, "descendant.pid");
+    const descendant =
+      'const fs = require("node:fs");process.on("SIGINT", () => {});process.on("SIGTERM", () => {});fs.writeFileSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID, String(process.pid));setInterval(() => {}, 1000);';
+    await writeFile(
+      preload,
+      `const fs = require("node:fs"); const { spawn } = require("node:child_process");
+const prompt = fs.readFileSync(0, "utf8"); const payload = JSON.parse(prompt.split("BEGIN UNTRUSTED PUBLICATION DATA\\n")[1].split("\\nEND UNTRUSTED PUBLICATION DATA")[0]); const finding = JSON.parse(fs.readFileSync(payload.publicationFile, "utf8")).batches[0][0];
+fs.appendFileSync(payload.handoffFile, JSON.stringify({ scanId: payload.scanId, findingId: finding.findingId, occurrenceId: finding.occurrenceId, error: "Synthetic connected publication may have completed.", possibleMutation: true, arguments: finding.arguments }) + "\\n"); fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));
+spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { env: { ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}), CODEX_PUBLICATION_DESCENDANT_PID: process.env.CODEX_PUBLICATION_DESCENDANT_PID }, stdio: "ignore" });
+const waiter = new Int32Array(new SharedArrayBuffer(4)); for (let attempts = 0; !fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID); attempts += 1) { if (attempts === 500) process.exit(3); Atomics.wait(waiter, 0, 0, 10); }
+process.on("SIGINT", () => {}); process.on("SIGTERM", () => {}); fs.writeSync(1, '{"type":"synthetic.publisher_ready"}\\n');
+for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
+      { mode: 0o600 },
+    );
+    const environment = {
+      ...(process.platform === "win32"
+        ? { SystemRoot: process.env["SystemRoot"] }
+        : {}),
+      PATH: completed.environment["PATH"],
+      PYTHON: completed.python,
+      CODEX_SECURITY_STATE_DIR: completed.stateDirectory,
+      CODEX_SECURITY_LINEAR_TEAM: OPTIONS.teamId,
+      NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
+      CODEX_PUBLICATION_PARENT_PID: publisherPidFile,
+      CODEX_PUBLICATION_DESCENDANT_PID: descendantPidFile,
+    };
+    const signals = new FakeSignals();
+    const cli = dependencies({
+      currentDirectory: completed.scanDirectory,
+      environment,
+      signals,
+    });
+    cli.forceExit = () => undefined;
+    cli.publishScan = async (directory, options) =>
+      await publishScanInternal(
+        directory,
+        {
+          ...options,
+          onProgress: (event) => {
+            options.onProgress?.(event);
+            if (event.type !== "codex_event") return;
+            signals.emit("SIGINT");
+            signals.emit("SIGTERM");
+          },
+        },
+        {
+          environment,
+          resolveCodex: () => ({ command: NODE_EXECUTABLE }),
+        },
+      );
+
+    try {
+      expect(
+        await Promise.race([
+          main(
+            ["publish", "scan", completed.scanDirectory, "--to", "linear"],
+            capture().stream,
+            capture().stream,
+            cli,
+          ),
+          Bun.sleep(20_000).then(() => -1),
+        ]),
+      ).toBe(130);
+      const publisherPid = await readProcessId(publisherPidFile);
+      const descendantPid = await readProcessId(descendantPidFile);
+      await Promise.all([
+        waitForProcessExit(publisherPid),
+        waitForProcessExit(descendantPid),
+      ]);
+      const handoffRoot = join(root, "state/publications/linear/handoffs");
+      const handoffs = await readdir(handoffRoot);
+      expect(handoffs).toHaveLength(1);
+      const handoff = join(handoffRoot, handoffs[0]!);
+      expect(await readFile(join(handoff, "issues.jsonl"), "utf8")).toContain(
+        '"possibleMutation":true',
+      );
+      expect(
+        await readFile(join(handoff, "publication.json"), "utf8"),
+      ).toContain(completed.findings[0]!.findingId);
+    } finally {
+      const publisherPid = await readProcessId(publisherPidFile);
+      const descendantPid = await readProcessId(descendantPidFile);
+      killTestProcess(-publisherPid);
+      killTestProcess(publisherPid);
+      killTestProcess(descendantPid);
+    }
+  }, 30_000);
 
   test("recovers verified SQLite publications before an interrupted CLI exits", async () => {
     const completed = await fixture(3);

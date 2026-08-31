@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -16,6 +17,7 @@ import { CodexSecurityError, type ScanOptions } from "../src/index.js";
 import {
   codexSecurityCredentialAllowsAmbientImport,
   prepareCodexSecurityCredentialHome,
+  setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
 import {
   capture,
@@ -180,25 +182,25 @@ describe("CLI authentication", () => {
         `Effective scan authentication: API key from ${expectedSource}.`,
       );
       expect(stderr.text()).toContain(
-        "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.",
+        "To use a ChatGPT sign-in, remove OPENAI_API_KEY and CODEX_API_KEY from the environment.",
       );
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
   });
 
   test("explains interactive choice and how to unset every shadowing key after ChatGPT login", async () => {
-    for (const [argv, environment, source, unsetCommand] of [
+    for (const [argv, environment, source, removalGuidance] of [
       [
         ["login"],
         { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY",
+        "remove OPENAI_API_KEY from the environment",
       ],
       [
         ["login", "--device-auth"],
         { Codex_Api_Key: "sk-proj-SYNTHETIC_SECRET_456" },
         "CODEX_API_KEY",
-        "unset Codex_Api_Key",
+        "remove Codex_Api_Key from the environment",
       ],
       [
         ["login"],
@@ -207,7 +209,7 @@ describe("CLI authentication", () => {
           CODEX_API_KEY: "sk-proj-SYNTHETIC_SECRET_456",
         },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY CODEX_API_KEY",
+        "remove OPENAI_API_KEY and CODEX_API_KEY from the environment",
       ],
     ] as const) {
       const stdout = capture();
@@ -229,22 +231,23 @@ describe("CLI authentication", () => {
         `noninteractive scans will use ${source}.`,
       );
       expect(stderr.text()).toContain("--auth chatgpt");
-      expect(stderr.text()).toContain(`'${unsetCommand}'`);
+      expect(stderr.text()).toContain(removalGuidance);
+      expect(stderr.text()).not.toContain("unset ");
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
   });
 
   test("warns when an environment API key overrides a successful access-token login", async () => {
-    for (const [environment, source, unsetCommand] of [
+    for (const [environment, source, removalGuidance] of [
       [
         { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY",
+        "remove OPENAI_API_KEY from the environment",
       ],
       [
         { Codex_Api_Key: "sk-proj-SYNTHETIC_SECRET_456" },
         "CODEX_API_KEY",
-        "unset Codex_Api_Key",
+        "remove Codex_Api_Key from the environment",
       ],
       [
         {
@@ -252,7 +255,7 @@ describe("CLI authentication", () => {
           CODEX_API_KEY: "sk-proj-SYNTHETIC_SECRET_456",
         },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY CODEX_API_KEY",
+        "remove OPENAI_API_KEY and CODEX_API_KEY from the environment",
       ],
     ] as const) {
       const stdout = capture();
@@ -271,9 +274,9 @@ describe("CLI authentication", () => {
         `Access-token login succeeded, but noninteractive scans will use ${source}.`,
       );
       expect(stderr.text()).toContain(
-        "To use your stored credentials, pass '--auth chatgpt' or run ",
+        `To use your stored credentials, pass '--auth chatgpt' or ${removalGuidance}.`,
       );
-      expect(stderr.text()).toContain(`'${unsetCommand}'`);
+      expect(stderr.text()).not.toContain("unset ");
       expect(stderr.text()).not.toContain("ChatGPT login succeeded");
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
@@ -878,9 +881,79 @@ describe("CLI authentication", () => {
         expect(stderr.text()).toContain(expected);
         expect(stderr.text()).toContain(source);
         expect(stderr.text()).toContain("--auth chatgpt");
+        expect(stderr.text()).not.toContain("ChatGPT sign-in was not used");
         expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
         expect(stderr.text()).not.toContain("org-private");
       }
+    }
+  });
+
+  test("replaces permanent stored sign-in refresh details with recovery steps", async () => {
+    for (const auth of ["chatgpt", "api-key"] as const) {
+      for (const detail of [
+        "Your access token could not be refreshed.",
+        "Your access token could not be refreshed because your refresh token has expired.",
+        "Your access token could not be refreshed because your refresh token was already used.",
+        "Your access token could not be refreshed because your refresh token was revoked.",
+      ]) {
+        const stdout = capture();
+        const stderr = capture(false);
+        const deps = dependencies({
+          environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
+          onRun: () => {
+            throw new CodexSecurityError(
+              `Codex Exec exited with code 1: Error: ${detail} Please log out and sign in again. PRIVATE_UPSTREAM_DETAIL`,
+            );
+          },
+        });
+
+        expect(
+          await main(
+            ["scan", ".", "--auth", auth, "--json"],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain("workspace-managed policies");
+        expect(stderr.text()).toContain(
+          "API key is selected for model authentication",
+        );
+        expect(stderr.text()).toContain(
+          "npx @openai/codex-security login status",
+        );
+        expect(stderr.text()).toContain(
+          "npx @openai/codex-security logout', then 'npx @openai/codex-security login",
+        );
+        expect(stderr.text()).not.toContain("provide a valid API key");
+        expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
+      }
+    }
+  });
+
+  test("leaves other sign-in recovery messages unchanged", async () => {
+    for (const message of [
+      "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.",
+      "Your authentication session could not be refreshed automatically. Please log out and sign in again.",
+    ]) {
+      const stdout = capture();
+      const stderr = capture(false);
+      const deps = dependencies({
+        onRun: () => {
+          throw new CodexSecurityError(
+            `Codex Exec exited with code 1: ${message} PRIVATE_UPSTREAM_DETAIL`,
+          );
+        },
+      });
+
+      expect(
+        await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(`${message}\n`);
+      expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
+      expect(stderr.text()).not.toContain("npx @openai/codex-security logout");
     }
   });
 
@@ -995,5 +1068,79 @@ describe("CLI authentication", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toMatchObject({ authentication });
     expect(`${stdout.text()}${stderr.text()}`).not.toContain("synthetic");
+  });
+
+  test("recognizes existing ambient Codex authentication on a fresh state directory during login status", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-ambient-auth-")),
+    );
+    try {
+      const ambientHome = join(root, "ambient-codex");
+      await mkdir(ambientHome, { mode: 0o700 });
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        '{"auth_mode":"chatgpt"}\n',
+      );
+
+      const stdout = capture();
+      const stderr = capture();
+      let forwardedHome: string | undefined;
+      const deps = dependencies({
+        environment: {
+          CODEX_HOME: ambientHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+      });
+      deps.runCodex = async (_args, _output, authEnvironment) => {
+        forwardedHome = authEnvironment?.["CODEX_HOME"];
+        return 0;
+      };
+
+      expect(
+        await main(["login", "status"], stdout.stream, stderr.stream, deps),
+      ).toBe(0);
+      expect(forwardedHome).toBe(join(stateDirectory, "codex-home"));
+      expect(existsSync(join(stateDirectory, "codex-home", "auth.json"))).toBe(
+        true,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not import ambient Codex authentication during login status after explicit logout", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-ambient-logout-")),
+    );
+    try {
+      const ambientHome = join(root, "ambient-codex");
+      await mkdir(ambientHome, { mode: 0o700 });
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        '{"auth_mode":"chatgpt"}\n',
+      );
+
+      const credentialHome = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      });
+      await setCodexSecurityCredentialLogout(credentialHome, true);
+
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies({
+        environment: {
+          CODEX_HOME: ambientHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+      });
+      deps.runCodex = async () => 0;
+
+      expect(
+        await main(["login", "status"], stdout.stream, stderr.stream, deps),
+      ).toBe(0);
+      expect(existsSync(join(credentialHome, "auth.json"))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

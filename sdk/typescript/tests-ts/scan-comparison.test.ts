@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import {
   Codex,
   type CodexOptions,
@@ -21,6 +21,7 @@ import {
   comparisonEnvironment,
   matchCompletedScan,
   matchScanFindings,
+  matchScanFindingsInternal,
   type ScanComparisonInput,
   type ScanComparisonOptions,
   type ScanComparisonResult,
@@ -30,9 +31,22 @@ const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
+    temporaryDirectories.splice(0).map(async (path) => {
+      // Bun 1.3.13 ignores fs.rm's retry options.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await rm(path, { recursive: true, force: true });
+          return;
+        } catch (error) {
+          if (
+            (error as NodeJS.ErrnoException).code !== "EBUSY" ||
+            attempt === 10
+          )
+            throw error;
+          await Bun.sleep(100 * (attempt + 1));
+        }
+      }
+    }),
   );
 });
 
@@ -67,6 +81,16 @@ function fakeCodex(response: unknown) {
 }
 
 describe("semantic scan comparison", () => {
+  test("uses comparison attribution for CLI comparison turns", async () => {
+    const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+    await matchScanFindingsInternal(
+      { before: [], after: [] },
+      { codex },
+      { surface: "cli" },
+    );
+    expect(calls.threadOptions?.threadSource).toBe("security_scan_comparison");
+  });
+
   test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
     const home = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
     temporaryDirectories.push(home);
@@ -91,6 +115,7 @@ describe("semantic scan comparison", () => {
     const { codex } = fakeCodex({ matches: [], uncertain: [] });
     let config: CodexOptions["config"];
     let codexPath: string | undefined;
+    let codexEnvironment: CodexOptions["env"];
     const startThread = spyOn(
       Codex.prototype,
       "startThread",
@@ -98,6 +123,8 @@ describe("semantic scan comparison", () => {
       config = (this as unknown as { options: CodexOptions }).options.config;
       codexPath = (this as unknown as { options: CodexOptions }).options
         .codexPathOverride;
+      codexEnvironment = (this as unknown as { options: CodexOptions }).options
+        .env;
       return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
     });
     try {
@@ -119,7 +146,12 @@ describe("semantic scan comparison", () => {
         synthetic: { command: "synthetic-integration", enabled: false },
         inherited: { enabled: false },
       });
-      expect(codexPath).toBe(executable);
+      expect(codexPath).toBe(
+        process.platform === "win32"
+          ? win32.toNamespacedPath(executable)
+          : executable,
+      );
+      expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
       const effective = await runCodexCommand(
         resolveCodexCommand(environment),
         [
@@ -187,6 +219,8 @@ describe("semantic scan comparison", () => {
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       CODEX_SECURITY_SCAN_ID: "scan",
       CODEX_HOME: "/provider-home",
+      CODEX_CLI_PATH: "/compatible-codex",
+      CODEX_SAFETY_IDENTIFIER: "synthetic-user",
       FIREWORKS_API_KEY: "provider-key",
     };
     expect(await comparisonEnvironment(provider, account)).toEqual(provider);
@@ -407,6 +441,7 @@ describe("semantic scan comparison", () => {
       }),
     ).toEqual(result);
     expect(calls.threadOptions).toEqual({
+      threadSource: "security_scan_comparison",
       model: "comparison-model",
       modelReasoningEffort: "high",
       sandboxMode: "read-only",

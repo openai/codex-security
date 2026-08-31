@@ -22,6 +22,8 @@ export interface PrepareScanPublicationOptions {
   teamId: string;
   projectId?: string;
   uploadedAt?: string;
+  signal?: AbortSignal;
+  expectedScanId?: string;
 }
 
 export interface PreparedPublicationIssue {
@@ -40,6 +42,24 @@ export interface PreparedScanPublication {
   issues: PreparedPublicationIssue[];
 }
 
+export function linearPublicationArguments(
+  destination: LinearPublicationDestination,
+  issue: PreparedPublicationIssue,
+): Pick<PreparedPublicationIssue, "title" | "description" | "priority"> & {
+  team: string;
+  project?: string;
+} {
+  return {
+    team: destination.teamId,
+    ...(destination.projectId === undefined
+      ? {}
+      : { project: destination.projectId }),
+    title: issue.title,
+    description: issue.description,
+    ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+  };
+}
+
 const LINEAR_PRIORITIES = {
   critical: 1,
   high: 2,
@@ -55,6 +75,8 @@ export async function prepareScanPublication(
   const { contract, scanDirectory: canonicalScanDirectory } =
     await loadContractWithScanDirectory(scanDirectory, {
       pluginRoot: await bundledPluginRoot(),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      expectedScanId: options.expectedScanId,
     });
   const uploadedAt = options.uploadedAt ?? new Date().toISOString();
   const scanId = contract.manifest.scan.id;
@@ -90,7 +112,50 @@ function renderFindingDescription(
 ): string {
   const { coverage } = contract;
   const { scan } = contract.manifest;
-  const lines = [
+  const lines = ["## Summary", "", finding.summary];
+
+  if (finding.attackPath?.summary !== undefined) {
+    lines.push("", "## Reproduction summary", "", finding.attackPath.summary);
+  }
+
+  const rootCause = finding.rootCause;
+  if (typeof rootCause === "string") {
+    lines.push("", "## Root cause", "", rootCause);
+  } else if (rootCause !== undefined) {
+    lines.push("", "## Root cause", "", rootCause.summary);
+    if (rootCause.code !== undefined) {
+      lines.push("", fencedCode(rootCause.code, rootCause.language));
+    }
+  }
+
+  lines.push("", "## Remediation", "", finding.remediation);
+
+  const validation = finding.validation;
+  const limits = [
+    ...new Set([
+      ...(validation?.limitations ?? []),
+      ...(validation?.counterEvidence ?? []),
+      ...(finding.attackPath?.limitations ?? []),
+    ]),
+  ];
+  if (validation?.summary || validation?.method || limits.length > 0) {
+    lines.push("", "## Validation", "");
+    if (validation?.summary) lines.push(validation.summary, "");
+    if (validation?.method) lines.push(`**Method:** ${validation.method}`, "");
+    lines.push(...limits.map((limit) => `- ${limit}`));
+  }
+
+  if (finding.codeEvidence !== undefined && finding.codeEvidence.length > 0) {
+    lines.push("", "## Source-code evidence");
+    for (const evidence of finding.codeEvidence) {
+      lines.push("", ...renderCodeEvidence(scan.target, evidence));
+    }
+  }
+
+  lines.push(
+    "",
+    "---",
+    "",
     "## Codex Security finding",
     "",
     `**Scan ID:** ${scan.id}`,
@@ -126,30 +191,7 @@ function renderFindingDescription(
     ...finding.locations.map((location) =>
       renderLocation(scan.target, location),
     ),
-    "",
-    "## Summary",
-    "",
-    finding.summary,
-  ];
-
-  const rootCause = finding.rootCause;
-  if (typeof rootCause === "string") {
-    lines.push("", "## Root cause", "", rootCause);
-  } else if (rootCause !== undefined) {
-    lines.push("", "## Root cause", "", rootCause.summary);
-    if (rootCause.code !== undefined) {
-      lines.push("", fencedCode(rootCause.code, rootCause.language));
-    }
-  }
-
-  if (finding.codeEvidence !== undefined && finding.codeEvidence.length > 0) {
-    lines.push("", "## Source-code evidence");
-    for (const evidence of finding.codeEvidence) {
-      lines.push("", ...renderCodeEvidence(scan.target, evidence));
-    }
-  }
-
-  lines.push("", "## Remediation", "", finding.remediation);
+  );
   return `${lines.join("\n")}\n`;
 }
 
