@@ -309,26 +309,6 @@ export class DeepScanCoordinator {
       if (draft.scanId !== this.state.scanId) {
         throw new Error("Deep Scan aggregate does not match its authoritative scan identity.");
       }
-      // Saturation can race with a worker's durable acceptance. Keep those
-      // already-validated findings without restarting discovery or reducing
-      // them again, and without reopening worker files during publication.
-      const omitted = new Set(schedulerResult.omittedWorkerIds);
-      for (const worker of schedulerResult.accepted) {
-        if (!omitted.has(worker.id)) continue;
-        for (const [index, finding] of worker.result.findings.entries()) {
-          const original = structuredClone(finding);
-          delete (original.provenance as Record<string, unknown>).sourceFindingIds;
-          const sourceId = `${worker.id}:${index}`;
-          draft.findings.push({
-            ...structuredClone(finding),
-            provenance: {
-              ...finding.provenance as Record<string, unknown>,
-              sourceFindingIds: [sourceId],
-              sourceFindings: [{ id: sourceId, finding: original }],
-            },
-          });
-        }
-      }
       await this.options.onComplete?.(draft, this.publicationAbortController.signal);
       if (this.canceled || this.externallyFailed) return;
       this.state = await this.finishWithReplay(schedulerResult);
@@ -959,7 +939,9 @@ export class DeepScanCoordinator {
     this.audit.canceledWorkerIds = unique(canceledWorkerIds);
     this.audit.bufferedWorkerIds = buffer.map((worker) => worker.id);
 
-    if (lateFailure) throw lateFailure;
+    // Saturation fixes the aggregate at the stop boundary. Failures from workers
+    // still settling after cancellation cannot overturn that completed result.
+    if (lateFailure && stopReason !== "saturated") throw lateFailure;
 
     if (
       !previousReducerResultPath
@@ -985,7 +967,7 @@ export class DeepScanCoordinator {
       if (!worker.resultManifestPath || !worker.completionSequence) {
         throw new Error(`Accepted discovery ${worker.id} has incomplete persisted evidence.`);
       }
-      const result = await validateDiscoveryArtifacts(
+      await validateDiscoveryArtifacts(
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId
@@ -996,7 +978,6 @@ export class DeepScanCoordinator {
         label: basename(dirname(worker.promptPath)),
         artifactDir: worker.artifactDir,
         resultPath: worker.resultManifestPath,
-        result,
         completionSequence: worker.completionSequence,
         attempt: worker.attempt,
         ...(worker.threadId ? { threadId: worker.threadId } : {}),

@@ -4,9 +4,9 @@ import path from "node:path";
 
 export async function testDeepScanPublication({
   fixtureRun, FakeStore, FakeExecutor, DeepScanCoordinator, deferred,
-  immediateClock, eventually, standardScanDraft,
+  immediateClock, eventually,
 }) {
-  async function testSaturationPublishesFindingAcceptedDuringCancellation() {
+  async function testSaturationOmitsWorkerAcceptedDuringCancellation() {
     const fixture = await fixtureRun({ workers: 3, subagents: 0, stopAfterNoNew: 2, maxDiscoveryRuns: 3 });
     const store = new FakeStore(fixture.run);
     const releaseLateWorker = deferred();
@@ -19,7 +19,7 @@ export async function testDeepScanPublication({
       if (update.kind === "discovery" && update.status === "succeeded"
         && path.basename(path.dirname(update.promptPath)) === "discovery-0003") {
         acceptedLateWorker = persisted;
-        // Publication must use the result already validated before acceptance.
+        // A worker still settling when saturation is reached is omitted.
         await rm(update.resultManifestPath);
         lateAcceptance.resolve();
         await releaseAcceptance.promise;
@@ -52,14 +52,7 @@ export async function testDeepScanPublication({
     assert.deepEqual(store.finishCalls[0].omittedWorkerIds, [acceptedLateWorker.id]);
     assert.equal(completed.length, 1);
     assert.equal(completed[0].coverage.completeness, "complete");
-    const [finding] = completed[0].findings;
-    assert.equal(completed[0].findings.length, 1);
-    assert.equal(finding.provenance.candidateId, "late-accepted-finding");
-    assert.deepEqual(finding.provenance.sourceFindingIds, [`${acceptedLateWorker.id}:0`]);
-    assert.deepEqual(finding.provenance.sourceFindings, [{
-      id: `${acceptedLateWorker.id}:0`,
-      finding: standardScanDraft(fixture.run.scanId, "late-accepted-finding", "discovery-0003").findings[0],
-    }]);
+    assert.deepEqual(completed[0].findings, [], "late worker findings are not appended to the saturated aggregate");
   }
 
   async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
@@ -106,6 +99,54 @@ export async function testDeepScanPublication({
     }
   }
 
+  async function testSaturationIgnoresDiscoveryCancellationWriteFailure() {
+    const fixture = await fixtureRun({ workers: 2, subagents: 0, stopAfterNoNew: 2, maxDiscoveryRuns: 6 });
+    const store = new FakeStore(fixture.run);
+    const executor = new FakeExecutor({ blockDedup: true, blockDiscoveryAfterCalls: 2 });
+    const updateWorker = store.updateWorker.bind(store);
+    const rejectedCancellations = new Set();
+    store.updateWorker = async (update) => {
+      if (update.kind === "discovery" && update.status === "canceled") {
+        assert.equal(executor.dedupSignal?.aborted, true);
+        assert.equal(store.run.noNewStreak, 2);
+        rejectedCancellations.add(update.id);
+        throw new Error("fixture cancellation persistence failure");
+      }
+      return updateWorker(update);
+    };
+    const completed = [];
+    const coordinator = new DeepScanCoordinator({
+      run: fixture.run, store, executor, pluginRoot: fixture.pluginRoot,
+      clock: immediateClock,
+      onComplete: async (draft) => completed.push(structuredClone(draft)),
+    });
+    coordinator.start();
+    await executor.dedupStarted;
+    await eventually(() => executor.discoveryCalls === 4 && executor.runningDiscovery === 2);
+    executor.releaseDedup();
+
+    const terminal = await coordinator.wait(undefined, 5_000);
+    assert.equal(rejectedCancellations.size, 2, "the redundant discoveries reached the failing cancellation write");
+    assert.equal(terminal?.status, "succeeded", terminal?.error);
+    assert.equal(terminal.terminalReason, "saturated");
+    assert.equal(store.failCalls, 0);
+    assert.equal(store.finishCalls.length, 1);
+    assert.equal(store.finishCalls[0].reason, "saturated");
+    assert.equal(executor.discoveryCalls, 4, "cancellation persistence failures must not dispatch replacement reviews after saturation");
+    assert.equal(executor.dedupCalls, 1, "cancellation persistence failures must not restart reduction after saturation");
+    assert.equal(executor.runningDiscovery, 0);
+    assert.equal(completed.length, 1);
+    assert.equal(completed[0].coverage.completeness, "complete");
+    const acceptedReducer = [...store.workers.values()].find((worker) => (
+      worker.kind === "dedup" && worker.status === "succeeded"
+    ));
+    assert.deepEqual(
+      completed[0],
+      JSON.parse(await readFile(acceptedReducer.resultManifestPath, "utf8")),
+      "the accepted aggregate still reaches publication when redundant cancellation writes fail",
+    );
+  }
+
   async function testPublicationUsesAcceptedReducerSnapshot() {
     const fixture = await fixtureRun({ workers: 1, subagents: 0, stopAfterNoNew: 1, maxDiscoveryRuns: 1 });
     const store = new FakeStore(fixture.run);
@@ -134,7 +175,8 @@ export async function testDeepScanPublication({
     assert.equal(completed[0].coverage.completeness, "complete");
   }
 
-  await testSaturationPublishesFindingAcceptedDuringCancellation();
+  await testSaturationOmitsWorkerAcceptedDuringCancellation();
   await testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus();
+  await testSaturationIgnoresDiscoveryCancellationWriteFailure();
   await testPublicationUsesAcceptedReducerSnapshot();
 }

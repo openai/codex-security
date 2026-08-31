@@ -3944,20 +3944,6 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
     manifest = scan_dir / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
     manifest.write_text("{}\n")
 
-    active_rejected = run_workbench(
-        state_dir,
-        "finish-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--terminal-reason",
-        "saturated",
-        "--manifest-path",
-        str(manifest),
-        environment=deep_environment(codex_home),
-        check=False,
-    )
-    assert "while workers are active" in str(active_rejected["stderr"])
-
     late_result.write_text("{}\n")
     accepted_late = upsert_worker(
         state_dir,

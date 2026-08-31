@@ -39,7 +39,6 @@ export interface AcceptedDiscovery {
   label: string;
   artifactDir: string;
   resultPath: string;
-  result: ScanDraftInput;
   completionSequence: number;
   attempt: number;
   threadId?: string;
@@ -177,7 +176,7 @@ export class DeepScanWorkerRunner {
       artifactDir,
       attempt: 1
     });
-    let discoveryResult: ScanDraftInput | undefined;
+    let discoveryValidated = false;
     let outcome = await this.runWorkerWithRetries({
       workerId,
       kind: "discovery",
@@ -187,7 +186,8 @@ export class DeepScanWorkerRunner {
       artifactContext: { root: artifactDir, layout: "worker" },
       subagents: run.config.subagents,
       validate: async () => {
-        discoveryResult = await validateDiscoveryArtifacts(artifacts, files.resultPath, run.scanId);
+        await validateDiscoveryArtifacts(artifacts, files.resultPath, run.scanId);
+        discoveryValidated = true;
       },
       beforeRetry: async (attempt) => {
         await archiveDirectory(
@@ -205,7 +205,7 @@ export class DeepScanWorkerRunner {
       }, outcome.attempt, outcome.threadId);
       outcome = { ...outcome, status: "canceled" };
     }
-    if (!discoveryResult) {
+    if (!discoveryValidated) {
       await fs.rm(files.resultPath, { force: true });
     }
     const basePromptSha256 = sha256(basePrompt);
@@ -282,7 +282,6 @@ export class DeepScanWorkerRunner {
         label: workerLabel,
         artifactDir,
         resultPath: files.resultPath,
-        result: discoveryResult!,
         completionSequence: persisted.completionSequence,
         attempt: outcome.attempt,
         threadId: outcome.threadId,
