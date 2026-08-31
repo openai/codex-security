@@ -34,6 +34,7 @@ import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
 import {
   bundledPluginRoot,
+  executablePathForSpawn,
   pluginHelperEnvironment,
   requireSecureOutputAncestry,
   resolvePluginPath,
@@ -223,7 +224,7 @@ async function runCampaign(
         ]);
       })());
       await execFile(
-        python.executable,
+        executablePathForSpawn(python.executable),
         [
           "-I",
           "-B",
@@ -952,6 +953,7 @@ async function loadResumableScan(
           ? "deep_repository"
           : "repository";
     if (
+      manifest.scan.status !== "completed" ||
       producer.name !== "codex-security-plugin" ||
       target.targetId !== targetId ||
       (receipt.targetId !== undefined && receipt.targetId !== targetId) ||

@@ -1719,6 +1719,14 @@ describe("multiscan", () => {
       skipped: 1,
     });
     const corruptions: Array<(outputDir: string) => Promise<void>> = [
+      ...(["failed", "canceled", "interrupted"] as const).map(
+        (status) => async (outputDir: string) => {
+          await modify(outputDir, "scan-manifest.json", (manifest) => {
+            manifest.scan!.status = status;
+          });
+          await loadContract(outputDir, { pluginRoot: PLUGIN_ROOT });
+        },
+      ),
       async (outputDir) => {
         await writeFile(
           join(outputDir, "scan-manifest.json"),
