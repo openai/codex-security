@@ -6638,9 +6638,7 @@ async function executeScan(
           requested: auth ?? "auto",
           method: authentication.method,
           source:
-            authentication.method !== "stored_credentials"
-              ? authentication.source
-              : undefined,
+            "source" in authentication ? authentication.source : undefined,
           verified: authentication.verified,
         });
         if (dashboard !== null) {
@@ -6649,7 +6647,9 @@ async function executeScan(
               ? `Using API key from ${authentication.source}`
               : authentication.method === "aws_credentials"
                 ? `Using AWS credentials from ${authentication.source}`
-                : "Using stored Codex credentials",
+                : authentication.method === "command"
+                  ? "Using native Codex command authentication"
+                  : "Using stored Codex credentials",
           );
           return;
         }
@@ -6665,6 +6665,8 @@ async function executeScan(
           progress?.stage(
             `Authentication: AWS credentials from ${authentication.source}.`,
           );
+        } else if (authentication.method === "command") {
+          progress?.stage("Authentication: native Codex command.");
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
         }
@@ -6889,7 +6891,7 @@ async function executeScan(
       reasoning_effort: effectivePreflight.reasoningEffort,
       method: effectivePreflight.authentication.method,
       source:
-        effectivePreflight.authentication.method !== "stored_credentials"
+        "source" in effectivePreflight.authentication
           ? effectivePreflight.authentication.source
           : undefined,
       verified: effectivePreflight.authentication.verified,
@@ -7149,6 +7151,9 @@ function scanFailureMessage(
   }
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
+      if (authentication?.method === "command") {
+        return "Native Codex command authentication failed. Check the configured provider auth command.";
+      }
       if (authentication?.method === "aws_credentials") {
         return (
           `Authentication failed using AWS credentials from ${authentication.source}. ` +
@@ -7161,6 +7166,9 @@ function scanFailureMessage(
         : "Authentication failed using stored ChatGPT credentials. " +
             "Sign in again with 'codex-security login' or provide a valid API key.";
     case "forbidden":
+      if (authentication?.method === "command") {
+        return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
+      }
       if (authentication?.method === "aws_credentials") {
         return (
           `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +

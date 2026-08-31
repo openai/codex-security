@@ -2,13 +2,15 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, win32 } from "node:path";
+import { join, relative, win32 } from "node:path";
+import { parse, stringify } from "smol-toml";
 import {
   Codex,
   type CodexOptions,
@@ -89,6 +91,143 @@ describe("semantic scan comparison", () => {
       { surface: "cli" },
     );
     expect(calls.threadOptions?.threadSource).toBe("security_scan_comparison");
+  });
+
+  test.each(["home", "profile", "overrides", "override-away"])(
+    "preserves native command auth selection from %s",
+    async (selection) => {
+      const home = await mkdtemp(
+        join(tmpdir(), "codex-security-command-comparison-"),
+      );
+      temporaryDirectories.push(home);
+      const commandAuth = selection !== "override-away";
+      const provider = {
+        name: "Synthetic",
+        wire_api: "responses",
+        base_url: "https://provider.example/v1",
+        auth: {
+          command: "./synthetic-auth",
+          args: ["original"],
+          refresh_interval_ms: 1234,
+        },
+      };
+      const config = {
+        model_provider:
+          selection === "overrides" || selection === "profile"
+            ? "openai"
+            : "synthetic.provider",
+        model_providers: { "synthetic.provider": provider },
+      };
+      const contents = stringify(config);
+      await writeFile(join(home, "config.toml"), contents);
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: relative(process.cwd(), home),
+        OPENAI_API_KEY: "synthetic-ambient-key",
+        CODEX_API_KEY: "synthetic-other-key",
+      };
+      let captured: CodexOptions | undefined;
+      let threadOptions: ThreadOptions | undefined;
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, options) {
+        captured = (this as unknown as { options: CodexOptions }).options;
+        threadOptions = options;
+        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      });
+      try {
+        await matchScanFindings(
+          { before: [], after: [] },
+          {
+            environment,
+            workingDirectory: home,
+            ...(selection === "overrides"
+              ? {
+                  config: {
+                    codexOverrides: {
+                      model_provider: "synthetic.provider",
+                      model_providers: {
+                        "synthetic.provider": {
+                          auth: { args: ["override"], cwd: "~/helpers" },
+                        },
+                      },
+                    },
+                  },
+                }
+              : selection === "override-away"
+                ? { config: { codexOverrides: { model_provider: "openai" } } }
+                : selection === "profile"
+                  ? {
+                      config: {
+                        codexOverrides: {
+                          profile: "review",
+                          profiles: {
+                            review: { model_provider: "synthetic.provider" },
+                          },
+                        },
+                      },
+                    }
+                  : {}),
+          },
+        );
+        expect(captured?.env?.["CODEX_HOME"]).toBe(home);
+        if (selection === "profile")
+          expect(captured?.config?.["profile"]).toBe("review");
+        if (commandAuth) {
+          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+          expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+          expect(parse(captured!.configOverrides![0]!)).toEqual({
+            model_providers: {
+              "synthetic.provider": {
+                ...provider,
+                auth: {
+                  ...provider.auth,
+                  cwd: selection === "overrides" ? "~/helpers" : home,
+                  args: selection === "overrides" ? ["override"] : ["original"],
+                },
+              },
+            },
+          });
+        } else {
+          expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
+            "synthetic-ambient-key",
+          );
+          expect(captured?.configOverrides).toBeUndefined();
+        }
+        expect(threadOptions).toMatchObject({
+          workingDirectory: home,
+          sandboxMode: "read-only",
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+        });
+        expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+          contents,
+        );
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test("does not substitute managed login for an explicitly configured command provider", async () => {
+    const home = await mkdtemp(join(tmpdir(), "codex-security-command-login-"));
+    temporaryDirectories.push(home);
+    const state = join(home, "state");
+    await mkdir(join(state, "codex-home"), { recursive: true });
+    // Invalid auth remains native Codex's responsibility, without login fallback.
+    await writeFile(
+      join(home, "config.toml"),
+      'model_provider="openai"\nprofile="review"\n[profiles.review]\nmodel_provider="synthetic"\n[model_providers.synthetic.auth]\ncommand=""\n',
+    );
+    const environment = { CODEX_HOME: home, CODEX_SECURITY_STATE_DIR: state };
+    expect(
+      await comparisonEnvironment(environment, async () => {
+        throw new Error("Must not probe managed login");
+      }),
+    ).toEqual(environment);
   });
 
   test("disables explicit and inherited MCP servers for read-only helper turns", async () => {

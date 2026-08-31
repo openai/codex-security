@@ -186,6 +186,16 @@ Environment API keys apply to the current scan; only `login --with-api-key`
 saves them. Pass Codex access tokens on stdin to `login --with-access-token`.
 Access-token environment variables are not scan API keys.
 
+SDK callers can select native command authentication through
+`codexOverrides.model_providers.<id>.auth` and `model_provider` (including a
+selected `profile`). Scans, comparisons, and deduplication reviews preserve
+that selection without requiring an API key or replacing it with a stored
+login. Codex executes the helper and renews its token. Helper paths and relative
+`auth.cwd` values resolve from the supplied `CODEX_HOME` (default `~/.codex`),
+not the source checkout; an absolute `auth.cwd` is preserved. Comparisons and
+reviews also honor the selected command provider in that home's `config.toml`.
+Configuration is passed to Codex for validation, including profile support.
+
 For other inference providers:
 
 ```bash
@@ -1469,6 +1479,17 @@ migration that also imports known associations from stored scan occurrences.
 New scan findings retain their target associations when indexed locally.
 The server entrypoint selects the concrete
 embedder and store, so either can be replaced independently.
+
+For renewable embeddings credentials, import `OpenAiFindingEmbedder`,
+`SqliteFindingsStore`, and `startFindingsServer` from
+`@openai/codex-security/server`. The embedder's first argument accepts a static
+key or `() => string | Promise<string>`. It calls the callback before every
+HTTP batch, including subsequent calls to `embed`; callers own token acquisition.
+Pass `fetch` as the second argument and
+`process.env.CODEX_SECURITY_EMBEDDINGS_URL || undefined` as the third to use
+the same full endpoint URL and default as `codex-security serve`. Importing the
+server API does not start a listener.
+
 The local workflow lives under `src/deduplication/`. `FindingDeduplicator`
 receives a candidate API client and a `DeduplicationReviewer`, keeping grouping
 separate from HTTP and model transport. `CodexDeduplicationReviewer` owns prompts

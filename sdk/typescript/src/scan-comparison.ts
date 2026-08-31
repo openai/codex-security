@@ -10,9 +10,18 @@ import {
 } from "@openai/codex-sdk";
 import { z } from "incur";
 import type { CodexSecuritySurface } from "./api.js";
-import { accountStatus } from "./auth.js";
 import {
+  accountStatus,
+  configuredCodexHome,
+  environmentEntry,
+  readCodexHomeConfig,
+} from "./auth.js";
+import {
+  deepMerge,
+  hasCommandAuth,
   mergedCodexConfig,
+  modelProviderConfigOverride,
+  resolveCommandAuthConfig,
   scanModelConfiguration,
   type CodexSecurityConfig,
   type JsonObject,
@@ -31,6 +40,8 @@ import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
 } from "./thread-source.js";
+
+export { environmentEntry } from "./auth.js";
 
 type Finding = { occurrenceId: string } & Record<string, unknown>;
 type ReadOnlyCodexThreadSource = Extract<
@@ -254,12 +265,28 @@ export async function runReadOnlyCodex(
     options.reasoningEffort ??
     (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
     "medium";
+  const source = options.environment ?? process.env;
+  const providerConfig =
+    options.codex === undefined
+      ? resolveCommandAuthConfig(
+          deepMerge(
+            await readCodexHomeConfig(source, options.signal),
+            config ?? {},
+          ),
+          configuredCodexHome(source),
+        )
+      : {};
+  const commandAuth = hasCommandAuth(providerConfig);
+  const sdkConfig = { ...config };
+  if (commandAuth) delete sdkConfig["model_providers"];
   const environment =
     options.codex === undefined
       ? await comparisonEnvironment(
           options.environment,
           accountStatus,
           options.signal,
+          undefined,
+          providerConfig,
         )
       : undefined;
   const command =
@@ -269,8 +296,11 @@ export async function runReadOnlyCodex(
     new Codex({
       codexPathOverride: executablePathForSpawn(command!.command),
       env: environment,
+      ...(commandAuth
+        ? { configOverrides: modelProviderConfigOverride(providerConfig) }
+        : {}),
       config: {
-        ...config,
+        ...sdkConfig,
         mcp_servers: await disabledMcpServers(
           command!,
           config,
@@ -492,6 +522,7 @@ export async function comparisonEnvironment(
   nativeAccountStatus: typeof accountStatus = accountStatus,
   signal?: AbortSignal,
   prepareCredentialHome: typeof prepareCodexSecurityCredentialHome = prepareCodexSecurityCredentialHome,
+  config?: JsonObject,
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
   const environment = Object.fromEntries(
@@ -499,6 +530,23 @@ export async function comparisonEnvironment(
       (entry): entry is [string, string] => entry[1] !== undefined,
     ),
   );
+  const home = configuredCodexHome(environment);
+  for (const key of Object.keys(environment)) {
+    const name = process.platform === "win32" ? key.toUpperCase() : key;
+    if (name === "CODEX_HOME" && environment[key]) {
+      environment[key] = home;
+    }
+  }
+  if (
+    hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
+  ) {
+    for (const key of Object.keys(environment)) {
+      if (["OPENAI_API_KEY", "CODEX_API_KEY"].includes(key.toUpperCase())) {
+        delete environment[key];
+      }
+    }
+    return environment;
+  }
   if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
     return environment;
   }
@@ -545,18 +593,6 @@ export async function comparisonEnvironment(
     }
   }
   return environment;
-}
-
-export function environmentEntry(
-  environment: Record<string, string>,
-  requested: string,
-): string | undefined {
-  const exact = environment[requested];
-  if (exact !== undefined || process.platform !== "win32") return exact;
-  const upper = requested.toUpperCase();
-  return Object.entries(environment).find(
-    ([name]) => name.toUpperCase() === upper,
-  )?.[1];
 }
 
 function validateComparison(
