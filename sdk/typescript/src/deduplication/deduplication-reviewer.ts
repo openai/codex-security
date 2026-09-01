@@ -23,21 +23,16 @@ const reviewSchema = z.discriminatedUnion("decision", [
   distinctSchema,
 ]);
 const findingIds = z.tuple([z.string(), z.string()]);
-const screeningSameSchema = z.object({
-  decision: z.literal("SAME"),
-  rationale,
-});
-const screeningDistinctSchema = z.object({
-  decision: z.literal("DISTINCT"),
-  rationale,
-});
 const screeningSchema = z
   .object({
     decisions: z.array(
-      z.discriminatedUnion("decision", [
-        screeningSameSchema.extend({ findingIds }).strict(),
-        screeningDistinctSchema.extend({ findingIds }).strict(),
-      ]),
+      z
+        .object({
+          decision: z.enum(["SAME", "DISTINCT"]),
+          rationale,
+          findingIds,
+        })
+        .strict(),
     ),
   })
   .strict();

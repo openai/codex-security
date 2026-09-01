@@ -39,12 +39,11 @@ function addSupport(
   support: Map<number, Map<number, number>>,
   left: number,
   right: number,
-  weight = 1,
 ): void {
   const leftSupport = support.get(left) ?? new Map<number, number>();
   const rightSupport = support.get(right) ?? new Map<number, number>();
-  leftSupport.set(right, (leftSupport.get(right) ?? 0) + weight);
-  rightSupport.set(left, (rightSupport.get(left) ?? 0) + weight);
+  leftSupport.set(right, (leftSupport.get(right) ?? 0) + 1);
+  rightSupport.set(left, (rightSupport.get(left) ?? 0) + 1);
   support.set(left, leftSupport);
   support.set(right, rightSupport);
 }
