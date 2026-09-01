@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   CodexOptions,
@@ -86,6 +86,7 @@ describe("CodexSecurity headless patching", () => {
       projectTrust?: "trusted" | "untrusted";
       repositoryKind?:
         | "repository"
+        | "repository-alias-trust"
         | "worktree-subdirectory"
         | "marker-subdirectory"
         | "marker-subdirectory-exact"
@@ -121,12 +122,22 @@ describe("CodexSecurity headless patching", () => {
     if (repositoryKind === "empty-git-marker-subdirectory") {
       await mkdir(join(projectRoot, ".git"));
     }
+    const projectAlias = join(root, "repository alias");
+    if (repositoryKind === "repository-alias-trust") {
+      await symlink(
+        projectRoot,
+        projectAlias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    }
     const configuredTrustRoot =
       repositoryKind === "marker-subdirectory-exact"
         ? markerRoot
-        : repositoryKind === "marker-non-git"
-          ? repository
-          : projectRoot;
+        : repositoryKind === "repository-alias-trust"
+          ? projectAlias
+          : repositoryKind === "marker-non-git"
+            ? repository
+            : projectRoot;
     const captured: {
       codex?: CodexOptions;
       thread?: ThreadOptions;
@@ -362,6 +373,13 @@ describe("CodexSecurity headless patching", () => {
     ["repository", "missing", undefined, "repository", "untrusted"],
     ["repository", "untrusted", "untrusted", "repository", "untrusted"],
     ["repository", "trusted", "trusted", "repository", "trusted"],
+    [
+      "repository",
+      "trusted path alias",
+      "trusted",
+      "repository-alias-trust",
+      process.platform === "win32" ? "trusted" : "untrusted",
+    ],
     [
       "worktree subdirectory",
       "missing",

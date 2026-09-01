@@ -2974,7 +2974,9 @@ async function configuredProjectTrust(
     const trust = project["trust_level"];
     if (
       (trust !== "trusted" && trust !== "untrusted") ||
-      !(await sameExistingPath(path, repository))
+      (path !== repository &&
+        (process.platform !== "win32" ||
+          !(await sameExistingPath(path, repository))))
     ) {
       continue;
     }
