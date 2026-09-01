@@ -45,6 +45,7 @@ export {
   CodexSecurityError,
   ConfigurationError,
   ContractValidationError,
+  DeduplicationReviewError,
   IncompleteScanError,
   InvalidTargetError,
   OutputDirectoryError,
@@ -55,7 +56,12 @@ export {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
-export type { ProtectedScanPathKind } from "./errors.js";
+export type {
+  DeduplicationReviewFailureCategory,
+  DeduplicationReviewFailureMetadata,
+  DeduplicationReviewStage,
+  ProtectedScanPathKind,
+} from "./errors.js";
 export {
   DEFAULT_CODEX_CONFIG,
   mergedCodexConfig,

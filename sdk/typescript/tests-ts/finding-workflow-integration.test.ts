@@ -18,6 +18,7 @@ import type { CodexReview } from "../src/deduplication/codex-review.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import {
   CodexDeduplicationReviewer,
+  screeningPairSlot,
   type DuplicateDecision,
 } from "../src/deduplication/deduplication-reviewer.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -420,10 +421,15 @@ test.each(["screen", "pair"])(
         return review.validate(
           stage === "screen"
             ? {
-                decisions: originals.slice(1).map((finding) => ({
-                  findingIds: [originals[0]!.findingId, finding.findingId],
-                  ...sameRecommendation,
-                })),
+                decisions: Object.fromEntries(
+                  originals
+                    .slice(1)
+                    .map((_finding, index) => [
+                      screeningPairSlot(index),
+                      { ...sameRecommendation },
+                    ])
+                    .reverse(),
+                ),
               }
             : originals.some(
                   (finding) => finding.findingId === findings[3]!.findingId,
@@ -500,12 +506,7 @@ test("replays an unacknowledged group write after migrating its workflow databas
       return review.validate(
         review.model === "gpt-5.6-luna"
           ? {
-              decisions: [
-                {
-                  findingIds: originals.map((finding) => finding.findingId),
-                  ...sameRecommendation,
-                },
-              ],
+              decisions: { "pair-1": { ...sameRecommendation } },
             }
           : merged(originals),
       );
@@ -618,12 +619,7 @@ with sqlite3.connect(sys.argv[1]) as db:
         return review.validate(
           review.model === "gpt-5.6-luna"
             ? {
-                decisions: [
-                  {
-                    findingIds: originals.map((finding) => finding.findingId),
-                    ...distinct,
-                  },
-                ],
+                decisions: { "pair-1": { ...distinct } },
               }
             : merged(originals),
         );

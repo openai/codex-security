@@ -12,6 +12,7 @@ import {
 import {
   CodexDeduplicationReviewer,
   pairKey,
+  screeningPairSlot,
   validateReview,
   validateScreening,
   type DeduplicationReviewer,
@@ -78,22 +79,21 @@ function screening(
   findings: readonly Finding[],
   nominated: ReadonlySet<string>,
 ): ScreeningResult {
+  const decisions = findings.slice(1).map((finding, index) => {
+    const pair: [string, string] = [findings[0]!.findingId, finding.findingId];
+    return [
+      screeningPairSlot(index),
+      nominated.has(pairKey(pair))
+        ? {
+            decision: "SAME" as const,
+            rationale: "One existing control corrects every path.",
+          }
+        : distinct,
+    ] as const;
+  });
   return {
-    decisions: findings.slice(1).map((finding) => {
-      const findingIds: [string, string] = [
-        findings[0]!.findingId,
-        finding.findingId,
-      ];
-      return {
-        findingIds,
-        ...(nominated.has(pairKey(findingIds))
-          ? {
-              decision: "SAME" as const,
-              rationale: "One existing control corrects every path.",
-            }
-          : distinct),
-      };
-    }),
+    // Deliberately reverse insertion order: slot names, not object order, bind pairs.
+    decisions: Object.fromEntries(decisions.reverse()),
   };
 }
 
@@ -366,48 +366,46 @@ test("empty and isolated imports avoid models, while review failures propagate",
   await expect(service.run([first.findingId])).rejects.toBe(failure);
 });
 
-test("validates recommendation-only screening assignments and rejects non-anchor pairs", () => {
+test("validates exact screening slots without model-owned finding identity", () => {
   const findings = [entry(1), entry(2), entry(3)];
   const ids = findings.map((finding) => finding.findingId);
   const result = screening(findings, new Set([pairKey([ids[0]!, ids[1]!])]));
   expect(validateScreening(result, findings)).toEqual(result);
+  expect(Object.keys(result.decisions)).toEqual(["pair-2", "pair-1"]);
   for (const invalid of [
-    { decisions: result.decisions.slice(1) },
     {
-      decisions: [
+      decisions: { "pair-1": result.decisions["pair-1"] },
+    },
+    {
+      decisions: {
         ...result.decisions,
-        { findingIds: [ids[1], ids[0]], ...same(findings.slice(0, 2)) },
-      ],
+        "pair-3": { decision: "DISTINCT", rationale: "Outside assignment." },
+      },
     },
     {
-      decisions: [
-        ...result.decisions.slice(0, 2),
-        { findingIds: [ids[0], "outside"], ...same(findings.slice(0, 2)) },
-      ],
+      decisions: Object.fromEntries(
+        Object.entries(result.decisions).map(([slot, decision]) => [
+          slot,
+          { ...decision, findingIds: [ids[0], "outside"] },
+        ]),
+      ),
     },
     {
-      decisions: [
-        ...result.decisions,
-        { findingIds: [ids[1], ids[2]], ...same(findings.slice(1)) },
-      ],
+      decisions: Object.fromEntries(
+        Object.entries(result.decisions).map(([slot, decision]) => [
+          slot,
+          { ...decision, rationale: " " },
+        ]),
+      ),
     },
     {
-      decisions: [
-        ...result.decisions.slice(0, 2),
-        { findingIds: [ids[1], ids[2]], ...distinct },
-      ],
-    },
-    {
-      decisions: result.decisions.map((value) => ({
-        ...value,
-        rationale: " ",
-      })),
-    },
-    {
-      decisions: result.decisions.map((value) =>
-        value.decision === "SAME"
-          ? { ...value, canonicalFindingId: ids[0] }
-          : value,
+      decisions: Object.fromEntries(
+        Object.entries(result.decisions).map(([slot, decision]) => [
+          slot,
+          decision.decision === "SAME"
+            ? { ...decision, canonicalFindingId: ids[0] }
+            : decision,
+        ]),
       ),
     },
   ])
@@ -428,7 +426,7 @@ test("keeps recommendation-only screening independent from complete pair reviews
             pairKey(findings.slice(0, 2).map((finding) => finding.findingId)),
           ]),
         );
-        for (const decision of result.decisions)
+        for (const decision of Object.values(result.decisions))
           decision.rationale = "SCREENING_ONLY_RATIONALE";
       } else {
         result = same(
@@ -442,12 +440,40 @@ test("keeps recommendation-only screening independent from complete pair reviews
       );
       expect(validateSchema(result)).toBe(true);
       if ("decisions" in result) {
+        expect(
+          validateSchema({
+            decisions: { "pair-1": result.decisions["pair-1"] },
+          }),
+        ).toBe(false);
+        expect(
+          validateSchema({
+            decisions: {
+              ...result.decisions,
+              "pair-3": result.decisions["pair-1"],
+            },
+          }),
+        ).toBe(false);
+        const decisionsWithFindingIds = Object.fromEntries(
+          Object.entries(result.decisions).map(([slot, decision]) => [
+            slot,
+            {
+              ...decision,
+              findingIds: [findings[0]!.findingId, findings[1]!.findingId],
+            },
+          ]),
+        );
+        expect(validateSchema({ decisions: decisionsWithFindingIds })).toBe(
+          false,
+        );
         for (const field of ["canonicalFindingId", "mergedFinding"] as const) {
           const invalid = {
-            decisions: result.decisions.map((decision) =>
-              decision.decision === "SAME"
-                ? { ...decision, [field]: null }
-                : decision,
+            decisions: Object.fromEntries(
+              Object.entries(result.decisions).map(([slot, decision]) => [
+                slot,
+                decision.decision === "SAME"
+                  ? { ...decision, [field]: null }
+                  : decision,
+              ]),
             ),
           };
           expect(validateSchema(invalid)).toBe(false);
@@ -466,10 +492,12 @@ test("keeps recommendation-only screening independent from complete pair reviews
   await reviewer.screen(findings);
   await reviewer.reviewPair(findings.slice(0, 2));
   await reviewer.reviewPair(findings.slice(1));
-  expect(calls.map(({ model, effort }) => [model, effort])).toEqual([
-    ["gpt-5.6-luna", "xhigh"],
-    ["gpt-5.6-sol", "xhigh"],
-    ["gpt-5.6-sol", "xhigh"],
+  expect(
+    calls.map(({ stage, model, effort }) => [stage, model, effort]),
+  ).toEqual([
+    ["screening", "gpt-5.6-luna", "xhigh"],
+    ["pair-review", "gpt-5.6-sol", "xhigh"],
+    ["pair-review", "gpt-5.6-sol", "xhigh"],
   ]);
   expect(calls[0]!.prompt).toContain(JSON.stringify({ findings }));
   expect(calls[1]!.prompt).toContain(

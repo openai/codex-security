@@ -2,6 +2,7 @@ import type { Finding } from "../models.js";
 import type { FindingNeighborhood } from "../finding-retrieval.js";
 import {
   pairKey,
+  screeningPairSlot,
   type DeduplicationReviewer,
 } from "./deduplication-reviewer.js";
 
@@ -195,12 +196,17 @@ export class FindingDeduplicator {
         findings.set(finding.findingId, finding);
       if (neighborhood.length < 2) continue;
       const screening = await this.reviewer.screen(neighborhood);
-      for (const decision of screening.decisions) {
-        const key = pairKey(decision.findingIds);
+      for (let index = 0; index < neighborhood.length - 1; index++) {
+        const decision = screening.decisions[screeningPairSlot(index)]!;
+        const pair: [string, string] = [
+          neighborhood[0]!.findingId,
+          neighborhood[index + 1]!.findingId,
+        ];
+        const key = pairKey(pair);
         if (decision.decision === "SAME") {
-          if (!rejected.has(key)) nominated.set(key, decision.findingIds);
+          if (!rejected.has(key)) nominated.set(key, pair);
         } else {
-          rejected.set(key, decision.findingIds);
+          rejected.set(key, pair);
           nominated.delete(key);
         }
       }

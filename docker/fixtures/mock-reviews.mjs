@@ -74,10 +74,14 @@ const server = createServer(async (request, response) => {
       const result =
         stage === "screen"
           ? {
-              decisions: findings.slice(1).map((finding) => ({
-                findingIds: [findings[0].findingId, finding.findingId],
-                ...sameRecommendation,
-              })),
+              decisions: Object.fromEntries(
+                findings
+                  .slice(1)
+                  .map((_finding, index) => [
+                    `pair-${index + 1}`,
+                    { ...sameRecommendation },
+                  ]),
+              ),
             }
           : same
             ? sameDecision(findings)

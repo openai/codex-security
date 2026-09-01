@@ -61,7 +61,7 @@ try {
       assert.ok(row["source_content_digest"]);
       assert.ok(row["prompt_digest"] && row["contract_digest"]);
       for (const decision of "decisions" in result
-        ? result.decisions
+        ? Object.values(result.decisions)
         : [result]) {
         decisions.add(decision.decision);
         if (decision.decision === "SAME") {
