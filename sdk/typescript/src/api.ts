@@ -166,6 +166,10 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
+import {
+  startHeadDriftMonitor,
+  type HeadDriftMonitor,
+} from "./target-drift.js";
 
 interface CodexThreadLike {
   readonly id: string | null;
@@ -773,6 +777,7 @@ export class CodexSecurity {
       id: string;
       options: WorkbenchCommandOptions;
     } | null = null;
+    let headDriftMonitor: HeadDriftMonitor | null = null;
     const prepareArtifactRestorer =
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
@@ -929,11 +934,11 @@ export class CodexSecurity {
         );
       }
       checkOpen();
+      const readRepositoryRevision =
+        this.#dependencies.repositoryRevision ?? repositoryRevision;
       const expectation: ScanExpectation = {
         repository: repo,
-        repositoryRevision: await (
-          this.#dependencies.repositoryRevision ?? repositoryRevision
-        )(repo, signal),
+        repositoryRevision: await readRepositoryRevision(repo, signal),
         target: normalized,
         mode,
         pluginVersion: runtime.plugin.version,
@@ -1152,6 +1157,27 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      const monitorsHeadDrift =
+        registeredRevision !== "unversioned" &&
+        (targetKind === "git_revision" ||
+          targetKind === "git_worktree" ||
+          (targetKind === "git_diff" && normalized.kind === "working_tree"));
+      if (monitorsHeadDrift) {
+        headDriftMonitor = startHeadDriftMonitor({
+          expectedRevision: registeredRevision,
+          readRevision: (revisionSignal) =>
+            readRepositoryRevision(repo, revisionSignal),
+          signal,
+          onDrift: () =>
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              "Repository HEAD changed while the scan was running; results remain bound to the original revision.",
+              { kind: "target_changed" },
+            ),
+        });
+      }
       if (mode === "deep" && options.onDeepProgress !== undefined) {
         let progressWarningReported = false;
         deepProgressTracker = new DeepScanProgressTracker({
@@ -1763,6 +1789,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      headDriftMonitor?.stop();
       deepProgressTracker?.stop();
       // Removing the temporary scan inputs is best effort. A throw here would replace the
       // outcome the try and catch blocks already produced, so these failures are reported
