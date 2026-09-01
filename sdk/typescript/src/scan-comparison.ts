@@ -174,7 +174,7 @@ export async function matchScanFindings(
 export async function matchScanFindingsInternal(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
-  runtimeOptions: { surface: CodexSecuritySurface; allowBatching?: boolean },
+  runtimeOptions: { surface: CodexSecuritySurface },
 ): Promise<ScanComparisonResult> {
   const comparisons: ScanComparisonResult[] = [];
   const allowHistoricalUncertainty =
@@ -182,7 +182,7 @@ export async function matchScanFindingsInternal(
   const outputSchema = z.toJSONSchema(comparisonSchema.required(), {
     target: "openapi-3.0",
   });
-  for (const batch of comparisonBatches(input, runtimeOptions.allowBatching)) {
+  for (const batch of comparisonBatches(input)) {
     options.signal?.throwIfAborted();
     const finalResponse = await runReadOnlyCodex(
       batch.prompt,
@@ -214,10 +214,9 @@ export async function matchScanFindingsInternal(
 
 function* comparisonBatches(
   input: ScanComparisonInput,
-  allowBatching = true,
 ): Generator<{ input: ScanComparisonInput; prompt: string }> {
   const prompt = comparisonPrompt(input);
-  if (allowBatching && prompt.length > CODEX_MAX_INPUT_CHARACTERS / 2) {
+  if (prompt.length > CODEX_MAX_INPUT_CHARACTERS / 2) {
     // Splitting one side at a time covers every before/after pair exactly once.
     const side =
       input.before.length > 1 &&

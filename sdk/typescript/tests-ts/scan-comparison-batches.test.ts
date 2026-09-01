@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import {
   matchScanFindings,
-  matchScanFindingsInternal,
   type ScanComparisonInput,
   type ScanComparisonOptions,
   type ScanComparisonResult,
@@ -251,36 +250,6 @@ test("uses Codex's full allowance for individual pairs without truncation", asyn
   expect(calls).toHaveLength(1);
   expect(oversized.before[0]!.evidence).toHaveLength(1048576);
 });
-
-test.each([200000, 300000])(
-  "keeps automatic post-scan matching to at most one call (%p characters per finding)",
-  async (characters) => {
-    const input = {
-      before: Array.from({ length: 4 }, (_, index) =>
-        finding(`before-${index}`, characters),
-      ),
-      after: [finding("after")],
-    };
-    const calls: ScanComparisonInput[] = [];
-    const comparison = matchScanFindingsInternal(
-      input,
-      {
-        codex: codex((batch) => {
-          calls.push(batch);
-          return noMatches;
-        }),
-      },
-      { surface: "sdk", allowBatching: false },
-    );
-    if (characters === 300000) {
-      await expect(comparison).rejects.toThrow("input limit");
-      expect(calls).toEqual([]);
-    } else {
-      expect(await comparison).toEqual(noMatches);
-      expect(calls).toEqual([input]);
-    }
-  },
-);
 
 test("stops between batches when canceled", async () => {
   const controller = new AbortController();

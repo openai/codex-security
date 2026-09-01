@@ -39,8 +39,9 @@ try {
 ```
 
 `result.findings` contains this scan's findings; `repositoryFindings` also
-includes earlier open findings when available. Matching earlier findings can
-make one extra model call, even with a cost limit.
+includes earlier open findings when available. Matching earlier findings uses
+additional model calls, with large inputs split into batches. These calls are
+outside the scan's recorded cost and `maxCostUsd` limit.
 
 Keep results outside the repository and restrict access: reports can contain
 source code, vulnerability details, and reproduction steps.
