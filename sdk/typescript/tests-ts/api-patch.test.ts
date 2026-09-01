@@ -4,6 +4,7 @@ import type {
   CodexOptions,
   ThreadEvent,
   ThreadOptions,
+  TurnOptions,
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
@@ -33,9 +34,10 @@ describe("CodexSecurity headless patching", () => {
     verificationReport:
       "The injection payload is rejected and ordinary queries still pass.",
   } as const;
+  const verifiedResponse = { ...verified, reason: null } as const;
 
   async function* patchEvents(
-    response: unknown = verified,
+    response: unknown = verifiedResponse,
     complete = true,
   ): AsyncGenerator<ThreadEvent> {
     yield { type: "thread.started", thread_id: "patch-thread" };
@@ -85,6 +87,7 @@ describe("CodexSecurity headless patching", () => {
     const captured: {
       codex?: CodexOptions;
       thread?: ThreadOptions;
+      turn?: TurnOptions;
       prompt?: string;
     } = {};
     const workbench = mock(async () => ({}));
@@ -124,6 +127,7 @@ describe("CodexSecurity headless patching", () => {
                 id: null,
                 async runStreamed(prompt, options) {
                   captured.prompt = prompt;
+                  captured.turn = options;
                   return { events: events(options.signal!) };
                 },
               };
@@ -245,7 +249,7 @@ describe("CodexSecurity headless patching", () => {
           id: "result",
           kind: "message",
           status: "completed",
-          description: JSON.stringify(verified),
+          description: JSON.stringify(verifiedResponse),
           paths: [],
         },
       ]);
@@ -256,6 +260,22 @@ describe("CodexSecurity headless patching", () => {
       expect(captured.prompt!.endsWith(JSON.stringify(finding))).toBe(true);
       expect(captured.prompt).not.toContain("Synthetic file contents");
       expect(captured.prompt).toContain("Do not commit, push, publish");
+      expect(captured.turn?.outputSchema).toMatchObject({
+        type: "object",
+        properties: {
+          verificationReport: {
+            anyOf: [{ type: "string", minLength: 1 }, { type: "null" }],
+          },
+          reason: {
+            anyOf: [{ type: "string", minLength: 1 }, { type: "null" }],
+          },
+        },
+        required: ["status", "changedFiles", "verificationReport", "reason"],
+        additionalProperties: false,
+      });
+      expect(captured.turn?.outputSchema).not.toHaveProperty("oneOf");
+      expect(captured.turn?.outputSchema).not.toHaveProperty("anyOf");
+      expect(captured.turn?.outputSchema).not.toHaveProperty("$schema");
       expect(captured.thread).toMatchObject({
         threadSource: "security_remediation",
         workingDirectory: options.repositoryPath,
@@ -323,9 +343,22 @@ describe("CodexSecurity headless patching", () => {
   ] satisfies Array<Omit<PatchResult, "threadId" | "cost">>)(
     "returns the structured $status outcome",
     async (outcome) => {
-      const { client, options } = await patchClient(() => patchEvents(outcome));
+      const response = {
+        ...outcome,
+        verificationReport: outcome.verificationReport ?? null,
+        reason: outcome.reason ?? null,
+      };
+      const { client, options } = await patchClient(() =>
+        patchEvents(response),
+      );
       await using security = client;
-      await expect(security.patch(options)).resolves.toMatchObject(outcome);
+      const result = await security.patch(options);
+      expect(result).toMatchObject(outcome);
+      if (outcome.status === "no_change") {
+        expect(result).not.toHaveProperty("reason");
+      } else if (outcome.verificationReport === undefined) {
+        expect(result).not.toHaveProperty("verificationReport");
+      }
     },
   );
 
@@ -361,18 +394,32 @@ describe("CodexSecurity headless patching", () => {
 
     for (const [response, complete, message] of [
       ["not JSON", true, "invalid result"],
-      [{ ...verified, verificationReport: " " }, true, "invalid result"],
+      [
+        { ...verifiedResponse, verificationReport: " " },
+        true,
+        "invalid result",
+      ],
       [
         {
           status: "no_change",
           changedFiles: ["src/query.ts"],
           verificationReport: "The finding is already safe.",
+          reason: null,
         },
         true,
         "invalid result",
       ],
-      [{ status: "blocked", changedFiles: [] }, true, "invalid result"],
-      [verified, false, "did not complete"],
+      [
+        {
+          status: "blocked",
+          changedFiles: [],
+          verificationReport: null,
+          reason: null,
+        },
+        true,
+        "invalid result",
+      ],
+      [verifiedResponse, false, "did not complete"],
     ] as const) {
       const { client, options } = await patchClient(() =>
         patchEvents(response, complete),
