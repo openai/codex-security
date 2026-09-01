@@ -14,6 +14,7 @@ import { main } from "../src/cli.js";
 import { DiffTarget } from "../src/targets.js";
 import { runWorkbench } from "../src/runtime.js";
 import { loadContract } from "../src/contract.js";
+import { ScanInterruptedError } from "../src/errors.js";
 import { TestClient } from "./support/api-client.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -287,7 +288,7 @@ test("aborting mock generation leaves a terminal scan record", async () => {
         signal: controller.signal,
         onScanStarted: () => controller.abort(),
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(ScanInterruptedError);
     const history = await runWorkbench(
       { python, pluginRoot: PLUGIN_ROOT, environment },
       ["list-scans", "--repository", repository],

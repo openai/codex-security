@@ -2495,6 +2495,7 @@ export class CodexSecurity {
     let activeScan:
       | { id: string; options: WorkbenchCommandOptions }
       | undefined;
+    let scanDir = "";
     try {
       const pluginRoot = await resolvePluginPath(
         this.config.pluginPath,
@@ -2534,7 +2535,7 @@ export class CodexSecurity {
             )
           : undefined;
       let archivedScanDir: string | undefined;
-      const scanDir = await prepareOutputDir(
+      scanDir = await prepareOutputDir(
         local.outputDir ?? undefined,
         basename(local.repository),
         outputRoot,
@@ -2706,6 +2707,8 @@ export class CodexSecurity {
           safeErrorMessage(error).slice(0, 2400),
         ]).catch(() => undefined);
       }
+      if (this.#closed) this.#requireOpen();
+      throwIfAborted(signal, scanDir);
       throw error;
     } finally {
       await cleanupSdkDirectory(workspace);
