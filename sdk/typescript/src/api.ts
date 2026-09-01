@@ -805,6 +805,13 @@ export class CodexSecurity {
         signal,
         temporaryRoot,
       );
+      // The SDK turns workingDirectory into `--cd`, which can persist trust for
+      // a new project. Preserve an existing decision and keep an unknown
+      // repository untrusted. This must be a raw override so the repository
+      // path remains one quoted TOML key instead of a dotted key sequence.
+      const projectTrust =
+        (await configuredProjectTrust(session.effectiveConfig, repository)) ??
+        "untrusted";
       const configured = scanModelConfiguration(session.effectiveConfig);
       const model = options.model ?? configured.model;
       const reasoningEffort =
@@ -822,6 +829,9 @@ export class CodexSecurity {
           CODEX_SECURITY_SURFACE: this.#surface,
         },
         options.auth,
+        [
+          `projects.${JSON.stringify(repository)}.trust_level=${JSON.stringify(projectTrust)}`,
+        ],
       );
       tracker = new ScanCostTracker({
         codexHome: session.runtime.codexHome,
@@ -2262,6 +2272,7 @@ export class CodexSecurity {
     session: PreparedSession,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
+    configOverrides?: readonly string[],
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
     const {
       runtime,
@@ -2322,6 +2333,9 @@ export class CodexSecurity {
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
       env: sdkEnvironment,
+      ...(configOverrides === undefined
+        ? {}
+        : { configOverrides: [...configOverrides] }),
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
         responses_api_metadata: {
@@ -2909,6 +2923,28 @@ async function prepareDeepScanConfig(
     }),
     { mode: 0o600, signal },
   );
+}
+
+async function configuredProjectTrust(
+  config: Readonly<JsonObject>,
+  repository: string,
+): Promise<"trusted" | "untrusted" | undefined> {
+  const projects = config["projects"];
+  if (!isRecord(projects)) return undefined;
+  let matched: "trusted" | undefined;
+  for (const [path, project] of Object.entries(projects)) {
+    if (!isAbsolute(path) || !isRecord(project)) continue;
+    const trust = project["trust_level"];
+    if (
+      (trust !== "trusted" && trust !== "untrusted") ||
+      !(await sameExistingPath(path, repository))
+    ) {
+      continue;
+    }
+    if (trust === "untrusted") return trust;
+    matched = trust;
+  }
+  return matched;
 }
 
 async function sameExistingPath(left: string, right: string): Promise<boolean> {

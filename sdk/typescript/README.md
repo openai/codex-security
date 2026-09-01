@@ -121,6 +121,9 @@ Pass literal finding text or a JSON-serializable object; strings are never read
 as file paths. The method may edit only `repositoryPath`. It does not create a
 commit, push, open a pull request, publish findings, or add a scan to history.
 The patch thread runs without network access or web search.
+It preserves an existing Codex project trust decision and treats a workspace
+without one as untrusted, so repository-local Codex configuration cannot become
+active merely because `patch()` opened the workspace.
 Callers remain responsible for reviewing and deriving the authoritative diff,
 approval, commit creation, and delivery.
 

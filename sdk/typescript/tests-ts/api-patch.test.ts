@@ -76,9 +76,10 @@ describe("CodexSecurity headless patching", () => {
   async function patchClient(
     events: (signal: AbortSignal) => AsyncGenerator<ThreadEvent> = () =>
       patchEvents(),
+    projectTrust?: "trusted" | "untrusted",
   ) {
     const root = await temporaryDirectory();
-    const repository = join(root, "repository");
+    const repository = join(root, "repository with spaces");
     const codexHome = join(root, "codex-home");
     await Promise.all([mkdir(repository), mkdir(codexHome)]);
     const captured: {
@@ -97,6 +98,13 @@ describe("CodexSecurity headless patching", () => {
           model: "gpt-5.6-terra",
           model_reasoning_effort: "medium",
           approval_policy: "on-request",
+          ...(projectTrust === undefined
+            ? {}
+            : {
+                projects: {
+                  [repository]: { trust_level: projectTrust },
+                },
+              }),
         },
       },
       {
@@ -273,6 +281,25 @@ describe("CodexSecurity headless patching", () => {
       expect(captured.codex?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
         options.repositoryPath,
       );
+    },
+  );
+
+  test.each([
+    ["missing", undefined],
+    ["untrusted", "untrusted"],
+    ["trusted", "trusted"],
+  ] as const)(
+    "preserves the existing project trust decision: %s",
+    async (_label, projectTrust) => {
+      const { client, options, captured } = await patchClient(
+        () => patchEvents(),
+        projectTrust,
+      );
+      await using security = client;
+      await security.patch(options);
+      expect(captured.codex?.configOverrides).toEqual([
+        `projects.${JSON.stringify(options.repositoryPath)}.trust_level=${JSON.stringify(projectTrust ?? "untrusted")}`,
+      ]);
     },
   );
 
