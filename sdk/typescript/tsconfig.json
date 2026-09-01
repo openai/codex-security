@@ -1,5 +1,14 @@
 {
-  "include": ["src/**/*.ts", "src/**/*.tsx", "tests-ts/**/*.ts"],
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "dashboard/**/*.ts",
+    "dashboard/**/*.tsx",
+    "tests-ts/**/*.ts",
+    "scripts/smoke-findings-service.ts",
+    "scripts/fixtures/findings-service-sqlite.ts",
+    "scripts/fixtures/prepare-runner-scan.ts"
+  ],
   "exclude": ["dist", "node_modules", "tests-ts/package.test.ts"],
   "compilerOptions": {
     "allowJs": false,
@@ -10,7 +19,7 @@
     "incremental": true,
     "isolatedModules": true,
     "jsx": "react-jsx",
-    "lib": ["esnext"],
+    "lib": ["esnext", "dom", "dom.iterable"],
     "module": "esnext",
     "moduleResolution": "bundler",
     "noEmit": true,

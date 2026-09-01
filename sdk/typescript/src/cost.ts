@@ -108,6 +108,7 @@ function createSessionUsage(): SessionUsage {
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
   readonly #sessions = new Map<string, SessionUsage>();
+  readonly #receipts = new Map<string, ScanTokenUsage | null>();
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
@@ -126,6 +127,13 @@ export class ScanCostTracker {
 
   public setExpectedFilesTotal(filesTotal: number): void {
     this.#expectedFilesTotal = filesTotal;
+  }
+
+  public recordUsage(usage: unknown, threadId = this.#threadId): void {
+    const normalized = tokenUsage(usage);
+    if (threadId !== null) {
+      this.#receipts.set(threadId, normalized);
+    }
   }
 
   public start(threadId: string): void {
@@ -179,8 +187,10 @@ export class ScanCostTracker {
       clearInterval(this.#timer);
       this.#timer = null;
     }
+    if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
     await this.refresh();
-    if (this.#snapshot.usage !== null) return this.#snapshot;
+    if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
+      return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
     this.#reportCost(cost);
@@ -206,7 +216,7 @@ export class ScanCostTracker {
       }
     }
 
-    const included = new Set([this.#threadId]);
+    const included = new Set([this.#threadId, ...this.#receipts.keys()]);
     if (this.#options.scanDirectory !== undefined) {
       const scanStartedAt =
         [...this.#sessions.values()].find(
@@ -252,7 +262,7 @@ export class ScanCostTracker {
       if (included.has(session.threadId!)) throw error;
     }
 
-    let usage: ScanTokenUsage | null = null;
+    const usages = new Map(this.#receipts);
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
@@ -290,9 +300,20 @@ export class ScanCostTracker {
         }
         this.#reportWorkerProgress(session);
       }
-      if (session.usage !== null) {
-        usage = addTokenUsage(usage, session.usage);
+      if (
+        session.usage !== null &&
+        session.usage.total_tokens > (usages.get(threadId)?.total_tokens ?? -1)
+      ) {
+        usages.set(threadId, session.usage);
       }
+    }
+    let usage: ScanTokenUsage | null = null;
+    for (const value of usages.values()) {
+      if (value === null) {
+        this.#snapshot = { usage: null, cost: null };
+        return;
+      }
+      usage = addTokenUsage(usage, value);
     }
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
@@ -765,13 +786,6 @@ function addTokenUsage(
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
     total_tokens: previous.total_tokens + next.total_tokens,
   };
-}
-
-/** @internal Sum complete turn receipts when session usage is unavailable. */
-export function sumTokenUsage(first: unknown, second: unknown): unknown {
-  const left = tokenUsage(first);
-  const right = tokenUsage(second);
-  return left === null || right === null ? null : addTokenUsage(left, right);
 }
 
 function subtractTokenUsage(

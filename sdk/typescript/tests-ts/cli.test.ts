@@ -1,4 +1,3 @@
-import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
@@ -10,7 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, normalize } from "node:path";
-import { Writable } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
@@ -54,6 +53,8 @@ import {
   fakePreflight,
   fakeResult,
 } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runCommand } from "./support/shell.js";
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
@@ -77,14 +78,18 @@ async function multiscanInventory(root: string): Promise<void> {
       "initial",
     ],
   ]) {
-    expect(spawnSync("git", args, { encoding: "utf8" }).status).toBe(0);
+    const result = await runCommand("git", args, { timeout: 10_000 });
+    expect(result.status, result.stderr).toBe(0);
   }
-  const revision = spawnSync("git", ["-C", repository, "rev-parse", "HEAD"], {
-    encoding: "utf8",
-  }).stdout.trim();
+  const { status, stdout, stderr } = await runCommand(
+    "git",
+    ["-C", repository, "rev-parse", "HEAD"],
+    { timeout: 10_000 },
+  );
+  expect(status, stderr).toBe(0);
   await writeFile(
     join(root, "repositories.csv"),
-    `id,repository,revision\nsample,${repository},${revision}\n`,
+    `id,repository,revision\nsample,${repository},${stdout.trim()}\n`,
   );
 }
 
@@ -256,6 +261,7 @@ describe("CLI", () => {
   test("documents every public command argument and option", async () => {
     const commands = [
       ["scan"],
+      ["dedupe"],
       ["bulk-scan"],
       ["export"],
       ["validate"],
@@ -408,20 +414,14 @@ describe("CLI", () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-deep-defaults-"));
 
     try {
-      const result = spawnSync(
+      const { status, stdout, stderr } = await runCommand(
         python!,
         [
-          fileURLToPath(
-            new URL(
-              "../_bundled_plugin/scripts/deep_scan_config.py",
-              import.meta.url,
-            ),
-          ),
+          join(PLUGIN_ROOT, "scripts", "deep_scan_config.py"),
           "--available-parallelism",
           "12",
         ],
         {
-          encoding: "utf8",
           env: {
             ...process.env,
             CODEX_HOME: join(root, "codex-home"),
@@ -431,11 +431,10 @@ describe("CLI", () => {
         },
       );
 
-      expect(result.error).toBeUndefined();
-      expect(result.status).toBe(0);
-      expect(result.stderr).toBe("");
+      expect(status, stderr).toBe(0);
+      expect(stderr).toBe("");
 
-      const defaults = JSON.parse(result.stdout) as {
+      const defaults = JSON.parse(stdout) as {
         workers: number;
         subagents: number;
         stopAfterNoNew: number;
@@ -590,12 +589,13 @@ describe("CLI", () => {
       await mkdtemp(join(tmpdir(), "codex-security-cli-pre-commit-")),
     );
     try {
-      execFileSync("git", ["init", "-q", root], { timeout: 10_000 });
-      execFileSync(
-        "git",
+      for (const args of [
+        ["init", "-q", root],
         ["-C", root, "config", "core.hooksPath", ".custom hooks"],
-        { timeout: 10_000 },
-      );
+      ]) {
+        const result = await runCommand("git", args, { timeout: 10_000 });
+        expect(result.status, result.stderr).toBe(0);
+      }
       let started = false;
       const hook = join(root, ".custom hooks", "pre-commit");
       const deps = dependencies({
@@ -697,12 +697,13 @@ describe("CLI", () => {
         '#!/bin/sh\nprintf "codex-security\\n" > "$CODEX_SECURITY_HOOK_MARKER"\nexit 0\n',
         { mode: 0o755 },
       );
-      execFileSync(
+      const staged = await runCommand(
         "git",
         ["-C", root, "add", "-f", "node_modules/.bin/codex-security"],
         { timeout: 10_000 },
       );
-      const commit = spawnSync(
+      expect(staged.status, staged.stderr).toBe(0);
+      const commit = await runCommand(
         "git",
         [
           "-C",
@@ -719,7 +720,6 @@ describe("CLI", () => {
           "test",
         ],
         {
-          encoding: "utf8",
           env: {
             ...process.env,
             CODEX_HOME: join(root, "codex-home"),
@@ -731,8 +731,7 @@ describe("CLI", () => {
           timeout: 10_000,
         },
       );
-      expect(commit.error).toBeUndefined();
-      expect(commit.status).not.toBe(0);
+      expect(commit.status, commit.stderr).toBeGreaterThan(0);
       await expect(stat(maliciousMarker)).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -820,7 +819,7 @@ describe("CLI", () => {
     const previousHome = process.env["HOME"];
     const previousUserProfile = process.env["USERPROFILE"];
     try {
-      await mkdir(home);
+      await mkdir(home, { mode: 0o700 });
       await mkdir(currentDirectory);
       await multiscanInventory(home);
       process.env["HOME"] = home;
@@ -1365,6 +1364,10 @@ describe("CLI", () => {
         },
       ],
     };
+    const onWorkbench = (args: readonly string[]) =>
+      args[0] === "compare-scans"
+        ? { ...response, matchingCached: true }
+        : response;
     for (const argv of [
       ["scans", "compare", "before", "after", "--json"],
       ["scans", "compare", "before", "after", "--format", "yaml"],
@@ -1375,7 +1378,7 @@ describe("CLI", () => {
           argv,
           stdout.stream,
           capture().stream,
-          dependencies({ onWorkbench: () => response }),
+          dependencies({ onWorkbench }),
         ),
       ).toBe(0);
       expect(stdout.text()).toContain("internal-finding-id");
@@ -1391,7 +1394,7 @@ describe("CLI", () => {
         ["scans", "compare", "before", "after"],
         redirected.stream,
         capture().stream,
-        dependencies({ onWorkbench: () => response }),
+        dependencies({ onWorkbench }),
       ),
     ).toBe(0);
     expect(redirected.text()).toContain("internal-finding-id");
@@ -1404,7 +1407,7 @@ describe("CLI", () => {
         ["scans", "compare", "before", "after", "--filter-output", "summary"],
         filtered.stream,
         capture().stream,
-        dependencies({ onWorkbench: () => response }),
+        dependencies({ onWorkbench }),
       ),
     ).toBe(0);
     expect(filtered.text()).toContain("persisting: 1");
@@ -1477,7 +1480,7 @@ describe("CLI", () => {
   test("registers the scoped package as the MCP command", async () => {
     const home = await mkdtemp(join(tmpdir(), "codex-security-mcp-home-"));
     try {
-      const child = spawnSync(
+      const child = await runCommand(
         process.execPath,
         [
           join(import.meta.dir, "../src/cli.ts"),
@@ -1488,7 +1491,6 @@ describe("CLI", () => {
           "--full-output",
         ],
         {
-          encoding: "utf8",
           env: { ...process.env, HOME: home, USERPROFILE: home },
           timeout: 30_000,
         },
@@ -1701,6 +1703,31 @@ describe("CLI", () => {
       expect(stream.listenerCount("error")).toBe(0);
     },
   );
+
+  test("passes the workflow ID to scans without changing their JSON output", async () => {
+    const deps = dependencies();
+    const result = fakeResult();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        expect(options?.workflowId).toBe("scan-workflow");
+        return result;
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", ".", "--workflow-id", "scan-workflow", "--json"],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      scanDir: result.scanDir,
+    });
+  });
 
   test("keeps verbose diagnostics separate from interactive progress", async () => {
     const stdout = capture();
@@ -4703,6 +4730,43 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("RESULTS   /tmp/scan");
     expect(stderr.text()).not.toContain("Next:");
   });
+
+  test.each([
+    [[], {}, true, true, true],
+    [["--headless"], {}, true, true, false],
+    [["--verbose"], {}, true, true, false],
+    [["--json"], {}, true, true, false],
+    [["--format", "jsonl"], {}, true, true, false],
+    [[], { CI: "true" }, true, true, false],
+    [[], { TERM: "dumb" }, true, true, false],
+    [[], {}, false, true, false],
+    [[], {}, true, false, false],
+  ] as const)(
+    "gates budget interaction for flags %j, environment %j, input TTY %s, output TTY %s",
+    async (flags, environment, inputTty, outputTty, expected) => {
+      const input = Object.assign(new PassThrough(), { isTTY: inputTty });
+      let budgetCallback: ScanOptions["onBudgetApproaching"];
+      expect(
+        await main(
+          ["scan", ".", "--max-cost", "20", ...flags],
+          capture().stream,
+          capture(outputTty).stream,
+          {
+            ...dependencies({
+              environment,
+              onTurn: (_repository, options) => {
+                budgetCallback = (options as ScanOptions).onBudgetApproaching;
+              },
+            }),
+            scanInput: input,
+          },
+        ),
+      ).toBe(0);
+      expect(budgetCallback !== undefined).toBe(expected);
+      expect(input.listenerCount("data")).toBe(0);
+      input.destroy();
+    },
+  );
 
   test("reports the running cost against the scan budget", async () => {
     const stdout = capture();

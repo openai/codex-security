@@ -47,12 +47,14 @@ async function script(source: string) {
 }
 
 describe("CLI MCP command schemas", () => {
-  test("uses named CLI leaves without duplicating existing tools", () => {
+  test("uses named CLI leaves without duplicating tools or exposing findings service commands", () => {
     expect(
       buildCliMcpCommands({
         commands: [
           { name: "scan" },
           { name: "info" },
+          { name: "serve" },
+          { name: "dedupe" },
           { name: "findings false-positive", description: "Save a decision." },
           { name: "scans list" },
         ],
@@ -124,6 +126,8 @@ describe("CLI MCP command schemas", () => {
           scanDir: { type: "array", items: { type: "string" }, default: [] },
           to: { type: "string", default: "linear" },
           csv: { type: "boolean", default: false },
+          findingsUrl: { type: "string" },
+          workflowId: { type: "string" },
           project: { type: "string", minLength: 1 },
         },
         required: ["scanDir", "to", "project"],
@@ -148,9 +152,11 @@ describe("CLI MCP command schemas", () => {
     });
     expect(schema.options.required).toEqual(["scanDir", "to", "project"]);
     expect(schema.options.properties.to).not.toHaveProperty("enum");
-    expect(
-      tool.inputSchema.properties?.["options"]?.properties,
-    ).not.toHaveProperty("csv");
+    for (const field of ["csv", "findingsUrl", "workflowId"]) {
+      expect(
+        tool.inputSchema.properties?.["options"]?.properties,
+      ).not.toHaveProperty(field);
+    }
   });
 
   test("converts required and optional variadic operands to arrays", () => {

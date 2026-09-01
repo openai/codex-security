@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { main } from "../src/cli.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 function linearIssue(identifier: string) {
   return {
@@ -91,19 +93,13 @@ describe("read-only finding verification", () => {
     expect(prompt).toContain("Additional verification evidence for SEC-123");
     expect(prompt).toContain(
       await readFile(
-        new URL(
-          "../_bundled_plugin/skills/verify-fix/SKILL.md",
-          import.meta.url,
-        ),
+        join(PLUGIN_ROOT, "skills", "verify-fix", "SKILL.md"),
         "utf8",
       ),
     );
     expect(prompt).toContain(
       await readFile(
-        new URL(
-          "../_bundled_plugin/references/static-finding-assessment.md",
-          import.meta.url,
-        ),
+        join(PLUGIN_ROOT, "references", "static-finding-assessment.md"),
         "utf8",
       ),
     );

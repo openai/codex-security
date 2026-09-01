@@ -59,7 +59,7 @@ export interface CliMcpRunOptions extends CliMcpOutputOptions {
 /** Adapt the public CLI manifest without maintaining a second command schema. */
 export function buildCliMcpCommands(manifest: CliMcpManifest): CliMcpCommand[] {
   return manifest.commands
-    .filter(({ name }) => !["scan", "info"].includes(name))
+    .filter(({ name }) => !["scan", "info", "serve", "dedupe"].includes(name))
     .map(({ name, description, schema }) => {
       const properties: Record<string, CliMcpSchema> = {
         workingDirectory: {
@@ -82,10 +82,11 @@ export function buildCliMcpCommands(manifest: CliMcpManifest): CliMcpCommand[] {
           const options = properties[kind];
           const destination = options.properties?.["to"];
           if (destination !== undefined) destination["enum"] = ["linear"];
-          delete options.properties?.["csv"];
+          const cliOnly = ["csv", "findingsUrl", "workflowId"];
+          for (const field of cliOnly) delete options.properties?.[field];
           if (options.required !== undefined) {
             options.required = options.required.filter(
-              (field) => field !== "csv",
+              (field) => !cliOnly.includes(field),
             );
             if (options.required.length === 0) delete options.required;
           }

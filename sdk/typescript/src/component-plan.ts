@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
 import { z } from "incur";
+import type { ScanAuthMode } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import {
   runReadOnlyCodex,
@@ -40,6 +41,8 @@ export interface ComponentPlan {
 }
 
 export interface ComponentPlanningOptions {
+  /** @internal Authentication already selected by the calling scan. */
+  auth?: ScanAuthMode;
   config?: CodexSecurityConfig;
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
@@ -193,9 +196,11 @@ async function inventoryFiles(
           throw error;
         },
       );
-      if (metadata?.isFile()) files.push(path);
+      if (metadata?.isFile()) files.push(join(repository, path));
     }
-    return files.sort();
+    return files.length === 0
+      ? []
+      : [...(await normalizeTarget(repository, files, signal)).paths].sort();
   }
   const files: string[] = [];
   const pending = [""];
