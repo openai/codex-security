@@ -7,6 +7,9 @@ import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
+import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
+import { FindingWorkflow } from "../src/finding-workflow.js";
+import { checkpointWorkbench } from "./support/workbench-fakes.js";
 import { resolveCodexCommand } from "../src/runtime.js";
 import { environmentEntry } from "../src/scan-comparison.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -22,6 +25,12 @@ const failureReasons: Record<string, string> = {
   "credential-error": "[redacted]",
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
+  "required-source-error":
+    "Required review check could not be completed: Required source revision could not be read.",
+  "required-source-error-after-verdict":
+    "Required review check could not be completed: Required source revision could not be read.",
+  "invalid-review-error":
+    "Required review check could not be completed: Required source revision could not be read.",
   exit: "Codex exited before completing the review",
 };
 
@@ -43,9 +52,13 @@ const transportCases: {
     name: "command auth with ambient API key and relative home",
     commandAuth: "ambient",
   },
-  ...["correction", ...Object.keys(failureReasons), "cancel"].map(
-    (scenario) => ({ scenario }),
-  ),
+  ...[
+    "correction",
+    "incomplete-content",
+    "optional-lookup-failure",
+    ...Object.keys(failureReasons),
+    "cancel",
+  ].map((scenario) => ({ scenario })),
   {
     scenario: "correction",
     name: "lowercase Windows environment",
@@ -160,7 +173,21 @@ for (const {
         checkout,
       );
       let validations = 0;
-      const result = runner.run({
+      const checkpoints = checkpointWorkbench("blocked-review", {
+        repository: checkout,
+      });
+      const reportsBlocker =
+        scenario.startsWith("required-source-error") ||
+        scenario === "invalid-review-error";
+      const reviewRunner = reportsBlocker
+        ? new CheckpointedReviewRunner(
+            new FindingWorkflow("blocked-review", process.env, checkpoints.run),
+            runner,
+            checkpoints.source,
+            { allRepositories: true },
+          )
+        : runner;
+      const result = reviewRunner.run({
         model: "gpt-5.6-sol",
         effort: "ultra",
         prompt: "Review the supplied synthetic reports.",
@@ -176,7 +203,8 @@ for (const {
             typeof value !== "object" ||
             value === null ||
             !("decision" in value) ||
-            value.decision !== "SAME"
+            value.decision !==
+              (scenario === "incomplete-content" ? "DISTINCT" : "SAME")
           )
             throw new Error("Invalid decision");
           return { decision: value.decision };
@@ -185,6 +213,13 @@ for (const {
       if (scenario === "correction") {
         expect(await result).toEqual({ decision: "SAME" });
         expect(validations).toBe(2);
+      } else if (
+        ["incomplete-content", "optional-lookup-failure"].includes(scenario)
+      ) {
+        expect(await result).toEqual({
+          decision: scenario === "incomplete-content" ? "DISTINCT" : "SAME",
+        });
+        expect(validations).toBe(1);
       } else if (scenario === "cancel") {
         await expect(result).rejects.toBe("synthetic cancellation");
       } else {
@@ -193,8 +228,15 @@ for (const {
           message: `Codex did not complete a validated deduplication review. Findings are unchanged; retry the command. Reason: ${failureReasons[scenario]}`,
         });
         expect(validations).toBe(
-          ["failed-turn", "invalid-submission"].includes(scenario) ? 1 : 0,
+          [
+            "failed-turn",
+            "invalid-submission",
+            "required-source-error-after-verdict",
+          ].includes(scenario)
+            ? 1
+            : 0,
         );
+        if (reportsBlocker) expect(checkpoints.saved).toHaveLength(0);
       }
       if (commandAuth) {
         expect(args).not.toContain('cli_auth_credentials_store="ephemeral"');
