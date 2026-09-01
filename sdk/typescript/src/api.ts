@@ -487,6 +487,7 @@ export interface ScanPreflight extends DeepScanOptions {
 
 interface LocalScanInputs
   extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
+  gitWorktreeRoot: string | null;
   protectedRoot: string;
   stateDirectory: string;
 }
@@ -848,10 +849,12 @@ export class CodexSecurity {
       );
       const projectTrust =
         (await configuredProjectTrust(session.effectiveConfig, projectRoot)) ??
-        (await configuredProjectTrust(
-          session.effectiveConfig,
-          inputs.protectedRoot,
-        )) ??
+        (inputs.gitWorktreeRoot === null
+          ? undefined
+          : await configuredProjectTrust(
+              session.effectiveConfig,
+              inputs.gitWorktreeRoot,
+            )) ??
         "untrusted";
       const configured = scanModelConfiguration(session.effectiveConfig);
       const model = options.model ?? configured.model;
@@ -2720,8 +2723,8 @@ export class CodexSecurity {
     }
     await validateCommittedDiffCheckout(repo, normalized, signal);
     throwIfAborted(signal);
-    const protectedRoot =
-      (await enclosingGitWorktreeRoot(repo, signal)) ?? repo;
+    const gitWorktreeRoot = await enclosingGitWorktreeRoot(repo, signal);
+    const protectedRoot = gitWorktreeRoot ?? repo;
     const requestedOutput = await validateOutputDir(
       options.outputDir,
       options.archiveExisting,
@@ -2753,6 +2756,7 @@ export class CodexSecurity {
       target: normalized,
       mode,
       outputDir: requestedOutput,
+      gitWorktreeRoot,
       protectedRoot,
       stateDirectory,
     };
