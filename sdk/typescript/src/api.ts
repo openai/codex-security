@@ -8,6 +8,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -837,13 +838,20 @@ export class CodexSecurity {
         temporaryRoot,
       );
       // The SDK turns workingDirectory into `--cd`, which can persist trust for
-      // a new project. Preserve an existing decision for Codex's enclosing
-      // project root and keep an unknown project untrusted. This must be a raw
-      // override so the root path remains one quoted TOML key instead of a
-      // dotted key sequence.
-      const projectRoot = inputs.protectedRoot;
+      // a new project. Resolve the same marker-based project root Codex uses,
+      // preserve its effective project-or-worktree decision, and keep an
+      // unknown project untrusted. This must be a raw override so the root path
+      // remains one quoted TOML key instead of a dotted key sequence.
+      const projectRoot = await codexProjectRoot(
+        repository,
+        session.sessionConfig,
+      );
       const projectTrust =
         (await configuredProjectTrust(session.effectiveConfig, projectRoot)) ??
+        (await configuredProjectTrust(
+          session.effectiveConfig,
+          inputs.protectedRoot,
+        )) ??
         "untrusted";
       const configured = scanModelConfiguration(session.effectiveConfig);
       const model = options.model ?? configured.model;
@@ -2978,6 +2986,37 @@ async function configuredProjectTrust(
     matched = trust;
   }
   return matched;
+}
+
+async function codexProjectRoot(
+  cwd: string,
+  config: Readonly<JsonObject>,
+): Promise<string> {
+  const configured = config["project_root_markers"];
+  const markers =
+    configured === undefined
+      ? [".git"]
+      : Array.isArray(configured) &&
+          configured.every((marker) => typeof marker === "string")
+        ? configured
+        : [];
+  if (markers.length === 0) return cwd;
+  for (let ancestor = cwd; ; ancestor = dirname(ancestor)) {
+    for (const marker of markers) {
+      const markerPath = resolve(ancestor, marker);
+      const metadata = await stat(markerPath).catch(() => null);
+      if (metadata === null) continue;
+      if (
+        marker === ".git" &&
+        metadata.isDirectory() &&
+        (await stat(join(markerPath, "HEAD")).catch(() => null)) === null
+      ) {
+        continue;
+      }
+      return ancestor;
+    }
+    if (dirname(ancestor) === ancestor) return cwd;
+  }
 }
 
 async function sameExistingPath(left: string, right: string): Promise<boolean> {
