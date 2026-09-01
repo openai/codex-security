@@ -82,6 +82,9 @@ codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
 codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 
+export ORCAROUTER_API_KEY="<your-orcarouter-api-key>"
+codex-security scan . --provider orcarouter --model orcarouter/fusion
+
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
 ```

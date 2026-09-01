@@ -275,7 +275,11 @@ describe("one-shot scan events", () => {
   });
 
   test("does not mistake external-provider keys for OpenAI API organizations", async () => {
-    for (const source of ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"] as const) {
+    for (const source of [
+      "OPENROUTER_API_KEY",
+      "ORCAROUTER_API_KEY",
+      "FIREWORKS_API_KEY",
+    ] as const) {
       for (const status of ["not_granted", "unknown"] as const) {
         const scanDir = await copyCompletedScan(await temporaryDirectory());
         const warnings: string[] = [];

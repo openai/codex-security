@@ -17,6 +17,7 @@ import {
 import {
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
+  ORCAROUTER_CODEX_PROVIDER,
   scanModelProvider,
   writeCodexConfig,
   type JsonObject,
@@ -31,6 +32,13 @@ const EXTERNAL_PROVIDER_CASES = [
     "OPENROUTER_API_KEY",
     "anthropic/claude-sonnet-4.5",
     OPENROUTER_CODEX_PROVIDER,
+  ],
+  [
+    "OrcaRouter",
+    "orcarouter",
+    "ORCAROUTER_API_KEY",
+    "orcarouter/fusion",
+    ORCAROUTER_CODEX_PROVIDER,
   ],
   [
     "Fireworks AI",

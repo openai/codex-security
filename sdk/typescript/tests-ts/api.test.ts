@@ -47,6 +47,7 @@ import {
 import {
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
+  ORCAROUTER_CODEX_PROVIDER,
   type JsonObject,
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
@@ -195,6 +196,13 @@ const EXTERNAL_PROVIDER_CASES = [
     "OPENROUTER_API_KEY",
     "anthropic/claude-sonnet-4.5",
     OPENROUTER_CODEX_PROVIDER,
+  ],
+  [
+    "OrcaRouter",
+    "orcarouter",
+    "ORCAROUTER_API_KEY",
+    "orcarouter/fusion",
+    ORCAROUTER_CODEX_PROVIDER,
   ],
   [
     "Fireworks AI",
@@ -1287,7 +1295,7 @@ describe("CodexSecurity orchestration", () => {
         {
           environment: {
             OPENAI_API_KEY: "synthetic-openai-key",
-            [provider === "openrouter"
+            [provider === "openrouter" || provider === "orcarouter"
               ? "FIREWORKS_API_KEY"
               : "OPENROUTER_API_KEY"]: "synthetic-competing-provider-key",
           },
@@ -1319,7 +1327,9 @@ describe("CodexSecurity orchestration", () => {
       let codexOptions: CodexOptions | null = null;
       let authentication: ScanAuthentication | undefined;
       const competingApiKey =
-        provider === "openrouter" ? "FIREWORKS_API_KEY" : "OPENROUTER_API_KEY";
+        provider === "openrouter" || provider === "orcarouter"
+          ? "FIREWORKS_API_KEY"
+          : "OPENROUTER_API_KEY";
       const environment = {
         OPENAI_API_KEY: "synthetic-openai-key",
         [competingApiKey]: "synthetic-competing-provider-key",
@@ -1414,6 +1424,7 @@ describe("CodexSecurity orchestration", () => {
         OPENAI_API_KEY: "synthetic-openai-key",
         CODEX_API_KEY: "synthetic-codex-key",
         OPENROUTER_API_KEY: "synthetic-openrouter-key",
+        ORCAROUTER_API_KEY: "synthetic-orcarouter-key",
         FIREWORKS_API_KEY: "synthetic-fireworks-key",
         ...credentials,
       };
@@ -1490,6 +1501,7 @@ describe("CodexSecurity orchestration", () => {
         "OPENAI_API_KEY",
         "CODEX_API_KEY",
         "OPENROUTER_API_KEY",
+        "ORCAROUTER_API_KEY",
         "FIREWORKS_API_KEY",
       ]) {
         expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
@@ -5251,10 +5263,15 @@ describe("CodexSecurity orchestration", () => {
         [
           ["OPENAI_API_KEY", "gpt-5.6-sol", undefined],
           ["OPENROUTER_API_KEY", "anthropic/claude-sonnet-4.5", "openrouter"],
+          ["ORCAROUTER_API_KEY", "orcarouter/fusion", "orcarouter"],
         ] as const
       ).map(async ([apiKey, model, provider], index) => {
         const scanDir = join(root, `parallel-api-key-scan-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
+        const providerConfig =
+          provider === "openrouter"
+            ? OPENROUTER_CODEX_PROVIDER
+            : ORCAROUTER_CODEX_PROVIDER;
         return new TestClient(
           {
             pluginPath: PLUGIN_ROOT,
@@ -5265,7 +5282,7 @@ describe("CodexSecurity orchestration", () => {
                 : {
                     model_provider: provider,
                     model_providers: {
-                      [provider]: OPENROUTER_CODEX_PROVIDER,
+                      [provider]: providerConfig,
                     },
                   }),
             },
@@ -5287,7 +5304,7 @@ describe("CodexSecurity orchestration", () => {
                   : {
                       model_provider: provider,
                       model_providers: {
-                        [provider]: OPENROUTER_CODEX_PROVIDER,
+                        [provider]: providerConfig,
                       },
                     }),
               });
@@ -5295,7 +5312,7 @@ describe("CodexSecurity orchestration", () => {
                 startThread: () => ({
                   id: null,
                   async runStreamed() {
-                    if (++scansStarted === 2) releaseScans();
+                    if (++scansStarted === 3) releaseScans();
                     await concurrentScans;
                     throw new Error("parallel API-key scan reached");
                   },
@@ -5319,7 +5336,7 @@ describe("CodexSecurity orchestration", () => {
           }),
         });
       }
-      expect(scansStarted).toBe(2);
+      expect(scansStarted).toBe(3);
     } finally {
       releaseScans();
       await Promise.all(clients.map(async (client) => await client.close()));
