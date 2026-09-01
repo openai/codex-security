@@ -577,6 +577,11 @@ async function startReadOnlyCodexThread(
     new Codex({
       codexPathOverride: executablePathForSpawn(command!.command),
       env: environment,
+      // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
+      apiKey:
+        environmentEntry(environment!, "OPENAI_API_KEY")?.trim() ||
+        environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
+        undefined,
       ...(commandAuth
         ? { configOverrides: modelProviderConfigOverride(providerConfig) }
         : {}),

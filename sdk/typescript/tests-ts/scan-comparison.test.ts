@@ -94,6 +94,69 @@ describe("semantic scan comparison", () => {
     expect(calls.threadOptions?.threadSource).toBe("security_scan_comparison");
   });
 
+  test.each([
+    [
+      "OPENAI_API_KEY",
+      { OPENAI_API_KEY: "synthetic-openai-key" },
+      "synthetic-openai-key",
+    ],
+    [
+      "CODEX_API_KEY",
+      { CODEX_API_KEY: "synthetic-codex-key" },
+      "synthetic-codex-key",
+    ],
+    [
+      "OPENAI_API_KEY precedence",
+      {
+        OPENAI_API_KEY: "synthetic-openai-key",
+        CODEX_API_KEY: "synthetic-codex-key",
+      },
+      "synthetic-openai-key",
+    ],
+    [
+      "blank OPENAI_API_KEY fallback",
+      { OPENAI_API_KEY: " \t ", CODEX_API_KEY: "synthetic-codex-key" },
+      "synthetic-codex-key",
+    ],
+    ["no environment key", {}, undefined],
+  ] as const)(
+    "supplies %s authentication to Codex matching",
+    async (_name, keys, expected) => {
+      const home = await mkdtemp(
+        join(tmpdir(), "codex-security-matcher-auth-"),
+      );
+      temporaryDirectories.push(home);
+      let captured: CodexOptions | undefined;
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, options) {
+        captured = (this as unknown as { options: CodexOptions }).options;
+        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+              CODEX_SECURITY_STATE_DIR: join(home, "state"),
+              ...keys,
+            },
+            workingDirectory: home,
+          },
+        );
+        expect(startThread).toHaveBeenCalledTimes(1);
+        expect(captured?.apiKey).toBe(expected);
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
   test.each(["home", "profile", "overrides", "override-away"])(
     "preserves native command auth selection from %s",
     async (selection) => {
@@ -180,6 +243,7 @@ describe("semantic scan comparison", () => {
         if (commandAuth) {
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
           expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+          expect(captured?.apiKey).toBeUndefined();
           expect(parse(captured!.configOverrides![0]!)).toEqual({
             model_providers: {
               "synthetic.provider": {
