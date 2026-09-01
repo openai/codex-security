@@ -978,6 +978,7 @@ export function resolveCliPath(directory: string, value: string): string {
 }
 
 interface ScanArguments extends DeepScanOptions {
+  mock?: boolean;
   workflowId?: string;
   auth?: ScanAuthMode;
   safetyIdentifier?: string;
@@ -2927,6 +2928,12 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Validate local scan inputs without starting a scan."),
+          mock: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Save synthetic Standard scan findings without calling an LLM.",
+            ),
         })
         .refine(
           (options) =>
@@ -2966,6 +2973,12 @@ export async function main(
         .refine((options) => !options.patch || !options.dryRun, {
           message: "--patch cannot be combined with --dry-run.",
         })
+        .refine(
+          (options) => !options.mock || (!options.dryRun && !options.patch),
+          {
+            message: "--mock cannot be combined with --dry-run or --patch.",
+          },
+        )
         .refine(
           (options) =>
             options.mode === "deep" ||
@@ -3040,6 +3053,7 @@ export async function main(
             maxCostUsd: options.maxCost,
             headless: options.headless,
             dryRun: options.dryRun,
+            mock: options.mock,
           },
           errorOutput,
           dependencies,
@@ -4662,6 +4676,7 @@ function scanArgumentsFromRecipe(
     maxCostUsd,
     dryRun: false,
     parentScanId,
+    ...(recipe["mock"] === true ? { mock: true } : {}),
     expectedPluginVersion:
       typeof recipe["pluginVersion"] === "string"
         ? recipe["pluginVersion"]
@@ -6465,7 +6480,7 @@ async function executeScan(
       scanModelConfiguration(effectiveConfiguration));
     const provider = scanModelProvider(effectiveConfiguration);
     const auth =
-      !arguments_.dryRun && interactive
+      !arguments_.dryRun && !arguments_.mock && interactive
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
@@ -6487,11 +6502,9 @@ async function executeScan(
         )?.[provider],
       };
     }
-    selectedAuthentication = scanAuthentication(
-      dependencies.environment,
-      auth,
-      provider,
-    );
+    selectedAuthentication = arguments_.mock
+      ? null
+      : scanAuthentication(dependencies.environment, auth, provider);
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
@@ -6509,6 +6522,7 @@ async function executeScan(
               : "repository",
       requested_auth: auth ?? "auto",
       dry_run: arguments_.dryRun,
+      mock: arguments_.mock,
       profile:
         typeof selectedProfileName === "string"
           ? selectedProfileName
@@ -6583,7 +6597,13 @@ async function executeScan(
       }
     }
     security = dependencies.createSecurity(config);
+    if (arguments_.mock) {
+      errorOutput.write(
+        "codex-security: Mock scan: generating synthetic findings; no security analysis or LLM calls.\n",
+      );
+    }
     const options: ScanOptions = {
+      ...(arguments_.mock ? { mock: true } : {}),
       ...(arguments_.workflowId === undefined
         ? {}
         : { workflowId: arguments_.workflowId }),
@@ -7000,6 +7020,7 @@ async function executeScan(
     : undefined;
   let patchSelection: PatchSelection | null = null;
   if (
+    !arguments_.mock &&
     actionableFindings.length > 0 &&
     arguments_.patchSeverity === undefined &&
     progress?.interactive === true &&
