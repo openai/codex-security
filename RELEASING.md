@@ -41,6 +41,25 @@ Use `release` and `test` only for changes that do not affect package users. A
 maintainer can apply `skip-release-notes` to exclude another internal change.
 That manual label takes precedence over the title category.
 
+## Dependency updates
+
+Dependabot checks npm packages, Python test dependencies, and GitHub Actions
+daily, including weekends. OpenAI dependencies have no release cooldown; other
+releases must be at least seven days old. Security updates do not wait for the
+version-update cooldown.
+Updates still require review and passing CI; nothing is merged automatically.
+
+Keep `@openai/codex` and `@openai/codex-sdk` on the same exact version across the
+TypeScript SDK, MCP app, and triage evals. Dependabot groups their updates across
+all three projects, and the SDK tests reject mismatched pins or multiple locked
+SDK versions. The evals override Promptfoo's transitive Codex SDK to the direct
+SDK dependency so it follows the same update.
+
+Each pnpm project applies the same seven-day age policy to newly resolved
+dependencies, including transitive packages, with `openai` and `@openai/*` exempt.
+Committed lockfiles remain installable. The existing Socket release checks remain
+in place.
+
 ## Prepare a release
 
 1. Choose the next stable version and update `sdk/typescript/package.json`.
