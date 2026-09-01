@@ -48,6 +48,7 @@ import {
   type CodexSecurityThreadSource,
 } from "./thread-source.js";
 
+/** @internal */
 export { environmentEntry } from "./auth.js";
 
 type Finding = ComparisonFinding;
