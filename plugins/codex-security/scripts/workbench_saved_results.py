@@ -155,8 +155,8 @@ def _read_saved_result(scan_dir: Path, relative: str, scan_id: str) -> tuple[dic
     draft = _read_scan_local_json(scan_dir, relative, "Saved scan checkpoint")
     if draft.get("scanId") != scan_id:
         raise ContractError("checkpoint belongs to a different scan")
-    if not isinstance(draft.get("findings"), list) or (
-        "coverage" in draft and not isinstance(draft["coverage"], dict)
+    if not isinstance(draft.get("findings"), list) or not isinstance(
+        draft.get("coverage", {}), dict
     ):
         raise ContractError("checkpoint has no semantic findings or has invalid coverage")
     return draft, _digest(draft)

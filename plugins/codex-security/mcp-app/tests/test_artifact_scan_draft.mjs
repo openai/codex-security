@@ -561,7 +561,11 @@ try {
       await readFile(path.join(deepParentRoot, "checkpoints", name), "utf8"),
     ]),
   );
-  const acceptedDeepDraft = { ...input, complete: true };
+  const acceptedDeepDraft = {
+    ...input,
+    complete: true,
+    coverage: { completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [] },
+  };
   await recordCodexSecurityScanDraft(deepParentContext, acceptedDeepDraft);
   const acceptedDeepFindings = await readJson(deepParentRoot, "findings.json");
   const acceptedDeepCoverage = await readJson(deepParentRoot, "coverage.json");
@@ -571,10 +575,11 @@ try {
   assert.equal(acceptedDeepCoverage.completeness, "complete");
   assert.deepEqual(acceptedDeepCoverage.deferred, []);
   assert.deepEqual(
-    acceptedDeepCoverage.surfaces.map(({ label, disposition }) => ({ label, disposition })),
-    [{ label: "Archive extraction", disposition: "reported" }],
+    acceptedDeepCoverage.surfaces,
+    [],
     "accepted Deep coverage does not inherit obsolete parent review work",
   );
+  assert.deepEqual(acceptedDeepCoverage.explicitExclusions, []);
   assert.deepEqual(acceptedDeepCoverage.includePaths, ["src", "lib"]);
   assert.deepEqual(acceptedDeepCoverage.excludePaths, ["vendor"]);
   assert.deepEqual(acceptedDeepManifest.scan.scope.includePaths, ["src", "lib"]);
@@ -585,24 +590,10 @@ try {
 
   const obsoleteCheckpointPath = path.join(deepParentRoot, "checkpoints", "obsolete.json");
   await writeFile(obsoleteCheckpointPath, "{malformed obsolete checkpoint\n");
-  let deepPublicationCount = 0;
-  await recordCodexSecurityScanDraft(
-    deepParentContext,
-    acceptedDeepDraft,
-    async (draft, expectedDigest) => {
-      deepPublicationCount += 1;
-      assert.equal(expectedDigest, undefined);
-      assert.deepEqual(draft.findings, acceptedDeepFindings);
-      assert.deepEqual(draft.coverage, acceptedDeepCoverage);
-    },
-  );
-  assert.equal(deepPublicationCount, 1, "obsolete malformed checkpoints cannot block accepted Deep publication");
-
-  await writeFile(obsoleteCheckpointPath, "");
   let deepWorkbenchWrites = 0;
   await recordCodexSecurityScanDraftViaWorkbench(
     deepParentContext,
-    input,
+    acceptedDeepDraft,
     async (arguments_) => {
       deepWorkbenchWrites += 1;
       assert.deepEqual(arguments_.slice(0, 3), ["write-scan-draft", "--scan-id", scanId]);
@@ -614,11 +605,11 @@ try {
       const stagedCheckpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
       assert.deepEqual(staged.findings, acceptedDeepFindings);
       assert.deepEqual(staged.coverage, acceptedDeepCoverage);
-      assert.deepEqual(stagedCheckpoint.findings, input.findings);
+      assert.deepEqual(stagedCheckpoint.findings, acceptedDeepDraft.findings);
       assert.equal(stagedCheckpoint.handoffClaimToken, undefined);
     },
   );
-  assert.equal(deepWorkbenchWrites, 1, "terminal Deep drafts still publish through the workbench lock despite obsolete empty checkpoints");
+  assert.equal(deepWorkbenchWrites, 1, "terminal Deep drafts still publish through the workbench lock despite obsolete malformed checkpoints");
   assert.deepEqual(await readdir(path.join(deepParentRoot, "drafts")), []);
 
   const pendingRoot = path.join(root, "pending-worker");

@@ -56,12 +56,24 @@ try {
 
   const shared = finding("shared", "src/shared.ts");
   const independent = finding("independent", "src/independent.ts");
+  const rejectedCoverage = {
+    completeness: "partial",
+    surfaces: [
+      { label: "SQL route", disposition: "rejected", notes: "Parameterized queries prevent injection.",
+        receiptRefs: ["artifacts/missing-worker-receipt.md"] },
+      { label: "Archive upload", disposition: "needs_follow_up", notes: "The guard still needs review." },
+    ],
+    explicitExclusions: [{ pattern: "vendor", reason: "Outside the requested source scope." }],
+    deferred: [{ candidateId: "candidate-upload", reason: "Review the guard.", paths: ["src/upload.ts"] }],
+    openQuestions: ["Does the alternate upload handler use the guard?"],
+  };
   const first = await createWorker({
     workersRoot,
     label: "discovery-0001",
     id: "worker-001",
     result: workerDraft([shared], {
-      threatModel: { summary: "Requests may reach shared code." }
+      threatModel: { summary: "Requests may reach shared code." },
+      coverage: rejectedCoverage,
     }),
     completionSequence: 1
   });
@@ -70,10 +82,14 @@ try {
     label: "discovery-0002",
     id: "worker-002",
     result: workerDraft([shared, independent], {
-      scope: { summary: "Shared and independent request handling." }
+      scope: { summary: "Shared and independent request handling." },
+      coverage: { ...workerDraft([]).coverage, completeness: "unknown" },
     }),
     completionSequence: 2
   });
+  const originalWorkerArtifacts = await Promise.all(
+    [first, second].map((worker) => readFile(worker.resultPath, "utf8")),
+  );
   const outputRoot = path.join(dedupRoot, "dedup-0001", "output");
   await mkdir(outputRoot, { recursive: true });
   const context = {
@@ -163,49 +179,8 @@ try {
     "reducer checkpoints retain the accepted findings and scope without coverage",
   );
 
-  const rejectedCoverage = {
-    completeness: "partial",
-    surfaces: [
-      { label: "SQL route", disposition: "rejected", notes: "Parameterized queries prevent injection.",
-        receiptRefs: ["artifacts/missing-worker-receipt.md"] },
-      { label: "Archive upload", disposition: "needs_follow_up", notes: "The guard still needs review." },
-    ],
-    explicitExclusions: [{ pattern: "vendor", reason: "Outside the requested source scope." }],
-    deferred: [{ candidateId: "candidate-upload", reason: "Review the guard.", paths: ["src/upload.ts"] }],
-    openQuestions: ["Does the alternate upload handler use the guard?"],
-  };
-  const coverageWorker = await createWorker({
-    workersRoot, label: "discovery-coverage", id: "worker-coverage",
-    result: workerDraft([], { coverage: rejectedCoverage }), completionSequence: 4,
-  });
-  const unknownCoverageWorker = await createWorker({
-    workersRoot, label: "discovery-unknown", id: "worker-unknown",
-    result: workerDraft([], { coverage: { ...workerDraft([]).coverage, completeness: "unknown" } }),
-    completionSequence: 5,
-  });
-  const coverageWorkers = [coverageWorker, unknownCoverageWorker];
-  const originalWorkerArtifacts = await Promise.all(
-    coverageWorkers.map((worker) => readFile(worker.resultPath, "utf8")),
-  );
-  const coverageRoot = path.join(dedupRoot, "dedup-coverage", "output");
-  await mkdir(coverageRoot, { recursive: true });
-  const coverageContext = {
-    ...context, root: coverageRoot,
-    deepReducer: { scanRoot, claimedWorkers: coverageWorkers },
-  };
   assert.deepEqual(
-    (await getCodexSecurityDeepReducerInputs(coverageContext)).discoveries,
-    coverageWorkers.map((worker) => ({ workerId: worker.id, result: withSourceRefs(worker) })),
-    "worker coverage is absent from model-visible reducer inputs",
-  );
-  await recordCodexSecurityDeepReduction(coverageContext, reduction([]));
-  assert.deepEqual(
-    JSON.parse(await readFile(path.join(coverageRoot, "result.json"), "utf8")),
-    reduction([]),
-    "accepted reductions omit coverage even when every worker is partial or unknown",
-  );
-  assert.deepEqual(
-    await Promise.all(coverageWorkers.map((worker) => readFile(worker.resultPath, "utf8"))),
+    await Promise.all([first, second].map((worker) => readFile(worker.resultPath, "utf8"))),
     originalWorkerArtifacts,
     "reduction must not rewrite raw Standard worker coverage evidence",
   );

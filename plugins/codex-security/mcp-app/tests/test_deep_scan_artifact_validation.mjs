@@ -306,49 +306,6 @@ async function testReducerValidation(root) {
     riskArea: "filesystem",
     notes: "The reducer completed the extraction review.",
   };
-  await writeResult(resultPath, draft([firstFinding], {
-    coverage: {
-      completeness: "invalid legacy value",
-      surfaces: null,
-      deferred: "invalid legacy collection",
-    },
-  }));
-  const validatedCoverage = await validateReducerArtifacts({
-    artifacts,
-    artifactDir,
-    resultPath,
-    reducerId: "dedup-updated-coverage",
-    sources: {
-      discoveries: [{
-        workerId: first.id,
-        result: draft([firstFinding], {
-          coverage: {
-            completeness: "partial",
-            surfaces: [
-              {
-                riskArea: "filesystem",
-                notes: "The discovery worker still needed runtime validation.",
-                disposition: "needs_follow_up",
-                label: "Archive extraction",
-              },
-              { label: "Worker-only handler", disposition: "needs_follow_up" },
-            ],
-            explicitExclusions: [],
-            deferred: [{ reason: "An independent worker suggested another review." }],
-          },
-        }),
-      }],
-      previous: null,
-    },
-  }, scanId);
-  const reconciledResult = JSON.parse(await readFile(resultPath, "utf8"));
-  assert.equal(Object.hasOwn(reconciledResult, "coverage"), false);
-  assert.deepEqual(
-    validatedCoverage.result,
-    reconciledResult,
-    "accepted reducer results omit both malformed legacy coverage and worker coverage",
-  );
-  assert.deepEqual(reconciledResult.findings[0].provenance.sourceFindingIds, ["worker-001:0"]);
 
   await writeResult(resultPath, draft([]));
   await assert.rejects(

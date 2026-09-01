@@ -30,9 +30,8 @@ export function parseDeepReduction(
   input: Record<string, unknown>,
   persisted = false,
 ): DeepReductionInput {
-  const { coverage: _legacyCoverage, ...reduction } = input;
   const standard = {
-    ...reduction,
+    ...input,
     coverage: {
       completeness: "complete",
       surfaces: [],

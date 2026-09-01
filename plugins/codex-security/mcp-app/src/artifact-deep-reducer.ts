@@ -23,6 +23,7 @@ import {
   parseDeepReduction,
   reconcileDeepReduction,
   type DeepReductionInput,
+  type DeepReductionSources,
 } from "./deep-scan/artifact-validation.js";
 
 const schemaDocuments = [
@@ -43,14 +44,6 @@ export const deepReductionInputSchema = loadArtifactZodSchema(
   "reductionInput"
 ) as ZodType<DeepReductionInput>;
 
-interface DeepReducerInputs {
-  discoveries: {
-    workerId: string;
-    result: DeepReductionInput;
-  }[];
-  previous: DeepReductionInput | null;
-}
-
 interface BoundReducer {
   artifacts: DeepScanArtifacts;
   state: DeepReducerContext;
@@ -61,7 +54,7 @@ interface BoundReducer {
 /** Read the findings and scan context assigned to this reducer. */
 export async function getCodexSecurityDeepReducerInputs(
   context: ArtifactContext
-): Promise<DeepReducerInputs> {
+): Promise<DeepReductionSources> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
     const discoveries = await Promise.all(bound.state.claimedWorkers.map(async (worker) => {
