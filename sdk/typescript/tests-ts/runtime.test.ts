@@ -415,9 +415,26 @@ describe("plugin runtime preparation", () => {
   });
 
   test("generates canonical scoped security inventory paths", async () => {
-    if (Bun.which("rg") === null) {
-      return;
-    }
+    const ripgrep =
+      Bun.which("rg") ??
+      join(
+        dirname(dirname(resolveCodexCommand().command)),
+        "codex-path",
+        process.platform === "win32" ? "rg.exe" : "rg",
+      );
+    expect(existsSync(ripgrep)).toBe(true);
+    const pathVariable =
+      Object.keys(process.env).find((name) => name.toUpperCase() === "PATH") ??
+      "PATH";
+    const inventoryOptions = {
+      encoding: "utf8" as const,
+      env: {
+        ...process.env,
+        [pathVariable]: [dirname(ripgrep), process.env[pathVariable]]
+          .filter(Boolean)
+          .join(delimiter),
+      },
+    };
 
     const root = await temporaryDirectory("codex-security-scan-inventory-");
     const repository = join(root, "repository");
@@ -430,6 +447,17 @@ describe("plugin runtime preparation", () => {
       join(repository, "nested", "tracked-secret.py"),
       "secret = True\n",
     );
+    const mixedLongPath =
+      process.platform === "win32"
+        ? `long-file-${"c".repeat(
+            Math.max(1, 261 - join(repository, "long-file-.ts").length),
+          )}.ts`
+        : null;
+    if (mixedLongPath !== null) {
+      const mixedLongFile = join(repository, mixedLongPath);
+      expect(mixedLongFile.length).toBeGreaterThan(260);
+      await writeFile(mixedLongFile, "export {};\n");
+    }
     for (const args of [
       ["init", "--quiet", repository],
       ["-C", repository, "add", "--force", "--", "nested/tracked-secret.py"],
@@ -440,24 +468,40 @@ describe("plugin runtime preparation", () => {
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
+    const isolatedWindowsHelper = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "windows_scan_local_files.py"),
+        "--help",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(isolatedWindowsHelper.status, isolatedWindowsHelper.stderr).toBe(0);
     const output = join(root, "inventory.txt");
     const repeatedOutput = join(root, "inventory-repeated.txt");
-    const generatorArguments = (destination: string) =>
+    const generatorArguments = (
+      destination: string,
+      sourceRepository = repository,
+    ) =>
       [
         "-I",
         "-B",
         join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
         "--repo",
-        repository,
+        sourceRepository,
         "--scope",
         ".",
         "--out",
         destination,
       ] as const;
     for (const destination of [output, repeatedOutput]) {
-      const inventory = spawnSync(python!, generatorArguments(destination), {
-        encoding: "utf8",
-      });
+      const inventory = spawnSync(
+        python!,
+        generatorArguments(destination),
+        inventoryOptions,
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
     }
 
@@ -483,15 +527,1052 @@ describe("plugin runtime preparation", () => {
       );
       await writeFile(join(repository, "literal:colon.txt"), "colon\n");
       const posixOutput = join(root, "inventory-posix-filenames.txt");
-      const inventory = spawnSync(python!, generatorArguments(posixOutput), {
-        encoding: "utf8",
-      });
+      const inventory = spawnSync(
+        python!,
+        generatorArguments(posixOutput),
+        inventoryOptions,
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
       const posixRows = (await readFile(posixOutput, "utf8"))
         .trimEnd()
         .split(/\r?\n/u);
       expect(posixRows).toContain(String.raw`./literal\backslash.txt`);
       expect(posixRows).toContain("./literal:colon.txt");
+    } else {
+      expect(rows).toContain(`./${mixedLongPath}`);
+      const committed = spawnSync(
+        "git",
+        [
+          "-C",
+          repository,
+          "-c",
+          "user.name=Codex Security Test",
+          "-c",
+          "user.email=codex-security-test@example.invalid",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "--quiet",
+          "-m",
+          "base",
+        ],
+        { encoding: "utf8" },
+      );
+      expect(committed.status, committed.stderr).toBe(0);
+      const mixedScopeOutput = join(root, "inventory-mixed-long-scope.txt");
+      const mixedScopeInventory = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          mixedLongPath!,
+          "--out",
+          mixedScopeOutput,
+        ],
+        inventoryOptions,
+      );
+      expect(mixedScopeInventory.status, mixedScopeInventory.stderr).toBe(0);
+      expect(await readFile(mixedScopeOutput, "utf8")).toBe(
+        `${mixedLongPath}\n`,
+      );
+      const mixedDiffOutput = join(root, "inventory-mixed-long-diff.txt");
+      const mixedDiffInventory = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          ".",
+          "--out",
+          mixedDiffOutput,
+          "--diff-base",
+          "HEAD",
+          "--diff-mode",
+          "local-patch",
+        ],
+        { encoding: "utf8" },
+      );
+      expect(mixedDiffInventory.status, mixedDiffInventory.stderr).toBe(0);
+      expect(await readFile(mixedDiffOutput, "utf8")).toBe(
+        `${mixedLongPath}\n`,
+      );
+      await writeFile(join(repository, "SECURITY.md"), "# mixed policy\n");
+      const mixedPolicy = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "resolve_security_md.py"),
+          "--repo",
+          repository,
+          "--scope",
+          mixedLongPath!,
+          "--out",
+          "-",
+        ],
+        { encoding: "utf8" },
+      );
+      expect(mixedPolicy.status, mixedPolicy.stderr).toBe(0);
+      expect(mixedPolicy.stdout).toBe(
+        '## SECURITY.md source: "SECURITY.md"\n\n# mixed policy\n',
+      );
+      const longRepository = join(
+        root,
+        `long-${"a".repeat(100)}`,
+        `long-${"b".repeat(100)}`,
+        "repository",
+      );
+      await mkdir(longRepository, { recursive: true });
+      await writeFile(join(longRepository, "SECURITY.md"), "# policy\n");
+      await writeFile(join(longRepository, "app.ts"), "export {};\n");
+      expect(longRepository.length).toBeGreaterThan(260);
+      const longOutput = join(root, "inventory-long-path.txt");
+      const inventory = spawnSync(
+        python!,
+        generatorArguments(longOutput, longRepository),
+        inventoryOptions,
+      );
+      expect(inventory.status, inventory.stderr).toBe(0);
+      expect(await readFile(longOutput, "utf8")).toBe(
+        "./SECURITY.md\n./app.ts\n",
+      );
+
+      const longScopes = join(root, "long-path-scopes.json");
+      const longScopedOutput = join(root, "long-path-scoped-source.jsonl");
+      await writeFile(longScopes, JSON.stringify(["."]));
+      const scopedSource = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-repo-scope-input",
+          "--repo",
+          longRepository,
+          "--scopes-file",
+          longScopes,
+          "--out",
+          longScopedOutput,
+        ],
+        inventoryOptions,
+      );
+      expect(scopedSource.status, scopedSource.stderr).toBe(0);
+      expect(
+        (await readFile(longScopedOutput, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line)),
+      ).toEqual([{ path: "SECURITY.md" }, { path: "app.ts" }]);
+
+      const emojiCount = Math.ceil(
+        (248 - root.length - "unicode-".length - 1) / 2,
+      );
+      const unicodeRepository = join(
+        root,
+        `unicode-${"😀".repeat(emojiCount)}`,
+      );
+      expect(unicodeRepository.length).toBeGreaterThanOrEqual(248);
+      expect(Array.from(unicodeRepository).length).toBeLessThan(248);
+      await mkdir(unicodeRepository);
+      await writeFile(join(unicodeRepository, "app.ts"), "export {};\n");
+      const unicodeOutput = join(root, "inventory-unicode-long-path.txt");
+      const unicodeInventory = spawnSync(
+        python!,
+        generatorArguments(unicodeOutput, unicodeRepository),
+        inventoryOptions,
+      );
+      expect(unicodeInventory.status, unicodeInventory.stderr).toBe(0);
+      expect(await readFile(unicodeOutput, "utf8")).toBe("./app.ts\n");
+
+      const policy = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "resolve_security_md.py"),
+          "--repo",
+          longRepository,
+          "--scope",
+          "app.ts",
+          "--out",
+          "-",
+        ],
+        { encoding: "utf8" },
+      );
+      expect(policy.status, policy.stderr).toBe(0);
+      expect(policy.stdout).toBe(
+        '## SECURITY.md source: "SECURITY.md"\n\n# policy\n',
+      );
+
+      await mkdir(join(longRepository, "src"));
+      await writeFile(
+        join(longRepository, "src", "extract.py"),
+        Array.from({ length: 50 }, (_, index) => `line_${index + 1}`).join(
+          "\n",
+        ) + "\n",
+      );
+      const longScanDirectory = join(longRepository, "scan-output");
+      await mkdir(longScanDirectory);
+      await Promise.all(
+        ["scan-manifest.json", "findings.json", "coverage.json"].map(
+          (filename) =>
+            copyFile(
+              join(PLUGIN_ROOT, "examples", "completed-scan", filename),
+              join(longScanDirectory, filename),
+            ),
+        ),
+      );
+      const longSarifOutput = join(
+        longScanDirectory,
+        "exports",
+        "results.sarif",
+      );
+      const longSchemaDirectory = join(longRepository, "schemas");
+      await mkdir(longSchemaDirectory);
+      await Promise.all(
+        [
+          "scan-manifest.schema.json",
+          "findings.schema.json",
+          "coverage.schema.json",
+        ].map((filename) =>
+          copyFile(
+            join(PLUGIN_ROOT, "schemas", filename),
+            join(longSchemaDirectory, filename),
+          ),
+        ),
+      );
+      const finalization = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          longScanDirectory,
+          "--source-root",
+          longRepository,
+          "--schema-dir",
+          longSchemaDirectory,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(finalization.status, finalization.stderr).toBe(0);
+      expect(
+        await readFile(join(longScanDirectory, "report.md"), "utf8"),
+      ).toContain("# Security Review: example/repo");
+      expect(JSON.parse(await readFile(longSarifOutput, "utf8"))).toMatchObject(
+        {
+          version: "2.1.0",
+          runs: [
+            {
+              results: [
+                {
+                  partialFingerprints: {
+                    primaryLocationLineHash: expect.any(String),
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      );
+
+      const longRankInput = join(longScanDirectory, "rank_input.jsonl");
+      const longReviewInput = join(
+        longScanDirectory,
+        "deep_review_input.jsonl",
+      );
+      await writeFile(
+        longRankInput,
+        `${JSON.stringify({ path: "app.ts", area: "diff", preview: "export {};" })}\n`,
+      );
+      const runRankCommand = (args: string[]) => {
+        const result = spawnSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+            ...args,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(result.status, result.stderr).toBe(0);
+      };
+      runRankCommand([
+        "copy-deep-review-input",
+        "--rank-input",
+        longRankInput,
+        "--out",
+        longReviewInput,
+      ]);
+      expect(
+        JSON.parse((await readFile(longReviewInput, "utf8")).trim()),
+      ).toEqual({ path: "app.ts", area: "diff" });
+
+      const shardDirectory = join(longScanDirectory, "rank_shards");
+      const rankPlan = join(longScanDirectory, "rank_worker_assignments.json");
+      const rankOutput = join(longScanDirectory, "rank_output.jsonl");
+      runRankCommand([
+        "make-rank-shards",
+        "--rank-input",
+        longRankInput,
+        "--out-dir",
+        shardDirectory,
+      ]);
+      runRankCommand([
+        "make-rank-pool-plan",
+        "--shard-dir",
+        shardDirectory,
+        "--usable-worker-slots",
+        "1",
+        "--out",
+        rankPlan,
+      ]);
+      await writeFile(
+        join(shardDirectory, "rank-shard-0001.output.jsonl"),
+        `${JSON.stringify({ path: "app.ts", area: "diff", score: 1, include: true, reason: "review" })}\n`,
+      );
+      runRankCommand([
+        "validate-rank-worker",
+        "--plan",
+        rankPlan,
+        "--shard-dir",
+        shardDirectory,
+        "--slot",
+        "1",
+      ]);
+      runRankCommand([
+        "validate-rank-pool",
+        "--plan",
+        rankPlan,
+        "--shard-dir",
+        shardDirectory,
+      ]);
+      runRankCommand([
+        "merge-rank-outputs",
+        "--rank-input",
+        longRankInput,
+        "--shard-dir",
+        shardDirectory,
+        "--out",
+        rankOutput,
+      ]);
+      expect(
+        JSON.parse((await readFile(rankOutput, "utf8")).trim()),
+      ).toMatchObject({ path: "app.ts", area: "diff", score: 1 });
+
+      const candidates = join(root, "long-path-candidates.jsonl");
+      const normalized = join(root, "long-path-normalized.jsonl");
+      await writeFile(
+        candidates,
+        `${JSON.stringify({
+          cwe_ids: ["CWE-20"],
+          locations: [{ path: "app.ts", start_line: 1, role: "sink" }],
+          summary: "summary",
+          evidence: "evidence",
+        })}\n`,
+      );
+      const normalizeCandidates = (output: string) =>
+        spawnSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+            "--input",
+            candidates,
+            "--out",
+            output,
+            "--repo-root",
+            longRepository,
+            "--in-scope-files",
+            longOutput,
+          ],
+          { encoding: "utf8" },
+        );
+      const normalization = normalizeCandidates(normalized);
+      expect(normalization.status, normalization.stderr).toBe(0);
+      expect(
+        JSON.parse((await readFile(normalized, "utf8")).trim()),
+      ).toMatchObject({
+        cwe_ids: ["CWE-20"],
+        locations: [{ path: "app.ts", start_line: 1, role: "sink" }],
+      });
+      const atomicDirectory = join(root, "t".repeat(224 - root.length - 1));
+      await mkdir(atomicDirectory);
+      const atomicInventory = join(atomicDirectory, "inventory-output.jsonl");
+      const atomicNormalized = join(atomicDirectory, "normalize-output.jsonl");
+      expect(atomicInventory.length).toBe(247);
+      expect(atomicNormalized.length).toBe(247);
+      const atomicInventoryResult = spawnSync(
+        python!,
+        generatorArguments(atomicInventory, longRepository),
+        inventoryOptions,
+      );
+      expect(atomicInventoryResult.status, atomicInventoryResult.stderr).toBe(
+        0,
+      );
+      expect(await readFile(atomicInventory, "utf8")).toContain("./app.ts\n");
+      const atomicNormalization = normalizeCandidates(atomicNormalized);
+      expect(atomicNormalization.status, atomicNormalization.stderr).toBe(0);
+      expect(
+        JSON.parse((await readFile(atomicNormalized, "utf8")).trim()),
+      ).toMatchObject({ cwe_ids: ["CWE-20"] });
+
+      const stateDirectory = join(
+        root,
+        `state-${"f".repeat(100)}`,
+        `state-${"0".repeat(100)}`,
+      );
+      expect(stateDirectory.length).toBeGreaterThan(260);
+      await mkdir(stateDirectory, { recursive: true });
+      const longRolloutPath = join(stateDirectory, "rollout.jsonl");
+      await writeFile(longRolloutPath, '{"type":"synthetic"}\n');
+      const rolloutProbe = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "module = runpy.run_path(sys.argv[1])",
+            "path = module['_rollout_path'](sys.argv[2])",
+            "print(json.dumps({'available': path is not None, 'contents': None if path is None else path.read_text(encoding='utf-8')}))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts", "workbench_scan_usage.py"),
+          longRolloutPath,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(rolloutProbe.status, rolloutProbe.stderr).toBe(0);
+      expect(JSON.parse(rolloutProbe.stdout)).toEqual({
+        available: true,
+        contents: '{"type":"synthetic"}\n',
+      });
+      const scanRoot = join(root, "long-path-scans");
+      const workbench = join(PLUGIN_ROOT, "scripts", "workbench_db.py");
+      const nearLimitScanDirectory = join(
+        root,
+        "n".repeat(247 - root.length - 1),
+      );
+      expect(nearLimitScanDirectory.length).toBe(247);
+      await mkdir(nearLimitScanDirectory);
+      await copyFile(
+        join(longScanDirectory, "scan-manifest.json"),
+        join(nearLimitScanDirectory, "scan-manifest.json"),
+      );
+      const nearLimitConfigDirectory = join(nearLimitScanDirectory, ".codex");
+      await mkdir(nearLimitConfigDirectory);
+      await writeFile(
+        join(nearLimitConfigDirectory, "config.toml"),
+        'model = "near-limit"\n',
+      );
+      const configProbe = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "from pathlib import Path",
+            "module = runpy.run_path(sys.argv[1])",
+            "root = Path(sys.argv[2])",
+            "path = module['project_config_paths'](root, root)[0]",
+            "print(json.dumps(module['read_toml'](path, required=True)))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+          nearLimitScanDirectory,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(configProbe.status, configProbe.stderr).toBe(0);
+      expect(JSON.parse(configProbe.stdout)).toEqual({ model: "near-limit" });
+      const nearLimitDatabase = spawnSync(
+        python!,
+        ["-I", "-B", workbench, "database-info"],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: nearLimitScanDirectory,
+          },
+        },
+      );
+      expect(nearLimitDatabase.status, nearLimitDatabase.stderr).toBe(0);
+      expect(JSON.parse(nearLimitDatabase.stdout)).toEqual({
+        databasePath: join(nearLimitScanDirectory, "workbench.sqlite3"),
+      });
+      const nearLimitDiscovery = join(
+        nearLimitScanDirectory,
+        "artifacts",
+        "02_discovery",
+      );
+      const nearLimitWorkers = join(
+        nearLimitScanDirectory,
+        "artifacts",
+        "deep_discovery",
+      );
+      const nearLimitReducer = join(nearLimitWorkers, "reducer");
+      await mkdir(nearLimitDiscovery, { recursive: true });
+      await mkdir(join(nearLimitReducer, "canonical"), { recursive: true });
+      await writeFile(
+        join(nearLimitWorkers, "coordinator-heartbeat-2.json"),
+        JSON.stringify({
+          coordinatorGeneration: 2,
+          updatedAt: "2026-01-01T00:00:10+00:00",
+        }),
+      );
+      await writeFile(
+        join(nearLimitDiscovery, ".candidate_ledger.jsonl.synthetic.backup"),
+        "restored\n",
+      );
+      await writeFile(
+        join(nearLimitReducer, "canonical", "candidate_ledger.jsonl"),
+        "pending\n",
+      );
+      const atomicLedger = join(atomicDirectory, "candidate_ledger.json");
+      const atomicStagedLedger = join(atomicDirectory, "staged.json");
+      await writeFile(atomicLedger, "previous\n");
+      await writeFile(atomicStagedLedger, "published\n");
+      const nearLimitDeepScan = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, os, runpy, sqlite3, sys",
+            "from pathlib import Path",
+            "from types import SimpleNamespace",
+            "module = runpy.run_path(sys.argv[1])",
+            "scan = {'scan_dir': sys.argv[2]}",
+            "module['configure'](SimpleNamespace(require_scan=lambda _connection, _scan_id: scan))",
+            "connection = sqlite3.connect(':memory:')",
+            "connection.row_factory = sqlite3.Row",
+            "connection.execute('CREATE TABLE deep_scan_workers (scan_id TEXT, status TEXT, artifact_dir TEXT, kind TEXT, updated_at TEXT)')",
+            "connection.execute('INSERT INTO deep_scan_workers VALUES (?, ?, ?, ?, ?)', ('scan', 'running', sys.argv[3], 'dedup', '2026-01-01T00:00:00+00:00'))",
+            "run = {'coordinator_generation': 2, 'updated_at': '2000-01-01T00:00:00+00:00'}",
+            "live = module['coordinator_lease_is_live'](connection, run, scan, '2026-01-01T00:00:20+00:00')",
+            "module['recover_candidate_ledger_publication'](connection, 'scan')",
+            "ledger = module['scan_directory_path'](scan, 'artifacts', '02_discovery', 'candidate_ledger.jsonl')",
+            "canonical = module['filesystem_path'](Path(sys.argv[4]))",
+            "publication = module['temporary_artifact_path'](canonical, 'publish')",
+            "os.link(module['filesystem_path'](Path(sys.argv[5])), publication)",
+            "promotion = module['promote_staged_file'](str(publication), str(canonical))",
+            "module['finish_staged_file'](promotion)",
+            "print(json.dumps({'heartbeatLive': live, 'recoveredLedger': ledger.read_text(encoding='utf-8'), 'publishedLedger': canonical.read_text(encoding='utf-8')}))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts", "deep_scan_workbench.py"),
+          nearLimitScanDirectory,
+          nearLimitReducer,
+          atomicLedger,
+          atomicStagedLedger,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(nearLimitDeepScan.status, nearLimitDeepScan.stderr).toBe(0);
+      expect(JSON.parse(nearLimitDeepScan.stdout)).toEqual({
+        heartbeatLive: true,
+        recoveredLedger: "restored\n",
+        publishedLedger: "published\n",
+      });
+      const findingDirectory = join(
+        longScanDirectory,
+        "findings",
+        "candidate-1",
+      );
+      await mkdir(join(findingDirectory, "poc"), { recursive: true });
+      await writeFile(join(findingDirectory, "candidate-1.md"), "# Finding\n");
+      await writeFile(join(findingDirectory, "poc", "repro.txt"), "proof\n");
+      const artifactProbe = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "from pathlib import Path",
+            "module = runpy.run_path(sys.argv[1])",
+            "scan_dir = Path(sys.argv[2])",
+            "names = ('report.md', 'findings.json', 'exports/results.sarif')",
+            "artifacts = {name: module['available_artifact_path'](scan_dir, scan_dir / name) is not None for name in names}",
+            "near_limit = Path(sys.argv[3])",
+            "artifacts['nearLimitRequired'] = module['artifact_path'](near_limit, 'scan-manifest.json', required=True) is not None",
+            "artifacts['nearLimitAvailable'] = module['available_artifact_path'](near_limit, near_limit / 'scan-manifest.json') is not None",
+            "artifacts['findingArtifacts'] = module['finding_artifact_paths'](scan_dir, {'writeup': {'reportPath': 'findings/candidate-1/candidate-1.md'}})",
+            "print(json.dumps(artifacts))",
+          ].join("\n"),
+          workbench,
+          longScanDirectory,
+          nearLimitScanDirectory,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(artifactProbe.status, artifactProbe.stderr).toBe(0);
+      expect(JSON.parse(artifactProbe.stdout)).toEqual({
+        "report.md": true,
+        "findings.json": true,
+        "exports/results.sarif": true,
+        nearLimitRequired: true,
+        nearLimitAvailable: true,
+        findingArtifacts: [
+          "findings/candidate-1/candidate-1.md",
+          "findings/candidate-1/poc/repro.txt",
+        ],
+      });
+      const mixedStarted = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "start-headless-standard-scan",
+          "--thread-id",
+          "mixed-long-path-test",
+          "--target-path",
+          repository,
+          "--scope",
+          ".",
+          "--scan-root",
+          scanRoot,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(mixedStarted.status, mixedStarted.stderr).toBe(0);
+      expect(JSON.parse(mixedStarted.stdout)).toMatchObject({
+        scan: { targetPath: repository },
+        workspace: { targetPath: repository },
+      });
+      const inspected = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "inspect-target",
+          "--target-path",
+          longRepository,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(inspected.status, inspected.stderr).toBe(0);
+      expect(JSON.parse(inspected.stdout)).toMatchObject({
+        displayName: "repository",
+        targetPath: longRepository,
+      });
+
+      const preflight = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, pathlib, runpy, sys",
+            "module = runpy.run_path(sys.argv[1])",
+            "_, metadata = module['discover_config_paths'](cwd=pathlib.Path(sys.argv[2]), profile_layer_path=None)",
+            "print(json.dumps(metadata))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+          longRepository,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(preflight.status, preflight.stderr).toBe(0);
+      expect(JSON.parse(preflight.stdout)).toMatchObject({
+        cwd: longRepository,
+        project_root: longRepository,
+      });
+
+      const started = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "start-headless-standard-scan",
+          "--thread-id",
+          "long-path-test",
+          "--target-path",
+          longRepository,
+          "--scope",
+          ".",
+          "--scan-root",
+          scanRoot,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(started.status, started.stderr).toBe(0);
+      expect(JSON.parse(started.stdout)).toMatchObject({
+        scan: { targetPath: longRepository },
+        workspace: { targetPath: longRepository },
+      });
+
+      const legacyTarget = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import sqlite3, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "from windows_paths import extended_path, filesystem_path",
+            "from workbench_target_state import ensure_security_target",
+            "database = filesystem_path(Path(sys.argv[2]) / 'workbench.sqlite3')",
+            "connection = sqlite3.connect(database)",
+            "target_path = sys.argv[3]",
+            "target_id = connection.execute('SELECT id FROM security_targets WHERE current_path = ?', (target_path,)).fetchone()[0]",
+            "legacy_path = str(extended_path(Path(target_path)))",
+            "fixture = sqlite3.connect(':memory:')",
+            "fixture.row_factory = sqlite3.Row",
+            "fixture.executescript('CREATE TABLE security_targets (id TEXT PRIMARY KEY, current_path TEXT); CREATE TABLE workspaces (target_id TEXT, target_path TEXT); CREATE TABLE scans (target_id TEXT, target_path TEXT)')",
+            "fixture.executemany('INSERT INTO security_targets VALUES (?, ?)', ((target_id, target_path), ('legacy-target', legacy_path)))",
+            "fixture.execute('INSERT INTO scans VALUES (?, ?)', ('legacy-target', legacy_path))",
+            "assert ensure_security_target(fixture, target_path) == target_id",
+            "assert fixture.execute('SELECT target_id FROM scans').fetchone()[0] == 'legacy-target'",
+            "connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (legacy_path, target_id))",
+            "for table in ('workspaces', 'scans'):",
+            "    connection.execute(f'UPDATE {table} SET target_path = ? WHERE target_id = ?', (legacy_path, target_id))",
+            "connection.commit()",
+            "print(target_id)",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          stateDirectory,
+          longRepository,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(legacyTarget.status, legacyTarget.stderr).toBe(0);
+      for (const repositoryPath of [
+        longRepository,
+        `\\\\?\\${longRepository}`,
+      ]) {
+        const legacyHistory = spawnSync(
+          python!,
+          ["-I", "-B", workbench, "list-scans", "--repository", repositoryPath],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: stateDirectory,
+            },
+          },
+        );
+        expect(legacyHistory.status, legacyHistory.stderr).toBe(0);
+        expect(JSON.parse(legacyHistory.stdout)).toMatchObject({
+          scans: [
+            {
+              targetId: legacyTarget.stdout.trim(),
+              targetPath: longRepository,
+            },
+          ],
+        });
+      }
+      const migratedTarget = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "start-headless-standard-scan",
+          "--thread-id",
+          "migrated-long-path-test",
+          "--target-path",
+          longRepository,
+          "--scope",
+          ".",
+          "--scan-root",
+          scanRoot,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(migratedTarget.status, migratedTarget.stderr).toBe(0);
+      expect(JSON.parse(migratedTarget.stdout)).toMatchObject({
+        scan: {
+          contract: { target: { targetId: legacyTarget.stdout.trim() } },
+          targetPath: longRepository,
+        },
+        workspace: { targetPath: longRepository },
+      });
+
+      const repositories = spawnSync(
+        python!,
+        ["-I", "-B", workbench, "list-repositories"],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(repositories.status, repositories.stderr).toBe(0);
+      expect(JSON.parse(repositories.stdout)).toMatchObject({
+        repositories: expect.arrayContaining([
+          expect.objectContaining({
+            checkoutAvailable: true,
+            targetPath: longRepository,
+          }),
+        ]),
+      });
+
+      const nearLimitScanRoot = join(root, "r".repeat(215 - root.length - 1));
+      await mkdir(nearLimitScanRoot);
+      for (const [command, threadId] of [
+        ["start-headless-standard-scan", "near-limit-standard-root"],
+        ["begin-deep-scan", "near-limit-deep-root"],
+      ] as const) {
+        const nearLimitStarted = spawnSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            workbench,
+            command,
+            "--thread-id",
+            threadId,
+            "--target-path",
+            longRepository,
+            "--scope",
+            ".",
+            "--scan-root",
+            nearLimitScanRoot,
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: stateDirectory,
+            },
+          },
+        );
+        expect(nearLimitStarted.status, nearLimitStarted.stderr).toBe(0);
+        const scan = JSON.parse(nearLimitStarted.stdout)[
+          command === "begin-deep-scan" ? "deepScan" : "scan"
+        ] as { scanDir: string };
+        expect(scan.scanDir.length).toBeGreaterThan(260);
+        expect(scan.scanDir).not.toStartWith("\\\\?\\");
+      }
+
+      const longDeepScanRoot = join(
+        root,
+        `deep-${"d".repeat(100)}`,
+        `deep-${"e".repeat(100)}`,
+      );
+      expect(longDeepScanRoot.length).toBeGreaterThan(260);
+      const deepStarted = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "begin-deep-scan",
+          "--thread-id",
+          "deep-long-path-test",
+          "--target-path",
+          longRepository,
+          "--scan-root",
+          longDeepScanRoot,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(deepStarted.status, deepStarted.stderr).toBe(0);
+      const deepScan = JSON.parse(deepStarted.stdout).deepScan as {
+        scanDir: string;
+        scanId: string;
+      };
+      expect(deepScan.scanDir.length).toBeGreaterThan(260);
+      expect(deepScan.scanDir).not.toStartWith("\\\\?\\");
+
+      const deepDiscovery = join(deepScan.scanDir, "artifacts", "02_discovery");
+      await mkdir(deepDiscovery, { recursive: true });
+      await writeFile(join(deepDiscovery, "in_scope_files.txt"), "app.ts\n");
+      await writeFile(
+        join(deepDiscovery, "candidate_ledger.jsonl"),
+        `${JSON.stringify({
+          candidate_id: "candidate-1",
+          summary: "candidate",
+          evidence: "evidence",
+          locations: [{ path: "app.ts" }],
+        })}\n`,
+      );
+      const budgetProbe = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "from pathlib import Path",
+            "from types import SimpleNamespace",
+            "module = runpy.run_path(sys.argv[1])",
+            "module['deep_scan'].configure(SimpleNamespace(require_canonical_scan_directory=module['require_canonical_scan_directory']))",
+            "scan = {'scan_dir': sys.argv[2]}",
+            "scan_dir = module['require_canonical_scan_directory'](Path(sys.argv[2]))",
+            "print(json.dumps(module['budget_exhausted_candidates'](scan, scan_dir)))",
+          ].join("\n"),
+          workbench,
+          deepScan.scanDir,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(budgetProbe.status, budgetProbe.stderr).toBe(0);
+      expect(JSON.parse(budgetProbe.stdout)).toEqual([
+        {
+          candidate_id: "candidate-1",
+          summary: "candidate",
+          evidence: "evidence",
+          locations: [{ path: "app.ts" }],
+        },
+      ]);
+
+      const deepPromptPath = join(deepScan.scanDir, "setup-prompt.md");
+      const deepArtifactDirectory = join(deepScan.scanDir, "setup-artifacts");
+      await writeFile(deepPromptPath, "# Setup\n");
+      await mkdir(deepArtifactDirectory);
+      const workerId = "00000000-0000-4000-8000-000000000001";
+      const workerUpdated = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "upsert-deep-scan-worker",
+          "--scan-id",
+          deepScan.scanId,
+          "--worker-id",
+          workerId,
+          "--kind",
+          "setup",
+          "--status",
+          "running",
+          "--prompt-path",
+          deepPromptPath,
+          "--artifact-dir",
+          deepArtifactDirectory,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(workerUpdated.status, workerUpdated.stderr).toBe(0);
+      expect(JSON.parse(workerUpdated.stdout)).toMatchObject({
+        deepScan: {
+          workers: [
+            {
+              artifactDir: deepArtifactDirectory,
+              id: workerId,
+              promptPath: deepPromptPath,
+              status: "running",
+            },
+          ],
+        },
+      });
+
+      const expectListed = (scanRoot: string) => {
+        const listed = spawnSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            workbench,
+            "list-scans",
+            "--repository",
+            longRepository,
+            "--scan-root",
+            scanRoot,
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: stateDirectory,
+            },
+          },
+        );
+        expect(listed.status, listed.stderr).toBe(0);
+        expect(JSON.parse(listed.stdout)).toMatchObject({
+          scans: [
+            {
+              scanDir: deepScan.scanDir,
+              scanId: deepScan.scanId,
+              targetPath: longRepository,
+            },
+          ],
+        });
+      };
+      expectListed(longDeepScanRoot);
+
+      const legacyScan = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import sqlite3, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "from windows_paths import extended_path, filesystem_path",
+            "database = filesystem_path(Path(sys.argv[2]) / 'workbench.sqlite3')",
+            "connection = sqlite3.connect(database)",
+            "connection.execute('UPDATE scans SET scan_dir = ? WHERE id = ?', (str(extended_path(Path(sys.argv[3]))), sys.argv[4]))",
+            "connection.commit()",
+            "print(extended_path(Path(sys.argv[5])))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          stateDirectory,
+          deepScan.scanDir,
+          deepScan.scanId,
+          longDeepScanRoot,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(legacyScan.status, legacyScan.stderr).toBe(0);
+      expectListed(longDeepScanRoot);
+      expectListed(legacyScan.stdout.trim());
     }
   });
 
@@ -5161,15 +6242,17 @@ describe("runtime directories and plugin Python boundary", () => {
           "from pathlib import Path",
           "sys.path.insert(0, sys.argv[1])",
           "from workbench_scan_start import archive_scan",
+          "from windows_paths import extended_path",
           "scan_dir = Path(sys.argv[2])",
+          "stored_scan_dir = extended_path(scan_dir)",
           "archived_scan_dir = Path(sys.argv[3])",
           "connection = sqlite3.connect(':memory:')",
           "connection.row_factory = sqlite3.Row",
           "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
           "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(stored_scan_dir), 'before'))",
           "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
-          "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
+          "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(stored_scan_dir / path)) for kind, path in artifacts.items()])",
           "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
           "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
           "scan = connection.execute('SELECT scan_dir FROM scans WHERE id = ?', ('previous-scan',)).fetchone()",

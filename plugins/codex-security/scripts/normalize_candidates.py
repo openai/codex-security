@@ -12,6 +12,10 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_paths import extended_path, filesystem_path, portable_path
+
 CWE = re.compile(r"(?i)CWE-(\d+)")
 ROLES = {
     "entrypoint": 0,
@@ -70,9 +74,9 @@ def relative_file(value: Any, repo_root: Path) -> tuple[str, Path]:
         or (sys.platform == "win32" and re.match(r"^[A-Za-z]:", raw))
     ):
         raise ValueError("path: expected a repository-relative path without traversal")
-    resolved = (repo_root / raw).resolve(strict=True)
+    resolved = filesystem_path(repo_root / raw).resolve(strict=True)
     try:
-        relative = resolved.relative_to(repo_root).as_posix()
+        relative = portable_path(resolved).relative_to(portable_path(repo_root)).as_posix()
     except ValueError as error:
         raise ValueError("path: must resolve inside --repo-root") from error
     if not resolved.is_file():
@@ -187,9 +191,11 @@ def read_scope(path: Path, repo_root: Path, *, allow_missing: bool = False) -> s
                 candidate = PurePosixPath(line)
                 if candidate.is_absolute() or ".." in candidate.parts or "\0" in line:
                     raise ValueError(f"in-scope file row {number}: unsafe deleted path") from error
-                resolved = (repo_root / line).resolve(strict=False)
+                resolved = filesystem_path(repo_root / line).resolve(strict=False)
                 try:
-                    relative = resolved.relative_to(repo_root).as_posix()
+                    relative = (
+                        portable_path(resolved).relative_to(portable_path(repo_root)).as_posix()
+                    )
                 except ValueError as escaped:
                     raise ValueError(
                         f"in-scope file row {number}: path escapes repository"
@@ -281,12 +287,14 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
-        repo_root = Path(args.repo_root).expanduser().resolve(strict=True)
+        repo_root = filesystem_path(Path(args.repo_root).expanduser()).resolve(strict=True)
         if not repo_root.is_dir():
             raise ValueError("--repo-root: expected a directory")
-        output = Path(args.out).expanduser().resolve(strict=False)
-        scope_path = Path(args.in_scope_files).expanduser().resolve(strict=True)
-        inputs = sorted({Path(value).expanduser().resolve(strict=True) for value in args.input})
+        output = filesystem_path(Path(args.out).expanduser()).resolve(strict=False)
+        scope_path = filesystem_path(Path(args.in_scope_files).expanduser()).resolve(strict=True)
+        inputs = sorted(
+            {filesystem_path(Path(value).expanduser()).resolve(strict=True) for value in args.input}
+        )
         if output in inputs:
             raise ValueError("--out: must not also be an input")
         if output == scope_path:
@@ -313,7 +321,7 @@ def main() -> None:
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
-                dir=output.parent,
+                dir=extended_path(output.parent),
                 prefix=f".{output.name}.",
                 suffix=".tmp",
                 delete=False,

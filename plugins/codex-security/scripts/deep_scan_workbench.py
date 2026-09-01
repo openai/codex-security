@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_config import resolve_deep_scan_config
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import _read_scan_local_json
+from windows_paths import extended_path, filesystem_path, portable_path
 from workbench.handoff import require_current_continuation
 from workbench_target import (
     directory_content_digest,
@@ -242,6 +243,10 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
     return dependencies().require_canonical_scan_directory(scan_dir)
 
 
+def scan_directory_path(scan: sqlite3.Row, *parts: str) -> Path:
+    return filesystem_path(Path(scan["scan_dir"]).joinpath(*parts))
+
+
 def safe_segment(value: str) -> str:
     return dependencies().safe_segment(value)
 
@@ -310,25 +315,26 @@ def deep_scan_path(
     if not supplied.is_absolute():
         raise SystemExit(f"{label} must be an absolute path inside the scan directory.")
     try:
-        resolved = supplied.resolve(strict=True)
-        scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
-        resolved.relative_to(scan_dir)
+        resolved = type(supplied)(filesystem_path(supplied)).resolve(strict=True)
+        scan_dir = require_canonical_scan_directory(scan_directory_path(scan))
+        portable_resolved = portable_path(resolved)
+        portable_resolved.relative_to(portable_path(scan_dir))
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(f"{label} must be an existing path inside the scan directory.") from exc
-    if os.path.normcase(resolved) != os.path.normcase(supplied.absolute()):
+    if os.path.normcase(portable_resolved) != os.path.normcase(portable_path(supplied.absolute())):
         raise SystemExit(f"{label} must be a canonical non-symlink path.")
     if kind == "file" and not resolved.is_file():
         raise SystemExit(f"{label} must be a regular file.")
     if kind == "directory" and not resolved.is_dir():
         raise SystemExit(f"{label} must be a directory.")
-    return str(resolved)
+    return str(portable_resolved)
 
 
 def deep_scan_output_path(scan: sqlite3.Row, value: str, label: str) -> str:
     supplied = Path(value).expanduser()
     if not supplied.is_absolute():
         raise SystemExit(f"{label} must be an absolute path inside the scan directory.")
-    if supplied.exists():
+    if filesystem_path(supplied).exists():
         return deep_scan_path(scan, str(supplied), label, kind="file")
     parent = Path(deep_scan_path(scan, str(supplied.parent), label, kind="directory"))
     output = parent / supplied.name
@@ -337,12 +343,16 @@ def deep_scan_output_path(scan: sqlite3.Row, value: str, label: str) -> str:
     return str(output)
 
 
+def temporary_artifact_path(path: Path, suffix: str) -> Path:
+    return filesystem_path(path.with_name(f".{path.name}.{uuid.uuid4()}.{suffix}"))
+
+
 def promote_staged_file(staged_path: str, output_path: str) -> tuple[Path, Path, Path | None]:
-    staged = Path(staged_path)
-    output = Path(output_path)
+    staged = filesystem_path(Path(staged_path))
+    output = filesystem_path(Path(output_path))
     if staged == output:
         raise SystemExit("A staged Deep Scan artifact must not be its published output path.")
-    backup = output.with_name(f".{output.name}.{uuid.uuid4()}.backup") if output.exists() else None
+    backup = temporary_artifact_path(output, "backup") if output.exists() else None
     if backup is not None:
         os.replace(output, backup)
     try:
@@ -394,10 +404,13 @@ def publication_matches_snapshot(publication: Path, snapshot: Path) -> bool:
 
 
 def canonical_discovery_artifacts(scan: sqlite3.Row) -> dict[str, str]:
-    discovery_dir = Path(scan["scan_dir"]) / "artifacts" / "02_discovery"
     artifacts = {
-        "inScopeFilesPath": discovery_dir / "in_scope_files.txt",
-        "candidateLedgerPath": discovery_dir / "candidate_ledger.jsonl",
+        "inScopeFilesPath": scan_directory_path(
+            scan, "artifacts", "02_discovery", "in_scope_files.txt"
+        ),
+        "candidateLedgerPath": scan_directory_path(
+            scan, "artifacts", "02_discovery", "candidate_ledger.jsonl"
+        ),
     }
     labels = {
         "inScopeFilesPath": "Canonical in-scope inventory path",
@@ -435,15 +448,17 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         run["canonical_inventory_path"] is None
         and run["status"] == "succeeded"
         and run["manifest_path"] is not None
-        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
-        and (Path(scan["scan_dir"]) / "artifacts" / "02_discovery" / "in_scope_files.txt").exists()
+        and run["manifest_path"]
+        != str(portable_path(scan_directory_path(scan, "scan-manifest.json")))
+        and scan_directory_path(scan, "artifacts", "02_discovery", "in_scope_files.txt").exists()
     ):
         canonical_artifacts = canonical_discovery_artifacts(scan)
         if (
             run["terminal_reason"] == "capped"
             and run["completion_sequence"] == 0
             and deep_scan_deadline_reached(run)
-            and Path(canonical_artifacts["candidateLedgerPath"]).stat().st_size != 0
+            and filesystem_path(Path(canonical_artifacts["candidateLedgerPath"])).stat().st_size
+            != 0
         ):
             raise SystemExit(
                 "A capped Deep Scan without completed discoveries requires an empty "
@@ -767,7 +782,7 @@ def begin_deep_scan_for_target(
     target = require_target(args.target_path)
     require_scannable_target(target)
     scope = require_scope(args.scope, "deep", target)
-    target_path = str(target)
+    target_path = str(portable_path(target))
     existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
     if existing is not None:
         return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
@@ -833,10 +848,17 @@ def begin_deep_scan_for_target(
         if workflow_version is None:
             raise SystemExit("workflow-version is required.")
         root = (
-            Path(args.scan_root).expanduser().resolve() if args.scan_root else state_dir() / "scans"
+            filesystem_path(Path(args.scan_root).expanduser()).resolve()
+            if args.scan_root
+            else state_dir() / "scans"
         )
-        target_root = (root / safe_segment(target.name)).resolve()
-        if target_root == target or target in target_root.parents:
+        target_root = filesystem_path(root / safe_segment(target.name)).resolve()
+        portable_target = portable_path(target)
+        portable_target_root = portable_path(target_root)
+        if (
+            portable_target_root == portable_target
+            or portable_target in portable_target_root.parents
+        ):
             raise SystemExit("The scan artifact directory must be outside the selected target.")
         target_root.mkdir(parents=True, exist_ok=True)
         user_context = user_context_argument(args)
@@ -846,10 +868,12 @@ def begin_deep_scan_for_target(
         scan_id = str(uuid.uuid4())
         timestamp = now()
         target_id = ensure_security_target(connection, target_path)
-        scan_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
-                dir=target_root,
+        scan_dir = filesystem_path(
+            Path(
+                tempfile.mkdtemp(
+                    prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
+                    dir=extended_path(target_root),
+                )
             )
         ).resolve()
         connection.execute(
@@ -893,7 +917,7 @@ def begin_deep_scan_for_target(
                 scope,
                 user_context,
                 thread_id,
-                str(scan_dir),
+                str(portable_path(scan_dir)),
                 model,
                 reasoning_effort,
                 timestamp,
@@ -962,11 +986,11 @@ def coordinator_lease_is_live(
             seconds=DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS
         )
     heartbeat_time = _parse_timestamp(str(run["updated_at"]))
-    heartbeat_path = (
-        Path(scan["scan_dir"])
-        / "artifacts"
-        / "deep_discovery"
-        / f"coordinator-heartbeat-{run['coordinator_generation']}.json"
+    heartbeat_path = scan_directory_path(
+        scan,
+        "artifacts",
+        "deep_discovery",
+        f"coordinator-heartbeat-{run['coordinator_generation']}.json",
     )
     try:
         heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
@@ -1123,7 +1147,7 @@ def recover_expired_coordinator(
 
 def recover_candidate_ledger_publication(connection: sqlite3.Connection, scan_id: str) -> None:
     scan = require_scan(connection, scan_id)
-    ledger = Path(scan["scan_dir"]) / "artifacts" / "02_discovery" / "candidate_ledger.jsonl"
+    ledger = scan_directory_path(scan, "artifacts", "02_discovery", "candidate_ledger.jsonl")
     backups = sorted(
         ledger.parent.glob(f".{ledger.name}.*.backup"),
         key=lambda backup: backup.stat().st_mtime_ns,
@@ -1142,7 +1166,7 @@ def recover_candidate_ledger_publication(connection: sqlite3.Connection, scan_id
         (scan_id,),
     )
     for reducer in reducers:
-        snapshot = Path(reducer["artifact_dir"]) / "canonical" / ledger.name
+        snapshot = filesystem_path(Path(reducer["artifact_dir"]) / "canonical" / ledger.name)
         if not snapshot.exists():
             continue
         published = publication_matches_snapshot(ledger, snapshot)
@@ -1607,7 +1631,7 @@ def commit_deep_scan_dedup_locked(
                 "Staged candidate ledger path",
                 kind="file",
             )
-            discovery_dir = Path(scan["scan_dir"]) / "artifacts" / "02_discovery"
+            discovery_dir = scan_directory_path(scan, "artifacts", "02_discovery")
             deep_scan_path(
                 scan,
                 str(discovery_dir / "in_scope_files.txt"),
@@ -1643,11 +1667,9 @@ def commit_deep_scan_dedup_locked(
         if not inputs or any(row["merge_state"] != "merging" for row in inputs):
             raise SystemExit("Dedup inputs are not in the claimed merging state.")
         if candidate_ledger_path and canonical_candidate_ledger_path:
-            canonical_path = Path(canonical_candidate_ledger_path)
-            publication_copy = canonical_path.with_name(
-                f".{canonical_path.name}.{uuid.uuid4()}.publish"
-            )
-            create_publication_copy(candidate_ledger_path, publication_copy)
+            canonical_path = filesystem_path(Path(canonical_candidate_ledger_path))
+            publication_copy = temporary_artifact_path(canonical_path, "publish")
+            create_publication_copy(filesystem_path(Path(candidate_ledger_path)), publication_copy)
             promotion = promote_staged_file(
                 str(publication_copy),
                 canonical_candidate_ledger_path,
@@ -1727,7 +1749,9 @@ def finish_deep_scan_locked(
                 scan, args.manifest_path, "Deep Scan coordinator manifest path", kind="file"
             )
         )
-        standard_scan_manifest = manifest_path == str(Path(scan["scan_dir"]) / "scan-manifest.json")
+        standard_scan_manifest = manifest_path == str(
+            portable_path(scan_directory_path(scan, "scan-manifest.json"))
+        )
 
         failure_capped = False
         if (
@@ -1738,12 +1762,12 @@ def finish_deep_scan_locked(
             for artifact_name in ("scan-manifest.json", "findings.json", "coverage.json"):
                 deep_scan_path(
                     scan,
-                    str(Path(scan["scan_dir"]) / artifact_name),
+                    str(scan_directory_path(scan, artifact_name)),
                     f"Canonical parent {artifact_name}",
                     kind="file",
                 )
             coverage = _read_scan_local_json(
-                Path(scan["scan_dir"]), "coverage.json", "Canonical parent coverage.json"
+                scan_directory_path(scan), "coverage.json", "Canonical parent coverage.json"
             )
             deferred = coverage.get("deferred")
             failure_capped = (
@@ -1842,7 +1866,7 @@ def finish_deep_scan_locked(
             for artifact_name in ("scan-manifest.json", "findings.json", "coverage.json"):
                 deep_scan_path(
                     scan,
-                    str(Path(scan["scan_dir"]) / artifact_name),
+                    str(scan_directory_path(scan, artifact_name)),
                     f"Canonical parent {artifact_name}",
                     kind="file",
                 )
@@ -1868,7 +1892,8 @@ def finish_deep_scan_locked(
             and (
                 standard_scan_manifest
                 or canonical_artifacts is not None
-                and Path(canonical_artifacts["candidateLedgerPath"]).stat().st_size == 0
+                and filesystem_path(Path(canonical_artifacts["candidateLedgerPath"])).stat().st_size
+                == 0
             )
         )
         if successful_reducer is None and not zero_discovery_deadline:

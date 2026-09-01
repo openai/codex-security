@@ -43,6 +43,7 @@ from rank_preview import (
     preview_for,
     preview_for_bytes,
 )
+from windows_paths import extended_path, filesystem_path, portable_path
 from workbench_target import git_blob_bytes, git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
@@ -317,10 +318,12 @@ def resolve_scope(
         raise SystemExit(f"Scope must not use an NTFS alternate data stream: {stream}")
     if not scope_path.is_absolute():
         scope_path = repo / scope_path
+    scope_path = filesystem_path(scope_path)
+    repository = filesystem_path(repo).resolve()
+    portable_repository = portable_path(repository)
     if reject_symlinks:
-        repository = repo.resolve()
         try:
-            relative = scope_path.relative_to(repository)
+            relative = portable_path(scope_path).relative_to(portable_repository)
         except ValueError as exc:
             raise SystemExit(f"Scope must be inside repo: {scope_path}") from exc
         ancestor = repository
@@ -330,7 +333,7 @@ def resolve_scope(
                     raise SystemExit(f"Scope must be inside repo: {scope_path}")
                 ancestor = ancestor.parent
                 continue
-            ancestor /= part
+            ancestor = filesystem_path(ancestor / part)
             try:
                 metadata = ancestor.stat(follow_symlinks=False)
             except OSError as exc:
@@ -338,9 +341,8 @@ def resolve_scope(
             if ancestor.is_symlink() or getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
                 raise SystemExit(f"Requested scope must not contain symbolic links: {ancestor}")
     scope_path = scope_path.resolve()
-    repo_resolved = repo.resolve()
     try:
-        scope_path.relative_to(repo_resolved)
+        portable_path(scope_path).relative_to(portable_repository)
     except ValueError as exc:
         raise SystemExit(f"Scope must be inside repo: {scope_path}") from exc
     if not scope_path.is_dir() and not scope_path.is_file():
@@ -349,6 +351,7 @@ def resolve_scope(
 
 
 def write_jsonl(output: Path, rows: list[JsonRow]) -> None:
+    output = filesystem_path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -357,6 +360,7 @@ def write_jsonl(output: Path, rows: list[JsonRow]) -> None:
 
 
 def write_json(output: Path, payload: dict[str, object]) -> None:
+    output = filesystem_path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -366,7 +370,7 @@ def write_json(output: Path, payload: dict[str, object]) -> None:
 
 def load_scopes_file(scopes_file: Path) -> list[str]:
     try:
-        loaded: object = json.loads(scopes_file.read_text(encoding="utf-8"))
+        loaded: object = json.loads(filesystem_path(scopes_file).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Unable to read scopes file: {scopes_file}") from exc
     if (
@@ -379,11 +383,12 @@ def load_scopes_file(scopes_file: Path) -> list[str]:
 
 
 def load_jsonl(path: Path, label: str, validator: RowValidator) -> list[JsonRow]:
-    if not path.exists():
+    input_path = filesystem_path(path)
+    if not input_path.exists():
         raise SystemExit(f"{label} missing: {path}")
 
     rows: list[JsonRow] = []
-    with path.open(encoding="utf-8") as handle:
+    with input_path.open(encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             if not raw_line.strip():
                 raise SystemExit(f"{path}:{line_number}: blank JSONL rows are not allowed")
@@ -455,7 +460,7 @@ def require_unique_paths(rows: list[JsonRow], label: str) -> None:
 
 
 def make_repo_rank_input(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).expanduser().resolve()
+    repo = filesystem_path(Path(args.repo).expanduser()).resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
     scopes = [args.scope]
@@ -471,20 +476,23 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
     }
     rows_by_path: dict[str, JsonRow] = {}
     for scope_abs in resolved_scopes:
-        scope_rel = scope_abs.relative_to(repo)
+        scope_rel = portable_path(scope_abs).relative_to(portable_path(repo))
         area = args.area or scope_rel.as_posix()
-        candidates = (scope_abs,) if scope_abs.is_file() else scope_abs.rglob("*")
+        candidates = (scope_abs,) if scope_abs.is_file() else extended_path(scope_abs).rglob("*")
         for path in candidates:
+            path = filesystem_path(path)
             try:
                 if path.is_symlink() or not path.is_file():
                     continue
-                path.resolve(strict=True).relative_to(repo)
+                portable_path(path.resolve(strict=True)).relative_to(portable_path(repo))
             except (OSError, ValueError):
                 continue
-            rel = path.relative_to(repo)
+            rel = portable_path(path).relative_to(portable_path(repo))
             directly_requested = path in directly_requested_files
             excluded_path = (
-                path.relative_to(scope_abs if scope_abs.is_dir() else scope_abs.parent)
+                portable_path(path).relative_to(
+                    portable_path(scope_abs if scope_abs.is_dir() else scope_abs.parent)
+                )
                 if explicit_scopes
                 else rel
             )
@@ -513,17 +521,17 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
             )
 
     rows = sorted(rows_by_path.values(), key=lambda row: str(row["path"]))
-    output = Path(args.out).expanduser()
+    output = filesystem_path(Path(args.out).expanduser())
     write_jsonl(output, rows)
     print(f"Wrote {len(rows)} rows to {output}")
 
 
 def make_repo_scope_input(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).expanduser().resolve()
+    repo = filesystem_path(Path(args.repo).expanduser()).resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
 
-    scopes = load_scopes_file(Path(args.scopes_file).expanduser())
+    scopes = load_scopes_file(filesystem_path(Path(args.scopes_file).expanduser()))
     rows_by_path: dict[str, JsonRow] = {}
     for scope in scopes:
         scope_path = resolve_scope(repo, scope, expand_user=False, reject_symlinks=True)
@@ -534,6 +542,12 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
             if git_candidates is not None:
                 candidates = git_candidates
             else:
+                absolute_search = os.name == "nt" and str(repo).startswith("\\\\?\\")
+                search_path = (
+                    str(scope_path)
+                    if absolute_search
+                    else str(portable_path(scope_path).relative_to(portable_path(repo)))
+                )
                 command = [
                     "rg",
                     "--files",
@@ -543,10 +557,15 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                     "--glob",
                     "!.git/**",
                     "--",
-                    str(scope_path.relative_to(repo)),
+                    search_path,
                 ]
                 try:
-                    result = subprocess.run(command, cwd=repo, capture_output=True, check=False)
+                    result = subprocess.run(
+                        command,
+                        cwd=None if absolute_search else repo,
+                        capture_output=True,
+                        check=False,
+                    )
                 except OSError as exc:
                     ignore_names = (".gitignore", ".ignore", ".rgignore")
                     ancestors = (scope_path, *scope_path.parents)
@@ -560,7 +579,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                         )
                         or any(
                             path.name in ignore_names
-                            for path in scope_path.rglob("*")
+                            for path in extended_path(scope_path).rglob("*")
                             if path.is_file()
                         )
                     )
@@ -568,19 +587,22 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                         raise SystemExit(
                             "Could not safely enumerate ignored scoped files without Git or ripgrep."
                         ) from exc
-                    candidates = scope_path.rglob("*")
+                    candidates = extended_path(scope_path).rglob("*")
                 else:
                     if result.returncode not in (0, 1):
                         detail = result.stderr.decode("utf-8", errors="replace").strip()
                         raise SystemExit(f"Could not enumerate scoped repository files: {detail}")
                     candidates = (
-                        repo / os.fsdecode(path) for path in result.stdout.split(b"\0") if path
+                        filesystem_path(repo / os.fsdecode(path))
+                        for path in result.stdout.split(b"\0")
+                        if path
                     )
         for path in candidates:
+            path = filesystem_path(path)
             try:
                 if path.is_symlink() or not path.is_file():
                     continue
-                relative = path.resolve(strict=True).relative_to(repo)
+                relative = portable_path(path.resolve(strict=True)).relative_to(portable_path(repo))
             except (OSError, ValueError):
                 continue
             if ".git" in relative.parts:
@@ -588,15 +610,15 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
             rows_by_path.setdefault(relative.as_posix(), {"path": relative.as_posix()})
 
     rows = sorted(rows_by_path.values(), key=lambda row: str(row["path"]))
-    output = Path(args.out).expanduser()
+    output = filesystem_path(Path(args.out).expanduser())
     write_jsonl(output, rows)
     print(f"Wrote {len(rows)} scoped paths to {output}")
 
 
 def bind_repo_scopes(args: argparse.Namespace) -> None:
     scopes = load_scopes_file(Path(args.scopes_file).expanduser())
-    manifest_path = Path(args.manifest).expanduser()
-    coverage_path = Path(args.coverage).expanduser()
+    manifest_path = filesystem_path(Path(args.manifest).expanduser())
+    coverage_path = filesystem_path(Path(args.coverage).expanduser())
     try:
         manifest: object = json.loads(manifest_path.read_text(encoding="utf-8"))
         coverage: object = json.loads(coverage_path.read_text(encoding="utf-8"))
@@ -676,18 +698,18 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
 
 
 def make_diff_rank_input(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).expanduser().resolve()
+    repo = filesystem_path(Path(args.repo).expanduser()).resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
 
     changed = [
         (path, status)
         for path, status in git_changed_paths(repo, args.base, args.head, args.mode)
-        if not path_is_excluded(path.relative_to(repo))
+        if not path_is_excluded(portable_path(path).relative_to(portable_path(repo)))
         and path.suffix.lower() in TEXT_CODE_EXTENSIONS
     ]
     revision_paths = [
-        path.relative_to(repo)
+        portable_path(path).relative_to(portable_path(repo))
         for path, status in changed
         if args.mode == "revisions" and status != "D"
     ]
@@ -703,7 +725,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
 
     rows: list[JsonRow] = []
     for path, status in changed:
-        rel = path.relative_to(repo)
+        rel = portable_path(path).relative_to(portable_path(repo))
 
         if status == "D":
             preview = ""
@@ -716,23 +738,25 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             preview, is_binary = preview_for_bytes(rel, content, args.preview_bytes)
             if is_binary:
                 continue
-        elif path.is_symlink():
-            preview = ""
-        elif path.is_file():
-            try:
-                path.resolve(strict=True).relative_to(repo)
-            except (OSError, ValueError):
-                preview = ""
-            else:
-                preview, is_binary = preview_for(path, args.preview_bytes)
-                if is_binary:
-                    continue
         else:
-            preview = ""
+            path = filesystem_path(path)
+            if path.is_symlink():
+                preview = ""
+            elif path.is_file():
+                try:
+                    portable_path(path.resolve(strict=True)).relative_to(portable_path(repo))
+                except (OSError, ValueError):
+                    preview = ""
+                else:
+                    preview, is_binary = preview_for(path, args.preview_bytes)
+                    if is_binary:
+                        continue
+            else:
+                preview = ""
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
 
     rows.sort(key=lambda row: str(row["path"]))
-    output = Path(args.out).expanduser()
+    output = filesystem_path(Path(args.out).expanduser())
     write_jsonl(output, rows)
     print(f"Wrote {len(rows)} rows to {output}")
 
@@ -745,7 +769,7 @@ def make_rank_shards(args: argparse.Namespace) -> None:
     rows = load_jsonl(rank_input, "Rank input", validate_rank_input_row)
     require_unique_paths(rows, "Rank input")
 
-    output_dir = Path(args.out_dir).expanduser()
+    output_dir = filesystem_path(Path(args.out_dir).expanduser())
     output_dir.mkdir(parents=True, exist_ok=True)
     existing = sorted((*output_dir.glob(SHARD_INPUT_GLOB), *output_dir.glob(SHARD_OUTPUT_GLOB)))
     if existing:
@@ -816,8 +840,8 @@ def make_rank_pool_plan(args: argparse.Namespace) -> None:
     if args.usable_worker_slots < 1:
         raise SystemExit("--usable-worker-slots must be at least 1")
 
-    shard_dir = Path(args.shard_dir).expanduser()
-    output = Path(args.out).expanduser()
+    shard_dir = filesystem_path(Path(args.shard_dir).expanduser())
+    output = filesystem_path(Path(args.out).expanduser())
     require_plan_shard_dir(output, shard_dir)
     input_shards = discover_input_shards(shard_dir)
     worker_count = min(len(input_shards), args.usable_worker_slots, RANK_POOL_WORKER_CAP)
@@ -844,9 +868,10 @@ def make_rank_pool_plan(args: argparse.Namespace) -> None:
 
 
 def load_rank_pool_plan(plan_path: Path) -> tuple[dict[str, object], bytes]:
-    if not plan_path.exists():
+    plan_file = filesystem_path(plan_path)
+    if not plan_file.exists():
         raise SystemExit(f"Rank pool plan missing: {plan_path}")
-    plan_bytes = plan_path.read_bytes()
+    plan_bytes = plan_file.read_bytes()
     try:
         payload: object = json.loads(plan_bytes)
     except json.JSONDecodeError as exc:
@@ -989,8 +1014,8 @@ def validate_rank_pool_plan(
 
 
 def validate_rank_worker_command(args: argparse.Namespace) -> None:
-    plan_path = Path(args.plan).expanduser()
-    shard_dir = Path(args.shard_dir).expanduser()
+    plan_path = filesystem_path(Path(args.plan).expanduser())
+    shard_dir = filesystem_path(Path(args.shard_dir).expanduser())
     _, _, workers, plan_bytes = validate_rank_pool_plan(plan_path, shard_dir)
 
     slot = require_integer(args.slot, "--slot", minimum=1)
@@ -1029,8 +1054,8 @@ def validate_rank_worker_command(args: argparse.Namespace) -> None:
 
 
 def validate_rank_pool_command(args: argparse.Namespace) -> None:
-    plan_path = Path(args.plan).expanduser()
-    shard_dir = Path(args.shard_dir).expanduser()
+    plan_path = filesystem_path(Path(args.plan).expanduser())
+    shard_dir = filesystem_path(Path(args.shard_dir).expanduser())
     input_shards, expected_output_names, workers, _ = validate_rank_pool_plan(plan_path, shard_dir)
 
     actual_output_names = {path.name for path in shard_dir.glob(SHARD_OUTPUT_GLOB)}
@@ -1092,7 +1117,7 @@ def merge_rank_outputs(args: argparse.Namespace) -> None:
     authoritative_rows = load_jsonl(rank_input, "Rank input", validate_rank_input_row)
     require_unique_paths(authoritative_rows, "Rank input")
 
-    shard_dir = Path(args.shard_dir).expanduser()
+    shard_dir = filesystem_path(Path(args.shard_dir).expanduser())
     input_shards = discover_input_shards(shard_dir)
     output_shards = sorted(shard_dir.glob(SHARD_OUTPUT_GLOB))
     expected_output_names = {

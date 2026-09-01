@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
+from windows_paths import extended_path, portable_path
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
@@ -93,6 +94,7 @@ def archive_scan(
     timestamp: str,
     canonical_directory: Callable[[Path], Path],
 ) -> None:
+    portable_scan_dir = portable_path(scan_dir)
     archived_scan_dir = (
         canonical_directory(Path(args.archived_scan_dir).expanduser())
         if args.archived_scan_dir is not None
@@ -100,13 +102,14 @@ def archive_scan(
     )
     if archived_scan_dir is not None and (
         not args.archive_existing
-        or archived_scan_dir.parent != scan_dir.parent
+        or portable_path(archived_scan_dir).parent != portable_scan_dir.parent
         or not archived_scan_dir.name.startswith(f"{scan_dir.name}.previous-")
     ):
         raise SystemExit("The archived scan must be a previous sibling of the scan directory.")
 
     previous_scan = connection.execute(
-        "SELECT id, status FROM scans WHERE scan_dir = ?", (str(scan_dir),)
+        "SELECT id, status FROM scans WHERE scan_dir IN (?, ?)",
+        (str(portable_scan_dir), str(extended_path(portable_scan_dir))),
     ).fetchone()
     if previous_scan is None:
         return
@@ -127,21 +130,23 @@ def archive_scan(
                 "The archived scan directory is required to preserve existing scan artifacts."
             )
         archived_scan_dir = Path(
-            tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
+            tempfile.mkdtemp(
+                prefix=f"{scan_dir.name}.previous-", dir=extended_path(scan_dir.parent)
+            )
         ).resolve()
     connection.execute(
         "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
-        (str(archived_scan_dir), timestamp, previous_scan["id"]),
+        (str(portable_path(archived_scan_dir)), timestamp, previous_scan["id"]),
     )
     for artifact in artifacts:
         try:
-            relative_path = Path(artifact["path"]).relative_to(scan_dir)
+            relative_path = portable_path(Path(artifact["path"])).relative_to(portable_scan_dir)
         except ValueError:
             continue
         connection.execute(
             "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
             (
-                str(archived_scan_dir / relative_path),
+                str(portable_path(archived_scan_dir / relative_path)),
                 previous_scan["id"],
                 artifact["kind"],
             ),
@@ -173,7 +178,7 @@ def insert_running_scan(
         scan_dir = Path(
             tempfile.mkdtemp(
                 prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
-                dir=target_root,
+                dir=extended_path(target_root),
             )
         ).resolve()
     connection.execute(
@@ -191,7 +196,7 @@ def insert_running_scan(
             scan_id,
             workspace["id"],
             workspace["target_id"],
-            str(target),
+            workspace["target_path"],
             *target_identity,
             scope,
             workspace["default_mode"],
@@ -202,7 +207,7 @@ def insert_running_scan(
             diff_target["headRevision"] if diff_target else None,
             diff_target.get("contentDigest") if diff_target else None,
             target_summary,
-            str(scan_dir),
+            str(portable_path(scan_dir)),
             optional_text(model, maximum=200),
             optional_text(reasoning_effort, maximum=32),
             handoff_status,

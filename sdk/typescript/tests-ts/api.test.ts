@@ -5457,7 +5457,7 @@ describe("CodexSecurity orchestration", () => {
       ...Array.from(
         { length: 1024 },
         (_, index) =>
-          `scope-${String(index).padStart(4, "0")}-${"a".repeat(115)}.ts`,
+          `scope-${String(index).padStart(4, "0")}-${"a".repeat(180)}.ts`,
       ),
     );
     await mkdir(repository);
@@ -5708,6 +5708,39 @@ describe("CodexSecurity orchestration", () => {
     ).toEqual([...paths].sort());
     for (const separator of ["\u0085", "\u2028", "\u2029"])
       expect(scopedSourceInputContents).not.toContain(separator);
+    const candidateInput = join(scanDir, "long-path-candidate.jsonl");
+    const candidateScope = join(scanDir, "long-path-scope.txt");
+    const normalizedCandidates = join(scanDir, "long-path-normalized.jsonl");
+    const candidatePath = paths.at(-1)!;
+    await writeFile(candidateScope, `${candidatePath}\n`);
+    await writeFile(
+      candidateInput,
+      `${JSON.stringify({
+        cwe_ids: ["CWE-20"],
+        locations: [{ path: candidatePath, start_line: 1, role: "sink" }],
+        summary: "summary",
+        evidence: "evidence",
+      })}\n`,
+    );
+    execFileSync(
+      interpreter!,
+      [
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+        "--input",
+        candidateInput,
+        "--out",
+        normalizedCandidates,
+        "--repo-root",
+        repository,
+        "--in-scope-files",
+        candidateScope,
+      ],
+      { stdio: "pipe" },
+    );
+    expect(
+      JSON.parse((await readFile(normalizedCandidates, "utf8")).trim()),
+    ).toMatchObject({ locations: [{ path: candidatePath }] });
     const manifest = join(scanDir, "scan-manifest.json");
     const coverage = join(scanDir, "coverage.json");
     await writeFile(

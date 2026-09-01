@@ -31,6 +31,7 @@
     "bin",
     "dist",
     "_bundled_plugin",
+    "!_bundled_plugin/**/__pycache__/**",
     "LICENSE",
     "README.md"
   ],

@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_paths import filesystem_path, portable_path
+
 TOKEN_FIELDS = {
     "input_tokens": "inputTokens",
     "cached_input_tokens": "cachedInputTokens",
@@ -365,11 +368,11 @@ def _rollout_path(value: object) -> Path | None:
     if not candidate.is_absolute():
         return None
     try:
-        resolved = candidate.resolve(strict=True)
+        resolved = filesystem_path(candidate).resolve(strict=True)
         if not resolved.is_file():
             return None
 
-        if resolved == candidate:
+        if portable_path(resolved) == portable_path(candidate.absolute()):
             return resolved
 
         if sys.platform == "darwin" and candidate.parts[1] in {"var", "tmp"}:

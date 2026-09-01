@@ -20,8 +20,10 @@ test.skipIf(process.platform !== "win32")(
     try {
       const probe = [
         "import argparse, json, sqlite3, sys",
+        "from pathlib import Path",
         "sys.path.insert(0, sys.argv[1])",
         "import workbench_scan_history as history",
+        "from windows_paths import extended_path",
         "connection = sqlite3.connect(':memory:')",
         "connection.row_factory = sqlite3.Row",
         "connection.executescript('''",
@@ -30,8 +32,9 @@ test.skipIf(process.platform !== "win32")(
         "CREATE TABLE finding_occurrences (scan_id TEXT);",
         "''')",
         "connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, ?, NULL, NULL, ?, NULL, NULL, ?, ?, NULL, NULL, ?, NULL, ?)', ('scan', 'repository', 'complete', '1', 'standard_repository', 'complete', sys.argv[2] + '/scan', '.', '1', '[]'))",
+        "connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, ?, NULL, NULL, ?, NULL, NULL, ?, ?, NULL, NULL, ?, NULL, ?)', ('legacy', 'repository', 'complete', '1', 'standard_repository', 'complete', str(extended_path(Path(sys.argv[2]) / 'legacy')), '.', '1', '[]'))",
         "connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, ?, NULL, NULL, ?, NULL, NULL, ?, ?, NULL, NULL, ?, NULL, ?)', ('sibling', 'repository', 'complete', '1', 'standard_repository', 'complete', sys.argv[2] + ' Other/scan', '.', '1', '[]'))",
-        "connection.execute('INSERT INTO scan_progress VALUES (?, 0, 1, 1, 1, ?)', ('scan', '1'))",
+        "connection.executemany('INSERT INTO scan_progress VALUES (?, 0, 1, 1, 1, ?)', [(name, '1') for name in ['scan', 'legacy', 'sibling']])",
         "args = argparse.Namespace(repository=None, scan_root=sys.argv[2].upper(), target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
         "print(json.dumps(history.list_scans(connection, args)))",
       ].join("\n");
@@ -43,8 +46,54 @@ test.skipIf(process.platform !== "win32")(
 
       expect(result.stderr).toBe("");
       expect(JSON.parse(result.stdout)).toMatchObject({
-        scans: [{ scanId: "scan" }],
+        scans: [{ scanId: "legacy" }, { scanId: "scan" }],
       });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform !== "win32")(
+  "archives a scan when only its previous sibling needs extended paths",
+  async () => {
+    const python = await resolvePluginPython();
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "codex-archive-")));
+    try {
+      const probe = [
+        "import argparse, json, sqlite3, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "from windows_paths import filesystem_path, WINDOWS_DIRECTORY_PATH_LIMIT",
+        "from workbench_scan_start import archive_scan",
+        "root = Path(sys.argv[2])",
+        "padding = WINDOWS_DIRECTORY_PATH_LIMIT - 1 - len('\\\\scan') - len(str(root).encode('utf-16-le')) // 2 - 1",
+        "assert padding > 0, 'temporary root leaves no room for the path-length boundary'",
+        "parent = root / ('p' * padding)",
+        "scan_dir = parent / 'scan'",
+        "archived_dir = parent / ('scan.previous-' + 'a' * 32)",
+        "scan_dir.mkdir(parents=True)",
+        "filesystem_path(archived_dir).mkdir()",
+        "assert filesystem_path(scan_dir) == scan_dir",
+        "assert filesystem_path(archived_dir) != archived_dir",
+        "connection = sqlite3.connect(':memory:')",
+        "connection.row_factory = sqlite3.Row",
+        "connection.executescript('CREATE TABLE scans (id TEXT, status TEXT, scan_dir TEXT, updated_at TEXT); CREATE TABLE scan_artifacts (scan_id TEXT, kind TEXT, path TEXT);')",
+        "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('scan', 'complete', str(scan_dir), 'before'))",
+        "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('scan', 'findings', str(filesystem_path(scan_dir / 'findings.json'))))",
+        "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_dir))",
+        "archive_scan(connection, args, scan_dir, 'after', lambda path: filesystem_path(path).resolve(strict=True))",
+        "assert connection.execute('SELECT scan_dir FROM scans').fetchone()[0] == str(archived_dir)",
+        "assert connection.execute('SELECT path FROM scan_artifacts').fetchone()[0] == str(archived_dir / 'findings.json')",
+        "print(json.dumps({'archived': True}))",
+      ].join("\n");
+      const result = await promisify(execFile)(
+        python,
+        ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts"), root],
+        { encoding: "utf8", timeout: 10_000, windowsHide: true },
+      );
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toEqual({ archived: true });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

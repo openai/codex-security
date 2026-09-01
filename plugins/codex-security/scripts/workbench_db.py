@@ -58,6 +58,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
+from windows_paths import filesystem_path, portable_path
 from workbench import handoff
 from workbench_cli import parse_args
 from workbench_constants import (
@@ -163,20 +164,20 @@ def stale_claim_before(seconds: int = CLAIM_LEASE_SECONDS) -> str:
 def state_dir() -> Path:
     state_dir = os.environ.get("CODEX_SECURITY_STATE_DIR")
     if state_dir:
-        return Path(state_dir).expanduser().resolve()
+        return filesystem_path(Path(state_dir).expanduser()).resolve()
     codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    return (codex_home / "state" / "plugins" / "codex-security").resolve()
+    return filesystem_path(codex_home / "state" / "plugins" / "codex-security").resolve()
 
 
 def database_path() -> Path:
-    return state_dir() / "workbench.sqlite3"
+    return filesystem_path(state_dir() / "workbench.sqlite3")
 
 
 @contextmanager
 def scan_completion_lock(scan_id: str) -> Any:
-    lock_dir = state_dir() / "completion-locks"
+    lock_dir = filesystem_path(state_dir() / "completion-locks")
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock"
+    lock_path = filesystem_path(lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock")
     descriptor = os.open(
         lock_path,
         os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0),
@@ -265,7 +266,7 @@ def require_target(value: str) -> Path:
     expanded = Path(value).expanduser()
     if not expanded.is_absolute():
         raise SystemExit("Scan target must be an absolute local directory path.")
-    target = expanded.resolve()
+    target = filesystem_path(expanded).resolve()
     if not target.is_dir():
         raise SystemExit(f"Scan target is not a readable local directory: {target}")
     return target
@@ -276,7 +277,7 @@ def inspect_target(target_path: str) -> dict[str, Any]:
     return {
         "displayName": target.name,
         "targetMetadata": git_target_metadata(target),
-        "targetPath": str(target),
+        "targetPath": str(portable_path(target)),
     }
 
 
@@ -416,7 +417,7 @@ def inspect_setup(args: argparse.Namespace) -> dict[str, Any]:
 def require_review_changes_target(target: Path) -> str:
     revision = require_git_worktree_head(target)
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
-    if repository_root is None or Path(repository_root).resolve() != target:
+    if repository_root is None or filesystem_path(Path(repository_root)).resolve() != target:
         raise SystemExit(
             "Review changes requires the checked-out Git repository root as the target."
         )
@@ -622,10 +623,10 @@ def require_scope(scope: str, mode: str, target: Path) -> str:
     if ".." in requested_scope.parts:
         raise SystemExit("Scan scope must stay inside the scanned target.")
     try:
-        resolved_scope = (
+        resolved_scope = filesystem_path(
             requested_scope if requested_scope.is_absolute() else target / requested_scope
         ).resolve()
-        relative_scope = resolved_scope.relative_to(target)
+        relative_scope = portable_path(resolved_scope).relative_to(portable_path(target))
     except (RuntimeError, ValueError) as exc:
         raise SystemExit("Scan scope must stay inside the scanned target.") from exc
     normalized = relative_scope.as_posix() or "."
@@ -804,9 +805,15 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
 
 
 def scan_target_root(scan_root: str | None, target: Path) -> Path:
-    root = Path(scan_root).expanduser().resolve() if scan_root else state_dir() / "scans"
-    target_root = (root / safe_segment(target.name)).resolve()
-    if target_root == target or target in target_root.parents:
+    root = (
+        filesystem_path(Path(scan_root).expanduser()).resolve()
+        if scan_root
+        else state_dir() / "scans"
+    )
+    target_root = filesystem_path(root / safe_segment(target.name)).resolve()
+    portable_target = portable_path(target)
+    portable_target_root = portable_path(target_root)
+    if portable_target_root == portable_target or portable_target in portable_target_root.parents:
         raise SystemExit("The scan artifact directory must be outside the selected target.")
     return target_root
 
@@ -876,7 +883,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             return workspace_state(connection, workspace["id"])
         if workspace["updated_at"] != workspace_version:
             raise SystemExit("Codex Security setup changed while the scan was starting. Try again.")
-        current_target = require_remediation_target(str(target))
+        current_target = require_remediation_target(workspace["target_path"])
         current_target_metadata = current_target.stat()
         if (current_target_metadata.st_dev, current_target_metadata.st_ino) != (
             target_metadata.st_dev,
@@ -889,7 +896,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             owned_active_scan = deep_scan.existing_deep_scan_for_target(
                 connection,
                 workspace["thread_id"],
-                str(target),
+                workspace["target_path"],
                 scope,
             )
             if owned_active_scan is not None:
@@ -948,8 +955,8 @@ def _start_prompt_driven_scan(
         args.diff_head_revision,
         args.diff_content_digest,
     )
-    target = Path(inspected["target"]["targetPath"])
-    target_path = str(target)
+    target_path = inspected["target"]["targetPath"]
+    target = require_target(target_path)
     scope = inspected["scope"]
     diff_target = inspected["diffTarget"]
     user_context = user_context_argument(args)
@@ -1195,7 +1202,7 @@ def complete_budget_exhausted_scan(
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         candidates = (
             []
-            if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
+            if run["manifest_path"] == str(portable_path(scan_dir / "scan-manifest.json"))
             else budget_exhausted_candidates(scan, scan_dir)
         )
         warning = optional_text(args.message, maximum=2400)
@@ -1222,7 +1229,7 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
         inventory = Path(artifacts["inScopeFilesPath"])
         inventory_descriptor = open_scan_local_file_descriptor(
             scan_dir,
-            inventory.relative_to(scan_dir).as_posix(),
+            portable_path(inventory).relative_to(portable_path(scan_dir)).as_posix(),
             "Canonical Deep Scan in-scope inventory",
         )
         with os.fdopen(inventory_descriptor, "rb") as source:
@@ -1230,7 +1237,7 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
             in_scope = {re.sub(r"^(?:\./)+", "", line) for line in lines if line}
         descriptor = open_scan_local_file_descriptor(
             scan_dir,
-            ledger.relative_to(scan_dir).as_posix(),
+            portable_path(ledger).relative_to(portable_path(scan_dir)).as_posix(),
             "Canonical Deep Scan candidate ledger",
         )
         with os.fdopen(descriptor, "r", encoding="utf-8") as source:
@@ -1610,7 +1617,7 @@ def complete_scan_locked(
             if path is not None:
                 connection.execute(
                     "INSERT INTO scan_artifacts (scan_id, kind, path, created_at) VALUES (?, ?, ?, ?)",
-                    (scan["id"], kind, str(path), timestamp),
+                    (scan["id"], kind, str(portable_path(path)), timestamp),
                 )
         connection.execute("DELETE FROM finding_occurrences WHERE scan_id = ?", (scan["id"],))
         index_findings(connection, scan["id"], findings, timestamp)
@@ -1712,7 +1719,8 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     connection.execute("BEGIN IMMEDIATE")
     try:
         archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
-        target_id = ensure_security_target(connection, str(repository))
+        repository_path = str(portable_path(repository))
+        target_id = ensure_security_target(connection, repository_path)
         if parent_scan_id is not None:
             parent = require_scan(connection, parent_scan_id)
             if parent["target_id"] != target_id:
@@ -1729,7 +1737,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             (
                 workspace_id,
                 target_id,
-                str(repository),
+                repository_path,
                 repository.name,
                 scope,
                 mode,
@@ -1772,7 +1780,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     scan = require_scan(connection, scan_id)
     return {
         "contract": scan_contract(scan),
-        "scanDir": str(scan_dir),
+        "scanDir": str(portable_path(scan_dir)),
         "scanId": scan_id,
         "scopeFileCount": scope_file_count,
         "targetId": target_id,
@@ -2779,12 +2787,12 @@ def scan_result(
             continue
         path = available_artifact_path(Path(scan["scan_dir"]), Path(row["path"]))
         if path is not None:
-            artifacts[row["kind"]] = str(path)
+            artifacts[row["kind"]] = str(portable_path(path))
     sarif_path = available_artifact_path(
         Path(scan["scan_dir"]), Path(scan["scan_dir"]) / "exports" / "results.sarif"
     )
     if sarif_path is not None:
-        artifacts["sarifReport"] = str(sarif_path)
+        artifacts["sarifReport"] = str(portable_path(sarif_path))
     occurrence_rows = scan_history.finding_occurrence_rows(
         connection, scan["id"], offset=0, limit=FINDINGS_RESULT_LIMIT
     )
@@ -3089,7 +3097,7 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
         artifacts.append(report_path)
 
     poc_relative = report_relative.parent / "poc"
-    poc_root = scan_dir.joinpath(*poc_relative.parts)
+    poc_root = filesystem_path(scan_dir.joinpath(*poc_relative.parts))
     try:
         if not stat.S_ISDIR(poc_root.stat(follow_symlinks=False).st_mode):
             return artifacts
@@ -3111,7 +3119,9 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
         for file_name in sorted(file_names):
             candidate = current_path / file_name
             try:
-                relative_path = candidate.relative_to(scan_dir).as_posix()
+                relative_path = (
+                    portable_path(candidate).relative_to(portable_path(scan_dir)).as_posix()
+                )
             except ValueError:
                 continue
             if not scan_local_regular_file(scan_dir, relative_path):
@@ -3277,21 +3287,24 @@ def patch_artifact_preview(
 def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
     try:
         resolved_scan_dir = require_canonical_scan_directory(scan_dir)
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(resolved_scan_dir)
+        resolved = filesystem_path(candidate).resolve(strict=True)
+        portable_path(resolved).relative_to(portable_path(resolved_scan_dir))
     except (FileNotFoundError, RuntimeError, SystemExit, ValueError):
         return None
-    if os.path.normcase(resolved) != os.path.normcase(candidate) or not candidate.is_file():
+    if (
+        os.path.normcase(portable_path(resolved)) != os.path.normcase(portable_path(candidate))
+        or not resolved.is_file()
+    ):
         return None
     return resolved
 
 
 def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | None:
     scan_dir = require_canonical_scan_directory(scan_dir)
-    candidate = scan_dir / file_name
+    candidate = filesystem_path(scan_dir / file_name)
     try:
         resolved = candidate.resolve(strict=True)
-        resolved.relative_to(scan_dir.resolve())
+        portable_path(resolved).relative_to(portable_path(scan_dir))
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         if not required and isinstance(exc, FileNotFoundError):
             return None
@@ -3304,7 +3317,8 @@ def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | N
 
 
 def require_canonical_scan_directory(scan_dir: Path) -> Path:
-    scan_dir = scan_dir.absolute()
+    portable_scan_dir = portable_path(scan_dir.absolute())
+    scan_dir = filesystem_path(portable_scan_dir)
     try:
         metadata = scan_dir.lstat()
         resolved = scan_dir.resolve(strict=True)
@@ -3312,9 +3326,9 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         raise SystemExit(
             "Scan directory must be an existing canonical non-symlink directory."
         ) from exc
-    if not stat.S_ISDIR(metadata.st_mode) or os.path.normcase(resolved) != os.path.normcase(
-        scan_dir
-    ):
+    if not stat.S_ISDIR(metadata.st_mode) or os.path.normcase(
+        portable_path(resolved)
+    ) != os.path.normcase(portable_scan_dir):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
     # Re-check privacy so a shared parent cannot be used to substitute forged artifacts.
     if os.name != "nt":
@@ -3606,7 +3620,7 @@ def main() -> None:
         elif args.command == "export-findings":
             result = export_findings(connection, args)
         elif args.command == "database-info":
-            result = {"databasePath": str(database_path())}
+            result = {"databasePath": str(portable_path(database_path()))}
         elif args.command == "finding-workflow":
             result = finding_workflow(connection, json.load(sys.stdin), now())
         elif args.command == "dashboard":

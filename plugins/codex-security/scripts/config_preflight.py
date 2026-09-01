@@ -12,6 +12,10 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_paths import filesystem_path, portable_path
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
@@ -130,7 +134,7 @@ def parse_args() -> argparse.Namespace:
 
 def read_toml(path: Path, *, required: bool) -> dict[str, Any]:
     try:
-        with path.open("rb") as file:
+        with filesystem_path(path).open("rb") as file:
             return tomllib.load(file)
     except FileNotFoundError:
         if required:
@@ -240,7 +244,7 @@ def resolve_project_root(cwd: Path, config_layers: list[tuple[Path, dict[str, An
     if not markers:
         return cwd
     for candidate in (cwd, *cwd.parents):
-        if any((candidate / marker).exists() for marker in markers):
+        if any(filesystem_path(candidate / marker).exists() for marker in markers):
             return candidate
     return cwd
 
@@ -252,14 +256,17 @@ def project_trust_level(
         projects = config.get("projects")
         if not isinstance(projects, dict):
             continue
-        project = projects.get(str(project_root))
+        project = projects.get(str(portable_path(project_root)))
         if not isinstance(project, dict) and os.name == "nt":
-            project_key = os.path.normcase(os.path.realpath(project_root))
+            project_key = os.path.normcase(portable_path(Path(os.path.realpath(project_root))))
             project = next(
                 (
                     value
                     for path, value in projects.items()
-                    if os.path.normcase(os.path.realpath(path)) == project_key
+                    if os.path.normcase(
+                        portable_path(Path(os.path.realpath(filesystem_path(Path(path)))))
+                    )
+                    == project_key
                 ),
                 None,
             )
@@ -284,7 +291,7 @@ def project_config_paths(project_root: Path, cwd: Path) -> list[Path]:
 def discover_config_paths(
     *, cwd: Path, profile_layer_path: Path | None
 ) -> tuple[list[Path], dict[str, Any]]:
-    resolved_cwd = cwd.expanduser().resolve()
+    resolved_cwd = filesystem_path(cwd.expanduser()).resolve()
     if not resolved_cwd.is_dir():
         raise ValueError(f"cwd must be a directory, got {str(resolved_cwd)!r}")
 
@@ -298,8 +305,8 @@ def discover_config_paths(
     if trust_level == "trusted":
         paths.extend(project_config_paths(project_root, resolved_cwd))
     return paths, {
-        "cwd": str(resolved_cwd),
-        "project_root": str(project_root),
+        "cwd": str(portable_path(resolved_cwd)),
+        "project_root": str(portable_path(project_root)),
         "project_trust_level": trust_level,
         "project_layers_loaded": trust_level == "trusted",
     }
