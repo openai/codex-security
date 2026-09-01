@@ -4,10 +4,11 @@ Route existing Linear findings to the team that can fix them. Can update labels,
 
 ## Install in Codex
 
-Replace `<GitHub folder URL>` with this directory's URL on GitHub, then ask Codex:
+Copy this prompt into Codex:
 
 ```text
-$skill-installer install route-security-findings from <GitHub folder URL>
+$skill-installer install route-security-findings from https://github.com/openai/codex-security/tree/defense-factory/reference-skills/sdk/typescript/_bundled_plugin/skills/route-security-findings
+Use --repo openai/codex-security --ref defense-factory/reference-skills --path sdk/typescript/_bundled_plugin/skills/route-security-findings
 Then read its README and review the setup assumptions with me.
 ```
 

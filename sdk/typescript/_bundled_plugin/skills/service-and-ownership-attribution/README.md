@@ -4,10 +4,11 @@ Separate the affected service, the component needing change and the team respons
 
 ## Install in Codex
 
-Replace `<GitHub folder URL>` with this directory's URL on GitHub, then ask Codex:
+Copy this prompt into Codex:
 
 ```text
-$skill-installer install service-and-ownership-attribution from <GitHub folder URL>
+$skill-installer install service-and-ownership-attribution from https://github.com/openai/codex-security/tree/defense-factory/reference-skills/sdk/typescript/_bundled_plugin/skills/service-and-ownership-attribution
+Use --repo openai/codex-security --ref defense-factory/reference-skills --path sdk/typescript/_bundled_plugin/skills/service-and-ownership-attribution
 Then read its README and review the setup assumptions with me.
 ```
 

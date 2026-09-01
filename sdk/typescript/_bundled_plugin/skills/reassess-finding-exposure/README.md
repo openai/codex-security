@@ -4,10 +4,11 @@ Reassess an existing finding against a code revision, separating exposure, impac
 
 ## Install in Codex
 
-Replace `<GitHub folder URL>` with this directory's URL on GitHub, then ask Codex:
+Copy this prompt into Codex:
 
 ```text
-$skill-installer install reassess-finding-exposure from <GitHub folder URL>
+$skill-installer install reassess-finding-exposure from https://github.com/openai/codex-security/tree/defense-factory/reference-skills/sdk/typescript/_bundled_plugin/skills/reassess-finding-exposure
+Use --repo openai/codex-security --ref defense-factory/reference-skills --path sdk/typescript/_bundled_plugin/skills/reassess-finding-exposure
 Then read its README and review the setup assumptions with me.
 ```
 

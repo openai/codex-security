@@ -4,10 +4,11 @@ Find security findings with missing pickup, stalled work or unresolved ownership
 
 ## Install in Codex
 
-Replace `<GitHub folder URL>` with this directory's URL on GitHub, then ask Codex:
+Copy this prompt into Codex:
 
 ```text
-$skill-installer install review-remediation-pickup from <GitHub folder URL>
+$skill-installer install review-remediation-pickup from https://github.com/openai/codex-security/tree/defense-factory/reference-skills/sdk/typescript/_bundled_plugin/skills/review-remediation-pickup
+Use --repo openai/codex-security --ref defense-factory/reference-skills --path sdk/typescript/_bundled_plugin/skills/review-remediation-pickup
 Then read its README and review the setup assumptions with me.
 ```
 
