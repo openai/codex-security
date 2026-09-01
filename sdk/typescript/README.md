@@ -78,6 +78,65 @@ Failed, incomplete, or malformed responses reject the promise.
 `validations/` under the state directory. Pass `auth` to select credentials
 or `signal` to cancel.
 
+### Generate and verify a patch
+
+`patch()` runs the bundled remediation workflow non-interactively against a
+workspace that the caller has intentionally made writable:
+
+```ts
+const security = new CodexSecurity();
+try {
+  const result = await security.patch({
+    repositoryPath: "/path/to/disposable/workspace",
+    finding: {
+      title: "Possible SQL injection",
+      summary: "User input reaches a raw SQL query.",
+      locations: [{ path: "src/query.ts", startLine: 42 }],
+    },
+    signal,
+    onActivity(activity) {
+      console.log(activity.description);
+    },
+    onCost(cost) {
+      console.log(cost.estimatedUsd);
+    },
+  });
+
+  switch (result.status) {
+    case "verified":
+    case "no_change":
+      console.log(result.verificationReport);
+      break;
+    case "blocked":
+    case "failed":
+      console.error(result.reason);
+      break;
+  }
+} finally {
+  await security.close();
+}
+```
+
+Pass literal finding text or a JSON-serializable object; strings are never read
+as file paths. The method may edit only `repositoryPath`. It does not create a
+commit, push, open a pull request, publish findings, or add a scan to history.
+The patch thread runs without network access or web search.
+Callers remain responsible for reviewing and deriving the authoritative diff,
+approval, commit creation, and delivery.
+
+The discriminated result reports `verified`, `no_change`, `blocked`, or
+`failed`, plus repository-relative `changedFiles`, `threadId`, and estimated
+`cost` when model pricing and usage are available. Verified and no-change
+results include `verificationReport`; blocked and failed results include
+`reason`. Transport, authentication, cancellation, incomplete turns, and
+malformed results reject the promise. A rejected or interrupted operation can
+leave partial workspace changes for the caller to inspect or discard.
+
+Patch operations reuse constructor configuration and credentials. Pass `auth`,
+`safetyIdentifier`, `model`, or `reasoningEffort` for per-call selection.
+`onActivity`, `onSessionEvent`, `onCost`, `onReconnect`, `onAuthentication`,
+`onWarning`, and `onObserverError` use the same observer contracts as scans.
+
 ### Import GitHub code scanning alerts
 
 Import alerts, including third-party SARIF uploads, and validate them against

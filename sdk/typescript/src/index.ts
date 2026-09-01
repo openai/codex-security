@@ -20,6 +20,8 @@ export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,
+  PatchOptions,
+  PatchResult,
   ScanAuthMode,
   ScanAuthentication,
   ScanOptions,
