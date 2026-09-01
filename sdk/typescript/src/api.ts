@@ -837,11 +837,13 @@ export class CodexSecurity {
         temporaryRoot,
       );
       // The SDK turns workingDirectory into `--cd`, which can persist trust for
-      // a new project. Preserve an existing decision and keep an unknown
-      // repository untrusted. This must be a raw override so the repository
-      // path remains one quoted TOML key instead of a dotted key sequence.
+      // a new project. Preserve an existing decision for Codex's enclosing
+      // project root and keep an unknown project untrusted. This must be a raw
+      // override so the root path remains one quoted TOML key instead of a
+      // dotted key sequence.
+      const projectRoot = inputs.protectedRoot;
       const projectTrust =
-        (await configuredProjectTrust(session.effectiveConfig, repository)) ??
+        (await configuredProjectTrust(session.effectiveConfig, projectRoot)) ??
         "untrusted";
       const configured = scanModelConfiguration(session.effectiveConfig);
       const model = options.model ?? configured.model;
@@ -861,7 +863,7 @@ export class CodexSecurity {
         },
         options.auth,
         [
-          `projects.${JSON.stringify(repository)}.trust_level=${JSON.stringify(projectTrust)}`,
+          `projects.${JSON.stringify(projectRoot)}.trust_level=${JSON.stringify(projectTrust)}`,
         ],
       );
       tracker = new ScanCostTracker({

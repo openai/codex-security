@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -79,11 +80,21 @@ describe("CodexSecurity headless patching", () => {
     events: (signal: AbortSignal) => AsyncGenerator<ThreadEvent> = () =>
       patchEvents(),
     projectTrust?: "trusted" | "untrusted",
+    useSubdirectory = false,
   ) {
     const root = await temporaryDirectory();
-    const repository = join(root, "repository with spaces");
+    const projectRoot = join(root, "repository with spaces");
+    const repository = useSubdirectory
+      ? join(projectRoot, "packages", "app")
+      : projectRoot;
     const codexHome = join(root, "codex-home");
-    await Promise.all([mkdir(repository), mkdir(codexHome)]);
+    await Promise.all([
+      mkdir(repository, { recursive: true }),
+      mkdir(codexHome),
+    ]);
+    if (useSubdirectory) {
+      execFileSync("git", ["init", "--quiet", projectRoot]);
+    }
     const captured: {
       codex?: CodexOptions;
       thread?: ThreadOptions;
@@ -105,7 +116,7 @@ describe("CodexSecurity headless patching", () => {
             ? {}
             : {
                 projects: {
-                  [repository]: { trust_level: projectTrust },
+                  [projectRoot]: { trust_level: projectTrust },
                 },
               }),
         },
@@ -140,7 +151,14 @@ describe("CodexSecurity headless patching", () => {
       repositoryPath: repository,
       finding: "Candidate finding",
     };
-    return { client, options, captured, workbench, codexHome };
+    return {
+      client,
+      options,
+      captured,
+      workbench,
+      codexHome,
+      projectRoot,
+    };
   }
 
   test.each(["text", "object"] as const)(
@@ -305,21 +323,26 @@ describe("CodexSecurity headless patching", () => {
   );
 
   test.each([
-    ["missing", undefined],
-    ["untrusted", "untrusted"],
-    ["trusted", "trusted"],
+    ["repository", "missing", undefined, false],
+    ["repository", "untrusted", "untrusted", false],
+    ["repository", "trusted", "trusted", false],
+    ["worktree subdirectory", "missing", undefined, true],
+    ["worktree subdirectory", "untrusted", "untrusted", true],
+    ["worktree subdirectory", "trusted", "trusted", true],
   ] as const)(
-    "preserves the existing project trust decision: %s",
-    async (_label, projectTrust) => {
-      const { client, options, captured } = await patchClient(
+    "preserves the %s project trust decision: %s",
+    async (_scope, _label, projectTrust, useSubdirectory) => {
+      const { client, options, captured, projectRoot } = await patchClient(
         () => patchEvents(),
         projectTrust,
+        useSubdirectory,
       );
       await using security = client;
       await security.patch(options);
       expect(captured.codex?.configOverrides).toEqual([
-        `projects.${JSON.stringify(options.repositoryPath)}.trust_level=${JSON.stringify(projectTrust ?? "untrusted")}`,
+        `projects.${JSON.stringify(projectRoot)}.trust_level=${JSON.stringify(projectTrust ?? "untrusted")}`,
       ]);
+      expect(captured.thread?.workingDirectory).toBe(options.repositoryPath);
     },
   );
 
