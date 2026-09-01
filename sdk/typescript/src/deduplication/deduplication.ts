@@ -225,39 +225,52 @@ export class FindingDeduplicator {
       }
     }
 
-    const selected = new Set(ids);
-    const visited = new Set<string>();
-    const duplicateGroups: string[][] = [];
-    const canonical = new Map<string, string>();
+    const components: {
+      members: string[];
+      supported: [string, string][];
+      rejected: [string, string][];
+    }[] = [];
+    const componentByFinding = new Map<string, (typeof components)[number]>();
     for (const id of findings.keys()) {
       this.signal?.throwIfAborted();
-      if (!adjacent.has(id) || visited.has(id)) continue;
-      const members: string[] = [];
+      if (!adjacent.has(id) || componentByFinding.has(id)) continue;
+      const component: (typeof components)[number] = {
+        members: [],
+        supported: [],
+        rejected: [],
+      };
+      components.push(component);
       const pending = [id];
       while (pending.length > 0) {
         const member = pending.pop()!;
-        if (visited.has(member)) continue;
-        visited.add(member);
-        members.push(member);
+        if (componentByFinding.has(member)) continue;
+        componentByFinding.set(member, component);
         pending.push(...adjacent.get(member)!);
       }
-      const identities = new Set(members);
-      const orderedMembers = [...findings.keys()].filter((member) =>
-        identities.has(member),
-      );
-      const componentPairs = supported.filter(
-        ([left, right]) => identities.has(left) && identities.has(right),
-      );
-      const contradicted = [...rejected.values()].filter(
-        ([left, right]) => identities.has(left) && identities.has(right),
-      );
+    }
+    // Preserve finding insertion order for contradiction-grouping ties.
+    for (const id of findings.keys())
+      componentByFinding.get(id)?.members.push(id);
+    for (const pair of supported)
+      componentByFinding.get(pair[0])!.supported.push(pair);
+    for (const pair of rejected.values()) {
+      const component = componentByFinding.get(pair[0]);
+      if (component && component === componentByFinding.get(pair[1]))
+        component.rejected.push(pair);
+    }
+
+    const selected = new Set(ids);
+    const duplicateGroups: string[][] = [];
+    const canonical = new Map<string, string>();
+    for (const component of components) {
+      this.signal?.throwIfAborted();
       const groups =
-        contradicted.length === 0
-          ? [identities]
+        component.rejected.length === 0
+          ? [new Set(component.members)]
           : contradictionFreeSubgroups(
-              orderedMembers,
-              componentPairs,
-              contradicted,
+              component.members,
+              component.supported,
+              component.rejected,
               this.signal,
             );
       for (const group of groups) {

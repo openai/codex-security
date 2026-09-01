@@ -290,6 +290,96 @@ test("prefers the better-supported legal subgroup in a conflicted star", async (
   });
 });
 
+test("keeps disconnected groups ordered and conflict ties in finding insertion order", async () => {
+  const aCenter = entry(30);
+  const bCenter = entry(40);
+  const aLeft = entry(10);
+  const bLeft = entry(20);
+  const aRight = entry(50);
+  const bRight = entry(60);
+  const cleanCenter = entry(80);
+  const cleanNeighbor = entry(70);
+  const isolated = entry(90);
+  const entries = [
+    aCenter,
+    bCenter,
+    aLeft,
+    bLeft,
+    aRight,
+    bRight,
+    cleanCenter,
+    cleanNeighbor,
+    isolated,
+  ];
+  for (const finding of entries) finding.severity.level = "medium";
+  aLeft.severity.level = aRight.severity.level = "critical";
+  const nominations = new Set(
+    [
+      [aCenter, aLeft],
+      [aCenter, aRight],
+      [bCenter, bLeft],
+      [bCenter, bRight],
+      [cleanCenter, cleanNeighbor],
+    ].map((pair) => pairKey(pair.map((finding) => finding.findingId))),
+  );
+  const selected = [aCenter, bCenter, aLeft, bLeft, cleanCenter, isolated];
+  for (const reverse of [false, true]) {
+    const aNeighbors = reverse ? [aRight, aLeft] : [aLeft, aRight];
+    const bNeighbors = reverse ? [bRight, bLeft] : [bLeft, bRight];
+    const neighborhoods = new Map<string, Finding[]>([
+      [
+        aCenter.findingId,
+        [
+          bCenter,
+          aNeighbors[0]!,
+          bNeighbors[0]!,
+          aNeighbors[1]!,
+          bNeighbors[1]!,
+          cleanCenter,
+          cleanNeighbor,
+          isolated,
+        ],
+      ],
+      [bCenter.findingId, [bLeft, bRight]],
+      [aLeft.findingId, [aRight]],
+      [bLeft.findingId, [bRight]],
+      [cleanCenter.findingId, [cleanNeighbor]],
+    ]);
+    const service = new FindingDeduplicator(
+      {
+        async potentialDuplicates(findingId) {
+          return {
+            finding: entries.find((entry) => entry.findingId === findingId)!,
+            potentialDuplicates: neighborhoods.get(findingId) ?? [],
+          };
+        },
+      },
+      {
+        async screen(findings) {
+          return screening(findings, nominations);
+        },
+        async reviewPair(findings) {
+          return same(findings);
+        },
+      },
+    );
+    expect(
+      await service.run(selected.map((finding) => finding.findingId)),
+    ).toEqual({
+      uniqueFindingIds: (reverse
+        ? [aRight, bCenter, aLeft, bLeft, cleanNeighbor, isolated]
+        : [aLeft, bLeft, cleanNeighbor, isolated]
+      ).map((finding) => finding.findingId),
+      duplicateGroups: [
+        [aNeighbors[0]!, aCenter],
+        reverse ? [bCenter, bRight] : [bLeft, bCenter],
+        [cleanNeighbor, cleanCenter],
+      ].map((group) => group.map((finding) => finding.findingId)),
+      deduplicationStatus: "completed",
+    });
+  }
+});
+
 test("scales contradiction grouping with conflict neighbors instead of all clusters", () => {
   const count = 200;
   const ids = Array.from(
