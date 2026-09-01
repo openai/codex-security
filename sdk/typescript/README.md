@@ -120,9 +120,9 @@ try {
 Pass literal finding text or a JSON-serializable object; strings are never read
 as file paths. Sandboxed patch commands may edit only `repositoryPath` and run
 without network access or web search. Patch workspaces are always treated as
-untrusted Codex projects, so repository-local configuration and MCP servers are
-not loaded. The method does not create a commit, push, open a pull request,
-publish findings, or add a scan to history.
+untrusted Codex projects, so repository-local configuration, hooks, rules, and
+MCP servers are not loaded. The method does not create a commit, push, open a
+pull request, publish findings, or add a scan to history.
 Callers remain responsible for reviewing and deriving the authoritative diff,
 approval, commit creation, and delivery.
 
