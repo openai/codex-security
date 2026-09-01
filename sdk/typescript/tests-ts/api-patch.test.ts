@@ -88,7 +88,8 @@ describe("CodexSecurity headless patching", () => {
         | "repository"
         | "worktree-subdirectory"
         | "marker-subdirectory"
-        | "marker-non-git";
+        | "marker-non-git"
+        | "empty-git-marker-subdirectory";
     } = {},
   ) {
     const root = await temporaryDirectory();
@@ -97,7 +98,8 @@ describe("CodexSecurity headless patching", () => {
     const usesProjectRootMarker = repositoryKind.startsWith("marker-");
     const repository = usesProjectRootMarker
       ? join(markerRoot, "src")
-      : repositoryKind === "worktree-subdirectory"
+      : repositoryKind === "worktree-subdirectory" ||
+          repositoryKind === "empty-git-marker-subdirectory"
         ? markerRoot
         : projectRoot;
     const codexHome = join(root, "codex-home");
@@ -113,6 +115,9 @@ describe("CodexSecurity headless patching", () => {
     }
     if (usesProjectRootMarker) {
       await writeFile(join(markerRoot, "package.json"), "{}\n");
+    }
+    if (repositoryKind === "empty-git-marker-subdirectory") {
+      await mkdir(join(projectRoot, ".git"));
     }
     const configuredTrustRoot =
       repositoryKind === "marker-non-git" ? repository : projectRoot;
@@ -398,6 +403,13 @@ describe("CodexSecurity headless patching", () => {
       "nested-only trusted",
       "trusted",
       "marker-non-git",
+      "untrusted",
+    ],
+    [
+      "empty .git marker subdirectory",
+      "missing",
+      undefined,
+      "empty-git-marker-subdirectory",
       "untrusted",
     ],
   ] as const)(

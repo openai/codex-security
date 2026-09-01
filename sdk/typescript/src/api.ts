@@ -3010,13 +3010,6 @@ async function codexProjectRoot(
       const markerPath = resolve(ancestor, marker);
       const metadata = await stat(markerPath).catch(() => null);
       if (metadata === null) continue;
-      if (
-        marker === ".git" &&
-        metadata.isDirectory() &&
-        (await stat(join(markerPath, "HEAD")).catch(() => null)) === null
-      ) {
-        continue;
-      }
       return ancestor;
     }
     if (dirname(ancestor) === ancestor) return cwd;
