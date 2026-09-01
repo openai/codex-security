@@ -487,7 +487,6 @@ export interface ScanPreflight extends DeepScanOptions {
 
 interface LocalScanInputs
   extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
-  gitWorktreeRoot: string | null;
   protectedRoot: string;
   stateDirectory: string;
 }
@@ -840,21 +839,15 @@ export class CodexSecurity {
       );
       // The SDK turns workingDirectory into `--cd`, which can persist trust for
       // a new project. Resolve the same marker-based project root Codex uses,
-      // preserve its effective project-or-worktree decision, and keep an
-      // unknown project untrusted. This must be a raw override so the root path
-      // remains one quoted TOML key instead of a dotted key sequence.
+      // preserve its exact decision, and keep an unknown project untrusted.
+      // This must be a raw override so the root path remains one quoted TOML
+      // key instead of a dotted key sequence.
       const projectRoot = await codexProjectRoot(
         repository,
         session.sessionConfig,
       );
       const projectTrust =
         (await configuredProjectTrust(session.effectiveConfig, projectRoot)) ??
-        (inputs.gitWorktreeRoot === null
-          ? undefined
-          : await configuredProjectTrust(
-              session.effectiveConfig,
-              inputs.gitWorktreeRoot,
-            )) ??
         "untrusted";
       const configured = scanModelConfiguration(session.effectiveConfig);
       const model = options.model ?? configured.model;
@@ -2723,8 +2716,8 @@ export class CodexSecurity {
     }
     await validateCommittedDiffCheckout(repo, normalized, signal);
     throwIfAborted(signal);
-    const gitWorktreeRoot = await enclosingGitWorktreeRoot(repo, signal);
-    const protectedRoot = gitWorktreeRoot ?? repo;
+    const protectedRoot =
+      (await enclosingGitWorktreeRoot(repo, signal)) ?? repo;
     const requestedOutput = await validateOutputDir(
       options.outputDir,
       options.archiveExisting,
@@ -2756,7 +2749,6 @@ export class CodexSecurity {
       target: normalized,
       mode,
       outputDir: requestedOutput,
-      gitWorktreeRoot,
       protectedRoot,
       stateDirectory,
     };

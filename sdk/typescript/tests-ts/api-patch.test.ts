@@ -88,6 +88,7 @@ describe("CodexSecurity headless patching", () => {
         | "repository"
         | "worktree-subdirectory"
         | "marker-subdirectory"
+        | "marker-subdirectory-exact"
         | "marker-non-git"
         | "empty-git-marker-subdirectory";
     } = {},
@@ -109,7 +110,8 @@ describe("CodexSecurity headless patching", () => {
     ]);
     if (
       repositoryKind === "worktree-subdirectory" ||
-      repositoryKind === "marker-subdirectory"
+      repositoryKind === "marker-subdirectory" ||
+      repositoryKind === "marker-subdirectory-exact"
     ) {
       execFileSync("git", ["init", "--quiet", projectRoot]);
     }
@@ -120,7 +122,11 @@ describe("CodexSecurity headless patching", () => {
       await mkdir(join(projectRoot, ".git"));
     }
     const configuredTrustRoot =
-      repositoryKind === "marker-non-git" ? repository : projectRoot;
+      repositoryKind === "marker-subdirectory-exact"
+        ? markerRoot
+        : repositoryKind === "marker-non-git"
+          ? repository
+          : projectRoot;
     const captured: {
       codex?: CodexOptions;
       thread?: ThreadOptions;
@@ -379,23 +385,37 @@ describe("CodexSecurity headless patching", () => {
     ],
     [
       "configured-marker subdirectory",
-      "missing",
+      "enclosing missing",
       undefined,
       "marker-subdirectory",
       "untrusted",
     ],
     [
       "configured-marker subdirectory",
-      "untrusted",
+      "enclosing untrusted",
       "untrusted",
       "marker-subdirectory",
       "untrusted",
     ],
     [
       "configured-marker subdirectory",
-      "trusted",
+      "enclosing trusted",
       "trusted",
       "marker-subdirectory",
+      "untrusted",
+    ],
+    [
+      "configured-marker subdirectory",
+      "exact untrusted",
+      "untrusted",
+      "marker-subdirectory-exact",
+      "untrusted",
+    ],
+    [
+      "configured-marker subdirectory",
+      "exact trusted",
+      "trusted",
+      "marker-subdirectory-exact",
       "trusted",
     ],
     [
