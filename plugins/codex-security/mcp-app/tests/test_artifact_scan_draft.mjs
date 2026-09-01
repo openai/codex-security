@@ -527,6 +527,89 @@ try {
   assert.deepEqual(resolvedRejection.coverage.deferred, []);
   assert.deepEqual(resolvedRejection.coverage.surfaces[0].candidate, candidate);
 
+  const resolvedSurfaceRoot = path.join(root, "resolved-checkpoint-surface");
+  await mkdir(resolvedSurfaceRoot);
+  const resolvedSurfaceContext = { ...context, root: resolvedSurfaceRoot };
+  const surfaceId = "surface_source-review";
+  await recordCodexSecurityScanDraft(resolvedSurfaceContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [{ label: "Source review", disposition: "needs_follow_up" }],
+      deferred: [{
+        id: "checkpoint-source-review",
+        reason: "Source review was pending.",
+        surfaceIds: [surfaceId],
+      }],
+      openQuestions: ["Has source review completed?"],
+    },
+  });
+  await recordCodexSecurityScanDraft(resolvedSurfaceContext, {
+    ...input,
+    findings: [],
+    coverage: {
+      ...coverage,
+      surfaces: [{ label: "Source review", disposition: "no_issue_found" }],
+      openQuestions: [],
+    },
+  });
+  const resolvedSurfaceResult = JSON.parse(
+    await readFile(path.join(resolvedSurfaceRoot, "coverage.json"), "utf8"),
+  );
+  assert.equal(resolvedSurfaceResult.completeness, "complete");
+  assert.deepEqual(resolvedSurfaceResult.deferred, []);
+  assert.deepEqual(resolvedSurfaceResult.openQuestions, []);
+  const resolvedSurfaceHistory = await Promise.all(
+    (await readdir(path.join(resolvedSurfaceRoot, "checkpoints"))).map(async name => (
+      JSON.parse(await readFile(path.join(resolvedSurfaceRoot, "checkpoints", name), "utf8"))
+    )),
+  );
+  assert.equal(resolvedSurfaceHistory.some(checkpoint => (
+    checkpoint.complete === false
+    && checkpoint.coverage.deferred.some(item => item.id === "checkpoint-source-review")
+  )), true);
+
+  const unresolvedSurfaceRoot = path.join(root, "unresolved-checkpoint-surface");
+  await mkdir(unresolvedSurfaceRoot);
+  const unresolvedSurfaceContext = { ...context, root: unresolvedSurfaceRoot };
+  await recordCodexSecurityScanDraft(unresolvedSurfaceContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [
+        { label: "Source review", disposition: "needs_follow_up" },
+        { label: "Source review", disposition: "needs_follow_up" },
+      ],
+      deferred: [{
+        id: "checkpoint-multiple-surfaces",
+        reason: "Two source review units were pending.",
+        surfaceIds: [surfaceId, `${surfaceId}-2`],
+      }],
+    },
+  });
+  await recordCodexSecurityScanDraft(unresolvedSurfaceContext, {
+    ...input,
+    findings: [],
+    coverage: {
+      ...coverage,
+      surfaces: [{ label: "Source review", disposition: "no_issue_found" }],
+    },
+  });
+  const unresolvedSurfaceResult = JSON.parse(
+    await readFile(path.join(unresolvedSurfaceRoot, "coverage.json"), "utf8"),
+  );
+  assert.equal(unresolvedSurfaceResult.completeness, "partial");
+  assert.deepEqual(
+    unresolvedSurfaceResult.deferred.map(item => item.id),
+    ["checkpoint-multiple-surfaces"],
+  );
+
   const undefinedCandidateRoot = path.join(root, "undefined-candidate-worker");
   await mkdir(undefinedCandidateRoot);
   const undefinedCandidateContext = { ...workerContext, root: undefinedCandidateRoot };

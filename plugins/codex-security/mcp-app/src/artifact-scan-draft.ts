@@ -333,11 +333,16 @@ async function preserveScanDraft(
       ))
       .map((surface) => surface.candidateId),
   ].filter((value): value is string => typeof value === "string"));
+  const currentSurfaces = result.coverage.surfaces as JsonObject[];
+  const resolvedSurfaces = resolvedCoverageSurfaces(currentSurfaces, sources);
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
     const pending = source.coverage.deferred as JsonObject[];
     if (pending.length === 0 || pending.some((item) => {
       const candidateId = item.candidateId ?? item.id;
-      return typeof candidateId !== "string" || !resolvedCandidateIds.has(candidateId);
+      return (
+        (typeof candidateId !== "string" || !resolvedCandidateIds.has(candidateId))
+        && !deferredSurfacesResolved(item, resolvedSurfaces.ids)
+      );
     })) return [];
     return (source.coverage.surfaces as JsonObject[]).filter(
       (surface) => surface.disposition === "needs_follow_up",
@@ -401,6 +406,7 @@ async function preserveScanDraft(
         return (
           (typeof candidateId !== "string" || !resolvedIds.has(candidateId))
           && !coverageEntryPresent(result.coverage.deferred as unknown[], item)
+          && !deferredSurfacesResolved(item, resolvedSurfaces.ids)
         );
       }),
       surfaces: (source.coverage.surfaces as JsonObject[]).filter((surface) => {
@@ -410,7 +416,10 @@ async function preserveScanDraft(
           && !coverageEntryPresent(result.coverage.surfaces as unknown[], surface)
           && !(
             surface.disposition === "needs_follow_up"
-            && coverageEntryPresent(resolvedFollowUpSurfaces, surface)
+            && (
+              coverageEntryPresent(resolvedFollowUpSurfaces, surface)
+              || coverageSurfaceResolved(surface, resolvedSurfaces)
+            )
           )
         );
       }),
@@ -849,6 +858,75 @@ function coverageEntryIdentities(entry: JsonObject): string[] {
     ];
   }
   return [];
+}
+
+function resolvedCoverageSurfaces(
+  current: JsonObject[],
+  sources: ScanDraftInput[],
+): { ids: Set<string>; semanticKeys: Set<string> } {
+  // Surface IDs are workbench-owned, so a later semantic draft can omit them.
+  // Reconnect a terminal surface to history only when its label and risk area
+  // identify one historical ID; duplicate surfaces must stay distinct.
+  const historicalIds = new Map<string, Set<string>>();
+  for (const source of sources) {
+    for (const surface of source.coverage.surfaces as JsonObject[]) {
+      const key = coverageSurfaceSemanticKey(surface);
+      if (key === undefined || typeof surface.id !== "string") continue;
+      const ids = historicalIds.get(key) ?? new Set<string>();
+      ids.add(surface.id);
+      historicalIds.set(key, ids);
+    }
+  }
+  const ids = new Set<string>();
+  const currentByKey = new Map<string, JsonObject[]>();
+  for (const surface of current) {
+    if (surface.disposition !== "needs_follow_up" && typeof surface.id === "string") {
+      ids.add(surface.id);
+    }
+    const key = coverageSurfaceSemanticKey(surface);
+    if (key === undefined) continue;
+    const surfaces = currentByKey.get(key) ?? [];
+    surfaces.push(surface);
+    currentByKey.set(key, surfaces);
+  }
+  const semanticKeys = new Set<string>();
+  for (const [key, surfaces] of currentByKey) {
+    if (
+      surfaces.length !== 1
+      || surfaces[0]!.disposition === "needs_follow_up"
+    ) continue;
+    const previousIds = historicalIds.get(key);
+    if (previousIds?.size !== 1) continue;
+    ids.add([...previousIds][0]!);
+    semanticKeys.add(key);
+  }
+  return { ids, semanticKeys };
+}
+
+function deferredSurfacesResolved(
+  deferred: JsonObject,
+  resolvedSurfaceIds: Set<string>,
+): boolean {
+  const surfaceIds = deferred.surfaceIds;
+  return Array.isArray(surfaceIds)
+    && surfaceIds.length > 0
+    && surfaceIds.every((value) => (
+      typeof value === "string" && resolvedSurfaceIds.has(value)
+    ));
+}
+
+function coverageSurfaceResolved(
+  surface: JsonObject,
+  resolved: { ids: Set<string>; semanticKeys: Set<string> },
+): boolean {
+  if (typeof surface.id === "string") return resolved.ids.has(surface.id);
+  const key = coverageSurfaceSemanticKey(surface);
+  return key !== undefined && resolved.semanticKeys.has(key);
+}
+
+function coverageSurfaceSemanticKey(surface: JsonObject): string | undefined {
+  if (typeof surface.label !== "string") return undefined;
+  return JSON.stringify([surface.riskArea ?? null, surface.label]);
 }
 
 /** Reducers cannot resolve source review by omitting its coverage records. */
