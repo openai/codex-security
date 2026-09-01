@@ -7,6 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { z } from "incur";
 import {
   comparisonEnvironment,
   disabledMcpServers,
@@ -34,9 +35,14 @@ import {
   resolveCommandAuthConfig,
 } from "../config.js";
 import {
+  reviewErrorInstructions,
   reviewSubmissionInstructions,
   sourceReviewInstructions,
 } from "./deduplication-prompts.js";
+
+const reviewErrorSchema = z
+  .object({ reason: z.string().trim().min(1) })
+  .strict();
 
 export interface CodexReview<T> {
   stage: DeduplicationReviewStage;
@@ -255,6 +261,14 @@ export class CodexReviewRunner {
                     description: reviewSubmissionInstructions,
                     inputSchema: review.schema,
                   },
+                  {
+                    type: "function",
+                    name: "submit_error",
+                    description: reviewErrorInstructions,
+                    inputSchema: z.toJSONSchema(reviewErrorSchema, {
+                      target: "openapi-3.0",
+                    }),
+                  },
                 ],
               },
             ],
@@ -307,18 +321,25 @@ export class CodexReviewRunner {
               turnId !== undefined &&
               params.threadId === threadId &&
               params.turnId === turnId &&
-              params.tool === "submit_decisions" &&
+              (params.tool === "submit_decisions" ||
+                params.tool === "submit_error") &&
               params.namespace === "review_validator"
             ) {
               let success = false;
+              let reportedFailure: string | undefined;
               let rejection =
                 "Check the result schema and assigned finding IDs.";
               try {
-                if (accepted === undefined)
+                if (params.tool === "submit_error") {
+                  reportedFailure = reviewErrorSchema.parse(
+                    params.arguments,
+                  ).reason;
+                  accepted = undefined;
+                } else if (accepted === undefined) {
                   accepted = review.validate(params.arguments);
+                }
                 success = true;
               } catch (error) {
-                accepted = undefined;
                 if (error instanceof Error) rejection = error.message;
                 validationFailure = rejection;
               }
@@ -330,12 +351,20 @@ export class CodexReviewRunner {
                     {
                       type: "inputText",
                       text: success
-                        ? "Accepted. End the turn."
+                        ? reportedFailure === undefined
+                          ? "Accepted. End the turn."
+                          : "Review failure recorded. End the turn."
                         : `Invalid submission. ${rejection} Resubmit the complete result.`,
                     },
                   ],
                 },
               });
+              if (reportedFailure !== undefined)
+                throw new ReviewAttemptError(
+                  "model",
+                  `Required review check could not be completed: ${reportedFailure}`,
+                  "A required review check could not be completed.",
+                );
             } else {
               send({
                 id: message.id,

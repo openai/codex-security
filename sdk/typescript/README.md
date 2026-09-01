@@ -1329,6 +1329,19 @@ and Codex state. Screening denies approval requests; final reviews use Codex's
 automatic approval reviewer. Web, plugins, and inherited MCP servers are disabled.
 Finding content never authorizes access to another target.
 
+Pair reviews cover exactly the two supplied findings. Linked parent tickets,
+duplicate targets, and related-ticket records are metadata, not additional
+findings to fetch or prerequisites for a verdict. An unsupplied duplicate target
+is neither automatically canonical nor an error; source-code investigation for
+the supplied pair remains allowed.
+
+Incomplete supplied finding content can produce `DISTINCT` with the limitation
+explained. An execution, tool, or source-access blocker that prevents a required
+check instead uses `review_validator.submit_error` with a nonempty `reason`.
+That submission fails the review without a verdict or review checkpoint, so it
+cannot become a `DISTINCT` veto or a completed duplicate-group result. A failed
+optional lookup does not force failure or `DISTINCT` when other evidence suffices.
+
 Decisions must arrive through the direct `review_validator.submit_decisions`
 tool; invalid submissions can be corrected in the same session. A final text
 answer alone is insufficient. Luna screening returns a `SAME` or `DISTINCT`
@@ -1352,7 +1365,8 @@ or after rejected submissions, the runner sends one corrective instruction in
 the same conversation. This preserves the original assignment, source work, and
 tool feedback. Reviews are limited to two turns; `metadata.attempts` counts
 those turns (or the initial attempt if setup fails). Accepted results are not
-replayed. Cancellation and model or transport failures remain terminal.
+replayed. Cancellation, accepted `submit_error` reports, and model or transport
+failures remain terminal.
 
 The SDK does not retain private review transcripts, subprocess stderr, or full
 provider/RPC error payloads, and ephemeral review state is removed after the

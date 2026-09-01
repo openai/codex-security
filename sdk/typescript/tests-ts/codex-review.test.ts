@@ -7,6 +7,9 @@ import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
+import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
+import { FindingWorkflow } from "../src/finding-workflow.js";
+import { checkpointWorkbench } from "./support/workbench-fakes.js";
 import { resolveCodexCommand } from "../src/runtime.js";
 import { environmentEntry } from "../src/scan-comparison.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -22,6 +25,14 @@ const failureReasons: Record<string, string> = {
   "credential-error": "[redacted]",
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
+  "required-source-error":
+    "Required review check could not be completed: Required source revision could not be read.",
+  "required-source-error-after-verdict":
+    "Required review check could not be completed: Required source revision could not be read.",
+  "required-source-error-after-text":
+    "Required review check could not be completed: Required source revision could not be read.",
+  "invalid-review-error":
+    "Required review check could not be completed: Required source revision could not be read.",
   exit: "Codex exited before completing the review",
 };
 
@@ -47,9 +58,13 @@ const transportCases: {
   { scenario: "text-only-correction" },
   { scenario: "cancel-continuation" },
   { scenario: "accepted-no-replay" },
-  ...["correction", ...Object.keys(failureReasons), "cancel"].map(
-    (scenario) => ({ scenario }),
-  ),
+  ...[
+    "correction",
+    "incomplete-content",
+    "optional-lookup-failure",
+    ...Object.keys(failureReasons),
+    "cancel",
+  ].map((scenario) => ({ scenario })),
   {
     scenario: "correction",
     name: "lowercase Windows environment",
@@ -170,7 +185,21 @@ for (const {
         checkout,
       );
       let validations = 0;
-      const result = runner.run({
+      const checkpoints = checkpointWorkbench("blocked-review", {
+        repository: checkout,
+      });
+      const reportsBlocker =
+        scenario.startsWith("required-source-error") ||
+        scenario === "invalid-review-error";
+      const reviewRunner = reportsBlocker
+        ? new CheckpointedReviewRunner(
+            new FindingWorkflow("blocked-review", process.env, checkpoints.run),
+            runner,
+            checkpoints.source,
+            { allRepositories: true },
+          )
+        : runner;
+      const result = reviewRunner.run({
         stage: "pair-review",
         model: "gpt-5.6-sol",
         effort: "ultra",
@@ -187,7 +216,8 @@ for (const {
             typeof value !== "object" ||
             value === null ||
             !("decision" in value) ||
-            value.decision !== "SAME"
+            value.decision !==
+              (scenario === "incomplete-content" ? "DISTINCT" : "SAME")
           )
             throw new Error("Invalid decision");
           return { decision: value.decision };
@@ -207,6 +237,13 @@ for (const {
             ? 1
             : 2,
         );
+      } else if (
+        ["incomplete-content", "optional-lookup-failure"].includes(scenario)
+      ) {
+        expect(await result).toEqual({
+          decision: scenario === "incomplete-content" ? "DISTINCT" : "SAME",
+        });
+        expect(validations).toBe(1);
       } else if (["cancel", "cancel-continuation"].includes(scenario)) {
         await expect(result).rejects.toBe("synthetic cancellation");
       } else {
@@ -234,10 +271,14 @@ for (const {
               ? "validation"
               : scenario === "text-only"
                 ? "no-submission"
-                : scenario === "failed-turn"
+                : scenario === "failed-turn" || reportsBlocker
                   ? "model"
                   : "transport",
-          attempts: ["invalid-submission", "text-only"].includes(scenario)
+          attempts: [
+            "invalid-submission",
+            "text-only",
+            "required-source-error-after-text",
+          ].includes(scenario)
             ? 2
             : 1,
           reason:
@@ -249,9 +290,11 @@ for (const {
                   ? "Codex did not submit a validated review."
                   : scenario === "failed-turn"
                     ? "Codex review turn failed."
-                    : scenario === "request-error"
-                      ? "Codex rejected the review request."
-                      : "Codex review transport failed.",
+                    : reportsBlocker
+                      ? "A required review check could not be completed."
+                      : scenario === "request-error"
+                        ? "Codex rejected the review request."
+                        : "Codex review transport failed.",
         });
         const supportBundle = JSON.stringify(reviewFailure.metadata);
         expect(supportBundle).not.toContain("synthetic-review-key");
@@ -260,10 +303,13 @@ for (const {
         expect(validations).toBe(
           scenario === "invalid-submission"
             ? 2
-            : scenario === "failed-turn"
+            : ["failed-turn", "required-source-error-after-verdict"].includes(
+                  scenario,
+                )
               ? 1
               : 0,
         );
+        if (reportsBlocker) expect(checkpoints.saved).toHaveLength(0);
       }
       expect(starts).toBe(1);
       if (commandAuth) {
@@ -315,6 +361,7 @@ for (const {
             "retry-correction",
             "text-only-correction",
             "cancel-continuation",
+            "required-source-error-after-text",
           ].includes(scenario)
             ? 2
             : ["request-error", "credential-error"].includes(scenario)

@@ -69,6 +69,11 @@ for await (const line of createInterface({ input: process.stdin })) {
       message.params.dynamicTools[0].tools[0].name,
       "submit_decisions",
     );
+    const errorTool = message.params.dynamicTools[0].tools.find(
+      (tool) => tool.name === "submit_error",
+    );
+    assert.deepEqual(errorTool.inputSchema.required, ["reason"]);
+    assert.equal(errorTool.inputSchema.additionalProperties, false);
     send({
       id: message.id,
       result: {
@@ -114,7 +119,11 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("invalid", { decision: "UNKNOWN" });
     } else if (
       scenario === "text-only" ||
-      (["text-only-correction", "cancel-continuation"].includes(scenario) &&
+      ([
+        "text-only-correction",
+        "cancel-continuation",
+        "required-source-error-after-text",
+      ].includes(scenario) &&
         turns === 1)
     ) {
       send({
@@ -132,16 +141,54 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("wrong-thread", { decision: "SAME" }, { threadId: "other" });
       submit("wrong-tool", { decision: "SAME" }, { tool: "other" });
       submit("wrong-namespace", { decision: "SAME" }, { namespace: null });
+      submit(
+        "wrong-error-thread",
+        { reason: "Unrelated failure" },
+        { tool: "submit_error", threadId: "other" },
+      );
       submit("invalid", { decision: "UNKNOWN" });
+    } else if (scenario === "invalid-review-error") {
+      submit("invalid-error", { reason: " " }, { tool: "submit_error" });
+    } else if (scenario.startsWith("required-source-error")) {
+      if (scenario === "required-source-error-after-verdict")
+        submit("pending-verdict", { decision: "SAME" });
+      submit(
+        "blocked",
+        { reason: "Required source revision could not be read." },
+        { tool: "submit_error" },
+      );
+    } else if (scenario === "incomplete-content") {
+      submit("valid", { decision: "DISTINCT" });
     } else {
+      if (scenario === "optional-lookup-failure")
+        send({
+          method: "item/completed",
+          params: {
+            threadId: "review-thread",
+            turnId,
+            item: { type: "commandExecution", status: "failed", exitCode: 1 },
+          },
+        });
       submit("valid", { decision: "SAME" });
     }
   } else if (
-    ["wrong-thread", "wrong-tool", "wrong-namespace", "wrong-turn"].includes(
-      message.id,
-    )
+    [
+      "wrong-thread",
+      "wrong-tool",
+      "wrong-namespace",
+      "wrong-error-thread",
+      "wrong-turn",
+    ].includes(message.id)
   ) {
     assert.equal(message.error.code, -32601);
+  } else if (message.id === "invalid-error") {
+    assert.equal(message.result.success, false);
+    assert.match(message.result.contentItems[0].text, /Resubmit/);
+    submit(
+      "blocked",
+      { reason: "Required source revision could not be read." },
+      { tool: "submit_error" },
+    );
   } else if (message.id === "invalid") {
     assert.equal(message.result.success, false);
     assert.match(message.result.contentItems[0].text, /Resubmit/);

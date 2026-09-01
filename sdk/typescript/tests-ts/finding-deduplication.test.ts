@@ -414,6 +414,12 @@ test("validates exact screening slots without model-owned finding identity", () 
 
 test("keeps recommendation-only screening independent from complete pair reviews", async () => {
   const findings = [entry(1), entry(2), entry(3)];
+  const linkedId = entry(4).findingId;
+  findings[0]!.extensions = {
+    ...findings[0]!.extensions,
+    parent: { id: "external-parent", url: "https://issues.example/parent" },
+    duplicateOf: { id: linkedId, url: "https://issues.example/duplicate" },
+  };
   const calls: CodexReview<unknown>[] = [];
   const reviewer = new CodexDeduplicationReviewer({
     async run<T>(review: CodexReview<T>): Promise<T> {
@@ -518,6 +524,36 @@ test("keeps recommendation-only screening independent from complete pair reviews
   ).toBe(true);
   expect(calls[0]!.prompt).not.toContain("canonicalFindingId");
   expect(calls[0]!.prompt).not.toContain("mergedFinding");
+  for (const { prompt } of calls) {
+    expect(prompt).toMatch(/incomplete or insufficient.*DISTINCT/);
+    expect(prompt).toMatch(/failure prevents a required check.*submit_error/);
+    expect(prompt).toMatch(
+      /failed optional lookup.*continue when other available evidence is sufficient/,
+    );
+  }
+  for (const { prompt } of calls.slice(1)) {
+    expect(prompt).toMatch(/exactly the two supplied findings/);
+    expect(prompt).toMatch(
+      /Linked parent tickets, duplicate targets, and related-ticket records are metadata/,
+    );
+    expect(prompt).toMatch(/Do not fetch those records or expand the pair/);
+    expect(prompt).toMatch(
+      /unsupplied linked duplicate target is not automatically the canonical finding.*not itself an error/,
+    );
+    expect(prompt).toMatch(
+      /Necessary source-code investigation.*remains allowed/,
+    );
+  }
+  expect(() =>
+    validateReview(
+      {
+        ...same(findings.slice(0, 2)),
+        canonicalFindingId: linkedId,
+        mergedFinding: { ...findings[0], findingId: linkedId },
+      },
+      findings.slice(0, 2),
+    ),
+  ).toThrow("The canonical finding must belong to the assigned findings.");
 });
 
 test("accepts complete canonical and merged reviews and rejects invalid assignments", () => {
@@ -698,7 +734,7 @@ test("lookup failures and cancellation never produce a completed uniqueness resu
   ).rejects.toBe("synthetic cancellation");
 });
 
-test("writes accepted groups only after all reviews and fails when write-back fails", async () => {
+test("writes accepted groups only after all reviews and fails on review or write-back errors", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dedupe-writeback-"));
   try {
     await cp(join(PLUGIN_ROOT, "examples/completed-scan"), directory, {
@@ -707,7 +743,7 @@ test("writes accepted groups only after all reviews and fails when write-back fa
     if (process.platform !== "win32") await chmod(directory, 0o700);
     const findings = [document.findings[0]!, entry(2), entry(3)];
     const ids = findings.map((finding) => finding.findingId);
-    for (const status of [201, 409]) {
+    for (const failure of ["none", "write", "review"]) {
       const phases: string[] = [];
       const controller = new AbortController();
       const result = deduplicateScanInternal(
@@ -734,7 +770,9 @@ test("writes accepted groups only after all reviews and fails when write-back fa
               expect(JSON.parse(options.body as string)).toEqual({
                 groups: [[...ids].sort()],
               });
-              return Response.json([], { status });
+              return Response.json([], {
+                status: failure === "write" ? 409 : 201,
+              });
             }
             phases.push("lookup");
             return Response.json({
@@ -756,19 +794,33 @@ test("writes accepted groups only after all reviews and fails when write-back fa
             },
             async reviewPair(values) {
               phases.push("pair");
+              if (failure === "review" && values[1]!.findingId === ids[2])
+                throw new CodexSecurityError(
+                  "Required source revision could not be read.",
+                );
               return same(values);
             },
           },
         },
       );
-      if (status === 201) {
+      if (failure === "none") {
         expect((await result).duplicateGroups).toEqual([[...ids].sort()]);
+      } else if (failure === "review") {
+        await expect(result).rejects.toThrow(
+          "Required source revision could not be read.",
+        );
       } else {
         await expect(result).rejects.toThrow(
           "POST /v1/dedupe-groups failed (HTTP 409)",
         );
       }
-      expect(phases).toEqual(["lookup", "screen", "pair", "pair", "store"]);
+      expect(phases).toEqual([
+        "lookup",
+        "screen",
+        "pair",
+        "pair",
+        ...(failure === "review" ? [] : ["store"]),
+      ]);
     }
     expect(
       JSON.parse(await readFile(join(directory, "findings.json"), "utf8")),
