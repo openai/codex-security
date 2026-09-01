@@ -109,6 +109,8 @@ describe("CLI MCP scans", () => {
         auth: { default: "auto" },
         mode: { default: "standard" },
         dryRun: { type: "boolean", default: false },
+        mock: { type: "boolean", default: false },
+        workflowId: { type: "string" },
       });
       for (const name of ["patch", "patchSeverity", "createPr"]) {
         expect(scan.inputSchema.properties).not.toHaveProperty(name);
@@ -191,6 +193,7 @@ describe("CLI MCP scans", () => {
             mode: "deep",
             workers: 2,
             maxCostUsd: 5,
+            onBudgetApproaching: undefined,
             outputDir: "/synthetic/results",
           }),
         }),
@@ -198,6 +201,29 @@ describe("CLI MCP scans", () => {
       expect(closed).toBe(1);
       expect(session.stderr.text()).toContain("Scan complete");
       expect(session.stderr.text()).not.toContain("\u001b[");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("passes mock scans and workflow reuse through to the SDK", async () => {
+    const calls: unknown[] = [];
+    const session = await connect(
+      dependencies({ onTurn: (_repository, options) => calls.push(options) }),
+    );
+    try {
+      const result = await session.call("scan", {
+        repository: "/synthetic/repo",
+        mock: true,
+        workflowId: "synthetic-workflow",
+      }).result;
+      expect(result.isError).not.toBe(true);
+      expect(calls).toEqual([
+        expect.objectContaining({
+          mock: true,
+          workflowId: "synthetic-workflow",
+        }),
+      ]);
     } finally {
       await session.close();
     }
@@ -242,6 +268,7 @@ describe("CLI MCP scans", () => {
         { archiveExisting: true },
         { workers: 2 },
         { maxCost: -1 },
+        { mock: true, dryRun: true },
         { patch: true },
         { patchSeverity: "high" },
         { createPr: true },
