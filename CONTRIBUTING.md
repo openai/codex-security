@@ -35,6 +35,9 @@ customer data, and security findings before posting.
 
 Open an issue describing the problem and the workflow you want to support.
 Documentation corrections and safe examples are welcome.
+Use synthetic examples when documenting expected behavior.
+Keep example values fictional and safe to share.
+Do not include credentials or private information in examples.
 
 ## Report a security issue
 

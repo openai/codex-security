@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   realpath,
@@ -16,6 +18,7 @@ import { CodexSecurityError, type ScanOptions } from "../src/index.js";
 import {
   codexSecurityCredentialAllowsAmbientImport,
   prepareCodexSecurityCredentialHome,
+  setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
 import {
   capture,
@@ -741,10 +744,11 @@ describe("CLI authentication", () => {
     const tildeHome = join(root, ".codex-security-home");
     const mountedHome = join(root, "mounted-codex-home");
     const defaultHome = join(root, ".codex");
-    await mkdir(relativeHome, { recursive: true });
-    await mkdir(tildeHome, { recursive: true });
-    await mkdir(mountedHome, { recursive: true });
-    await mkdir(defaultHome, { recursive: true });
+    await mkdir(repository, { mode: 0o700 });
+    await mkdir(relativeHome, { mode: 0o700 });
+    await mkdir(tildeHome, { mode: 0o700 });
+    await mkdir(mountedHome, { mode: 0o700 });
+    await mkdir(defaultHome, { mode: 0o700 });
     try {
       for (const [configuredHome, expectedHome, userHome] of [
         [".codex-security-home", relativeHome, root],
@@ -757,14 +761,25 @@ describe("CLI authentication", () => {
               ["   ", defaultHome, root],
             ] as const)),
       ] as const) {
-        const credentialHome = join(
-          expectedHome,
-          "state",
-          "plugins",
-          "codex-security",
-          "codex-home",
-        );
+        const credentialAncestors = [
+          join(expectedHome, "state"),
+          join(expectedHome, "state", "plugins"),
+          join(expectedHome, "state", "plugins", "codex-security"),
+          join(
+            expectedHome,
+            "state",
+            "plugins",
+            "codex-security",
+            "codex-home",
+          ),
+        ];
+        const credentialHome = credentialAncestors.at(-1)!;
         await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+        if (process.platform !== "win32") {
+          for (const path of [expectedHome, ...credentialAncestors]) {
+            await chmod(path, 0o700);
+          }
+        }
         await writeFile(
           join(credentialHome, "config.toml"),
           'cli_auth_credentials_store = "file"\n',
@@ -1066,5 +1081,79 @@ describe("CLI authentication", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toMatchObject({ authentication });
     expect(`${stdout.text()}${stderr.text()}`).not.toContain("synthetic");
+  });
+
+  test("recognizes existing ambient Codex authentication on a fresh state directory during login status", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-ambient-auth-")),
+    );
+    try {
+      const ambientHome = join(root, "ambient-codex");
+      await mkdir(ambientHome, { mode: 0o700 });
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        '{"auth_mode":"chatgpt"}\n',
+      );
+
+      const stdout = capture();
+      const stderr = capture();
+      let forwardedHome: string | undefined;
+      const deps = dependencies({
+        environment: {
+          CODEX_HOME: ambientHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+      });
+      deps.runCodex = async (_args, _output, authEnvironment) => {
+        forwardedHome = authEnvironment?.["CODEX_HOME"];
+        return 0;
+      };
+
+      expect(
+        await main(["login", "status"], stdout.stream, stderr.stream, deps),
+      ).toBe(0);
+      expect(forwardedHome).toBe(join(stateDirectory, "codex-home"));
+      expect(existsSync(join(stateDirectory, "codex-home", "auth.json"))).toBe(
+        true,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not import ambient Codex authentication during login status after explicit logout", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-ambient-logout-")),
+    );
+    try {
+      const ambientHome = join(root, "ambient-codex");
+      await mkdir(ambientHome, { mode: 0o700 });
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        '{"auth_mode":"chatgpt"}\n',
+      );
+
+      const credentialHome = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      });
+      await setCodexSecurityCredentialLogout(credentialHome, true);
+
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies({
+        environment: {
+          CODEX_HOME: ambientHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+      });
+      deps.runCodex = async () => 0;
+
+      expect(
+        await main(["login", "status"], stdout.stream, stderr.stream, deps),
+      ).toBe(0);
+      expect(existsSync(join(credentialHome, "auth.json"))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

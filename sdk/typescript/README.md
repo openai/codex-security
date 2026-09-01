@@ -356,10 +356,16 @@ original IDs. Uncertain matches stay separate. `summary.json` records coverage
 and matching status; `report.md` links to component reports. Export and publish
 from the individual scan folders, not the combined summary.
 
+Large comparisons use bounded batches that cover every earlier/later finding
+pair. Overlapping confirmed groups are joined in code. Finding text is not
+truncated; pairs above Codex's input limit leave matching incomplete.
+
 Use an empty output directory outside the project. Failed components don't
 stop others, but failures, incomplete coverage, or failed matching exit with
 `2`. Retry failed or incomplete components with
 `--components-file retry-components.json` and a new output directory.
+The retry report covers only those components; it does not update the original
+combined report.
 
 `--max-cost` applies per component, excluding planning and matching.
 `--model` and `--effort` also apply to matching; `--auth` applies throughout.
@@ -472,6 +478,7 @@ restrictions.
 | Variable                                                                    | Effect                                                                               |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; `OPENAI_API_KEY` wins if both are set.                             |
+| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Findings service endpoint; see [Embeddings and storage](#embeddings-and-storage).    |
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default team and project for completed-scan publication.                             |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Personal API key for Linear patching and direct publication.                         |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; `debug` enables verbose diagnostics.                                       |
@@ -512,6 +519,27 @@ the limit, though in-flight requests can finish above it. If deep-scan
 discovery has finished, the scan returns a sealed partial report without more
 model calls and lists unvalidated candidates as follow-up work. Bulk scans
 apply the limit per repository attempt.
+
+For a single scan in the interactive dashboard, reaching 80% of the limit
+offers a higher **total** USD limit. Enter a larger amount to approve it, or
+press Enter with an empty input or Escape to keep the current limit. The scan
+continues running while you decide, and the existing limit remains enforced
+until the increase is saved. Increases keep the same scan and accumulated cost;
+they do not restart work or extend time or discovery limits. CI, JSON/JSONL,
+`--headless`, and `--verbose` scans do not offer budget increases. If usage crosses the limit
+before an increase is approved, the scan still stops.
+
+SDK callers can supply `onBudgetApproaching({ maxCostUsd, cost, signal })` and
+return a higher total limit, or `undefined` to keep the current limit. The
+callback runs once per limit at 80% usage without blocking tracking or
+execution. Its signal aborts when the scan stops or finishes model work; late
+answers are ignored. Invalid increases or failures to save them leave the
+existing limit in place and report a warning. `onCost(cost, maxCostUsd)` reports
+the current limit, including after an approved increase.
+
+These amounts estimate API-equivalent model usage, not ChatGPT subscription
+allowance. Post-scan prompts run after scan cost tracking ends and are outside
+this limit.
 
 ### Bulk scans
 
@@ -1350,6 +1378,18 @@ precedence over `CODEX_API_KEY`; remove the `OPENAI_API_KEY` entry if using
 `CODEX_API_KEY` instead. Listing and empty imports do not require a key.
 A Codex ChatGPT login is not an embedding API credential.
 
+Set `CODEX_SECURITY_EMBEDDINGS_URL` to override the full embeddings endpoint URL,
+including its path and any query parameters. Unset or empty values use
+`https://api.openai.com/v1/embeddings`. Export it before `codex-security serve`,
+or set it in `.env` for Docker Compose, which passes it to the service. For example:
+
+```bash
+CODEX_SECURITY_EMBEDDINGS_URL=https://embeddings.example.com/v1/embeddings codex-security serve
+```
+
+The configured endpoint receives the finding inputs and the API key as a bearer
+token and must support the same OpenAI embeddings request and response format.
+
 The service calls the OpenAI embeddings API with `text-embedding-3-large` and
 1,536 dimensions. The complete finding JSON is tokenized using `js-tiktoken`'s
 bundled `cl100k_base` encoding. Long inputs are split without truncation;
@@ -1379,8 +1419,8 @@ The findings Compose configuration sets `HOST=0.0.0.0`, `PORT=3000`, and
 `CODEX_SECURITY_STATE_DIR=/state`. Keep port and volume mappings aligned if
 changing these settings. Compose binds only to host loopback; the API has no
 authentication. Use an authenticated TLS proxy before sharing access. Finding
-JSON is sent to `api.openai.com` over HTTPS for embeddings; the database and
-generated embeddings stay in the local volume.
+JSON is sent to the configured embeddings endpoint (`api.openai.com` over HTTPS
+by default); the database and generated embeddings stay in the local volume.
 
 ### Upgrades and backups
 

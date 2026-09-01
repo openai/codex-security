@@ -60,7 +60,6 @@ import {
 import {
   estimateScanCost,
   ScanCostTracker,
-  sumTokenUsage,
   type ScanCost,
   type ScanSessionEvent,
 } from "./cost.js";
@@ -244,7 +243,10 @@ export interface ScanOptions extends DeepScanOptions {
   expectedPluginVersion?: string;
   failureSeverity?: SeverityLevel;
   maxCostUsd?: number;
-  onCost?: (cost: Readonly<ScanCost>) => void;
+  onCost?: (cost: Readonly<ScanCost>, maxCostUsd?: number) => void;
+  onBudgetApproaching?: (
+    budget: ScanBudget,
+  ) => number | undefined | Promise<number | undefined>;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
@@ -333,6 +335,12 @@ export interface ScanReconnectDetails {
 
 export interface ScanWarningDetails {
   kind: "target_changed";
+}
+
+export interface ScanBudget {
+  maxCostUsd: number;
+  cost: Readonly<ScanCost>;
+  signal: AbortSignal;
 }
 
 type ScanObserverName =
@@ -750,6 +758,14 @@ export class CodexSecurity {
       costAbortController.signal,
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
+    const budgetAbortController = new AbortController();
+    const budgetSignal = AbortSignal.any([
+      signal,
+      budgetAbortController.signal,
+    ]);
+    let maxCostUsd = options.maxCostUsd;
+    let latestCost: Readonly<ScanCost> | null = null;
+    let notifiedLimit: number | undefined;
     let scanDir = "";
     let archivedScanDir: string | null = null;
     let targetPathsFile: string | null = null;
@@ -1010,24 +1026,86 @@ export class CodexSecurity {
           options.onCost === undefined && options.maxCostUsd === undefined
             ? undefined
             : (cost) => {
+                latestCost = cost;
                 notifyObserver(
                   "onCost",
                   options.onCost,
                   options.onObserverError,
                   cost,
+                  maxCostUsd,
                 );
                 if (
-                  options.maxCostUsd !== undefined &&
-                  cost.estimatedUsd > options.maxCostUsd
+                  maxCostUsd !== undefined &&
+                  cost.estimatedUsd > maxCostUsd
                 ) {
                   costAbortController.abort(
-                    new ScanCostLimitExceededError(
-                      options.maxCostUsd,
-                      cost,
-                      scanDir,
-                    ),
+                    new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
                   );
+                  return;
                 }
+                const request = options.onBudgetApproaching;
+                if (
+                  request === undefined ||
+                  maxCostUsd === undefined ||
+                  budgetSignal.aborted ||
+                  notifiedLimit === maxCostUsd ||
+                  cost.estimatedUsd < maxCostUsd * 0.8
+                )
+                  return;
+                const limit = maxCostUsd;
+                notifiedLimit = limit;
+                void Promise.resolve()
+                  .then(async () => {
+                    if (budgetSignal.aborted) return;
+                    const next = await request({
+                      maxCostUsd: limit,
+                      cost,
+                      signal: budgetSignal,
+                    });
+                    if (
+                      next === undefined ||
+                      budgetSignal.aborted ||
+                      activeScan === null
+                    )
+                      return;
+                    if (
+                      !Number.isFinite(next) ||
+                      next <= Math.max(limit, latestCost!.estimatedUsd)
+                    ) {
+                      throw new CodexSecurityError(
+                        "The new cost limit must exceed the current limit and estimated cost.",
+                      );
+                    }
+                    await workbench(
+                      { ...activeScan.options, signal: budgetSignal },
+                      [
+                        "set-scan-cost-limit",
+                        "--scan-id",
+                        activeScan.id,
+                        "--max-cost-usd",
+                        String(next),
+                      ],
+                    );
+                    if (budgetSignal.aborted) return;
+                    maxCostUsd = next;
+                    notifyObserver(
+                      "onCost",
+                      options.onCost,
+                      options.onObserverError,
+                      latestCost!,
+                      maxCostUsd,
+                    );
+                  })
+                  .catch((error: unknown) => {
+                    if (!budgetSignal.aborted) {
+                      notifyObserver(
+                        "onWarning",
+                        options.onWarning,
+                        options.onObserverError,
+                        `Could not increase scan cost limit: ${errorMessage(error)}`,
+                      );
+                    }
+                  });
               },
         onError: reportTrackingError,
       });
@@ -1357,6 +1435,9 @@ export class CodexSecurity {
         },
         onFinalize: async (usage) => {
           if (options.validationPrompt !== undefined) {
+            tracker.recordUsage(usage);
+            await tracker.refresh().catch(reportTrackingError);
+            checkOpen();
             await runCustomValidation({
               repository: repo,
               target: normalized,
@@ -1402,12 +1483,16 @@ export class CodexSecurity {
                     turn.lastStreamError ??
                       "The custom validation turn did not complete.",
                   );
-                usage = sumTokenUsage(usage, turn.usage);
+                budgetAbortController.abort();
+                tracker.recordUsage(turn.usage, turn.threadId);
+                await tracker.refresh().catch(reportTrackingError);
+                checkOpen();
                 return turn.finalResponse;
               },
             });
             customValidationComplete = true;
           }
+          budgetAbortController.abort();
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
             if (options.maxCostUsd !== undefined) throw error;
             reportTrackingError(error);
@@ -1612,6 +1697,7 @@ export class CodexSecurity {
               ((input, comparisonOptions) =>
                 matchScanFindingsInternal(input, comparisonOptions, {
                   surface: this.#surface,
+                  allowBatching: false,
                 })),
             environment,
             model,
@@ -1636,10 +1722,21 @@ export class CodexSecurity {
       // scan, and cleanup must treat all of those as a failure it is not allowed to mask.
       scanFailure = true;
       const snapshot = await costTracker?.stop().catch(() => null);
-      const failure =
+      let failure =
         signal.reason instanceof ScanCostLimitExceededError
           ? signal.reason
           : error;
+      if (
+        failure instanceof ScanCostLimitExceededError &&
+        snapshot?.cost &&
+        snapshot.cost.estimatedUsd > failure.cost.estimatedUsd
+      ) {
+        failure = new ScanCostLimitExceededError(
+          failure.maxCostUsd,
+          snapshot.cost,
+          scanDir,
+        );
+      }
       if (
         failure instanceof ScanCostLimitExceededError &&
         budgetRecovery !== null &&
@@ -1762,6 +1859,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      budgetAbortController.abort();
       deepProgressTracker?.stop();
       // Removing the temporary scan inputs is best effort. A throw here would replace the
       // outcome the try and catch blocks already produced, so these failures are reported
@@ -1847,6 +1945,14 @@ export class CodexSecurity {
       }
       const authentication = await this.#authentication();
       this.#requireOpen();
+      const ambientHome =
+        environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
+        join(homedir(), ".codex");
+      await initialCredentialsAvailable(
+        this.#dependencies.environment,
+        ambientHome,
+        authentication.codexHome,
+      );
       return await accountStatus(
         this.#codexCommand(),
         authentication.environment,
