@@ -610,6 +610,74 @@ try {
     ["checkpoint-multiple-surfaces"],
   );
 
+  const resolvedDuplicateRoot = path.join(root, "resolved-duplicate-surfaces");
+  await mkdir(resolvedDuplicateRoot);
+  const resolvedDuplicateContext = { ...context, root: resolvedDuplicateRoot };
+  await recordCodexSecurityScanDraft(resolvedDuplicateContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [
+        { label: "Source review", disposition: "needs_follow_up" },
+        { label: "Source review", disposition: "needs_follow_up" },
+      ],
+      deferred: [{
+        id: "checkpoint-resolved-duplicates",
+        reason: "Two source review units were pending.",
+        surfaceIds: [surfaceId, `${surfaceId}-2`],
+      }],
+    },
+  });
+  const rawDuplicateHistory = await Promise.all(
+    (await readdir(path.join(resolvedDuplicateRoot, "checkpoints"))).map(async name => (
+      JSON.parse(await readFile(path.join(resolvedDuplicateRoot, "checkpoints", name), "utf8"))
+    )),
+  );
+  const rawDuplicateCheckpoint = rawDuplicateHistory.find(checkpoint => (
+    checkpoint.complete === false
+    && checkpoint.coverage.deferred.some(item => item.id === "checkpoint-resolved-duplicates")
+  ));
+  assert.ok(rawDuplicateCheckpoint);
+  assert.equal(rawDuplicateCheckpoint.coverage.surfaces.length, 2);
+  assert.equal(
+    rawDuplicateCheckpoint.coverage.surfaces.every(surface => !("id" in surface)),
+    true,
+  );
+  await recordCodexSecurityScanDraft(resolvedDuplicateContext, {
+    ...input,
+    findings: [],
+    coverage: {
+      ...coverage,
+      surfaces: [
+        {
+          id: surfaceId,
+          label: "Source review",
+          disposition: "no_issue_found",
+        },
+        {
+          id: `${surfaceId}-2`,
+          label: "Source review",
+          disposition: "no_issue_found",
+        },
+      ],
+    },
+  });
+  const resolvedDuplicateResult = JSON.parse(
+    await readFile(path.join(resolvedDuplicateRoot, "coverage.json"), "utf8"),
+  );
+  assert.equal(resolvedDuplicateResult.completeness, "complete");
+  assert.deepEqual(resolvedDuplicateResult.deferred, []);
+  assert.deepEqual(
+    resolvedDuplicateResult.surfaces.map(surface => [surface.id, surface.disposition]),
+    [
+      [surfaceId, "no_issue_found"],
+      [`${surfaceId}-2`, "no_issue_found"],
+    ],
+  );
+
   const undefinedCandidateRoot = path.join(root, "undefined-candidate-worker");
   await mkdir(undefinedCandidateRoot);
   const undefinedCandidateContext = { ...workerContext, root: undefinedCandidateRoot };
