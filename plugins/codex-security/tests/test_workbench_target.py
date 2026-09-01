@@ -133,10 +133,12 @@ def test_worktree_content_digest_streams_tracked_binary_patch(
     target = tmp_path / "target"
     initialize_git_repository(target)
     binary = target / "fixture.bin"
-    binary.write_bytes(bytes(range(256)) * 4)
+    # Incompressible fixture bytes keep the binary patch larger than one hash read.
+    fixture_size = 1024 * 1024 + 17
+    binary.write_bytes(hashlib.shake_256(b"original binary fixture").digest(fixture_size))
     subprocess.run(["git", "add", binary.name], cwd=target, check=True)
     subprocess.run(["git", "commit", "-qm", "Add binary fixture"], cwd=target, check=True)
-    binary.write_bytes(bytes(reversed(range(256))) * 4)
+    binary.write_bytes(hashlib.shake_256(b"changed binary fixture").digest(fixture_size))
 
     tracked = subprocess.run(
         [
@@ -156,6 +158,7 @@ def test_worktree_content_digest_streams_tracked_binary_patch(
         capture_output=True,
     ).stdout
     assert b"GIT binary patch" in tracked
+    assert len(tracked) > 1024 * 1024
     expected = hashlib.sha256()
     update_digest_field(expected, b"format", b"codex-security-snapshot/v1")
     update_digest_field(expected, b"tracked-diff", tracked)
