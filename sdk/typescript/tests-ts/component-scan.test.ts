@@ -1161,6 +1161,7 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
       {
         ...dependencies({ currentDirectory: paths.root, environment }),
         planComponents: async (_repository, options) => {
+          expect(options?.auth).toBe(auth);
           expect(options?.environment).toEqual(expectedEnvironment);
           planned = true;
           return { components: components.slice(0, 2) };
@@ -1170,6 +1171,7 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
           return completed(options);
         }),
         matchFindings: async (_input, options) => {
+          expect(options?.auth).toBe(auth);
           expect(options?.environment).toEqual(expectedEnvironment);
           matched = true;
           return noMatches;

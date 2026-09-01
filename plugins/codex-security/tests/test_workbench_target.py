@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import runpy
 import subprocess
 from pathlib import Path
-from typing import Callable, cast
+from typing import Any, Callable, cast
 
 import pytest
 from workbench_test_support import initialize_git_repository
@@ -13,6 +14,9 @@ WORKBENCH_TARGET = runpy.run_path(
 )
 directory_content_digest = cast(Callable[[Path], str], WORKBENCH_TARGET["directory_content_digest"])
 worktree_content_digest = cast(Callable[[Path], str], WORKBENCH_TARGET["worktree_content_digest"])
+update_digest_field = cast(
+    Callable[[Any, bytes, bytes], None], WORKBENCH_TARGET["update_digest_field"]
+)
 
 
 def initialize_unborn_git_repository(target: Path) -> None:
@@ -121,3 +125,55 @@ def test_directory_content_digest_skips_missing_cached_paths(tmp_path: Path) -> 
     cached_source.unlink()
 
     assert directory_content_digest(target) == original_digest
+
+
+def test_worktree_content_digest_streams_tracked_binary_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    binary = target / "fixture.bin"
+    binary.write_bytes(bytes(range(256)) * 4)
+    subprocess.run(["git", "add", binary.name], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add binary fixture"], cwd=target, check=True)
+    binary.write_bytes(bytes(reversed(range(256))) * 4)
+
+    tracked = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=none",
+            "HEAD",
+            "--",
+            ".",
+        ],
+        cwd=target,
+        check=True,
+        capture_output=True,
+    ).stdout
+    assert b"GIT binary patch" in tracked
+    expected = hashlib.sha256()
+    update_digest_field(expected, b"format", b"codex-security-snapshot/v1")
+    update_digest_field(expected, b"tracked-diff", tracked)
+
+    function_globals = cast(dict[str, Any], cast(Any, worktree_content_digest).__globals__)
+    git_command = cast(
+        Callable[..., subprocess.CompletedProcess[Any]], function_globals["git_command"]
+    )
+
+    def require_streamed_diff(
+        repository: Path, *args: str, **kwargs: object
+    ) -> subprocess.CompletedProcess[Any]:
+        if args and args[0] == "diff":
+            assert kwargs.get("stdout_file") is not None
+        return git_command(repository, *args, **kwargs)
+
+    monkeypatch.setitem(function_globals, "git_command", require_streamed_diff)
+
+    assert worktree_content_digest(target) == (
+        f"codex-security-snapshot/v1:sha256:{expected.hexdigest()}"
+    )

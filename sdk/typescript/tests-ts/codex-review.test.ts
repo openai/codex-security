@@ -1,8 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve, win32 } from "node:path";
+import { join, relative, resolve, win32 } from "node:path";
+import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
@@ -14,14 +15,35 @@ const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
 );
 
+const failureReasons: Record<string, string> = {
+  "text-only": "Codex did not submit a validated review",
+  "failed-turn": "Rate limit exceeded",
+  "request-error": "Authentication required",
+  "credential-error": "[redacted]",
+  "invalid-json": "Codex returned malformed JSON",
+  "invalid-submission": "Review validation failed: Invalid decision",
+  exit: "Codex exited before completing the review",
+};
+
 const transportCases: {
   scenario: string;
   name?: string;
   environmentNames?: readonly [string, string, string];
   extraEnvironment?: Record<string, string>;
   windowsOnly?: boolean;
+  commandAuth?: "direct" | "ambient";
 }[] = [
-  ...["correction", "text-only", "failed-turn", "exit", "cancel"].map(
+  {
+    scenario: "correction",
+    name: "command auth without an API key",
+    commandAuth: "direct",
+  },
+  {
+    scenario: "correction",
+    name: "command auth with ambient API key and relative home",
+    commandAuth: "ambient",
+  },
+  ...["correction", ...Object.keys(failureReasons), "cancel"].map(
     (scenario) => ({ scenario }),
   ),
   {
@@ -57,6 +79,7 @@ for (const {
   environmentNames = ["CODEX_HOME", "OPENAI_API_KEY", "GH_CONFIG_DIR"],
   extraEnvironment,
   windowsOnly = false,
+  commandAuth,
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
@@ -69,9 +92,30 @@ for (const {
     let args: readonly string[] = [];
     const controller = new AbortController();
     try {
-      const configuration =
-        '[mcp_servers.synthetic]\ncommand = "synthetic-unused-command"\n';
+      const auth = {
+        command: "./synthetic-auth",
+        args: ["token"],
+        refresh_interval_ms: 1234,
+        ...(commandAuth === "ambient" ? { cwd: modelHome } : {}),
+      };
+      const configuration = stringify({
+        mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        ...(commandAuth
+          ? {
+              model_provider: "synthetic.provider",
+              model_providers: {
+                "synthetic.provider": {
+                  name: "Synthetic",
+                  wire_api: "responses",
+                  base_url: "https://provider.example/v1",
+                  auth,
+                },
+              },
+            }
+          : {}),
+      });
       await writeFile(join(modelHome, "config.toml"), configuration);
+      await mkdir(join(modelHome, "state", "codex-home"), { recursive: true });
       const [homeName, keyName, ghName] = environmentNames;
       const runner = new CodexReviewRunner(
         {
@@ -79,8 +123,14 @@ for (const {
           SystemRoot: process.env["SystemRoot"],
           TEMP: process.env["TEMP"],
           TMP: process.env["TMP"],
-          [homeName]: modelHome,
-          [keyName]: "synthetic-review-key",
+          [homeName]:
+            commandAuth === "ambient"
+              ? relative(process.cwd(), modelHome)
+              : modelHome,
+          ...(commandAuth === "direct"
+            ? {}
+            : { [keyName]: "synthetic-review-key" }),
+          CODEX_SECURITY_STATE_DIR: join(modelHome, "state"),
           [ghName]: ghConfig,
           ...extraEnvironment,
         },
@@ -93,10 +143,11 @@ for (const {
           );
           args = commandArgs;
           directory = options.env!["CODEX_SQLITE_HOME"];
-          expect(options.cwd).toBe(checkout);
+          expect(options.cwd).toBe(directory);
+          expect(environmentEntry(options.env!, "CODEX_HOME")).toBe(modelHome);
           child = spawn(
             process.execPath,
-            [fixture, scenario, transcript],
+            [fixture, scenario, transcript, checkout],
             options,
           );
           if (scenario === "cancel")
@@ -138,12 +189,26 @@ for (const {
         await expect(result).rejects.toBe("synthetic cancellation");
       } else {
         await expect(result).rejects.toMatchObject({
-          message:
-            "Codex did not complete a validated deduplication review. Findings are unchanged; retry the command.",
+          name: "CodexSecurityError",
+          message: `Codex did not complete a validated deduplication review. Findings are unchanged; retry the command. Reason: ${failureReasons[scenario]}`,
         });
-        expect(validations).toBe(scenario === "failed-turn" ? 1 : 0);
+        expect(validations).toBe(
+          ["failed-turn", "invalid-submission"].includes(scenario) ? 1 : 0,
+        );
       }
-      expect(args).toContain('cli_auth_credentials_store="ephemeral"');
+      if (commandAuth) {
+        expect(args).not.toContain('cli_auth_credentials_store="ephemeral"');
+        const providers = parse(
+          args.find((value) => value.startsWith("model_providers="))!,
+        );
+        expect(providers).toMatchObject({
+          model_providers: {
+            "synthetic.provider": { auth: { ...auth, cwd: modelHome } },
+          },
+        });
+      } else {
+        expect(args).toContain('cli_auth_credentials_store="ephemeral"');
+      }
       expect(args.join(" ")).not.toContain("synthetic-review-key");
       const permissions = args.find((argument) =>
         argument.startsWith("permissions.codex_security_review="),
@@ -166,8 +231,13 @@ for (const {
               },
           )
           .find((message) => message.method === "account/login/start");
-        expect(loginRequest?.params?.apiKey).toBe("synthetic-review-key");
+        expect(loginRequest?.params?.apiKey).toBe(
+          commandAuth ? undefined : "synthetic-review-key",
+        );
       }
+      expect(await readFile(join(modelHome, "config.toml"), "utf8")).toBe(
+        configuration,
+      );
       expect(existsSync(join(modelHome, "auth.json"))).toBe(false);
       expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
       expect(existsSync(directory!)).toBe(false);

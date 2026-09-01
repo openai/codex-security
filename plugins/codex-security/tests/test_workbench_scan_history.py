@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from test_workbench_db import HEAD_CHANGED_WARNING, create_saved_workspace
+from test_workbench_db import HEAD_CHANGED_WARNING
 from workbench_test_support import (
     initialize_git_repository,
     mark_deep_coordinator_succeeded,

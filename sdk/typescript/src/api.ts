@@ -36,6 +36,7 @@ import {
 import { z } from "incur";
 import {
   accountStatus,
+  configuredCodexHome,
   CodexLoginHandle,
   loginApiKey as persistApiKey,
   logout as codexLogout,
@@ -49,7 +50,10 @@ import {
 import {
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
+  hasCommandAuth,
   mergedCodexConfig,
+  modelProviderConfigOverride,
+  resolveCommandAuthConfig,
   scanApprovalPolicy,
   scanModelConfiguration,
   scanModelProvider,
@@ -60,7 +64,6 @@ import {
 import {
   estimateScanCost,
   ScanCostTracker,
-  sumTokenUsage,
   type ScanCost,
   type ScanSessionEvent,
 } from "./cost.js";
@@ -243,7 +246,10 @@ export interface ScanOptions extends DeepScanOptions {
   expectedPluginVersion?: string;
   failureSeverity?: SeverityLevel;
   maxCostUsd?: number;
-  onCost?: (cost: Readonly<ScanCost>) => void;
+  onCost?: (cost: Readonly<ScanCost>, maxCostUsd?: number) => void;
+  onBudgetApproaching?: (
+    budget: ScanBudget,
+  ) => number | undefined | Promise<number | undefined>;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
@@ -296,6 +302,7 @@ export const SCAN_AUTH_MODES = ["auto", "chatgpt", "api-key"] as const;
 export type ScanAuthMode = (typeof SCAN_AUTH_MODES)[number];
 
 export type ScanAuthentication =
+  | { method: "command"; verified: false }
   | {
       method: "api_key";
       source:
@@ -332,6 +339,12 @@ export interface ScanReconnectDetails {
 
 export interface ScanWarningDetails {
   kind: "target_changed";
+}
+
+export interface ScanBudget {
+  maxCostUsd: number;
+  cost: Readonly<ScanCost>;
+  signal: AbortSignal;
 }
 
 type ScanObserverName =
@@ -732,6 +745,7 @@ export class CodexSecurity {
         this.#dependencies.environment,
         options.auth,
         modelProvider,
+        hasCommandAuth(configuration),
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -749,6 +763,14 @@ export class CodexSecurity {
       costAbortController.signal,
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
+    const budgetAbortController = new AbortController();
+    const budgetSignal = AbortSignal.any([
+      signal,
+      budgetAbortController.signal,
+    ]);
+    let maxCostUsd = options.maxCostUsd;
+    let latestCost: Readonly<ScanCost> | null = null;
+    let notifiedLimit: number | undefined;
     let scanDir = "";
     let archivedScanDir: string | null = null;
     let targetPathsFile: string | null = null;
@@ -1009,24 +1031,86 @@ export class CodexSecurity {
           options.onCost === undefined && options.maxCostUsd === undefined
             ? undefined
             : (cost) => {
+                latestCost = cost;
                 notifyObserver(
                   "onCost",
                   options.onCost,
                   options.onObserverError,
                   cost,
+                  maxCostUsd,
                 );
                 if (
-                  options.maxCostUsd !== undefined &&
-                  cost.estimatedUsd > options.maxCostUsd
+                  maxCostUsd !== undefined &&
+                  cost.estimatedUsd > maxCostUsd
                 ) {
                   costAbortController.abort(
-                    new ScanCostLimitExceededError(
-                      options.maxCostUsd,
-                      cost,
-                      scanDir,
-                    ),
+                    new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
                   );
+                  return;
                 }
+                const request = options.onBudgetApproaching;
+                if (
+                  request === undefined ||
+                  maxCostUsd === undefined ||
+                  budgetSignal.aborted ||
+                  notifiedLimit === maxCostUsd ||
+                  cost.estimatedUsd < maxCostUsd * 0.8
+                )
+                  return;
+                const limit = maxCostUsd;
+                notifiedLimit = limit;
+                void Promise.resolve()
+                  .then(async () => {
+                    if (budgetSignal.aborted) return;
+                    const next = await request({
+                      maxCostUsd: limit,
+                      cost,
+                      signal: budgetSignal,
+                    });
+                    if (
+                      next === undefined ||
+                      budgetSignal.aborted ||
+                      activeScan === null
+                    )
+                      return;
+                    if (
+                      !Number.isFinite(next) ||
+                      next <= Math.max(limit, latestCost!.estimatedUsd)
+                    ) {
+                      throw new CodexSecurityError(
+                        "The new cost limit must exceed the current limit and estimated cost.",
+                      );
+                    }
+                    await workbench(
+                      { ...activeScan.options, signal: budgetSignal },
+                      [
+                        "set-scan-cost-limit",
+                        "--scan-id",
+                        activeScan.id,
+                        "--max-cost-usd",
+                        String(next),
+                      ],
+                    );
+                    if (budgetSignal.aborted) return;
+                    maxCostUsd = next;
+                    notifyObserver(
+                      "onCost",
+                      options.onCost,
+                      options.onObserverError,
+                      latestCost!,
+                      maxCostUsd,
+                    );
+                  })
+                  .catch((error: unknown) => {
+                    if (!budgetSignal.aborted) {
+                      notifyObserver(
+                        "onWarning",
+                        options.onWarning,
+                        options.onObserverError,
+                        `Could not increase scan cost limit: ${errorMessage(error)}`,
+                      );
+                    }
+                  });
               },
         onError: reportTrackingError,
       });
@@ -1356,6 +1440,9 @@ export class CodexSecurity {
         },
         onFinalize: async (usage) => {
           if (options.validationPrompt !== undefined) {
+            tracker.recordUsage(usage);
+            await tracker.refresh().catch(reportTrackingError);
+            checkOpen();
             await runCustomValidation({
               repository: repo,
               target: normalized,
@@ -1401,12 +1488,16 @@ export class CodexSecurity {
                     turn.lastStreamError ??
                       "The custom validation turn did not complete.",
                   );
-                usage = sumTokenUsage(usage, turn.usage);
+                budgetAbortController.abort();
+                tracker.recordUsage(turn.usage, turn.threadId);
+                await tracker.refresh().catch(reportTrackingError);
+                checkOpen();
                 return turn.finalResponse;
               },
             });
             customValidationComplete = true;
           }
+          budgetAbortController.abort();
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
             if (options.maxCostUsd !== undefined) throw error;
             reportTrackingError(error);
@@ -1638,10 +1729,21 @@ export class CodexSecurity {
       // scan, and cleanup must treat all of those as a failure it is not allowed to mask.
       scanFailure = true;
       const snapshot = await costTracker?.stop().catch(() => null);
-      const failure =
+      let failure =
         signal.reason instanceof ScanCostLimitExceededError
           ? signal.reason
           : error;
+      if (
+        failure instanceof ScanCostLimitExceededError &&
+        snapshot?.cost &&
+        snapshot.cost.estimatedUsd > failure.cost.estimatedUsd
+      ) {
+        failure = new ScanCostLimitExceededError(
+          failure.maxCostUsd,
+          snapshot.cost,
+          scanDir,
+        );
+      }
       if (
         failure instanceof ScanCostLimitExceededError &&
         budgetRecovery !== null &&
@@ -1764,6 +1866,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      budgetAbortController.abort();
       deepProgressTracker?.stop();
       // Removing the temporary scan inputs is best effort. A throw here would replace the
       // outcome the try and catch blocks already produced, so these failures are reported
@@ -2002,11 +2105,18 @@ export class CodexSecurity {
       apiKey,
       sessionConfig,
     } = session;
+    const commandAuth = hasCommandAuth(sessionConfig);
     const environment: ProcessEnvironment = {
       ...pluginExecutionEnvironment(
         python,
         withoutCodexHome(
-          selectedScanEnvironment(runtime.environment, auth, modelProvider),
+          selectedScanEnvironment(
+            commandAuth
+              ? withoutOpenAiApiKeys(runtime.environment)
+              : runtime.environment,
+            auth,
+            modelProvider,
+          ),
         ),
       ),
       ...(externalProvider === null
@@ -2027,6 +2137,7 @@ export class CodexSecurity {
     // cannot safely encode their path and selector keys as dotted overrides.
     delete sdkCodexConfig["projects"];
     delete sdkCodexConfig["permissions"];
+    if (commandAuth) delete sdkCodexConfig["model_providers"];
     const configuredResponsesMetadata = isRecord(
       sdkCodexConfig["responses_api_metadata"],
     )
@@ -2037,9 +2148,7 @@ export class CodexSecurity {
       undefined
         ? undefined
         : this.#codexCommand().command;
-    let sdkEnvironment = definedEnvironment(
-      selectedScanEnvironment(environment, "chatgpt"),
-    );
+    let sdkEnvironment = definedEnvironment(withoutOpenAiApiKeys(environment));
     if (process.platform === "win32" && codexPathOverride === undefined) {
       codexPathOverride = environment["CODEX_CLI_PATH"]!;
       sdkEnvironment = bundledCodexSdkEnvironment(
@@ -2052,6 +2161,9 @@ export class CodexSecurity {
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+      ...(commandAuth
+        ? { configOverrides: modelProviderConfigOverride(sessionConfig) }
+        : {}),
       env: sdkEnvironment,
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
@@ -2085,15 +2197,21 @@ export class CodexSecurity {
       throwIfAborted(signal);
     };
     try {
-      const requestedConfig = await mergedCodexConfig(this.config);
+      const requestedConfig = resolveCommandAuthConfig(
+        await mergedCodexConfig(this.config),
+        configuredCodexHome(this.#dependencies.environment),
+      );
+      const commandAuth = hasCommandAuth(requestedConfig);
       const modelProvider = scanModelProvider(requestedConfig);
-      const externalProvider = isExternalModelProvider(modelProvider)
-        ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
-        : null;
+      const externalProvider =
+        !commandAuth && isExternalModelProvider(modelProvider)
+          ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
+          : null;
       let authentication = scanAuthentication(
         this.#dependencies.environment,
         options.auth,
         modelProvider,
+        commandAuth,
       );
       const apiKey =
         authentication.method === "api_key"
@@ -2105,7 +2223,9 @@ export class CodexSecurity {
         );
       }
       const scanEnvironment = selectedScanEnvironment(
-        this.#dependencies.environment,
+        commandAuth
+          ? withoutOpenAiApiKeys(this.#dependencies.environment)
+          : this.#dependencies.environment,
         options.auth,
         modelProvider,
       );
@@ -2200,6 +2320,7 @@ export class CodexSecurity {
       if (
         !runtime.credentialsAvailable &&
         apiKey === null &&
+        !commandAuth &&
         authentication.method !== "aws_credentials"
       ) {
         throw new AuthenticationRequiredError(
@@ -2208,12 +2329,13 @@ export class CodexSecurity {
             "OPENAI_API_KEY or CODEX_API_KEY for CI.",
         );
       }
-      authentication = await runtimeScanAuthentication(
-        this.#dependencies.environment,
-        runtime.codexHome,
-        options.auth,
-        modelProvider,
-      );
+      if (!commandAuth)
+        authentication = await runtimeScanAuthentication(
+          this.#dependencies.environment,
+          runtime.codexHome,
+          options.auth,
+          modelProvider,
+        );
       if (
         options.safetyIdentifier !== undefined &&
         authentication.method !== "api_key" &&
@@ -2449,7 +2571,9 @@ export class CodexSecurity {
         ? undefined
         : scanModelProvider(requestedConfig);
     const processEnvironment = selectedScanEnvironment(
-      this.#dependencies.environment,
+      requestedConfig !== undefined && hasCommandAuth(requestedConfig)
+        ? withoutOpenAiApiKeys(this.#dependencies.environment)
+        : this.#dependencies.environment,
       auth,
       modelProvider,
     );
@@ -2495,6 +2619,7 @@ export class CodexSecurity {
         ? join(bootstrapWorkspace, "deep-scan-config.toml")
         : undefined;
       const credentialsAvailable =
+        hasCommandAuth(mergedConfig) ||
         isExternalModelProvider(modelProvider) ||
         modelProvider === "amazon-bedrock"
           ? false
@@ -3263,12 +3388,14 @@ export function scanAuthentication(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
+  commandAuth = false,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
       "Scan authentication mode must be auto, chatgpt, or api-key.",
     );
   }
+  if (commandAuth) return { method: "command", verified: false };
   if (modelProvider === "amazon-bedrock") {
     const sources = [
       "AWS_BEARER_TOKEN_BEDROCK",
@@ -3363,9 +3490,8 @@ export function selectedScanEnvironment(
     return environment;
   }
   return Object.fromEntries(
-    Object.entries(environment).filter(([name]) => {
+    Object.entries(withoutOpenAiApiKeys(environment)).filter(([name]) => {
       const key = name.toUpperCase();
-      if (key === "OPENAI_API_KEY" || key === "CODEX_API_KEY") return false;
       if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
         return (
           !bedrockProvider &&
@@ -3374,6 +3500,17 @@ export function selectedScanEnvironment(
       }
       return true;
     }),
+  );
+}
+
+function withoutOpenAiApiKeys(
+  environment: ProcessEnvironment,
+): ProcessEnvironment {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+    ),
   );
 }
 
@@ -3570,6 +3707,12 @@ function sharedCredentialCodexConfig(
     if (Object.hasOwn(config, key)) shared[key] = structuredClone(config[key]!);
   }
   const modelProvider = scanModelProvider(config);
+  if (hasCommandAuth(config)) {
+    for (const key of ["profile", "profiles"]) {
+      if (Object.hasOwn(config, key))
+        shared[key] = structuredClone(config[key]!);
+    }
+  }
   if (typeof modelProvider === "string" && modelProvider.length > 0) {
     shared["model_provider"] = modelProvider;
     const providers = config["model_providers"];

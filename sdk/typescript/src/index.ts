@@ -29,6 +29,7 @@ export type {
   DeepScanOptions,
   ScanAuthMode,
   ScanAuthentication,
+  ScanBudget,
   ScanOptions,
   ScanPreflight,
   ScanReconnectDetails,

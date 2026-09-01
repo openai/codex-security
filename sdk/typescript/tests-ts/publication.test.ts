@@ -210,7 +210,7 @@ describe("scan publication preparation", () => {
     const parent = join(root, "actual-parent");
     const alias = join(root, "aliased-parent");
     const scanDirectory = join(parent, "scan");
-    await mkdir(parent);
+    await mkdir(parent, { mode: 0o700 });
     await cp(EXAMPLE, scanDirectory, { recursive: true });
     if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
     await symlink(

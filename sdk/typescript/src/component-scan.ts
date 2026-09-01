@@ -156,6 +156,7 @@ export async function runComponentScans(
     repository,
     options.auto
       ? await (options.planComponents ?? planComponents)(repository, {
+          auth,
           config: options.config,
           environment,
           signal: options.signal,
@@ -364,6 +365,7 @@ async function deduplicateFindings(
         { before: [...previous], after: current },
         {
           allowHistoricalUncertainty: true,
+          auth: options.scanOptions?.auth,
           config: options.config ?? {},
           environment: options.environment,
           signal: options.signal,

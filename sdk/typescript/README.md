@@ -186,6 +186,16 @@ Environment API keys apply to the current scan; only `login --with-api-key`
 saves them. Pass Codex access tokens on stdin to `login --with-access-token`.
 Access-token environment variables are not scan API keys.
 
+SDK callers can select native command authentication through
+`codexOverrides.model_providers.<id>.auth` and `model_provider` (including a
+selected `profile`). Scans, comparisons, and deduplication reviews preserve
+that selection without requiring an API key or replacing it with a stored
+login. Codex executes the helper and renews its token. Helper paths and relative
+`auth.cwd` values resolve from the supplied `CODEX_HOME` (default `~/.codex`),
+not the source checkout; an absolute `auth.cwd` is preserved. Comparisons and
+reviews also honor the selected command provider in that home's `config.toml`.
+Configuration is passed to Codex for validation, including profile support.
+
 For other inference providers:
 
 ```bash
@@ -369,6 +379,9 @@ combined report.
 
 `--max-cost` applies per component, excluding planning and matching.
 `--model` and `--effort` also apply to matching; `--auth` applies throughout.
+Planning and matching reject an ambient command provider that conflicts with
+explicit `--auth chatgpt` or `--auth api-key`. A command provider explicitly
+selected through SDK `codexOverrides` retains its authentication configuration.
 Use `--knowledge-base`, `--scan-prompt-file`, and `--post-scan-prompt-file` as for
 bulk scans.
 
@@ -478,6 +491,7 @@ restrictions.
 | Variable                                                                    | Effect                                                                               |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; `OPENAI_API_KEY` wins if both are set.                             |
+| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Findings service endpoint; see [Embeddings and storage](#embeddings-and-storage).    |
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default team and project for completed-scan publication.                             |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Personal API key for Linear patching and direct publication.                         |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; `debug` enables verbose diagnostics.                                       |
@@ -522,6 +536,27 @@ apply the limit per repository attempt.
 With `--max-cost`, automatic finding-history matching makes at most one extra
 model call. If it needs more context, the completed scan is kept and a warning
 directs you to run `scans match --all` explicitly.
+
+For a single scan in the interactive dashboard, reaching 80% of the limit
+offers a higher **total** USD limit. Enter a larger amount to approve it, or
+press Enter with an empty input or Escape to keep the current limit. The scan
+continues running while you decide, and the existing limit remains enforced
+until the increase is saved. Increases keep the same scan and accumulated cost;
+they do not restart work or extend time or discovery limits. CI, JSON/JSONL,
+`--headless`, and `--verbose` scans do not offer budget increases. If usage crosses the limit
+before an increase is approved, the scan still stops.
+
+SDK callers can supply `onBudgetApproaching({ maxCostUsd, cost, signal })` and
+return a higher total limit, or `undefined` to keep the current limit. The
+callback runs once per limit at 80% usage without blocking tracking or
+execution. Its signal aborts when the scan stops or finishes model work; late
+answers are ignored. Invalid increases or failures to save them leave the
+existing limit in place and report a warning. `onCost(cost, maxCostUsd)` reports
+the current limit, including after an approved increase.
+
+These amounts estimate API-equivalent model usage, not ChatGPT subscription
+allowance. Post-scan prompts run after scan cost tracking ends and are outside
+this limit.
 
 ### Bulk scans
 
@@ -1398,6 +1433,18 @@ precedence over `CODEX_API_KEY`; remove the `OPENAI_API_KEY` entry if using
 `CODEX_API_KEY` instead. Listing and empty imports do not require a key.
 A Codex ChatGPT login is not an embedding API credential.
 
+Set `CODEX_SECURITY_EMBEDDINGS_URL` to override the full embeddings endpoint URL,
+including its path and any query parameters. Unset or empty values use
+`https://api.openai.com/v1/embeddings`. Export it before `codex-security serve`,
+or set it in `.env` for Docker Compose, which passes it to the service. For example:
+
+```bash
+CODEX_SECURITY_EMBEDDINGS_URL=https://embeddings.example.com/v1/embeddings codex-security serve
+```
+
+The configured endpoint receives the finding inputs and the API key as a bearer
+token and must support the same OpenAI embeddings request and response format.
+
 The service calls the OpenAI embeddings API with `text-embedding-3-large` and
 1,536 dimensions. The complete finding JSON is tokenized using `js-tiktoken`'s
 bundled `cl100k_base` encoding. Long inputs are split without truncation;
@@ -1427,8 +1474,8 @@ The findings Compose configuration sets `HOST=0.0.0.0`, `PORT=3000`, and
 `CODEX_SECURITY_STATE_DIR=/state`. Keep port and volume mappings aligned if
 changing these settings. Compose binds only to host loopback; the API has no
 authentication. Use an authenticated TLS proxy before sharing access. Finding
-JSON is sent to `api.openai.com` over HTTPS for embeddings; the database and
-generated embeddings stay in the local volume.
+JSON is sent to the configured embeddings endpoint (`api.openai.com` over HTTPS
+by default); the database and generated embeddings stay in the local volume.
 
 ### Upgrades and backups
 
@@ -1498,6 +1545,17 @@ migration that also imports known associations from stored scan occurrences.
 New scan findings retain their target associations when indexed locally.
 The server entrypoint selects the concrete
 embedder and store, so either can be replaced independently.
+
+For renewable embeddings credentials, import `OpenAiFindingEmbedder`,
+`SqliteFindingsStore`, and `startFindingsServer` from
+`@openai/codex-security/server`. The embedder's first argument accepts a static
+key or `() => string | Promise<string>`. It calls the callback before every
+HTTP batch, including subsequent calls to `embed`; callers own token acquisition.
+Pass `fetch` as the second argument and
+`process.env.CODEX_SECURITY_EMBEDDINGS_URL || undefined` as the third to use
+the same full endpoint URL and default as `codex-security serve`. Importing the
+server API does not start a listener.
+
 The local workflow lives under `src/deduplication/`. `FindingDeduplicator`
 receives a candidate API client and a `DeduplicationReviewer`, keeping grouping
 separate from HTTP and model transport. `CodexDeduplicationReviewer` owns prompts
