@@ -258,6 +258,7 @@ testPosix(
     const shimDirectory = join(repository, "tools");
     const shim = join(shimDirectory, "git");
     const externalBin = join(root, "external-bin");
+    const ripgrep = join(externalBin, "rg");
     const marker = join(root, "shim-ran");
     mkdirSync(shimDirectory, { recursive: true });
     mkdirSync(externalBin);
@@ -273,6 +274,8 @@ testPosix(
     writeFileSync(shim, '#!/bin/sh\n: > "$GIT_SHIM_MARKER"\nexit 99\n');
     chmodSync(shim, 0o700);
     symlinkSync(shim, join(externalBin, "git"));
+    writeFileSync(ripgrep, "#!/bin/sh\nprintf './source.py\\n'\n");
+    chmodSync(ripgrep, 0o700);
 
     const python = pythonExecutable();
     expect(python).not.toBeNull();

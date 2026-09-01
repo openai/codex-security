@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
   copyFile,
   mkdir,
@@ -188,18 +187,20 @@ test("isolated timeout", async () => {
   );
 
   try {
-    const result = spawnSync(
-      process.execPath,
-      ["test", "--timeout", "30000", fixture],
-      {
-        encoding: "utf8",
-        env: { ...process.env, CODEX_SECURITY_TEST_TIMEOUT_MS: "100" },
-        timeout: 30_000,
-        windowsHide: true,
-      },
-    );
-    expect(result.status, result.stderr || result.error?.message).toBe(1);
-    expect(result.stderr).toContain("this test timed out after 100ms");
+    const child = Bun.spawn({
+      cmd: [process.execPath, "test", "--timeout", "30000", fixture],
+      env: { ...process.env, CODEX_SECURITY_TEST_TIMEOUT_MS: "100" },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+      timeout: 30_000,
+    });
+    const [status, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stderr).text(),
+    ]);
+    expect(status, stderr).toBe(1);
+    expect(stderr).toContain("this test timed out after 100ms");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
