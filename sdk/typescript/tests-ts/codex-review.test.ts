@@ -44,6 +44,9 @@ const transportCases: {
     commandAuth: "ambient",
   },
   { scenario: "retry-correction" },
+  { scenario: "text-only-correction" },
+  { scenario: "cancel-continuation" },
+  { scenario: "accepted-no-replay" },
   ...["correction", ...Object.keys(failureReasons), "cancel"].map(
     (scenario) => ({ scenario }),
   ),
@@ -150,20 +153,15 @@ for (const {
           expect(environmentEntry(options.env!, "CODEX_HOME")).toBe(modelHome);
           child = spawn(
             process.execPath,
-            [
-              fixture,
-              scenario === "retry-correction"
-                ? starts === 1
-                  ? "invalid-submission"
-                  : "correction"
-                : scenario,
-              transcript,
-              checkout,
-            ],
+            [fixture, scenario, transcript, checkout],
             options,
           );
           if (scenario === "cancel")
             child.once("spawn", () =>
+              controller.abort("synthetic cancellation"),
+            );
+          if (scenario === "cancel-continuation")
+            child.stderr.once("data", () =>
               controller.abort("synthetic cancellation"),
             );
           return child;
@@ -195,10 +193,21 @@ for (const {
           return { decision: value.decision };
         },
       });
-      if (["correction", "retry-correction"].includes(scenario)) {
+      if (
+        [
+          "correction",
+          "retry-correction",
+          "text-only-correction",
+          "accepted-no-replay",
+        ].includes(scenario)
+      ) {
         expect(await result).toEqual({ decision: "SAME" });
-        expect(validations).toBe(scenario === "correction" ? 2 : 3);
-      } else if (scenario === "cancel") {
+        expect(validations).toBe(
+          ["text-only-correction", "accepted-no-replay"].includes(scenario)
+            ? 1
+            : 2,
+        );
+      } else if (["cancel", "cancel-continuation"].includes(scenario)) {
         await expect(result).rejects.toBe("synthetic cancellation");
       } else {
         const failure = await result.catch((error: unknown) => error);
@@ -228,7 +237,9 @@ for (const {
                 : scenario === "failed-turn"
                   ? "model"
                   : "transport",
-          attempts: scenario === "invalid-submission" ? 2 : 1,
+          attempts: ["invalid-submission", "text-only"].includes(scenario)
+            ? 2
+            : 1,
           reason:
             scenario === "credential-error"
               ? "[redacted]"
@@ -254,9 +265,7 @@ for (const {
               : 0,
         );
       }
-      expect(starts).toBe(
-        ["invalid-submission", "retry-correction"].includes(scenario) ? 2 : 1,
-      );
+      expect(starts).toBe(1);
       if (commandAuth) {
         expect(args).not.toContain('cli_auth_credentials_store="ephemeral"');
         const providers = parse(
@@ -281,7 +290,7 @@ for (const {
         `${JSON.stringify(resolve(ghConfig))}="deny"`,
       );
       if (scenario !== "cancel") {
-        const loginRequest = (await readFile(transcript, "utf8"))
+        const messages = (await readFile(transcript, "utf8"))
           .trim()
           .split("\n")
           .map(
@@ -290,8 +299,28 @@ for (const {
                 method?: string;
                 params?: { apiKey?: string };
               },
-          )
-          .find((message) => message.method === "account/login/start");
+          );
+        const loginRequest = messages.find(
+          (message) => message.method === "account/login/start",
+        );
+        expect(
+          messages.filter((message) => message.method === "thread/start"),
+        ).toHaveLength(1);
+        expect(
+          messages.filter((message) => message.method === "turn/start"),
+        ).toHaveLength(
+          [
+            "invalid-submission",
+            "text-only",
+            "retry-correction",
+            "text-only-correction",
+            "cancel-continuation",
+          ].includes(scenario)
+            ? 2
+            : ["request-error", "credential-error"].includes(scenario)
+              ? 0
+              : 1,
+        );
         expect(loginRequest?.params?.apiKey).toBe(
           commandAuth ? undefined : "synthetic-review-key",
         );

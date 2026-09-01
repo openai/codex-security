@@ -90,44 +90,35 @@ export class CodexReviewRunner {
   ) {}
 
   async run<T>(review: CodexReview<T>): Promise<T> {
-    let attempts = 0;
-    while (attempts < 2) {
-      attempts++;
-      try {
-        return await this.runAttempt(review);
-      } catch (error) {
-        this.signal?.throwIfAborted();
-        if (
-          attempts === 1 &&
-          error instanceof ReviewAttemptError &&
-          error.category === "validation"
-        ) {
-          continue;
-        }
-        const category =
-          error instanceof ReviewAttemptError ? error.category : "transport";
-        const supportReason =
-          error instanceof ReviewAttemptError
-            ? error.supportReason
-            : "Codex review transport failed.";
-        const displayReason = safeErrorMessage(error);
-        throw new DeduplicationReviewError(
-          {
-            stage: review.stage,
-            model: review.model,
-            category,
-            attempts,
-            reason:
-              displayReason === "[redacted]" ? "[redacted]" : supportReason,
-          },
-          displayReason,
-        );
-      }
+    const state = { attempts: 1 };
+    try {
+      return await this.runSession(review, state);
+    } catch (error) {
+      this.signal?.throwIfAborted();
+      const category =
+        error instanceof ReviewAttemptError ? error.category : "transport";
+      const supportReason =
+        error instanceof ReviewAttemptError
+          ? error.supportReason
+          : "Codex review transport failed.";
+      const displayReason = safeErrorMessage(error);
+      throw new DeduplicationReviewError(
+        {
+          stage: review.stage,
+          model: review.model,
+          category,
+          attempts: state.attempts,
+          reason: displayReason === "[redacted]" ? "[redacted]" : supportReason,
+        },
+        displayReason,
+      );
     }
-    throw new Error("Unreachable review retry state");
   }
 
-  private async runAttempt<T>(review: CodexReview<T>): Promise<T> {
+  private async runSession<T>(
+    review: CodexReview<T>,
+    state: { attempts: number },
+  ): Promise<T> {
     this.signal?.throwIfAborted();
     const workingDirectory = resolve(this.workingDirectory);
     const directory = await mkdtemp(join(tmpdir(), "codex-security-dedupe-"));
@@ -273,6 +264,21 @@ export class CodexReviewRunner {
       let turnId: string | undefined;
       let accepted: T | undefined;
       let validationFailure: string | undefined;
+      const startTurn = (prompt: string) => {
+        this.signal?.throwIfAborted();
+        turnId = undefined;
+        validationFailure = undefined;
+        send({
+          id: 3 + state.attempts,
+          method: "turn/start",
+          params: {
+            threadId,
+            model: review.model,
+            effort: review.effort,
+            input: [{ type: "text", text: prompt, text_elements: [] }],
+          },
+        });
+      };
       try {
         send({
           id: 1,
@@ -308,7 +314,8 @@ export class CodexReviewRunner {
               let rejection =
                 "Check the result schema and assigned finding IDs.";
               try {
-                accepted = review.validate(params.arguments);
+                if (accepted === undefined)
+                  accepted = review.validate(params.arguments);
                 success = true;
               } catch (error) {
                 accepted = undefined;
@@ -360,19 +367,8 @@ export class CodexReviewRunner {
               );
             }
             threadId = thread.id;
-            send({
-              id: 4,
-              method: "turn/start",
-              params: {
-                threadId,
-                model: review.model,
-                effort: review.effort,
-                input: [
-                  { type: "text", text: review.prompt, text_elements: [] },
-                ],
-              },
-            });
-          } else if (message.id === 4) {
+            startTurn(review.prompt);
+          } else if (message.id === 3 + state.attempts) {
             turnId = message.result?.turn?.id ?? turnId;
           } else if (
             message.method === "turn/started" &&
@@ -397,6 +393,13 @@ export class CodexReviewRunner {
               );
             }
             if (accepted === undefined) {
+              if (state.attempts === 1) {
+                state.attempts++;
+                startTurn(
+                  `Continue the original assigned review in this conversation. No submission was accepted.${validationFailure ? ` The last submission was rejected: ${validationFailure}` : ""} ${reviewSubmissionInstructions}`,
+                );
+                continue;
+              }
               if (validationFailure) {
                 throw new ReviewAttemptError(
                   "validation",

@@ -3,6 +3,8 @@ import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const [scenario, transcript, checkout] = process.argv.slice(2);
+let turns = 0;
+let turnId;
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const submit = (id, arguments_, overrides = {}) =>
   send({
@@ -10,7 +12,7 @@ const submit = (id, arguments_, overrides = {}) =>
     method: "item/tool/call",
     params: {
       threadId: "review-thread",
-      turnId: "review-turn",
+      turnId,
       tool: "submit_decisions",
       namespace: "review_validator",
       arguments: arguments_,
@@ -22,7 +24,7 @@ const complete = (status = "completed", error = null) =>
     method: "turn/completed",
     params: {
       threadId: "review-thread",
-      turn: { id: "review-turn", status, error },
+      turn: { id: turnId, status, error },
     },
   });
 
@@ -74,26 +76,58 @@ for await (const line of createInterface({ input: process.stdin })) {
       },
     });
   } else if (message.method === "turn/start") {
+    turns++;
+    turnId = `review-turn-${turns}`;
+    assert.equal(message.params.threadId, "review-thread");
+    if (turns > 1) {
+      assert.equal(turns, 2);
+      assert.match(message.params.input[0].text, /original assigned review/);
+      assert.match(
+        message.params.input[0].text,
+        /review_validator.submit_decisions/,
+      );
+      if (["retry-correction", "invalid-submission"].includes(scenario))
+        assert.match(message.params.input[0].text, /Invalid decision/);
+    }
     send({
       method: "turn/started",
-      params: { threadId: "review-thread", turn: { id: "review-turn" } },
+      params: { threadId: "review-thread", turn: { id: turnId } },
     });
-    send({ id: message.id, result: { turn: { id: "review-turn" } } });
+    send({ id: message.id, result: { turn: { id: turnId } } });
+    if (turns > 1) {
+      submit("wrong-turn", { decision: "SAME" }, { turnId: "review-turn-1" });
+      send({
+        method: "turn/completed",
+        params: {
+          threadId: "review-thread",
+          turn: { id: "review-turn-1", status: "completed" },
+        },
+      });
+    }
     if (scenario === "exit") process.exit(1);
     if (scenario === "invalid-json") {
       process.stdout.write("Synthetic private response data\n");
-    } else if (scenario === "invalid-submission") {
+    } else if (
+      scenario === "invalid-submission" ||
+      (scenario === "retry-correction" && turns === 1)
+    ) {
       submit("invalid", { decision: "UNKNOWN" });
-    } else if (scenario === "text-only") {
+    } else if (
+      scenario === "text-only" ||
+      (["text-only-correction", "cancel-continuation"].includes(scenario) &&
+        turns === 1)
+    ) {
       send({
         method: "item/completed",
         params: {
           threadId: "review-thread",
-          turnId: "review-turn",
+          turnId,
           item: { type: "agentMessage", text: '{"decision":"SAME"}' },
         },
       });
       complete();
+    } else if (scenario === "cancel-continuation") {
+      process.stderr.write("Ready to cancel continuation\n");
     } else if (scenario === "correction") {
       submit("wrong-thread", { decision: "SAME" }, { threadId: "other" });
       submit("wrong-tool", { decision: "SAME" }, { tool: "other" });
@@ -103,17 +137,22 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("valid", { decision: "SAME" });
     }
   } else if (
-    ["wrong-thread", "wrong-tool", "wrong-namespace"].includes(message.id)
+    ["wrong-thread", "wrong-tool", "wrong-namespace", "wrong-turn"].includes(
+      message.id,
+    )
   ) {
     assert.equal(message.error.code, -32601);
   } else if (message.id === "invalid") {
     assert.equal(message.result.success, false);
     assert.match(message.result.contentItems[0].text, /Resubmit/);
-    if (scenario === "invalid-submission") complete();
+    if (["invalid-submission", "retry-correction"].includes(scenario))
+      complete();
     else submit("valid", { decision: "SAME" });
   } else if (message.id === "valid") {
     assert.equal(message.result.success, true);
-    if (scenario === "failed-turn") {
+    if (scenario === "accepted-no-replay") {
+      submit("late-submission", { decision: "UNKNOWN" });
+    } else if (scenario === "failed-turn") {
       process.stderr.write("Synthetic provider failure with private details\n");
       complete("failed", {
         message: "Rate limit exceeded",
@@ -121,5 +160,8 @@ for await (const line of createInterface({ input: process.stdin })) {
         additionalDetails: "Synthetic private response data",
       });
     } else complete();
+  } else if (message.id === "late-submission") {
+    assert.equal(message.result.success, true);
+    complete();
   }
 }
