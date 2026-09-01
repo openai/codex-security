@@ -1162,6 +1162,22 @@ const result = await deduplicateScan("scan_example_001", {
 console.log(result.duplicateGroups);
 ```
 
+For a complete, sealed scan directory that is not registered in local scan
+history, provide the repository checkout separately:
+
+```typescript
+import { deduplicateScanDirectory } from "@openai/codex-security";
+
+const result = await deduplicateScanDirectory("/path/to/completed-scan", {
+  repository: "/path/to/repository",
+  findingsUrl: "http://127.0.0.1:3000",
+  // expectedScanId: "scan_example_001",
+  // allRepositories: true,
+  // signal: controller.signal,
+});
+console.log(result.duplicateGroups);
+```
+
 The CLI and SDK return the same result:
 
 ```json
@@ -1494,7 +1510,9 @@ The local workflow lives under `src/deduplication/`. `FindingDeduplicator`
 receives a candidate API client and a `DeduplicationReviewer`, keeping grouping
 separate from HTTP and model transport. `CodexDeduplicationReviewer` owns prompts
 and result validation; `CodexReviewRunner` owns app-server sessions and cleanup.
-`deduplicateScan` validates saved scan artifacts before running the workflow.
+`deduplicateScan` validates saved scan artifacts before running the workflow;
+`deduplicateScanDirectory` performs the same validation for an explicit sealed
+scan directory without consulting local scan history.
 The SDK reuses the existing Codex runtime and credentials without additional
 runtime dependencies.
 
