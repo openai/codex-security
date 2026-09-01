@@ -21,7 +21,11 @@ import {
 } from "../src/deduplication/deduplication-reviewer.js";
 import { CodexSecurityError } from "../src/errors.js";
 import { FindingsClient } from "../src/findings-client.js";
-import { deduplicateScanInternal } from "../src/deduplication/scan.js";
+import { deduplicateScanDirectory } from "../src/index.js";
+import {
+  deduplicateScanDirectoryInternal,
+  deduplicateScanInternal,
+} from "../src/deduplication/scan.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import type { JsonObject } from "../src/config.js";
 
@@ -288,6 +292,96 @@ test("prefers the better-supported legal subgroup in a conflicted star", async (
     duplicateGroups: [[ids[0]!, ids[2]!, ids[3]!]],
     deduplicationStatus: "completed",
   });
+});
+
+test("keeps disconnected groups ordered and conflict ties in finding insertion order", async () => {
+  const aCenter = entry(30);
+  const bCenter = entry(40);
+  const aLeft = entry(10);
+  const bLeft = entry(20);
+  const aRight = entry(50);
+  const bRight = entry(60);
+  const cleanCenter = entry(80);
+  const cleanNeighbor = entry(70);
+  const isolated = entry(90);
+  const entries = [
+    aCenter,
+    bCenter,
+    aLeft,
+    bLeft,
+    aRight,
+    bRight,
+    cleanCenter,
+    cleanNeighbor,
+    isolated,
+  ];
+  for (const finding of entries) finding.severity.level = "medium";
+  aLeft.severity.level = aRight.severity.level = "critical";
+  const nominations = new Set(
+    [
+      [aCenter, aLeft],
+      [aCenter, aRight],
+      [bCenter, bLeft],
+      [bCenter, bRight],
+      [cleanCenter, cleanNeighbor],
+    ].map((pair) => pairKey(pair.map((finding) => finding.findingId))),
+  );
+  const selected = [aCenter, bCenter, aLeft, bLeft, cleanCenter, isolated];
+  for (const reverse of [false, true]) {
+    const aNeighbors = reverse ? [aRight, aLeft] : [aLeft, aRight];
+    const bNeighbors = reverse ? [bRight, bLeft] : [bLeft, bRight];
+    const neighborhoods = new Map<string, Finding[]>([
+      [
+        aCenter.findingId,
+        [
+          bCenter,
+          aNeighbors[0]!,
+          bNeighbors[0]!,
+          aNeighbors[1]!,
+          bNeighbors[1]!,
+          cleanCenter,
+          cleanNeighbor,
+          isolated,
+        ],
+      ],
+      [bCenter.findingId, [bLeft, bRight]],
+      [aLeft.findingId, [aRight]],
+      [bLeft.findingId, [bRight]],
+      [cleanCenter.findingId, [cleanNeighbor]],
+    ]);
+    const service = new FindingDeduplicator(
+      {
+        async potentialDuplicates(findingId) {
+          return {
+            finding: entries.find((entry) => entry.findingId === findingId)!,
+            potentialDuplicates: neighborhoods.get(findingId) ?? [],
+          };
+        },
+      },
+      {
+        async screen(findings) {
+          return screening(findings, nominations);
+        },
+        async reviewPair(findings) {
+          return same(findings);
+        },
+      },
+    );
+    expect(
+      await service.run(selected.map((finding) => finding.findingId)),
+    ).toEqual({
+      uniqueFindingIds: (reverse
+        ? [aRight, bCenter, aLeft, bLeft, cleanNeighbor, isolated]
+        : [aLeft, bLeft, cleanNeighbor, isolated]
+      ).map((finding) => finding.findingId),
+      duplicateGroups: [
+        [aNeighbors[0]!, aCenter],
+        reverse ? [bCenter, bRight] : [bLeft, bCenter],
+        [cleanNeighbor, cleanCenter],
+      ].map((group) => group.map((finding) => finding.findingId)),
+      deduplicationStatus: "completed",
+    });
+  }
 });
 
 test("scales contradiction grouping with conflict neighbors instead of all clusters", () => {
@@ -703,6 +797,75 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
     ).rejects.toThrow("do not match selected scan");
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("deduplicates an explicit sealed scan directory without reading scan history", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dedupe-directory-"));
+  const repository = await mkdtemp(join(tmpdir(), "dedupe-repository-"));
+  try {
+    await cp(join(PLUGIN_ROOT, "examples/completed-scan"), directory, {
+      recursive: true,
+    });
+    if (process.platform !== "win32") await chmod(directory, 0o700);
+    const original = await readFile(join(directory, "findings.json"), "utf8");
+    const commands: string[][] = [];
+    const requests: string[] = [];
+    const result = await deduplicateScanDirectoryInternal(
+      directory,
+      {
+        repository,
+        expectedScanId: "scan_example_001",
+        findingsUrl: "http://synthetic.test/api",
+      },
+      {
+        runWorkbench: async (args) => {
+          commands.push([...args]);
+          throw new Error("Explicit scan directories must not read history");
+        },
+        fetch: async (url, options) => {
+          requests.push(String(url));
+          expect(options?.method).toBeUndefined();
+          return Response.json({
+            finding: document.findings[0],
+            potentialDuplicates: [],
+          });
+        },
+        reviewer: {
+          async screen() {
+            throw new Error("No review for an empty neighborhood");
+          },
+          async reviewPair() {
+            throw new Error("No pair to review");
+          },
+        },
+      },
+    );
+    expect(result).toEqual({
+      scanId: "scan_example_001",
+      uniqueFindingIds: document.findings.map((finding) => finding.findingId),
+      duplicateGroups: [],
+      deduplicationStatus: "completed",
+    });
+    expect(commands).toEqual([]);
+    expect(requests).toEqual([
+      `http://synthetic.test/api/v1/finding/${document.findings[0]!.findingId}/potential-duplicates?repositoryId=target_sha256_example`,
+    ]);
+    expect(await readFile(join(directory, "findings.json"), "utf8")).toBe(
+      original,
+    );
+    await expect(
+      deduplicateScanDirectory(directory, {
+        repository,
+        expectedScanId: "scan_other",
+        findingsUrl: "http://synthetic.test/api",
+      }),
+    ).rejects.toThrow("do not match selected scan");
+  } finally {
+    await Promise.all([
+      rm(directory, { recursive: true, force: true }),
+      rm(repository, { recursive: true, force: true }),
+    ]);
   }
 });
 

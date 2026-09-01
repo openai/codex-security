@@ -299,6 +299,41 @@ Scans are report-only by default. Set `--fail-on-severity high` to exit with
 `1` if a completed scan finds high or critical issues. Incomplete scans exit
 with `2`, writing available results to stdout and a coverage warning to stderr.
 
+### Generate mock scan results
+
+Use `--mock` to populate a Standard scan with synthetic test data in seconds,
+without Codex authentication or any LLM calls:
+
+```bash
+codex-security scan /path/to/repository --mock
+codex-security scan /path/to/repository --mock --output-dir /path/outside/repository/mock-results
+```
+
+The SDK equivalent is `await security.run(repository, { mock: true })`.
+Mock mode is off by default. It uses normal target validation, scan registration,
+artifact finalization, reports, and local scan/finding history. Output directories,
+archiving, JSON output, exports, and `--fail-on-severity` work as usual.
+`--dry-run` only validates inputs; `--mock` saves a completed scan.
+
+Each run contains 12 findings across all severity levels: eight stable findings
+recur on subsequent scans of the same repository, and four have new identities
+on every run. Two pairs describe the same root causes with different titles and
+identities, providing inputs for deduplication testing. Mock scans skip automatic
+LLM matching; existing identity-based history indexing still runs. Separate
+comparison or deduplication commands retain their usual model behavior.
+
+Titles, provenance, artifact metadata, and reports identify the results as
+synthetic. Paths and code snippets are fictional and are never written into the
+repository. Completion means fixture generation finished, not that the repository
+was audited. Results enter the selected local state just like other scans; set
+`CODEX_SECURITY_STATE_DIR` to a separate directory when creating disposable data.
+Token usage is zero. `scans rerun` preserves mock mode.
+
+Mock mode supports repository, path, and diff targets in Standard mode. It cannot
+be combined with `--dry-run`, `--patch`, Deep mode, custom validation, or post-scan
+prompts. Scan prompts and knowledge-base inputs do not change the fixtures, and
+mock scans do not offer interactive patching.
+
 ### Attribute scans to end users
 
 When scanning on behalf of users, pass each user's stable hashed ID:
@@ -1175,6 +1210,22 @@ const result = await deduplicateScan("scan_example_001", {
 console.log(result.duplicateGroups);
 ```
 
+For a complete, sealed scan directory that is not registered in local scan
+history, provide the repository checkout separately:
+
+```typescript
+import { deduplicateScanDirectory } from "@openai/codex-security";
+
+const result = await deduplicateScanDirectory("/path/to/completed-scan", {
+  repository: "/path/to/repository",
+  findingsUrl: "http://127.0.0.1:3000",
+  // expectedScanId: "scan_example_001",
+  // allRepositories: true,
+  // signal: controller.signal,
+});
+console.log(result.duplicateGroups);
+```
+
 The CLI and SDK return the same result:
 
 ```json
@@ -1278,10 +1329,10 @@ Every SAME pair-review checkpoint retains its
 required `canonicalFindingId` and generated `mergedFinding`; the merged record
 must satisfy the Finding schema and preserve the canonical finding ID. Validation
 still happens through `review_validator.submit_decisions`; invalid submissions
-are corrected in the same review conversation. If a turn completes after only
-rejected semantic submissions, the review is attempted once more in a fresh
-ephemeral thread. Transport, model, cancellation, and text-only failures are not
-retried. Invalid or unfinished reviews are not cached.
+are corrected in the same review conversation. A completed turn without an
+accepted submission receives one corrective turn in that same conversation.
+Transport, model, cancellation, and accepted `submit_error` failures are terminal.
+Invalid or unfinished reviews are not cached.
 
 Checkpoints bind to the exact original records and ordering, approved source path,
 Git revision and current file contents (including ignored files), repository scope,
@@ -1559,7 +1610,9 @@ The local workflow lives under `src/deduplication/`. `FindingDeduplicator`
 receives a candidate API client and a `DeduplicationReviewer`, keeping grouping
 separate from HTTP and model transport. `CodexDeduplicationReviewer` owns prompts
 and result validation; `CodexReviewRunner` owns app-server sessions and cleanup.
-`deduplicateScan` validates saved scan artifacts before running the workflow.
+`deduplicateScan` validates saved scan artifacts before running the workflow;
+`deduplicateScanDirectory` performs the same validation for an explicit sealed
+scan directory without consulting local scan history.
 The SDK reuses the existing Codex runtime and credentials without additional
 runtime dependencies.
 

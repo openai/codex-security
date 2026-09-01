@@ -77,8 +77,12 @@ export type {
   PublishScanToCustomOptions,
   CustomPublicationResult,
 } from "./custom-publish.js";
-export { deduplicateScan } from "./deduplication/scan.js";
+export {
+  deduplicateScan,
+  deduplicateScanDirectory,
+} from "./deduplication/scan.js";
 export type {
+  DeduplicateScanDirectoryOptions,
   DeduplicateScanOptions,
   DeduplicateScanResult,
 } from "./deduplication/scan.js";

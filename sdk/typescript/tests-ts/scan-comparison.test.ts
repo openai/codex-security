@@ -665,7 +665,7 @@ describe("semantic scan comparison", () => {
     });
     expect(calls.turnOptions).toMatchObject({ signal: controller.signal });
     expect(calls.turnOptions?.outputSchema).toMatchObject({
-      required: ["matches", "uncertain"],
+      required: ["matches", "uncertain", "related"],
     });
     expect(calls.prompt).toContain(
       "same underlying root cause and remediation",
@@ -729,6 +729,7 @@ describe("semantic scan comparison", () => {
                 {
                   afterScanId: "current",
                   afterFindings: [after],
+                  knownFindingGroups: [["dismissed", "historical-alias"]],
                   beforeScans: [
                     {
                       scanId: "another-target",
@@ -768,7 +769,11 @@ describe("semantic scan comparison", () => {
         };
       },
     });
-    expect(input).toEqual({ before: [open, dismissed], after: [after] });
+    expect(input).toEqual({
+      before: [open, dismissed],
+      after: [after],
+      knownFindingGroups: [["dismissed", "historical-alias"]],
+    });
     expect(commands.map(({ args: [command] }) => command)).toEqual([
       "list-unmatched-scan-pairs",
       "save-scan-comparison",
@@ -875,6 +880,171 @@ describe("semantic scan comparison", () => {
     ).toEqual(response);
   });
 
+  test("honors confirmed historical groups and preserves distinct related findings", async () => {
+    const input = {
+      before: [
+        { occurrenceId: "before-known", findingId: "known-a" },
+        { occurrenceId: "before-related", findingId: "related-a" },
+      ],
+      after: [
+        { occurrenceId: "after-known", findingId: "known-b" },
+        { occurrenceId: "after-related", findingId: "related-b" },
+      ],
+      knownFindingGroups: [["known-a", "known-b"]],
+    };
+    const response = {
+      matches: [
+        {
+          beforeOccurrenceIds: ["before-known"],
+          afterOccurrenceIds: ["after-known"],
+          confidence: "high" as const,
+          reason: "Previously confirmed root cause.",
+        },
+      ],
+      uncertain: [],
+      related: [
+        {
+          beforeOccurrenceId: "before-related",
+          afterOccurrenceId: "after-related",
+          reason: "Related controls remain independently vulnerable.",
+        },
+      ],
+    };
+    const { codex, calls } = fakeCodex(response);
+
+    expect(await matchScanFindings(input, { codex })).toEqual(response);
+    expect(calls.prompt).toContain(JSON.stringify(input.knownFindingGroups));
+  });
+
+  test("rejects uncertainty that contradicts a confirmed historical group", async () => {
+    const input = {
+      before: [{ occurrenceId: "before", findingId: "known-a" }],
+      after: [{ occurrenceId: "after", findingId: "known-b" }],
+      knownFindingGroups: [["known-a", "known-b"]],
+    };
+    const response = {
+      matches: [],
+      uncertain: [
+        {
+          beforeOccurrenceId: "before",
+          afterOccurrenceId: "after",
+          reason: "Contradicts a saved confirmed identity.",
+        },
+      ],
+    };
+
+    await expect(
+      matchScanFindings(input, { codex: fakeCodex(response).codex }),
+    ).rejects.toThrow("confirmed finding groups");
+  });
+
+  test.each(["omitted", "uncertain", "related"] as const)(
+    "rejects an %s result across overlapping confirmed finding groups",
+    async (decision) => {
+      const input = {
+        before: [{ occurrenceId: "before", findingId: "identity-a" }],
+        after: [{ occurrenceId: "after", findingId: "identity-c" }],
+        knownFindingGroups: [
+          ["identity-a", "identity-b"],
+          ["identity-b", "identity-c"],
+        ],
+      };
+      const pair = {
+        beforeOccurrenceId: "before",
+        afterOccurrenceId: "after",
+        reason: "Contradicts a transitively confirmed identity.",
+      };
+      const response = {
+        matches: [],
+        uncertain: decision === "uncertain" ? [pair] : [],
+        ...(decision === "related" ? { related: [pair] } : {}),
+      };
+
+      await expect(
+        matchScanFindings(input, { codex: fakeCodex(response).codex }),
+      ).rejects.toThrow("confirmed finding groups");
+    },
+  );
+
+  test("rejects uncertainty between occurrences of the same stable finding", async () => {
+    const input = {
+      before: [{ occurrenceId: "before", findingId: "shared-identity" }],
+      after: [{ occurrenceId: "after", findingId: "shared-identity" }],
+    };
+    const response = {
+      matches: [],
+      uncertain: [
+        {
+          beforeOccurrenceId: "before",
+          afterOccurrenceId: "after",
+          reason: "Incorrectly treats the same stable identity as uncertain.",
+        },
+      ],
+    };
+
+    await expect(
+      matchScanFindings(input, { codex: fakeCodex(response).codex }),
+    ).rejects.toThrow("confirmed finding groups");
+  });
+
+  test.each(["omitted", "split"] as const)(
+    "rejects %s confirmed matches for the same stable finding identity",
+    async (scenario) => {
+      const input = {
+        before: [
+          { occurrenceId: "before-a", findingId: "shared-identity" },
+          { occurrenceId: "before-b", findingId: "shared-identity" },
+        ],
+        after: [
+          { occurrenceId: "after-a", findingId: "shared-identity" },
+          { occurrenceId: "after-b", findingId: "shared-identity" },
+        ],
+      };
+      const response = {
+        matches:
+          scenario === "omitted"
+            ? []
+            : input.before.map(({ occurrenceId }, index) => ({
+                beforeOccurrenceIds: [occurrenceId],
+                afterOccurrenceIds: [input.after[index]!.occurrenceId],
+                confidence: "high" as const,
+                reason: "Incorrectly splits one stable finding identity.",
+              })),
+        uncertain: [],
+      };
+
+      await expect(
+        matchScanFindings(input, { codex: fakeCodex(response).codex }),
+      ).rejects.toThrow("confirmed finding groups");
+    },
+  );
+
+  test("rejects a match that splits a confirmed historical group", async () => {
+    const input = {
+      before: [
+        { occurrenceId: "before-a", findingId: "known-a" },
+        { occurrenceId: "before-b", findingId: "known-b" },
+      ],
+      after: [{ occurrenceId: "after", findingId: "new" }],
+      knownFindingGroups: [["known-a", "known-b"]],
+    };
+    const response = {
+      matches: [
+        {
+          beforeOccurrenceIds: ["before-a"],
+          afterOccurrenceIds: ["after"],
+          confidence: "high" as const,
+          reason: "Incorrectly separates a confirmed identity.",
+        },
+      ],
+      uncertain: [],
+    };
+
+    await expect(
+      matchScanFindings(input, { codex: fakeCodex(response).codex }),
+    ).rejects.toThrow("confirmed finding groups");
+  });
+
   const match = (beforeOccurrenceIds = ["before-1"]) => ({
     beforeOccurrenceIds,
     afterOccurrenceIds: ["after-1"],
@@ -927,6 +1097,42 @@ describe("semantic scan comparison", () => {
       label: "duplicate uncertain pairs",
       result: { matches: [], uncertain: [uncertain(), uncertain()] },
       error: "duplicate uncertain pair",
+    },
+    {
+      label: "invented related occurrences",
+      result: {
+        matches: [],
+        uncertain: [],
+        related: [uncertain("invented")],
+      },
+      error: "invalid related pair",
+    },
+    {
+      label: "duplicate related pairs",
+      result: {
+        matches: [],
+        uncertain: [],
+        related: [uncertain(), uncertain()],
+      },
+      error: "invalid related pair",
+    },
+    {
+      label: "related pairs that contradict confirmed matches",
+      result: {
+        matches: [match()],
+        uncertain: [],
+        related: [uncertain()],
+      },
+      error: "invalid related pair",
+    },
+    {
+      label: "related pairs that duplicate uncertainty",
+      result: {
+        matches: [],
+        uncertain: [uncertain()],
+        related: [uncertain()],
+      },
+      error: "invalid related pair",
     },
   ])("rejects $label", async ({ result, error }) => {
     const { codex } = fakeCodex(result);

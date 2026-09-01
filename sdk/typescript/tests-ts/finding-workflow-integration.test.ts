@@ -77,7 +77,7 @@ timestamp = "2026-08-01T00:00:00Z"
 with db:
     db.execute("DROP TABLE finding_workflow_reviews")
     db.execute("DROP TABLE finding_workflows")
-    db.execute("DELETE FROM schema_migrations WHERE version >= 38")
+    db.execute("DELETE FROM schema_migrations WHERE version IN (38, 39)")
     for version, _, sql in MIGRATIONS:
         if version in (36, 37):
             for statement in sql_statements(sql):

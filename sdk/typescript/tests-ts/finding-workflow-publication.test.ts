@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { expect, test } from "bun:test";
 import type { JsonObject } from "../src/config.js";
 import { publishScanToCustomInternal } from "../src/custom-publish.js";
 import {
+  deduplicateScanDirectoryInternal,
   deduplicateScanInternal,
   type DeduplicateScanResult,
 } from "../src/deduplication/scan.js";
@@ -36,6 +37,122 @@ function publicationBinding(
     { request: { id, action: "complete", stage: "scan", result: null } },
   ];
 }
+
+test("deduplicates an external scan through its bound workflow without reading scan history", async () => {
+  await using fixture = await workflowFixture();
+  const { scanDir, repository, environment, document } = fixture;
+  const id = "external-directory";
+  const options = {
+    workflowId: id,
+    findingsUrl: "http://synthetic.test/service",
+    repository: relative(process.cwd(), repository),
+    expectedScanId: document.scanId,
+    allRepositories: true,
+  };
+  const result: DeduplicateScanResult = {
+    scanId: document.scanId,
+    uniqueFindingIds: document.findings.map((finding) => finding.findingId),
+    duplicateGroups: [],
+    deduplicationStatus: "completed",
+  };
+  const source = {
+    repository,
+    revision: "synthetic-revision",
+    refsDigest: "synthetic-refs",
+    content: "synthetic-content",
+  };
+  const binding = {
+    scanId: document.scanId,
+    scanDir,
+    artifactDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    destination: "http://synthetic.test/service/",
+  };
+  const workbench = scriptedWorkbench([
+    {
+      request: {
+        id,
+        action: "bind",
+        binding: {
+          repositoryPath: repository,
+          ...binding,
+          scope: { allRepositories: true },
+        },
+      },
+    },
+    { request: { id, action: "complete", stage: "scan", result: null } },
+    { request: { id, action: "bind", binding } },
+    { request: { id, action: "complete", stage: "scan", result: null } },
+    {
+      request: { id, action: "begin", stage: "publish" },
+      response: {
+        workflow: {
+          stages: {
+            publish: {
+              status: "completed",
+              result: {
+                findingIds: document.findings.map(
+                  (finding) => finding.findingId,
+                ),
+              },
+            },
+          },
+        },
+      },
+    },
+    {
+      request: { id, action: "begin", stage: "dedupe" },
+      response: { workflow: { stages: { dedupe: { status: "running" } } } },
+    },
+    {
+      request: { id, action: "get" },
+      response: { workflow: { stages: { dedupe: { status: "running" } } } },
+    },
+    { request: { id, action: "source", repository }, response: { source } },
+    { request: { id, action: "source", repository }, response: { source } },
+    {
+      request: {
+        id,
+        action: "prepare-dedupe",
+        stage: "dedupe",
+        result,
+        pendingWrite: { groups: [] },
+      },
+    },
+    { request: { id, action: "complete", stage: "dedupe", result } },
+  ]);
+  const requests: string[] = [];
+  expect(
+    await deduplicateScanDirectoryInternal(scanDir, options, {
+      environment,
+      runWorkbench: (args, input) =>
+        workbench.run(
+          { environment, pluginRoot: PLUGIN_ROOT, python: "unused" },
+          args,
+          input,
+        ),
+      fetch: async (url, init) => {
+        requests.push(String(url));
+        expect(init.method).toBeUndefined();
+        return Response.json({
+          finding: document.findings[0],
+          potentialDuplicates: [],
+        });
+      },
+      reviewer: {
+        async screen() {
+          throw new Error("No review for an empty neighborhood");
+        },
+        async reviewPair() {
+          throw new Error("No pair to review");
+        },
+      },
+    }),
+  ).toEqual(result);
+  expect(requests).toEqual([
+    `http://synthetic.test/service/v1/finding/${document.findings[0]!.findingId}/potential-duplicates?allRepositories=true`,
+  ]);
+  workbench.assertDone();
+});
 
 test("failed publication records its error, dry-run does not advance it, and retry records the receipt", async () => {
   await using fixture = await workflowFixture();
