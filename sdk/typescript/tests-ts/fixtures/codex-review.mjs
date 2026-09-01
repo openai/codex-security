@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
-const [scenario, transcript] = process.argv.slice(2);
+const [scenario, transcript, checkout] = process.argv.slice(2);
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const submit = (id, arguments_, overrides = {}) =>
   send({
@@ -60,7 +60,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       message.params.config.features.code_mode.direct_only_tool_namespaces,
       ["review_validator"],
     );
-    assert.equal(message.params.cwd, process.cwd());
+    assert.equal(message.params.cwd, checkout);
+    assert.notEqual(message.params.cwd, process.cwd());
     assert.equal(message.params.dynamicTools[0].name, "review_validator");
     assert.equal(
       message.params.dynamicTools[0].tools[0].name,

@@ -252,6 +252,16 @@ Environment API keys apply to the current scan; only `login --with-api-key`
 saves them. Pass Codex access tokens on stdin to `login --with-access-token`.
 Access-token environment variables are not scan API keys.
 
+SDK callers can select native command authentication through
+`codexOverrides.model_providers.<id>.auth` and `model_provider` (including a
+selected `profile`). Scans, comparisons, and deduplication reviews preserve
+that selection without requiring an API key or replacing it with a stored
+login. Codex executes the helper and renews its token. Helper paths and relative
+`auth.cwd` values resolve from the supplied `CODEX_HOME` (default `~/.codex`),
+not the source checkout; an absolute `auth.cwd` is preserved. Comparisons and
+reviews also honor the selected command provider in that home's `config.toml`.
+Configuration is passed to Codex for validation, including profile support.
+
 For other inference providers:
 
 ```bash
@@ -435,6 +445,9 @@ combined report.
 
 `--max-cost` applies per component, excluding planning and matching.
 `--model` and `--effort` also apply to matching; `--auth` applies throughout.
+Planning and matching reject an ambient command provider that conflicts with
+explicit `--auth chatgpt` or `--auth api-key`. A command provider explicitly
+selected through SDK `codexOverrides` retains its authentication configuration.
 Use `--knowledge-base`, `--scan-prompt-file`, and `--post-scan-prompt-file` as for
 bulk scans.
 
@@ -585,6 +598,27 @@ the limit, though in-flight requests can finish above it. If deep-scan
 discovery has finished, the scan returns a sealed partial report without more
 model calls and lists unvalidated candidates as follow-up work. Bulk scans
 apply the limit per repository attempt.
+
+For a single scan in the interactive dashboard, reaching 80% of the limit
+offers a higher **total** USD limit. Enter a larger amount to approve it, or
+press Enter with an empty input or Escape to keep the current limit. The scan
+continues running while you decide, and the existing limit remains enforced
+until the increase is saved. Increases keep the same scan and accumulated cost;
+they do not restart work or extend time or discovery limits. CI, JSON/JSONL,
+`--headless`, and `--verbose` scans do not offer budget increases. If usage crosses the limit
+before an increase is approved, the scan still stops.
+
+SDK callers can supply `onBudgetApproaching({ maxCostUsd, cost, signal })` and
+return a higher total limit, or `undefined` to keep the current limit. The
+callback runs once per limit at 80% usage without blocking tracking or
+execution. Its signal aborts when the scan stops or finishes model work; late
+answers are ignored. Invalid increases or failures to save them leave the
+existing limit in place and report a warning. `onCost(cost, maxCostUsd)` reports
+the current limit, including after an approved increase.
+
+These amounts estimate API-equivalent model usage, not ChatGPT subscription
+allowance. Post-scan prompts run after scan cost tracking ends and are outside
+this limit.
 
 ### Bulk scans
 
@@ -1535,6 +1569,17 @@ migration that also imports known associations from stored scan occurrences.
 New scan findings retain their target associations when indexed locally.
 The server entrypoint selects the concrete
 embedder and store, so either can be replaced independently.
+
+For renewable embeddings credentials, import `OpenAiFindingEmbedder`,
+`SqliteFindingsStore`, and `startFindingsServer` from
+`@openai/codex-security/server`. The embedder's first argument accepts a static
+key or `() => string | Promise<string>`. It calls the callback before every
+HTTP batch, including subsequent calls to `embed`; callers own token acquisition.
+Pass `fetch` as the second argument and
+`process.env.CODEX_SECURITY_EMBEDDINGS_URL || undefined` as the third to use
+the same full endpoint URL and default as `codex-security serve`. Importing the
+server API does not start a listener.
+
 The local workflow lives under `src/deduplication/`. `FindingDeduplicator`
 receives a candidate API client and a `DeduplicationReviewer`, keeping grouping
 separate from HTTP and model transport. `CodexDeduplicationReviewer` owns prompts

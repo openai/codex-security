@@ -404,6 +404,16 @@ try {
     { cwd: consumer },
   );
 
+  run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `const sdk = await import(${JSON.stringify(`${packageManifest.name}/server`)}); for (const name of ["OpenAiFindingEmbedder", "SqliteFindingsStore", "startFindingsServer"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
+    ],
+    { cwd: consumer },
+  );
+
   await cp(
     join(packageRoot, "scripts", "fixtures", "package-consumer.ts"),
     join(consumer, "consumer.ts"),

@@ -7,6 +7,7 @@ import argparse
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -1789,6 +1790,31 @@ def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) ->
     return {"scanId": scan["id"], "threadId": args.thread_id}
 
 
+def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    limit = args.max_cost_usd
+    if not math.isfinite(limit) or limit <= 0:
+        raise SystemExit("The scan cost limit must be a positive finite USD amount.")
+    with scan_completion_lock(scan_id), connection:
+        scan = require_scan(connection, scan_id)
+        if scan["status"] != "running" or scan["recipe_json"] is None:
+            raise SystemExit("Only a running CLI scan can increase its cost limit.")
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        previous = recipe.get("maxCostUsd")
+        if (
+            not isinstance(previous, (int, float))
+            or isinstance(previous, bool)
+            or limit <= previous
+        ):
+            raise SystemExit("The new cost limit must exceed the current limit.")
+        recipe["maxCostUsd"] = limit
+        connection.execute(
+            "UPDATE scans SET recipe_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(recipe, allow_nan=False), now(), scan["id"]),
+        )
+    return {"scanId": scan["id"], "maxCostUsd": limit}
+
+
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
     if len(value.encode("utf-8")) > SCAN_RECIPE_MAX_BYTES:
         raise SystemExit("Scan launch recipe must be no larger than 256 KiB.")
@@ -3468,6 +3494,8 @@ def main() -> None:
             result = register_cli_scan(connection, args)
         elif args.command == "set-scan-thread":
             result = set_scan_thread(connection, args)
+        elif args.command == "set-scan-cost-limit":
+            result = set_scan_cost_limit(connection, args)
         elif args.command == "get-scan-recipe":
             result = get_scan_recipe(connection, args)
         elif args.command == "compare-scans":

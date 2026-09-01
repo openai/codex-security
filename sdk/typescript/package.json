@@ -18,6 +18,11 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./server": {
+      "types": "./dist/server/api.d.ts",
+      "import": "./dist/server/api.js",
+      "default": "./dist/server/api.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",

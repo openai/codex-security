@@ -24,6 +24,7 @@ export type {
   PatchResult,
   ScanAuthMode,
   ScanAuthentication,
+  ScanBudget,
   ScanOptions,
   ScanPreflight,
   ScanReconnectDetails,
