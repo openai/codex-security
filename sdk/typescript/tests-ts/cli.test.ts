@@ -2353,7 +2353,7 @@ describe("CLI", () => {
     );
     expect(help.text()).toContain("--model <string>");
     expect(help.text()).toContain(
-      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
+      "--provider <openai|openrouter|fireworks|azure|amazon-bedrock>",
     );
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
@@ -2425,7 +2425,7 @@ describe("CLI", () => {
     expect(help.text()).not.toContain("--outputDir");
     expect(help.text()).not.toContain("--maxAttempts");
     expect(help.text()).toContain(
-      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
+      "--provider <openai|openrouter|fireworks|azure|amazon-bedrock>",
     );
     expect(stderr.text()).toBe("");
   });

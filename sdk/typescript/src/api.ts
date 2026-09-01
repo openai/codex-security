@@ -48,6 +48,7 @@ import {
 } from "./codex-prompt.js";
 import {
   EXTERNAL_CODEX_PROVIDERS,
+  hasResolvedBaseUrl,
   isExternalModelProvider,
   mergedCodexConfig,
   scanApprovalPolicy,
@@ -305,7 +306,8 @@ export type ScanAuthentication =
         | "OPENAI_API_KEY"
         | "CODEX_API_KEY"
         | "OPENROUTER_API_KEY"
-        | "FIREWORKS_API_KEY";
+        | "FIREWORKS_API_KEY"
+        | "AZURE_OPENAI_API_KEY";
       verified: false;
     }
   | {
@@ -3445,6 +3447,10 @@ async function runtimeScanAuthentication(
   return authentication;
 }
 
+const EXTERNAL_PROVIDER_KEYS: ReadonlySet<string> = new Set(
+  Object.values(EXTERNAL_CODEX_PROVIDERS).map((provider) => provider.env_key),
+);
+
 /** @internal */
 export function selectedScanEnvironment(
   environment: ProcessEnvironment,
@@ -3462,7 +3468,7 @@ export function selectedScanEnvironment(
     Object.entries(environment).filter(([name]) => {
       const key = name.toUpperCase();
       if (key === "OPENAI_API_KEY" || key === "CODEX_API_KEY") return false;
-      if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
+      if (EXTERNAL_PROVIDER_KEYS.has(key)) {
         return (
           !bedrockProvider &&
           (selectedProviderKey === null || key === selectedProviderKey)
@@ -3502,7 +3508,8 @@ function environmentApiKeyEntry(
     | "OPENAI_API_KEY"
     | "CODEX_API_KEY"
     | "OPENROUTER_API_KEY"
-    | "FIREWORKS_API_KEY";
+    | "FIREWORKS_API_KEY"
+    | "AZURE_OPENAI_API_KEY";
   value: string;
 } | null {
   const keys = isExternalModelProvider(modelProvider)
@@ -3761,8 +3768,19 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   }
   const modelProvider = scanModelProvider(result);
   if (isExternalModelProvider(modelProvider)) {
+    // Per-account endpoints must survive into saved recipes, or replaying a
+    // recipe would lose the resource the scan actually ran against.
+    const configured = isRecord(config["model_providers"])
+      ? config["model_providers"][modelProvider]
+      : undefined;
+    const baseUrl = isRecord(configured) ? configured["base_url"] : undefined;
     result["model_providers"] = {
-      [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
+      [modelProvider]: {
+        ...EXTERNAL_CODEX_PROVIDERS[modelProvider],
+        ...(hasResolvedBaseUrl(modelProvider) && safeString(baseUrl)
+          ? { base_url: baseUrl }
+          : {}),
+      },
     };
   } else if (modelProvider === "amazon-bedrock") {
     const providers = config["model_providers"];

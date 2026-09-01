@@ -79,12 +79,23 @@ export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
 export AWS_REGION="us-east-2"
 codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 
+export AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com"
+export AZURE_OPENAI_API_KEY="<your-azure-openai-key>"
+codex-security scan . --provider azure --model <your-deployment-name>
+
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
 codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
 ```
+
+For Azure, `--model` is the **deployment** name, not the underlying model name,
+and the deployment must serve a reasoning model because scans always request a
+reasoning effort. `AZURE_OPENAI_API_KEY` accepts either a resource key or a
+Microsoft Entra access token, so
+`az account get-access-token --resource https://ai.azure.com` works in place of
+a static key.
 
 ## Documentation
 

@@ -189,6 +189,10 @@ Access-token environment variables are not scan API keys.
 For other inference providers:
 
 ```bash
+export AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com"
+export AZURE_OPENAI_API_KEY="<your-azure-openai-key>"
+npx @openai/codex-security scan . --provider azure --model <your-deployment-name>
+
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
 npx @openai/codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 
@@ -199,6 +203,21 @@ export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
 export AWS_REGION="us-east-2"
 npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
+
+Azure uses the resource's v1 endpoint, so no `api-version` is needed. Set
+`AZURE_OPENAI_ENDPOINT` (or `AZURE_OPENAI_BASE_URL`) to the resource address
+such as `https://<resource>.openai.azure.com`; `/openai/v1` is appended when
+absent. `--model` is the deployment name. `AZURE_OPENAI_API_KEY` accepts a
+resource key or a Microsoft Entra access token from
+`az account get-access-token --resource https://ai.azure.com`. Saved scan
+recipes keep the resolved endpoint so a replay targets the same resource.
+
+Deploy a reasoning model: scans always send a reasoning effort, so a
+non-reasoning deployment fails with `Unsupported parameter: 'reasoning.effort'`.
+Give the deployment enough tokens-per-minute for scan-sized prompts; a small
+quota surfaces as repeated `Rate limit reached` retries. Deploying a model the
+cost table already prices, such as `gpt-5.6-sol`, also keeps `--max-cost` and
+cost reporting working; other deployments report no cost estimate.
 
 Bedrock also accepts AWS access keys, profiles, web identity, container
 credentials, and the default AWS credential chain. Set `AWS_REGION` and choose
