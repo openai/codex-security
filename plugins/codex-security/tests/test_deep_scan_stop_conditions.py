@@ -8,7 +8,9 @@ from test_deep_scan_successful_publication import (
     add_worker,
     assert_published_aggregate,
     complete,
-    publication_scan,
+)
+from test_deep_scan_successful_publication import (
+    publication_scan as publication_scan,
 )
 
 

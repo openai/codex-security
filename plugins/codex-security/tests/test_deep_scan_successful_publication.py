@@ -292,12 +292,14 @@ def test_deep_prepare_and_complete_preserve_the_same_aggregate(
     [
         ("standard-worker-checkpoint", ".", True),
         ("deep-reducer-checkpoint", ".", True),
+        ("deep-reducer-archived-checkpoint", ".", True),
         ("deep-reducer-result", ".", True),
         ("deep-reducer-result", "subdir", False),
     ],
     ids=[
         "standard-worker-checkpoint",
         "deep-reducer-checkpoint",
+        "deep-reducer-archived-checkpoint",
         "deep-reducer-result",
         "scoped-reducer-without-parent",
     ],
@@ -343,7 +345,12 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
         checkpoint = None
         result.write_text(json.dumps(saved))
     else:
-        checkpoint = write_checkpoint(result.parent / "checkpoints", saved)
+        checkpoint_root = (
+            result.parent / "attempts" / "attempt-01"
+            if source == "deep-reducer-archived-checkpoint"
+            else result.parent
+        )
+        checkpoint = write_checkpoint(checkpoint_root / "checkpoints", saved)
         result.write_text("{interrupted worker output")
     result_bytes = result.read_bytes()
 
@@ -375,6 +382,71 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
     if checkpoint is not None:
         assert json.loads(checkpoint.read_text()) == saved
     assert result.read_bytes() == result_bytes
+
+
+@pytest.mark.parametrize("source", ["result", "checkpoint", "parent-checkpoint"])
+def test_stopped_deep_scan_ignores_non_reducer_sources_without_coverage(
+    workbench_api, workbench_db, publication_scan, source
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    invalid_finding = copy.deepcopy(scan.findings[0])
+    invalid_finding["identity"]["anchor"] = "non-reducer-without-coverage"
+    invalid_finding["summary"] = "Finding from a non-reducer artifact missing required coverage."
+    saved = {
+        "scanId": scan.scan_id,
+        "complete": source == "result",
+        "findings": [invalid_finding],
+    }
+    if source == "parent-checkpoint":
+        source_path = write_checkpoint(scan.scan_dir / "checkpoints", saved)
+    else:
+        result = add_worker(
+            workbench_db, scan, status="succeeded" if source == "result" else "running"
+        )
+        if source == "result":
+            result.write_text(json.dumps(saved))
+            source_path = result
+        else:
+            source_path = write_checkpoint(result.parent / "checkpoints", saved)
+    source_bytes = source_path.read_bytes()
+    source_relative = source_path.relative_to(scan.scan_dir).as_posix()
+
+    stopped = workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Scan interrupted."
+        ),
+    )["scan"]
+
+    assert stopped["progress"]["status"] == "failed"
+    assert stopped["resultsRecoveryNeeded"] is False
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert [finding["summary"] for finding in findings] == [scan.findings[0]["summary"]]
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    frozen = json.loads(
+        workbench_db.execute(
+            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
+        ).fetchone()[0]
+    )
+    assert manifest["scan"]["preservedSources"] == frozen
+    assert source_relative not in frozen
+    artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
+    published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
+
+    recovered = workbench_api["recover_scan_results"](
+        workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+
+    assert recovered["findingCount"] == 1
+    assert recovered["resultsRecoveryNeeded"] is False
+    assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == published
+    assert source_path.read_bytes() == source_bytes
 
 
 def test_standard_publication_preserves_deliberately_partial_coverage(
