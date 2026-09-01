@@ -295,8 +295,8 @@ export class DeepScanCoordinator {
       const draft = schedulerResult.result
         ? {
             ...structuredClone(schedulerResult.result),
-            // Keep the saved coverage contract for existing readers. Deep
-            // completion comes from the coordinator, not worker observations.
+            // Readers require coverage.json. The coordinator has accepted this
+            // result, so mark it complete and leave review notes empty.
             coverage: {
               completeness: "complete",
               surfaces: [],
@@ -949,8 +949,7 @@ export class DeepScanCoordinator {
     this.audit.canceledWorkerIds = unique(canceledWorkerIds);
     this.audit.bufferedWorkerIds = buffer.map((worker) => worker.id);
 
-    // Saturation fixes the aggregate at the stop boundary. Failures from workers
-    // still settling after cancellation cannot overturn that completed result.
+    // Once Deep reaches saturation, late worker errors cannot fail the scan.
     if (lateFailure && stopReason !== "saturated") throw lateFailure;
 
     if (

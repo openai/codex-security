@@ -1908,8 +1908,8 @@ def finish_deep_scan_locked(
         if failed_worker is not None and not failure_capped:
             raise SystemExit("Deep Scan cannot finish after a worker has failed.")
         if args.terminal_reason == "saturated":
-            # The coordinator has stopped discovery. Its remaining workers cannot
-            # override that outcome if their own cancellation writes failed.
+            # Mark any remaining workers canceled, including those whose own
+            # cancellation writes failed, so they cannot block completion.
             cancel_active_workers(connection, scan_id, now())
         active_worker = connection.execute(
             """

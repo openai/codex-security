@@ -66,8 +66,7 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
             "SELECT started_at FROM scans WHERE id = ?", (scan_id,)
         ).fetchone()[0]
         if mode == "deep":
-            # The coordinator has already accepted and submitted its final aggregate.
-            # Exercise publication independently of the worker execution lifecycle.
+            # Start with a finished Deep result so these tests only need to save it.
             with workbench_db:
                 workbench_db.execute(
                     "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, "
@@ -104,7 +103,7 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
             coverage["openQuestions"] = [{"question": "Which deployment controls apply?"}]
         for field in ("documentType", "schemaVersion", "scanId"):
             coverage.pop(field)
-        # Match the ordinary semantic envelopes written by the host draft writer.
+        # Use the same draft format as the writer, before finalization adds metadata.
         manifest = {"scan": {key: manifest["scan"][key] for key in ("target", "scope")}}
         findings[0]["severity"]["changeConditions"] = "Reassess if the upload route is removed."
         findings[0]["provenance"]["sourceFindings"] = [

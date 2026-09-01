@@ -19,7 +19,7 @@ export async function testDeepScanPublication({
       if (update.kind === "discovery" && update.status === "succeeded"
         && path.basename(path.dirname(update.promptPath)) === "discovery-0003") {
         acceptedLateWorker = persisted;
-        // A worker still settling when saturation is reached is omitted.
+        // This worker finishes too late to be included in the final result.
         await rm(update.resultManifestPath);
         lateAcceptance.resolve();
         await releaseAcceptance.promise;

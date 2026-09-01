@@ -1534,8 +1534,8 @@ def complete_scan_locked(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
             completion_binding=completion_binding,
-            # Deep has already accepted its aggregate. Publication must not
-            # recover worker-local drafts or revise the aggregate's coverage.
+            # Save the finished Deep result as submitted. Worker drafts and
+            # recovery repairs belong to the stopped-scan path.
             completion_warnings=warnings if scan["mode"] != "deep" else None,
             draft_documents=saved_results.merge_saved_results(
                 scan_dir,

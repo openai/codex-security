@@ -104,9 +104,11 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 ## Coverage
 
-`coverage.json` prevents downstream consumers from confusing `not observed` with `not scanned`.
+`coverage.json` records scan scope and completion information. Standard and diff summaries also describe reviewed surfaces and outstanding work.
 
-Deep parent scans keep this file for compatibility. The host copies the configured include and exclude paths and derives completeness from the coordinator's outcome. An accepted aggregate uses `complete` with empty `surfaces`, `explicitExclusions`, and `deferred` arrays and no `openQuestions`. Deep reducer inputs and outputs contain no coverage. A time limit reached before any review completes retains the host's partial outcome and diagnostic; stopped scans retain their existing recovery behavior. Standard workers keep their own coverage in their saved results.
+For a Deep parent scan, the host copies the configured paths into `includePaths` and `excludePaths` and sets `completeness` from the coordinator's outcome. A successful aggregate uses `complete`; `surfaces`, `explicitExclusions`, and `deferred` are empty arrays, and `openQuestions` is omitted. If the configured time limit expires before any review completes, the coordinator writes `partial` and records the explanation in `deferred`. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
+
+Each Deep worker writes an ordinary Standard result, including its own coverage. A reducer submits `record_codex_security_deep_reduction({ scanId, findings, scope?, threatModel? })`; its saved results and checkpoints contain the accepted findings and optional scope and threat-model context.
 
 For Standard and diff scans, record:
 

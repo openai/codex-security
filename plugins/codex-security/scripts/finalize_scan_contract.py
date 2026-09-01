@@ -1252,7 +1252,7 @@ def _normalize_unsealed_deep_repository_inventory_strategy(
     *,
     expected_coverage_mode: str | None,
 ) -> None:
-    """Derive the inventory label from the selected Deep repository mode."""
+    """Label whole-repository Deep scans as using the repository inventory."""
 
     if expected_coverage_mode == "deep_repository":
         coverage["inventoryStrategy"] = "repository"

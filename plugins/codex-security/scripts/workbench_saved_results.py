@@ -576,8 +576,8 @@ def merge_saved_results(
             if frozen_source_digests is not None and frozen_source_digests[relative] != digest:
                 raise ContractError("checkpoint changed after the scan stopped")
             source_digests[relative] = digest
-            # Deep reducers save findings without coverage. Keep their original
-            # digest while supplying empty observations to the recovery union.
+            # Recovery expects coverage, but reducer results only contain findings
+            # and context. Add an empty value after hashing the original result.
             sources.append((relative, {"coverage": {}, **draft}, worker_id))
         except (ContractError, OSError, ValueError) as exc:
             if (scan_dir / relative).exists():

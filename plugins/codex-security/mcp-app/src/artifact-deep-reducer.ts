@@ -58,7 +58,7 @@ interface BoundReducer {
   scanId?: string;
 }
 
-/** Return assigned findings and context without exposing worker artifact locations. */
+/** Read the findings and scan context assigned to this reducer. */
 export async function getCodexSecurityDeepReducerInputs(
   context: ArtifactContext
 ): Promise<DeepReducerInputs> {
@@ -101,7 +101,7 @@ export async function getCodexSecurityDeepReducerInputs(
   });
 }
 
-/** Validate and durably replace this reducer's complete semantic result. */
+/** Check and save the reducer's finished result. */
 export async function recordCodexSecurityDeepReduction(
   context: ArtifactContext,
   input: unknown

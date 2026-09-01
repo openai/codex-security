@@ -88,8 +88,8 @@ export async function recordCodexSecurityScanDraft(
 
   for (;;) {
     signal?.throwIfAborted();
-    // The coordinator has already accepted and reconciled a terminal Deep
-    // aggregate. Publishing it must not reopen checkpoints or prior drafts.
+    // Deep results are ready to save. Do not merge older drafts or
+    // checkpoints into them.
     const preserved = context.mode === "deep" && parsed.complete !== false
       ? { input: parsed, previousDigest: undefined }
       : await preserveScanDraft(context, parsed, false);

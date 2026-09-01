@@ -5,9 +5,9 @@ description: Use when the user asks for a deep, exhaustive, multi-pass, or varia
 
 # Deep Security Scan
 
-Use `start_codex_security_deep_scan` to run repeated independent workers against the exact requested target and scope. Each worker loads `../../references/core-scan.md` directly and performs the complete ordinary Standard audit, including its own threat map, investigation, source-backed validation, and attack-path reasoning, saving worker-bound checkpoints as results arrive and one final semantic scan draft when its audit finishes. The coordinator aggregates the finished Standard results and writes the parent scan's unsealed `scan-manifest.json`, `findings.json`, and `coverage.json` before returning `{ manifestPath }`.
+Use `start_codex_security_deep_scan` to run repeated independent workers against the exact requested target and scope. Each worker reads `../../references/core-scan.md` directly and completes the ordinary Standard audit, saving checkpoints as results arrive and a final scan draft when the audit finishes.
 
-The configured directories and exclusions remain in the scan scope and report. Reducers aggregate findings without coverage inputs or outputs. The coordinator supplies the parent `coverage.json` for compatibility from the configured scope and execution outcome; successful aggregates contain no surface observations, deferred work, or coverage notes. Each Standard worker retains its own coverage in its original result.
+The coordinator combines the finished findings and writes the parent scan's unsealed `scan-manifest.json`, `findings.json`, and `coverage.json` before returning `{ manifestPath }`. The final report identifies the configured directories and exclusions alongside the findings.
 
 ## Phase Ownership
 

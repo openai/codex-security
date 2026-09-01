@@ -22,7 +22,10 @@ export interface ReducerArtifactValidation {
   result: DeepReductionInput;
 }
 
-/** Reuse Standard finding validation without admitting legacy reducer coverage. */
+/**
+ * Check reducer findings with the Standard scan validator.
+ * It requires coverage, so add an empty value and remove it after validation.
+ */
 export function parseDeepReduction(
   input: Record<string, unknown>,
   persisted = false,
