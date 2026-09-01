@@ -362,6 +362,21 @@ describe("CodexSecurity headless patching", () => {
     },
   );
 
+  test.each([
+    "/outside.ts",
+    "../outside.ts",
+    "src/../../outside.ts",
+    "C:\\outside.ts",
+    "C:outside.ts",
+    "\\\\server\\share\\outside.ts",
+  ])("rejects a non-relative changed-file path: %s", async (changedFile) => {
+    const { client, options } = await patchClient(() =>
+      patchEvents({ ...verifiedResponse, changedFiles: [changedFile] }),
+    );
+    await using security = client;
+    await expect(security.patch(options)).rejects.toThrow("invalid result");
+  });
+
   test("rejects invalid inputs and malformed or incomplete patch results", async () => {
     const repositoryPath = await temporaryDirectory();
     const prepareRuntime = mock(async () => {

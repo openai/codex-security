@@ -18,9 +18,11 @@ import {
   dirname,
   isAbsolute,
   join,
+  posix,
   relative,
   resolve,
   sep,
+  win32,
 } from "node:path";
 import {
   Codex,
@@ -347,7 +349,24 @@ type PatchOutcome = { readonly changedFiles: readonly string[] } & (
 
 export type PatchResult = PatchResultMetadata & PatchOutcome;
 
-const patchChangedFilesSchema = z.array(z.string().trim().min(1));
+function isRepositoryRelativePatchPath(value: string): boolean {
+  const posixPath = posix.normalize(value);
+  const windowsPath = win32.normalize(value);
+  return (
+    !posix.isAbsolute(value) &&
+    win32.parse(value).root === "" &&
+    posixPath !== "." &&
+    posixPath !== ".." &&
+    !posixPath.startsWith("../") &&
+    windowsPath !== "." &&
+    windowsPath !== ".." &&
+    !windowsPath.startsWith("..\\")
+  );
+}
+
+const patchChangedFilesSchema = z.array(
+  z.string().trim().min(1).refine(isRepositoryRelativePatchPath),
+);
 const patchVerificationSchema = z.string().trim().min(1);
 const patchResponseSchema = z
   .object({
