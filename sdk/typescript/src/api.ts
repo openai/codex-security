@@ -8,7 +8,6 @@ import {
   readFile,
   realpath,
   rm,
-  stat,
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -851,17 +850,10 @@ export class CodexSecurity {
         temporaryRoot,
       );
       // The SDK turns workingDirectory into `--cd`, which can persist trust for
-      // a new project. Resolve the same marker-based project root Codex uses,
-      // preserve its exact decision, and keep an unknown project untrusted.
-      // This must be a raw override so the root path remains one quoted TOML
-      // key instead of a dotted key sequence.
-      const projectRoot = await codexProjectRoot(
-        repository,
-        session.sessionConfig,
-      );
-      const projectTrust =
-        (await configuredProjectTrust(session.effectiveConfig, projectRoot)) ??
-        "untrusted";
+      // a new project. Pin this workspace as the project root and keep it
+      // untrusted so no lower configuration layer can activate repository-local
+      // configuration or MCP servers. These must be raw overrides so the root
+      // path remains one quoted TOML key instead of a dotted key sequence.
       const configured = scanModelConfiguration(session.effectiveConfig);
       const model = options.model ?? configured.model;
       const reasoningEffort =
@@ -880,7 +872,8 @@ export class CodexSecurity {
         },
         options.auth,
         [
-          `projects.${JSON.stringify(projectRoot)}.trust_level=${JSON.stringify(projectTrust)}`,
+          "project_root_markers=[]",
+          `projects.${JSON.stringify(repository)}.trust_level="untrusted"`,
         ],
       );
       tracker = new ScanCostTracker({
@@ -3085,54 +3078,6 @@ async function prepareDeepScanConfig(
     }),
     { mode: 0o600, signal },
   );
-}
-
-async function configuredProjectTrust(
-  config: Readonly<JsonObject>,
-  repository: string,
-): Promise<"trusted" | "untrusted" | undefined> {
-  const projects = config["projects"];
-  if (!isRecord(projects)) return undefined;
-  let matched: "trusted" | undefined;
-  for (const [path, project] of Object.entries(projects)) {
-    if (!isAbsolute(path) || !isRecord(project)) continue;
-    const trust = project["trust_level"];
-    if (
-      (trust !== "trusted" && trust !== "untrusted") ||
-      (path !== repository &&
-        (process.platform !== "win32" ||
-          !(await sameExistingPath(path, repository))))
-    ) {
-      continue;
-    }
-    if (trust === "untrusted") return trust;
-    matched = trust;
-  }
-  return matched;
-}
-
-async function codexProjectRoot(
-  cwd: string,
-  config: Readonly<JsonObject>,
-): Promise<string> {
-  const configured = config["project_root_markers"];
-  const markers =
-    configured === undefined
-      ? [".git"]
-      : Array.isArray(configured) &&
-          configured.every((marker) => typeof marker === "string")
-        ? configured
-        : [];
-  if (markers.length === 0) return cwd;
-  for (let ancestor = cwd; ; ancestor = dirname(ancestor)) {
-    for (const marker of markers) {
-      const markerPath = resolve(ancestor, marker);
-      const metadata = await stat(markerPath).catch(() => null);
-      if (metadata === null) continue;
-      return ancestor;
-    }
-    if (dirname(ancestor) === ancestor) return cwd;
-  }
 }
 
 async function sameExistingPath(left: string, right: string): Promise<boolean> {

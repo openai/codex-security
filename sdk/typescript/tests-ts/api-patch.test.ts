@@ -1,5 +1,4 @@
-import { execFileSync } from "node:child_process";
-import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   CodexOptions,
@@ -79,65 +78,17 @@ describe("CodexSecurity headless patching", () => {
   async function patchClient(
     events: (signal: AbortSignal) => AsyncGenerator<ThreadEvent> = () =>
       patchEvents(),
-    {
-      projectTrust,
-      repositoryKind = "repository",
-    }: {
-      projectTrust?: "trusted" | "untrusted";
-      repositoryKind?:
-        | "repository"
-        | "repository-alias-trust"
-        | "worktree-subdirectory"
-        | "marker-subdirectory"
-        | "marker-subdirectory-exact"
-        | "marker-non-git"
-        | "empty-git-marker-subdirectory";
-    } = {},
   ) {
     const root = await temporaryDirectory();
     const projectRoot = join(root, "repository with spaces");
     const markerRoot = join(projectRoot, "packages", "app");
-    const usesProjectRootMarker = repositoryKind.startsWith("marker-");
-    const repository = usesProjectRootMarker
-      ? join(markerRoot, "src")
-      : repositoryKind === "worktree-subdirectory" ||
-          repositoryKind === "empty-git-marker-subdirectory"
-        ? markerRoot
-        : projectRoot;
+    const repository = join(markerRoot, "src");
     const codexHome = join(root, "codex-home");
     await Promise.all([
       mkdir(repository, { recursive: true }),
       mkdir(codexHome),
     ]);
-    if (
-      repositoryKind === "worktree-subdirectory" ||
-      repositoryKind === "marker-subdirectory" ||
-      repositoryKind === "marker-subdirectory-exact"
-    ) {
-      execFileSync("git", ["init", "--quiet", projectRoot]);
-    }
-    if (usesProjectRootMarker) {
-      await writeFile(join(markerRoot, "package.json"), "{}\n");
-    }
-    if (repositoryKind === "empty-git-marker-subdirectory") {
-      await mkdir(join(projectRoot, ".git"));
-    }
-    const projectAlias = join(root, "repository alias");
-    if (repositoryKind === "repository-alias-trust") {
-      await symlink(
-        projectRoot,
-        projectAlias,
-        process.platform === "win32" ? "junction" : "dir",
-      );
-    }
-    const configuredTrustRoot =
-      repositoryKind === "marker-subdirectory-exact"
-        ? markerRoot
-        : repositoryKind === "repository-alias-trust"
-          ? projectAlias
-          : repositoryKind === "marker-non-git"
-            ? repository
-            : projectRoot;
+    await writeFile(join(markerRoot, "package.json"), "{}\n");
     const captured: {
       codex?: CodexOptions;
       thread?: ThreadOptions;
@@ -155,16 +106,8 @@ describe("CodexSecurity headless patching", () => {
           model: "gpt-5.6-terra",
           model_reasoning_effort: "medium",
           approval_policy: "on-request",
-          ...(usesProjectRootMarker
-            ? { project_root_markers: ["package.json"] }
-            : {}),
-          ...(projectTrust === undefined
-            ? {}
-            : {
-                projects: {
-                  [configuredTrustRoot]: { trust_level: projectTrust },
-                },
-              }),
+          project_root_markers: ["package.json"],
+          projects: { [markerRoot]: { trust_level: "trusted" } },
         },
       },
       {
@@ -203,8 +146,6 @@ describe("CodexSecurity headless patching", () => {
       captured,
       workbench,
       codexHome,
-      projectRoot,
-      codexProjectRoot: usesProjectRootMarker ? markerRoot : projectRoot,
     };
   }
 
@@ -369,102 +310,16 @@ describe("CodexSecurity headless patching", () => {
     },
   );
 
-  test.each([
-    ["repository", "missing", undefined, "repository", "untrusted"],
-    ["repository", "untrusted", "untrusted", "repository", "untrusted"],
-    ["repository", "trusted", "trusted", "repository", "trusted"],
-    [
-      "repository",
-      "trusted path alias",
-      "trusted",
-      "repository-alias-trust",
-      process.platform === "win32" ? "trusted" : "untrusted",
-    ],
-    [
-      "worktree subdirectory",
-      "missing",
-      undefined,
-      "worktree-subdirectory",
-      "untrusted",
-    ],
-    [
-      "worktree subdirectory",
-      "untrusted",
-      "untrusted",
-      "worktree-subdirectory",
-      "untrusted",
-    ],
-    [
-      "worktree subdirectory",
-      "trusted",
-      "trusted",
-      "worktree-subdirectory",
-      "trusted",
-    ],
-    [
-      "configured-marker subdirectory",
-      "enclosing missing",
-      undefined,
-      "marker-subdirectory",
-      "untrusted",
-    ],
-    [
-      "configured-marker subdirectory",
-      "enclosing untrusted",
-      "untrusted",
-      "marker-subdirectory",
-      "untrusted",
-    ],
-    [
-      "configured-marker subdirectory",
-      "enclosing trusted",
-      "trusted",
-      "marker-subdirectory",
-      "untrusted",
-    ],
-    [
-      "configured-marker subdirectory",
-      "exact untrusted",
-      "untrusted",
-      "marker-subdirectory-exact",
-      "untrusted",
-    ],
-    [
-      "configured-marker subdirectory",
-      "exact trusted",
-      "trusted",
-      "marker-subdirectory-exact",
-      "trusted",
-    ],
-    [
-      "configured-marker non-Git directory",
-      "nested-only trusted",
-      "trusted",
-      "marker-non-git",
-      "untrusted",
-    ],
-    [
-      "empty .git marker subdirectory",
-      "missing",
-      undefined,
-      "empty-git-marker-subdirectory",
-      "untrusted",
-    ],
-  ] as const)(
-    "preserves the %s project trust decision: %s",
-    async (_scope, _label, projectTrust, repositoryKind, expectedTrust) => {
-      const { client, options, captured, codexProjectRoot } = await patchClient(
-        () => patchEvents(),
-        { projectTrust, repositoryKind },
-      );
-      await using security = client;
-      await security.patch(options);
-      expect(captured.codex?.configOverrides).toEqual([
-        `projects.${JSON.stringify(codexProjectRoot)}.trust_level=${JSON.stringify(expectedTrust)}`,
-      ]);
-      expect(captured.thread?.workingDirectory).toBe(options.repositoryPath);
-    },
-  );
+  test("keeps the patch workspace untrusted across native config layers", async () => {
+    const { client, options, captured } = await patchClient();
+    await using security = client;
+    await security.patch(options);
+    expect(captured.codex?.configOverrides).toEqual([
+      "project_root_markers=[]",
+      `projects.${JSON.stringify(options.repositoryPath)}.trust_level="untrusted"`,
+    ]);
+    expect(captured.thread?.workingDirectory).toBe(options.repositoryPath);
+  });
 
   test.each([
     {
