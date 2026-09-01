@@ -6,10 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 let sequence = 0;
+const sameRecommendation = {
+  decision: "SAME",
+  rationale: "Synthetic shared correction for the complete original reports.",
+};
 function sameDecision(findings) {
   return {
-    decision: "SAME",
-    rationale: "Synthetic shared correction for the complete original reports.",
+    ...sameRecommendation,
     canonicalFindingId: findings[0].findingId,
     mergedFinding: {
       ...findings[0],
@@ -73,7 +76,7 @@ const server = createServer(async (request, response) => {
           ? {
               decisions: findings.slice(1).map((finding) => ({
                 findingIds: [findings[0].findingId, finding.findingId],
-                ...sameDecision([findings[0], finding]),
+                ...sameRecommendation,
               })),
             }
           : same

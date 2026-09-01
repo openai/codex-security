@@ -1272,8 +1272,9 @@ reviews or group writes. A publication whose acknowledgement was lost is retried
 using the service's existing idempotent upsert.
 
 Each validated screening and pair review is checkpointed locally,
-including DISTINCT decisions. Every SAME checkpoint retains its required
-`canonicalFindingId` and generated `mergedFinding`. The merged record must satisfy
+including DISTINCT decisions. Screening checkpoints retain pair recommendations
+and rationales only. Every SAME pair-review checkpoint retains its required
+`canonicalFindingId` and generated `mergedFinding`; the merged record must satisfy
 the Finding schema and preserve the canonical finding ID. Validation still happens
 through `review_validator.submit_decisions`; invalid submissions are corrected in
 the same review conversation, and invalid or unfinished reviews are not cached.
@@ -1306,10 +1307,10 @@ use another workflow ID for a fresh review rather than changing that saved resul
    neighbors are rejected.
 3. Independently review each nominated pair once with `gpt-5.6-sol` at `xhigh`
    reasoning effort. Only accepted pairs contribute to duplicate groups.
-4. Group connected findings deterministically, treating accepted duplicate
-   pairs as transitive: if A matches B and B matches C, all three belong to one
-   group. There is no additional whole-group review. A mistaken accepted pair
-   can therefore join otherwise distinct findings.
+4. Group accepted duplicate pairs transitively unless a Luna or Sol `DISTINCT`
+   decision contradicts the resulting component. Contradicted components are
+   split deterministically, preferring legal subgroups that preserve more
+   accepted-pair support. There is no additional whole-group review.
 5. Post all accepted groups to `/v1/dedupe-groups`. Return a completed result
    only after the service accepts the write. An empty result requires no write.
 
@@ -1326,12 +1327,13 @@ Finding content never authorizes access to another target.
 
 Decisions must arrive through the direct `review_validator.submit_decisions`
 tool; invalid submissions can be corrected in the same session. A final text
-answer alone is insufficient. Every `SAME` decision, including screening
-nominations, requires an assigned `canonicalFindingId` and a generated,
-inclusive `mergedFinding`; missing or null values are rejected. Screening
-canonicals must belong to the nominated pair. Sol reviews use only the complete
-originals, never earlier merged findings. These review fields do not change
-the command's ID-only result or stored findings.
+answer alone is insufficient. Luna screening returns pair IDs, `SAME` or
+`DISTINCT`, and a rationale; it does not select a canonical or generate a merged
+finding. Every Sol `SAME` decision requires an assigned `canonicalFindingId` and
+a generated, inclusive `mergedFinding`; missing or null values are rejected.
+Sol reviews use only the complete originals, never earlier model rationales or
+merged findings. These review fields do not change the command's ID-only result
+or stored findings.
 
 Model calls run sequentially on the SDK/CLI host using its Codex sign-in or
 `OPENAI_API_KEY`/`CODEX_API_KEY`, with access to the configured models. Model

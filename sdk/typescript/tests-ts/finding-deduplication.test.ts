@@ -5,7 +5,10 @@ import { expect, test } from "bun:test";
 import Ajv2020 from "ajv/dist/2020.js";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
-import { FindingDeduplicator } from "../src/deduplication/deduplication.js";
+import {
+  contradictionFreeSubgroups,
+  FindingDeduplicator,
+} from "../src/deduplication/deduplication.js";
 import {
   CodexDeduplicationReviewer,
   pairKey,
@@ -84,14 +87,17 @@ function screening(
       return {
         findingIds,
         ...(nominated.has(pairKey(findingIds))
-          ? same([findings[0]!, finding])
+          ? {
+              decision: "SAME" as const,
+              rationale: "One existing control corrects every path.",
+            }
           : distinct),
       };
     }),
   };
 }
 
-test("reviews nominated pairs once and groups accepted pairs by reported severity", async () => {
+test("reviews nominated pairs once and groups non-conflicting accepted pairs by severity", async () => {
   const entries = [entry(1), entry(2), entry(3), entry(4)];
   entries[1]!.severity.level = "critical";
   const ids = entries.map((finding) => finding.findingId);
@@ -123,8 +129,8 @@ test("reviews nominated pairs once and groups accepted pairs by reported severit
   };
   const service = new FindingDeduplicator(candidates(entries), reviewer);
   expect(await service.run([...ids, ids[0]!])).toEqual({
-    uniqueFindingIds: [ids[1]!, ids[3]!],
-    duplicateGroups: [[ids[1]!, ids[0]!, ids[2]!]],
+    uniqueFindingIds: [ids[1]!, ids[2]!, ids[3]!],
+    duplicateGroups: [[ids[1]!, ids[0]!]],
     deduplicationStatus: "completed",
   });
   expect(new Set(reviewedPairs)).toEqual(nominations);
@@ -162,6 +168,156 @@ test("groups accepted neighbors transitively without screening them as anchors",
     deduplicationStatus: "completed",
   });
   expect(screened).toEqual([ids[1]!]);
+});
+
+test("an explicit DISTINCT screening vetoes the same unordered pair", async () => {
+  const entries = [entry(1), entry(2)];
+  const ids = entries.map((finding) => finding.findingId);
+  for (const selected of [ids, [...ids].reverse()]) {
+    let pairReviews = 0;
+    const service = new FindingDeduplicator(candidates(entries), {
+      async screen(findings) {
+        return screening(
+          findings,
+          findings[0]!.findingId === ids[0]
+            ? new Set([pairKey(ids)])
+            : new Set(),
+        );
+      },
+      async reviewPair() {
+        pairReviews += 1;
+        return same(entries);
+      },
+    });
+    expect(await service.run(selected)).toEqual({
+      uniqueFindingIds: selected,
+      duplicateGroups: [],
+      deduplicationStatus: "completed",
+    });
+    expect(pairReviews).toBe(0);
+  }
+});
+
+test("does not connect DISTINCT findings through accepted transitive pairs", async () => {
+  const entries = [entry(1), entry(2), entry(3)];
+  const ids = entries.map((finding) => finding.findingId);
+  const nominations = new Set([
+    pairKey([ids[0]!, ids[1]!]),
+    pairKey([ids[1]!, ids[2]!]),
+  ]);
+  const reviewedPairs: string[] = [];
+  const service = new FindingDeduplicator(candidates(entries), {
+    async screen(findings) {
+      return screening(findings, nominations);
+    },
+    async reviewPair(findings) {
+      reviewedPairs.push(pairKey(findings.map((finding) => finding.findingId)));
+      return same(findings);
+    },
+  });
+  expect(await service.run(ids)).toEqual({
+    uniqueFindingIds: [ids[0]!, ids[2]!],
+    duplicateGroups: [[ids[0]!, ids[1]!]],
+    deduplicationStatus: "completed",
+  });
+  expect(new Set(reviewedPairs)).toEqual(nominations);
+  expect(reviewedPairs).toHaveLength(2);
+});
+
+test("does not connect findings through a pair rejected by Sol", async () => {
+  const entries = [entry(1), entry(2), entry(3)];
+  const ids = entries.map((finding) => finding.findingId);
+  const nominations = new Set([
+    pairKey([ids[0]!, ids[1]!]),
+    pairKey([ids[0]!, ids[2]!]),
+    pairKey([ids[1]!, ids[2]!]),
+  ]);
+  const reviewedPairs: string[] = [];
+  const service = new FindingDeduplicator(candidates(entries), {
+    async screen(findings) {
+      return screening(findings, nominations);
+    },
+    async reviewPair(findings) {
+      const key = pairKey(findings.map((finding) => finding.findingId));
+      reviewedPairs.push(key);
+      return key === pairKey([ids[0]!, ids[2]!]) ? distinct : same(findings);
+    },
+  });
+  expect(await service.run(ids)).toEqual({
+    uniqueFindingIds: [ids[0]!, ids[2]!],
+    duplicateGroups: [[ids[0]!, ids[1]!]],
+    deduplicationStatus: "completed",
+  });
+  expect(new Set(reviewedPairs)).toEqual(nominations);
+  expect(reviewedPairs).toHaveLength(3);
+});
+
+test("prefers the better-supported legal subgroup in a conflicted star", async () => {
+  const entries = [entry(1), entry(2), entry(3), entry(4)];
+  const ids = entries.map((finding) => finding.findingId);
+  const nominations = new Set([
+    pairKey([ids[0]!, ids[1]!]),
+    pairKey([ids[0]!, ids[2]!]),
+    pairKey([ids[0]!, ids[3]!]),
+    pairKey([ids[2]!, ids[3]!]),
+  ]);
+  const neighborIndexes = [[1, 2, 3], [2, 3], [3], []];
+  const service = new FindingDeduplicator(
+    {
+      async potentialDuplicates(findingId) {
+        const index = ids.indexOf(findingId);
+        return {
+          finding: entries[index]!,
+          potentialDuplicates: neighborIndexes[index]!.map(
+            (neighbor) => entries[neighbor]!,
+          ),
+        };
+      },
+    },
+    {
+      async screen(findings) {
+        return screening(findings, nominations);
+      },
+      async reviewPair(findings) {
+        return same(findings);
+      },
+    },
+  );
+  expect(await service.run(ids)).toEqual({
+    uniqueFindingIds: [ids[0]!, ids[1]!],
+    duplicateGroups: [[ids[0]!, ids[2]!, ids[3]!]],
+    deduplicationStatus: "completed",
+  });
+});
+
+test("scales contradiction grouping with conflict neighbors instead of all clusters", () => {
+  const count = 200;
+  const ids = Array.from(
+    { length: count },
+    (_value, index) => `finding-${index}`,
+  );
+  const samePairs: [string, string][] = [];
+  for (let left = 0; left < count; left++) {
+    for (let right = left + 1; right < Math.min(count, left + 51); right++)
+      samePairs.push([ids[left]!, ids[right]!]);
+  }
+  const metrics = { candidateEvaluations: 0, conflictNeighborChecks: 0 };
+  const groups = contradictionFreeSubgroups(
+    ids,
+    samePairs,
+    [[ids[0]!, ids[count - 1]!]],
+    undefined,
+    metrics,
+  );
+  expect(groups).toHaveLength(1);
+  expect(groups[0]!.size).toBe(count - 1);
+  expect(groups[0]!.has(ids[0]!) && groups[0]!.has(ids[count - 1]!)).toBe(
+    false,
+  );
+  expect(metrics.candidateEvaluations).toBeLessThan(count * samePairs.length);
+  expect(metrics.conflictNeighborChecks).toBeLessThan(
+    metrics.candidateEvaluations * 3,
+  );
 });
 
 test("matches an import to an existing canonical", async () => {
@@ -210,7 +366,7 @@ test("empty and isolated imports avoid models, while review failures propagate",
   await expect(service.run([first.findingId])).rejects.toBe(failure);
 });
 
-test("validates complete screening assignments and rejects non-anchor pairs", () => {
+test("validates recommendation-only screening assignments and rejects non-anchor pairs", () => {
   const findings = [entry(1), entry(2), entry(3)];
   const ids = findings.map((finding) => finding.findingId);
   const result = screening(findings, new Set([pairKey([ids[0]!, ids[1]!])]));
@@ -250,7 +406,7 @@ test("validates complete screening assignments and rejects non-anchor pairs", ()
     {
       decisions: result.decisions.map((value) =>
         value.decision === "SAME"
-          ? { ...value, canonicalFindingId: ids[2] }
+          ? { ...value, canonicalFindingId: ids[0] }
           : value,
       ),
     },
@@ -258,7 +414,7 @@ test("validates complete screening assignments and rejects non-anchor pairs", ()
     expect(() => validateScreening(invalid, findings)).toThrow();
 });
 
-test("requires complete SAME tool outputs and keeps reviews independent", async () => {
+test("keeps recommendation-only screening independent from complete pair reviews", async () => {
   const findings = [entry(1), entry(2), entry(3)];
   const calls: CodexReview<unknown>[] = [];
   const reviewer = new CodexDeduplicationReviewer({
@@ -272,11 +428,8 @@ test("requires complete SAME tool outputs and keeps reviews independent", async 
             pairKey(findings.slice(0, 2).map((finding) => finding.findingId)),
           ]),
         );
-        for (const decision of result.decisions) {
+        for (const decision of result.decisions)
           decision.rationale = "SCREENING_ONLY_RATIONALE";
-          if (decision.decision === "SAME")
-            decision.mergedFinding["title"] = "SCREENING_ONLY_MERGED";
-        }
       } else {
         result = same(
           calls.length === 2 ? findings.slice(0, 2) : findings.slice(1),
@@ -288,19 +441,23 @@ test("requires complete SAME tool outputs and keeps reviews independent", async 
         review.schema as object,
       );
       expect(validateSchema(result)).toBe(true);
-      for (const field of ["canonicalFindingId", "mergedFinding"] as const) {
-        for (const value of [undefined, null]) {
-          const invalid =
-            "decisions" in result
-              ? {
-                  decisions: result.decisions.map((decision) =>
-                    decision.decision === "SAME"
-                      ? { ...decision, [field]: value }
-                      : decision,
-                  ),
-                }
-              : { ...result, [field]: value };
+      if ("decisions" in result) {
+        for (const field of ["canonicalFindingId", "mergedFinding"] as const) {
+          const invalid = {
+            decisions: result.decisions.map((decision) =>
+              decision.decision === "SAME"
+                ? { ...decision, [field]: null }
+                : decision,
+            ),
+          };
           expect(validateSchema(invalid)).toBe(false);
+        }
+      } else {
+        for (const field of ["canonicalFindingId", "mergedFinding"] as const) {
+          for (const value of [undefined, null]) {
+            const invalid = { ...result, [field]: value };
+            expect(validateSchema(invalid)).toBe(false);
+          }
         }
       }
       return review.validate(result);
@@ -328,10 +485,11 @@ test("requires complete SAME tool outputs and keeps reviews independent", async 
         ({ prompt }) =>
           !prompt.includes("SCREENING_ONLY_RATIONALE") &&
           !prompt.includes("PAIR_ONLY_RATIONALE") &&
-          !prompt.includes("SCREENING_ONLY_MERGED") &&
           !prompt.includes("PAIR_ONLY_MERGED"),
       ),
   ).toBe(true);
+  expect(calls[0]!.prompt).not.toContain("canonicalFindingId");
+  expect(calls[0]!.prompt).not.toContain("mergedFinding");
 });
 
 test("accepts complete canonical and merged reviews and rejects invalid assignments", () => {
@@ -378,19 +536,6 @@ test("accepts complete canonical and merged reviews and rejects invalid assignme
     { ...result, decision: "DISTINCT" },
   ]) {
     expect(() => validateReview(invalid, findings)).toThrow();
-    expect(() =>
-      validateScreening(
-        {
-          decisions: [
-            {
-              ...invalid,
-              findingIds: findings.map((finding) => finding.findingId),
-            },
-          ],
-        },
-        findings,
-      ),
-    ).toThrow();
   }
 });
 

@@ -226,9 +226,12 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
       );
     };
     let reviews = 0;
-    const decision = {
+    const screeningDecision = {
       decision: "SAME" as const,
       rationale: "One correction covers both findings.",
+    };
+    const decision = {
+      ...screeningDecision,
       canonicalFindingId: originals[0]!.findingId,
       mergedFinding: originals[0]!,
     };
@@ -239,7 +242,7 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
         return {
           decisions: [
             {
-              ...decision,
+              ...screeningDecision,
               findingIds: [originals[0]!.findingId, originals[1]!.findingId],
             },
           ],

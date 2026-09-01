@@ -354,10 +354,14 @@ test("does not write workflow metadata into sealed artifacts", async () => {
   ).rejects.toThrow("outside the sealed scan artifacts");
 });
 
+const sameRecommendation = {
+  decision: "SAME" as const,
+  rationale: "REVIEW_OUTPUT_ONLY: one correction covers the supplied paths.",
+};
+
 function merged(findings: readonly Finding[]) {
   return {
-    decision: "SAME" as const,
-    rationale: "REVIEW_OUTPUT_ONLY: one correction covers the supplied paths.",
+    ...sameRecommendation,
     canonicalFindingId: findings[0]!.findingId,
     mergedFinding: {
       ...findings[0]!,
@@ -418,7 +422,7 @@ test.each(["screen", "pair"])(
             ? {
                 decisions: originals.slice(1).map((finding) => ({
                   findingIds: [originals[0]!.findingId, finding.findingId],
-                  ...merged([originals[0]!, finding]),
+                  ...sameRecommendation,
                 })),
               }
             : originals.some(
@@ -499,7 +503,7 @@ test("replays an unacknowledged group write after migrating its workflow databas
               decisions: [
                 {
                   findingIds: originals.map((finding) => finding.findingId),
-                  ...merged(originals),
+                  ...sameRecommendation,
                 },
               ],
             }
