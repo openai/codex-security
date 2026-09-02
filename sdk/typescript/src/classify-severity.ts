@@ -176,7 +176,7 @@ export async function classifySeverityInternal(
           "Preserve the supplied findingId exactly. Return only the requested JSON object.",
           JSON.stringify({ rubric, knowledgeBase: knowledge, finding }),
         ].join("\n\n"),
-        z.toJSONSchema(decisionSchema, { target: "openapi-3.0" }),
+        z.toJSONSchema(decisionSchema),
         options,
         {
           surface,

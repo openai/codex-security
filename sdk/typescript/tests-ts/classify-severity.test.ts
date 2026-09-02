@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
+import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, expect, test } from "bun:test";
 import {
   classifySeverity,
@@ -133,15 +134,24 @@ test("supplies complete evidence and separate policy/context to a restricted str
 
 test("represents policy exclusions independently from Low", async () => {
   const rubricPath = await document("Exclude administrative records.");
-  const { codex } = fakeCodex({
+  const excluded = {
     ...assessed,
     decision: "excluded",
     level: null,
     rubricLabel: null,
     rationale: "This record is an administrative tracker.",
+    confidence: null,
     reviewTrigger: null,
-  });
+  };
+  const { codex, calls } = fakeCodex(excluded);
   const result = await classifySeverity([finding], { rubricPath, codex });
+  // Codex consumes JSON Schema, without OpenAPI's nullable extension.
+  const validate = new Ajv2020()
+    .removeKeyword("nullable")
+    .compile(calls[0]!.turn.outputSchema as object);
+  expect(validate(excluded)).toBe(true);
+  expect(validate(assessed)).toBe(true);
+  expect(validate({ ...assessed, level: "severe" })).toBe(false);
   expect(result.assessments[0]).toMatchObject({
     decision: "excluded",
     level: null,
