@@ -1960,107 +1960,129 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("upgrades the predecessor cache and restores with the SDK-owned helper", async () => {
-    const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "0.1.60");
-    // Keep the stale MCP configuration regression covered while upgrading the
-    // current predecessor cache to the generated bundle.
-    await writeFile(
-      join(previous, ".mcp.json"),
-      JSON.stringify({ mcpServers: { "codex-security": { env_vars: [] } } }),
-    );
-    await copyFile(
-      join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
-      join(previous, "scripts", "workbench_target.py"),
-    );
-    const home = join(root, "home");
-    const unrelatedProject = join(root, "unrelated-project");
-    await mkdir(home, { mode: 0o700 });
-    await mkdir(unrelatedProject);
-    await writeFile(
-      join(home, "config.toml"),
-      'cli_auth_credentials_store = "file"\n\n[features]\nplugins = true\n\n[projects.' +
-        JSON.stringify(unrelatedProject) +
-        ']\ntrust_level = "trusted"\n',
-    );
-    await writeFile(join(home, "unrelated-state"), "preserved\n");
+  test.each([
+    "0.1.22",
+    "0.1.37",
+    "0.1.59",
+    "0.1.60",
+    "0.1.79",
+    "0.1.92",
+    "0.1.93",
+  ])(
+    "upgrades a cached %s plugin and restores with the SDK-owned helper",
+    async (previousVersion) => {
+      const root = await temporaryDirectory();
+      const previous = await plugin(join(root, "previous"), previousVersion);
+      await writeFile(
+        join(previous, "scripts", "workbench_scan_history.py"),
+        "print('previous bundled scan history')\n",
+      );
+      await writeFile(
+        join(previous, ".mcp.json"),
+        JSON.stringify({ mcpServers: { "codex-security": { env_vars: [] } } }),
+      );
+      await copyFile(
+        join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
+        join(previous, "scripts", "workbench_target.py"),
+      );
+      const home = join(root, "home");
+      const unrelatedProject = join(root, "unrelated-project");
+      await mkdir(home, { mode: 0o700 });
+      await mkdir(unrelatedProject);
+      await writeFile(
+        join(home, "config.toml"),
+        'cli_auth_credentials_store = "file"\n\n[features]\nplugins = true\n\n[projects.' +
+          JSON.stringify(unrelatedProject) +
+          ']\ntrust_level = "trusted"\n',
+      );
+      await writeFile(join(home, "unrelated-state"), "preserved\n");
 
-    const command = resolveCodexCommand();
-    const environment = {
-      ...process.env,
-      CODEX_HOME: home,
-      OPENAI_API_KEY: undefined,
-      CODEX_API_KEY: undefined,
-    };
-    const login = spawnSync(command.command, ["login", "--with-api-key"], {
-      env: environment,
-      input: "synthetic-key\n",
-      encoding: "utf8",
-      windowsHide: true,
-    });
-    expect(login.status).toBe(0);
-    const credentials = await readFile(join(home, "auth.json"), "utf8");
-
-    const options = { codexCommand: command, environment };
-    const stale = await bootstrapPlugin(home, previous, options);
-    const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
-
-    expect(stale.version).toBe("0.1.60");
-    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
-    expect(upgraded.version).not.toBe(stale.version);
-    expect(upgraded.installedRoot).not.toBe(stale.installedRoot);
-    for (const script of ["workbench_target.py", "finalize_scan_contract.py"]) {
-      expect(
-        await readFile(join(upgraded.installedRoot, "scripts", script)),
-      ).toEqual(await readFile(join(PLUGIN_ROOT, "scripts", script)));
-    }
-    const configuration = JSON.parse(
-      await readFile(join(upgraded.installedRoot, ".mcp.json"), "utf8"),
-    ) as {
-      mcpServers: Record<string, { command: string; env_vars: string[] }>;
-    };
-    const server = configuration.mcpServers["codex-security"];
-
-    expect(server?.command).toBe("./scripts/launch_codex_security_mcp");
-    expect(server?.env_vars).toContain("CODEX_SAFETY_IDENTIFIER");
-    expect(server?.env_vars).toContain("CODEX_MANAGED_PACKAGE_ROOT");
-    expect(server?.env_vars).toContain("CODEX_MCP_NODE_PATH");
-    expect(await readFile(join(home, "auth.json"), "utf8")).toBe(credentials);
-    expect(await readFile(join(home, "unrelated-state"), "utf8")).toBe(
-      "preserved\n",
-    );
-    expect(await readFile(join(home, "config.toml"), "utf8")).toContain(
-      "[projects." + JSON.stringify(unrelatedProject) + "]",
-    );
-    expect(
-      spawnSync(command.command, ["login", "status"], {
+      const command = resolveCodexCommand();
+      const environment = {
+        ...process.env,
+        CODEX_HOME: home,
+        OPENAI_API_KEY: undefined,
+        CODEX_API_KEY: undefined,
+      };
+      const login = spawnSync(command.command, ["login", "--with-api-key"], {
         env: environment,
+        input: "synthetic-key\n",
         encoding: "utf8",
         windowsHide: true,
-      }).status,
-    ).toBe(0);
+      });
+      expect(login.status).toBe(0);
+      const credentials = await readFile(join(home, "auth.json"), "utf8");
 
-    const scanDir = join(root, "scan");
-    const artifact = "artifacts/worker.bin";
-    const expected = Buffer.from([0, 255, 10, 1]);
-    await mkdir(join(scanDir, "artifacts"), {
-      recursive: true,
-      mode: 0o700,
-    });
-    await writeFile(join(scanDir, artifact), expected);
-    const python = await resolvePluginPython({ environment });
-    const restorer = await prepareScanArtifactRestorer(
-      {
-        python,
-        pluginRoot: upgraded.installedRoot,
-        environment,
-      },
-      scanDir,
-    );
-    await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
-    await restorer.restore(artifact, expected);
-    expect(await readFile(join(scanDir, artifact))).toEqual(expected);
-  });
+      const options = { codexCommand: command, environment };
+      const stale = await bootstrapPlugin(home, previous, options);
+      const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
+
+      expect(stale.version).toBe(previousVersion);
+      expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
+      expect(upgraded.version).not.toBe(stale.version);
+      expect(upgraded.installedRoot).not.toBe(stale.installedRoot);
+      for (const pluginRoot of [
+        join(home, "sdk-marketplace", "plugins", "codex-security"),
+        upgraded.installedRoot,
+      ]) {
+        for (const script of [
+          "workbench_target.py",
+          "finalize_scan_contract.py",
+          "workbench_scan_history.py",
+        ]) {
+          expect(await readFile(join(pluginRoot, "scripts", script))).toEqual(
+            await readFile(join(PLUGIN_ROOT, "scripts", script)),
+          );
+        }
+      }
+      const configuration = JSON.parse(
+        await readFile(join(upgraded.installedRoot, ".mcp.json"), "utf8"),
+      ) as {
+        mcpServers: Record<string, { command: string; env_vars: string[] }>;
+      };
+      const server = configuration.mcpServers["codex-security"];
+
+      expect(server?.command).toBe("./scripts/launch_codex_security_mcp");
+      expect(server?.env_vars).toContain("CODEX_SAFETY_IDENTIFIER");
+      expect(server?.env_vars).toContain("CODEX_MANAGED_PACKAGE_ROOT");
+      expect(server?.env_vars).toContain("CODEX_MCP_NODE_PATH");
+      expect(await readFile(join(home, "auth.json"), "utf8")).toBe(credentials);
+      expect(await readFile(join(home, "unrelated-state"), "utf8")).toBe(
+        "preserved\n",
+      );
+      expect(await readFile(join(home, "config.toml"), "utf8")).toContain(
+        "[projects." + JSON.stringify(unrelatedProject) + "]",
+      );
+      expect(
+        spawnSync(command.command, ["login", "status"], {
+          env: environment,
+          encoding: "utf8",
+          windowsHide: true,
+        }).status,
+      ).toBe(0);
+
+      const scanDir = join(root, "scan");
+      const artifact = "artifacts/worker.bin";
+      const expected = Buffer.from([0, 255, 10, 1]);
+      await mkdir(join(scanDir, "artifacts"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await writeFile(join(scanDir, artifact), expected);
+      const python = await resolvePluginPython({ environment });
+      const restorer = await prepareScanArtifactRestorer(
+        {
+          python,
+          pluginRoot: upgraded.installedRoot,
+          environment,
+        },
+        scanDir,
+      );
+      await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
+      await restorer.restore(artifact, expected);
+      expect(await readFile(join(scanDir, artifact))).toEqual(expected);
+    },
+  );
 
   test("resolves the exact npm Codex executable", () => {
     const command = resolveCodexCommand();
@@ -4607,11 +4629,10 @@ describe("runtime directories and plugin Python boundary", () => {
         "print(json.dumps({'ok': True, 'label': '出力', 'inputLength': len(payload), 'details': 'x' * (5 * 1024 * 1024)}, ensure_ascii=False))",
       ].join("\n"),
     );
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
+    const python = await resolvePluginPython();
     const result = await runWorkbench(
       {
-        python: python!,
+        python,
         pluginRoot,
         environment: {
           PATH: process.env["PATH"],
@@ -4629,6 +4650,127 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result["inputLength"]).toBe(64 * 1024);
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
+
+  test.each([
+    ["legacy", "0.1.22", false, false, undefined],
+    ["previous", "0.1.37", true, false, undefined],
+    ["independent version", "1.0.0", true, false, undefined],
+    ["development", "dev", true, true, undefined],
+    ["current", BUNDLED_PLUGIN_VERSION, true, true, undefined],
+    ["narrow-terminal", BUNDLED_PLUGIN_VERSION, true, true, "40"],
+  ] as const)(
+    "saves comparisons with a %s custom plugin",
+    async (_kind, version, supportsStdin, supportsRelated, columns) => {
+      const root = await temporaryDirectory();
+      const pluginRoot = join(root, "custom plugin");
+      const scripts = join(pluginRoot, "scripts");
+      await mkdir(scripts, { recursive: true });
+      await mkdir(join(pluginRoot, ".codex-plugin"));
+      await writeFile(
+        join(pluginRoot, ".codex-plugin", "plugin.json"),
+        JSON.stringify({ name: "codex-security", version }),
+      );
+      await writeFile(
+        join(scripts, "workbench_db.py"),
+        [
+          "import argparse, json, os, sys",
+          "from pathlib import Path",
+          "if '--help' in sys.argv:",
+          "    with Path(__file__).with_name('help-calls').open('ab') as calls: calls.write(b'help\\n')",
+          "    if os.environ.get('FAIL_COMPARISON_HELP'): sys.exit('Synthetic help failure')",
+          "parser = argparse.ArgumentParser()",
+          `command = parser.add_subparsers(dest='command', required=True).add_parser('save-scan-comparison', description=${supportsRelated ? "'Comparison payload supports related findings.'" : "None"})`,
+          "command.add_argument('--before-scan-id', required=True)",
+          "command.add_argument('--after-scan-id', required=True)",
+          ...(supportsStdin
+            ? [
+                "transport = command.add_mutually_exclusive_group(required=True)",
+                "transport.add_argument('--matches-json')",
+                "transport.add_argument('--matches-json-stdin', action='store_true')",
+              ]
+            : ["command.add_argument('--matches-json', required=True)"]),
+          "args = parser.parse_args()",
+          "uses_stdin = getattr(args, 'matches_json_stdin', False)",
+          "payload = json.loads(sys.stdin.buffer.read().decode('utf-8') if uses_stdin else args.matches_json)",
+          ...(supportsRelated
+            ? []
+            : [
+                "if 'related' in payload: sys.exit('Unsupported comparison fields')",
+              ]),
+          "print(json.dumps({'payload': payload, 'usesStdin': uses_stdin}))",
+        ].join("\n"),
+      );
+      const python = await resolvePluginPython();
+      const options = {
+        python,
+        pluginRoot,
+        environment: {
+          PATH: process.env["PATH"],
+          ...(columns === undefined ? {} : { COLUMNS: columns }),
+          OPENAI_API_KEY: "synthetic-openai-key",
+          CODEX_API_KEY: "synthetic-codex-key",
+          OPENROUTER_API_KEY: "synthetic-openrouter-key",
+          FIREWORKS_API_KEY: "synthetic-fireworks-key",
+        },
+      };
+      const original = {
+        matches: [
+          {
+            beforeOccurrenceIds: ["before"],
+            afterOccurrenceIds: ["after"],
+            confidence: "high",
+            reason: "Same synthetic control.",
+          },
+        ],
+        uncertain: [
+          {
+            beforeOccurrenceId: "uncertain-before",
+            afterOccurrenceId: "uncertain-after",
+            reason: "Needs more evidence.",
+          },
+        ],
+        related: [
+          {
+            beforeOccurrenceId: "related-before",
+            afterOccurrenceId: "related-after",
+            reason: "Separate synthetic controls. 🙂",
+          },
+        ],
+      };
+      const args = [
+        "save-scan-comparison",
+        "--before-scan-id",
+        "before-scan",
+        "--after-scan-id",
+        "after-scan",
+        "--matches-json-stdin",
+      ];
+      const input = JSON.stringify(original);
+      await expect(
+        runWorkbench(
+          {
+            ...options,
+            environment: { ...options.environment, FAIL_COMPARISON_HELP: "1" },
+          },
+          args,
+          input,
+        ),
+      ).rejects.toThrow("Synthetic help failure");
+      const expected = {
+        usesStdin: supportsStdin,
+        payload: supportsRelated
+          ? original
+          : { matches: original.matches, uncertain: original.uncertain },
+      };
+      expect(await runWorkbench(options, args, input)).toEqual(expected);
+      expect(await runWorkbench(options, args, input)).toEqual(expected);
+      expect(await readFile(join(scripts, "help-calls"), "utf8")).toBe(
+        "help\nhelp\n",
+      );
+      expect(args.at(-1)).toBe("--matches-json-stdin");
+      expect(JSON.parse(input)).toEqual(original);
+    },
+  );
 
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {
     const root = await temporaryDirectory("codex-security-legacy-migrations-");

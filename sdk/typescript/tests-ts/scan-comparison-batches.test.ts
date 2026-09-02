@@ -169,6 +169,64 @@ test("validates references against the current batch, not the whole input", asyn
   ).rejects.toThrow("unknown before occurrence");
 });
 
+test("preserves related findings and known identities across batches", async () => {
+  const input: ScanComparisonInput = {
+    before: ["first", "second"].map((id) => ({
+      ...finding(id, 300000),
+      findingId: `finding-${id}`,
+    })),
+    after: [{ ...finding("after"), findingId: "finding-after" }],
+    knownFindingGroups: [["finding-first", "finding-second"]],
+  };
+  const related = input.before.map(({ occurrenceId }) => ({
+    beforeOccurrenceId: occurrenceId,
+    afterOccurrenceId: "after",
+    reason: "Distinct controls share context.",
+  }));
+  let calls = 0;
+  const result = await matchScanFindings(input, {
+    codex: codex((batch) => {
+      calls++;
+      expect(batch.knownFindingGroups).toEqual(input.knownFindingGroups);
+      return {
+        matches: [],
+        uncertain: [],
+        related: related.filter(({ beforeOccurrenceId }) =>
+          batch.before.some(
+            ({ occurrenceId }) => occurrenceId === beforeOccurrenceId,
+          ),
+        ),
+      };
+    }),
+  });
+  expect(calls).toBe(2);
+  expect(result).toEqual({ matches: [], uncertain: [], related });
+});
+
+test("rejects cross-batch matches that split a confirmed finding identity", async () => {
+  await expect(
+    matchScanFindings(
+      {
+        before: ["first", "second"].map((id) => ({
+          ...finding(id, 300000),
+          findingId: `finding-${id}`,
+        })),
+        after: [finding("after-first"), finding("after-second")],
+        knownFindingGroups: [["finding-first", "finding-second"]],
+      },
+      {
+        codex: codex(({ before }) => {
+          const id = before[0]!.occurrenceId;
+          return {
+            matches: [match([id], [`after-${id}`])],
+            uncertain: [],
+          };
+        }),
+      },
+    ),
+  ).rejects.toThrow("contradicts previously confirmed finding groups");
+});
+
 test("uses Codex's full allowance for individual pairs without truncation", async () => {
   const input = {
     before: [finding("before", 600000)],

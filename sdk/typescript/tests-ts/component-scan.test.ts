@@ -627,7 +627,45 @@ test("keeps uncertain findings separate even when their fingerprints match", asy
   });
   const saved = await json(summary.findingsPath!);
   expect(saved.findings).toHaveLength(2);
+  expect(
+    saved.findings.map(
+      ({ finding }: { finding: Finding }) => finding.findingId,
+    ),
+  ).toEqual(["same", "same"]);
   expect(saved.deduplication.uncertain).toHaveLength(1);
+});
+
+test("preserves distinct related findings in the component findings artifact", async () => {
+  const paths = await fixture();
+  const reason = "These nearby controls need independent corrections.";
+  const summary = await scan(paths, {
+    components: components.slice(0, 2),
+    matchFindings: matcher(({ before, after }) => ({
+      matches: [],
+      uncertain: [],
+      related: [
+        {
+          beforeOccurrenceId: before[0]!.occurrenceId,
+          afterOccurrenceId: after[0]!.occurrenceId,
+          reason,
+        },
+      ],
+    })),
+  });
+  const saved = await json(summary.findingsPath!);
+
+  expect(saved.findings).toHaveLength(2);
+  expect(saved.deduplication).toMatchObject({
+    confirmedGroups: 0,
+    uncertainPairs: 0,
+    related: [
+      {
+        beforeOccurrenceId: "apps/api",
+        afterOccurrenceId: "apps/web",
+        reason,
+      },
+    ],
+  });
 });
 
 test("retains earlier confirmed matches if later matching fails", async () => {
