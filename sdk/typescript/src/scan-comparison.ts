@@ -49,6 +49,7 @@ type ReadOnlyCodexThreadSource = Extract<
   CodexSecurityThreadSource,
   | typeof CODEX_SECURITY_THREAD_SOURCES.scan
   | typeof CODEX_SECURITY_THREAD_SOURCES.scanComparison
+  | typeof CODEX_SECURITY_THREAD_SOURCES.severityClassification
 >;
 
 export interface ScanComparisonInput {

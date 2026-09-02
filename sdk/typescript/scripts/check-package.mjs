@@ -168,6 +168,8 @@ const distFiles = new Set(
     "auth",
     "bulk-scan-discovery",
     "cli",
+    "classify-severity",
+    "classify-scan-severity",
     "cloud-publish",
     "codex-prompt",
     "component-plan",
