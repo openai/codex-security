@@ -370,3 +370,69 @@ describe("scan history renderer", () => {
     }
   });
 });
+
+describe("severity badge column", () => {
+  const severities = ["critical", "high", "medium", "low", "informational"];
+
+  test("starts every finding title at the same column", () => {
+    for (const color of [false, true]) {
+      for (const columns of [48, 96, 120]) {
+        const text = stripVTControlCharacters(
+          renderScanHistory(
+            {
+              beforeScanId: "before-scan",
+              afterScanId: "after-scan",
+              coverage: { afterCompleteness: "complete" },
+              summary: { new: severities.length },
+              findings: severities.map((severity) => ({
+                status: "new",
+                severity,
+                title: `Title for ${severity}`,
+                path: `${severity}.ts`,
+              })),
+            },
+            "compare",
+            { color, columns },
+          ),
+        );
+        const offsets = severities.map((severity) => {
+          const line = text
+            .split("\n")
+            .find((candidate) => candidate.includes(`Title for ${severity}`))!;
+          return line.indexOf(`Title for ${severity}`);
+        });
+        expect(new Set(offsets).size).toBe(1);
+        // The path line under each badge lines up with the title above it.
+        const path = text
+          .split("\n")
+          .find((candidate) => candidate.includes("informational.ts"))!;
+        expect(path.indexOf("informational.ts")).toBe(offsets[0]!);
+      }
+    }
+  });
+
+  test("keeps the badge column as wide as its widest label", () => {
+    const text = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          beforeScanId: "before-scan",
+          afterScanId: "after-scan",
+          coverage: { afterCompleteness: "complete" },
+          summary: { new: 1 },
+          findings: [
+            {
+              status: "new",
+              severity: "informational",
+              title: "Informational finding",
+              path: "a.ts",
+            },
+          ],
+        },
+        "compare",
+        { color: false },
+      ),
+    );
+    expect(text).toContain("    INFO      Informational finding");
+    expect(text).not.toContain("INFORMATIONAL  ");
+  });
+});
