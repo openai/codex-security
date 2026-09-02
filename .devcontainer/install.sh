@@ -18,7 +18,12 @@ corepack install
 npm install --global bun@1.3.14 --no-audit --no-fund
 
 if ! command -v rg >/dev/null 2>&1; then
-    sudo apt-get update
+    # Refresh only the Ubuntu sources. Dev container features add APT sources of
+    # their own, and apt-get update exits 100 when any configured source fails
+    # validation, which would stop this script before ripgrep installs.
+    sudo apt-get update \
+        -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+        -o Dir::Etc::sourceparts=-
     sudo apt-get install --yes ripgrep
 fi
 
