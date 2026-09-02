@@ -5,6 +5,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  mkdtemp,
   readFile,
   realpath,
   rm,
@@ -36,6 +37,7 @@ import {
 import { z } from "incur";
 import {
   accountStatus,
+  configuredCodexHome,
   CodexLoginHandle,
   loginApiKey as persistApiKey,
   logout as codexLogout,
@@ -47,9 +49,13 @@ import {
   shellEnvironmentReference,
 } from "./codex-prompt.js";
 import {
+  DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
+  hasCommandAuth,
   mergedCodexConfig,
+  modelProviderConfigOverride,
+  resolveCommandAuthConfig,
   scanApprovalPolicy,
   scanModelConfiguration,
   scanModelProvider,
@@ -60,7 +66,6 @@ import {
 import {
   estimateScanCost,
   ScanCostTracker,
-  sumTokenUsage,
   type ScanCost,
   type ScanSessionEvent,
 } from "./cost.js";
@@ -105,6 +110,7 @@ import {
   type ScanResultOptions,
 } from "./result.js";
 import type { SeverityLevel } from "./models.js";
+import { writeMockScanDraft } from "./mock-scan.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   matchCompletedScan,
@@ -135,6 +141,7 @@ import {
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
+  pluginMetadata,
   planOutputArchive,
   prepareScanArtifactRestorer,
   prepareOutputDir,
@@ -227,6 +234,8 @@ export interface DeepScanOptions {
 }
 
 export interface ScanOptions extends DeepScanOptions {
+  /** Save synthetic Standard scan results without calling Codex or a model. */
+  mock?: boolean;
   /** Opt into a durable scan -> custom publication -> dedupe workflow. */
   workflowId?: string;
   auth?: ScanAuthMode;
@@ -244,7 +253,10 @@ export interface ScanOptions extends DeepScanOptions {
   expectedPluginVersion?: string;
   failureSeverity?: SeverityLevel;
   maxCostUsd?: number;
-  onCost?: (cost: Readonly<ScanCost>) => void;
+  onCost?: (cost: Readonly<ScanCost>, maxCostUsd?: number) => void;
+  onBudgetApproaching?: (
+    budget: ScanBudget,
+  ) => number | undefined | Promise<number | undefined>;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
@@ -297,6 +309,7 @@ export const SCAN_AUTH_MODES = ["auto", "chatgpt", "api-key"] as const;
 export type ScanAuthMode = (typeof SCAN_AUTH_MODES)[number];
 
 export type ScanAuthentication =
+  | { method: "command"; verified: false }
   | {
       method: "api_key";
       source:
@@ -333,6 +346,12 @@ export interface ScanReconnectDetails {
 
 export interface ScanWarningDetails {
   kind: "target_changed";
+}
+
+export interface ScanBudget {
+  maxCostUsd: number;
+  cost: Readonly<ScanCost>;
+  signal: AbortSignal;
 }
 
 type ScanObserverName =
@@ -733,6 +752,7 @@ export class CodexSecurity {
         this.#dependencies.environment,
         options.auth,
         modelProvider,
+        hasCommandAuth(configuration),
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -744,12 +764,21 @@ export class CodexSecurity {
 
   async #run(repository: string, options: ScanOptions): Promise<ScanResult> {
     this.#requireOpen();
+    if (options.mock) return await this.#runMock(repository, options);
     const costAbortController = new AbortController();
     const signal = AbortSignal.any([
       this.#abortController.signal,
       costAbortController.signal,
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
+    const budgetAbortController = new AbortController();
+    const budgetSignal = AbortSignal.any([
+      signal,
+      budgetAbortController.signal,
+    ]);
+    let maxCostUsd = options.maxCostUsd;
+    let latestCost: Readonly<ScanCost> | null = null;
+    let notifiedLimit: number | undefined;
     let scanDir = "";
     let archivedScanDir: string | null = null;
     let targetPathsFile: string | null = null;
@@ -1010,24 +1039,86 @@ export class CodexSecurity {
           options.onCost === undefined && options.maxCostUsd === undefined
             ? undefined
             : (cost) => {
+                latestCost = cost;
                 notifyObserver(
                   "onCost",
                   options.onCost,
                   options.onObserverError,
                   cost,
+                  maxCostUsd,
                 );
                 if (
-                  options.maxCostUsd !== undefined &&
-                  cost.estimatedUsd > options.maxCostUsd
+                  maxCostUsd !== undefined &&
+                  cost.estimatedUsd > maxCostUsd
                 ) {
                   costAbortController.abort(
-                    new ScanCostLimitExceededError(
-                      options.maxCostUsd,
-                      cost,
-                      scanDir,
-                    ),
+                    new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
                   );
+                  return;
                 }
+                const request = options.onBudgetApproaching;
+                if (
+                  request === undefined ||
+                  maxCostUsd === undefined ||
+                  budgetSignal.aborted ||
+                  notifiedLimit === maxCostUsd ||
+                  cost.estimatedUsd < maxCostUsd * 0.8
+                )
+                  return;
+                const limit = maxCostUsd;
+                notifiedLimit = limit;
+                void Promise.resolve()
+                  .then(async () => {
+                    if (budgetSignal.aborted) return;
+                    const next = await request({
+                      maxCostUsd: limit,
+                      cost,
+                      signal: budgetSignal,
+                    });
+                    if (
+                      next === undefined ||
+                      budgetSignal.aborted ||
+                      activeScan === null
+                    )
+                      return;
+                    if (
+                      !Number.isFinite(next) ||
+                      next <= Math.max(limit, latestCost!.estimatedUsd)
+                    ) {
+                      throw new CodexSecurityError(
+                        "The new cost limit must exceed the current limit and estimated cost.",
+                      );
+                    }
+                    await workbench(
+                      { ...activeScan.options, signal: budgetSignal },
+                      [
+                        "set-scan-cost-limit",
+                        "--scan-id",
+                        activeScan.id,
+                        "--max-cost-usd",
+                        String(next),
+                      ],
+                    );
+                    if (budgetSignal.aborted) return;
+                    maxCostUsd = next;
+                    notifyObserver(
+                      "onCost",
+                      options.onCost,
+                      options.onObserverError,
+                      latestCost!,
+                      maxCostUsd,
+                    );
+                  })
+                  .catch((error: unknown) => {
+                    if (!budgetSignal.aborted) {
+                      notifyObserver(
+                        "onWarning",
+                        options.onWarning,
+                        options.onObserverError,
+                        `Could not increase scan cost limit: ${errorMessage(error)}`,
+                      );
+                    }
+                  });
               },
         onError: reportTrackingError,
       });
@@ -1357,6 +1448,9 @@ export class CodexSecurity {
         },
         onFinalize: async (usage) => {
           if (options.validationPrompt !== undefined) {
+            tracker.recordUsage(usage);
+            await tracker.refresh().catch(reportTrackingError);
+            checkOpen();
             await runCustomValidation({
               repository: repo,
               target: normalized,
@@ -1402,12 +1496,16 @@ export class CodexSecurity {
                     turn.lastStreamError ??
                       "The custom validation turn did not complete.",
                   );
-                usage = sumTokenUsage(usage, turn.usage);
+                budgetAbortController.abort();
+                tracker.recordUsage(turn.usage, turn.threadId);
+                await tracker.refresh().catch(reportTrackingError);
+                checkOpen();
                 return turn.finalResponse;
               },
             });
             customValidationComplete = true;
           }
+          budgetAbortController.abort();
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
             if (options.maxCostUsd !== undefined) throw error;
             reportTrackingError(error);
@@ -1637,10 +1735,21 @@ export class CodexSecurity {
       // scan, and cleanup must treat all of those as a failure it is not allowed to mask.
       scanFailure = true;
       const snapshot = await costTracker?.stop().catch(() => null);
-      const failure =
+      let failure =
         signal.reason instanceof ScanCostLimitExceededError
           ? signal.reason
           : error;
+      if (
+        failure instanceof ScanCostLimitExceededError &&
+        snapshot?.cost &&
+        snapshot.cost.estimatedUsd > failure.cost.estimatedUsd
+      ) {
+        failure = new ScanCostLimitExceededError(
+          failure.maxCostUsd,
+          snapshot.cost,
+          scanDir,
+        );
+      }
       if (
         failure instanceof ScanCostLimitExceededError &&
         budgetRecovery !== null &&
@@ -1763,6 +1872,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      budgetAbortController.abort();
       deepProgressTracker?.stop();
       // Removing the temporary scan inputs is best effort. A throw here would replace the
       // outcome the try and catch blocks already produced, so these failures are reported
@@ -2001,11 +2111,18 @@ export class CodexSecurity {
       apiKey,
       sessionConfig,
     } = session;
+    const commandAuth = hasCommandAuth(sessionConfig);
     const environment: ProcessEnvironment = {
       ...pluginExecutionEnvironment(
         python,
         withoutCodexHome(
-          selectedScanEnvironment(runtime.environment, auth, modelProvider),
+          selectedScanEnvironment(
+            commandAuth
+              ? withoutOpenAiApiKeys(runtime.environment)
+              : runtime.environment,
+            auth,
+            modelProvider,
+          ),
         ),
       ),
       ...(externalProvider === null
@@ -2026,6 +2143,7 @@ export class CodexSecurity {
     // cannot safely encode their path and selector keys as dotted overrides.
     delete sdkCodexConfig["projects"];
     delete sdkCodexConfig["permissions"];
+    if (commandAuth) delete sdkCodexConfig["model_providers"];
     const configuredResponsesMetadata = isRecord(
       sdkCodexConfig["responses_api_metadata"],
     )
@@ -2036,9 +2154,7 @@ export class CodexSecurity {
       undefined
         ? undefined
         : this.#codexCommand().command;
-    let sdkEnvironment = definedEnvironment(
-      selectedScanEnvironment(environment, "chatgpt"),
-    );
+    let sdkEnvironment = definedEnvironment(withoutOpenAiApiKeys(environment));
     if (process.platform === "win32" && codexPathOverride === undefined) {
       codexPathOverride = environment["CODEX_CLI_PATH"]!;
       sdkEnvironment = bundledCodexSdkEnvironment(
@@ -2051,6 +2167,9 @@ export class CodexSecurity {
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+      ...(commandAuth
+        ? { configOverrides: modelProviderConfigOverride(sessionConfig) }
+        : {}),
       env: sdkEnvironment,
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
@@ -2084,15 +2203,21 @@ export class CodexSecurity {
       throwIfAborted(signal);
     };
     try {
-      const requestedConfig = await mergedCodexConfig(this.config);
+      const requestedConfig = resolveCommandAuthConfig(
+        await mergedCodexConfig(this.config),
+        configuredCodexHome(this.#dependencies.environment),
+      );
+      const commandAuth = hasCommandAuth(requestedConfig);
       const modelProvider = scanModelProvider(requestedConfig);
-      const externalProvider = isExternalModelProvider(modelProvider)
-        ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
-        : null;
+      const externalProvider =
+        !commandAuth && isExternalModelProvider(modelProvider)
+          ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
+          : null;
       let authentication = scanAuthentication(
         this.#dependencies.environment,
         options.auth,
         modelProvider,
+        commandAuth,
       );
       const apiKey =
         authentication.method === "api_key"
@@ -2104,7 +2229,9 @@ export class CodexSecurity {
         );
       }
       const scanEnvironment = selectedScanEnvironment(
-        this.#dependencies.environment,
+        commandAuth
+          ? withoutOpenAiApiKeys(this.#dependencies.environment)
+          : this.#dependencies.environment,
         options.auth,
         modelProvider,
       );
@@ -2199,6 +2326,7 @@ export class CodexSecurity {
       if (
         !runtime.credentialsAvailable &&
         apiKey === null &&
+        !commandAuth &&
         authentication.method !== "aws_credentials"
       ) {
         throw new AuthenticationRequiredError(
@@ -2207,12 +2335,13 @@ export class CodexSecurity {
             "OPENAI_API_KEY or CODEX_API_KEY for CI.",
         );
       }
-      authentication = await runtimeScanAuthentication(
-        this.#dependencies.environment,
-        runtime.codexHome,
-        options.auth,
-        modelProvider,
-      );
+      if (!commandAuth)
+        authentication = await runtimeScanAuthentication(
+          this.#dependencies.environment,
+          runtime.codexHome,
+          options.auth,
+          modelProvider,
+        );
       if (
         options.safetyIdentifier !== undefined &&
         authentication.method !== "api_key" &&
@@ -2344,11 +2473,263 @@ export class CodexSecurity {
     runtime.effectiveConfig = mergedConfig;
   }
 
+  async #runMock(
+    repository: string,
+    options: ScanOptions,
+  ): Promise<ScanResult> {
+    const signal = AbortSignal.any([
+      this.#abortController.signal,
+      ...(options.signal ? [options.signal] : []),
+    ]);
+    const local = await this.#validateLocalInputs(repository, options, signal);
+    const temporaryRoot = await realpath(tmpdir());
+    requireOutputOutsideRepository(
+      local.protectedRoot,
+      temporaryRoot,
+      "temporary",
+    );
+    const workspace = await mkdtemp(
+      join(temporaryRoot, "codex-security-mock-"),
+    );
+    const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+    let activeScan:
+      | { id: string; options: WorkbenchCommandOptions }
+      | undefined;
+    let scanDir = "";
+    try {
+      const pluginRoot = await resolvePluginPath(
+        this.config.pluginPath,
+        workspace,
+        signal,
+      );
+      const plugin = await pluginMetadata(pluginRoot);
+      if (
+        options.expectedPluginVersion !== undefined &&
+        options.expectedPluginVersion !== plugin.version
+      ) {
+        throw new CodexSecurityError(
+          "The selected plugin version does not match the expected plugin version.",
+        );
+      }
+      const python = await (
+        this.#dependencies.resolvePluginPython ?? resolvePluginPython
+      )({
+        configuredPath: this.config.pythonPath,
+        environment: this.#dependencies.environment,
+        protectedRoot: local.protectedRoot,
+        signal,
+      });
+      if (options.knowledgeBasePaths?.length) {
+        const knowledgeBase = await prepareKnowledgeBase(
+          options.knowledgeBasePaths,
+          signal,
+        );
+        await knowledgeBase.cleanup();
+      }
+      const outputRoot =
+        local.outputDir === null
+          ? await preparePersistentOutputRoot(
+              local.stateDirectory,
+              "scans",
+              basename(local.repository),
+            )
+          : undefined;
+      let archivedScanDir: string | undefined;
+      scanDir = await prepareOutputDir(
+        local.outputDir ?? undefined,
+        basename(local.repository),
+        outputRoot,
+        (path) => requireOutputOutsideRepository(local.protectedRoot, path),
+        options.archiveExisting,
+        (path) => {
+          archivedScanDir = path;
+          notifyObserver(
+            "onOutputArchived",
+            options.onOutputArchived,
+            options.onObserverError,
+            path,
+          );
+        },
+      );
+      requireModelSafeOutputDir(scanDir);
+      notifyObserver(
+        "onOutputDirReady",
+        options.onOutputDirReady,
+        options.onObserverError,
+        scanDir,
+      );
+      const revision = await repositoryRevision(local.repository, signal);
+      const { model } = scanModelConfiguration({
+        ...DEFAULT_CODEX_CONFIG,
+        ...this.config.codexOverrides,
+      });
+      const workbenchOptions: WorkbenchCommandOptions = {
+        python,
+        pluginRoot,
+        environment: {
+          ...this.#dependencies.environment,
+          CODEX_SECURITY_STATE_DIR: local.stateDirectory,
+        },
+        signal,
+        failureMessage: "Could not save the mock scan",
+      };
+      const registration = await workbench(
+        workbenchOptions,
+        [
+          "register-cli-scan",
+          "--repository",
+          local.repository,
+          "--scan-dir",
+          scanDir,
+          "--registration-json-stdin",
+          ...(options.archiveExisting ? ["--archive-existing"] : []),
+          ...(archivedScanDir === undefined
+            ? []
+            : ["--archived-scan-dir", archivedScanDir]),
+          ...(options.parentScanId === undefined
+            ? []
+            : ["--parent-scan-id", options.parentScanId]),
+        ],
+        JSON.stringify({
+          recipe: {
+            ...scanRecipe(
+              local.repository,
+              local.target,
+              local.mode,
+              revision,
+              plugin.version,
+              { model },
+              options.failureSeverity,
+              options.knowledgeBasePaths,
+              options.maxCostUsd,
+            ),
+            mock: true,
+          },
+          userContext: options.scanPrompt,
+          ...(options.workflowId === undefined
+            ? {}
+            : { workflowId: options.workflowId }),
+        }),
+      );
+      const scanId = registration["scanId"];
+      const targetId = registration["targetId"];
+      if (
+        typeof scanId !== "string" ||
+        typeof targetId !== "string" ||
+        registration["scanDir"] !== scanDir
+      ) {
+        throw new CodexSecurityError(
+          "The workbench returned an invalid mock scan registration.",
+        );
+      }
+      activeScan = { id: scanId, options: workbenchOptions };
+      notifyObserver(
+        "onScanStarted",
+        options.onScanStarted,
+        options.onObserverError,
+      );
+      await writeMockScanDraft(
+        scanDir,
+        scanId,
+        local.target,
+        registration,
+        signal,
+      );
+      const usage = {
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+      };
+      const cost = estimateScanCost(model, usage);
+      await workbench(workbenchOptions, [
+        "prepare-scan-completion",
+        "--scan-id",
+        scanId,
+      ]);
+      const completion = await workbench(workbenchOptions, [
+        "complete-scan",
+        "--scan-id",
+        scanId,
+        ...(cost === null ? [] : ["--cost-json", JSON.stringify(cost)]),
+      ]);
+      activeScan = undefined;
+      const completedScan = completion["scan"];
+      if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
+        for (const warning of completedScan["warnings"]) {
+          if (typeof warning === "string")
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              warning,
+              Array.isArray(completion["targetWarnings"]) &&
+                completion["targetWarnings"].includes(warning)
+                ? { kind: "target_changed" }
+                : undefined,
+            );
+        }
+      }
+      const result = await collectResult(
+        {
+          status: "completed",
+          model,
+          usage,
+          mock: true,
+          finalResponse:
+            "Synthetic mock scan; no security analysis was performed.",
+        },
+        "",
+        scanDir,
+        pluginRoot,
+        {
+          repository: local.repository,
+          repositoryRevision: revision,
+          target: local.target,
+          mode: local.mode,
+          pluginVersion: plugin.version,
+        },
+        signal,
+        true,
+      );
+      // Stable fixture identities are indexed by complete-scan without model matching.
+      result.repositoryFindings = (await listRepositoryFindings(
+        (args) => workbench(workbenchOptions, args),
+        targetId,
+      )) as RepositoryFinding[] | undefined;
+      return result;
+    } catch (error) {
+      if (activeScan !== undefined) {
+        await workbench({ ...activeScan.options, signal: undefined }, [
+          "fail-scan",
+          "--scan-id",
+          activeScan.id,
+          "--message",
+          safeErrorMessage(error).slice(0, 2400),
+        ]).catch(() => undefined);
+      }
+      if (this.#closed) this.#requireOpen();
+      throwIfAborted(signal, scanDir);
+      throw error;
+    } finally {
+      await cleanupSdkDirectory(workspace);
+    }
+  }
+
   async #validateLocalInputs(
     repository: string,
     options: ScanOptions,
     signal?: AbortSignal,
   ): Promise<LocalScanInputs> {
+    if (
+      options.mock &&
+      (options.mode === "deep" ||
+        options.validationPrompt !== undefined ||
+        options.postScanPrompt !== undefined)
+    ) {
+      throw new CodexSecurityError(
+        "Mock scans support Standard mode without custom validation or post-scan prompts; those workflows require model calls.",
+      );
+    }
     deepScanOptions(options);
     const identifier = options.safetyIdentifier;
     if (
@@ -2448,7 +2829,9 @@ export class CodexSecurity {
         ? undefined
         : scanModelProvider(requestedConfig);
     const processEnvironment = selectedScanEnvironment(
-      this.#dependencies.environment,
+      requestedConfig !== undefined && hasCommandAuth(requestedConfig)
+        ? withoutOpenAiApiKeys(this.#dependencies.environment)
+        : this.#dependencies.environment,
       auth,
       modelProvider,
     );
@@ -2494,6 +2877,7 @@ export class CodexSecurity {
         ? join(bootstrapWorkspace, "deep-scan-config.toml")
         : undefined;
       const credentialsAvailable =
+        hasCommandAuth(mergedConfig) ||
         isExternalModelProvider(modelProvider) ||
         modelProvider === "amazon-bedrock"
           ? false
@@ -3262,12 +3646,14 @@ export function scanAuthentication(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
+  commandAuth = false,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
       "Scan authentication mode must be auto, chatgpt, or api-key.",
     );
   }
+  if (commandAuth) return { method: "command", verified: false };
   if (modelProvider === "amazon-bedrock") {
     const sources = [
       "AWS_BEARER_TOKEN_BEDROCK",
@@ -3362,9 +3748,8 @@ export function selectedScanEnvironment(
     return environment;
   }
   return Object.fromEntries(
-    Object.entries(environment).filter(([name]) => {
+    Object.entries(withoutOpenAiApiKeys(environment)).filter(([name]) => {
       const key = name.toUpperCase();
-      if (key === "OPENAI_API_KEY" || key === "CODEX_API_KEY") return false;
       if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
         return (
           !bedrockProvider &&
@@ -3373,6 +3758,17 @@ export function selectedScanEnvironment(
       }
       return true;
     }),
+  );
+}
+
+function withoutOpenAiApiKeys(
+  environment: ProcessEnvironment,
+): ProcessEnvironment {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+    ),
   );
 }
 
@@ -3569,6 +3965,12 @@ function sharedCredentialCodexConfig(
     if (Object.hasOwn(config, key)) shared[key] = structuredClone(config[key]!);
   }
   const modelProvider = scanModelProvider(config);
+  if (hasCommandAuth(config)) {
+    for (const key of ["profile", "profiles"]) {
+      if (Object.hasOwn(config, key))
+        shared[key] = structuredClone(config[key]!);
+    }
+  }
   if (typeof modelProvider === "string" && modelProvider.length > 0) {
     shared["model_provider"] = modelProvider;
     const providers = config["model_providers"];
