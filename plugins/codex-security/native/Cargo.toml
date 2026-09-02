@@ -1,0 +1,23 @@
+[package]
+name = "codex-security-native-unix"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.97"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "=3.12.2", default-features = false, features = ["napi8"] }
+napi-derive = "=3.6.3"
+libc = "=0.2.189"
+
+[build-dependencies]
+napi-build = "=2.4.1"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
