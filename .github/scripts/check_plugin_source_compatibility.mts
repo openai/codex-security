@@ -1,4 +1,4 @@
-#!/usr/bin/env -S node --experimental-strip-types --disable-warning=ExperimentalWarning
+#!/usr/bin/env node
 // Check that tracked plugin source stays portable across repository imports.
 
 import { spawnSync } from "node:child_process";
@@ -139,7 +139,7 @@ function main(): number {
       "Check tracked plugin source for deterministic import compatibility.\n",
     );
     console.log(
-      "Usage: node --experimental-strip-types --disable-warning=ExperimentalWarning check_plugin_source_compatibility.mts [--plugin-root PATH]",
+      "Usage: node check_plugin_source_compatibility.mjs [--plugin-root PATH]",
     );
     console.log(
       "\n--plugin-root PATH  plugin source root (default: plugins/codex-security in this repository)",

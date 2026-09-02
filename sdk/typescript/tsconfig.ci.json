@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "../../.github/scripts/*.mts",
+    "scripts/compare-test-reports.mts"
+  ],
+  "compilerOptions": {
+    "rootDir": "../..",
+    "noEmit": false,
+    "noEmitOnError": true,
+    "incremental": false,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "types": ["node"]
+  }
+}

@@ -20,8 +20,9 @@ submitting the change:
 ```bash
 python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
 python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
-node --experimental-strip-types --disable-warning=ExperimentalWarning .github/scripts/check_plugin_source_compatibility.mts
-node --experimental-strip-types --disable-warning=ExperimentalWarning --test .github/scripts/test_check_plugin_source_compatibility.mts
+pnpm --dir sdk/typescript run build:ci
+node .github/scripts/check_plugin_source_compatibility.mjs
+node --test .github/scripts/test_check_plugin_source_compatibility.mjs
 ```
 
 ## Avoid speculative defenses

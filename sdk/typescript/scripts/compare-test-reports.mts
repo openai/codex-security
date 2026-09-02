@@ -189,7 +189,7 @@ function main(): number {
   }
   if (args.values.help) {
     console.log(
-      "Compare Bun JUnit inventories before changing the required CI runner.\n\nUsage: node --experimental-strip-types --disable-warning=ExperimentalWarning compare-test-reports.mts baseline candidates [candidates ...]\nCandidates are JUnit files or glob patterns.",
+      "Compare Bun JUnit inventories before changing the required CI runner.\n\nUsage: node compare-test-reports.mjs baseline candidates [candidates ...]\nCandidates are JUnit files or glob patterns.",
     );
     return 0;
   }

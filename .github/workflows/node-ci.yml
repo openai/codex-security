@@ -96,14 +96,18 @@ jobs:
         with:
           node-version: "22.13.0"
 
-      - name: Check plugin source compatibility
-        if: steps.scope.outputs.ci-mode == 'markdown'
-        run: |
-          node --experimental-strip-types --disable-warning=ExperimentalWarning .github/scripts/check_plugin_source_compatibility.mts
-
       - name: Install dependencies
         if: steps.scope.outputs.check-markdown == 'true'
         run: pnpm --dir sdk/typescript install --frozen-lockfile
+
+      - name: Compile CI scripts
+        if: steps.scope.outputs.ci-mode == 'markdown'
+        run: pnpm --dir sdk/typescript run build:ci
+
+      - name: Check plugin source compatibility
+        if: steps.scope.outputs.ci-mode == 'markdown'
+        run: |
+          node .github/scripts/check_plugin_source_compatibility.mjs
 
       - name: Check Markdown formatting
         if: steps.scope.outputs.check-markdown == 'true'
@@ -366,6 +370,16 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "22.13.0"
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: package.json
+          cache: true
+          cache_dependency_path: sdk/typescript/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm --dir sdk/typescript install --frozen-lockfile
+      - name: Compile CI scripts
+        run: pnpm --dir sdk/typescript run build:ci
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -382,9 +396,9 @@ jobs:
         run: |
           python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
           python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
-          node --experimental-strip-types --disable-warning=ExperimentalWarning .github/scripts/check_plugin_source_compatibility.mts
+          node .github/scripts/check_plugin_source_compatibility.mjs
       - name: Test source compatibility checker
-        run: node --experimental-strip-types --disable-warning=ExperimentalWarning --test .github/scripts/test_check_plugin_source_compatibility.mts
+        run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
       - name: Test Python source contracts
         run: python -m pytest plugins/codex-security/tests -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
       - name: Upload Python test reports

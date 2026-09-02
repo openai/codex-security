@@ -15,7 +15,7 @@ import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const checker = fileURLToPath(
-  new URL("./check_plugin_source_compatibility.mts", import.meta.url),
+  new URL("./check_plugin_source_compatibility.mjs", import.meta.url),
 );
 const directories: string[] = [];
 afterEach(() => {
@@ -39,16 +39,7 @@ function fixture(files: Record<string, string | Buffer> = {}): string {
 }
 
 function runChecker(...args: string[]): SpawnSyncReturns<string> {
-  return spawnSync(
-    process.execPath,
-    [
-      "--experimental-strip-types",
-      "--disable-warning=ExperimentalWarning",
-      checker,
-      ...args,
-    ],
-    { encoding: "utf8" },
-  );
+  return spawnSync(process.execPath, [checker, ...args], { encoding: "utf8" });
 }
 
 test("reports tracked source violations in stable order", () => {

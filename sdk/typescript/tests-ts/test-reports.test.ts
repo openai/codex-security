@@ -1,11 +1,50 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, test } from "bun:test";
-import { bashCommand } from "./support/shell.js";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+} from "bun:test";
+import { bashCommand, runCommand } from "./support/shell.js";
 
 const bash = bashCommand();
+const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+let buildRoot: string;
+beforeAll(async () => {
+  buildRoot = await mkdtemp(join(tmpdir(), "codex-security-ci-build-"));
+  const result = await runCommand(
+    "node",
+    [
+      join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
+      "--project",
+      join(packageRoot, "tsconfig.ci.json"),
+      "--outDir",
+      buildRoot,
+    ],
+    { timeout: 30_000 },
+  );
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  await symlink(
+    join(packageRoot, "node_modules"),
+    join(buildRoot, "sdk", "typescript", "node_modules"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+}, 30_000);
+afterAll(async () => {
+  if (buildRoot) await rm(buildRoot, { recursive: true, force: true });
+});
 const directories: string[] = [];
 afterEach(async () => {
   await Promise.all(
@@ -44,10 +83,12 @@ async function compare(baseline: string, ...candidates: string[]) {
   const child = Bun.spawn({
     cmd: [
       "node",
-      "--experimental-strip-types",
-      "--disable-warning=ExperimentalWarning",
-      fileURLToPath(
-        new URL("../scripts/compare-test-reports.mts", import.meta.url),
+      join(
+        buildRoot,
+        "sdk",
+        "typescript",
+        "scripts",
+        "compare-test-reports.mjs",
       ),
       baseline,
       ...candidates,
@@ -87,8 +128,8 @@ describe("JUnit inventory comparison", () => {
       "reports/runner-windows-latest-shard-*.xml",
     ];
     const mock = `node() {
-  printf '%s\\n' "$5"
-  [[ "$5" != "$CODEX_SECURITY_TEST_FAIL_REPORT" ]]
+  printf '%s\\n' "$3"
+  [[ "$3" != "$CODEX_SECURITY_TEST_FAIL_REPORT" ]]
 }`;
     const summary = join(fixture.root, "summary.md");
     for (const failedReport of ["", expected[0]!]) {
