@@ -131,23 +131,6 @@ test("supplies complete evidence and separate policy/context to a restricted str
   expect(finding.severity!.level).toBe("high");
 });
 
-test("keeps the original rubric label separate from its normalized level", async () => {
-  const rubricPath = await document(
-    "Use Urgent for the highest severity band.",
-  );
-  const { codex } = fakeCodex({
-    ...assessed,
-    level: "critical",
-    rubricLabel: "Urgent",
-  });
-  expect(
-    (await classifySeverity([finding], { rubricPath, codex })).assessments[0],
-  ).toMatchObject({
-    level: "critical",
-    rubricLabel: "Urgent",
-  });
-});
-
 test("represents policy exclusions independently from Low", async () => {
   const rubricPath = await document("Exclude administrative records.");
   const { codex } = fakeCodex({

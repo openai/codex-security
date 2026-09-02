@@ -94,13 +94,11 @@ export const severityClassificationSchema = z
     rubricSha256: digestSchema.nullable(),
     knowledgeBaseSha256: digestSchema.nullable(),
     assessments: z.array(
-      decisionSchema
-        .extend({
-          occurrenceId: textSchema.nullable(),
-          inputSha256: digestSchema,
-          source: z.enum(["existing-severity", "rubric"]),
-        })
-        .strict(),
+      decisionSchema.extend({
+        occurrenceId: textSchema.nullable(),
+        inputSha256: digestSchema,
+        source: z.enum(["existing-severity", "rubric"]),
+      }),
     ),
   })
   .strict() satisfies z.ZodType<SeverityClassification>;
@@ -143,7 +141,6 @@ export async function classifySeverityInternal(
     knowledgeBaseSha256: knowledge === null ? null : workflowDigest(knowledge),
     assessments: [],
   };
-  // Assess reports in separate turns to keep their evidence independent.
   for (const finding of findings) {
     options.signal?.throwIfAborted();
     const inputSha256 = workflowDigest(finding);
@@ -240,19 +237,16 @@ async function readDocuments(
   }
 }
 
-/** @internal Check assessments against the actual finding evidence. */
+/** @internal Check parsed assessments against the actual finding evidence. */
 export function validateSeverityClassification(
-  value: unknown,
+  result: SeverityClassification,
   findings: readonly SeverityClassificationFinding[],
 ): SeverityClassification {
-  const result = severityClassificationSchema.parse(value);
   const byId = new Map(findings.map((finding) => [finding.findingId, finding]));
-  const seen = new Set<string>();
   for (const assessment of result.assessments) {
     const finding = byId.get(assessment.findingId);
     if (
       !finding ||
-      seen.has(assessment.findingId) ||
       assessment.occurrenceId !== (finding.occurrenceId ?? null) ||
       assessment.inputSha256 !== workflowDigest(finding) ||
       (assessment.source === "rubric") !== (result.rubricSha256 !== null) ||
@@ -271,7 +265,7 @@ export function validateSeverityClassification(
         "Severity assessment does not match the supplied findings. Classify the findings again.",
       );
     }
-    seen.add(assessment.findingId);
+    byId.delete(assessment.findingId);
   }
   return result;
 }

@@ -12,6 +12,7 @@ import type {
 import { bundledPluginRoot } from "./runtime.js";
 import { CodexSecurityError } from "./errors.js";
 import {
+  severityClassificationSchema,
   validateSeverityClassification,
   type SeverityClassification,
   type SeverityAssessment,
@@ -110,7 +111,7 @@ export async function prepareScanPublication(
       );
     }
     classification = validateSeverityClassification(
-      assessment,
+      severityClassificationSchema.parse(assessment),
       contract.findings.findings,
     );
   } else {
@@ -183,28 +184,6 @@ export async function prepareScanPublication(
   };
 }
 
-function renderSeverityAssessment(
-  assessment: SeverityAssessment | undefined,
-): string {
-  if (assessment?.source !== "rubric") return "";
-  return [
-    "",
-    "",
-    "## Severity classification",
-    "",
-    `**Assessed severity:** ${assessment.level}`,
-    `**Rubric label:** ${assessment.rubricLabel}`,
-    "",
-    assessment.rationale,
-    ...(assessment.confidence === null
-      ? []
-      : ["", `**Classification confidence:** ${assessment.confidence}`]),
-    ...(assessment.reviewTrigger === null
-      ? []
-      : ["", `**Review trigger:** ${assessment.reviewTrigger}`]),
-  ].join("\n");
-}
-
 function renderFindingDescription(
   contract: LoadedContract,
   finding: Finding,
@@ -214,8 +193,22 @@ function renderFindingDescription(
   const { coverage } = contract;
   const { scan } = contract.manifest;
   const lines = ["## Summary", "", finding.summary];
-  if (assessment?.source === "rubric")
-    lines.push(renderSeverityAssessment(assessment));
+  if (assessment?.source === "rubric") {
+    lines.push(
+      "",
+      "",
+      "## Severity classification",
+      "",
+      `**Assessed severity:** ${assessment.level}`,
+      `**Rubric label:** ${assessment.rubricLabel}`,
+      "",
+      assessment.rationale,
+    );
+    if (assessment.confidence !== null)
+      lines.push("", `**Classification confidence:** ${assessment.confidence}`);
+    if (assessment.reviewTrigger !== null)
+      lines.push("", `**Review trigger:** ${assessment.reviewTrigger}`);
+  }
 
   if (finding.attackPath?.summary !== undefined) {
     lines.push("", "## Reproduction summary", "", finding.attackPath.summary);

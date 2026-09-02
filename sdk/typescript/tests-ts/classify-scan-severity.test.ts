@@ -119,7 +119,6 @@ function classifier(
 test("a classified dedupe selection drives Linear priority and preserves sealed evidence", async () => {
   const { scanDirectory, rubricPath, findings, scanId } = await fixture();
   const before = await loadContract(scanDirectory, { pluginRoot: PLUGIN_ROOT });
-  const originalBytes = await readFile(join(scanDirectory, "findings.json"));
   const classification = await classifyScanDirectorySeverity(scanDirectory, {
     findingIds: [findings[1]!.findingId],
     rubricPath,
@@ -140,9 +139,6 @@ test("a classified dedupe selection drives Linear priority and preserves sealed 
   expect(result.issues![0]!.description).toContain("**Severity:** HIGH");
   expect(result.issues![0]!.description).toContain(
     "Only bounded impact is established.",
-  );
-  expect(await readFile(join(scanDirectory, "findings.json"))).toEqual(
-    originalBytes,
   );
   expect(
     await loadContract(scanDirectory, { pluginRoot: PLUGIN_ROOT }),

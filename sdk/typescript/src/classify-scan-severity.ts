@@ -1,4 +1,5 @@
-import { lstat, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "incur";
 import {
@@ -121,20 +122,20 @@ export async function classifyScanDirectorySeverityInternal(
     scanId: contract.manifest.scan.id,
   };
   options.signal?.throwIfAborted();
-  const temporary = await mkdtemp(
-    join(scanDirectory, ".severity-classification-"),
+  const temporary = join(
+    scanDirectory,
+    `.severity-classification-${randomUUID()}.json`,
   );
   try {
-    const file = join(temporary, CLASSIFICATION_FILE);
-    await writeFile(file, `${JSON.stringify(result, null, 2)}\n`, {
+    await writeFile(temporary, `${JSON.stringify(result, null, 2)}\n`, {
       flag: "wx",
       mode: 0o600,
       signal: options.signal,
     });
     options.signal?.throwIfAborted();
-    await rename(file, join(scanDirectory, CLASSIFICATION_FILE));
+    await rename(temporary, join(scanDirectory, CLASSIFICATION_FILE));
   } finally {
-    await rm(temporary, { recursive: true, force: true });
+    await rm(temporary, { force: true });
   }
   return result;
 }
@@ -143,8 +144,8 @@ export async function classifyScanDirectorySeverityInternal(
 export function selectClassificationFindings(
   findings: readonly Finding[],
   findingIds?: readonly string[],
-): Finding[] {
-  if (findingIds === undefined) return [...findings];
+): readonly Finding[] {
+  if (findingIds === undefined) return findings;
   const selected = new Set(findingIds);
   const result = findings.filter((finding) => selected.has(finding.findingId));
   if (result.length !== selected.size) {

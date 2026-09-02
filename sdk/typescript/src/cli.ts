@@ -3231,21 +3231,17 @@ export async function main(
             environment: dependencies.environment,
             workingDirectory: currentDirectory,
             signal: controller.signal,
-            ...(options.rubric === undefined
-              ? {}
-              : {
-                  rubricPath: resolveCliPath(currentDirectory, options.rubric),
-                }),
+            rubricPath:
+              options.rubric === undefined
+                ? undefined
+                : resolveCliPath(currentDirectory, options.rubric),
             knowledgeBasePaths: options.knowledgeBase.map((path) =>
               resolveCliPath(currentDirectory, path),
             ),
-            ...(options.findingId.length === 0
-              ? {}
-              : { findingIds: options.findingId }),
-            ...(options.model === undefined ? {} : { model: options.model }),
-            ...(options.effort === undefined
-              ? {}
-              : { reasoningEffort: options.effort }),
+            findingIds:
+              options.findingId.length === 0 ? undefined : options.findingId,
+            model: options.model,
+            reasoningEffort: options.effort,
           };
           const result =
             options.scan !== undefined
