@@ -22,3 +22,7 @@ __pycache__/
 # Emitted by sdk/typescript's build:ci script.
 /.github/scripts/check_plugin_source_compatibility.mjs
 /.github/scripts/test_check_plugin_source_compatibility.mjs
+
+# Emitted by sdk/typescript's build:examples script.
+/examples/custom-validation/app.mjs
+/examples/custom-validation/validate.mjs

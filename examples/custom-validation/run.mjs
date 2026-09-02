@@ -8,9 +8,30 @@ const root = await mkdtemp(join(tmpdir(), "codex-security-validation-demo-"));
 const target = join(root, "target");
 const output = join(root, "scan");
 await mkdir(target);
-for (const name of ["app.py", "validate.py"]) {
+for (const name of ["app.mts", "validate.mts"]) {
   await copyFile(new URL(name, import.meta.url), join(target, name));
 }
+
+const build = spawnSync(
+  process.execPath,
+  [
+    fileURLToPath(
+      new URL(
+        "../../sdk/typescript/node_modules/typescript/bin/tsc",
+        import.meta.url,
+      ),
+    ),
+    "--project",
+    fileURLToPath(
+      new URL("../../sdk/typescript/tsconfig.examples.json", import.meta.url),
+    ),
+    "--outDir",
+    target,
+  ],
+  { stdio: "inherit" },
+);
+if (build.error) throw build.error;
+if (build.status !== 0) process.exit(build.status ?? 1);
 
 console.log(`Demo target: ${target}\nScan output: ${output}`);
 const child = spawnSync(
@@ -22,7 +43,7 @@ const child = spawnSync(
     "scan",
     target,
     "--path",
-    "app.py",
+    "app.mts",
     "--scan-prompt-file",
     fileURLToPath(new URL("scan.md", import.meta.url)),
     "--validation-prompt-file",
