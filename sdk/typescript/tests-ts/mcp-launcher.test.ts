@@ -55,7 +55,11 @@ test.skipIf(process.platform !== "win32")(
       // Native candidates in the caller directory must not participate either.
       await copyFile(node, join(caller, "node.exe"));
       await copyFile(node, join(caller, "where.exe"));
-      for (const path of [runtime, `;.;;relative-bin;"${runtime}";`]) {
+      for (const path of [
+        runtime,
+        `"${runtime}"`,
+        `;.;;relative-bin;${runtime};`,
+      ]) {
         const result = spawnSync(
           join(process.env["SystemRoot"]!, "System32", "cmd.exe"),
           ["/d", "/s", "/c", `""${launcher}" --stdio "argument with spaces""`],
@@ -71,7 +75,10 @@ test.skipIf(process.platform !== "win32")(
             windowsVerbatimArguments: true,
           },
         );
-        expect(result.status, result.stderr || result.error?.message).toBe(23);
+        expect(
+          result.status,
+          `PATH=${path}\n${result.stderr || result.error?.message || ""}`,
+        ).toBe(23);
         expect(JSON.parse(result.stdout)).toEqual({
           executable: join(runtime, "node.exe"),
           cwd: parse(launcher).root,

@@ -21,7 +21,8 @@ if defined CODEX_ELECTRON_RESOURCES_PATH if exist "%CODEX_ELECTRON_RESOURCES_PAT
 if defined CODEX_CLI_PATH for %%I in ("%CODEX_CLI_PATH%") do if exist "%%~dpIcua_node\bin\node.exe" ("%%~dpIcua_node\bin\node.exe" "%CODEX_SECURITY_MCP_SCRIPT%" %* & exit)
 
 rem Resolve Node from PATH once and launch that exact executable.
-for %%I in (node.exe) do set "CODEX_SECURITY_MCP_NODE=%%~$PATH:I"
+set "CODEX_SECURITY_MCP_SEARCH_PATH=%PATH:"=%"
+for %%I in (node.exe) do set "CODEX_SECURITY_MCP_NODE=%%~$CODEX_SECURITY_MCP_SEARCH_PATH:I"
 if defined CODEX_SECURITY_MCP_NODE ("%CODEX_SECURITY_MCP_NODE%" "%CODEX_SECURITY_MCP_SCRIPT%" %* & exit)
 
 echo Codex Security could not find a Node runtime. Reinstall or update Codex, or set CODEX_MCP_NODE_PATH to an executable Node runtime. 1>&2
