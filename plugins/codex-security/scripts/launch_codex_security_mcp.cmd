@@ -20,8 +20,9 @@ if defined CODEX_BROWSER_USE_NODE_PATH if exist "%CODEX_BROWSER_USE_NODE_PATH%" 
 if defined CODEX_ELECTRON_RESOURCES_PATH if exist "%CODEX_ELECTRON_RESOURCES_PATH%\cua_node\bin\node.exe" ("%CODEX_ELECTRON_RESOURCES_PATH%\cua_node\bin\node.exe" "%CODEX_SECURITY_MCP_SCRIPT%" %* & exit)
 if defined CODEX_CLI_PATH for %%I in ("%CODEX_CLI_PATH%") do if exist "%%~dpIcua_node\bin\node.exe" ("%%~dpIcua_node\bin\node.exe" "%CODEX_SECURITY_MCP_SCRIPT%" %* & exit)
 
-where node >nul 2>&1
-if not errorlevel 1 (node "%CODEX_SECURITY_MCP_SCRIPT%" %* & exit)
+rem Resolve Node from PATH once and launch that exact executable.
+for %%I in (node.exe) do set "CODEX_SECURITY_MCP_NODE=%%~$PATH:I"
+if defined CODEX_SECURITY_MCP_NODE ("%CODEX_SECURITY_MCP_NODE%" "%CODEX_SECURITY_MCP_SCRIPT%" %* & exit)
 
 echo Codex Security could not find a Node runtime. Reinstall or update Codex, or set CODEX_MCP_NODE_PATH to an executable Node runtime. 1>&2
 exit /b 127

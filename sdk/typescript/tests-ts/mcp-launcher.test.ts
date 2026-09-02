@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import {
   chmod,
+  copyFile,
+  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -8,9 +10,102 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+
+test.skipIf(process.platform !== "win32")(
+  "launches the PATH Node executable independently of command extensions and the caller directory",
+  async () => {
+    const node = Bun.which("node");
+    if (node === null)
+      throw new Error("Node is required for the launcher test.");
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-launch-")),
+    );
+    try {
+      const caller = join(root, "caller");
+      const runtime = join(root, "Node runtime");
+      const scripts = join(root, "plugin", "scripts");
+      const server = join(root, "plugin", "mcp", "server.mjs");
+      await Promise.all(
+        [caller, runtime, scripts, join(root, "plugin", "mcp")].map(
+          (directory) => mkdir(directory, { recursive: true }),
+        ),
+      );
+      const launcher = join(scripts, "launch_codex_security_mcp.cmd");
+      await copyFile(
+        join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp.cmd"),
+        launcher,
+      );
+      await copyFile(node, join(runtime, "node.exe"));
+      await writeFile(
+        server,
+        `console.log(JSON.stringify({ executable: process.execPath, cwd: process.cwd(), args: process.argv.slice(2) }));\nprocess.exitCode = 23;\n`,
+      );
+      const marker = join(root, "command-used");
+      for (const directory of [caller, runtime]) {
+        for (const name of ["node.cmd", "where.cmd"]) {
+          await writeFile(
+            join(directory, name),
+            `@echo off\n> "${marker}" echo used\nexit /b 0\n`,
+          );
+        }
+      }
+      // Native candidates in the caller directory must not participate either.
+      await copyFile(node, join(caller, "node.exe"));
+      await copyFile(node, join(caller, "where.exe"));
+      for (const path of [runtime, `;.;;relative-bin;"${runtime}";`]) {
+        const result = spawnSync(
+          join(process.env["SystemRoot"]!, "System32", "cmd.exe"),
+          ["/d", "/s", "/c", `""${launcher}" --stdio "argument with spaces""`],
+          {
+            cwd: caller,
+            env: {
+              SystemRoot: process.env["SystemRoot"],
+              PATH: path,
+              PATHEXT: ".CMD;.EXE;.BAT;.COM",
+            },
+            encoding: "utf8",
+            windowsHide: true,
+            windowsVerbatimArguments: true,
+          },
+        );
+        expect(result.status, result.stderr || result.error?.message).toBe(23);
+        expect(JSON.parse(result.stdout)).toEqual({
+          executable: join(runtime, "node.exe"),
+          cwd: parse(launcher).root,
+          args: ["--stdio", "argument with spaces"],
+        });
+        await expect(readFile(marker)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
+      const missing = spawnSync(
+        join(process.env["SystemRoot"]!, "System32", "cmd.exe"),
+        ["/d", "/s", "/c", `""${launcher}" --stdio"`],
+        {
+          cwd: caller,
+          env: {
+            SystemRoot: process.env["SystemRoot"],
+            PATH: ";.;relative-bin;",
+          },
+          encoding: "utf8",
+          windowsHide: true,
+          windowsVerbatimArguments: true,
+        },
+      );
+      expect(missing.status, missing.stderr || missing.error?.message).toBe(
+        127,
+      );
+      expect(missing.stdout).toBe("");
+      expect(missing.stderr).toContain("could not find a Node runtime");
+      await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("starts the packaged MCP server with managed Node and an empty PATH", async () => {
   const node = Bun.which("node");
