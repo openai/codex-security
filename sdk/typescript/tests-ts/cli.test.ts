@@ -748,6 +748,127 @@ describe("CLI", () => {
     }
   });
 
+  test("refreshes a generated hook before replacing a local installation on checkout", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-hook-refresh-")),
+    );
+    try {
+      const repository = join(root, "worktree's files");
+      await mkdir(repository);
+      const git = async (args: string[]) => {
+        const result = await runCommand(
+          "git",
+          [
+            "-C",
+            repository,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            ...args,
+          ],
+          { timeout: 10_000 },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        return result.stdout.trim();
+      };
+      await git(["init", "-q", "-b", "original"]);
+      await writeFile(join(repository, ".gitignore"), "node_modules/\n");
+      await git(["add", ".gitignore"]);
+      await git(["commit", "--no-verify", "-qm", "initial"]);
+
+      const localCli = join(
+        repository,
+        "node_modules",
+        "@openai",
+        "codex-security",
+        "dist",
+        "cli.js",
+      );
+      await mkdir(join(localCli, ".."), { recursive: true });
+      const marker = join(root, "local-module-used");
+      await writeFile(
+        localCli,
+        `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "used");\n`,
+      );
+      await git(["switch", "-qc", "replacement"]);
+      await git([
+        "add",
+        "-f",
+        "node_modules/@openai/codex-security/dist/cli.js",
+      ]);
+      await git(["commit", "--no-verify", "-qm", "fixture update"]);
+      await git(["switch", "-q", "original"]);
+      await mkdir(join(localCli, ".."), { recursive: true });
+      await writeFile(localCli, "throw new Error('old installation');\n");
+
+      const quote = (path: string) => `'${path.replaceAll("'", `'"'"'`)}'`;
+      const hook = join(repository, ".git", "hooks", "pre-commit");
+      await writeFile(
+        hook,
+        `#!/bin/sh\nset -eu\nexec ${quote(await realpath(process.execPath))} ${quote(localCli)} scan . --working-tree --fail-on-severity high\n`,
+        { mode: 0o755 },
+      );
+      const stderr = capture();
+      expect(
+        await main(
+          ["install-hook", repository],
+          capture().stream,
+          stderr.stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(stderr.text()).toBe("");
+      const refreshed = await readFile(hook, "utf8");
+      expect(refreshed).toContain("# Managed by Codex Security.");
+      expect(refreshed).not.toContain(quote(localCli));
+      expect(refreshed).toContain(
+        quote(
+          await realpath(
+            fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+          ),
+        ),
+      );
+
+      await git(["switch", "-q", "replacement"]);
+      expect(await readFile(localCli, "utf8")).toContain("writeFileSync");
+      const before = await git(["rev-parse", "HEAD"]);
+      const commit = await runCommand(
+        "git",
+        [
+          "-C",
+          repository,
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.com",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "--allow-empty",
+          "-qm",
+          "fixture commit",
+        ],
+        {
+          env: {
+            ...process.env,
+            CODEX_HOME: join(root, "codex-home"),
+            CODEX_API_KEY: "",
+            OPENAI_API_KEY: "",
+          },
+          timeout: 10_000,
+        },
+      );
+      expect(commit.status, commit.stderr).toBeGreaterThan(0);
+      await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await git(["rev-parse", "HEAD"])).toBe(before);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {

@@ -893,7 +893,13 @@ reject `--json`.
 
 `install-hook` scans staged and unstaged changes before each commit. It blocks
 on high-severity findings or failed scans, respects `core.hooksPath`, and leaves
-existing hooks alone. Change the threshold with `--fail-on-severity`.
+custom hooks alone. Change the threshold with `--fail-on-severity`.
+The Codex Security installation and Node runtime must be outside the scanned
+repository. Install the CLI globally, then run `codex-security install-hook`
+from the repository. Repository-local installations cannot install a hook.
+To refresh an existing generated hook, rerun `install-hook` from the external
+installation with the same severity threshold. Updating the package alone does
+not update installed hooks.
 
 ### Import alerts from the CLI
 
