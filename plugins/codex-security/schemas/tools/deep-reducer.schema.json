@@ -9,7 +9,33 @@
       "additionalProperties": false
     },
     "reductionInput": {
-      "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanDraftInput"
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean",
+          "description": "Omit or set true when submitting the finished aggregate."
+        },
+        "scanId": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanId"
+        },
+        "handoffClaimToken": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/handoffClaimToken"
+        },
+        "scope": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scope"
+        },
+        "threatModel": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/threatModel"
+        },
+        "findings": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanDraftInput/properties/findings"
+        }
+      },
+      "required": [
+        "scanId",
+        "findings"
+      ],
+      "additionalProperties": false
     }
   }
 }
