@@ -25,6 +25,18 @@ from workbench_validation import reject_non_finite_json
 OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 
+def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
+    if scan["mode"] == "diff":
+        return ["git_diff"]
+    if scan["target_revision"] == "unversioned":
+        return ["directory_snapshot"]
+    if scan["target_snapshot_digest"] is None:
+        return ["git_worktree", "git_revision"]
+    if scan["target_snapshot_digest"] == clean_worktree_content_digest():
+        return ["git_revision"]
+    return ["git_worktree"]
+
+
 def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
     if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
         recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)

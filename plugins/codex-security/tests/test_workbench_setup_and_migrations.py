@@ -405,7 +405,7 @@ def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) ->
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (42,)
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])
@@ -866,7 +866,8 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
             (38, "store findings workflow metadata in columns"),
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
-            (41, "persist authorized source excerpt scopes"),
+            (41, "checkpoint finding severity assessments"),
+            (42, "persist authorized source excerpt scopes"),
         ]
         assert {row[1] for row in connection.execute("PRAGMA table_info(workspaces)")} >= {
             "diff_target_kind",
@@ -969,7 +970,7 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN handoff_claim_token")
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (42,)
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
             "handoff_claim_token",
@@ -1922,7 +1923,7 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
         ).fetchone() == (None, None, "gpt-5.6-sol", "high")
 
 
-@pytest.mark.parametrize("preview_version", [34, 40])
+@pytest.mark.parametrize("preview_version", [34, 40, 41])
 def test_workbench_upgrades_pre_release_source_scope_migration(
     tmp_path: Path, preview_version: int
 ) -> None:
@@ -1966,7 +1967,7 @@ def test_workbench_upgrades_pre_release_source_scope_migration(
         assert connection.execute(
             "SELECT version FROM schema_migrations WHERE name = ?",
             (source_scope[1],),
-        ).fetchone() == (41,)
+        ).fetchone() == (42,)
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_repositories'"
         ).fetchone() == ("finding_repositories",)
@@ -2048,7 +2049,8 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
             (38, "store findings workflow metadata in columns"),
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
-            (41, "persist authorized source excerpt scopes"),
+            (41, "checkpoint finding severity assessments"),
+            (42, "persist authorized source excerpt scopes"),
         ]
         assert "capability_preflight_json" in {
             row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
@@ -2131,7 +2133,8 @@ def test_workbench_upgrades_pre_release_phase_progress_migration(tmp_path: Path)
             (38, "store findings workflow metadata in columns"),
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
-            (41, "persist authorized source excerpt scopes"),
+            (41, "checkpoint finding severity assessments"),
+            (42, "persist authorized source excerpt scopes"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
@@ -2222,7 +2225,8 @@ def test_workbench_upgrades_pre_release_preflight_progress_migration(tmp_path: P
             (38, "store findings workflow metadata in columns"),
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
-            (41, "persist authorized source excerpt scopes"),
+            (41, "checkpoint finding severity assessments"),
+            (42, "persist authorized source excerpt scopes"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")

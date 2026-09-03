@@ -40,6 +40,7 @@ import workbench_remediation as remediation
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
+import workbench_severity as severity
 from filesystem_identity import (
     serialize_filesystem_identity as serialize_filesystem_identity,
 )
@@ -112,6 +113,7 @@ from workbench_schema import (
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
     capture_source_scopes,
+    expected_target_kinds,
     public_scan_recipe,
     requested_scan_paths,
     safe_source_path,
@@ -436,18 +438,6 @@ def require_scannable_target(target: Path) -> None:
         raise SystemExit(
             "Codex Security requires a checked-out worktree, not a bare Git repository."
         )
-
-
-def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
-    if scan["mode"] == "diff":
-        return ["git_diff"]
-    if scan["target_revision"] == "unversioned":
-        return ["directory_snapshot"]
-    if scan["target_snapshot_digest"] is None:
-        return ["git_worktree", "git_revision"]
-    if scan["target_snapshot_digest"] == clean_worktree_content_digest():
-        return ["git_revision"]
-    return ["git_worktree"]
 
 
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
@@ -3480,6 +3470,10 @@ def main() -> None:
         result = inspect_setup(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
+    if args.command == "read-severity-classification":
+        result = severity.read_classification(database_path(), args.scan_id)
+        print(json.dumps(result, allow_nan=False, sort_keys=True))
+        return
     if args.command == "inspect-linear-publication":
         result = inspect_linear_publication(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
@@ -3650,6 +3644,8 @@ def main() -> None:
             result = export_findings(connection, args)
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
+        elif args.command == "severity-classification":
+            result = severity.checkpoint(connection, json.load(sys.stdin), now())
         elif args.command == "finding-workflow":
             result = finding_workflow(connection, json.load(sys.stdin), now())
         elif args.command == "dashboard":
