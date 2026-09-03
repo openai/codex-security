@@ -110,6 +110,7 @@ export function renderScanHistory(
         ? `  ${accent("·")}  ${before?.length ?? 1} → ${after?.length ?? 1}`
         : "";
     const matches = entry["matches"] as JsonObject[] | undefined;
+    const related = entry["related"] as JsonObject[] | undefined;
     const knownScanIds = entry["knownScanIds"] as string[] | undefined;
     const knownScans = knownScanIds?.length
       ? ` in ${clean(knownScanIds[0]).slice(0, 8)}${knownScanIds.length > 1 ? ` … ${clean(knownScanIds[knownScanIds.length - 1]).slice(0, 8)}` : ""}`
@@ -132,6 +133,22 @@ export function renderScanHistory(
           `                ${strong("MATCHED SCAN")} ${accent(clean(match["scanId"]).slice(0, 8))}`,
         );
         wrap(`↳ ${clean(match["title"])}`, 18);
+      }
+    }
+    if (related?.length) {
+      lines.push(
+        `              ${accent("↔")} ${related.length} related finding${related.length === 1 ? "" : "s"}, kept separate`,
+      );
+      if (showLinkedFindings) {
+        for (const relation of related) {
+          if (relation["scanId"] !== undefined) {
+            lines.push(
+              `                ${strong("RELATED SCAN")} ${accent(clean(relation["scanId"]).slice(0, 8))}`,
+            );
+          }
+          wrap(`↳ ${clean(relation["title"])}`, 18);
+          wrap(clean(relation["reason"]), 20);
+        }
       }
     }
     const reason =
@@ -409,6 +426,17 @@ export function renderScanHistory(
       for (const entry of group) {
         lines.push("");
         finding(entry, status !== "not_rescanned");
+      }
+    }
+    const related = result["related"] as JsonObject[] | undefined;
+    if (related?.length) {
+      lines.push("", `  ${strong("Related findings, kept separate")}`);
+      for (const relation of related) {
+        wrap(
+          `${clean(relation["beforeTitle"])} ↔ ${clean(relation["afterTitle"])}`,
+          4,
+        );
+        wrap(clean(relation["reason"]), 6);
       }
     }
   } else {

@@ -825,6 +825,48 @@ MIGRATIONS = (
         ALTER TABLE finding_workflow_reviews ADD COLUMN contract_digest TEXT;
         """,
     ),
+    (
+        40,
+        "index finding identity and comparison history",
+        """
+        CREATE INDEX finding_occurrences_by_finding
+        ON finding_occurrences(finding_id, id);
+
+        CREATE INDEX scan_comparisons_by_after_scan
+        ON scan_comparisons(after_scan_id, before_scan_id);
+        """,
+    ),
+    (
+        41,
+        "checkpoint finding severity assessments",
+        """
+        CREATE TABLE finding_severity_assessments (
+            finding_id TEXT PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,
+            occurrence_id TEXT,
+            input_sha256 TEXT NOT NULL,
+            rubric_sha256 TEXT,
+            knowledge_base_sha256 TEXT,
+            assessed_at TEXT NOT NULL,
+            source TEXT NOT NULL CHECK (source IN ('existing-severity', 'rubric')),
+            decision TEXT NOT NULL CHECK (decision IN ('assessed', 'excluded')),
+            level TEXT CHECK (level IN ('critical', 'high', 'medium', 'low', 'informational')),
+            rubric_label TEXT,
+            rationale TEXT NOT NULL,
+            confidence TEXT CHECK (confidence IN ('high', 'medium', 'low')),
+            review_trigger TEXT,
+            CHECK ((decision = 'assessed' AND level IS NOT NULL)
+                OR (decision = 'excluded' AND level IS NULL AND rubric_label IS NULL))
+        );
+
+        CREATE TABLE scan_severity_classifications (
+            scan_id TEXT PRIMARY KEY,
+            finding_ids_json TEXT NOT NULL,
+            assessed_at TEXT NOT NULL,
+            rubric_sha256 TEXT,
+            knowledge_base_sha256 TEXT
+        );
+        """,
+    ),
 )
 
 
@@ -1106,6 +1148,10 @@ def normalize_pre_release_execution_profile_migrations(
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
+    connection.execute(
+        "UPDATE schema_migrations SET version = 40 WHERE version = 33 AND name = ?",
+        ("index finding identity and comparison history",),
+    )
 
     completion_warning_migration = connection.execute(
         "SELECT name FROM schema_migrations WHERE version = 25"
