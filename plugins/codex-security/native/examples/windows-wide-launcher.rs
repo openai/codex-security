@@ -95,7 +95,7 @@ fn main() -> std::io::Result<()> {
 
     fn policy_proof(node: OsString, script: OsString, root: &Path) -> io::Result<()> {
         let cwds = [raw("cwd-", 0xd800), raw("cwd-", 0xfffd)];
-        let repos = [raw("repo-", 0xdc80), raw("repo-", 0xfffd)];
+        let repos = [raw("İrepo-", 0xdc80), raw("İrepo-", 0xfffd)];
         let scopes = [raw("scope-", 0xdfff), raw("scope-", 0xfffd)];
         let replacement_output = raw("out-", 0xfffd);
         let mut sentinels = Vec::new();
