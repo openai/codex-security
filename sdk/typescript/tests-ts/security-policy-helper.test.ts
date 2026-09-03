@@ -115,50 +115,50 @@ describe("built SECURITY.md helper", () => {
       const home = join(root, "current");
       write(home, "project/SECURITY.md", "home-variable policy\n");
       const drive = win32.parse(home).root.slice(0, 2);
-      const env = Object.fromEntries(
-        Object.entries(process.env).filter(
-          ([key]) =>
-            !["USERPROFILE", "HOMEDRIVE", "HOMEPATH"].includes(
-              key.toUpperCase(),
-            ),
-        ),
-      );
-      const variants = [
-        { HOMEDRIVE: drive, HOMEPATH: home.slice(drive.length) },
-        { HOMEPATH: home },
-        { USERPROFILE: home, HOMEDRIVE: "Z:", HOMEPATH: "\\missing" },
-        { HOMEDRIVE: drive, HOMEPATH: "current" },
-        { USERPROFILE: `${drive}current` },
-      ];
-      for (const variables of variants) {
-        const result = run(
-          ["--repo", "~/project", "--scope", "."],
-          { ...env, ...variables },
+      const hook = join(root, "home-env.cjs");
+      function homeEnv(variables: NodeJS.ProcessEnv) {
+        // libuv restores omitted Windows home variables when spawning a child.
+        writeFileSync(
+          hook,
+          `
+          for (const name of ["USERPROFILE", "HOMEDRIVE", "HOMEPATH"]) delete process.env[name];
+          Object.assign(process.env, ${JSON.stringify(variables)});
+        `,
+        );
+        return {
+          ...process.env,
+          NODE_OPTIONS: `${process.env["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(hook)}`,
+        };
+      }
+      const variants: [NodeJS.ProcessEnv, string, string][] = [
+        [
+          { HOMEDRIVE: drive, HOMEPATH: home.slice(drive.length) },
+          "~/project",
           root,
-        );
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout).toContain("home-variable policy");
-      }
-      for (const variables of [
-        { USERPROFILE: "" },
-        { HOMEDRIVE: drive, HOMEPATH: "" },
-      ]) {
+        ],
+        [{ HOMEPATH: home }, "~/project", root],
+        [
+          { USERPROFILE: home, HOMEDRIVE: "Z:", HOMEPATH: "\\missing" },
+          "~/project",
+          root,
+        ],
+        [{ HOMEDRIVE: drive, HOMEPATH: "current" }, "~/project", root],
+        [{ USERPROFILE: `${drive}current` }, "~/project", root],
+        [{ USERPROFILE: "" }, "~", join(home, "project")],
+        [{ HOMEDRIVE: drive, HOMEPATH: "" }, "~", join(home, "project")],
+      ];
+      for (const [variables, repo, cwd] of variants) {
         const result = run(
-          ["--repo", "~", "--scope", "."],
-          { ...env, ...variables },
-          join(home, "project"),
+          ["--repo", repo, "--scope", "."],
+          homeEnv(variables),
+          cwd,
         );
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).toContain("home-variable policy");
       }
-      expect(run(["--repo", root, "--scope", "~"], env).status).toBe(1);
-      expect(
-        run(["--repo", "~other", "--scope", "."], {
-          ...env,
-          USERPROFILE: `${home}\\`,
-          USERNAME: "current",
-        }).status,
-      ).toBe(1);
+      expect(run(["--repo", root, "--scope", "~"], homeEnv({})).status).toBe(1);
+      const other = homeEnv({ USERPROFILE: `${home}\\`, USERNAME: "current" });
+      expect(run(["--repo", "~other", "--scope", "."], other).status).toBe(1);
     },
   );
 
@@ -255,13 +255,13 @@ describe("built SECURITY.md helper", () => {
 
   test("frames Unicode paths as ASCII JSON in codepoint order", () => {
     const { root } = fixture();
-    for (const name of ["\u{10000}", "\uffff", "\u0080", "\u007f"]) {
+    for (const name of ["\u{10000}", "\ue000", "\u0080", "\u007f"]) {
       write(root, `${name}/SECURITY.md`, "policy\n");
     }
     const result = inventory(root);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toBe(
-      '["\\u007f/SECURITY.md", "\\u0080/SECURITY.md", "\\uffff/SECURITY.md", "\\ud800\\udc00/SECURITY.md"]\n',
+      '["\\u007f/SECURITY.md", "\\u0080/SECURITY.md", "\\ue000/SECURITY.md", "\\ud800\\udc00/SECURITY.md"]\n',
     );
     expect(resolve(root, "\u{10000}").stdout).toBe(
       '## SECURITY.md source: "\\ud800\\udc00/SECURITY.md"\n\npolicy\n',
