@@ -7,6 +7,7 @@ use std::{
     mem::{offset_of, size_of, MaybeUninit},
     os::windows::{
         ffi::{OsStrExt, OsStringExt},
+        fs::MetadataExt,
         io::{AsRawHandle, FromRawHandle},
     },
     ptr::{copy_nonoverlapping, null, null_mut},
@@ -92,6 +93,18 @@ pub struct DirectoryResult {
     pub value: Vec<Buffer>,
 }
 
+#[napi(object)]
+pub struct DirectoryEntry {
+    pub name: Buffer,
+    pub is_directory: bool,
+}
+
+#[napi(object)]
+pub struct DirectoryEntriesResult {
+    pub error: u32,
+    pub value: Vec<DirectoryEntry>,
+}
+
 #[napi]
 pub fn windows_arguments() -> Vec<Buffer> {
     std::env::args_os()
@@ -131,15 +144,32 @@ pub fn windows_absolute_path(path: Buffer) -> napi::Result<BufferResult> {
 
 #[napi]
 pub fn windows_directory_names(path: Buffer) -> napi::Result<DirectoryResult> {
+    let result = windows_directory_entries(path)?;
+    Ok(DirectoryResult {
+        error: result.error,
+        value: result.value.into_iter().map(|entry| entry.name).collect(),
+    })
+}
+
+#[napi]
+pub fn windows_directory_entries(path: Buffer) -> napi::Result<DirectoryEntriesResult> {
     let path = os_string(path)?;
-    let names = std::fs::read_dir(path).and_then(|entries| {
+    let entries = std::fs::read_dir(path).and_then(|entries| {
         entries
-            .map(|entry| entry.map(|entry| wide_bytes(entry.file_name().encode_wide())))
+            .map(|entry| {
+                let entry = entry?;
+                // Windows DirEntry metadata comes from cached WIN32_FIND_DATAW.
+                let attributes = entry.metadata()?.file_attributes();
+                Ok(DirectoryEntry {
+                    name: wide_bytes(entry.file_name().encode_wide()),
+                    is_directory: attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                })
+            })
             .collect::<std::io::Result<Vec<_>>>()
     });
-    Ok(match names {
-        Ok(value) => DirectoryResult { error: 0, value },
-        Err(error) => DirectoryResult {
+    Ok(match entries {
+        Ok(value) => DirectoryEntriesResult { error: 0, value },
+        Err(error) => DirectoryEntriesResult {
             error: error.raw_os_error().unwrap() as u32,
             value: Vec::new(),
         },
