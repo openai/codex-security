@@ -11,6 +11,7 @@ services:
       CODEX_SECURITY_STATE_DIR: /state
       OPENAI_API_KEY:
       CODEX_API_KEY:
+      CODEX_SECURITY_EMBEDDINGS_URL:
     ports:
       - "127.0.0.1:3000:3000"
     volumes:

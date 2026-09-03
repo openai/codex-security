@@ -30,15 +30,24 @@ import {
   CheckpointedReviewRunner,
   reviewSettingsDigest,
 } from "./checkpointed-review.js";
+import { normalizeRepository } from "../targets.js";
 
 export interface DeduplicateScanOptions {
   /** Resume the named local findings workflow, including custom publication. */
   workflowId?: string;
   /** Findings API base URL. The scan's findings must already be indexed there. */
   findingsUrl: string;
-  /** Search all repositories instead of the saved scan's targetId. Defaults to false. */
+  /** Search all repositories instead of the scan's targetId. Defaults to false. */
   allRepositories?: boolean;
   signal?: AbortSignal;
+}
+
+export interface DeduplicateScanDirectoryOptions
+  extends DeduplicateScanOptions {
+  /** Local repository checkout used to review duplicate candidates. */
+  repository: string;
+  /** Require the sealed artifacts to belong to this scan. */
+  expectedScanId?: string;
 }
 
 export interface DeduplicateScanResult extends DeduplicationResult {
@@ -53,16 +62,48 @@ export async function deduplicateScan(
   return await deduplicateScanInternal(scanId, options);
 }
 
+/** Review a complete, sealed scan directory without resolving local scan history. */
+export async function deduplicateScanDirectory(
+  scanDirectory: string,
+  options: DeduplicateScanDirectoryOptions,
+): Promise<DeduplicateScanResult> {
+  return await deduplicateScanDirectoryInternal(scanDirectory, options);
+}
+
+type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
+  environment?: NodeJS.ProcessEnv;
+  reviewer?: DeduplicationReviewer;
+  reviewRunner?: Pick<CodexReviewRunner, "run">;
+  fetch?: FindingsRequest;
+};
+
+/** @internal */
+export async function deduplicateScanDirectoryInternal(
+  scanDirectory: string,
+  options: DeduplicateScanDirectoryOptions,
+  dependencies: DeduplicateScanDependencies = {},
+): Promise<DeduplicateScanResult> {
+  options.signal?.throwIfAborted();
+  const repository = await normalizeRepository(
+    options.repository,
+    options.signal,
+  );
+  return await deduplicateResolvedScan(
+    scanDirectory,
+    repository,
+    options.expectedScanId,
+    options,
+    dependencies,
+    await bundledPluginRoot(),
+    true,
+  );
+}
+
 /** @internal */
 export async function deduplicateScanInternal(
   scanId: string,
   options: DeduplicateScanOptions,
-  dependencies: Partial<SavedScanDependencies> & {
-    environment?: NodeJS.ProcessEnv;
-    reviewer?: DeduplicationReviewer;
-    reviewRunner?: Pick<CodexReviewRunner, "run">;
-    fetch?: FindingsRequest;
-  } = {},
+  dependencies: DeduplicateScanDependencies = {},
 ): Promise<DeduplicateScanResult> {
   options.signal?.throwIfAborted();
   const environment = dependencies.environment ?? process.env;
@@ -90,14 +131,36 @@ export async function deduplicateScanInternal(
         );
       }),
   });
-  const { contract, scanDirectory } = await loadContractWithScanDirectory(
+  return await deduplicateResolvedScan(
     scan.scanDir,
+    scan["targetPath"] as string,
+    scan.scanId,
+    options,
+    dependencies,
+    pluginRoot,
+    false,
+  );
+}
+
+async function deduplicateResolvedScan(
+  selectedDirectory: string,
+  repositoryPath: string,
+  expectedScanId: string | undefined,
+  options: DeduplicateScanOptions,
+  dependencies: DeduplicateScanDependencies,
+  pluginRoot: string,
+  bindRepository: boolean,
+): Promise<DeduplicateScanResult> {
+  const environment = dependencies.environment ?? process.env;
+  const { contract, scanDirectory } = await loadContractWithScanDirectory(
+    selectedDirectory,
     {
       pluginRoot,
-      expectedScanId: scan.scanId,
+      expectedScanId,
       signal: options.signal,
     },
   );
+  const scanId = contract.manifest.scan.id;
   const client = new FindingsClient(
     options.findingsUrl,
     options.signal,
@@ -121,7 +184,8 @@ export async function deduplicateScanInternal(
   if (workflow) {
     await workflow.protectArtifacts(scanDirectory);
     await workflow.bind({
-      scanId: scan.scanId,
+      ...(bindRepository ? { repositoryPath } : {}),
+      scanId,
       scanDir: scanDirectory,
       artifactDigest: workflowDigest(contract),
       destination: workflowDestination(options.findingsUrl),
@@ -133,7 +197,7 @@ export async function deduplicateScanInternal(
       {
         findingsUrl: options.findingsUrl,
         workflowId: options.workflowId,
-        expectedScanId: scan.scanId,
+        expectedScanId: scanId,
         signal: options.signal,
       },
       {
@@ -159,13 +223,13 @@ export async function deduplicateScanInternal(
         environment,
         undefined,
         options.signal,
-        scan["targetPath"] as string,
+        repositoryPath,
       );
     const checkpoints = workflow
       ? new CheckpointedReviewRunner(
           workflow,
           runner,
-          await workflow.sourceSnapshot(scan["targetPath"] as string),
+          await workflow.sourceSnapshot(repositoryPath),
           scope,
           await reviewSettingsDigest(environment),
         )
@@ -184,7 +248,7 @@ export async function deduplicateScanInternal(
     );
     await checkpoints?.assertSourceUnchanged();
     options.signal?.throwIfAborted();
-    const result: DeduplicateScanResult = { scanId: scan.scanId, ...reviewed };
+    const result: DeduplicateScanResult = { scanId, ...reviewed };
     await workflow?.prepareDedupe(result, { groups: result.duplicateGroups });
     await client.storeDedupeGroups(result.duplicateGroups);
     return result;
