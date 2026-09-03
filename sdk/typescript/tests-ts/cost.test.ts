@@ -2053,7 +2053,7 @@ describe("live scan cost tracking", () => {
   });
 
   test.each([undefined, 100, 1_000, 1_500])(
-    "reconciles the parent receipt with worker usage when logged parent tokens are %s",
+    "reconciles the parent receipt with worker usage when logged parent tokens are %p",
     async (parentTokens) => {
       const home = await codexHome();
       if (parentTokens !== undefined) {

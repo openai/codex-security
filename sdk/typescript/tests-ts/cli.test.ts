@@ -4805,7 +4805,7 @@ describe("CLI", () => {
     [[], {}, false, true, false],
     [[], {}, true, false, false],
   ] as const)(
-    "gates budget interaction for flags %j, environment %j, input TTY %s, output TTY %s",
+    "gates budget interaction for flags %j, environment %j, input TTY %p, output TTY %p",
     async (flags, environment, inputTty, outputTty, expected) => {
       const input = Object.assign(new PassThrough(), { isTTY: inputTty });
       let budgetCallback: ScanOptions["onBudgetApproaching"];
