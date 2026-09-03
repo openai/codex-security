@@ -44,7 +44,7 @@ Canonical report semantics live in these fields:
 - `scan-manifest.json`: optional `scan.hardening.portfolioPath` for the derived, unsealed design portfolio at `hardening/hardening.md`
 - `coverage.json`: `surfaces` including `riskArea` and `notes`, plus `openQuestions`
 
-For a whole-repository Deep scan, the workbench derives `coverage.inventoryStrategy: "repository"` in the stored coverage document; repeated discovery is workflow metadata, not a different inventory strategy. Do not include `inventoryStrategy` in `record_codex_security_scan_draft`.
+For a whole-repository Deep scan, the workbench derives `coverage.inventoryStrategy: "repository"` in the stored coverage document; repeated discovery is workflow metadata, not a different inventory strategy. Do not include `inventoryStrategy`, `mode`, `scanId`, or `includePaths`/`excludePaths` in `record_codex_security_scan_draft`.
 
 Older v1 producers may omit the new optional fields. Finalization uses explicit JSON-derived fallback text in that case; it never reads a pre-existing report to fill gaps.
 

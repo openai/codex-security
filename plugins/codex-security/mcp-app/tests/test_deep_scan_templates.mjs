@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const bundle = await build({
   bundle: true,
-  entryPoints: [new URL("../src/deep-scan/templates.ts", import.meta.url).pathname],
+  entryPoints: [fileURLToPath(new URL("../src/deep-scan/templates.ts", import.meta.url))],
   format: "esm",
   loader: { ".md": "text" },
   platform: "node",
@@ -25,6 +26,9 @@ const rendered = renderDiscoveryPrompt({
 assert.doesNotMatch(rendered, /false_positive_feedback\.json/);
 assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
 assert.match(rendered, /record_codex_security_scan_draft/);
+assert.match(rendered, /The workbench derives authoritative target, scope include and exclude paths/);
+assert.match(rendered, /coverage mode, inventory strategy/);
+assert.match(rendered, /do not include those derived values in draft arguments/);
 const discoveryContext = firstJsonBlock(rendered);
 assert.deepEqual(discoveryContext, {
   scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
