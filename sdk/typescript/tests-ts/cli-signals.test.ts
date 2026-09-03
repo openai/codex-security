@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import {
@@ -10,32 +13,46 @@ import {
 
 describe("CLI signals", () => {
   test("maps Ctrl-C and SIGTERM to conventional exits and preserves partial output", async () => {
-    for (const [signal, expectedExit, phrase] of [
-      ["SIGINT", 130, "Scan canceled by Ctrl-C."],
-      ["SIGTERM", 143, "Scan terminated by SIGTERM."],
-    ] as const) {
-      const stdout = capture();
-      const stderr = capture();
-      const signals = new FakeSignals();
-      let interrupted = false;
-      const exit = await main(
-        ["scan", "."],
-        stdout.stream,
-        stderr.stream,
-        dependencies({
-          signals,
-          onRun: () => signals.emit(signal),
-          onInterrupt: () => {
-            interrupted = true;
-          },
-        }),
-      );
-      expect(exit).toBe(expectedExit);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(phrase);
-      expect(stderr.text()).toContain("Partial output was kept at /tmp/scan.");
-      expect(interrupted).toBe(true);
-      expect(signals.listeners.get(signal)?.size).toBe(0);
+    const root = await mkdtemp(join(tmpdir(), "codex-security-signals-"));
+    const scanDir = join(root, "scan");
+    await mkdir(scanDir);
+    await writeFile(join(scanDir, "progress.log"), "partial\n");
+    const result = fakeResult();
+    Object.defineProperty(result, "scanDir", { value: scanDir });
+
+    try {
+      for (const [signal, expectedExit, phrase] of [
+        ["SIGINT", 130, "Scan canceled by Ctrl-C."],
+        ["SIGTERM", 143, "Scan terminated by SIGTERM."],
+      ] as const) {
+        const stdout = capture();
+        const stderr = capture();
+        const signals = new FakeSignals();
+        let interrupted = false;
+        const exit = await main(
+          ["scan", "."],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            signals,
+            result,
+            onRun: () => signals.emit(signal),
+            onInterrupt: () => {
+              interrupted = true;
+            },
+          }),
+        );
+        expect(exit).toBe(expectedExit);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(phrase);
+        expect(stderr.text()).toContain(
+          `Partial output was kept at ${scanDir}.`,
+        );
+        expect(interrupted).toBe(true);
+        expect(signals.listeners.get(signal)?.size).toBe(0);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 
