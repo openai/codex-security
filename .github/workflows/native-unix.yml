@@ -66,6 +66,9 @@ jobs:
           cargo fmt --check
           cargo clippy --locked -- -D warnings
           cargo fetch --locked
+      - name: Prepare shared native notices
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: node notices.mjs
       - name: Build and verify Linux on glibc 2.28 with Node.js 22
         if: matrix.platform == 'linux'
         run: |
@@ -115,9 +118,6 @@ jobs:
           node check.mjs
           native_node="$(command -v node)"
           PATH= "$native_node" proof.mjs
-      - name: Prepare shared native notices
-        if: matrix.platform == 'linux' && matrix.arch == 'x64'
-        run: node notices.mjs
       - name: Upload verified native artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
