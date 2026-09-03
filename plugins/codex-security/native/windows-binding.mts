@@ -34,7 +34,9 @@ export interface WindowsBinding {
   windowsDirectoryNames(path: Buffer): WindowsResult<Buffer[]>;
   windowsDirectoryEntries(
     path: Buffer,
-  ): WindowsResult<{ name: Buffer; isDirectory: boolean }[]>;
+  ): WindowsResult<
+    { name: Buffer; isDirectory: boolean; isSymbolicLink: boolean }[]
+  >;
   openWindowsFile(
     path: Buffer,
     access: number,

@@ -85,7 +85,22 @@ export function windowsFileSystem(native: WindowsBinding) {
           textPath.slice(0, end + 1) +
           win32.normalize(`\\${tail}`).slice(1).replace(/\\+$/u, "");
       }
-    } else normalizedText = win32.normalize(textPath);
+    } else {
+      if (textPath[1] === ":" && textPath.slice(2, 4) === ".\\") {
+        // Windows normpath retains the first drive-relative dot until a parent consumes it.
+        const parts = ["."];
+        for (const part of textPath.slice(4).split("\\")) {
+          if (part === "" || part === ".") continue;
+          if (part === ".." && parts.length && parts.at(-1) !== "..")
+            parts.pop();
+          else parts.push(part);
+        }
+        normalizedText = textPath.slice(0, 2) + parts.join("\\");
+      } else normalizedText = win32.normalize(textPath);
+      const root = win32.parse(normalizedText).root;
+      normalizedText =
+        root + normalizedText.slice(root.length).replace(/\\+$/u, "");
+    }
     const normalized = widePath(normalizedText);
     const resolved = finalPath(normalized);
     if (pathText(normalized).startsWith("\\\\?\\")) return resolved;
@@ -141,9 +156,10 @@ export function windowsFileSystem(native: WindowsBinding) {
   function entriesWithTypes(path: Buffer) {
     const result = native.windowsDirectoryEntries(operationPath(path));
     check(result.error, path);
-    return result.value.map(({ name, isDirectory }) => ({
+    return result.value.map(({ name, isDirectory, isSymbolicLink }) => ({
       name,
       isDirectory: () => isDirectory,
+      isSymbolicLink: () => isSymbolicLink,
     }));
   }
 

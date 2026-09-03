@@ -104,6 +104,7 @@ function worker(root: string): Record<string, boolean> {
       "directory-\udc80",
       "file-link",
       "directory-link",
+      "dangling-directory-link",
       "denied-\udfff",
     ].sort(),
   );
@@ -117,10 +118,18 @@ function worker(root: string): Record<string, boolean> {
     .map((entry) => pathText(entry.name))
     .sort();
   assert.deepEqual(directories, [
+    "dangling-directory-link",
     "directory-link",
     "directory-\udc80",
     "empty",
   ]);
+  assert.deepEqual(
+    listed
+      .filter((entry) => entry.isSymbolicLink())
+      .map((entry) => pathText(entry.name))
+      .sort(),
+    ["dangling-directory-link", "directory-link", "file-link"],
+  );
   assert.throws(() => files.stat(widePath("denied-\udfff")), { winerror: 5 });
   assert.equal(
     listed
@@ -133,6 +142,10 @@ function worker(root: string): Record<string, boolean> {
     value: [],
   });
   assert.deepEqual(native.windowsDirectoryEntries(widePath("missing")), {
+    error: 3,
+    value: [],
+  });
+  assert.deepEqual(native.windowsDirectoryEntries(Buffer.alloc(0)), {
     error: 3,
     value: [],
   });
@@ -155,7 +168,17 @@ function worker(root: string): Record<string, boolean> {
     assert(files.stat(widePath(name)).isFile());
     assert(!files.stat(widePath(name), false).isSymbolicLink());
     samePath(files.realpath(widePath(name)), win32.join(cwd, name));
+    for (const input of [
+      `${name}/`,
+      `${name}\\`,
+      `${drive}${name}/`,
+      `${drive}.\\..\\${name}\\`,
+      `${win32.join(cwd, name)}\\`,
+    ]) {
+      samePath(files.realpath(widePath(input)), win32.join(cwd, name));
+    }
   }
+  samePath(files.realpath(widePath(`${drive}///`)), `${drive}\\`);
   assert(files.stat(widePath(".")).isDirectory());
   const bounded = Buffer.alloc(4);
   assert.equal(files.readInto(widePath(names[0]!), bounded), 4);
@@ -238,6 +261,8 @@ function worker(root: string): Record<string, boolean> {
     rawCwdAndDriveRelativePaths: true,
     completeWideDirectoryIteration: true,
     cachedDirectoryAttributesWithoutFileAccess: true,
+    cachedSymlinkTagsIncludingDanglingDirectories: true,
+    existingFilesWithTrailingSeparators: true,
     distinctRawAndReplacementFiles: true,
     canonicalPathsBoundedReadsAndTruncation: true,
     verbatimTrailingDotsAndSpaces: true,
