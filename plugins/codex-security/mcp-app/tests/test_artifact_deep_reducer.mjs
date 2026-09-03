@@ -130,6 +130,14 @@ try {
     threatModel: { summary: "Requests reach shared and independent code." },
     scope: { summary: "Shared and independent request handling." }
   });
+  await assert.rejects(
+    recordCodexSecurityDeepReduction(context, {
+      ...merged,
+      findings: [{ ...shared, severity: { level: "medium" } }, independent],
+    }),
+    /without recording severity\.rationale and severity\.changeConditions/,
+    "a reducer cannot silently recalibrate unanimous Standard results",
+  );
   const outcome = await recordCodexSecurityDeepReduction(context, merged);
   const mergedWithSources = {
     ...merged,
@@ -202,6 +210,45 @@ try {
   await assert.rejects(recordCodexSecurityDeepReduction(collisionContext, draft([{
     ...shared, provenance: { ...shared.provenance, sourceFindingIds: ["unassigned:0"] },
   }])), /unknown source finding/);
+
+  const mediumShared = {
+    ...shared,
+    severity: { level: "medium" },
+  };
+  const severityWorker = await createWorker({
+    workersRoot, label: "discovery-severity", id: "worker-severity",
+    result: draft([mediumShared]), completionSequence: 6,
+  });
+  const severityRoot = path.join(dedupRoot, "dedup-severity", "output");
+  await mkdir(severityRoot, { recursive: true });
+  const severityContext = {
+    ...context, root: severityRoot,
+    deepReducer: { scanRoot, claimedWorkers: [first, severityWorker] },
+  };
+  const severitySourceFindingIds = ["worker-001:0", "worker-severity:0"];
+  await assert.rejects(
+    recordCodexSecurityDeepReduction(severityContext, draft([{
+      ...shared,
+      provenance: { ...shared.provenance, sourceFindingIds: severitySourceFindingIds },
+    }])),
+    /without recording severity\.rationale and severity\.changeConditions/,
+    "conflicting Standard severities require an explicit evidence-based resolution",
+  );
+  const reconciledSeverity = {
+    ...shared,
+    provenance: { ...shared.provenance, sourceFindingIds: severitySourceFindingIds },
+    severity: {
+      level: "high",
+      rationale: "The retained source establishes direct attacker reachability and impact.",
+      changeConditions: "Constrained reachability or impact would lower the severity.",
+    },
+  };
+  await recordCodexSecurityDeepReduction(severityContext, draft([reconciledSeverity]));
+  const severityOutput = JSON.parse(
+    await readFile(path.join(severityRoot, "result.json"), "utf8"),
+  );
+  assert.equal(severityOutput.findings[0].severity.level, "high");
+  assert.equal(severityOutput.findings[0].provenance.sourceFindings.length, 2);
   await assert.rejects(
     readFile(path.join(scanRoot, "artifacts", "02_discovery", "candidate_ledger.jsonl")),
     { code: "ENOENT" }

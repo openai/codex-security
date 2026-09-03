@@ -117,6 +117,7 @@ export function reconcileDeepReduction(
     }
   }
   retainSourceFindings(result, { discoveries, previous });
+  validateSeverityReconciliation(result, { discoveries, previous });
   result.coverage = preserveScanCoverage(result.coverage, [
     ...discoveries.map((discovery) => discovery.result.coverage),
     ...(previous ? [previous.coverage] : []),
@@ -167,8 +168,9 @@ function findingSourceIds(finding: Record<string, unknown>): string[] {
   ));
 }
 
-function retainSourceFindings(result: ScanDraftInput, inputs: DeepReductionSources): void {
-  type Finding = Record<string, unknown>;
+type Finding = Record<string, unknown>;
+
+function sourceFindingsById(inputs: DeepReductionSources): Map<string, Finding> {
   const sources = new Map<string, Finding>();
   for (const discovery of inputs.discoveries) {
     for (const [index, finding] of discovery.result.findings.entries()) {
@@ -186,6 +188,11 @@ function retainSourceFindings(result: ScanDraftInput, inputs: DeepReductionSourc
       sources.set(`previous:${index}`, finding);
     }
   }
+  return sources;
+}
+
+function retainSourceFindings(result: ScanDraftInput, inputs: DeepReductionSources): void {
+  const sources = sourceFindingsById(inputs);
   const claimed = new Set<string>();
   for (const finding of result.findings) {
     const provenance = finding.provenance as Finding;
@@ -210,6 +217,50 @@ function retainSourceFindings(result: ScanDraftInput, inputs: DeepReductionSourc
   }
   const missing = [...sources.keys()].filter((id) => !claimed.has(id));
   if (missing.length) throw new Error(`Deep reduction left unaccounted source findings: ${missing.join(", ")}.`);
+}
+
+function validateSeverityReconciliation(
+  result: ScanDraftInput,
+  inputs: DeepReductionSources,
+): void {
+  const sources = sourceFindingsById(inputs);
+  for (const finding of result.findings) {
+    const sourceLevels = new Set(
+      findingSourceIds(finding).map((id) => severityLevel(sources.get(id))),
+    );
+    sourceLevels.delete(undefined);
+    const outputLevel = severityLevel(finding);
+    if (
+      outputLevel === undefined
+      || sourceLevels.size === 0
+      || (sourceLevels.size === 1 && sourceLevels.has(outputLevel))
+    ) {
+      continue;
+    }
+
+    const severity = finding.severity as Finding;
+    if (
+      !isNonEmptyText(severity.rationale)
+      || !isNonEmptyText(severity.changeConditions)
+    ) {
+      throw new Error(
+        "Deep reduction changed or reconciled conflicting Standard scan severities "
+        + "without recording severity.rationale and severity.changeConditions."
+      );
+    }
+  }
+}
+
+function severityLevel(finding: Finding | undefined): string | undefined {
+  if (!finding || typeof finding.severity !== "object" || finding.severity === null) {
+    return undefined;
+  }
+  const level = (finding.severity as Finding).level;
+  return typeof level === "string" ? level : undefined;
+}
+
+function isNonEmptyText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 
