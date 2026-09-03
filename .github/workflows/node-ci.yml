@@ -156,9 +156,14 @@ jobs:
       - name: Check formatting
         run: pnpm --dir sdk/typescript run format
 
+  native:
+    needs: validate-title
+    if: needs.validate-title.outputs.ci-mode == 'full'
+    uses: ./.github/workflows/native-artifacts.yml
+
   package:
     name: build and check package
-    needs: validate-title
+    needs: [validate-title, native]
     if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -169,6 +174,8 @@ jobs:
           persist-credentials: false
       - name: Check plugin source boundary
         run: node sdk/typescript/scripts/check-plugin-source.mjs
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -219,6 +226,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -319,6 +328,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -457,6 +468,8 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:

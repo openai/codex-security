@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - .dockerignore
+      - .github/workflows/native-*.yml
+      - .github/actions/download-native/**
       - .github/workflows/container-ci.yml
       - Dockerfile
       - Dockerfile.dockerignore
@@ -18,6 +20,8 @@ on:
   pull_request:
     paths:
       - .dockerignore
+      - .github/workflows/native-*.yml
+      - .github/actions/download-native/**
       - .github/workflows/container-ci.yml
       - Dockerfile
       - Dockerfile.dockerignore
@@ -38,7 +42,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  native:
+    uses: ./.github/workflows/native-artifacts.yml
+
   container:
+    needs: native
     name: linux-amd64
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -48,6 +56,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
 
       - name: Verify customer build excludes secrets and scan data
         shell: bash
