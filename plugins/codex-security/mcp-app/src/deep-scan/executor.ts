@@ -369,7 +369,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
+export async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
   const environment = Object.fromEntries(
     Object.entries(process.env)
       .filter((entry): entry is [string, string] => entry[1] !== undefined)

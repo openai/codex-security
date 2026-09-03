@@ -35,7 +35,7 @@ Do not repeat this guard after it passes, on later context loads, or after the s
 
 ## Shared Scan Setup
 
-After preserving any native continuation's scan context and applying its one-time concurrent-scan guard, read `../../references/scan-prologue.md` once. Deep scans do not run a capability helper, inspect runtime tools, request configuration remediation, or publish preflight checks. The coordinator validates its own ownership, target, scope, and sandbox and manages its workers independently of this thread's delegation runtime and subagent allowance.
+After preserving any native continuation's scan context and applying its one-time concurrent-scan guard, read `../../references/scan-prologue.md` once, including its optional model advisory. Deep scans do not run a capability helper, inspect delegation capabilities, request configuration remediation, or publish preflight checks. The coordinator validates its own ownership, target, scope, and sandbox and manages its workers independently of this thread's delegation runtime and subagent allowance.
 
 ## TAC Status Advisory
 

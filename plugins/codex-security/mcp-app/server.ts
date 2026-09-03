@@ -9,6 +9,8 @@ import * as z from "zod/v4";
 import { missingPythonHelperMessage, resolvePythonCommand } from "./src/python_command.js";
 import type { ScanResults } from "./src/types.js";
 import { MCP_APP_VERSION } from "./src/version.js";
+import { scanModelGuidance } from "./src/model-guidance.js";
+import { readModelCatalog, type CatalogModel } from "./src/model-catalog.js";
 import {
   handoffClaimTokenSchema,
   recoveryHandoffClaimTokenSchema,
@@ -22,9 +24,10 @@ import {
   DeepScanStartLock,
   startOrJoinDeepScanCoordinator
 } from "./src/deep-scan/registry.js";
-import { CodexSdkWorkerExecutor } from "./src/deep-scan/executor.js";
+import { CodexSdkWorkerExecutor, resolveCodexPath, snapshotWorkerEnvironment } from "./src/deep-scan/executor.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
+  codexSandboxWorkingDirectory,
   resolveDeepWorkerParentSandbox,
   type DeepWorkerParentSandbox
 } from "./src/deep-scan/parent-sandbox.js";
@@ -360,6 +363,38 @@ export function createCodexSecurityServer(): McpServer {
   server.server.onclose = () => deepScanCoordinators.shutdown("mcp_transport_closed");
   const appMeta = { ui: { visibility: ["app"] as const } };
   const modelActionMeta = { ui: { visibility: ["model"] as const } };
+
+  server.registerTool("get_codex_security_model_guidance", {
+    title: "Get Codex Security Model Guidance",
+    description: "Read the current scan model, reasoning effort, and Codex model catalog to return optional scan-quality guidance. Call once before a top-level scan; this does not start a scan or change settings.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    _meta: modelActionMeta
+  }, async (_args, extra) => {
+    const settings = codexModelSettingsFromExtra(extra);
+    const signal = abortSignalFromExtra(extra) ?? new AbortController().signal;
+    let catalog: readonly CatalogModel[] | undefined;
+    if (settings.model) {
+      try {
+        const cwd = codexSandboxWorkingDirectory(extra);
+        if (cwd) {
+          catalog = await readModelCatalog({
+            codexPath: resolveCodexPath(),
+            cwd,
+            configOverrides: [],
+            env: await snapshotWorkerEnvironment(),
+            signal
+          });
+        }
+      } catch {
+        // A failed quality advisory must not block an otherwise valid scan.
+        signal.throwIfAborted();
+      }
+    }
+    return {
+      content: [{ type: "text" as const, text: scanModelGuidance(settings, catalog) }]
+    };
+  });
 
   server.registerTool("start_codex_security_standard_scan", {
     title: "Start or Join Codex Security Standard Scan",

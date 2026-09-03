@@ -5,6 +5,13 @@ import { DeepScanNonRetryableError } from "./errors.js";
 
 export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
 
+export function codexSandboxWorkingDirectory(extra: unknown): string | undefined {
+  const { sandboxCwd } = trustedSandboxState(extra);
+  validateSandboxCwd(sandboxCwd);
+  if (typeof sandboxCwd !== "string") return undefined;
+  return sandboxCwd.startsWith("file:") ? fileURLToPath(sandboxCwd) : sandboxCwd;
+}
+
 export type DeepWorkerParentSandbox = {
   /**
    * Validated path and glob keys copied into the worker's stricter root-read

@@ -74,7 +74,12 @@ export async function preflightDeepScanWorkerPermissionProfile(
   }
 }
 
-class AppServerPreflightClient {
+export type AppServerPreflightClientOptions = Pick<
+  DeepScanPermissionProfilePreflightOptions,
+  "codexPath" | "cwd" | "configOverrides" | "env" | "signal"
+>;
+
+export class AppServerPreflightClient {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly childClose: Promise<void>;
   private readonly stdoutLines: Interface;
@@ -85,7 +90,7 @@ class AppServerPreflightClient {
   private childClosed = false;
   private readonly removeAbortListener: () => void;
 
-  constructor(private readonly options: DeepScanPermissionProfilePreflightOptions) {
+  constructor(private readonly options: AppServerPreflightClientOptions) {
     const args: string[] = [];
     for (const override of options.configOverrides) {
       args.push("--config", override);
