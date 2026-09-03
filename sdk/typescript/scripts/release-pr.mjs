@@ -648,7 +648,7 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
         retry < 2 &&
         [500, 502, 503, 504].includes(response.status)
       ) {
-        await response.body?.cancel();
+        await response.body?.cancel().catch(() => undefined);
         await delay(1000 * 2 ** retry);
         continue;
       }

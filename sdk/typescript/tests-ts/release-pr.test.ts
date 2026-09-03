@@ -435,7 +435,7 @@ class FakeGitHub {
 }
 
 describe("GitHub request transport", () => {
-  test("recovers from a temporary server error without duplicating paginated results", async () => {
+  test("recovers from an errored response body without duplicating paginated results", async () => {
     const pages: number[] = [];
     const github = createGitHubClient(
       "example/release-fixture",
@@ -445,10 +445,12 @@ describe("GitHub request transport", () => {
         const page = Number(new URL(url).searchParams.get("page"));
         pages.push(page);
         if (pages.length === 2) {
-          return Response.json(
-            { message: "Temporary failure" },
-            { status: 500 },
-          );
+          const body = new ReadableStream({
+            start(controller) {
+              controller.error(new Error("Synthetic response body failure"));
+            },
+          });
+          return new Response(body, { status: 500 });
         }
         return Response.json([{ number: page }], {
           headers:
