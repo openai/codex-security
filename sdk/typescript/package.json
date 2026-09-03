@@ -1,6 +1,6 @@
 {
   "name": "@openai/codex-security",
-  "version": "0.1.24",
+  "version": "0.1.25",
   "description": "TypeScript SDK and CLI for Codex Security",
   "license": "Apache-2.0",
   "author": "OpenAI",
@@ -19,6 +19,11 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./server": {
+      "types": "./dist/server/api.d.ts",
+      "import": "./dist/server/api.js",
+      "default": "./dist/server/api.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
@@ -66,7 +71,7 @@
     "@openai/codex-sdk": "0.149.1",
     "ajv": "8.20.0",
     "extract-zip": "2.0.1",
-    "fast-uri": "3.1.5",
+    "fast-uri": "3.1.6",
     "fflate": "0.8.2",
     "incur": "0.4.13",
     "ink": "6.8.0",

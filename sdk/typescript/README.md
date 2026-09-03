@@ -39,8 +39,9 @@ try {
 ```
 
 `result.findings` contains this scan's findings; `repositoryFindings` also
-includes earlier open findings when available. Matching earlier findings can
-make one extra model call, even with a cost limit.
+includes earlier open findings when available. Matching earlier findings uses
+additional model calls, with large inputs split into batches. These calls are
+outside the scan's recorded cost and `maxCostUsd` limit.
 
 Keep results outside the repository and restrict access: reports can contain
 source code, vulnerability details, and reproduction steps.
@@ -68,6 +69,10 @@ try {
 Pass literal text or a JSON-serializable object as `finding`, not a file path.
 Validation uses the client's settings and credentials without changing
 repository files or adding a scan to history.
+
+To disable Codex usage analytics and built-in metrics, create the client with
+`new CodexSecurity({ codexOverrides: { analytics: { enabled: false } } })`.
+This setting also applies to scans run by the same client.
 
 Results include `disposition` (`reportable`, `suppressed`, `not_applicable`,
 or `deferred`), a Markdown `report`, `threadId`, and evidence `outputDir`.
@@ -186,6 +191,16 @@ Environment API keys apply to the current scan; only `login --with-api-key`
 saves them. Pass Codex access tokens on stdin to `login --with-access-token`.
 Access-token environment variables are not scan API keys.
 
+SDK callers can select native command authentication through
+`codexOverrides.model_providers.<id>.auth` and `model_provider` (including a
+selected `profile`). Scans, comparisons, and deduplication reviews preserve
+that selection without requiring an API key or replacing it with a stored
+login. Codex executes the helper and renews its token. Helper paths and relative
+`auth.cwd` values resolve from the supplied `CODEX_HOME` (default `~/.codex`),
+not the source checkout; an absolute `auth.cwd` is preserved. Comparisons and
+reviews also honor the selected command provider in that home's `config.toml`.
+Configuration is passed to Codex for validation, including profile support.
+
 For other inference providers:
 
 ```bash
@@ -289,6 +304,41 @@ Scans are report-only by default. Set `--fail-on-severity high` to exit with
 `1` if a completed scan finds high or critical issues. Incomplete scans exit
 with `2`, writing available results to stdout and a coverage warning to stderr.
 
+### Generate mock scan results
+
+Use `--mock` to populate a Standard scan with synthetic test data in seconds,
+without Codex authentication or any LLM calls:
+
+```bash
+codex-security scan /path/to/repository --mock
+codex-security scan /path/to/repository --mock --output-dir /path/outside/repository/mock-results
+```
+
+The SDK equivalent is `await security.run(repository, { mock: true })`.
+Mock mode is off by default. It uses normal target validation, scan registration,
+artifact finalization, reports, and local scan/finding history. Output directories,
+archiving, JSON output, exports, and `--fail-on-severity` work as usual.
+`--dry-run` only validates inputs; `--mock` saves a completed scan.
+
+Each run contains 12 findings across all severity levels: eight stable findings
+recur on subsequent scans of the same repository, and four have new identities
+on every run. Two pairs describe the same root causes with different titles and
+identities, providing inputs for deduplication testing. Mock scans skip automatic
+LLM matching; existing identity-based history indexing still runs. Separate
+comparison or deduplication commands retain their usual model behavior.
+
+Titles, provenance, artifact metadata, and reports identify the results as
+synthetic. Paths and code snippets are fictional and are never written into the
+repository. Completion means fixture generation finished, not that the repository
+was audited. Results enter the selected local state just like other scans; set
+`CODEX_SECURITY_STATE_DIR` to a separate directory when creating disposable data.
+Token usage is zero. `scans rerun` preserves mock mode.
+
+Mock mode supports repository, path, and diff targets in Standard mode. It cannot
+be combined with `--dry-run`, `--patch`, Deep mode, custom validation, or post-scan
+prompts. Scan prompts and knowledge-base inputs do not change the fixtures, and
+mock scans do not offer interactive patching.
+
 ### Attribute scans to end users
 
 When scanning on behalf of users, pass each user's stable hashed ID:
@@ -356,13 +406,22 @@ original IDs. Uncertain matches stay separate. `summary.json` records coverage
 and matching status; `report.md` links to component reports. Export and publish
 from the individual scan folders, not the combined summary.
 
+Large comparisons use bounded batches that cover every earlier/later finding
+pair. Overlapping confirmed groups are joined in code. Finding text is not
+truncated; pairs above Codex's input limit leave matching incomplete.
+
 Use an empty output directory outside the project. Failed components don't
 stop others, but failures, incomplete coverage, or failed matching exit with
 `2`. Retry failed or incomplete components with
 `--components-file retry-components.json` and a new output directory.
+The retry report covers only those components; it does not update the original
+combined report.
 
 `--max-cost` applies per component, excluding planning and matching.
 `--model` and `--effort` also apply to matching; `--auth` applies throughout.
+Planning and matching reject an ambient command provider that conflicts with
+explicit `--auth chatgpt` or `--auth api-key`. A command provider explicitly
+selected through SDK `codexOverrides` retains its authentication configuration.
 Use `--knowledge-base`, `--scan-prompt-file`, and `--post-scan-prompt-file` as for
 bulk scans.
 
@@ -461,8 +520,29 @@ or `features.plugins` are rejected, including in profiles. Multi-agent v2 must
 stay enabled: `agents.max_threads` and
 `features.multi_agent_v2.enabled=false` are rejected.
 
-`validate` and `patch` accept `--effort` and the `model` and
-`model_reasoning_effort` keys in `--codex`, but no other runtime overrides.
+`validate`, `patch`, and `verify-fix` accept `--effort` and the `model`,
+`model_reasoning_effort`, and `analytics.enabled` keys in `--codex`, but no
+other runtime overrides.
+
+Use `--codex 'analytics.enabled=false'` to disable Codex usage analytics and
+built-in metrics for a command:
+
+```bash
+npx @openai/codex-security validate "Candidate finding" --codex 'analytics.enabled=false'
+npx @openai/codex-security patch "Security issue" --codex 'analytics.enabled=false'
+npx @openai/codex-security verify-fix "Security issue" --codex 'analytics.enabled=false'
+```
+
+The same setting works for `scan` and `bulk-scan`. An explicit setting is
+preserved when `scan --patch` starts remediation and when
+`patch --assess-patch-risk` starts its follow-up assessment. Boolean `true`
+is also accepted; omitting the setting preserves the command's existing
+configuration and Codex defaults. Validation continues to ignore user
+configuration, while patching and verification retain their existing ambient
+configuration and project-trust behavior.
+
+This setting does not control explicitly configured OpenTelemetry log or trace
+exporters, authentication, integrations, or CLI update checks.
 
 See [Local security model](#local-security-model) for approval and filesystem
 restrictions.
@@ -472,6 +552,7 @@ restrictions.
 | Variable                                                                    | Effect                                                                               |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; `OPENAI_API_KEY` wins if both are set.                             |
+| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Findings service endpoint; see [Embeddings and storage](#embeddings-and-storage).    |
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default team and project for completed-scan publication.                             |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Personal API key for Linear patching and direct publication.                         |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; `debug` enables verbose diagnostics.                                       |
@@ -512,6 +593,27 @@ the limit, though in-flight requests can finish above it. If deep-scan
 discovery has finished, the scan returns a sealed partial report without more
 model calls and lists unvalidated candidates as follow-up work. Bulk scans
 apply the limit per repository attempt.
+
+For a single scan in the interactive dashboard, reaching 80% of the limit
+offers a higher **total** USD limit. Enter a larger amount to approve it, or
+press Enter with an empty input or Escape to keep the current limit. The scan
+continues running while you decide, and the existing limit remains enforced
+until the increase is saved. Increases keep the same scan and accumulated cost;
+they do not restart work or extend time or discovery limits. CI, JSON/JSONL,
+`--headless`, and `--verbose` scans do not offer budget increases. If usage crosses the limit
+before an increase is approved, the scan still stops.
+
+SDK callers can supply `onBudgetApproaching({ maxCostUsd, cost, signal })` and
+return a higher total limit, or `undefined` to keep the current limit. The
+callback runs once per limit at 80% usage without blocking tracking or
+execution. Its signal aborts when the scan stops or finishes model work; late
+answers are ignored. Invalid increases or failures to save them leave the
+existing limit in place and report a warning. `onCost(cost, maxCostUsd)` reports
+the current limit, including after an approved increase.
+
+These amounts estimate API-equivalent model usage, not ChatGPT subscription
+allowance. Post-scan prompts run after scan cost tracking ends and are outside
+this limit.
 
 ### Bulk scans
 
@@ -1134,6 +1236,22 @@ const result = await deduplicateScan("scan_example_001", {
 console.log(result.duplicateGroups);
 ```
 
+For a complete, sealed scan directory that is not registered in local scan
+history, provide the repository checkout separately:
+
+```typescript
+import { deduplicateScanDirectory } from "@openai/codex-security";
+
+const result = await deduplicateScanDirectory("/path/to/completed-scan", {
+  repository: "/path/to/repository",
+  findingsUrl: "http://127.0.0.1:3000",
+  // expectedScanId: "scan_example_001",
+  // allRepositories: true,
+  // signal: controller.signal,
+});
+console.log(result.duplicateGroups);
+```
+
 The CLI and SDK return the same result:
 
 ```json
@@ -1231,11 +1349,16 @@ reviews or group writes. A publication whose acknowledgement was lost is retried
 using the service's existing idempotent upsert.
 
 Each validated screening and pair review is checkpointed locally,
-including DISTINCT decisions. Every SAME checkpoint retains its required
-`canonicalFindingId` and generated `mergedFinding`. The merged record must satisfy
-the Finding schema and preserve the canonical finding ID. Validation still happens
-through `review_validator.submit_decisions`; invalid submissions are corrected in
-the same review conversation, and invalid or unfinished reviews are not cached.
+including DISTINCT decisions. Screening checkpoints retain pair recommendations
+and rationales under host-assigned pair slots bound to the original records.
+Every SAME pair-review checkpoint retains its
+required `canonicalFindingId` and generated `mergedFinding`; the merged record
+must satisfy the Finding schema and preserve the canonical finding ID. Validation
+still happens through `review_validator.submit_decisions`; invalid submissions
+are corrected in the same review conversation. A completed turn without an
+accepted submission receives one corrective turn in that same conversation.
+Transport, model, cancellation, and accepted `submit_error` failures are terminal.
+Invalid or unfinished reviews are not cached.
 
 Checkpoints bind to the exact original records and ordering, approved source path,
 Git revision and current file contents (including ignored files), repository scope,
@@ -1265,10 +1388,10 @@ use another workflow ID for a fresh review rather than changing that saved resul
    neighbors are rejected.
 3. Independently review each nominated pair once with `gpt-5.6-sol` at `xhigh`
    reasoning effort. Only accepted pairs contribute to duplicate groups.
-4. Group connected findings deterministically, treating accepted duplicate
-   pairs as transitive: if A matches B and B matches C, all three belong to one
-   group. There is no additional whole-group review. A mistaken accepted pair
-   can therefore join otherwise distinct findings.
+4. Group accepted duplicate pairs transitively unless a Luna or Sol `DISTINCT`
+   decision contradicts the resulting component. Contradicted components are
+   split deterministically, preferring legal subgroups that preserve more
+   accepted-pair support. There is no additional whole-group review.
 5. Post all accepted groups to `/v1/dedupe-groups`. Return a completed result
    only after the service accepts the write. An empty result requires no write.
 
@@ -1283,14 +1406,50 @@ and Codex state. Screening denies approval requests; final reviews use Codex's
 automatic approval reviewer. Web, plugins, and inherited MCP servers are disabled.
 Finding content never authorizes access to another target.
 
+Pair reviews cover exactly the two supplied findings. Linked parent tickets,
+duplicate targets, and related-ticket records are metadata, not additional
+findings to fetch or prerequisites for a verdict. An unsupplied duplicate target
+is neither automatically canonical nor an error; source-code investigation for
+the supplied pair remains allowed.
+
+Incomplete supplied finding content can produce `DISTINCT` with the limitation
+explained. An execution, tool, or source-access blocker that prevents a required
+check instead uses `review_validator.submit_error` with a nonempty `reason`.
+That submission fails the review without a verdict or review checkpoint, so it
+cannot become a `DISTINCT` veto or a completed duplicate-group result. A failed
+optional lookup does not force failure or `DISTINCT` when other evidence suffices.
+
 Decisions must arrive through the direct `review_validator.submit_decisions`
 tool; invalid submissions can be corrected in the same session. A final text
-answer alone is insufficient. Every `SAME` decision, including screening
-nominations, requires an assigned `canonicalFindingId` and a generated,
-inclusive `mergedFinding`; missing or null values are rejected. Screening
-canonicals must belong to the nominated pair. Sol reviews use only the complete
-originals, never earlier merged findings. These review fields do not change
-the command's ID-only result or stored findings.
+answer alone is insufficient. Luna screening returns a `SAME` or `DISTINCT`
+decision and rationale under each required host-assigned slot (`pair-1`,
+`pair-2`, and so on). The host binds each slot to its corresponding
+anchor-neighbor pair, so the model does not submit finding IDs. Luna does not
+select a canonical or generate a merged finding. Every
+Sol `SAME` decision requires an assigned `canonicalFindingId` and
+a generated, inclusive `mergedFinding`; missing or null values are rejected.
+Sol reviews use only the complete originals, never earlier model rationales or
+merged findings. These review fields do not change the command's ID-only result
+or stored findings.
+
+Non-cancellation review failures throw `DeduplicationReviewError`. Its `metadata`
+contains only the review stage, model, failure category, attempt count, and a
+sanitized reason for diagnostics or an external support bundle; it does not
+contain findings, prompts, paths, thread IDs, or credentials.
+
+If a completed turn has no accepted submission, whether it ended with text only
+or after rejected submissions, the runner sends one corrective instruction in
+the same conversation. This preserves the original assignment, source work, and
+tool feedback. Reviews are limited to two turns; `metadata.attempts` counts
+those turns (or the initial attempt if setup fails). Accepted results are not
+replayed. Cancellation, accepted `submit_error` reports, and model or transport
+failures remain terminal.
+
+The SDK does not retain private review transcripts, subprocess stderr, or full
+provider/RPC error payloads, and ephemeral review state is removed after the
+session. The public metadata is a limited diagnostic summary, not a complete
+troubleshooting trace; it intentionally omits the original error cause. Private
+diagnostic retention is not currently implemented.
 
 Model calls run sequentially on the SDK/CLI host using its Codex sign-in or
 `OPENAI_API_KEY`/`CODEX_API_KEY`, with access to the configured models. Model
@@ -1350,6 +1509,18 @@ precedence over `CODEX_API_KEY`; remove the `OPENAI_API_KEY` entry if using
 `CODEX_API_KEY` instead. Listing and empty imports do not require a key.
 A Codex ChatGPT login is not an embedding API credential.
 
+Set `CODEX_SECURITY_EMBEDDINGS_URL` to override the full embeddings endpoint URL,
+including its path and any query parameters. Unset or empty values use
+`https://api.openai.com/v1/embeddings`. Export it before `codex-security serve`,
+or set it in `.env` for Docker Compose, which passes it to the service. For example:
+
+```bash
+CODEX_SECURITY_EMBEDDINGS_URL=https://embeddings.example.com/v1/embeddings codex-security serve
+```
+
+The configured endpoint receives the finding inputs and the API key as a bearer
+token and must support the same OpenAI embeddings request and response format.
+
 The service calls the OpenAI embeddings API with `text-embedding-3-large` and
 1,536 dimensions. The complete finding JSON is tokenized using `js-tiktoken`'s
 bundled `cl100k_base` encoding. Long inputs are split without truncation;
@@ -1379,8 +1550,8 @@ The findings Compose configuration sets `HOST=0.0.0.0`, `PORT=3000`, and
 `CODEX_SECURITY_STATE_DIR=/state`. Keep port and volume mappings aligned if
 changing these settings. Compose binds only to host loopback; the API has no
 authentication. Use an authenticated TLS proxy before sharing access. Finding
-JSON is sent to `api.openai.com` over HTTPS for embeddings; the database and
-generated embeddings stay in the local volume.
+JSON is sent to the configured embeddings endpoint (`api.openai.com` over HTTPS
+by default); the database and generated embeddings stay in the local volume.
 
 ### Upgrades and backups
 
@@ -1451,11 +1622,24 @@ migration that also imports known associations from stored scan occurrences.
 New scan findings retain their target associations when indexed locally.
 The server entrypoint selects the concrete
 embedder and store, so either can be replaced independently.
+
+For renewable embeddings credentials, import `OpenAiFindingEmbedder`,
+`SqliteFindingsStore`, and `startFindingsServer` from
+`@openai/codex-security/server`. The embedder's first argument accepts a static
+key or `() => string | Promise<string>`. It calls the callback before every
+HTTP batch, including subsequent calls to `embed`; callers own token acquisition.
+Pass `fetch` as the second argument and
+`process.env.CODEX_SECURITY_EMBEDDINGS_URL || undefined` as the third to use
+the same full endpoint URL and default as `codex-security serve`. Importing the
+server API does not start a listener.
+
 The local workflow lives under `src/deduplication/`. `FindingDeduplicator`
 receives a candidate API client and a `DeduplicationReviewer`, keeping grouping
 separate from HTTP and model transport. `CodexDeduplicationReviewer` owns prompts
 and result validation; `CodexReviewRunner` owns app-server sessions and cleanup.
-`deduplicateScan` validates saved scan artifacts before running the workflow.
+`deduplicateScan` validates saved scan artifacts before running the workflow;
+`deduplicateScanDirectory` performs the same validation for an explicit sealed
+scan directory without consulting local scan history.
 The SDK reuses the existing Codex runtime and credentials without additional
 runtime dependencies.
 

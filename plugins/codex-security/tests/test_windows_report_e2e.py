@@ -12,7 +12,6 @@ from unittest import mock
 from workbench_test_support import (
     SCRIPT,
     create_saved_workspace,
-    run_workbench,
     start_delivered_scan,
     write_completed_contract,
 )

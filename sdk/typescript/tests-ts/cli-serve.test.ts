@@ -1,38 +1,90 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import type { FindingsDocument } from "../src/models.js";
+import {
+  EMBEDDING_DIMENSIONS,
+  EMBEDDING_MODEL,
+} from "../src/server/embeddings.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 
 const packageRoot = join(import.meta.dir, "..");
 const cli = join(packageRoot, "src", "cli.ts");
 
-for (const [name, args, port] of [
+for (const [name, args, port, customEmbeddings] of [
   ["CLI", [cli, "serve"], "0"],
   ["CLI --port overrides PORT", [cli, "serve", "--port", "0"], "invalid"],
   ["CLI --port=0 overrides PORT", [cli, "serve", "--port=0"], "invalid"],
+  ["CLI with custom embeddings URL", [cli, "serve"], "0", true],
   [
     "standalone entrypoint",
     [join(packageRoot, "src", "server", "index.ts")],
     "0",
   ],
+  [
+    "standalone entrypoint with custom embeddings URL",
+    [join(packageRoot, "src", "server", "index.ts")],
+    "0",
+    true,
+  ],
 ] as const) {
   test(`${name} serves findings with isolated state and shuts down`, async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-serve-"));
     const state = join(root, "state with spaces");
+    const requests: {
+      url: string | undefined;
+      authorization: string | undefined;
+    }[] = [];
+    const provider = customEmbeddings
+      ? createServer((request, response) => {
+          requests.push({
+            url: request.url,
+            authorization: request.headers.authorization,
+          });
+          request.resume();
+          response.setHeader("Content-Type", "application/json");
+          response.end(
+            JSON.stringify({
+              model: EMBEDDING_MODEL,
+              data: [
+                {
+                  index: 0,
+                  embedding: Array.from(
+                    { length: EMBEDDING_DIMENSIONS },
+                    (_, index) => (index === 0 ? 1 : 0),
+                  ),
+                },
+              ],
+            }),
+          );
+        })
+      : undefined;
+    let embeddingsUrl = "";
+    if (provider) {
+      provider.listen(0, "127.0.0.1");
+      await once(provider, "listening");
+      const address = provider.address();
+      if (!address || typeof address === "string")
+        throw new Error("No provider port");
+      embeddingsUrl = `http://127.0.0.1:${address.port}/custom/embeddings?api-version=test`;
+    }
     const child = spawn(process.execPath, [...args], {
       env: {
         ...process.env,
         CODEX_SECURITY_STATE_DIR: state,
         HOST: "127.0.0.1",
         PORT: port,
-        OPENAI_API_KEY: "",
+        OPENAI_API_KEY: customEmbeddings ? "synthetic-key" : "",
         CODEX_API_KEY: "",
+        CODEX_SECURITY_EMBEDDINGS_URL: embeddingsUrl,
       },
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 20_000,
@@ -57,6 +109,29 @@ for (const [name, args, port] of [
       const response = await fetch(`${base}/v1/findings`);
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ findings: [], total: 0 });
+      if (customEmbeddings) {
+        const document = JSON.parse(
+          await readFile(
+            join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
+            "utf8",
+          ),
+        ) as FindingsDocument;
+        const imported = await fetch(`${base}/v1/bulk/findings`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            repositoryId: "synthetic-repository",
+            findings: [document.findings[0]],
+          }),
+        });
+        expect(imported.status, await imported.text()).toBe(201);
+        expect(requests).toEqual([
+          {
+            url: "/custom/embeddings?api-version=test",
+            authorization: "Bearer synthetic-key",
+          },
+        ]);
+      }
       expect((await stat(join(state, "workbench.sqlite3"))).isFile()).toBe(
         true,
       );
@@ -70,6 +145,10 @@ for (const [name, args, port] of [
         child.kill("SIGKILL");
       }
       await exited;
+      if (provider)
+        await new Promise<void>((resolve, reject) =>
+          provider.close((error) => (error ? reject(error) : resolve())),
+        );
       await rm(root, { recursive: true, force: true });
     }
   }, 30_000);

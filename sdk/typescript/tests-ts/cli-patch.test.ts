@@ -198,10 +198,17 @@ describe("scan and patch workflow", () => {
       await writeFile(join(repository, "app.ts"), "original\nuser change\n");
 
       const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--assess-patch-risk"],
+        [
+          "patch",
+          "Synthetic issue",
+          "--assess-patch-risk",
+          "--codex",
+          "analytics.enabled=false",
+        ],
         {
           currentDirectory: repository,
-          onCodex: async (_args, output) => {
+          onCodex: async (args, output) => {
+            expect(args).toContain("analytics.enabled=false");
             if (
               output?.appServer?.prompt.includes(
                 "$codex-security:assess-patch-risk",
@@ -459,63 +466,74 @@ describe("scan and patch workflow", () => {
     }
   });
 
-  test("patches selected scan findings in the scanned repository and returns JSON", async () => {
-    const result = resultWithFindings(["critical", "high", "medium", "low"]);
-    const invocations: Array<{
-      args: readonly string[];
-      directory: string | undefined;
-      prompt: string | undefined;
-    }> = [];
-    const patched: Finding[] = [];
-    const outcome = await runWorkflow(
-      [
-        "scan",
-        "../other/repository",
-        "--patch",
-        "--patch-severity",
-        "high",
-        "--fail-on-severity",
-        "high",
-        "--json",
-      ],
-      {
-        result,
-        onCodex: (args, output) => {
-          invocations.push({
-            args,
-            directory: output?.appServer?.directory,
-            prompt: output?.appServer?.prompt,
-          });
-          patched.push(...completePatches(args, output));
-          return 0;
+  test.each([false, true])(
+    "patches selected scan findings with analytics.enabled=%p in the scanned repository and returns JSON",
+    async (analyticsEnabled) => {
+      const result = resultWithFindings(["critical", "high", "medium", "low"]);
+      const invocations: Array<{
+        args: readonly string[];
+        directory: string | undefined;
+        prompt: string | undefined;
+      }> = [];
+      const patched: Finding[] = [];
+      const outcome = await runWorkflow(
+        [
+          "scan",
+          "../other/repository",
+          "--patch",
+          "--codex",
+          `analytics.enabled=${analyticsEnabled}`,
+          "--codex",
+          "features.goals=false",
+          "--patch-severity",
+          "high",
+          "--fail-on-severity",
+          "high",
+          "--json",
+        ],
+        {
+          result,
+          onCodex: (args, output) => {
+            invocations.push({
+              args,
+              directory: output?.appServer?.directory,
+              prompt: output?.appServer?.prompt,
+            });
+            patched.push(...completePatches(args, output));
+            return 0;
+          },
         },
-      },
-    );
-
-    expect(outcome.exitCode).toBe(0);
-    expect(patched.map(({ occurrenceId }) => occurrenceId)).toEqual([
-      "occ_1",
-      "occ_2",
-    ]);
-    expect(invocations).toHaveLength(2);
-    for (const invocation of invocations) {
-      expect(invocation.args[0]).toBe("app-server");
-      expect(invocation.directory).toBe(
-        resolve(CURRENT_REPOSITORY, "../other/repository"),
       );
-      expect(invocation.prompt).toContain("Return exactly one JSON object");
-    }
-    expect(JSON.parse(outcome.stdout)).toMatchObject({
-      manifest: result.manifest,
-      findings: result.findings,
-      patchSeverity: "high",
-      patches: [
-        { occurrenceId: "occ_1", status: "verified" },
-        { occurrenceId: "occ_2", status: "verified" },
-      ],
-    });
-    expect(outcome.stderr).toContain("Patching 2 confirmed findings...");
-  });
+
+      expect(outcome.exitCode).toBe(0);
+      expect(patched.map(({ occurrenceId }) => occurrenceId)).toEqual([
+        "occ_1",
+        "occ_2",
+      ]);
+      expect(invocations).toHaveLength(2);
+      for (const invocation of invocations) {
+        expect(invocation.args[0]).toBe("app-server");
+        expect(invocation.args).toContain(
+          `analytics.enabled=${analyticsEnabled}`,
+        );
+        expect(invocation.args).not.toContain("features.goals=false");
+        expect(invocation.directory).toBe(
+          resolve(CURRENT_REPOSITORY, "../other/repository"),
+        );
+        expect(invocation.prompt).toContain("Return exactly one JSON object");
+      }
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        manifest: result.manifest,
+        findings: result.findings,
+        patchSeverity: "high",
+        patches: [
+          { occurrenceId: "occ_1", status: "verified" },
+          { occurrenceId: "occ_2", status: "verified" },
+        ],
+      });
+      expect(outcome.stderr).toContain("Patching 2 confirmed findings...");
+    },
+  );
 
   test("continues with separate patch tasks when one finding fails", async () => {
     const result = resultWithFindings(["critical", "high", "medium"]);
