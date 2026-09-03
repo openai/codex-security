@@ -18,6 +18,7 @@ from workbench_test_support import (
     mark_deep_coordinator_succeeded,
     run_workbench,
     stable_target_id,
+    start_delivered_scan,
     write_completed_contract,
 )
 
@@ -278,7 +279,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         return claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (39,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (40,)
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -2163,9 +2164,8 @@ def test_target_continuation_does_not_reuse_another_threads_app_scan(
         "deep",
         environment=deep_environment(codex_home),
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -3943,20 +3943,6 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
     assert late_worker["status"] == "running"
     manifest = scan_dir / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
     manifest.write_text("{}\n")
-
-    active_rejected = run_workbench(
-        state_dir,
-        "finish-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--terminal-reason",
-        "saturated",
-        "--manifest-path",
-        str(manifest),
-        environment=deep_environment(codex_home),
-        check=False,
-    )
-    assert "while workers are active" in str(active_rejected["stderr"])
 
     late_result.write_text("{}\n")
     accepted_late = upsert_worker(

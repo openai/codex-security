@@ -1,6 +1,6 @@
 {
   "name": "codex-security",
-  "version": "0.1.84",
+  "version": "0.1.96",
   "description": "Codex Security workflows for security scans, analysis, and investigation.",
   "author": {
     "name": "OpenAI"

@@ -45,16 +45,26 @@ TARGET_REQUIRED_COORDINATE_FIELDS = {
 }
 DISPOSITIONS = {"reported", "no_issue_found", "rejected", "not_applicable", "needs_follow_up"}
 NON_COVERAGE_TARGET_WARNINGS = {
-    "Directory contents changed while the scan was running; "
-    "results were saved for the original snapshot.",
-    "The scanned Git repository became unavailable while the scan was running; "
-    "results were saved for the original revision.",
-    "Repository HEAD changed while the scan was running; "
-    "results were saved for the original revision.",
-    "Working-tree contents changed while the scan was running; "
-    "results were saved for the original snapshot.",
-    "The scan target became unavailable while the scan was running; "
-    "results were saved for the original revision or snapshot.",
+    (
+        "Directory contents changed while the scan was running; "
+        "results were saved for the original snapshot."
+    ),
+    (
+        "The scanned Git repository became unavailable while the scan was running; "
+        "results were saved for the original revision."
+    ),
+    (
+        "Repository HEAD changed while the scan was running; "
+        "results were saved for the original revision."
+    ),
+    (
+        "Working-tree contents changed while the scan was running; "
+        "results were saved for the original snapshot."
+    ),
+    (
+        "The scan target became unavailable while the scan was running; "
+        "results were saved for the original revision or snapshot."
+    ),
 }
 SARIF_LEVELS = {
     "critical": "error",
@@ -1284,12 +1294,9 @@ def _normalize_unsealed_deep_repository_inventory_strategy(
     *,
     expected_coverage_mode: str | None,
 ) -> None:
-    """Normalize the old Deep workflow label to the ordinary repository inventory."""
+    """Label whole-repository Deep scans as using the repository inventory."""
 
-    if (
-        expected_coverage_mode == "deep_repository"
-        and coverage.get("inventoryStrategy") == "deep_repository_repeated_discovery"
-    ):
+    if expected_coverage_mode == "deep_repository":
         coverage["inventoryStrategy"] = "repository"
 
 

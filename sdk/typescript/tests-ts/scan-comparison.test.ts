@@ -2,13 +2,15 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, win32 } from "node:path";
+import { parse, stringify } from "smol-toml";
 import {
   Codex,
   type CodexOptions,
@@ -91,6 +93,216 @@ describe("semantic scan comparison", () => {
     expect(calls.threadOptions?.threadSource).toBe("security_scan_comparison");
   });
 
+  test.each(["home", "profile", "overrides", "override-away"])(
+    "preserves native command auth selection from %s",
+    async (selection) => {
+      const home = await mkdtemp(
+        join(tmpdir(), "codex-security-command-comparison-"),
+      );
+      temporaryDirectories.push(home);
+      const commandAuth = selection !== "override-away";
+      const provider = {
+        name: "Synthetic",
+        wire_api: "responses",
+        base_url: "https://provider.example/v1",
+        auth: {
+          command: "./synthetic-auth",
+          args: ["original"],
+          refresh_interval_ms: 1234,
+        },
+      };
+      const config = {
+        model_provider:
+          selection === "overrides" || selection === "profile"
+            ? "openai"
+            : "synthetic.provider",
+        model_providers: { "synthetic.provider": provider },
+      };
+      const contents = stringify(config);
+      await writeFile(join(home, "config.toml"), contents);
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: relative(process.cwd(), home),
+        OPENAI_API_KEY: "synthetic-ambient-key",
+        CODEX_API_KEY: "synthetic-other-key",
+      };
+      let captured: CodexOptions | undefined;
+      let threadOptions: ThreadOptions | undefined;
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, options) {
+        captured = (this as unknown as { options: CodexOptions }).options;
+        threadOptions = options;
+        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      });
+      try {
+        await matchScanFindings(
+          { before: [], after: [] },
+          {
+            environment,
+            workingDirectory: home,
+            ...(selection === "overrides"
+              ? {
+                  config: {
+                    codexOverrides: {
+                      model_provider: "synthetic.provider",
+                      model_providers: {
+                        "synthetic.provider": {
+                          auth: { args: ["override"], cwd: "~/helpers" },
+                        },
+                      },
+                    },
+                  },
+                }
+              : selection === "override-away"
+                ? { config: { codexOverrides: { model_provider: "openai" } } }
+                : selection === "profile"
+                  ? {
+                      config: {
+                        codexOverrides: {
+                          profile: "review",
+                          profiles: {
+                            review: { model_provider: "synthetic.provider" },
+                          },
+                        },
+                      },
+                    }
+                  : {}),
+          },
+        );
+        expect(captured?.env?.["CODEX_HOME"]).toBe(home);
+        if (selection === "profile")
+          expect(captured?.config?.["profile"]).toBe("review");
+        if (commandAuth) {
+          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+          expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+          expect(parse(captured!.configOverrides![0]!)).toEqual({
+            model_providers: {
+              "synthetic.provider": {
+                ...provider,
+                auth: {
+                  ...provider.auth,
+                  cwd: selection === "overrides" ? "~/helpers" : home,
+                  args: selection === "overrides" ? ["override"] : ["original"],
+                },
+              },
+            },
+          });
+        } else {
+          expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
+            "synthetic-ambient-key",
+          );
+          expect(captured?.configOverrides).toBeUndefined();
+        }
+        expect(threadOptions).toMatchObject({
+          workingDirectory: home,
+          sandboxMode: "read-only",
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+        });
+        expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+          contents,
+        );
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test("does not substitute managed login for an explicitly configured command provider", async () => {
+    const home = await mkdtemp(join(tmpdir(), "codex-security-command-login-"));
+    temporaryDirectories.push(home);
+    const state = join(home, "state");
+    await mkdir(join(state, "codex-home"), { recursive: true });
+    // Invalid auth remains native Codex's responsibility, without login fallback.
+    await writeFile(
+      join(home, "config.toml"),
+      'model_provider="openai"\nprofile="review"\n[profiles.review]\nmodel_provider="synthetic"\n[model_providers.synthetic.auth]\ncommand=""\n',
+    );
+    const environment = { CODEX_HOME: home, CODEX_SECURITY_STATE_DIR: state };
+    expect(
+      await comparisonEnvironment(environment, async () => {
+        throw new Error("Must not probe managed login");
+      }),
+    ).toEqual(environment);
+  });
+
+  test.each(["chatgpt", "api-key"] as const)(
+    "rejects ambient command auth that conflicts with explicit %s authentication",
+    async (auth) => {
+      const home = await mkdtemp(
+        join(tmpdir(), "codex-security-auth-conflict-"),
+      );
+      temporaryDirectories.push(home);
+      const provider = {
+        name: "Synthetic",
+        base_url: "https://provider.example/v1",
+        wire_api: "responses",
+        auth: { command: "./synthetic-auth" },
+      };
+      const config = {
+        model_provider: "synthetic",
+        model_providers: { synthetic: provider },
+      };
+      await writeFile(join(home, "config.toml"), stringify(config));
+      const options = {
+        auth,
+        config: {},
+        environment: {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          OPENAI_API_KEY: "synthetic-selected-key",
+        },
+        workingDirectory: home,
+      };
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(
+        (options) =>
+          codex.startThread(options!) as ReturnType<Codex["startThread"]>,
+      );
+      try {
+        await expect(
+          matchScanFindings({ before: [], after: [] }, options),
+        ).rejects.toThrow("conflicts with command authentication");
+        expect(startThread).not.toHaveBeenCalled();
+
+        // A complete command provider selected by the caller keeps scan precedence.
+        await matchScanFindings(
+          { before: [], after: [] },
+          { ...options, config: { codexOverrides: config } },
+        );
+        expect(startThread).toHaveBeenCalledTimes(1);
+        startThread.mockClear();
+
+        // An ambient profile must not replace that explicitly selected provider.
+        await writeFile(
+          join(home, "config.toml"),
+          stringify({
+            profile: "ambient",
+            profiles: { ambient: { model_provider: "other" } },
+            model_providers: { other: provider },
+          }),
+        );
+        await expect(
+          matchScanFindings(
+            { before: [], after: [] },
+            { ...options, config: { codexOverrides: config } },
+          ),
+        ).rejects.toThrow("conflicts with command authentication");
+        expect(startThread).not.toHaveBeenCalled();
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
   test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
     const home = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
     temporaryDirectories.push(home);
@@ -115,6 +327,7 @@ describe("semantic scan comparison", () => {
     const { codex } = fakeCodex({ matches: [], uncertain: [] });
     let config: CodexOptions["config"];
     let codexPath: string | undefined;
+    let codexEnvironment: CodexOptions["env"];
     const startThread = spyOn(
       Codex.prototype,
       "startThread",
@@ -122,6 +335,8 @@ describe("semantic scan comparison", () => {
       config = (this as unknown as { options: CodexOptions }).options.config;
       codexPath = (this as unknown as { options: CodexOptions }).options
         .codexPathOverride;
+      codexEnvironment = (this as unknown as { options: CodexOptions }).options
+        .env;
       return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
     });
     try {
@@ -143,7 +358,12 @@ describe("semantic scan comparison", () => {
         synthetic: { command: "synthetic-integration", enabled: false },
         inherited: { enabled: false },
       });
-      expect(codexPath).toBe(executable);
+      expect(codexPath).toBe(
+        process.platform === "win32"
+          ? win32.toNamespacedPath(executable)
+          : executable,
+      );
+      expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
       const effective = await runCodexCommand(
         resolveCodexCommand(environment),
         [
@@ -210,7 +430,7 @@ describe("semantic scan comparison", () => {
     const provider = {
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       CODEX_SECURITY_SCAN_ID: "scan",
-      CODEX_HOME: "/provider-home",
+      CODEX_HOME: join(root, "provider-home"),
       CODEX_CLI_PATH: "/compatible-codex",
       CODEX_SAFETY_IDENTIFIER: "synthetic-user",
       FIREWORKS_API_KEY: "provider-key",
@@ -398,7 +618,7 @@ describe("semantic scan comparison", () => {
     },
   );
 
-  test("compares all findings with one restricted structured-output turn", async () => {
+  test("compares small inputs with one restricted structured-output turn", async () => {
     const input: ScanComparisonInput = {
       before: [finding("before-1"), finding("before-2")],
       after: [finding("after-1"), finding("after-2"), finding("after-3")],
@@ -445,7 +665,7 @@ describe("semantic scan comparison", () => {
     });
     expect(calls.turnOptions).toMatchObject({ signal: controller.signal });
     expect(calls.turnOptions?.outputSchema).toMatchObject({
-      required: ["matches", "uncertain"],
+      required: ["matches", "uncertain", "related"],
     });
     expect(calls.prompt).toContain(
       "same underlying root cause and remediation",
@@ -509,6 +729,7 @@ describe("semantic scan comparison", () => {
                 {
                   afterScanId: "current",
                   afterFindings: [after],
+                  knownFindingGroups: [["dismissed", "historical-alias"]],
                   beforeScans: [
                     {
                       scanId: "another-target",
@@ -548,7 +769,11 @@ describe("semantic scan comparison", () => {
         };
       },
     });
-    expect(input).toEqual({ before: [open, dismissed], after: [after] });
+    expect(input).toEqual({
+      before: [open, dismissed],
+      after: [after],
+      knownFindingGroups: [["dismissed", "historical-alias"]],
+    });
     expect(commands.map(({ args: [command] }) => command)).toEqual([
       "list-unmatched-scan-pairs",
       "save-scan-comparison",
@@ -655,6 +880,171 @@ describe("semantic scan comparison", () => {
     ).toEqual(response);
   });
 
+  test("honors confirmed historical groups and preserves distinct related findings", async () => {
+    const input = {
+      before: [
+        { occurrenceId: "before-known", findingId: "known-a" },
+        { occurrenceId: "before-related", findingId: "related-a" },
+      ],
+      after: [
+        { occurrenceId: "after-known", findingId: "known-b" },
+        { occurrenceId: "after-related", findingId: "related-b" },
+      ],
+      knownFindingGroups: [["known-a", "known-b"]],
+    };
+    const response = {
+      matches: [
+        {
+          beforeOccurrenceIds: ["before-known"],
+          afterOccurrenceIds: ["after-known"],
+          confidence: "high" as const,
+          reason: "Previously confirmed root cause.",
+        },
+      ],
+      uncertain: [],
+      related: [
+        {
+          beforeOccurrenceId: "before-related",
+          afterOccurrenceId: "after-related",
+          reason: "Related controls remain independently vulnerable.",
+        },
+      ],
+    };
+    const { codex, calls } = fakeCodex(response);
+
+    expect(await matchScanFindings(input, { codex })).toEqual(response);
+    expect(calls.prompt).toContain(JSON.stringify(input.knownFindingGroups));
+  });
+
+  test("rejects uncertainty that contradicts a confirmed historical group", async () => {
+    const input = {
+      before: [{ occurrenceId: "before", findingId: "known-a" }],
+      after: [{ occurrenceId: "after", findingId: "known-b" }],
+      knownFindingGroups: [["known-a", "known-b"]],
+    };
+    const response = {
+      matches: [],
+      uncertain: [
+        {
+          beforeOccurrenceId: "before",
+          afterOccurrenceId: "after",
+          reason: "Contradicts a saved confirmed identity.",
+        },
+      ],
+    };
+
+    await expect(
+      matchScanFindings(input, { codex: fakeCodex(response).codex }),
+    ).rejects.toThrow("confirmed finding groups");
+  });
+
+  test.each(["omitted", "uncertain", "related"] as const)(
+    "rejects an %s result across overlapping confirmed finding groups",
+    async (decision) => {
+      const input = {
+        before: [{ occurrenceId: "before", findingId: "identity-a" }],
+        after: [{ occurrenceId: "after", findingId: "identity-c" }],
+        knownFindingGroups: [
+          ["identity-a", "identity-b"],
+          ["identity-b", "identity-c"],
+        ],
+      };
+      const pair = {
+        beforeOccurrenceId: "before",
+        afterOccurrenceId: "after",
+        reason: "Contradicts a transitively confirmed identity.",
+      };
+      const response = {
+        matches: [],
+        uncertain: decision === "uncertain" ? [pair] : [],
+        ...(decision === "related" ? { related: [pair] } : {}),
+      };
+
+      await expect(
+        matchScanFindings(input, { codex: fakeCodex(response).codex }),
+      ).rejects.toThrow("confirmed finding groups");
+    },
+  );
+
+  test("rejects uncertainty between occurrences of the same stable finding", async () => {
+    const input = {
+      before: [{ occurrenceId: "before", findingId: "shared-identity" }],
+      after: [{ occurrenceId: "after", findingId: "shared-identity" }],
+    };
+    const response = {
+      matches: [],
+      uncertain: [
+        {
+          beforeOccurrenceId: "before",
+          afterOccurrenceId: "after",
+          reason: "Incorrectly treats the same stable identity as uncertain.",
+        },
+      ],
+    };
+
+    await expect(
+      matchScanFindings(input, { codex: fakeCodex(response).codex }),
+    ).rejects.toThrow("confirmed finding groups");
+  });
+
+  test.each(["omitted", "split"] as const)(
+    "rejects %s confirmed matches for the same stable finding identity",
+    async (scenario) => {
+      const input = {
+        before: [
+          { occurrenceId: "before-a", findingId: "shared-identity" },
+          { occurrenceId: "before-b", findingId: "shared-identity" },
+        ],
+        after: [
+          { occurrenceId: "after-a", findingId: "shared-identity" },
+          { occurrenceId: "after-b", findingId: "shared-identity" },
+        ],
+      };
+      const response = {
+        matches:
+          scenario === "omitted"
+            ? []
+            : input.before.map(({ occurrenceId }, index) => ({
+                beforeOccurrenceIds: [occurrenceId],
+                afterOccurrenceIds: [input.after[index]!.occurrenceId],
+                confidence: "high" as const,
+                reason: "Incorrectly splits one stable finding identity.",
+              })),
+        uncertain: [],
+      };
+
+      await expect(
+        matchScanFindings(input, { codex: fakeCodex(response).codex }),
+      ).rejects.toThrow("confirmed finding groups");
+    },
+  );
+
+  test("rejects a match that splits a confirmed historical group", async () => {
+    const input = {
+      before: [
+        { occurrenceId: "before-a", findingId: "known-a" },
+        { occurrenceId: "before-b", findingId: "known-b" },
+      ],
+      after: [{ occurrenceId: "after", findingId: "new" }],
+      knownFindingGroups: [["known-a", "known-b"]],
+    };
+    const response = {
+      matches: [
+        {
+          beforeOccurrenceIds: ["before-a"],
+          afterOccurrenceIds: ["after"],
+          confidence: "high" as const,
+          reason: "Incorrectly separates a confirmed identity.",
+        },
+      ],
+      uncertain: [],
+    };
+
+    await expect(
+      matchScanFindings(input, { codex: fakeCodex(response).codex }),
+    ).rejects.toThrow("confirmed finding groups");
+  });
+
   const match = (beforeOccurrenceIds = ["before-1"]) => ({
     beforeOccurrenceIds,
     afterOccurrenceIds: ["after-1"],
@@ -707,6 +1097,42 @@ describe("semantic scan comparison", () => {
       label: "duplicate uncertain pairs",
       result: { matches: [], uncertain: [uncertain(), uncertain()] },
       error: "duplicate uncertain pair",
+    },
+    {
+      label: "invented related occurrences",
+      result: {
+        matches: [],
+        uncertain: [],
+        related: [uncertain("invented")],
+      },
+      error: "invalid related pair",
+    },
+    {
+      label: "duplicate related pairs",
+      result: {
+        matches: [],
+        uncertain: [],
+        related: [uncertain(), uncertain()],
+      },
+      error: "invalid related pair",
+    },
+    {
+      label: "related pairs that contradict confirmed matches",
+      result: {
+        matches: [match()],
+        uncertain: [],
+        related: [uncertain()],
+      },
+      error: "invalid related pair",
+    },
+    {
+      label: "related pairs that duplicate uncertainty",
+      result: {
+        matches: [],
+        uncertain: [uncertain()],
+        related: [uncertain()],
+      },
+      error: "invalid related pair",
     },
   ])("rejects $label", async ({ result, error }) => {
     const { codex } = fakeCodex(result);

@@ -404,6 +404,16 @@ try {
     { cwd: consumer },
   );
 
+  run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `const sdk = await import(${JSON.stringify(`${packageManifest.name}/server`)}); for (const name of ["OpenAiFindingEmbedder", "SqliteFindingsStore", "startFindingsServer"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
+    ],
+    { cwd: consumer },
+  );
+
   await cp(
     join(packageRoot, "scripts", "fixtures", "package-consumer.ts"),
     join(consumer, "consumer.ts"),
@@ -663,10 +673,19 @@ try {
     { cwd: consumer },
   );
 
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "fixtures", "package-behavior.mjs"),
+      installedRoot,
+      consumer,
+    ],
+    { cwd: consumer },
+  );
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, dashboard assets, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, dashboard assets, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {

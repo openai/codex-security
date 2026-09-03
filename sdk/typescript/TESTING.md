@@ -29,6 +29,9 @@ tracked by Git. Required CI runs the same check before installing dependencies.
 
 For CI's full archive inspection, pass the exact `.tgz` path printed by
 `pnpm pack` to `pnpm run check:package`.
+These checks include native Node contracts for SDK completion, cancellation,
+close cleanup, and CLI terminal sanitization. They use the installed package,
+controlled model output, and the real workbench without live model credentials.
 
 Tests run in random order by default. To replay a failure, pass the seed from
 Bun's summary to `pnpm run test --seed 12345`.
@@ -88,6 +91,9 @@ workflow run, using the commit SHA in the artifact name. Every supported Node
 runtime still installs and inspects the package, including a strict NodeNext
 TypeScript consumer, the actual CLI, credential locking, dashboard assets, and
 a nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
+Typechecking and formatting run once in an independent required job, so package
+consumers do not wait for those checks. Package compilation and archive
+validation still finish before the test jobs start.
 
 The full Bun suite runs once per OS under Node 22: three file shards on Linux
 and macOS, and seven on Windows. The other Node versions run the installed

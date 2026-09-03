@@ -825,6 +825,17 @@ MIGRATIONS = (
         ALTER TABLE finding_workflow_reviews ADD COLUMN contract_digest TEXT;
         """,
     ),
+    (
+        40,
+        "index finding identity and comparison history",
+        """
+        CREATE INDEX finding_occurrences_by_finding
+        ON finding_occurrences(finding_id, id);
+
+        CREATE INDEX scan_comparisons_by_after_scan
+        ON scan_comparisons(after_scan_id, before_scan_id);
+        """,
+    ),
 )
 
 
@@ -1106,6 +1117,10 @@ def normalize_pre_release_execution_profile_migrations(
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
+    connection.execute(
+        "UPDATE schema_migrations SET version = 40 WHERE version = 33 AND name = ?",
+        ("index finding identity and comparison history",),
+    )
 
     completion_warning_migration = connection.execute(
         "SELECT name FROM schema_migrations WHERE version = 25"

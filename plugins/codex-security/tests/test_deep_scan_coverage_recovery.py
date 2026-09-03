@@ -73,8 +73,10 @@ def recover_saved_scan(
         pytest.param(
             {
                 "warnings": [
-                    "Repository HEAD changed while the scan was running; "
-                    "results were saved for the original revision."
+                    (
+                        "Repository HEAD changed while the scan was running; "
+                        "results were saved for the original revision."
+                    )
                 ],
                 "expected": "complete",
             },
