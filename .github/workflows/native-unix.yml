@@ -115,11 +115,18 @@ jobs:
           node check.mjs
           native_node="$(command -v node)"
           PATH= "$native_node" proof.mjs
+      - name: Prepare shared native notices
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: node notices.mjs
       - name: Upload verified native artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-platform-${{ matrix.artifact }}-${{ github.sha }}
-          path: plugins/codex-security/native/dist/*/*.node
+          path: |
+            plugins/codex-security/native/dist/*/*.node
+            plugins/codex-security/native/dist/THIRD_PARTY_NOTICES.txt
+            plugins/codex-security/native/dist/COPYRIGHT-library.html
+            plugins/codex-security/native/dist/licenses/*.txt
           if-no-files-found: error
           overwrite: true
           retention-days: 7

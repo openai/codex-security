@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
@@ -21,9 +21,14 @@ export async function buildMcpApp({ output }) {
 
   await writeRuntime("server", "main.ts");
   for (const target of [
-    "darwin-arm64", "darwin-x64",
-    "linux-arm64-gnu", "linux-arm64-musl", "linux-x64-gnu", "linux-x64-musl",
-    "win32-arm64", "win32-x64"
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64-gnu",
+    "linux-arm64-musl",
+    "linux-x64-gnu",
+    "linux-x64-musl",
+    "win32-arm64",
+    "win32-x64"
   ]) {
     const name = target.startsWith("win32-") ? "windows.node" : "unix.node";
     const destination = join(mcpDir, "native", target);
@@ -32,6 +37,15 @@ export async function buildMcpApp({ output }) {
       join(root, "../native/prebuilt", target, name),
       join(destination, name)
     );
+  }
+  for (const path of [
+    "THIRD_PARTY_NOTICES.txt", "COPYRIGHT-library.html",
+    "licenses/MIT.txt", "licenses/Apache-2.0.txt",
+    "licenses/Unicode-3.0.txt", "licenses/BSD-2-Clause.txt"
+  ]) {
+    const destination = join(mcpDir, "native", path);
+    await mkdir(dirname(destination), { recursive: true });
+    await copyFile(join(root, "../native/prebuilt", path), destination);
   }
 
   async function writeRuntime(name, entryPoint) {
