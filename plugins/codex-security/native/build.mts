@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { binaryPath, output, root } from "./binding.mjs";
 import { checkPrivatePaths } from "./check.mjs";
+import { libc, nativeTarget } from "./platform.mjs";
 
 let windowsTarget: string | undefined;
 if (process.platform === "win32") {
@@ -32,6 +33,7 @@ const inheritedFlags =
 const flags = [
   ...inheritedFlags,
   ...(windowsTarget === undefined ? [] : ["-C", "target-feature=+crt-static"]),
+  ...(libc === "musl" ? ["-C", "target-feature=-crt-static"] : []),
   `--remap-path-prefix=${root}=codex-security-native`,
   `--remap-path-prefix=${cargoHome}=cargo`,
   `--remap-path-prefix=${sysroot}=rust-toolchain`,
@@ -61,4 +63,4 @@ const library = join(
 checkPrivatePaths(readFileSync(library), [root, cargoHome, sysroot, target]);
 mkdirSync(output, { recursive: true });
 copyFileSync(library, binaryPath);
-console.log(`Built ${process.platform}-${process.arch} Node-API 8 primitives.`);
+console.log(`Built ${nativeTarget} Node-API 8 primitives.`);
