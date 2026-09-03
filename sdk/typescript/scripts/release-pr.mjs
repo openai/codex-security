@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { assertStableVersion, releaseVersion } from "./release-automation.mjs";
@@ -513,7 +514,7 @@ export async function reconcileReleasePullRequest({
   github,
   dryRun = true,
 }) {
-  // Re-read only when main or the proposal actually moves; API failures are not retried blindly.
+  // Rebuild the plan only when main or the proposal actually moves.
   for (;;) {
     const mainSha = await branchHead(github, "main");
     const history = await readReleaseHistory(repo, mainSha, github);
@@ -630,24 +631,33 @@ export async function reconcileReleasePullRequest({
 export function createGitHubClient(repository, token, fetcher = fetch) {
   const apiRoot = `https://api.github.com/repos/${repository}/`;
   async function responseFor(method, path, body) {
-    const response = await fetcher(`${apiRoot}${path}`, {
-      method,
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${token}`,
-        "X-GitHub-Api-Version": "2026-03-10",
-        "Content-Type": "application/json",
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    if (!response.ok) {
+    for (let retry = 0; ; retry += 1) {
+      const response = await fetcher(`${apiRoot}${path}`, {
+        method,
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "X-GitHub-Api-Version": "2026-03-10",
+          "Content-Type": "application/json",
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      if (response.ok) return response;
+      if (
+        method === "GET" &&
+        retry < 2 &&
+        [500, 502, 503, 504].includes(response.status)
+      ) {
+        await response.body?.cancel();
+        await delay(1000 * 2 ** retry);
+        continue;
+      }
       const error = new Error(
         `GitHub ${method} ${path} failed with HTTP ${response.status}.`,
       );
       error.status = response.status;
       throw error;
     }
-    return response;
   }
   return {
     repository,

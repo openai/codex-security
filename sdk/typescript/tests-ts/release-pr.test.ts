@@ -435,6 +435,82 @@ class FakeGitHub {
 }
 
 describe("GitHub request transport", () => {
+  test("recovers from a temporary server error without duplicating paginated results", async () => {
+    const pages: number[] = [];
+    const github = createGitHubClient(
+      "example/release-fixture",
+      "synthetic-release-token",
+      async (url, options) => {
+        expect(options.method).toBe("GET");
+        const page = Number(new URL(url).searchParams.get("page"));
+        pages.push(page);
+        if (pages.length === 2) {
+          return Response.json(
+            { message: "Temporary failure" },
+            { status: 500 },
+          );
+        }
+        return Response.json([{ number: page }], {
+          headers:
+            page === 1
+              ? {
+                  link: '<https://api.github.com/repos/example/release-fixture/pulls?per_page=1&page=2>; rel="next"',
+                }
+              : {},
+        });
+      },
+    );
+    expect(await github.list("pulls?per_page=1")).toEqual([
+      { number: 1 },
+      { number: 2 },
+    ]);
+    expect(pages).toEqual([1, 2, 2]);
+  });
+
+  test("reports a persistent server error after bounded read retries", async () => {
+    let requests = 0;
+    const github = createGitHubClient(
+      "example/release-fixture",
+      "synthetic-release-token",
+      async () => {
+        requests++;
+        return Response.json({ message: "Unavailable" }, { status: 503 });
+      },
+    );
+    await expect(
+      github.request("GET", "git/ref/heads/main"),
+    ).rejects.toMatchObject({
+      status: 503,
+      message: "GitHub GET git/ref/heads/main failed with HTTP 503.",
+    });
+    expect(requests).toBe(3);
+  });
+
+  test.each([
+    ["POST", 500],
+    ["PATCH", 503],
+    ["GET", 403],
+    ["GET", 404],
+    ["GET", 422],
+  ])(
+    "does not replay a %s request that fails with HTTP %i",
+    async (method, status) => {
+      let requests = 0;
+      const github = createGitHubClient(
+        "example/release-fixture",
+        "synthetic-release-token",
+        async () => {
+          requests++;
+          return Response.json({ message: "Failed request" }, { status });
+        },
+      );
+      await expect(github.request(method, "pulls")).rejects.toMatchObject({
+        status,
+      });
+      expect(requests).toBe(1);
+    },
+  );
+
   test("creates and updates a draft through serialized requests, including a concurrent commit conflict", async () => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
