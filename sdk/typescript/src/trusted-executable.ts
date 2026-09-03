@@ -1,7 +1,9 @@
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import {
+  basename,
   delimiter,
+  dirname,
   extname,
   isAbsolute,
   join,
@@ -92,7 +94,18 @@ export async function resolveTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
-      executable ??= pathLike ? canonical : current.path;
+      const canonicalParent = await realpath(dirname(current.path)).catch(
+        () => null,
+      );
+      const invocationPath =
+        canonicalParent === null
+          ? current.path
+          : join(canonicalParent, basename(current.path));
+      // Explicit launchers outside the protected root retain invocation semantics
+      // such as Python virtualenv selection. Repository-local links still execute
+      // only the canonical target that passed the trust check.
+      executable ??=
+        pathLike && isWithin(root, invocationPath) ? canonical : current.path;
     } catch {
       continue;
     }
