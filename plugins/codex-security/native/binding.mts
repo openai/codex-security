@@ -5,7 +5,10 @@ import { fileURLToPath } from "node:url";
 
 export const root = dirname(fileURLToPath(import.meta.url));
 export const output = join(root, "dist", `${process.platform}-${process.arch}`);
-export const binaryPath = join(output, "unix.node");
+export const binaryPath = join(
+  output,
+  process.platform === "win32" ? "windows.node" : "unix.node",
+);
 
 export interface SyscallResult {
   value: number;

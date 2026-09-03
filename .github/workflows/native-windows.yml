@@ -1,0 +1,89 @@
+name: native-windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  primitives:
+    name: primitives / win32-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            arch: x64
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: plugins/codex-security/native
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: package.json
+      - name: Set up Node.js 22
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+          architecture: ${{ matrix.arch }}
+      - name: Compile TypeScript tools
+        working-directory: .
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --dir sdk/typescript run build:ci
+      - name: Set up Rust
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy --target ${{ matrix.target }}
+      - name: Check Rust source
+        run: |
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked --target ${{ matrix.target }} -- -D warnings
+      - name: Build and verify with Node.js 22
+        run: |
+          node build.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node check.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nativeNode = (Get-Command node).Source
+          $env:PATH = ""
+          & $nativeNode --expose-gc proof-windows.mjs
+      - name: Set up Node.js 20
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "20.0.0"
+          architecture: ${{ matrix.arch }}
+      - name: Verify the same artifact with Node.js 20
+        run: |
+          node check.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nativeNode = (Get-Command node).Source
+          $env:PATH = ""
+          & $nativeNode --expose-gc proof-windows.mjs
+      - name: Upload verified native artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-win32-${{ matrix.arch }}-${{ github.sha }}
+          path: plugins/codex-security/native/dist/win32-${{ matrix.arch }}/windows.node
+          if-no-files-found: error
+          retention-days: 7
