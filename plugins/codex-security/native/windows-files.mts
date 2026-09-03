@@ -1,9 +1,6 @@
 import { win32 } from "node:path";
-import {
-  windowsFlags as flags,
-  type WindowsBinding,
-  type WindowsHandle,
-} from "./windows-binding.mjs";
+import type { WindowsBinding, WindowsHandle } from "./windows-binding.mjs";
+import { windowsFlags as flags } from "./windows-flags.mjs";
 
 export const widePath = (path: string): Buffer => Buffer.from(path, "utf16le");
 export const pathText = (path: Buffer): string => path.toString("utf16le");

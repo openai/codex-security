@@ -116,6 +116,15 @@ describe("bundled plugin build", () => {
         .map((path) => path.slice(4))
         .sort(),
     );
+    const helper = await execFileAsync("node", [
+      join(destination, "helpers.mjs"),
+      "resolve-security-md",
+      "--repo",
+      root,
+      "--list",
+    ]);
+    expect(helper.stdout).toBe("[]\n");
+    expect(helper.stderr).toBe("");
   });
 
   test("builds from a source snapshot without Git metadata", async () => {

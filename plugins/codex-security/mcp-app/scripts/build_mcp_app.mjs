@@ -27,6 +27,7 @@ export async function buildMcpApp({ output }) {
     await mkdir(dirname(destination), { recursive: true });
     await copyFile(join(root, "../native/prebuilt", path), destination);
   }
+  await writeRuntime("helpers", "helpers-main.ts");
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");

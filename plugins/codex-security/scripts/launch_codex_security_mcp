@@ -6,6 +6,12 @@ export PATH
 
 launcher_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 server_path=$launcher_dir/../mcp/server.mjs
+if [ "${1:-}" = "--helper" ]; then
+  server_path=$launcher_dir/../mcp/helpers.mjs
+  shift
+  # Node decodes argv and HOME as UTF-8; preserve POSIX bytes first.
+  set -- --helper "$(printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | od -An -v -tx1 | tr -d ' \n')"
+fi
 cache_root=${XDG_CACHE_HOME:-${HOME:-}/.cache}
 codex_resources=
 case "${CODEX_CLI_PATH:-}" in

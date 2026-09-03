@@ -7,8 +7,10 @@
 Compile the full `SECURITY.md` policy for a file or directory with:
 
 ```
-<python_command> <plugin_dir>/scripts/resolve_security_md.py --repo <repo_root> --scope <file_or_directory> --out <output_path_or_dash>
+<plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --scope <file_or_directory> --out <output_path_or_dash>
 ```
+
+On Windows, use `launch_codex_security_mcp.cmd` with the same arguments. The launcher reuses the plugin's configured or bundled Node runtime and preserves the working directory for relative helper paths.
 
 The resolver concatenates each nonempty `SECURITY.md` from the scan root through the target's directory, in root-to-leaf order. A `SECURITY.md` applies to the directory that contains it and all descendant directories. If policies conflict, the policy located closest to the target takes precedence.
 

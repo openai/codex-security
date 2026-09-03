@@ -56,6 +56,8 @@ jobs:
         run: |
           node build.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node proof-policy-windows.mjs build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node check.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test windows-files.test.mjs
@@ -63,6 +65,8 @@ jobs:
           $nativeNode = (Get-Command node).Source
           $env:PATH = ""
           & $nativeNode --expose-gc proof-windows.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $nativeNode proof-policy-windows.mjs
       - name: Compare the existing Python completion lock
         run: |
           $python = (Get-Command python -ErrorAction Stop).Source
@@ -81,6 +85,8 @@ jobs:
           $nativeNode = (Get-Command node).Source
           $env:PATH = ""
           & $nativeNode --expose-gc proof-windows.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $nativeNode proof-policy-windows.mjs
       - name: Upload verified native artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
