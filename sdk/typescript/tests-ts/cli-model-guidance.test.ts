@@ -30,6 +30,25 @@ const models: CatalogModel[] = [
   },
 ];
 
+function captureWarnings(isTTY = false) {
+  const output = capture(isTTY);
+  const warnings: string[] = [];
+  return {
+    ...output,
+    warnings,
+    stream: {
+      ...output.stream,
+      write(value: string | Uint8Array): boolean {
+        const message = value.toString();
+        if (message.startsWith("codex-security: warning:")) {
+          warnings.push(message);
+        }
+        return output.stream.write(value);
+      },
+    },
+  };
+}
+
 function runtimeWithGuidance(environment: NodeJS.ProcessEnv = {}) {
   const deps = dependencies({ environment });
   const originalCreate = deps.createSecurity;
@@ -38,7 +57,8 @@ function runtimeWithGuidance(environment: NodeJS.ProcessEnv = {}) {
   let confirmations = 0;
   deps.scanModelPrompt = {
     isInteractive: () => true,
-    confirm: async () => {
+    confirm: async (_question, defaultValue) => {
+      expect(defaultValue).toBe(false);
       confirmations += 1;
       return true;
     },
@@ -71,9 +91,9 @@ function runtimeWithGuidance(environment: NodeJS.ProcessEnv = {}) {
 }
 
 describe("CLI scan model guidance", () => {
-  test("passes accepted per-scan model and effort selections to the runtime", async () => {
+  test("applies model and effort guidance with one warning and confirmation", async () => {
     const runtime = runtimeWithGuidance();
-    const stderr = capture(true);
+    const stderr = captureWarnings(true);
     expect(
       await main(
         ["scan", "--model", "scan-model-old", "--effort", "high"],
@@ -86,8 +106,11 @@ describe("CLI scan model guidance", () => {
       model: "scan-model-new",
       reasoningEffort: "xhigh",
     });
-    expect(runtime.confirmations()).toBe(2);
+    expect(runtime.confirmations()).toBe(1);
     expect(runtime.discoveries()).toBe(1);
+    expect(stderr.warnings).toHaveLength(1);
+    expect(stderr.warnings[0]).toContain("scan-model-new");
+    expect(stderr.warnings[0]).toContain("xhigh");
   });
 
   test.each([
@@ -106,7 +129,7 @@ describe("CLI scan model guidance", () => {
     async ({ argv, tty, environment }) => {
       const runtime = runtimeWithGuidance(environment);
       const stdout = capture();
-      const stderr = capture(tty);
+      const stderr = captureWarnings(tty);
       expect(
         await main(
           ["scan", "--model", "scan-model-old", "--effort", "high", ...argv],
@@ -120,8 +143,9 @@ describe("CLI scan model guidance", () => {
         reasoningEffort: "high",
       });
       expect(runtime.confirmations()).toBe(0);
-      expect(stderr.text()).toContain("scan-model-new");
-      expect(stderr.text()).toContain("xhigh");
+      expect(stderr.warnings).toHaveLength(1);
+      expect(stderr.warnings[0]).toContain("scan-model-new");
+      expect(stderr.warnings[0]).toContain("xhigh");
       expect(stdout.text()).not.toContain("codex-security: warning:");
     },
   );
@@ -148,6 +172,7 @@ describe("CLI scan model guidance", () => {
     "reruns with %j warn without model prompts",
     async ({ outputArguments }) => {
       const runtime = runtimeWithGuidance();
+      const stderr = captureWarnings(true);
       runtime.deps.runWorkbench = async () => ({
         recipe: {
           repository: "/synthetic/repository",
@@ -160,11 +185,14 @@ describe("CLI scan model guidance", () => {
         await main(
           ["scans", "rerun", "scan-original", ...outputArguments],
           capture().stream,
-          capture(true).stream,
+          stderr.stream,
           runtime.deps,
         ),
       ).toBe(0);
       expect(runtime.confirmations()).toBe(0);
+      expect(stderr.warnings).toHaveLength(1);
+      expect(stderr.warnings[0]).toContain("scan-model-new");
+      expect(stderr.warnings[0]).toContain("xhigh");
       expect(runtime.selection()).toEqual({
         model: "scan-model-old",
         reasoningEffort: "high",

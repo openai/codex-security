@@ -498,12 +498,13 @@ sandbox = "unelevated"
 
 Before scanning, the CLI warns when a cyber model other than Astra is selected,
 offers available upgrades recommended by Codex's model catalog, and recommends
-`xhigh` when the selected reasoning effort is lower. An interactive terminal
-asks before changing the model or effort, and accepted changes apply only to
-the current command. Headless, JSON, and CI runs print warnings to stderr and
-keep the configured settings. If model availability cannot be checked, the
-scan continues without changing its model or effort. Dry runs do not contact
-the model catalog.
+`xhigh` when the selected reasoning effort is lower. This guidance appears in
+one combined warning. An interactive terminal offers one confirmation, defaulting
+to No, to apply all suggested model and effort changes for the current command.
+Headless, JSON, and CI runs print the combined warning to stderr without prompting
+and keep the configured settings. If model availability cannot be checked, the
+scan continues without changing its model or effort. Dry runs do not contact the
+model catalog.
 
 Use `--model` to choose a model and `--effort minimal|low|medium|high|xhigh|max`
 for reasoning effort. Repeat `--codex KEY=VALUE` for other TOML settings:

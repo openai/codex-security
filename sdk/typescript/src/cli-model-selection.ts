@@ -29,29 +29,25 @@ export function createScanModelSelector(options: {
     signal: AbortSignal,
   ): Promise<ScanModelConfiguration> {
     let availableModels: readonly CatalogModel[] | undefined;
-    const warn = (message: string): void => {
-      try {
-        options.write(`codex-security: warning: ${message}\n`);
-      } catch {}
-    };
+    const warnings: string[] = [];
     try {
       availableModels = await loadModels();
     } catch {
       signal.throwIfAborted();
-      warn(
+      warnings.push(
         "Could not check available scan models. Continuing with the configured model.",
       );
     }
     signal.throwIfAborted();
     const interactive = options.interactive && options.prompt.isInteractive();
-    const selected = { ...configuration };
-    let advice = getScanModelAdvice({ ...selected, availableModels });
-    if (advice.cyberWarning !== undefined) warn(advice.cyberWarning);
+    const proposed = { ...configuration };
+    let advice = getScanModelAdvice({ ...configuration, availableModels });
+    if (advice.cyberWarning !== undefined) warnings.push(advice.cyberWarning);
 
     const upgrade = advice.modelUpgrade;
     if (upgrade !== undefined) {
-      warn(
-        `${upgrade.model} is available as an upgrade to ${selected.model} and may give better scanning results.`,
+      warnings.push(
+        `${upgrade.model} is available as an upgrade to ${configuration.model} and may give better scanning results.`,
       );
       if (
         options.maxCostUsd !== undefined &&
@@ -60,62 +56,59 @@ export function createScanModelSelector(options: {
           output_tokens: 0,
         }) === null
       ) {
-        warn(
+        warnings.push(
           `Cost tracking is unavailable for ${upgrade.model}. Keeping the configured model to preserve the scan cost limit.`,
         );
       } else if (
         upgrade.supportedReasoningEfforts.some(
-          ({ reasoningEffort }) => reasoningEffort === selected.reasoningEffort,
+          ({ reasoningEffort }) =>
+            reasoningEffort === configuration.reasoningEffort,
         )
       ) {
-        if (
-          interactive &&
-          (await abortable(
-            () =>
-              options.prompt.confirm(
-                `Use ${upgrade.model} for this scan?`,
-                false,
-                signal,
-              ),
-            signal,
-          ))
-        ) {
-          selected.model = upgrade.model;
-          advice = getScanModelAdvice({ ...selected, availableModels });
-        }
+        proposed.model = upgrade.model;
+        advice = getScanModelAdvice({ ...proposed, availableModels });
       } else {
-        warn(
-          `${upgrade.model} does not support the configured ${selected.reasoningEffort} reasoning effort. Keeping the configured model and effort.`,
+        warnings.push(
+          `${upgrade.model} does not support the configured ${configuration.reasoningEffort} reasoning effort. Keeping the configured model.`,
         );
       }
     }
     if (advice.recommendXhigh) {
-      warn(
-        `The configured reasoning effort is ${selected.reasoningEffort}. Use xhigh for the best scanning results.`,
+      warnings.push(
+        `The configured reasoning effort is ${configuration.reasoningEffort}. Use xhigh for the best scanning results.`,
       );
       const model = availableModels?.find(
         (candidate) =>
-          candidate.model === selected.model || candidate.id === selected.model,
+          candidate.model === proposed.model || candidate.id === proposed.model,
       );
       if (
-        interactive &&
         model?.supportedReasoningEfforts.some(
           ({ reasoningEffort }) => reasoningEffort === "xhigh",
-        ) &&
-        (await abortable(
-          () =>
-            options.prompt.confirm(
-              "Use xhigh reasoning for this scan?",
-              false,
-              signal,
-            ),
-          signal,
-        ))
+        )
       ) {
-        selected.reasoningEffort = "xhigh";
+        proposed.reasoningEffort = "xhigh";
       }
     }
+    if (warnings.length > 0) {
+      try {
+        options.write(`codex-security: warning: ${warnings.join(" ")}\n`);
+      } catch {}
+    }
+    const changeModel = proposed.model !== configuration.model;
+    const changeEffort =
+      proposed.reasoningEffort !== configuration.reasoningEffort;
+    if (interactive && (changeModel || changeEffort)) {
+      const question = changeModel
+        ? `Use ${proposed.model}${changeEffort ? " with xhigh reasoning" : ""} for this scan?`
+        : "Use xhigh reasoning for this scan?";
+      const accepted = await abortable(
+        () => options.prompt.confirm(question, false, signal),
+        signal,
+      );
+      signal.throwIfAborted();
+      if (accepted) return proposed;
+    }
     signal.throwIfAborted();
-    return selected;
+    return { ...configuration };
   }
 }

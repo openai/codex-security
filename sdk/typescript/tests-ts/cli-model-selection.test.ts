@@ -63,14 +63,11 @@ function fixture(
 }
 
 describe("CLI scan model selection", () => {
-  test("requires independent affirmative choices for model and effort changes", async () => {
-    for (const answers of [
-      [false, false],
-      [true, false],
-      [false, true],
-      [true, true],
-    ]) {
-      const { select, confirmations, controller } = fixture({ answers });
+  test("accepts or declines model and effort changes together with one default-no confirmation", async () => {
+    for (const accepted of [false, true]) {
+      const { select, warnings, confirmations, controller } = fixture({
+        answers: [accepted],
+      });
       const configuration = { model: "model-old", reasoningEffort: "high" };
       expect(
         await select(
@@ -79,16 +76,19 @@ describe("CLI scan model selection", () => {
           controller.signal,
         ),
       ).toEqual({
-        model: answers[0] ? "model-new" : "model-old",
-        reasoningEffort: answers[1] ? "xhigh" : "high",
+        model: accepted ? "model-new" : "model-old",
+        reasoningEffort: accepted ? "xhigh" : "high",
       });
       expect(configuration).toEqual({
         model: "model-old",
         reasoningEffort: "high",
       });
-      expect(confirmations).toHaveLength(2);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("model-new");
+      expect(warnings[0]).toContain("xhigh");
+      expect(confirmations).toHaveLength(1);
       expect(confirmations[0]?.question).toContain("model-new");
-      expect(confirmations[1]?.question).toContain("xhigh");
+      expect(confirmations[0]?.question).toContain("xhigh");
       expect(
         confirmations.every(({ defaultValue }) => defaultValue === false),
       ).toBe(true);
@@ -96,6 +96,80 @@ describe("CLI scan model selection", () => {
         confirmations.every(({ signal }) => signal === controller.signal),
       ).toBe(true);
     }
+  });
+
+  test("combines cyber, model, and effort guidance into one warning", async () => {
+    const { select, warnings, confirmations, controller } = fixture({
+      answers: [true],
+    });
+    expect(
+      await select(
+        { model: "model-cyber", reasoningEffort: "high" },
+        async () => [
+          catalogModel("model-cyber", { upgrade: "model-new" }),
+          catalogModel("model-new", { isDefault: true }),
+        ],
+        controller.signal,
+      ),
+    ).toEqual({ model: "model-new", reasoningEffort: "xhigh" });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("dynamic exploitation");
+    expect(warnings[0]).toContain("available as an upgrade");
+    expect(warnings[0]).toContain("xhigh");
+    expect(confirmations).toHaveLength(1);
+  });
+
+  test("checks xhigh eligibility on the proposed model before asking", async () => {
+    for (const upgradeSupportsXhigh of [false, true]) {
+      const { select, confirmations, controller } = fixture({
+        answers: [true],
+      });
+      const models = [
+        catalogModel("model-old", {
+          upgrade: "model-new",
+          supportedReasoningEfforts: upgradeSupportsXhigh
+            ? [{ reasoningEffort: "high" }]
+            : catalogModel("model-old").supportedReasoningEfforts,
+        }),
+        catalogModel("model-new", {
+          supportedReasoningEfforts: upgradeSupportsXhigh
+            ? catalogModel("model-new").supportedReasoningEfforts
+            : [{ reasoningEffort: "high" }],
+        }),
+      ];
+      expect(
+        await select(
+          { model: "model-old", reasoningEffort: "high" },
+          async () => models,
+          controller.signal,
+        ),
+      ).toEqual({
+        model: "model-new",
+        reasoningEffort: upgradeSupportsXhigh ? "xhigh" : "high",
+      });
+      expect(confirmations).toHaveLength(1);
+      expect(confirmations[0]?.question).toContain("model-new");
+      expect(confirmations[0]?.question.includes("xhigh")).toBe(
+        upgradeSupportsXhigh,
+      );
+    }
+  });
+
+  test("offers an effort-only change when there is no model upgrade", async () => {
+    const { select, warnings, confirmations, controller } = fixture({
+      answers: [true],
+    });
+    expect(
+      await select(
+        { model: "model-current", reasoningEffort: "high" },
+        async () => [catalogModel("model-current")],
+        controller.signal,
+      ),
+    ).toEqual({ model: "model-current", reasoningEffort: "xhigh" });
+    expect(warnings).toHaveLength(1);
+    expect(confirmations).toHaveLength(1);
+    expect(confirmations[0]?.question).toContain("xhigh");
+    expect(confirmations[0]?.question).not.toContain("model-current");
   });
 
   test("writes warnings without prompting in headless or noninteractive terminals", async () => {
@@ -113,6 +187,7 @@ describe("CLI scan model selection", () => {
         ),
       ).toEqual(configuration);
       expect(confirmations).toHaveLength(0);
+      expect(warnings).toHaveLength(1);
       expect(warnings.join(" ")).toContain("model-new");
       expect(warnings.join(" ")).toContain("xhigh");
     }
@@ -135,7 +210,7 @@ describe("CLI scan model selection", () => {
       const { select, warnings, confirmations, controller } = fixture({
         answers: [true],
       });
-      const configuration = { model: "model-unknown", reasoningEffort };
+      const configuration = { model: "model-cyber", reasoningEffort };
       expect(
         await select(
           configuration,
@@ -145,15 +220,23 @@ describe("CLI scan model selection", () => {
           controller.signal,
         ),
       ).toEqual(configuration);
+      expect(warnings).toHaveLength(1);
       expect(warnings.join(" ")).toContain(
         "Could not check available scan models",
       );
+      expect(warnings[0]).toContain("dynamic exploitation");
+      expect(warnings[0]?.includes("xhigh")).toBe(reasoningEffort === "high");
       expect(confirmations).toHaveLength(0);
     }
   });
 
-  test("preserves higher effort settings when accepting a model upgrade", async () => {
-    for (const reasoningEffort of ["max", "ultra", "persistent"]) {
+  test("preserves higher and unknown effort settings when accepting a model upgrade", async () => {
+    for (const reasoningEffort of [
+      "max",
+      "ultra",
+      "persistent",
+      "custom-effort",
+    ]) {
       const { select, confirmations, controller } = fixture({
         answers: [true],
       });
@@ -172,6 +255,7 @@ describe("CLI scan model selection", () => {
         ),
       ).toEqual({ model: "model-new", reasoningEffort });
       expect(confirmations).toHaveLength(1);
+      expect(confirmations[0]?.question).not.toContain("xhigh");
     }
   });
 
@@ -197,26 +281,62 @@ describe("CLI scan model selection", () => {
     expect(confirmations).toHaveLength(0);
   });
 
-  test("keeps the current model when an upgrade cannot support the scan cost limit", async () => {
+  test("does not combine an incompatible model upgrade with a supported effort change", async () => {
     const { select, warnings, confirmations, controller } = fixture({
       answers: [true],
-      maxCostUsd: 10,
     });
-    const configuration = scanModelConfiguration(DEFAULT_CODEX_CONFIG);
-    const models = [
-      catalogModel(configuration.model, { upgrade: "model-new" }),
-      catalogModel("model-new"),
-    ];
     expect(
-      await select(configuration, async () => models, controller.signal),
-    ).toEqual(configuration);
-    expect(confirmations).toHaveLength(0);
-    expect(warnings.join(" ")).toContain("Cost tracking is unavailable");
-    expect(warnings.join(" ")).toContain("preserve the scan cost limit");
+      await select(
+        { model: "model-old", reasoningEffort: "high" },
+        async () => [
+          catalogModel("model-old", { upgrade: "model-new" }),
+          catalogModel("model-new", {
+            supportedReasoningEfforts: [{ reasoningEffort: "xhigh" }],
+          }),
+        ],
+        controller.signal,
+      ),
+    ).toEqual({ model: "model-old", reasoningEffort: "xhigh" });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("does not support the configured high");
+    expect(warnings[0]).toContain("Use xhigh");
+    expect(confirmations).toHaveLength(1);
+    expect(confirmations[0]?.question).toContain("xhigh");
+    expect(confirmations[0]?.question).not.toContain("model-new");
+  });
+
+  test("keeps the current model when an upgrade cannot support the scan cost limit", async () => {
+    for (const reasoningEffort of ["high", "xhigh"]) {
+      const { select, warnings, confirmations, controller } = fixture({
+        answers: [true],
+        maxCostUsd: 10,
+      });
+      const configuration = {
+        ...scanModelConfiguration(DEFAULT_CODEX_CONFIG),
+        reasoningEffort,
+      };
+      const models = [
+        catalogModel(configuration.model, { upgrade: "model-new" }),
+        catalogModel("model-new"),
+      ];
+      expect(
+        await select(configuration, async () => models, controller.signal),
+      ).toEqual({ ...configuration, reasoningEffort: "xhigh" });
+      expect(confirmations).toHaveLength(reasoningEffort === "high" ? 1 : 0);
+      if (reasoningEffort === "high") {
+        expect(confirmations[0]?.question).toContain("xhigh");
+        expect(confirmations[0]?.question).not.toContain("model-new");
+      }
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("Cost tracking is unavailable");
+      expect(warnings[0]).toContain("preserve the scan cost limit");
+    }
   });
 
   test("shares discovery and choices across concurrent scans with matching settings", async () => {
-    const { select, confirmations, controller } = fixture({ answers: [true] });
+    const { select, warnings, confirmations, controller } = fixture({
+      answers: [true],
+    });
     const pendingModels = Promise.withResolvers<CatalogModel[]>();
     let discoveryCalls = 0;
     const loadModels = async () => {
@@ -224,12 +344,12 @@ describe("CLI scan model selection", () => {
       return await pendingModels.promise;
     };
     const first = select(
-      { model: "model-old", reasoningEffort: "xhigh" },
+      { model: "model-old", reasoningEffort: "high" },
       loadModels,
       controller.signal,
     );
     const second = select(
-      { model: "model-old", reasoningEffort: "xhigh" },
+      { model: "model-old", reasoningEffort: "high" },
       loadModels,
       controller.signal,
     );
@@ -241,6 +361,7 @@ describe("CLI scan model selection", () => {
       { model: "model-new", reasoningEffort: "xhigh" },
       { model: "model-new", reasoningEffort: "xhigh" },
     ]);
+    expect(warnings).toHaveLength(1);
     expect(confirmations).toHaveLength(1);
   });
 
@@ -300,7 +421,7 @@ describe("CLI scan model selection", () => {
 
   test("continues with explicit selections when warning output fails", async () => {
     const { select, confirmations, controller } = fixture({
-      answers: [true, true],
+      answers: [true],
       write: () => {
         throw new Error("Output stream closed");
       },
@@ -312,6 +433,6 @@ describe("CLI scan model selection", () => {
         controller.signal,
       ),
     ).toEqual({ model: "model-new", reasoningEffort: "xhigh" });
-    expect(confirmations).toHaveLength(2);
+    expect(confirmations).toHaveLength(1);
   });
 });
