@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import {
   chmod,
   cp,
@@ -22,6 +23,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createInterface } from "node:readline";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 
 const PACKAGE_SMOKE_TIMEOUT_MS = packageSmokeTimeouts().commandTimeoutMs;
@@ -162,6 +164,74 @@ async function pluginFiles(directory) {
   }
 
   return files.sort();
+}
+
+async function smokeCliMcp(launcher, consumer) {
+  const repository = join(consumer, "mcp-repository");
+  await mkdir(repository);
+  await writeFile(
+    join(repository, "example.js"),
+    "export const example = 1;\n",
+  );
+  const child = spawn(process.execPath, [launcher, "--mcp"], {
+    cwd: consumer,
+    env: {
+      ...process.env,
+      CODEX_SECURITY_STATE_DIR: join(consumer, "mcp-state"),
+    },
+    stdio: "pipe",
+    timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+    windowsHide: true,
+  });
+  const closed = once(child, "close");
+  const lines = createInterface({ input: child.stdout });
+  const responses = lines[Symbol.asyncIterator]();
+  let stderr = "";
+  child.stderr.setEncoding("utf8").on("data", (text) => (stderr += text));
+  const send = (message) => child.stdin.write(JSON.stringify(message) + "\n");
+  async function request(id, method, params) {
+    send({ jsonrpc: "2.0", id, method, params });
+    for (;;) {
+      const line = await responses.next();
+      assert.equal(line.done, false, `MCP closed before ${method}: ${stderr}`);
+      const response = JSON.parse(line.value);
+      if (response.id !== id) continue;
+      assert.equal(response.error, undefined, JSON.stringify(response));
+      return response.result;
+    }
+  }
+  try {
+    await request(1, "initialize", {
+      protocolVersion: "2025-11-25",
+      capabilities: {},
+      clientInfo: { name: "package-smoke", version: "1.0.0" },
+    });
+    send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    const tools = await request(2, "tools/list", {});
+    assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), [
+      "info",
+      "scan",
+    ]);
+    const info = await request(3, "tools/call", {
+      name: "info",
+      arguments: {},
+    });
+    assert.equal(info.structuredContent.scanMcp, true);
+    const scan = await request(4, "tools/call", {
+      name: "scan",
+      arguments: { repository, dryRun: true },
+    });
+    assert.notEqual(scan.isError, true, JSON.stringify(scan));
+    assert.equal(scan.structuredContent.exitCode, 0);
+    assert.equal(scan.structuredContent.data.dryRun, true);
+    child.stdin.end();
+    assert.equal((await closed)[0], 0, stderr);
+  } finally {
+    lines.close();
+    child.kill("SIGKILL");
+    await closed;
+  }
 }
 
 async function smokeNestedDeepScanWorker(installedRoot, consumer) {
@@ -488,6 +558,8 @@ try {
   assert.match(help, /Usage: codex-security\b/u);
   assert.match(help, /\bpublish\b/u);
   assert.match(help, /\bdedupe\b/u);
+
+  await smokeCliMcp(launcher, consumer);
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(

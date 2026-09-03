@@ -39,7 +39,6 @@ import {
   resolveCliPath,
 } from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
-import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
@@ -1064,59 +1063,6 @@ describe("CLI", () => {
     );
   });
 
-  test("exposes only typed, read-only SDK metadata over MCP", async () => {
-    const child = await runCommand(
-      process.execPath,
-      [join(import.meta.dir, "../src/cli.ts"), "--mcp"],
-      {
-        input: [
-          '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-security-test","version":"1.0.0"}}}',
-          '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
-          '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
-          '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"info","arguments":{}}}',
-          "",
-        ].join("\n"),
-        timeout: 30_000,
-      },
-    );
-    expect(child.status).toBe(0);
-    const responses = child.stdout
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    const tools = responses.find((response) => response.id === 2).result.tools;
-    expect(tools).toHaveLength(1);
-    expect(tools[0]).toMatchObject({
-      name: "info",
-      annotations: {
-        readOnlyHint: true,
-        idempotentHint: true,
-        destructiveHint: false,
-        openWorldHint: false,
-      },
-      outputSchema: {
-        properties: {
-          sdkVersion: { type: "string" },
-          bundledPluginVersion: { type: "string" },
-          scanMcp: { const: false },
-          cancellationNote: { type: "string" },
-        },
-      },
-    });
-    const metadata = responses.find((response) => response.id === 3).result;
-    expect(metadata.structuredContent).toMatchObject({
-      sdkVersion: VERSION,
-      bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
-      scanMcp: false,
-      cliVersion: VERSION,
-      codexVersion: CODEX_EXECUTABLE_VERSION,
-      codexSdkVersion: CODEX_SDK_VERSION,
-      model: "gpt-5.6-sol",
-      reasoningEffort: "xhigh",
-      nextStep: "codex-security scan . --dry-run",
-    });
-  }, 30_000);
-
   test("presents interactive scan history and hides abandoned running scans", async () => {
     const stdout = capture(true);
     const scan = {
@@ -1485,7 +1431,7 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({
       sdkVersion: VERSION,
       bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
-      scanMcp: false,
+      scanMcp: true,
     });
     expect(stderr.text()).toBe("");
     expect(started).toBe(false);
