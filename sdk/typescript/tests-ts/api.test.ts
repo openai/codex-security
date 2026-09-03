@@ -15,7 +15,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { basename, delimiter, dirname, join, win32 } from "node:path";
+import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   Codex,
@@ -69,6 +69,7 @@ import {
 } from "./support/api-events.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
+import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 
 type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
@@ -80,7 +81,7 @@ const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
 afterEach(cleanup);
 
-test.each(["completed", "receipt-lost", "scan-interrupted"])(
+test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
   "durable scan workflow resumes after %s without rerunning completed work",
   async (scenario) => {
     const root = await temporaryDirectory();
@@ -96,6 +97,9 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     };
     const workflowId = "durable-scan";
+    const scanPrompt = "Review synthetic authentication boundaries.";
+    const promptFile = join(root, "instructions.md");
+    if (scenario === "prompt-files") await writeFile(promptFile, scanPrompt);
     let modelCalls = 0;
     let completed = false;
     let loseReceipt = scenario === "receipt-lost";
@@ -121,7 +125,10 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
                 loseReceipt = false;
                 throw new Error("Synthetic receipt write failure");
               }
-              return await runWorkbench(options, args, input);
+              const state = await runWorkbench(options, args, input);
+              if (scenario === "prompt-files" && payload.action === "begin")
+                await rm(promptFile);
+              return state;
             }
             if (args[0] === "get-scan")
               return {
@@ -145,8 +152,10 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
           createCodex: () => ({
             startThread: () => ({
               id: "thread-1",
-              async runStreamed() {
+              async runStreamed(input: string) {
                 modelCalls++;
+                if (scenario === "prompt-files")
+                  expect(input).toContain(scanPrompt);
                 if (scenario === "scan-interrupted" && modelCalls === 1)
                   throw new Error("Synthetic interrupted scan");
                 await copyCompletedScan(root);
@@ -160,8 +169,15 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
     const first = await makeClient(1);
     let original: Record<string, unknown> | undefined;
     try {
-      if (scenario === "completed")
-        original = (await first.run(repository, { workflowId })).toJSON();
+      if (scenario === "completed" || scenario === "prompt-files")
+        original = (
+          await first.run(repository, {
+            workflowId,
+            ...(scenario === "prompt-files"
+              ? { scanPromptFile: promptFile }
+              : {}),
+          })
+        ).toJSON();
       else
         await expect(first.run(repository, { workflowId })).rejects.toThrow(
           "Synthetic",
@@ -171,7 +187,12 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
     }
     const resumed = await makeClient(2);
     try {
-      const result = await resumed.run(repository, { workflowId });
+      const replacement = join(root, "replacement-instructions.md");
+      if (scenario === "prompt-files") await writeFile(replacement, scanPrompt);
+      const result = await resumed.run(repository, {
+        workflowId,
+        ...(scenario === "prompt-files" ? { scanPromptFile: replacement } : {}),
+      });
       expect(result.manifest.scan.id).toBe("scan_example_001");
       if (original) expect(result.toJSON()).toEqual(original);
       expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
@@ -184,6 +205,60 @@ test.each(["completed", "receipt-lost", "scan-interrupted"])(
       ).rejects.toThrow("already bound to a different");
     } finally {
       await resumed.close();
+    }
+  },
+);
+
+test.each(["ambient settings", "shipped defaults"])(
+  "a deep workflow can resume after changing %s but rejects a different request",
+  async (change) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const source = join(codexHome, "codex-security", "config.toml");
+    await mkdir(repository);
+    await mkdir(dirname(source), { recursive: true });
+    await writeFile(source, "[deep_scan]\nsubagents = 1\n");
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: codexHome,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        runWorkbench: async (options, args, input) => {
+          if (
+            args[0] === "finding-workflow" &&
+            JSON.parse(input!).action === "begin"
+          ) {
+            throw new Error("Synthetic stop before scan");
+          }
+          return runWorkbench(options, args, input);
+        },
+      },
+    );
+    const defaults = DEFAULT_DEEP_SCAN_SETTINGS as { workers: number };
+    const originalWorkers = defaults.workers;
+    const request = { workflowId: "deep-resume", mode: "deep" } as const;
+    try {
+      await expect(client.run(repository, request)).rejects.toThrow(
+        "Synthetic stop before scan",
+      );
+      if (change === "ambient settings")
+        await writeFile(source, "[deep_scan]\nworkers = 9\nsubagents = 2\n");
+      else defaults.workers = originalWorkers + 1;
+      await expect(client.run(repository, request)).rejects.toThrow(
+        "Synthetic stop before scan",
+      );
+      await expect(
+        client.run(repository, { ...request, workers: 2 }),
+      ).rejects.toThrow("already bound to a different");
+    } finally {
+      defaults.workers = originalWorkers;
+      await client.close();
     }
   },
 );
@@ -765,7 +840,10 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       { pythonPath: "/definitely/missing/python" },
       {
-        environment: { OPENAI_API_KEY: "must-not-be-used" },
+        environment: {
+          OPENAI_API_KEY: "must-not-be-used",
+          CODEX_HOME: join(root, "ambient"),
+        },
         prepareRuntime: async () => {
           runtimeStarted = true;
           throw new Error("runtime should not initialize");
@@ -783,6 +861,20 @@ describe("CodexSecurity orchestration", () => {
       repository,
       target: { kind: "paths", paths: ["src"] },
       mode: "deep",
+      workers: 4,
+      subagents: 3,
+      stopAfterNoNew: 4,
+      stopAfterConsecutiveErrors: 3,
+      maxDiscoveryRuns: 40,
+      maxTimeHours: 96,
+      deepScanSources: {
+        workers: "default",
+        subagents: "default",
+        stopAfterNoNew: "default",
+        stopAfterConsecutiveErrors: "default",
+        maxDiscoveryRuns: "default",
+        maxTimeHours: "default",
+      },
       outputDir: output,
       authentication: {
         method: "api_key",
@@ -2361,10 +2453,17 @@ describe("CodexSecurity orchestration", () => {
       },
     );
 
+    const scanPromptFile = join(root, "instructions.md");
+    const postScanPromptFile = join(root, "follow-up.md");
+    await writeFile(
+      scanPromptFile,
+      "Focus on authentication and authorization.",
+    );
+    await writeFile(postScanPromptFile, "Draft fixes for confirmed findings.");
     const scanStartedAt = Date.now();
     const result = await client.run(repository, {
-      scanPrompt: "Focus on authentication and authorization.",
-      postScanPrompt: "Draft fixes for confirmed findings.",
+      scanPromptFile,
+      postScanPromptFile,
       onScanStarted: () => {
         scanStarted = true;
       },
@@ -2575,7 +2674,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("applies deep scan overrides over the user's existing settings", async () => {
+  test("resolves deep settings before runtime preparation and records the snapshot", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const ambientHome = join(root, "ambient-home");
@@ -2604,7 +2703,13 @@ describe("CodexSecurity orchestration", () => {
       {},
       {
         environment: { CODEX_HOME: ambientHome },
-        prepareRuntime: async () => preparedRuntime(codexHome),
+        prepareRuntime: async () => {
+          await writeFile(
+            join(ambientHome, "codex-security", "config.toml"),
+            "[deep_scan]\nstop_after_no_new = 99\n",
+          );
+          return preparedRuntime(codexHome);
+        },
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
@@ -2638,8 +2743,10 @@ describe("CodexSecurity orchestration", () => {
     await expect(
       client.run(repository, {
         mode: "deep",
+        auth: "auto",
         workers: 2,
         subagents: 0,
+        stopAfterConsecutiveErrors: 2,
         maxDiscoveryRuns: 10,
         maxTimeHours: 1.5,
       }),
@@ -2651,15 +2758,20 @@ describe("CodexSecurity orchestration", () => {
     expect(configuration).toContain("workers = 2");
     expect(configuration).toContain("subagents = 0");
     expect(configuration).toContain("stop_after_no_new = 7");
+    expect(configuration).toContain("stop_after_consecutive_errors = 2");
     expect(configuration).toContain("max_discovery_runs = 10");
     expect(configuration).toContain("max_time_hours = 1.5");
     expect(configuration).toContain("[other]");
     expect(configuration).toContain("enabled = true");
     expect(recipe).toMatchObject({
       mode: "deep",
+      auth: "auto",
+      deepScanResolved: true,
       deepScan: {
         workers: 2,
         subagents: 0,
+        stopAfterNoNew: 7,
+        stopAfterConsecutiveErrors: 2,
         maxDiscoveryRuns: 10,
         maxTimeHours: 1.5,
       },
@@ -2856,8 +2968,15 @@ describe("CodexSecurity orchestration", () => {
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "deep scan settings captured",
       );
-      await expect(fsPromises.lstat(runtimeConfig)).rejects.toMatchObject({
-        code: "ENOENT",
+      expect(
+        parseToml(await readFile(runtimeConfig, "utf8"))["deep_scan"],
+      ).toEqual({
+        workers: 4,
+        subagents: 3,
+        stop_after_no_new: 4,
+        stop_after_consecutive_errors: 3,
+        max_discovery_runs: 40,
+        max_time_hours: 96,
       });
 
       await writeFile(ambientConfig, "[deep_scan]\nworkers = 7\n");
@@ -2870,47 +2989,14 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("preserves ambient configuration when the deep-scan runtime uses the same home", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    const configPath = join(codexHome, "codex-security", "config.toml");
-    const originalConfiguration = "[other]\nenabled = true\n";
-    await mkdir(repository);
-    await mkdir(join(codexHome, "codex-security"), { recursive: true });
-    await writeFile(configPath, originalConfiguration);
-    await mkdir(scanDir, { mode: 0o700 });
-
-    const client = new TestClient(
-      {},
-      {
-        environment: { CODEX_HOME: codexHome },
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              throw new Error("deep scan settings captured");
-            },
-          }),
-        }),
-      },
-    );
-
-    await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-      "deep scan settings captured",
-    );
-    expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
-    await client.close();
-  });
-
-  test.skipIf(process.platform !== "win32")(
-    "preserves ambient configuration when the same Windows home uses different casing",
-    async () => {
+  test.each([
+    ["defaults", "absolute"],
+    ["complete overrides", "absolute"],
+    ["missing configuration", "absolute"],
+    ["missing configuration", "relative"],
+  ] as const)(
+    "preserves ambient configuration when the deep-scan runtime uses the same home with %s (%s path)",
+    async (settings, homeKind) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -2919,10 +3005,98 @@ describe("CodexSecurity orchestration", () => {
       const originalConfiguration = "[other]\nenabled = true\n";
       await mkdir(repository);
       await mkdir(join(codexHome, "codex-security"), { recursive: true });
-      await writeFile(configPath, originalConfiguration);
+      if (settings !== "missing configuration")
+        await writeFile(configPath, originalConfiguration);
       await mkdir(scanDir, { mode: 0o700 });
 
-      const client = new TestClient(
+      await using client = new TestClient(
+        {},
+        {
+          environment: {
+            CODEX_HOME:
+              homeKind === "relative"
+                ? relative(process.cwd(), codexHome)
+                : codexHome,
+          },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("deep scan settings captured");
+              },
+            }),
+          }),
+        },
+      );
+
+      await expect(
+        client.run(repository, {
+          mode: "deep",
+          ...(settings === "complete overrides"
+            ? {
+                workers: 2,
+                subagents: 0,
+                stopAfterNoNew: 7,
+                stopAfterConsecutiveErrors: 2,
+                maxDiscoveryRuns: 12,
+                maxTimeHours: 1.5,
+              }
+            : {}),
+        }),
+      ).rejects.toThrow("deep scan settings captured");
+      if (settings === "missing configuration") {
+        await expect(readFile(configPath)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } else {
+        const written = await readFile(configPath, "utf8");
+        if (settings === "defaults") {
+          expect(written).toBe(originalConfiguration);
+        } else {
+          expect(parseToml(written)).toEqual({
+            other: { enabled: true },
+            deep_scan: {
+              workers: 2,
+              subagents: 0,
+              stop_after_no_new: 7,
+              stop_after_consecutive_errors: 2,
+              max_discovery_runs: 12,
+              max_time_hours: 1.5,
+            },
+          });
+        }
+      }
+    },
+  );
+
+  test
+    .skipIf(process.platform !== "win32")
+    .each([
+      "existing configuration",
+      "missing configuration",
+      "missing configuration directory",
+    ])(
+    "preserves ambient configuration when the same Windows home uses different casing with %s",
+    async (state) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      const configPath = join(codexHome, "codex-security", "config.toml");
+      const originalConfiguration = "[other]\nenabled = true\n";
+      await mkdir(repository);
+      await mkdir(codexHome);
+      if (state !== "missing configuration directory")
+        await mkdir(join(codexHome, "codex-security"));
+      if (state === "existing configuration")
+        await writeFile(configPath, originalConfiguration);
+      await mkdir(scanDir, { mode: 0o700 });
+
+      await using client = new TestClient(
         {},
         {
           environment: { CODEX_HOME: codexHome.toUpperCase() },
@@ -2944,8 +3118,13 @@ describe("CodexSecurity orchestration", () => {
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "deep scan settings captured",
       );
-      expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
-      await client.close();
+      if (state === "existing configuration") {
+        expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
+      } else {
+        await expect(readFile(configPath)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
     },
   );
 

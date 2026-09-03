@@ -42,6 +42,7 @@
     "schemas/tools/worker-threat-model.schema.json",
     "scripts/config_preflight.py",
     "scripts/deep_scan_config.py",
+    "scripts/deep_scan_defaults.json",
     "scripts/deep_scan_workbench.py",
     "scripts/filesystem_identity.py",
     "scripts/finalize_scan_contract.py",

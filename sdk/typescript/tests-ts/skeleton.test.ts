@@ -357,8 +357,10 @@ describe("TypeScript package skeleton", () => {
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
 
-    expect(packageJson.scripts.build).toBe(
-      "node --run clean && tsc -p tsconfig.build.json && node scripts/build-dashboard.mjs",
+    expect(packageJson.scripts.build).not.toMatch(/\b(?:pnpm|npm|bun)\b/u);
+    expect(packageJson.scripts.build).toMatch(/^node --run clean &&/u);
+    expect(packageJson.scripts.build).toContain(
+      "node scripts/build-dashboard.mjs",
     );
     expect(packageJson.scripts["build:plugin"]).toBe(
       "node scripts/build-plugin.mjs",

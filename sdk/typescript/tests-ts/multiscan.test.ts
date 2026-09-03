@@ -25,6 +25,7 @@ import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
+import { DiffTarget } from "../src/targets.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
@@ -135,6 +136,70 @@ async function results(path: string): Promise<Record<string, unknown>[]> {
 }
 
 describe("multiscan", () => {
+  test("prepares shared prompt files once while missing sources remain row failures", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "prompt-source");
+    const prompt = join(paths.root, "shared-prompt.md");
+    await writeFile(prompt, "Review synthetic boundaries.");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nmissing,${join(paths.root, "absent")},${source.revision}\nfirst,${source.path},${source.revision}\nsecond,${source.path},${source.revision}\n`,
+    );
+    let scans = 0;
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_checkout, scanOptions = {}) => {
+          expect(scanOptions.scanPrompt).toBe("Review synthetic boundaries.");
+          expect(scanOptions.scanPromptFile).toBeUndefined();
+          if (scans++ === 0) await rm(prompt);
+          return await completedScan(scanOptions.outputDir!);
+        }),
+        { maxAttempts: 1, scanPromptFile: prompt },
+      ),
+    );
+    expect(scans).toBe(2);
+    expect(summary).toMatchObject({ total: 3, completed: 2, failed: 1 });
+    expect(await results(summary.resultsPath)).toMatchObject([
+      { id: "missing", status: "failed" },
+      { id: "first", status: "completed" },
+      { id: "second", status: "completed" },
+    ]);
+  });
+
+  test.each([DiffTarget.refs({ base: "HEAD~1" }), DiffTarget.workingTree()])(
+    "rejects unsupported bulk diff scopes before preparing a campaign: %j",
+    async (target) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "configured-scope");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nexample,${source.path},${source.revision}\n`,
+      );
+      let initialized = false;
+      const security = client(async () => {
+        throw new Error("The unsupported target must not reach a scan.");
+      });
+      await expect(
+        runMultiscan(
+          options(paths, security, {
+            scanOptionsByMode: { standard: { target } },
+            createSecurity: () => {
+              initialized = true;
+              return security;
+            },
+          }),
+        ),
+      ).rejects.toThrow(
+        "Bulk scans do not support diff or working-tree scopes",
+      );
+      expect(initialized).toBe(false);
+      await expect(access(paths.output)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    },
+  );
+
   test("scopes GitHub CLI credentials to the discovered GitHub host", () => {
     expect(buildGitHubCredentialArgs(undefined)).toEqual([]);
     expect(buildGitHubCredentialArgs("github.com")).toEqual([
@@ -219,6 +284,9 @@ describe("multiscan", () => {
           scanPrompt: "Review boundaries.",
           postScanPrompt: "Draft confirmed fixes.",
           maxCostUsd: 12.5,
+          scanOptionsByMode: {
+            deep: { target: DiffTarget.workingTree() },
+          },
         },
       ),
     );

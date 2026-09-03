@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -399,7 +400,20 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "loadProjectConfig", "resolveProjectConfig"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");
+       const assert = await import("node:assert/strict");
+       const { writeFile } = await import("node:fs/promises");
+       const input = { scan: { mode: "deep", deep: { subagents_per_worker: 0 } }, policy: { fail_on_severity: "high" } };
+       await writeFile("scan.json", JSON.stringify(input));
+       const loaded = await sdk.loadProjectConfig("scan.json");
+       const resolved = sdk.resolveProjectConfig(input);
+       assert.deepEqual(loaded.config, resolved.config);
+       assert.deepEqual(loaded.options, resolved.options);
+       assert.equal(loaded.options.subagents, 0);
+       assert.equal(loaded.options.failureSeverity, "high");
+       assert.equal(loaded.sources["scan.deep.subagents_per_worker"], "project");
+       assert.equal(loaded.sources["output.directory"], "default");
+       assert.equal(Object.isFrozen(loaded.sources), true);`,
     ],
     { cwd: consumer },
   );
@@ -488,6 +502,44 @@ try {
   assert.match(help, /Usage: codex-security\b/u);
   assert.match(help, /\bpublish\b/u);
   assert.match(help, /\bdedupe\b/u);
+
+  const starterPath = join(consumer, "codex-security.yaml");
+  const starter = JSON.parse(
+    run(process.execPath, [launcher, "init", "--json"], {
+      cwd: consumer,
+      capture: true,
+    }),
+  );
+  // Compare file identities across symlink aliases and Windows short names.
+  const canonicalStarterPath = await realpath(starterPath);
+  assert.equal(await realpath(starter.path), canonicalStarterPath);
+  for (const args of [["-c", starterPath], []]) {
+    const info = JSON.parse(
+      run(process.execPath, [launcher, "info", ...args, "--json"], {
+        cwd: consumer,
+        capture: true,
+        env: { ...process.env, CODEX_SECURITY_PROJECT_CONFIG: starterPath },
+      }),
+    );
+    assert.equal(await realpath(info.configuration.path), canonicalStarterPath);
+    assert.equal(info.configuration.settings.mode, "standard");
+    assert.equal(info.configuration.sources["scan.mode"], "default");
+  }
+
+  const nestedDirectory = join(consumer, "settings");
+  await mkdir(nestedDirectory);
+  const nestedPath = join(nestedDirectory, "security.json");
+  run(process.execPath, [launcher, "init", nestedPath, "--json"], {
+    cwd: consumer,
+    capture: true,
+  });
+  const nestedConfig = JSON.parse(await readFile(nestedPath, "utf8"));
+  assert.equal(
+    await realpath(resolve(nestedDirectory, nestedConfig.$schema)),
+    await realpath(
+      join(installedRoot, "schemas", "project-config.schema.json"),
+    ),
+  );
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(

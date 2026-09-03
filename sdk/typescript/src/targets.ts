@@ -8,6 +8,9 @@ import { InvalidTargetError } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { windowsUnsafePathComponent } from "./windows-path.js";
 
+import type { ScanMode } from "./scan-modes.js";
+export type { ScanMode } from "./scan-modes.js";
+
 const execFile = promisify(execFileCallback);
 const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
   "GIT_DIR",
@@ -30,7 +33,6 @@ const GIT_REPOSITORY_ENVIRONMENT = new Set([
   "GIT_SHALLOW_FILE",
 ]);
 
-export type ScanMode = "standard" | "deep";
 export type DiffTargetKind = "refs" | "working_tree";
 
 export interface DiffTargetOptions {

@@ -6,20 +6,24 @@ import {
   classifyScanDirectorySeverity,
   deduplicateScan,
   estimateScanCost,
+  loadProjectConfig,
   planComponents,
   publishScanToCustom,
   publishScan,
   runComponentScans,
+  resolveProjectConfig,
   type ComponentScanOptions,
   type DeduplicateScanResult,
   type CustomPublicationResult,
   type Finding,
+  type ProjectConfigInput,
   type SeverityClassification,
   type ScanSeverityClassification,
   type ScanCost,
   type ScanOptions,
   type ScanProgress,
   type ScanResult,
+  type ScanSettings,
   type ValidationOptions,
   type ValidationResult,
 } from "@openai/codex-security";
@@ -112,6 +116,35 @@ export async function scan(repository: string): Promise<ScanResult> {
   } finally {
     await client.close();
   }
+}
+
+export function configuredScanOptions(
+  input: ProjectConfigInput = {
+    scan: {
+      mode: "deep",
+      scope: { paths: ["src"] },
+      deep: { subagents_per_worker: 0, stop_after_consecutive_errors: 2 },
+    },
+    limits: { max_cost_usd_per_scan: 5 },
+    policy: { fail_on_severity: "high" },
+  },
+): ScanSettings {
+  return resolveProjectConfig(input).options;
+}
+
+export async function scanFromFile(repository: string, file: string) {
+  const { config, options } = await loadProjectConfig(file);
+  await using client = new CodexSecurity(config);
+  const result = await client.run(repository, {
+    ...options,
+    postScanPromptFile: "follow-up.md",
+  });
+  return {
+    result,
+    failed:
+      options.failureSeverity !== undefined &&
+      result.hasFindingsAtOrAbove(options.failureSeverity),
+  };
 }
 
 export const cost: ScanCost | null = estimateScanCost("gpt-5.6-sol", {

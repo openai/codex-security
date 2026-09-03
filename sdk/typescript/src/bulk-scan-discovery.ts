@@ -120,6 +120,7 @@ export function createBulkScanDiscoveryDependencies(options: {
 export async function runBulkScanWizard(
   dependencies: BulkScanDiscoveryDependencies,
   signal?: AbortSignal,
+  defaultOutputDir = "./security-scans",
 ): Promise<BulkScanWizardResult | null> {
   const { prompt } = dependencies;
   if (!prompt.isInteractive()) {
@@ -153,7 +154,7 @@ export async function runBulkScanWizard(
     expandHome(
       await prompt.input(
         "Where should scan results be saved?",
-        "./security-scans",
+        defaultOutputDir,
       ),
     ),
   );

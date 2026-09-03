@@ -1,0 +1,343 @@
+# Project configuration
+
+Use `scan [repository] -c FILE` or `scan [repository] --config FILE` to load one
+YAML or JSON file:
+
+```sh
+codex-security scan . -c codex-security.yaml --dry-run --json
+codex-security scan . -c codex-security.json --model gpt-5.6-terra
+```
+
+The supported extensions are `.yaml`, `.yml`, and `.json`. `scan`, `bulk-scan`,
+`scan-components`, and `info` accept `-c` / `--config`. An operator can set
+`CODEX_SECURITY_PROJECT_CONFIG` instead; an explicit `-c` takes precedence. With
+neither, no file is loaded, even if `codex-security.yaml` exists. SDK `run()` calls
+and saved reruns do not read this environment variable or discover project files.
+The repository comes from the command's target selection, not the config file.
+
+**Treat the selected file as trusted operator configuration, with the same
+authority as CLI options and SDK `codexOverrides`.** Native Codex settings can
+start configured MCP server processes and select model-service destinations. Do not select a
+file controlled by an untrusted repository or pull request. In CI, keep the
+scanner configuration in an operator-controlled location outside the checkout
+being assessed. Explicit selection does not make a file safe to trust.
+
+Create a starter and inspect its settings without a repository or runtime:
+
+```sh
+codex-security init
+codex-security info -c codex-security.yaml --json
+```
+
+`init [file]` defaults to `codex-security.yaml`, refuses to overwrite an existing
+file, and accepts `.yaml`, `.yml`, or `.json`. YAML starters show current defaults
+as comments so future releases can still update defaults you have not overridden.
+The editor hint is relative to the chosen file and expects the package to be
+installed in the invocation directory's `node_modules`.
+
+For a project with a `src` directory:
+
+```yaml
+scan:
+  scope:
+    paths: [src]
+  knowledge_base: [SECURITY.md, docs/architecture.md]
+codex:
+  model: gpt-5.6-sol
+  model_reasoning_effort: xhigh
+policy:
+  fail_on_severity: high
+```
+
+All settings are optional; `{}` uses the existing defaults. No `version` field
+is needed. Unknown wrapper keys and invalid types are errors. Values are literal:
+the loader does not evaluate JavaScript, interpolate environment values, include remote files,
+or merge multiple files. Wrapper `null` values do not reset settings. Project-file
+keys use `snake_case`, matching native Codex configuration. Keys inside `codex`
+keep their native spelling; names and values are not converted.
+YAML anchors are supported; the parser retains its guard against excessive nested
+alias expansion.
+
+The [YAML example](examples/codex-security.yaml) and equivalent
+[JSON example](examples/codex-security.json) select this repository's TypeScript
+source. After [setting up the source checkout](../sdk/typescript/TESTING.md), try:
+
+```sh
+cd sdk/typescript
+pnpm run build:plugin
+pnpm run build
+cd ../..
+node sdk/typescript/bin/codex-security.mjs scan . -c docs/examples/codex-security.yaml --dry-run --json
+```
+
+## Settings
+
+| Field                          | Meaning                                                                      | Default                            |
+| ------------------------------ | ---------------------------------------------------------------------------- | ---------------------------------- |
+| `auth`                         | Credential source: `auto`, `chatgpt`, or `api-key`; never a credential value | `auto`                             |
+| `scan.mode`                    | `standard` or `deep`                                                         | `standard`                         |
+| `scan.scope`                   | Exactly one of `paths: [src]`, `diff: {base: HEAD}`, or `working_tree: {}`   | Whole repository                   |
+| `scan.knowledge_base`          | Context files or directories                                                 | Empty list                         |
+| `scan.instructions_file`       | Additional scan instructions                                                 | Unset                              |
+| `scan.validation_file`         | Custom validation instructions; incompatible with active deep mode           | Built-in validation                |
+| `scan.deep`                    | Deep discovery settings shown below                                          | Existing deep defaults             |
+| `codex`                        | Native Codex settings and profiles                                           | Existing isolated configuration    |
+| `limits.max_cost_usd_per_scan` | Estimated USD limit for one scan attempt                                     | No limit                           |
+| `policy.fail_on_severity`      | Exit threshold: `critical`, `high`, `medium`, or `low`                       | Report-only                        |
+| `output.directory`             | Artifact directory outside the scanned Git worktree                          | Existing private artifact location |
+
+The file configures scan settings. Patching, PR creation, publication, post-scan
+actions, and machine-specific plugin or Python selection remain explicit CLI/SDK
+inputs.
+
+## SDK and CLI contract
+
+The SDK's `ScanSettings` type is shared by `ScanOptions`, CLI resolution, and
+project-file resolution. Project files and typed `ProjectConfigInput` objects
+use `snake_case`; SDK options keep `camelCase`, and CLI flags keep `kebab-case`.
+The resolver maps file keys to the existing SDK options:
+
+| Project file                              | SDK option                            | CLI flag                        |
+| ----------------------------------------- | ------------------------------------- | ------------------------------- |
+| `auth`                                    | `auth`                                | `--auth`                        |
+| `scan.mode`                               | `mode`                                | `--mode`                        |
+| `scan.scope.paths`                        | `target: ["src"]`                     | `--path`                        |
+| `scan.scope.diff`                         | `target: DiffTarget.refs(...)`        | `--diff`, `--head`              |
+| `scan.scope.working_tree`                 | `target: DiffTarget.workingTree(...)` | `--working-tree`, `--base`      |
+| `scan.knowledge_base`                     | `knowledgeBasePaths`                  | `--knowledge-base`              |
+| `scan.instructions_file`                  | `scanPromptFile`                      | `--scan-prompt-file`            |
+| `scan.validation_file`                    | `validationPromptFile`                | `--validation-prompt-file`      |
+| `scan.deep.workers`                       | `workers`                             | `--workers`                     |
+| `scan.deep.subagents_per_worker`          | `subagents`                           | `--subagents`                   |
+| `scan.deep.stop_after_no_new`             | `stopAfterNoNew`                      | `--stop-after-no-new`           |
+| `scan.deep.stop_after_consecutive_errors` | `stopAfterConsecutiveErrors`          | No flag                         |
+| `scan.deep.max_discovery_runs`            | `maxDiscoveryRuns`                    | `--max-discovery-runs`          |
+| `scan.deep.max_time_hours`                | `maxTimeHours`                        | `--max-time-hours`              |
+| `limits.max_cost_usd_per_scan`            | `maxCostUsd`                          | `--max-cost`                    |
+| `policy.fail_on_severity`                 | `failureSeverity`                     | `--fail-on-severity`            |
+| `output.directory`                        | `outputDir`                           | `--output-dir`                  |
+| `codex`                                   | Constructor `codexOverrides`          | `--codex`, model/provider flags |
+
+Use an explicit file with `loadProjectConfig()`:
+
+```ts
+import { CodexSecurity, loadProjectConfig } from "@openai/codex-security";
+
+const { config, options } = await loadProjectConfig("codex-security.yaml");
+await using security = new CodexSecurity(config);
+const result = await security.run(repository, options);
+if (
+  options.failureSeverity !== undefined &&
+  result.hasFindingsAtOrAbove(options.failureSeverity)
+) {
+  process.exitCode = 1;
+}
+```
+
+For configuration already in memory, pass the same structured object to
+`resolveProjectConfig()`:
+
+```ts
+import {
+  resolveProjectConfig,
+  type ProjectConfigInput,
+} from "@openai/codex-security";
+
+const input = {
+  scan: { mode: "deep", scope: { paths: ["src"] } },
+  limits: { max_cost_usd_per_scan: 5 },
+} satisfies ProjectConfigInput;
+const { config, options } = resolveProjectConfig(input, process.cwd());
+```
+
+Both return constructor `config`, scan `options`, and an immutable `sources` map;
+the file loader also returns
+`projectConfig` path and source metadata. The optional directory argument defaults
+to the current directory. It locates a selected file or anchors an in-memory
+object's context, prompt, and output paths. Files anchor those paths to their own
+directory. Neither helper reads prompt contents or prepares a runtime.
+Resolved context, prompt, and output paths have the SDK's `AbsolutePath` type;
+scope paths remain relative to the selected repository.
+
+Use `security.preflight(repository, options)` for the same local checks as CLI
+`--dry-run`, including active-mode compatibility and remaining legacy deep
+defaults. To override a resolved value or attach a callback, pass
+`{ ...options, maxCostUsd: 10, onProgress }` to `run()`.
+
+SDK callers can use inline `scanPrompt`, `validationPrompt`, and `postScanPrompt`,
+or the corresponding `*PromptFile` options. Inline text wins without reading the
+matching file. Direct SDK file paths resolve from the current directory and use
+the CLI's existing file protections. Post-scan instructions remain explicit
+SDK/CLI options and are not part of project files.
+
+`failureSeverity` records the policy in the scan recipe. The SDK does not throw or
+set process status when the threshold is met; call `hasFindingsAtOrAbove()` and
+choose the caller's response. The method uses the same ordering as the CLI and
+does not filter findings. The CLI/file contract keeps its four reportable levels;
+existing SDK calls also accept `informational`. An unknown threshold throws,
+including when the result has no findings.
+
+## Overrides and paths
+
+Settings apply in this order: built-in defaults, applicable legacy deep settings,
+the project file, then explicitly supplied CLI values. Schema defaults are editor
+hints; parsing does not insert them. Lists are replaced, not concatenated.
+
+| Path                                                    | Relative to                    |
+| ------------------------------------------------------- | ------------------------------ |
+| Repository positional argument                          | Invocation directory           |
+| File `scan.scope.paths`                                 | Selected repository            |
+| File context, instruction, validation, and output paths | Configuration file's directory |
+| CLI context, prompt, and output paths                   | Invocation directory           |
+| Native values under `codex`                             | Existing native Codex rules    |
+
+Scope paths follow `scan --path`: the same config can select `src` in each target
+repository. Context, instruction, validation, and output paths belong to the config
+file and therefore stay anchored to its directory when the invocation moves.
+
+For example, `--knowledge-base context.md` replaces the file's entire context list
+and resolves from the invocation directory. Existing regular-file, protected-path,
+credential, and outside-worktree output checks still apply.
+
+A CLI scope selector replaces the file's scope variant: `--diff HEAD` discards
+configured paths, and `--path src` discards a configured diff. `--head` can refine a
+file diff; `--base` can refine a file working-tree scope. Contradictory explicit
+selectors fail. `--no-working-tree` disables a configured working-tree scope but
+does not clear a path or committed-diff scope.
+
+There is no general CLI reset for configured context, policy, cost limit, or scope.
+Edit the file, select another file, or omit `-c` and unset
+`CODEX_SECURITY_PROJECT_CONFIG`. An empty context list is valid.
+
+Native objects merge using the existing configuration code. Duplicate native CLI
+assignments remain errors; overriding a file value is valid. Selected native
+profiles can still override root model/effort values, including convenience flags.
+`--provider openai` retains its existing behavior and does not clear a native
+provider selected by the file.
+
+## Deep settings and limits
+
+```yaml
+scan:
+  mode: deep
+  deep:
+    workers: 4
+    subagents_per_worker: 3
+    stop_after_no_new: 4
+    stop_after_consecutive_errors: 3
+    max_discovery_runs: 40
+    max_time_hours: 96
+limits:
+  max_cost_usd_per_scan: 10
+```
+
+These deep settings show the existing defaults, shared with the Python plugin.
+The cost limit is illustrative. Legacy user `[deep_scan]` TOML remains supported,
+including `workers = "auto"`. File and CLI values override individual settings.
+All six effective values are resolved before runtime preparation and saved in new
+recipes.
+If a runtime aliases the ambient TOML file, only explicit overrides are written
+back; unrelated sections and inherited defaults remain untouched. Isolated runtime
+files still receive a complete snapshot.
+
+A valid deep block can stay inactive in standard mode. Explicit deep CLI options
+still require deep mode. Deep diff scans and custom validation remain unsupported.
+Counts retain their existing bounds; zero subagents is valid, and discovery time
+cannot exceed 96 hours.
+
+`max_cost_usd_per_scan` has the same meaning as `--max-cost`: an estimated limit for one
+scan attempt. In-flight work may exceed it. It is not a total budget for a batch or
+follow-up actions. `fail_on_severity` changes the exit status without filtering the
+retained findings.
+
+## Batch and component scans
+
+```sh
+codex-security bulk-scan repositories.csv -c codex-security.yaml --output-dir ../batch-results
+codex-security scan-components . --component src -c codex-security.yaml --output-dir ../component-results
+```
+
+`output.directory` can supply the batch output directory; `--output-dir` overrides
+it. In the interactive bulk wizard, it supplies the proposed output directory.
+Both commands use the same config precedence, path anchoring, native settings,
+context, prompts, per-attempt cost limit, and severity policy as `scan`.
+
+A bulk CSV row's mode and scope override the file's defaults for that repository.
+Bulk checkouts are clean, shallow snapshots, so bulk scans accept repository or
+path scopes. A configured diff or working-tree scope is rejected before work
+starts unless every affected row supplies its own CSV path scope. Deep settings
+apply only to deep rows. Component plans select each component's
+scope, overriding `scan.scope`; `scan.mode` selects standard or deep component
+scans. Batch `--workers` controls concurrent repositories or components, while
+`scan.deep.workers` controls discovery workers within each deep scan.
+
+The severity policy returns exit `1` without discarding completed results or
+retrying a scan just because it found issues. Errors or incomplete results take
+precedence with exit `2`. Bulk resume retains the saved policy outcome and checks
+that the selected scan configuration still matches the campaign.
+
+## Dry run and editor support
+
+`info [-c FILE] --json` reports resolved settings and their sources without a scan
+target, prompt-file reads, credentials checks, or runtime initialization. With no
+file, it shows defaults. Active deep mode also resolves legacy TOML. It reports
+effective model details and native key sources without dumping raw native values.
+This is configuration inspection,
+not a filesystem, target, or model-availability check.
+
+`scan ... --dry-run --json` checks local inputs without starting Codex, verifying
+credentials, or establishing model availability. Removing `--dry-run` starts a
+scan and may incur model charges. Deep preflight shows all six effective settings
+and `deepScanSources`, including when no project file was selected; invalid
+applicable legacy settings now fail before runtime startup.
+
+With `-c`, the output also includes `projectConfig.path`, per-setting sources,
+selected instruction/validation file paths, and the finding policy. Native sources
+identify which layer supplied a key; profile selection still determines the
+effective model and effort. Raw native configuration and credentials are not dumped.
+Source paths use the project-file spelling, such as
+`scan.deep.stop_after_no_new`; existing output properties such as `deepScanSources`
+keep their names.
+The source map includes all wrapper settings, including unset values attributed
+to `default`; resolving preflight sources does not mutate previously returned maps.
+
+Help, version, and command schema output do not load project files. Missing,
+malformed, or invalid selected files exit `2`. Scan exit codes remain `0` for
+completion without a policy failure, `1` for the finding threshold, and `2` for
+failed, invalid, or incomplete scans. Signal cancellation retains `130` for
+`SIGINT` and `143` for `SIGTERM`.
+
+The generated [project schema](../sdk/typescript/schemas/project-config.schema.json)
+is self-contained Draft-07 and ships in the npm package. A project-root YAML file
+can use:
+
+```yaml
+# yaml-language-server: $schema=./node_modules/@openai/codex-security/schemas/project-config.schema.json
+{}
+```
+
+JSON files can use a root `$schema` string with the same relative path. The CLI
+uses its bundled schema and never fetches the hint. Validation does not coerce
+values, insert defaults, or discard unknown wrapper keys. Completion inside
+`codex` covers common model/provider fields; other native JSON settings retain
+existing checks. CLI `scan --schema --json` and result artifact schemas remain
+separate contracts.
+
+## Saved reruns
+
+New recipes retain resolved native configuration, scope, auth choice, finding
+policy, cost limit, context paths, and all active deep settings. Reruns do not load
+the project file again. Complete saved deep settings do not use the current legacy
+file; older partial recipes continue using applicable defaults for missing values.
+
+Recipes do not snapshot source or context contents. Reruns use the current checkout
+and current context files. Additional scan instructions are not retained: a new
+recipe records that requirement, and `scans rerun` refuses to omit them silently.
+Use `scans rerun [SCAN_ID] --scan-prompt-file FILE` to supply them again. A required
+replacement must not be empty. The file resolves from the invocation directory.
+Custom validation keeps its existing `scans rerun --validation-prompt-file FILE`
+requirement.
+
+Workflow identity records explicitly requested deep settings, not ambient values
+or shipped defaults, so changing those defaults does not prevent resumption.
+Changing the explicit request still requires a different workflow ID.
