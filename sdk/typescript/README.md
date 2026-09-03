@@ -16,6 +16,69 @@ Use Node.js 22.13.0+ (22.x), 24.x, or 26.x on macOS, Linux, or Windows.
 Scans, exports, scan history, and saved findings also need Python 3.10+
 (plus `tomli` on Python 3.10).
 
+## Release and bundle provenance
+
+A published package contains several independently versioned layers. The npm
+package version is the release anchor, while the bundled plugin and the Codex
+runtime dependencies have their own version fields:
+
+| Layer          | Source of truth                                                          | What it identifies                                                |
+| -------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| npm package    | `sdk/typescript/package.json` and the `npm-vX.Y.Z` tag                   | The published SDK and CLI release                                 |
+| bundled plugin | `_bundled_plugin/.codex-plugin/plugin.json` and `BUNDLED_PLUGIN_VERSION` | The plugin manifest and compatibility version, not a content hash |
+| Codex runtime  | `@openai/codex` and `@openai/codex-sdk` in `package.json`                | The runtime and SDK dependency versions used by the package       |
+
+For an exact, byte-for-byte reference to the bundled plugin, use its Git tree
+object at the release tag. For example, replace `0.1.5` with the release you
+are checking:
+
+```bash
+VERSION=0.1.5
+TAG="npm-v${VERSION}"
+
+git rev-parse "${TAG}^{commit}"
+git rev-parse "${TAG}:sdk/typescript/_bundled_plugin"
+git show "${TAG}:sdk/typescript/package.json" | jq -r .version
+git show "${TAG}:sdk/typescript/_bundled_plugin/.codex-plugin/plugin.json" | jq -r .version
+```
+
+The first two values form the immutable release-to-bundle mapping. The npm
+registry exposes release metadata that is useful for inspection:
+
+```bash
+npm view "@openai/codex-security@${VERSION}" version gitHead dist.integrity
+```
+
+This metadata is not signed provenance verification. To verify the published
+package cryptographically, use npm's signature and attestation audit and the
+release workflow's SLSA checks:
+
+```bash
+npm audit signatures \
+  --prefix "$CONSUMER_DIR" \
+  --registry=https://registry.npmjs.org/ \
+  --json \
+  --include-attestations
+```
+
+The audit must identify the public npm registry, an SLSA v1 attestation, the
+exact package tarball, the protected release workflow, and the release commit.
+The `npm view` fields and `dist.integrity` value are useful cross-checks, but a
+matching registry record alone does not prove who built or signed the package.
+
+The first two historical npm releases, `0.1.0` and `0.1.1`, may omit `gitHead`
+from their registry metadata. For those versions only, the release workflow
+recovers the commit from verified SLSA provenance and then performs the normal
+integrity and provenance checks. Every later release must publish a matching
+40-character `gitHead`; a missing or mismatched value fails verification.
+
+`bundledPluginVersion` in `codex-security info --json` is useful diagnostic
+metadata, but it does not replace the bundled tree hash. A runtime or catalog
+version supplied by the Codex distribution is external to this repository and
+cannot be inferred from the npm tag or the plugin manifest. Record that value
+from the runtime's own release metadata alongside the package tag and bundled
+tree hash when producing a provenance report.
+
 ## Run a scan from TypeScript
 
 Sign in with `npx @openai/codex-security login` or set `OPENAI_API_KEY` or
