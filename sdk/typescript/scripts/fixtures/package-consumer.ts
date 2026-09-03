@@ -1,11 +1,15 @@
 import {
   CodexSecurity,
   DiffTarget,
+  classifySeverity,
+  classifyScanSeverity,
+  classifyScanDirectorySeverity,
   deduplicateScan,
   estimateScanCost,
   loadProjectConfig,
   planComponents,
   publishScanToCustom,
+  publishScan,
   runComponentScans,
   resolveProjectConfig,
   type ComponentScanOptions,
@@ -13,6 +17,8 @@ import {
   type CustomPublicationResult,
   type Finding,
   type ProjectConfigInput,
+  type SeverityClassification,
+  type ScanSeverityClassification,
   type ScanCost,
   type ScanOptions,
   type ScanProgress,
@@ -26,6 +32,38 @@ import {
   SqliteFindingsStore,
   startFindingsServer,
 } from "@openai/codex-security/server";
+
+export async function classify(
+  findings: Finding[],
+  scanId: string,
+  scanDirectory: string,
+  signal: AbortSignal,
+): Promise<SeverityClassification> {
+  const classification = await classifySeverity(findings, {
+    rubricPath: "policy.md",
+    knowledgeBasePaths: ["context.md"],
+    reasoningEffort: "high",
+    signal,
+  });
+  const saved: ScanSeverityClassification = await classifyScanSeverity(scanId, {
+    signal,
+  });
+  await classifyScanDirectorySeverity(scanDirectory, {
+    expectedScanId: saved.scanId,
+    reprocess: true,
+    findingIds: findings.map(({ findingId }) => findingId),
+    signal,
+  });
+  await publishScan(scanDirectory, {
+    destination: "linear",
+    teamId: "example-team",
+    classification,
+    findingIds: classification.assessments.map(({ findingId }) => findingId),
+    dryRun: true,
+    signal,
+  });
+  return classification;
+}
 
 export async function findingsServer(getApiKey: () => Promise<string>) {
   return await startFindingsServer({

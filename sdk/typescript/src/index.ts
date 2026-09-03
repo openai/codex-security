@@ -9,6 +9,21 @@ export type {
   ProjectScope,
 } from "./project-config-schema.js";
 export type { ScanSettings } from "./scan-settings.js";
+export { classifySeverity } from "./classify-severity.js";
+export type {
+  ClassifySeverityOptions,
+  SeverityClassificationFinding,
+  SeverityClassification,
+  SeverityAssessment,
+} from "./classify-severity.js";
+export {
+  classifyScanSeverity,
+  classifyScanDirectorySeverity,
+} from "./classify-scan-severity.js";
+export type {
+  ClassifyScanSeverityOptions,
+  ScanSeverityClassification,
+} from "./classify-scan-severity.js";
 export { runComponentScans } from "./component-scan.js";
 export type {
   ComponentDeduplicationSummary,
