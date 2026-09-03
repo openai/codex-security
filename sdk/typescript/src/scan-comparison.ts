@@ -483,7 +483,10 @@ export async function matchCompletedScan(
   );
   if (batch === undefined) return;
 
-  const historical = new Map<string, { scanId: string; finding: Finding }>();
+  const historical = new Map<
+    string,
+    { scanId: string; finding: Finding }[]
+  >();
   for (const { scanId, findings } of batch.beforeScans) {
     for (const finding of findings) {
       const findingId = finding["findingId"] as string;
@@ -491,19 +494,26 @@ export async function matchCompletedScan(
         openOccurrences.has(finding.occurrenceId) ||
         falsePositiveScans.get(findingId) === scanId
       ) {
-        historical.set(findingId, { scanId, finding });
+        const entries = historical.get(findingId) ?? [];
+        entries.push({ scanId, finding });
+        historical.set(findingId, entries);
       }
     }
   }
   if (historical.size === 0) return;
 
-  const groups = Map.groupBy(historical.values(), ({ scanId }) => scanId);
+  const groups = Map.groupBy(
+    [...historical.values()].flat(),
+    ({ scanId }) => scanId,
+  );
   const matches: ScanComparisonResult["matches"] = [];
   const after = batch.afterFindings.filter((finding) => {
     const previous = historical.get(finding["findingId"] as string);
     if (previous === undefined) return true;
     matches.push({
-      beforeOccurrenceIds: [previous.finding.occurrenceId],
+      beforeOccurrenceIds: previous.map(
+        ({ finding: historicalFinding }) => historicalFinding.occurrenceId,
+      ),
       afterOccurrenceIds: [finding.occurrenceId],
       confidence: "high",
       reason: "The findings have the same stable identity.",
@@ -516,7 +526,9 @@ export async function matchCompletedScan(
   if (historical.size > 0 && after.length > 0) {
     semanticComparison = await (options.matchFindings ?? matchScanFindings)(
       {
-        before: [...historical.values()].map(({ finding }) => finding),
+        before: [...historical.values()]
+          .flat()
+          .map(({ finding }) => finding),
         after,
         ...(batch.knownFindingGroups === undefined
           ? {}
