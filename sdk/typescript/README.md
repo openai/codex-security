@@ -576,6 +576,9 @@ Python lookup order: `--python` (on `scan`, `bulk-scan`, or `export`) or SDK
 on `PATH` (`py` also works on Windows). `CODEX_SECURITY_STATE_DIR` overrides
 `CODEX_HOME` for state storage. Keep state and results outside the repository.
 
+`CODEX_SECURITY_GIT` is an internal executable binding generated for active
+scans, not a supported user setting.
+
 ### Progress and cost
 
 Interactive scans show full-screen progress; CI, redirected output, and

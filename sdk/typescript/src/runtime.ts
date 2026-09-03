@@ -58,7 +58,12 @@ import {
   errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  inspectTrustedExecutable,
+  resolveTrustedExecutable,
+  type InspectedExecutable,
+} from "./trusted-executable.js";
+import { outermostGitMarkerRoot } from "./targets.js";
 import {
   isWindowsUnsafePathComponent,
   windowsUnsafePathComponent,
@@ -156,6 +161,7 @@ export interface WorkbenchCommandOptions {
   python: string;
   pluginRoot: string;
   environment: ProcessEnvironment;
+  git?: InspectedExecutable;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1544,10 +1550,28 @@ export async function runWorkbench(
     arguments_: readonly string[],
     input?: string,
   ): Promise<string> => {
+    const git =
+      options.git ??
+      (await inspectTrustedExecutable(
+        "git",
+        options.environment,
+        await outermostGitMarkerRoot(process.cwd(), options.signal),
+      ));
+    const environment = pluginHelperEnvironment(
+      pluginExecutionEnvironmentWithGit(
+        options.python,
+        options.environment,
+        git,
+      ),
+    );
+    for (const name of Object.keys(environment)) {
+      if (name.toUpperCase() === "PATH") delete environment[name];
+    }
+    environment["PATH"] = git.environment["PATH"] ?? "";
     const result = await runCodexCommand(
       { command: options.python },
       ["-I", "-X", "utf8", "-B", script, ...arguments_],
-      pluginHelperEnvironment(options.environment),
+      environment,
       input,
       options.signal,
     );
@@ -2639,6 +2663,22 @@ export function pluginExecutionEnvironment(
     PYTHON: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
+}
+
+export function pluginExecutionEnvironmentWithGit(
+  python: string,
+  environment: ProcessEnvironment,
+  git: InspectedExecutable,
+): ProcessEnvironment {
+  const result = pluginExecutionEnvironment(python, environment);
+  for (const name of Object.keys(result)) {
+    const normalized = name.toUpperCase();
+    if (normalized === "CODEX_SECURITY_GIT") {
+      delete result[name];
+    }
+  }
+  result["CODEX_SECURITY_GIT"] = git.executable ?? "";
+  return result;
 }
 
 export function pythonUtf8Environment(

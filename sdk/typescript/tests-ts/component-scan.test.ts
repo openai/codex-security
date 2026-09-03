@@ -227,7 +227,11 @@ async function scopedInventory(paths: Fixture, scope: string) {
       scopesFile,
       output,
     ],
-    { encoding: "utf8", stdio: "pipe" },
+    {
+      encoding: "utf8",
+      stdio: "pipe",
+      env: { ...process.env, CODEX_SECURITY_GIT: Bun.which("git") ?? "" },
+    },
   );
   return JSON.parse(stdout.trim().split("\n").at(-1)!) as {
     paths: string[];

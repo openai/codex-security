@@ -73,7 +73,11 @@ test("writes nested Git pointers as UTF-8 independently of the locale", () => {
       repository,
       checkout,
     ],
-    { encoding: "utf8", windowsHide: true },
+    {
+      encoding: "utf8",
+      env: { ...process.env, CODEX_SECURITY_GIT: Bun.which("git") ?? "" },
+      windowsHide: true,
+    },
   );
 
   expect(result.status, result.stderr).toBe(0);

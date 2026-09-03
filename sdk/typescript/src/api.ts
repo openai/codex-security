@@ -140,7 +140,7 @@ import {
   importAmbientAuth,
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
-  pluginExecutionEnvironment,
+  pluginExecutionEnvironmentWithGit,
   pluginMetadata,
   planOutputArchive,
   prepareScanArtifactRestorer,
@@ -164,6 +164,7 @@ import {
   enclosingGitWorktreeRoot,
   normalizeRepository,
   normalizeTarget,
+  outermostGitMarkerRoot,
   repositoryRevision,
   resolveRepositoryPath,
   type NormalizedTarget,
@@ -173,6 +174,10 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
+import {
+  inspectTrustedExecutable,
+  type InspectedExecutable,
+} from "./trusted-executable.js";
 
 interface CodexThreadLike {
   readonly id: string | null;
@@ -654,6 +659,15 @@ export class CodexSecurity {
           CODEX_SECURITY_SURFACE: this.#surface,
         },
         options.auth,
+        await inspectTrustedExecutable(
+          "git",
+          selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+            session.modelProvider,
+          ),
+          inputs.protectedRoot,
+        ),
       );
       const thread = codex.startThread({
         threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
@@ -861,6 +875,27 @@ export class CodexSecurity {
         python,
       } = session;
       releaseCredentialHome = session.releaseCredentialHome;
+      const pluginEnvironment = selectedScanEnvironment(
+        runtime.environment,
+        options.auth,
+        modelProvider,
+      );
+      let git = await inspectTrustedExecutable(
+        "git",
+        pluginEnvironment,
+        await outermostGitMarkerRoot(repo, signal),
+      );
+      for (const source of knowledgeBase?.sources ?? []) {
+        const sourceDirectory = (await lstat(source)).isDirectory()
+          ? source
+          : dirname(source);
+        git = await inspectTrustedExecutable(
+          "git",
+          git.environment,
+          await outermostGitMarkerRoot(sourceDirectory, signal),
+        );
+      }
+      checkOpen();
       const deepScanConfigPath =
         mode === "deep"
           ? runtime.deepScanConfigPath ??
@@ -1141,13 +1176,10 @@ export class CodexSecurity {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-          ),
+          ...pluginEnvironment,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
+        git,
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
@@ -1388,6 +1420,7 @@ export class CodexSecurity {
         session,
         runtimePaths,
         options.auth,
+        git,
       );
       const thread = codex.startThread({
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -2101,6 +2134,7 @@ export class CodexSecurity {
     session: PreparedSession,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
+    git: InspectedExecutable,
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
     const {
       runtime,
@@ -2112,7 +2146,7 @@ export class CodexSecurity {
     } = session;
     const commandAuth = hasCommandAuth(sessionConfig);
     const environment: ProcessEnvironment = {
-      ...pluginExecutionEnvironment(
+      ...pluginExecutionEnvironmentWithGit(
         python,
         withoutCodexHome(
           selectedScanEnvironment(
@@ -2123,6 +2157,7 @@ export class CodexSecurity {
             modelProvider,
           ),
         ),
+        git,
       ),
       ...(externalProvider === null
         ? {}
