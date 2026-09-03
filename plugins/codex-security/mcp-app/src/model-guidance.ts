@@ -40,25 +40,39 @@ export function scanModelGuidance(
       ? `Current reasoning effort: ${reasoningEffort}.`
       : "The host did not provide the current reasoning effort.",
   ];
+  const nudge: string[] = [];
   if (model && isNonAstraCyberModel(current?.model ?? model)) {
-    messages.push(
+    nudge.push(
       `${model} is designed for dynamic exploitation. You may get better vulnerability scanning results with ${nonCyberModel?.model ?? "the latest non-cyber model available to you"}.`,
     );
   }
   if (upgrade) {
-    messages.push(
-      `A newer recommended model, ${upgrade.model}, is available in your Codex model catalog. Would you like to use it for better scanning results?`,
+    nudge.push(
+      `A newer recommended model, ${upgrade.model}, is available in your Codex model catalog.`,
     );
   }
-  const efforts = current?.supportedReasoningEfforts.map(
+  const efforts = (upgrade ?? current)?.supportedReasoningEfforts.map(
     ({ reasoningEffort: effort }) => effort,
   );
   const supportsXhigh = efforts?.includes("xhigh");
   const belowXhigh = reasoningEffort && isBelowXhigh(reasoningEffort);
+  const suggestions: string[] = [];
+  if (upgrade) suggestions.push(upgrade.model);
   if (belowXhigh && supportsXhigh !== false) {
-    messages.push(
-      `For the best scanning results, would you like to use xhigh reasoning${supportsXhigh ? "" : " if your model supports it"}?`,
+    suggestions.push(
+      `xhigh reasoning${supportsXhigh ? "" : " if your model supports it"}`,
     );
+  }
+  if (suggestions.length > 0) {
+    nudge.push(
+      `For the best scanning results, would you like to use ${suggestions.join(" with ")}?`,
+    );
+  }
+  if (nudge.length > 0) {
+    nudge.push(
+      "You can change the model or reasoning selector, or keep going with your current settings.",
+    );
+    messages.push(nudge.join(" "));
   }
   messages.push(
     ...(catalog
@@ -66,7 +80,7 @@ export function scanModelGuidance(
       : [
           "The available-model catalog could not be established. Do not claim a newer model is available without current host catalog evidence.",
         ]),
-    "In the app, present applicable guidance as a brief text nudge. The user can change the model selector or keep going; do not change settings or wait for an answer.",
+    "In the app, combine all applicable guidance into a single brief text nudge with at most one question. Do not emit separate warnings or questions for each setting. The user can change the model selector or keep going; do not change settings or wait for an answer.",
   );
   return messages.join("\n");
 }

@@ -86,7 +86,46 @@ assert.doesNotMatch(
   /scan-default/,
   "Prefer the declared non-cyber upgrade to an unrelated default.",
 );
-assert.match(advice, /use xhigh reasoning/);
+assert.match(advice, /use scan-upgrade with xhigh reasoning\?/);
+for (const cyber of [false, true]) {
+  for (const newer of [false, true]) {
+    for (const lowerEffort of [false, true]) {
+      const selected = model(cyber ? "example-cyber" : "scan-current", {
+        ...(newer ? { upgrade: "scan-upgrade" } : {}),
+      });
+      const guidance = scanModelGuidance(
+        {
+          model: selected.model,
+          reasoningEffort: lowerEffort ? "high" : "xhigh",
+        },
+        [selected, upgrade],
+      );
+      const nudge = guidance
+        .split("\n")
+        .filter((line) =>
+          line.includes("keep going with your current settings"),
+        );
+      assert.equal(nudge.length, cyber || newer || lowerEffort ? 1 : 0);
+      assert.equal(
+        (guidance.match(/\?/g) ?? []).length,
+        newer || lowerEffort ? 1 : 0,
+      );
+      if (cyber) assert.match(nudge[0], /dynamic exploitation/);
+      if (newer) assert.match(nudge[0], /use scan-upgrade/);
+      if (lowerEffort) assert.match(nudge[0], /xhigh reasoning/);
+    }
+  }
+}
+assert.doesNotMatch(
+  scanModelGuidance({ model: current.model, reasoningEffort: "high" }, [
+    current,
+    model("scan-upgrade", {
+      supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+    }),
+  ]),
+  /xhigh reasoning/,
+  "The combined suggestion must use an effort supported by its proposed model.",
+);
 assert.doesNotMatch(
   scanModelGuidance({ model: "astra-cyber", reasoningEffort: "xhigh" }),
   /dynamic exploitation/,
