@@ -17,10 +17,10 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
 const temporaryDirectories: string[] = [];
 
-function fixture(): { root: string; output: string } {
+function fixture(name = "repository") {
   const directory = mkdtempSync(join(tmpdir(), "security-policy-helper-"));
   temporaryDirectories.push(directory);
-  const root = join(directory, "repository");
+  const root = join(directory, name);
   const output = join(directory, "output");
   mkdirSync(root);
   return { root, output };
@@ -630,17 +630,9 @@ describe("built SECURITY.md helper", () => {
         ["", `~${project}`],
       ] as const) {
         const result = spawnSync(
-          "/bin/sh",
-          [
-            "-c",
-            (home === undefined ? "unset HOME; " : 'HOME="$2"; export HOME; ') +
-              'exec "$1" --helper resolve-security-md --repo "$3" --scope "$3"',
-            "helper-test",
-            join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
-            home ?? "",
-            path,
-          ],
-          { encoding: "utf8" },
+          join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
+          ["--helper", "resolve-security-md", "--repo", path, "--scope", path],
+          { encoding: "utf8", env: { ...process.env, HOME: home } },
         );
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).toBe(
@@ -776,7 +768,7 @@ describe("built SECURITY.md helper", () => {
   test.skipIf(process.platform !== "win32")(
     "resolves drive-relative and rooted scopes using the repository drive",
     () => {
-      const { root } = fixture();
+      const { root } = fixture("İrepository");
       write(root, "src/SECURITY.md", "component policy\n");
       write(root, "src/app.ts", "export {};\n");
       const drive = root.slice(0, 2);
