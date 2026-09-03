@@ -1529,6 +1529,72 @@ export async function preparePersistentOutputRoot(
   return root;
 }
 
+/** @internal */
+export async function resolveScanSessionPaths(
+  options: WorkbenchCommandOptions,
+  scanId: string,
+  rootThreadId: string,
+): Promise<ReadonlySet<string>> {
+  const source = [
+    "import json, os, sqlite3, sys",
+    "from pathlib import Path",
+    "sys.path.insert(0, sys.argv[1])",
+    "import workbench_scan_usage as usage",
+    "path = (Path(os.environ['CODEX_SECURITY_STATE_DIR']) / 'workbench.sqlite3').expanduser().resolve()",
+    "connection = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=1)",
+    "try:",
+    "    connection.row_factory = sqlite3.Row",
+    "    connection.execute('PRAGMA query_only = ON')",
+    "    scan = connection.execute('SELECT * FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()",
+    "    if scan is None: raise RuntimeError('Scan ownership is unavailable.')",
+    "    roots = usage._scan_root_thread_ids(connection, scan, sys.argv[3])",
+    "finally:",
+    "    connection.close()",
+    "database = usage._codex_state_database()",
+    "if database is None: raise RuntimeError('Codex session ownership is unavailable.')",
+    "warnings = set()",
+    "sessions, missing = usage._discover_rollout_sessions(database, roots, warnings)",
+    "if missing or warnings or not any(session.thread_id == sys.argv[3] for session in sessions):",
+    "    raise RuntimeError('Scan session ownership is incomplete.')",
+    "print(json.dumps([str(session.path) for session in sessions], allow_nan=False))",
+  ].join("\n");
+  try {
+    const { stdout } = await execFile(
+      options.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        source,
+        join(options.pluginRoot, "scripts"),
+        scanId,
+        rootThreadId,
+      ],
+      {
+        env: pluginHelperEnvironment(options.environment),
+        encoding: "utf8",
+        maxBuffer: Infinity,
+        windowsHide: true,
+        signal: options.signal,
+      },
+    );
+    const paths: unknown = JSON.parse(stdout);
+    if (
+      !Array.isArray(paths) ||
+      !paths.every((path) => typeof path === "string" && isAbsolute(path))
+    ) {
+      throw new Error("The scan session ownership response is invalid.");
+    }
+    return new Set(paths);
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    throw new CodexSecurityError(
+      "The scan session ownership could not be verified.",
+      { cause: error },
+    );
+  }
+}
+
 const workbenchComparisonSupport = new Map<
   string,
   { stdin: boolean; related: boolean }

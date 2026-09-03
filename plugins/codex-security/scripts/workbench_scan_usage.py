@@ -456,8 +456,9 @@ def _read_rollout_usage(
             if timestamp is None or snapshot is None:
                 warnings.add("token_record_invalid")
                 continue
+            reset = snapshot["totalTokens"] < previous["totalTokens"]
             delta = {
-                key: value - previous[key] if value >= previous[key] else value
+                key: value if reset or value < previous[key] else value - previous[key]
                 for key, value in snapshot.items()
             }
             previous = snapshot
@@ -465,8 +466,19 @@ def _read_rollout_usage(
                 continue
             if completed_at is not None and timestamp > completed_at:
                 continue
+            delta["totalTokens"] = delta["inputTokens"] + delta["outputTokens"]
             if delta["totalTokens"] <= 0:
                 continue
+            delta["cacheWriteInputTokens"] = min(
+                delta["cacheWriteInputTokens"], delta["inputTokens"]
+            )
+            delta["cachedInputTokens"] = min(
+                delta["cachedInputTokens"],
+                delta["inputTokens"] - delta["cacheWriteInputTokens"],
+            )
+            delta["reasoningOutputTokens"] = min(
+                delta["reasoningOutputTokens"], delta["outputTokens"]
+            )
             _add_token_usage(total, delta)
 
     if not boundary_reached:
@@ -501,19 +513,19 @@ def _is_owned_task_start(
     turn_id = payload.get("turn_id")
     if not isinstance(turn_id, str) or not turn_id:
         return False
-    thread_timestamp = _uuid7_timestamp(thread_id)
-    turn_timestamp = _uuid7_timestamp(turn_id)
-    if thread_timestamp is None:
+    thread_order = _uuid7_order(thread_id)
+    turn_order = _uuid7_order(turn_id)
+    if thread_order is None:
         return True
-    return turn_timestamp is not None and turn_timestamp >= thread_timestamp
+    return turn_order is not None and turn_order >= thread_order
 
 
-def _uuid7_timestamp(value: str) -> int | None:
+def _uuid7_order(value: str) -> int | None:
     try:
         parsed = uuid.UUID(value)
     except ValueError:
         return None
-    return parsed.int >> 80 if parsed.version == 7 else None
+    return parsed.int if parsed.version == 7 else None
 
 
 def _token_snapshot(payload: Mapping[str, Any]) -> dict[str, int] | None:

@@ -1,4 +1,4 @@
-import { open, readdir } from "node:fs/promises";
+import { open, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
   estimateScanCost,
@@ -40,14 +40,18 @@ interface SessionUsage {
   offset: number;
   pendingLine: Buffer[];
   pendingLineBytes: number;
-  unreadable: boolean;
+  unreadable: { error: unknown } | null;
   threadId: string | null;
   parentThreadId: string | null;
   workingDirectory: string | null;
   startedAt: number | null;
   inheritedUsage: ScanTokenUsage | null;
+  previousRawUsage: ScanTokenUsage | null;
+  accumulatedOwnUsage: ScanTokenUsage | null;
   replaying: boolean;
-  usage: ScanTokenUsage | null;
+  accounting: { usage: ScanTokenUsage; cost: ScanCost | null } | null;
+  accountingError: Error | null;
+  taskCompleted: boolean;
   calls: Map<string, ScanActivity>;
   activities: ScanActivity[];
   progress: ScanProgress[];
@@ -66,11 +70,14 @@ interface ScanCostTrackerOptions {
   scanDirectory?: string;
   maxCostUsd?: number;
   expectedFilesTotal?: number;
-  onCost?: (cost: Readonly<ScanCost>) => void;
+  onCost?: (cost: Readonly<ScanCost>, usage: unknown) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onError?: (error: unknown) => void;
+  resolveOwnedSessionPaths?: (
+    rootThreadId: string,
+  ) => Promise<ReadonlySet<string>>;
 }
 
 interface ScanCostSnapshot {
@@ -78,6 +85,16 @@ interface ScanCostSnapshot {
   cost: ScanCost | null;
 }
 
+interface ObservedSessionUsage {
+  root: ScanTokenUsage | null;
+  workers: ScanTokenUsage | null;
+  completedRoot: ScanTokenUsage | null;
+  rootCompleted: boolean;
+  unverified: boolean;
+  unfinishedWorkers: boolean;
+  unidentifiedSessions: Set<string>;
+  accountedSessions: Set<string>;
+}
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
 
@@ -86,14 +103,18 @@ function createSessionUsage(): SessionUsage {
     offset: 0,
     pendingLine: [],
     pendingLineBytes: 0,
-    unreadable: false,
+    unreadable: null,
     threadId: null,
     parentThreadId: null,
     workingDirectory: null,
     startedAt: null,
     inheritedUsage: null,
+    previousRawUsage: null,
+    accumulatedOwnUsage: null,
     replaying: false,
-    usage: null,
+    accounting: null,
+    accountingError: null,
+    taskCompleted: false,
     calls: new Map(),
     activities: [],
     progress: [],
@@ -108,7 +129,6 @@ function createSessionUsage(): SessionUsage {
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
   readonly #sessions = new Map<string, SessionUsage>();
-  readonly #receipts = new Map<string, ScanTokenUsage | null>();
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
@@ -116,7 +136,20 @@ export class ScanCostTracker {
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
+  #finalSnapshot: ScanCostSnapshot | null = null;
+  #completedThreadUsage = new Map<string | null, ScanTokenUsage | null>();
+  #observedUsage: ObservedSessionUsage = {
+    root: null,
+    workers: null,
+    completedRoot: null,
+    rootCompleted: false,
+    unverified: false,
+    unfinishedWorkers: false,
+    unidentifiedSessions: new Set(),
+    accountedSessions: new Set(),
+  };
   #lastCost: number | null = null;
+  #rootOnlyReadError = false;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -129,11 +162,19 @@ export class ScanCostTracker {
     this.#expectedFilesTotal = filesTotal;
   }
 
+  public recordCompletedThreadUsage(
+    threadId: string | null,
+    usage: unknown,
+  ): void {
+    this.#completedThreadUsage.set(threadId, tokenUsage(usage));
+  }
+
   public recordUsage(usage: unknown, threadId = this.#threadId): void {
-    const normalized = tokenUsage(usage);
-    if (threadId !== null) {
-      this.#receipts.set(threadId, normalized);
-    }
+    this.recordCompletedThreadUsage(threadId, usage);
+  }
+
+  public setMaxCostUsd(maxCostUsd: number): void {
+    this.#options.maxCostUsd = maxCostUsd;
   }
 
   public start(threadId: string): void {
@@ -183,22 +224,129 @@ export class ScanCostTracker {
   }
 
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
+    const finalizing = arguments.length > 0;
+    if (this.#finalSnapshot !== null) return this.#finalSnapshot;
     if (this.#timer !== null) {
       clearInterval(this.#timer);
       this.#timer = null;
     }
-    if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
-    await this.refresh();
-    if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
-      return this.#snapshot;
-    const cost = estimateScanCost(this.#options.model, fallbackUsage);
-    this.#snapshot = { usage: fallbackUsage ?? null, cost };
-    this.#reportCost(cost);
-    return this.#snapshot;
+    const suppliedRoot = tokenUsage(fallbackUsage);
+    let refreshFailure: { error: unknown } | null = null;
+    try {
+      await this.refresh();
+    } catch (error) {
+      refreshFailure = { error };
+    }
+    const observed = this.#observedUsage;
+    const completedRoot = higherCostUsage(
+      this.#options.model,
+      observed.completedRoot,
+      suppliedRoot,
+    );
+    observed.completedRoot = completedRoot;
+    const rootUsage = higherCostUsage(
+      this.#options.model,
+      observed.root,
+      completedRoot,
+    );
+    let completedUsage: unknown = rootUsage;
+    const workerUsage = observed.workers;
+    if (workerUsage !== null) {
+      completedUsage = addTokenUsage(rootUsage, workerUsage);
+    }
+    const cost = estimateScanCost(this.#options.model, completedUsage);
+    if (workerUsage === null && rootUsage === suppliedRoot && cost === null) {
+      completedUsage = fallbackUsage;
+    }
+    const snapshot =
+      this.#snapshot.usage !== null &&
+      ((rootUsage === null && workerUsage === null) ||
+        (this.#snapshot.cost !== null &&
+          (cost === null ||
+            this.#snapshot.cost.estimatedUsd > cost.estimatedUsd)))
+        ? this.#snapshot
+        : { usage: completedUsage ?? null, cost };
+    this.#snapshot = snapshot;
+    if (
+      this.#options.maxCostUsd !== undefined &&
+      snapshot.cost !== null &&
+      snapshot.cost.estimatedUsd > this.#options.maxCostUsd
+    ) {
+      this.#reportCost(snapshot.cost);
+      if (!finalizing) return snapshot;
+    }
+    if (refreshFailure !== null) {
+      if (
+        fallbackUsage === undefined ||
+        (this.#options.maxCostUsd !== undefined &&
+          (completedRoot === null || !this.#rootOnlyReadError))
+      ) {
+        throw refreshFailure.error;
+      }
+      if (this.#options.maxCostUsd === undefined) {
+        this.#options.onError?.(refreshFailure.error);
+      }
+    }
+    let unidentifiedOwnedSession = false;
+    if (finalizing && this.#options.maxCostUsd !== undefined) {
+      const resolveOwnedSessionPaths = this.#options.resolveOwnedSessionPaths;
+      if (resolveOwnedSessionPaths === undefined || this.#threadId === null) {
+        unidentifiedOwnedSession = observed.unidentifiedSessions.size > 0;
+      } else {
+        const ownedPaths = await resolveOwnedSessionPaths(this.#threadId);
+        const accountedPaths = new Set(
+          await Promise.all(
+            [...observed.accountedSessions].map(async (path) => realpath(path)),
+          ),
+        );
+        for (const path of ownedPaths) {
+          if (!accountedPaths.has(path)) {
+            unidentifiedOwnedSession = true;
+            break;
+          }
+        }
+      }
+    }
+    if (
+      this.#options.maxCostUsd !== undefined &&
+      (rootUsage === null ||
+        cost === null ||
+        observed.unverified ||
+        unidentifiedOwnedSession ||
+        (finalizing &&
+          ((completedRoot === null && !observed.rootCompleted) ||
+            observed.unfinishedWorkers)))
+    ) {
+      throw (
+        refreshFailure?.error ??
+        new Error(
+          "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+        )
+      );
+    }
+    const unknownCompletedUsage = [...this.#completedThreadUsage].some(
+      ([threadId, usage]) =>
+        usage === null &&
+        ![...this.#sessions.values()].some(
+          (session) =>
+            session.threadId === threadId && session.accounting !== null,
+        ),
+    );
+    const result =
+      this.#options.maxCostUsd === undefined && unknownCompletedUsage
+        ? { usage: null, cost: null }
+        : snapshot;
+    this.#snapshot = result;
+    if (finalizing) this.#finalSnapshot = result;
+    this.#reportCost(result.cost);
+    return result;
   }
 
   async #readSessions(): Promise<void> {
-    if (this.#threadId === null) return;
+    const rootThreadId = this.#threadId;
+    if (rootThreadId === null) return;
+    this.#rootOnlyReadError = false;
+    const presentSessions = new Set<string>();
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
@@ -209,38 +357,94 @@ export class ScanCostTracker {
         this.#sessions.set(path, session);
       }
       try {
-        await readSessionUsage(path, session, this.#options.repository);
+        presentSessions.add(path);
+        if (
+          !(await readSessionUsage(
+            path,
+            session,
+            this.#options.model,
+            this.#options.repository,
+            this.#options.maxCostUsd !== undefined,
+          ))
+        ) {
+          presentSessions.delete(path);
+        }
       } catch (error) {
         if (session.threadId === null) throw error;
         unreadable.push({ session, error });
       }
     }
 
-    const included = new Set([this.#threadId, ...this.#receipts.keys()]);
+    const parents = new Map<string, string | null>();
+    const conflictingParents = new Set<string>();
+    for (const session of this.#sessions.values()) {
+      if (session.threadId === null) continue;
+      const previous = parents.get(session.threadId);
+      if (previous !== undefined && previous !== session.parentThreadId) {
+        conflictingParents.add(session.threadId);
+      } else {
+        parents.set(session.threadId, session.parentThreadId);
+      }
+    }
+    const knownOwner = (threadId: string): string | null => {
+      const seen = new Set<string>();
+      while (threadId !== rootThreadId) {
+        if (seen.has(threadId) || conflictingParents.has(threadId)) return null;
+        seen.add(threadId);
+        const parent = parents.get(threadId);
+        if (parent === undefined) return null;
+        if (parent === null) return threadId;
+        threadId = parent;
+      }
+      return rootThreadId;
+    };
+
+    const included = new Set([
+      rootThreadId,
+      ...[...this.#completedThreadUsage.keys()].filter(
+        (threadId): threadId is string => threadId !== null,
+      ),
+    ]);
+    const ambiguousWorkers = new Set<string>();
     if (this.#options.scanDirectory !== undefined) {
       const scanStartedAt =
         [...this.#sessions.values()].find(
-          (session) => session.threadId === this.#threadId,
+          (session) => session.threadId === rootThreadId,
         )?.startedAt ?? null;
       for (const session of this.#sessions.values()) {
         if (
           session.threadId === null ||
-          session.parentThreadId !== null ||
-          session.workingDirectory === null ||
-          scanStartedAt === null ||
-          session.startedAt === null ||
-          session.startedAt < scanStartedAt
+          session.threadId === rootThreadId ||
+          session.workingDirectory === null
         ) {
           continue;
         }
         if (
-          isScanArtifactDirectory(
+          !isScanArtifactDirectory(
             this.#options.scanDirectory,
             session.workingDirectory,
           )
         ) {
-          included.add(session.threadId);
+          continue;
         }
+        if (
+          scanStartedAt !== null &&
+          session.startedAt !== null &&
+          session.startedAt < scanStartedAt
+        ) {
+          continue;
+        }
+        const owner = knownOwner(session.threadId);
+        if (owner === null) {
+          ambiguousWorkers.add(session.threadId);
+          continue;
+        }
+        if (owner !== session.threadId) continue;
+        if (scanStartedAt === null || session.startedAt === null) {
+          ambiguousWorkers.add(session.threadId);
+          continue;
+        }
+        included.add(session.threadId);
       }
     }
     let changed = true;
@@ -253,72 +457,195 @@ export class ScanCostTracker {
           included.has(session.parentThreadId) &&
           !included.has(session.threadId)
         ) {
+          if (conflictingParents.has(session.threadId)) {
+            ambiguousWorkers.add(session.threadId);
+            continue;
+          }
           included.add(session.threadId);
           changed = true;
         }
       }
     }
-    for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) throw error;
-    }
-
-    const usages = new Map(this.#receipts);
-    for (const [path, tracked] of this.#sessions) {
-      const threadId = tracked.threadId;
-      if (threadId === null || !included.has(threadId)) continue;
-      let session = tracked;
-      if (
-        this.#options.onSessionEvent !== undefined &&
-        session.events === undefined
-      ) {
-        // Replay only newly associated sessions, including their early events.
-        session = createSessionUsage();
-        session.events = [];
-        await readSessionUsage(path, session, this.#options.repository);
-        this.#sessions.set(path, session);
-      }
-      let worker: number | undefined;
-      if (threadId !== this.#threadId) {
-        worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
-        this.#workers.set(threadId, worker);
-      }
-      for (const event of session.events?.splice(0) ?? []) {
-        this.#options.onSessionEvent?.({
-          threadId,
-          parentThreadId: session.parentThreadId,
-          worker,
-          event,
-        });
-      }
-      if (worker !== undefined) {
-        for (const activity of session.activities.splice(0)) {
-          this.#options.onActivity?.({
-            ...activity,
-            id: `${threadId}:${activity.id}`,
-            worker,
+    const hasUnverifiedWorkerAttribution = [...ambiguousWorkers].some(
+      (threadId) => !included.has(threadId),
+    );
+    const readFailures: Array<{
+      session: SessionUsage;
+      error: unknown;
+      rootOnlyRecoverable: boolean;
+    }> = [];
+    if (this.#options.maxCostUsd !== undefined) {
+      for (const [path, session] of this.#sessions) {
+        if (
+          session.threadId !== null &&
+          included.has(session.threadId) &&
+          !presentSessions.has(path)
+        ) {
+          readFailures.push({
+            session,
+            error: new Error(
+              "A tracked scan session disappeared before its cost could be verified.",
+            ),
+            rootOnlyRecoverable: false,
           });
         }
-        this.#reportWorkerProgress(session);
       }
+    }
+    for (const { session, error } of unreadable) {
+      if (included.has(session.threadId!)) {
+        readFailures.push({ session, error, rootOnlyRecoverable: true });
+      } else if (isSessionAccessDenied(error)) {
+        quarantineSession(session, error);
+      }
+    }
+
+    const observed: ObservedSessionUsage = {
+      root: null,
+      workers: null,
+      completedRoot: this.#observedUsage.completedRoot,
+      rootCompleted: false,
+      unverified: hasUnverifiedWorkerAttribution,
+      unfinishedWorkers: false,
+      unidentifiedSessions: new Set(),
+      accountedSessions: new Set(),
+    };
+    const accountedThreads = new Set<string | null>();
+    for (const [path, session] of this.#sessions) {
       if (
-        session.usage !== null &&
-        session.usage.total_tokens > (usages.get(threadId)?.total_tokens ?? -1)
+        this.#options.maxCostUsd !== undefined &&
+        session.threadId === null &&
+        presentSessions.has(path)
       ) {
-        usages.set(threadId, session.usage);
+        observed.unidentifiedSessions.add(path);
+      }
+      if (session.threadId !== null && included.has(session.threadId)) {
+        accountedThreads.add(session.threadId);
+        if (presentSessions.has(path)) observed.accountedSessions.add(path);
+        await this.#reportSessionEvents(path, session);
+        if (
+          this.#options.maxCostUsd !== undefined &&
+          session.accountingError !== null
+        ) {
+          readFailures.push({
+            session,
+            error: session.accountingError,
+            rootOnlyRecoverable: true,
+          });
+        }
+        if (session.pendingLineBytes > 0) observed.unverified = true;
+        const usage = higherCostUsage(
+          this.#options.model,
+          session.accounting?.usage ?? null,
+          this.#completedThreadUsage.get(session.threadId) ?? null,
+        );
+        if (session.threadId === this.#threadId) {
+          observed.rootCompleted =
+            session.taskCompleted ||
+            this.#completedThreadUsage.has(session.threadId);
+          if (usage !== null) {
+            observed.root = addTokenUsage(observed.root, usage);
+          }
+        } else {
+          if (usage === null) {
+            observed.unverified = true;
+          } else {
+            observed.workers = addTokenUsage(observed.workers, usage);
+          }
+          if (
+            !session.taskCompleted &&
+            !this.#completedThreadUsage.has(session.threadId)
+          )
+            observed.unfinishedWorkers = true;
+        }
       }
     }
-    let usage: ScanTokenUsage | null = null;
-    for (const value of usages.values()) {
-      if (value === null) {
-        this.#snapshot = { usage: null, cost: null };
-        return;
+    for (const [threadId, usage] of this.#completedThreadUsage) {
+      if (accountedThreads.has(threadId)) continue;
+      if (usage === null) {
+        observed.unverified = true;
+      } else if (threadId === rootThreadId) {
+        observed.root = addTokenUsage(observed.root, usage);
+        observed.rootCompleted = true;
+      } else {
+        observed.workers = addTokenUsage(observed.workers, usage);
       }
-      usage = addTokenUsage(usage, value);
     }
-    if (usage === null) return;
-    const cost = estimateScanCost(this.#options.model, usage);
-    this.#snapshot = { usage, cost };
-    this.#reportCost(cost);
+    this.#observedUsage = observed;
+    const usage =
+      observed.workers === null
+        ? observed.root
+        : addTokenUsage(observed.root, observed.workers);
+    if (usage !== null) {
+      const cost = estimateScanCost(this.#options.model, usage);
+      if (
+        this.#snapshot.cost === null ||
+        (cost !== null && cost.estimatedUsd >= this.#snapshot.cost.estimatedUsd)
+      ) {
+        this.#snapshot = { usage, cost };
+      }
+      this.#reportCost(this.#snapshot.cost);
+    }
+    const readFailure = readFailures[0];
+    if (readFailure !== undefined) {
+      this.#rootOnlyReadError =
+        readFailures.every(
+          (failure) =>
+            failure.rootOnlyRecoverable &&
+            failure.session.threadId === rootThreadId,
+        ) && !hasUnverifiedWorkerAttribution;
+      throw readFailure.error;
+    }
+  }
+
+  async #reportSessionEvents(
+    path: string,
+    session: SessionUsage,
+  ): Promise<void> {
+    const threadId = session.threadId;
+    if (threadId === null) return;
+    if (
+      this.#options.onSessionEvent !== undefined &&
+      session.events === undefined
+    ) {
+      const replay = createSessionUsage();
+      replay.events = [];
+      try {
+        // Replay only bytes already accounted for, without replacing cost state.
+        await readSessionUsage(
+          path,
+          replay,
+          this.#options.model,
+          this.#options.repository,
+          false,
+          session.offset,
+        );
+      } catch {
+        // Detail replay is optional. The accounting reader retains its own errors.
+      }
+      session.events = replay.threadId === threadId ? replay.events : [];
+    }
+    let worker: number | undefined;
+    if (threadId !== this.#threadId) {
+      worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
+      this.#workers.set(threadId, worker);
+    }
+    for (const event of session.events?.splice(0) ?? []) {
+      this.#options.onSessionEvent?.({
+        threadId,
+        parentThreadId: session.parentThreadId,
+        worker,
+        event,
+      });
+    }
+    if (worker === undefined) return;
+    for (const activity of session.activities.splice(0)) {
+      this.#options.onActivity?.({
+        ...activity,
+        id: `${threadId}:${activity.id}`,
+        worker,
+      });
+    }
+    this.#reportWorkerProgress(session);
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -364,7 +691,7 @@ export class ScanCostTracker {
   #reportCost(cost: ScanCost | null): void {
     if (cost === null || cost.estimatedUsd === this.#lastCost) return;
     this.#lastCost = cost.estimatedUsd;
-    this.#options.onCost?.(cost);
+    this.#options.onCost?.(cost, this.#snapshot.usage);
   }
 }
 
@@ -389,33 +716,45 @@ export async function* sessionFiles(directory: string): AsyncGenerator<string> {
 async function readSessionUsage(
   path: string,
   session: SessionUsage,
+  model: string,
   repository?: string,
-): Promise<void> {
-  if (session.unreadable) return;
+  requireReadableSessions = false,
+  endOffset?: number,
+): Promise<boolean> {
+  if (session.unreadable !== null) {
+    if (requireReadableSessions) throw session.unreadable.error;
+    return true;
+  }
   let file;
   try {
     file = await open(path, "r");
   } catch (error) {
-    if (isMissingFile(error)) return;
+    if (isMissingFile(error)) return false;
+    if (session.threadId === null && isSessionAccessDenied(error)) {
+      quarantineSession(session, error);
+    }
     throw error;
   }
   try {
     const buffer = Buffer.alloc(SESSION_READ_SIZE);
     while (true) {
-      const { bytesRead } = await file.read(
-        buffer,
-        0,
-        buffer.length,
-        session.offset,
-      );
-      if (bytesRead === 0) return;
+      const length =
+        endOffset === undefined
+          ? buffer.length
+          : Math.min(buffer.length, endOffset - session.offset);
+      if (length <= 0) return true;
+      const { bytesRead } = await file.read(buffer, 0, length, session.offset);
+      if (bytesRead === 0) return true;
       session.offset += bytesRead;
       try {
-        readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
+        readSessionChunk(
+          buffer.subarray(0, bytesRead),
+          session,
+          model,
+          repository,
+        );
       } catch (error) {
-        session.unreadable = true;
-        session.pendingLine = [];
-        session.pendingLineBytes = 0;
+        quarantineSession(session, error);
         throw error;
       }
     }
@@ -424,9 +763,16 @@ async function readSessionUsage(
   }
 }
 
+function quarantineSession(session: SessionUsage, error: unknown): void {
+  session.unreadable = { error };
+  session.pendingLine = [];
+  session.pendingLineBytes = 0;
+}
+
 function readSessionChunk(
   contents: Buffer,
   session: SessionUsage,
+  model: string,
   repository?: string,
 ): void {
   let lineStart = 0;
@@ -445,12 +791,13 @@ function readSessionChunk(
     }
 
     if (session.pendingLineBytes === 0) {
-      readSessionEvent(fragment.toString("utf8"), session, repository);
+      readSessionEvent(fragment.toString("utf8"), session, model, repository);
     } else {
       if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
       readSessionEvent(
         Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
         session,
+        model,
         repository,
       );
       session.pendingLine = [];
@@ -460,9 +807,22 @@ function readSessionChunk(
   }
 }
 
+function uuid7Order(value: unknown): bigint | null {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      value,
+    )
+  ) {
+    return null;
+  }
+  return BigInt(`0x${value.replaceAll("-", "")}`);
+}
+
 function readSessionEvent(
   line: string,
   session: SessionUsage,
+  model: string,
   repository?: string,
 ): void {
   if (line.length === 0) return;
@@ -470,6 +830,11 @@ function readSessionEvent(
   try {
     event = JSON.parse(line) as unknown;
   } catch {
+    if (!session.replaying) {
+      session.accountingError ??= new Error(
+        "The scan cost limit could not be verified because a tracked session record could not be read.",
+      );
+    }
     return;
   }
   if (!isRecord(event) || !isRecord(event["payload"])) return;
@@ -477,6 +842,7 @@ function readSessionEvent(
   if (event["type"] === "session_meta") {
     if (session.threadId !== null) {
       session.replaying = payload["id"] !== session.threadId;
+      session.taskCompleted = false;
       if (!session.replaying) session.events?.push(event);
       return;
     }
@@ -488,6 +854,8 @@ function readSessionEvent(
     }
     session.startedAt = sessionStartedAt(payload["timestamp"]);
     session.parentThreadId = sessionParentThreadId(payload);
+    const forkedFrom = payload["forked_from_id"];
+    session.replaying = typeof forkedFrom === "string" && forkedFrom.length > 0;
     session.events?.push(event);
     return;
   }
@@ -495,20 +863,43 @@ function readSessionEvent(
     if (event["type"] !== "event_msg") return;
     if (payload["type"] === "token_count" && isRecord(payload["info"])) {
       const usage = tokenUsage(payload["info"]["total_token_usage"]);
-      if (usage !== null) session.inheritedUsage = usage;
+      if (usage !== null) {
+        session.inheritedUsage = usage;
+        session.previousRawUsage = usage;
+      }
     }
-    if (
-      payload["type"] === "task_started" &&
-      typeof payload["started_at"] === "number" &&
-      session.startedAt !== null &&
-      payload["started_at"] >= Math.floor(session.startedAt / 1_000)
-    ) {
-      session.replaying = false;
-      session.events?.push(event);
+    if (payload["type"] === "task_started") {
+      const threadOrder = uuid7Order(session.threadId);
+      const turnOrder = uuid7Order(payload["turn_id"]);
+      const owned =
+        threadOrder === null
+          ? typeof payload["started_at"] === "number" &&
+            session.startedAt !== null &&
+            payload["started_at"] >= Math.floor(session.startedAt / 1_000)
+          : turnOrder !== null && turnOrder >= threadOrder;
+      if (owned) {
+        session.replaying = false;
+        session.taskCompleted = false;
+        session.events?.push(event);
+      }
     }
     return;
   }
   session.events?.push(event);
+  if (event["type"] === "event_msg") {
+    if (payload["type"] === "task_started") {
+      session.taskCompleted = false;
+      return;
+    }
+    if (
+      payload["type"] === "task_complete" ||
+      payload["type"] === "turn_complete" ||
+      payload["type"] === "turn_aborted"
+    ) {
+      session.taskCompleted = true;
+      return;
+    }
+  }
   if (event["type"] === "response_item") {
     session.progress.push(...sessionProgressUpdates(payload));
     if (repository === undefined) return;
@@ -641,12 +1032,56 @@ function readSessionEvent(
     return;
   }
   const usage = tokenUsage(payload["info"]["total_token_usage"]);
-  if (usage === null) return;
+  const accumulated =
+    usage === null
+      ? null
+      : accumulateTokenUsage(
+          session.previousRawUsage,
+          session.accumulatedOwnUsage,
+          usage,
+        );
   const ownUsage =
-    session.inheritedUsage === null
-      ? usage
-      : subtractTokenUsage(usage, session.inheritedUsage);
-  if (ownUsage !== null) session.usage = ownUsage;
+    usage === null
+      ? null
+      : session.inheritedUsage === null
+        ? usage
+        : subtractTokenUsage(usage, session.inheritedUsage);
+  const cost = ownUsage === null ? null : estimateScanCost(model, ownUsage);
+  const accumulatedUsage = accumulated ?? session.accumulatedOwnUsage;
+  const accumulatedCost = estimateScanCost(model, accumulatedUsage);
+  if (
+    accumulated === null ||
+    accumulatedCost === null ||
+    (ownUsage !== null && cost === null)
+  ) {
+    session.accountingError ??= new Error(
+      "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+    );
+  }
+  if (usage === null) return;
+  session.previousRawUsage = usage;
+  if (accumulated !== null) session.accumulatedOwnUsage = accumulated;
+  for (const candidate of [
+    ownUsage === null ? null : { usage: ownUsage, cost },
+    accumulatedUsage === null
+      ? null
+      : { usage: accumulatedUsage, cost: accumulatedCost },
+  ]) {
+    if (candidate === null) continue;
+    const previous = session.accounting;
+    if (
+      previous === null ||
+      (candidate.cost !== null
+        ? previous.cost === null ||
+          candidate.cost.estimatedUsd >= previous.cost.estimatedUsd
+        : previous.cost === null &&
+          higherCostUsage(model, previous.usage, candidate.usage) ===
+            candidate.usage)
+    ) {
+      session.accounting = candidate;
+    }
+  }
+  session.taskCompleted = false;
 }
 
 function readSessionReasoning(
@@ -770,6 +1205,82 @@ function sessionContentText(
     .join("\n");
 }
 
+function higherCostUsage(
+  model: string,
+  previous: ScanTokenUsage | null,
+  next: ScanTokenUsage | null,
+): ScanTokenUsage | null {
+  if (next === null) return previous;
+  const previousCost = estimateScanCost(model, previous);
+  const nextCost = estimateScanCost(model, next);
+  if (previous !== null && previousCost === null && nextCost === null) {
+    const previousTotal =
+      BigInt(previous.input_tokens) + BigInt(previous.output_tokens);
+    const nextTotal = BigInt(next.input_tokens) + BigInt(next.output_tokens);
+    return previousTotal > nextTotal ? previous : next;
+  }
+  return previousCost !== null &&
+    nextCost !== null &&
+    previousCost.estimatedUsd > nextCost.estimatedUsd
+    ? previous
+    : next;
+}
+
+function accumulateTokenUsage(
+  previousRaw: ScanTokenUsage | null,
+  accumulated: ScanTokenUsage | null,
+  next: ScanTokenUsage,
+): ScanTokenUsage | null {
+  const previousTotal =
+    BigInt(previousRaw?.input_tokens ?? 0) +
+    BigInt(previousRaw?.output_tokens ?? 0);
+  const nextTotal = BigInt(next.input_tokens) + BigInt(next.output_tokens);
+  const reset = nextTotal < previousTotal;
+  if (
+    next.input_tokens === (previousRaw?.input_tokens ?? 0) &&
+    next.output_tokens === (previousRaw?.output_tokens ?? 0)
+  ) {
+    return accumulated ?? tokenUsage({ input_tokens: 0, output_tokens: 0 });
+  }
+  type TokenField = Exclude<keyof ScanTokenUsage, "total_tokens">;
+  const fieldDelta = (field: TokenField): bigint => {
+    const previous = BigInt(previousRaw?.[field] ?? 0);
+    const value = BigInt(next[field]);
+    return reset || value < previous ? value : value - previous;
+  };
+  const inputDelta = fieldDelta("input_tokens");
+  const outputDelta = fieldDelta("output_tokens");
+  const cacheWriteRaw = fieldDelta("cache_write_input_tokens");
+  const cacheWriteDelta =
+    cacheWriteRaw > inputDelta ? inputDelta : cacheWriteRaw;
+  const remainingInputDelta = inputDelta - cacheWriteDelta;
+  const cachedRaw = fieldDelta("cached_input_tokens");
+  const cachedDelta =
+    cachedRaw > remainingInputDelta ? remainingInputDelta : cachedRaw;
+  const reasoningRaw = fieldDelta("reasoning_output_tokens");
+  const reasoningDelta =
+    reasoningRaw > outputDelta ? outputDelta : reasoningRaw;
+  const addDelta = (field: TokenField, delta: bigint): number | null => {
+    const total = BigInt(accumulated?.[field] ?? 0) + delta;
+    return total <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(total) : null;
+  };
+  const usage = {
+    input_tokens: addDelta("input_tokens", inputDelta),
+    cached_input_tokens: addDelta("cached_input_tokens", cachedDelta),
+    cache_write_input_tokens: addDelta(
+      "cache_write_input_tokens",
+      cacheWriteDelta,
+    ),
+    output_tokens: addDelta("output_tokens", outputDelta),
+    reasoning_output_tokens: addDelta(
+      "reasoning_output_tokens",
+      reasoningDelta,
+    ),
+  };
+  return Object.values(usage).some((value) => value === null)
+    ? null
+    : tokenUsage(usage);
+}
 function addTokenUsage(
   previous: ScanTokenUsage | null,
   next: ScanTokenUsage,
@@ -810,4 +1321,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
+}
+
+function isSessionAccessDenied(error: unknown): boolean {
+  return (
+    isRecord(error) && (error["code"] === "EACCES" || error["code"] === "EPERM")
+  );
 }

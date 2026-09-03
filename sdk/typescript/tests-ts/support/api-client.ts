@@ -68,6 +68,7 @@ export class TestClient extends CodexSecurity {
           throw new Error("Unexpected Codex invocation in test");
         },
         environment: {},
+        resolveScanSessionPaths: async () => new Set<string>(),
         prepareScanArtifactRestorer: async () => ({
           restore: async () => {},
         }),

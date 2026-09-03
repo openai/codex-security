@@ -136,7 +136,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           } else if (event.type === "turn.completed") {
             turnCompleted = true;
             request.signal.removeEventListener("abort", forwardAbort);
-            break;
+            // Drain the SDK stream so the worker can flush its session records.
           } else if (event.type === "turn.failed") {
             throw new Error(event.error.message);
           } else if (event.type === "error") {

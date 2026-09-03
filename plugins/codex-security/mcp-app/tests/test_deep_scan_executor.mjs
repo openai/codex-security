@@ -87,7 +87,7 @@ try {
     await testSandboxNamespaceDiagnosticIsSanitized();
     await testOwnedArtifactToolFailureDiagnosticIsSanitized();
     await testStreamTerminationWithoutTerminalEventFails();
-    await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
+    await testCompletedWorkerFlushesBeforeSettling();
     await testAbortPropagation();
     await testConfigurationFailureIsNonRetryable();
     await testThreadStartConfigurationFailureIsNonRetryable();
@@ -1005,7 +1005,7 @@ async function testAbortPropagation() {
   }
 }
 
-async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
+async function testCompletedWorkerFlushesBeforeSettling() {
   const fixture = await fakeCodexFixture();
   const previousPath = process.env.CODEX_CLI_PATH;
   process.env.CODEX_CLI_PATH = fixture.executablePath;
@@ -1021,7 +1021,7 @@ async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
     const promptPath = path.join(fixture.root, "prompt.md");
     const workingDirectory = path.join(fixture.root, "artifacts");
     await mkdir(workingDirectory);
-    await writeFile(promptPath, "COMPLETE_THEN_HANG\n");
+    await writeFile(promptPath, "COMPLETE_THEN_FLUSH\n");
     execution = new CodexSdkWorkerExecutor({
       parentSandbox: trustedParentSandbox
     }).run({
@@ -1037,7 +1037,7 @@ async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
       new Promise((_, reject) => {
         timeout = setTimeout(() => {
           controller.abort("completed worker fixture timed out");
-          reject(new Error("completed worker did not settle after turn.completed"));
+          reject(new Error("completed worker did not settle after flushing usage"));
         }, 1_000);
       })
     ]);
@@ -1045,6 +1045,7 @@ async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
     assert.equal(result.threadId, "fixture-thread-id");
     assert.equal(result.finalResponse, "fixture final response");
     childPid = JSON.parse(await readFile(fixture.markerPath, "utf8")).pid;
+    assert.equal(await readFile(fixture.completionMarkerPath, "utf8"), "flushed\n");
 
     controller.abort("coordinator immediately canceled its remaining workers");
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1337,6 +1338,7 @@ async function fakeCodexFixture(
   const root = await mkdtemp(path.join(tmpdir(), "codex-security-sdk-executor-"));
   temporaryRoots.push(root);
   const markerPath = path.join(root, "invocation.json");
+  const completionMarkerPath = path.join(root, "completed-usage.txt");
   const preflightMarkerPath = path.join(root, "preflight.json");
   const scriptPath = path.join(root, "fake-codex.mjs");
   await writeFile(scriptPath, [
@@ -1345,6 +1347,7 @@ async function fakeCodexFixture(
     `const preflightProfile = ${JSON.stringify(preflightProfile)};`,
     `const preflightAllowed = ${JSON.stringify(preflightAllowed)};`,
     `const preflightMarkerPath = ${JSON.stringify(preflightMarkerPath)};`,
+    `const completionMarkerPath = ${JSON.stringify(completionMarkerPath)};`,
     "if (process.argv.includes('app-server')) {",
     "  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, requests: [] };",
     "  writeFileSync(preflightMarkerPath, JSON.stringify(preflight));",
@@ -1385,8 +1388,7 @@ async function fakeCodexFixture(
     "let stdin = '';",
     "for await (const chunk of process.stdin) stdin += chunk;",
     "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
-    "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
-    "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
+    "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_FLUSH') ? { pid: process.pid } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
     "if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }",
     "if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }",
     "if (stdin.includes('MCP_STARTUP_TIMEOUT') || stdin.includes('CATALOG_AUTH_ONLY') || stdin.includes('SYNC_AUTH_ONLY')) {",
@@ -1426,13 +1428,13 @@ async function fakeCodexFixture(
     "}",
     "console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture final response' } }));",
     "console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));",
-    "if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }",
+    "if (stdin.includes('COMPLETE_THEN_FLUSH')) { await new Promise((resolve) => setTimeout(resolve, 100)); writeFileSync(completionMarkerPath, 'flushed\\n'); }",
     "}",
     ""
   ].join("\n"));
   await chmod(scriptPath, 0o755);
   process.env.FAKE_CODEX_MARKER = markerPath;
-  return { root, markerPath, preflightMarkerPath, executablePath: scriptPath };
+  return { root, markerPath, completionMarkerPath, preflightMarkerPath, executablePath: scriptPath };
 }
 
 function assertFlagPair(args, flag, value) {
