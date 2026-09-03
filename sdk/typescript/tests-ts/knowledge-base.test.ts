@@ -44,10 +44,14 @@ async function extractedDocuments(path: string): Promise<string[]> {
   );
 }
 
-function docx(text: string): Uint8Array {
+function docx(
+  text: string,
+  secondLine?: string,
+  breakElement = "<w:br/>",
+): Uint8Array {
   return zipSync({
     "word/document.xml": strToU8(
-      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`,
+      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r>${secondLine === undefined ? "" : `${breakElement}<w:r><w:t>${secondLine}</w:t></w:r>`}</w:p></w:body></w:document>`,
     ),
   });
 }
@@ -232,14 +236,27 @@ describe("scan knowledge bases", () => {
       join(root, "architecture.pdf"),
       pdf("Payment service boundary"),
     );
-    await writeFile(join(root, "threat-model.docx"), docx("SSRF &amp; IDOR"));
+    await writeFile(
+      join(root, "threat-model.docx"),
+      docx("SSRF &amp; IDOR", "Review authentication"),
+    );
+    await writeFile(
+      join(root, "paired-break.docx"),
+      docx("Authorization", "Review permissions", "<w:br></w:br>"),
+    );
+    await writeFile(
+      join(root, "carriage-return.docx"),
+      docx("Authentication", "Review sessions", "<w:cr/>"),
+    );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.push(knowledgeBase.path);
     const documents = await extractedDocuments(knowledgeBase.path);
 
     expect(documents).toContain("Payment service boundary");
-    expect(documents).toContain("SSRF & IDOR\n");
+    expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
+    expect(documents).toContain("Authorization\nReview permissions\n");
+    expect(documents).toContain("Authentication\nReview sessions\n");
   });
 
   test("cleans up documents and rediscovers directory contents on later runs", async () => {
