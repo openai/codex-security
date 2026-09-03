@@ -17,6 +17,24 @@ import {
   type ValidationOptions,
   type ValidationResult,
 } from "@openai/codex-security";
+import {
+  OpenAiFindingEmbedder,
+  SqliteFindingsStore,
+  startFindingsServer,
+} from "@openai/codex-security/server";
+
+export async function findingsServer(getApiKey: () => Promise<string>) {
+  return await startFindingsServer({
+    store: new SqliteFindingsStore(),
+    embeddings: new OpenAiFindingEmbedder(
+      getApiKey,
+      fetch,
+      process.env["CODEX_SECURITY_EMBEDDINGS_URL"] || undefined,
+    ),
+    host: "127.0.0.1",
+    port: 0,
+  });
+}
 
 export async function publishCustom(
   scanDir: string,

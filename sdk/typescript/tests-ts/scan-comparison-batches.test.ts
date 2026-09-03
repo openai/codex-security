@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import {
   matchScanFindings,
-  matchScanFindingsInternal,
   type ScanComparisonInput,
   type ScanComparisonOptions,
   type ScanComparisonResult,
@@ -169,6 +168,64 @@ test("validates references against the current batch, not the whole input", asyn
   ).rejects.toThrow("unknown before occurrence");
 });
 
+test("preserves related findings and known identities across batches", async () => {
+  const input: ScanComparisonInput = {
+    before: ["first", "second"].map((id) => ({
+      ...finding(id, 300000),
+      findingId: `finding-${id}`,
+    })),
+    after: [{ ...finding("after"), findingId: "finding-after" }],
+    knownFindingGroups: [["finding-first", "finding-second"]],
+  };
+  const related = input.before.map(({ occurrenceId }) => ({
+    beforeOccurrenceId: occurrenceId,
+    afterOccurrenceId: "after",
+    reason: "Distinct controls share context.",
+  }));
+  let calls = 0;
+  const result = await matchScanFindings(input, {
+    codex: codex((batch) => {
+      calls++;
+      expect(batch.knownFindingGroups).toEqual(input.knownFindingGroups);
+      return {
+        matches: [],
+        uncertain: [],
+        related: related.filter(({ beforeOccurrenceId }) =>
+          batch.before.some(
+            ({ occurrenceId }) => occurrenceId === beforeOccurrenceId,
+          ),
+        ),
+      };
+    }),
+  });
+  expect(calls).toBe(2);
+  expect(result).toEqual({ matches: [], uncertain: [], related });
+});
+
+test("rejects cross-batch matches that split a confirmed finding identity", async () => {
+  await expect(
+    matchScanFindings(
+      {
+        before: ["first", "second"].map((id) => ({
+          ...finding(id, 300000),
+          findingId: `finding-${id}`,
+        })),
+        after: [finding("after-first"), finding("after-second")],
+        knownFindingGroups: [["finding-first", "finding-second"]],
+      },
+      {
+        codex: codex(({ before }) => {
+          const id = before[0]!.occurrenceId;
+          return {
+            matches: [match([id], [`after-${id}`])],
+            uncertain: [],
+          };
+        }),
+      },
+    ),
+  ).rejects.toThrow("contradicts previously confirmed finding groups");
+});
+
 test("uses Codex's full allowance for individual pairs without truncation", async () => {
   const input = {
     before: [finding("before", 600000)],
@@ -193,36 +250,6 @@ test("uses Codex's full allowance for individual pairs without truncation", asyn
   expect(calls).toHaveLength(1);
   expect(oversized.before[0]!.evidence).toHaveLength(1048576);
 });
-
-test.each([200000, 300000])(
-  "keeps automatic post-scan matching to at most one call (%p characters per finding)",
-  async (characters) => {
-    const input = {
-      before: Array.from({ length: 4 }, (_, index) =>
-        finding(`before-${index}`, characters),
-      ),
-      after: [finding("after")],
-    };
-    const calls: ScanComparisonInput[] = [];
-    const comparison = matchScanFindingsInternal(
-      input,
-      {
-        codex: codex((batch) => {
-          calls.push(batch);
-          return noMatches;
-        }),
-      },
-      { surface: "sdk", allowBatching: false },
-    );
-    if (characters === 300000) {
-      await expect(comparison).rejects.toThrow("input limit");
-      expect(calls).toEqual([]);
-    } else {
-      expect(await comparison).toEqual(noMatches);
-      expect(calls).toEqual([input]);
-    }
-  },
-);
 
 test("stops between batches when canceled", async () => {
   const controller = new AbortController();

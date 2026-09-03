@@ -1252,12 +1252,9 @@ def _normalize_unsealed_deep_repository_inventory_strategy(
     *,
     expected_coverage_mode: str | None,
 ) -> None:
-    """Normalize the old Deep workflow label to the ordinary repository inventory."""
+    """Label whole-repository Deep scans as using the repository inventory."""
 
-    if (
-        expected_coverage_mode == "deep_repository"
-        and coverage.get("inventoryStrategy") == "deep_repository_repeated_discovery"
-    ):
+    if expected_coverage_mode == "deep_repository":
         coverage["inventoryStrategy"] = "repository"
 
 
