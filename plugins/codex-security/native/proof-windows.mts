@@ -285,14 +285,13 @@ function handleProof(root: string) {
     assert(attributes.attributes & flags.FILE_ATTRIBUTE_DIRECTORY);
     assert.equal(attributes.reparseTag, 0xa0000003);
     const files = windowsFileSystem(native);
-    assert(
-      files
-        .entriesWithTypes(pathBytes(root))
-        .find((entry) =>
-          entry.name.equals(Buffer.from(basename(ancestor), "utf16le")),
-        )
-        ?.isDirectory(),
-    );
+    const junctionEntry = files
+      .entriesWithTypes(pathBytes(root))
+      .find((entry) =>
+        entry.name.equals(Buffer.from(basename(ancestor), "utf16le")),
+      );
+    assert(junctionEntry?.isDirectory());
+    assert.equal(junctionEntry?.isSymbolicLink(), false);
     const junctionStat = files.stat(pathBytes(ancestor), false);
     assert(junctionStat.isDirectory());
     assert(junctionStat.isReparsePoint());

@@ -115,6 +115,10 @@ fn main() -> std::io::Result<()> {
         fs::create_dir(cwd.join(raw("directory-", 0xdc80)))?;
         std::os::windows::fs::symlink_file(&names[0], cwd.join("file-link"))?;
         std::os::windows::fs::symlink_dir("empty", cwd.join("directory-link"))?;
+        std::os::windows::fs::symlink_dir(
+            raw("missing-", 0xdfff),
+            cwd.join("dangling-directory-link"),
+        )?;
         let denied = cwd.join(raw("denied-", 0xdfff));
         fs::write(&denied, "directory enumeration does not open this file")?;
         let verbatim = fs::canonicalize(&cwd)?;
