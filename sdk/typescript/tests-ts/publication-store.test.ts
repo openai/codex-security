@@ -96,6 +96,7 @@ async function publicationFixture(
   };
   const fixture = { environment, publication, python, stateDirectory };
   if (options.createDatabase !== false) {
+    await mkdir(stateDirectory, { mode: 0o700 });
     await runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, [
       "database-info",
     ]);

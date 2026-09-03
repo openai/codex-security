@@ -6,7 +6,7 @@ Use this exact reducer configuration:
 {{DEDUP_CONTEXT_JSON}}
 ```
 
-Call `get_codex_security_deep_reducer_inputs({})` to read each assigned worker's complete, already-validated Standard scan result and the previous aggregate, if any. The scan identity, findings, coverage, threat model, and scope already use the Standard semantic scan-draft contract.
+Call `get_codex_security_deep_reducer_inputs({})` to read the findings and context from each assigned, already-validated Standard scan and the previous aggregate, if any.
 
 Read every finding and the previous aggregate. Merge only the same actionable root issue using remediation-subsumption: fixing the retained finding must also fix every absorbed finding. Preserve distinct reachable vulnerable instances, proof tuples, useful evidence, uncertainty, locations, provenance, severity, validation, attack paths, and remediation.
 
@@ -16,6 +16,6 @@ For a valid merge, synthesize one stronger finding while preserving every materi
 
 Account for every input finding using the host-supplied `provenance.sourceFindingIds`. Copy the refs for retained findings; union them for a valid merge, preserving previous refs. Never invent, omit, or reuse a ref across independent output findings. The host retains original source payloads and rejects unaccounted input. Identity collisions do not establish that findings are duplicates.
 
-Combine the complete coverage, exclusions, deferred work, open questions, threat-model context, and optional scope from the Standard results without dropping meaningful information. Keep coverage partial whenever any deferred work or follow-up surface requires it. You cannot resolve or reject a source finding without inspecting code, which is outside this reducer's role.
+Preserve the threat-model context and scope as needed. You cannot resolve or reject a source finding without inspecting code, which is outside this reducer's role.
 
-Call `record_codex_security_deep_reduction({ scanId, findings, coverage, threatModel?, scope? })` with one complete Standard semantic result until it succeeds; correct a reported validation error and retry in the same conversation. After the first successful call, do not call it again. The host derives convergence and worker attribution from its existing state.
+Call `record_codex_security_deep_reduction({ scanId, findings, threatModel?, scope? })` until it succeeds; correct a reported validation error and retry in the same conversation. After the first successful call, do not call it again. The host derives convergence and worker attribution from its existing state.

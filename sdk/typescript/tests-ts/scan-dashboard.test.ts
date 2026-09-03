@@ -41,6 +41,90 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("edits a higher total budget while continuing to show live cost", async () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = new ScanDashboard(stderr.stream, {
+      repository: "/synthetic/repository",
+      maxCostUsd: 20,
+      clock: fakeClock(),
+      input,
+    });
+    const controller = new AbortController();
+    const cost = {
+      ...fakeResult([], "complete", { input_tokens: 100, output_tokens: 1 })
+        .cost!,
+      estimatedUsd: 16,
+    };
+    dashboard.start();
+    dashboard.setCost(cost);
+    const answer = dashboard.requestBudgetIncrease({
+      maxCostUsd: 20,
+      cost,
+      signal: controller.signal,
+    });
+    input.emit("data", "-30\r");
+    expect(stderr.text()).toContain("Enter a finite total above");
+    input.emit("data", "\u00150\r");
+    input.emit("data", "\u0015Infinity\r");
+    input.emit("data", "\u001520\r");
+    dashboard.setCost({ ...cost, estimatedUsd: 21 });
+    input.emit("data", "\u001520.5\r");
+    expect(stderr.text()).toContain("above $21.00");
+    expect(stderr.text()).toContain("$21.00 / $20.00");
+    input.emit("data", "\u0015300\u007F\r");
+    await expect(answer).resolves.toBe(30);
+    dashboard.setCost({ ...cost, estimatedUsd: 21 }, 30);
+    expect(stderr.text()).toContain("$21.00 / $30.00");
+    dashboard.stop();
+    expect(input.isRaw).toBe(false);
+    expect(input.listenerCount("data")).toBe(0);
+  });
+
+  test.each(["enter", "escape", "abort", "stop", "interrupt", "eof"] as const)(
+    "dismisses a budget prompt without increasing the limit on %s",
+    async (action) => {
+      const stderr = capture(true);
+      const input = new DashboardTestInput();
+      let interrupted = false;
+      const dashboard = new ScanDashboard(stderr.stream, {
+        repository: "/synthetic/repository",
+        maxCostUsd: 20,
+        clock: fakeClock(),
+        input,
+        onInterrupt: () => {
+          interrupted = true;
+        },
+      });
+      const controller = new AbortController();
+      dashboard.start();
+      const answer = dashboard.requestBudgetIncrease({
+        maxCostUsd: 20,
+        cost: {
+          ...fakeResult([], "complete", { input_tokens: 100, output_tokens: 1 })
+            .cost!,
+          estimatedUsd: 16,
+        },
+        signal: controller.signal,
+      });
+      if (action === "abort") controller.abort();
+      else if (action === "stop") dashboard.stop();
+      else
+        input.emit(
+          "data",
+          { enter: "\r", escape: "\u001B", interrupt: "\u0003", eof: "\u0004" }[
+            action
+          ],
+        );
+      await expect(answer).resolves.toBeUndefined();
+      expect(interrupted).toBe(action === "interrupt" || action === "eof");
+      input.emit("data", "30\r");
+      dashboard.stop();
+      expect(input.isRaw).toBe(false);
+      expect(input.listenerCount("data")).toBe(0);
+    },
+  );
+
   test("shows concurrent components and keeps their activity and costs separate", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();

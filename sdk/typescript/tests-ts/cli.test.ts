@@ -9,7 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, normalize } from "node:path";
-import { Writable } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
@@ -820,7 +820,7 @@ describe("CLI", () => {
     const previousHome = process.env["HOME"];
     const previousUserProfile = process.env["USERPROFILE"];
     try {
-      await mkdir(home);
+      await mkdir(home, { mode: 0o700 });
       await mkdir(currentDirectory);
       await multiscanInventory(home);
       process.env["HOME"] = home;
@@ -1418,6 +1418,10 @@ describe("CLI", () => {
         },
       ],
     };
+    const onWorkbench = (args: readonly string[]) =>
+      args[0] === "compare-scans"
+        ? { ...response, matchingCached: true }
+        : response;
     for (const argv of [
       ["scans", "compare", "before", "after", "--json"],
       ["scans", "compare", "before", "after", "--format", "yaml"],
@@ -1428,7 +1432,7 @@ describe("CLI", () => {
           argv,
           stdout.stream,
           capture().stream,
-          dependencies({ onWorkbench: () => response }),
+          dependencies({ onWorkbench }),
         ),
       ).toBe(0);
       expect(stdout.text()).toContain("internal-finding-id");
@@ -1444,7 +1448,7 @@ describe("CLI", () => {
         ["scans", "compare", "before", "after"],
         redirected.stream,
         capture().stream,
-        dependencies({ onWorkbench: () => response }),
+        dependencies({ onWorkbench }),
       ),
     ).toBe(0);
     expect(redirected.text()).toContain("internal-finding-id");
@@ -1457,7 +1461,7 @@ describe("CLI", () => {
         ["scans", "compare", "before", "after", "--filter-output", "summary"],
         filtered.stream,
         capture().stream,
-        dependencies({ onWorkbench: () => response }),
+        dependencies({ onWorkbench }),
       ),
     ).toBe(0);
     expect(filtered.text()).toContain("persisting: 1");
@@ -4780,6 +4784,43 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("RESULTS   /tmp/scan");
     expect(stderr.text()).not.toContain("Next:");
   });
+
+  test.each([
+    [[], {}, true, true, true],
+    [["--headless"], {}, true, true, false],
+    [["--verbose"], {}, true, true, false],
+    [["--json"], {}, true, true, false],
+    [["--format", "jsonl"], {}, true, true, false],
+    [[], { CI: "true" }, true, true, false],
+    [[], { TERM: "dumb" }, true, true, false],
+    [[], {}, false, true, false],
+    [[], {}, true, false, false],
+  ] as const)(
+    "gates budget interaction for flags %j, environment %j, input TTY %s, output TTY %s",
+    async (flags, environment, inputTty, outputTty, expected) => {
+      const input = Object.assign(new PassThrough(), { isTTY: inputTty });
+      let budgetCallback: ScanOptions["onBudgetApproaching"];
+      expect(
+        await main(
+          ["scan", ".", "--max-cost", "20", ...flags],
+          capture().stream,
+          capture(outputTty).stream,
+          {
+            ...dependencies({
+              environment,
+              onTurn: (_repository, options) => {
+                budgetCallback = (options as ScanOptions).onBudgetApproaching;
+              },
+            }),
+            scanInput: input,
+          },
+        ),
+      ).toBe(0);
+      expect(budgetCallback !== undefined).toBe(expected);
+      expect(input.listenerCount("data")).toBe(0);
+      input.destroy();
+    },
+  );
 
   test("reports the running cost against the scan budget", async () => {
     const stdout = capture();

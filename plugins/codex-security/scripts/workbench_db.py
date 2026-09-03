@@ -7,6 +7,7 @@ import argparse
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -39,6 +40,7 @@ import workbench_remediation as remediation
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
+import workbench_severity as severity
 from filesystem_identity import (
     serialize_filesystem_identity as serialize_filesystem_identity,
 )
@@ -1534,7 +1536,9 @@ def complete_scan_locked(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
             completion_binding=completion_binding,
-            completion_warnings=warnings,
+            # Save the finished Deep result as submitted. Worker drafts and
+            # recovery repairs belong to the stopped-scan path.
+            completion_warnings=warnings if scan["mode"] != "deep" else None,
             draft_documents=saved_results.merge_saved_results(
                 scan_dir,
                 scan["id"],
@@ -1547,7 +1551,7 @@ def complete_scan_locked(
                 stopped=False,
                 reason="",
             )
-            if current_manifest_path is not None and not already_sealed
+            if scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
             else None,
         )
         add_warning()
@@ -1787,6 +1791,31 @@ def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) ->
             (args.thread_id, now(), scan["id"]),
         )
     return {"scanId": scan["id"], "threadId": args.thread_id}
+
+
+def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    limit = args.max_cost_usd
+    if not math.isfinite(limit) or limit <= 0:
+        raise SystemExit("The scan cost limit must be a positive finite USD amount.")
+    with scan_completion_lock(scan_id), connection:
+        scan = require_scan(connection, scan_id)
+        if scan["status"] != "running" or scan["recipe_json"] is None:
+            raise SystemExit("Only a running CLI scan can increase its cost limit.")
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        previous = recipe.get("maxCostUsd")
+        if (
+            not isinstance(previous, (int, float))
+            or isinstance(previous, bool)
+            or limit <= previous
+        ):
+            raise SystemExit("The new cost limit must exceed the current limit.")
+        recipe["maxCostUsd"] = limit
+        connection.execute(
+            "UPDATE scans SET recipe_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(recipe, allow_nan=False), now(), scan["id"]),
+        )
+    return {"scanId": scan["id"], "maxCostUsd": limit}
 
 
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
@@ -2722,9 +2751,13 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
         values,
     ).fetchone()[0]
     next_offset = args.offset + len(rows)
+    relations = scan_history.finding_relations(connection, scan["id"], (row["id"] for row in rows))
     return {
         "findingsPage": {
-            "findings": [finding_result(connection, scan, row) for row in rows],
+            "findings": [
+                finding_result(connection, scan, row, related=relations.get(row["id"], []))
+                for row in rows
+            ],
             "limit": limit,
             "nextOffset": next_offset if next_offset < total else None,
             "offset": args.offset,
@@ -2817,6 +2850,9 @@ def scan_result(
             "maximum": independent_reviews["maximum"],
             "consolidating": independent_reviews["consolidating"],
         }
+    relations = scan_history.finding_relations(
+        connection, scan["id"], (row["id"] for row in occurrence_rows)
+    )
     return {
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
@@ -2824,7 +2860,10 @@ def scan_result(
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
         "failureMessage": scan["failure_message"],
-        "findings": [finding_result(connection, scan, row) for row in occurrence_rows],
+        "findings": [
+            finding_result(connection, scan, row, related=relations.get(row["id"], []))
+            for row in occurrence_rows
+        ],
         "findingCount": finding_count,
         "findingsTruncated": finding_count > len(occurrence_rows),
         "severityCounts": severity_counts,
@@ -2974,6 +3013,8 @@ def finding_result(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     occurrence: sqlite3.Row,
+    *,
+    related: list[dict[str, Any]],
 ) -> dict[str, Any]:
     details = bounded_finding_details(read_finding_details(occurrence["details_json"]))
     confidence = details.get("confidence")
@@ -3038,6 +3079,8 @@ def finding_result(
         result["matches"] = matches
         result["knownSince"] = known_since
         result["knownScanIds"] = known_scan_ids
+    if related:
+        result["related"] = related
     result.pop("artifactPaths", None)
     source_excerpt = finding_source_excerpt(scan, target, locations)
     if source_excerpt:
@@ -3411,6 +3454,10 @@ def main() -> None:
         result = inspect_setup(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
+    if args.command == "read-severity-classification":
+        result = severity.read_classification(database_path(), args.scan_id)
+        print(json.dumps(result, allow_nan=False, sort_keys=True))
+        return
     if args.command == "inspect-linear-publication":
         result = inspect_linear_publication(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
@@ -3468,6 +3515,8 @@ def main() -> None:
             result = register_cli_scan(connection, args)
         elif args.command == "set-scan-thread":
             result = set_scan_thread(connection, args)
+        elif args.command == "set-scan-cost-limit":
+            result = set_scan_cost_limit(connection, args)
         elif args.command == "get-scan-recipe":
             result = get_scan_recipe(connection, args)
         elif args.command == "compare-scans":
@@ -3579,6 +3628,8 @@ def main() -> None:
             result = export_findings(connection, args)
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
+        elif args.command == "severity-classification":
+            result = severity.checkpoint(connection, json.load(sys.stdin), now())
         elif args.command == "finding-workflow":
             result = finding_workflow(connection, json.load(sys.stdin), now())
         elif args.command == "dashboard":

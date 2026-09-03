@@ -169,6 +169,14 @@ export class ScanCostTracker {
     this.#completedThreadUsage.set(threadId, tokenUsage(usage));
   }
 
+  public recordUsage(usage: unknown, threadId = this.#threadId): void {
+    this.recordCompletedThreadUsage(threadId, usage);
+  }
+
+  public setMaxCostUsd(maxCostUsd: number): void {
+    this.#options.maxCostUsd = maxCostUsd;
+  }
+
   public start(threadId: string): void {
     if (this.#threadId !== null) return;
     this.#threadId = threadId;
@@ -241,13 +249,15 @@ export class ScanCostTracker {
       observed.root,
       completedRoot,
     );
-    let completedUsage: unknown =
-      rootUsage === suppliedRoot ? fallbackUsage : rootUsage;
+    let completedUsage: unknown = rootUsage;
     const workerUsage = observed.workers;
     if (workerUsage !== null) {
       completedUsage = addTokenUsage(rootUsage, workerUsage);
     }
     const cost = estimateScanCost(this.#options.model, completedUsage);
+    if (workerUsage === null && rootUsage === suppliedRoot && cost === null) {
+      completedUsage = fallbackUsage;
+    }
     const snapshot =
       this.#snapshot.usage !== null &&
       ((rootUsage === null && workerUsage === null) ||
@@ -314,9 +324,22 @@ export class ScanCostTracker {
         )
       );
     }
-    if (finalizing) this.#finalSnapshot = snapshot;
-    this.#reportCost(snapshot.cost);
-    return snapshot;
+    const unknownCompletedUsage = [...this.#completedThreadUsage].some(
+      ([threadId, usage]) =>
+        usage === null &&
+        ![...this.#sessions.values()].some(
+          (session) =>
+            session.threadId === threadId && session.accounting !== null,
+        ),
+    );
+    const result =
+      this.#options.maxCostUsd === undefined && unknownCompletedUsage
+        ? { usage: null, cost: null }
+        : snapshot;
+    this.#snapshot = result;
+    if (finalizing) this.#finalSnapshot = result;
+    this.#reportCost(result.cost);
+    return result;
   }
 
   async #readSessions(): Promise<void> {
@@ -1274,13 +1297,6 @@ function addTokenUsage(
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
     total_tokens: previous.total_tokens + next.total_tokens,
   };
-}
-
-/** @internal Sum complete turn receipts when session usage is unavailable. */
-export function sumTokenUsage(first: unknown, second: unknown): unknown {
-  const left = tokenUsage(first);
-  const right = tokenUsage(second);
-  return left === null || right === null ? null : addTokenUsage(left, right);
 }
 
 function subtractTokenUsage(

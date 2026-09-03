@@ -23,11 +23,15 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
   private readonly encoding = new Tiktoken(cl100kBase);
 
   constructor(
-    private readonly apiKey: string | undefined,
+    private readonly apiKey:
+      | string
+      | (() => string | Promise<string>)
+      | undefined,
     private readonly request: (
       url: string,
       init: RequestInit,
     ) => Promise<Response> = fetch,
+    private readonly url: string = "https://api.openai.com/v1/embeddings",
   ) {}
 
   async embed(findings: readonly Finding[]): Promise<FindingEmbedding[]> {
@@ -79,10 +83,13 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
   ): Promise<void> {
     let response: Response;
     try {
-      response = await this.request("https://api.openai.com/v1/embeddings", {
+      const apiKey =
+        typeof this.apiKey === "function" ? await this.apiKey() : this.apiKey;
+      if (!apiKey) throw new Error("Missing embedding credentials");
+      response = await this.request(this.url, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
