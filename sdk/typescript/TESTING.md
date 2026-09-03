@@ -2,6 +2,8 @@
 
 Use the pnpm version in `package.json` and Bun 1.3.14, matching required CI.
 Install both the SDK and MCP app dependencies before building or testing.
+Prepare the [universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
+before running a command that builds the bundled plugin.
 Run these commands from `sdk/typescript`:
 
 ```sh
