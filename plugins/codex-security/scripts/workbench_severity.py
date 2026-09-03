@@ -1,5 +1,6 @@
 """Per-finding severity checkpoints and the selection requested for each scan."""
 
+import argparse
 import json
 import sqlite3
 from contextlib import closing
@@ -112,3 +113,7 @@ def read_classification(database: Path, scan_id: str) -> dict[str, Any]:
             "knowledgeBaseSha256": row["knowledge_base_sha256"],
             "assessments": assessments(connection, finding_ids),
         }
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()
