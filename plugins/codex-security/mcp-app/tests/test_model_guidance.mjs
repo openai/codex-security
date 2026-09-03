@@ -26,12 +26,14 @@ for (const model of [
   "gpt-5.5-cyber-preview",
   "gpt-5.6-cyber-sol-preview",
   "example-cyber",
+  "provider/cyber-preview",
   "CYBER-preview",
 ]) {
   assert.equal(isNonAstraCyberModel(model), true, model);
 }
 for (const model of [
   "astra-cyber-preview",
+  "provider/astra-cyber-preview",
   "gpt-6-astra-cyber",
   "gpt-5.6-sol",
   "examplecyber",
@@ -71,6 +73,13 @@ const advice = scanModelGuidance(
   catalog,
 );
 assert.match(advice, /dynamic exploitation/);
+assert.match(
+  scanModelGuidance({ model: "selected-id" }, [
+    model("example-cyber", { id: "selected-id" }),
+  ]),
+  /dynamic exploitation/,
+  "Classify the catalog model behind a selected ID.",
+);
 assert.match(advice, /scan-upgrade/);
 assert.doesNotMatch(
   advice,

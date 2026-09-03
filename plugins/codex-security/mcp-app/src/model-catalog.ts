@@ -111,7 +111,7 @@ export function latestAvailableUpgrade(
     (model) =>
       !model.hidden &&
       (!isCyberModel(model.model) ||
-        /(?:^|[-_])astra(?:$|[-_])/i.test(model.model)),
+        /(?:^|[-_/])astra(?:$|[-_/])/i.test(model.model)),
   );
 }
 
@@ -151,7 +151,7 @@ function isNonCyberPickerModel(model: CatalogModel): boolean {
 }
 
 export function isCyberModel(model: string): boolean {
-  return /(?:^|[-_])cyber(?:$|[-_])/i.test(model);
+  return /(?:^|[-_/])cyber(?:$|[-_/])/i.test(model);
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

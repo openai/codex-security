@@ -7,7 +7,7 @@ import {
 } from "./model-catalog.js";
 
 export function isNonAstraCyberModel(model: string): boolean {
-  return isCyberModel(model) && !/(?:^|[-_])astra(?:$|[-_])/i.test(model);
+  return isCyberModel(model) && !/(?:^|[-_/])astra(?:$|[-_/])/i.test(model);
 }
 
 export function isBelowXhigh(reasoningEffort: string): boolean {
@@ -40,7 +40,7 @@ export function scanModelGuidance(
       ? `Current reasoning effort: ${reasoningEffort}.`
       : "The host did not provide the current reasoning effort.",
   ];
-  if (model && isNonAstraCyberModel(model)) {
+  if (model && isNonAstraCyberModel(current?.model ?? model)) {
     messages.push(
       `${model} is designed for dynamic exploitation. You may get better vulnerability scanning results with ${nonCyberModel?.model ?? "the latest non-cyber model available to you"}.`,
     );
