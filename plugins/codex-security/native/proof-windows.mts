@@ -211,7 +211,7 @@ function handleProof(root: string) {
       keep(
         open(
           directory,
-          flags.FILE_READ_ATTRIBUTES,
+          flags.GENERIC_READ,
           flags.FILE_SHARE_READ | flags.FILE_SHARE_WRITE,
           flags.OPEN_EXISTING,
           directoryFlags,
