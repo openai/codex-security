@@ -8,7 +8,7 @@ import { environmentEntry } from "./auth.js";
 import { readModelCatalog, type CatalogModel } from "./model-catalog.js";
 import { type CodexCommand, type ProcessEnvironment } from "./runtime.js";
 
-/** @internal The CLI may change settings for this scan after explicit consent. */
+/** The CLI may change settings for this scan after explicit consent. */
 export type ScanModelSelector = (
   configuration: ScanModelConfiguration,
   loadModels: () => Promise<readonly CatalogModel[] | undefined>,
