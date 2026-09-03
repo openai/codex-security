@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { binaryPath } from "./binding.mjs";
+import { libc } from "./platform.mjs";
 
 export function checkPrivatePaths(
   bytes: Buffer,
@@ -52,15 +53,44 @@ if (
     const required = [...versions.matchAll(/\bGLIBC_(\d+(?:\.\d+)*)/gu)].map(
       (match) => match[1]!,
     );
-    if (
-      required.length === 0 ||
-      required.some((version) => versionAfter(version, "2.28"))
-    ) {
-      throw new Error(
-        "Native payload requires glibc newer than 2.28, or has no inspectable glibc requirements.",
-      );
+    if (libc === "musl") {
+      const architecture =
+        process.arch === "x64"
+          ? { machine: 62, name: "x86_64" }
+          : process.arch === "arm64"
+            ? { machine: 183, name: "aarch64" }
+            : undefined;
+      const dynamic = execFileSync("readelf", ["--dynamic", binaryPath], {
+        encoding: "utf8",
+      });
+      const dependencies = [
+        ...dynamic.matchAll(/\(NEEDED\)[^\n]*\[([^\]]+)\]/gu),
+      ].map((match) => match[1]!);
+      if (
+        architecture === undefined ||
+        bytes.toString("latin1", 0, 4) !== "\x7fELF" ||
+        bytes[4] !== 2 ||
+        bytes[5] !== 1 ||
+        bytes.readUInt16LE(18) !== architecture.machine ||
+        !dependencies.includes(`libc.musl-${architecture.name}.so.1`) ||
+        /\bGLIBC_/u.test(versions)
+      ) {
+        throw new Error(
+          "Native payload is not a musl ELF image for this architecture, or imports glibc.",
+        );
+      }
+      floor = "musl; Node 20 and 22 load proofs required";
+    } else {
+      if (
+        required.length === 0 ||
+        required.some((version) => versionAfter(version, "2.28"))
+      ) {
+        throw new Error(
+          "Native payload requires glibc newer than 2.28, or has no inspectable glibc requirements.",
+        );
+      }
+      floor = "glibc 2.28";
     }
-    floor = "glibc 2.28";
   } else if (process.platform === "darwin") {
     const commands = execFileSync("otool", ["-l", binaryPath], {
       encoding: "utf8",
@@ -98,6 +128,7 @@ if (
     JSON.stringify({
       platform: process.platform,
       arch: process.arch,
+      libc,
       nodeApi: 8,
       floor,
       bytes: bytes.length,

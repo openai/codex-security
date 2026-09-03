@@ -2,9 +2,10 @@ import { createRequire } from "node:module";
 import { readSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { nativeTarget } from "./platform.mjs";
 
 export const root = dirname(fileURLToPath(import.meta.url));
-export const output = join(root, "dist", `${process.platform}-${process.arch}`);
+export const output = join(root, "dist", nativeTarget);
 export const binaryPath = join(
   output,
   process.platform === "win32" ? "windows.node" : "unix.node",
