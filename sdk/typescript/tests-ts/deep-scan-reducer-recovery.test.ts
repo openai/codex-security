@@ -14,7 +14,7 @@ function bundledFunction(runtime: string, name: string): string {
   return source;
 }
 
-test("keeps every advertised Deep worker tool within Codex's name limit", async () => {
+test("advertises distinct Standard worker and Deep reducer contracts", async () => {
   const runtime = await loadBundledRuntime();
   const method = /  compactArtifactServer\(request\) \{[\s\S]*?\n  \}/u.exec(
     runtime,
@@ -83,7 +83,12 @@ test("keeps every advertised Deep worker tool within Codex's name limit", async 
         .split("\n")
         .map((line) => JSON.parse(line) as { id?: number; result?: unknown })
         .find((message) => message.id === 2)?.result as
-        | { tools: Array<{ name: string }> }
+        | {
+            tools: Array<{
+              name: string;
+              inputSchema: { properties: Record<string, unknown> };
+            }>;
+          }
         | undefined;
       expect(response).toBeDefined();
       expect(response!.tools.length).toBeGreaterThan(0);
@@ -92,11 +97,22 @@ test("keeps every advertised Deep worker tool within Codex's name limit", async 
           64,
         );
       }
-      if (layout === "reducer") {
-        expect(response!.tools.map((tool) => tool.name)).toContain(
-          "record_codex_security_deep_reduction",
+      const recordTool = response!.tools.find(
+        (tool) =>
+          tool.name ===
+          (layout === "reducer"
+            ? "record_codex_security_deep_reduction"
+            : "record_codex_security_scan_draft"),
+      );
+      expect(recordTool).toBeDefined();
+      expect(recordTool!.inputSchema.properties).toHaveProperty("findings");
+      expect(recordTool!.inputSchema.properties).toHaveProperty("scope");
+      if (layout === "reducer")
+        expect(recordTool!.inputSchema.properties).not.toHaveProperty(
+          "coverage",
         );
-      }
+      else
+        expect(recordTool!.inputSchema.properties).toHaveProperty("coverage");
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

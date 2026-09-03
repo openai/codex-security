@@ -271,7 +271,7 @@ export function registerCompactWorkerArtifactTools(
   registerCompactTool(server, {
     name: "get_codex_security_deep_reducer_inputs",
     title: "Get Codex Security Deep Reducer Inputs",
-    description: "Read the complete Standard scan results assigned to this reducer.",
+    description: "Read the assigned findings, context, and previous aggregate.",
     inputSchema: deepReducerInputsInputSchema,
     readOnly: true,
     handler: async () => getCodexSecurityDeepReducerInputs(context)
@@ -280,12 +280,12 @@ export function registerCompactWorkerArtifactTools(
   registerCompactTool(server, {
     name: "record_codex_security_deep_reduction",
     title: "Record Codex Security Deep Reduction",
-    description: "Record this reducer's complete aggregated Standard scan result.",
+    description: "Record the merged findings and context for this Deep scan.",
     inputSchema: deepReductionInputSchema,
     readOnly: false,
     handler: async (value) => recordCodexSecurityDeepReduction(
       context,
-      value as ScanDraftInput
+      value
     )
   });
 }

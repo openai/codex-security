@@ -500,6 +500,118 @@ try {
   assert.deepEqual(carriedParentManifest.scan.scope.summary, input.scope.summary);
   assert.deepEqual(carriedParentManifest.scan.threatModel, input.threatModel);
 
+  const deepParentRoot = path.join(root, "accepted-deep-parent");
+  await mkdir(deepParentRoot);
+  const deepParentContext = {
+    ...context,
+    root: deepParentRoot,
+    mode: "deep",
+    scope: "src",
+    targetContract: {
+      ...context.targetContract,
+      scope: {
+        requiredIncludePaths: ["src", "lib"],
+        requiredExcludePaths: ["vendor"],
+      },
+    },
+  };
+  const obsoleteFinding = {
+    ...finding,
+    identity: { anchor: "obsolete-parent-finding" },
+    provenance: { ...finding.provenance, candidateId: "obsolete-parent-candidate" },
+    extensions: { candidateId: "obsolete-parent-candidate" },
+  };
+  const obsoleteDeepDraft = {
+    ...input,
+    complete: false,
+    findings: [obsoleteFinding],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [{
+        label: "Old upload handler",
+        disposition: "needs_follow_up",
+        notes: "An earlier parent draft left this review unfinished.",
+      }],
+      deferred: [{ candidateId: "obsolete-review", reason: "Earlier review work." }],
+    },
+  };
+  await recordCodexSecurityScanDraft(deepParentContext, obsoleteDeepDraft);
+  await saveScanDraftCheckpoint(deepParentContext, {
+    ...obsoleteDeepDraft,
+    findings: [interruptedFinding],
+  });
+  await recordCodexSecurityScanDraft(deepParentContext, {
+    ...input,
+    complete: false,
+    findings: [],
+  });
+  assert.deepEqual(
+    new Set((await readJson(deepParentRoot, "findings.json")).findings.map(
+      (item) => item.provenance.candidateId,
+    )),
+    new Set(["obsolete-parent-candidate", "interrupted-checkpoint"]),
+    "an unfinished Deep parent checkpoint still preserves earlier validated findings",
+  );
+  assert.equal((await readJson(deepParentRoot, "scan-manifest.json")).scan.complete, false);
+  assert.equal((await readJson(deepParentRoot, "coverage.json")).completeness, "partial");
+  const savedDeepCheckpoints = await Promise.all(
+    (await readdir(path.join(deepParentRoot, "checkpoints"))).map(async (name) => [
+      name,
+      await readFile(path.join(deepParentRoot, "checkpoints", name), "utf8"),
+    ]),
+  );
+  const acceptedDeepDraft = {
+    ...input,
+    complete: true,
+    coverage: { completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [] },
+  };
+  await recordCodexSecurityScanDraft(deepParentContext, acceptedDeepDraft);
+  const acceptedDeepFindings = await readJson(deepParentRoot, "findings.json");
+  const acceptedDeepCoverage = await readJson(deepParentRoot, "coverage.json");
+  const acceptedDeepManifest = await readJson(deepParentRoot, "scan-manifest.json");
+  assert.equal(acceptedDeepFindings.findings.length, 1);
+  assert.deepEqual(acceptedDeepFindings.findings[0].provenance, finding.provenance);
+  assert.equal(acceptedDeepCoverage.completeness, "complete");
+  assert.deepEqual(acceptedDeepCoverage.deferred, []);
+  assert.deepEqual(
+    acceptedDeepCoverage.surfaces,
+    [],
+    "accepted Deep coverage does not inherit obsolete parent review work",
+  );
+  assert.deepEqual(acceptedDeepCoverage.explicitExclusions, []);
+  assert.deepEqual(acceptedDeepCoverage.includePaths, ["src", "lib"]);
+  assert.deepEqual(acceptedDeepCoverage.excludePaths, ["vendor"]);
+  assert.deepEqual(acceptedDeepManifest.scan.scope.includePaths, ["src", "lib"]);
+  assert.deepEqual(acceptedDeepManifest.scan.scope.excludePaths, ["vendor"]);
+  for (const [name, contents] of savedDeepCheckpoints) {
+    assert.equal(await readFile(path.join(deepParentRoot, "checkpoints", name), "utf8"), contents);
+  }
+
+  const obsoleteCheckpointPath = path.join(deepParentRoot, "checkpoints", "obsolete.json");
+  await writeFile(obsoleteCheckpointPath, "{malformed obsolete checkpoint\n");
+  let deepWorkbenchWrites = 0;
+  await recordCodexSecurityScanDraftViaWorkbench(
+    deepParentContext,
+    acceptedDeepDraft,
+    async (arguments_) => {
+      deepWorkbenchWrites += 1;
+      assert.deepEqual(arguments_.slice(0, 3), ["write-scan-draft", "--scan-id", scanId]);
+      assert.equal(arguments_.includes("--expected-draft-digest"), false);
+      assert.deepEqual(arguments_.slice(-2), ["--claim-token", claimToken]);
+      const draftPath = arguments_[arguments_.indexOf("--draft-path") + 1];
+      const checkpointPath = arguments_[arguments_.indexOf("--checkpoint-path") + 1];
+      const staged = JSON.parse(await readFile(draftPath, "utf8"));
+      const stagedCheckpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+      assert.deepEqual(staged.findings, acceptedDeepFindings);
+      assert.deepEqual(staged.coverage, acceptedDeepCoverage);
+      assert.deepEqual(stagedCheckpoint.findings, acceptedDeepDraft.findings);
+      assert.equal(stagedCheckpoint.handoffClaimToken, undefined);
+    },
+  );
+  assert.equal(deepWorkbenchWrites, 1, "terminal Deep drafts still publish through the workbench lock despite obsolete malformed checkpoints");
+  assert.deepEqual(await readdir(path.join(deepParentRoot, "drafts")), []);
+
   const pendingRoot = path.join(root, "pending-worker");
   await mkdir(pendingRoot);
   const pendingContext = { ...workerContext, root: pendingRoot };
@@ -2187,6 +2299,94 @@ try {
     ],
     "duplicate stable instance sources remain collisions for finalization",
   );
+
+  const collisionFindings = ["src/upload.py", "src/import.py", "src/restore.py"].map((location) => ({
+    ...finding,
+    locations: [{ path: location, startLine: 41, endLine: 44 }],
+    provenance: { source: "local_plugin" },
+    extensions: {},
+  }));
+  const authoredCollisionIdentity = { anchor: "shared-archive-review" };
+  const reservedCollisionIdentity = { ...authoredCollisionIdentity, instance: "parser" };
+  const collisionCases = [
+    {
+      label: "authored",
+      findings: collisionFindings.map((item) => ({ ...item, identity: authoredCollisionIdentity })),
+      originalIdentity: authoredCollisionIdentity,
+    },
+    {
+      label: "generated",
+      findings: collisionFindings,
+      originalIdentity: { anchor: "unsafe-archive-extraction", instance: "unsafe-archive-extraction" },
+    },
+    {
+      label: "authored with reserved suffixes",
+      findings: [
+        ...collisionFindings.map((item) => ({ ...item, identity: reservedCollisionIdentity })),
+        ...collisionFindings.slice(0, 2).map((item, index) => ({
+          ...item,
+          identity: { ...reservedCollisionIdentity, instance: `parser-${index + 2}` },
+        })),
+      ],
+      originalIdentity: reservedCollisionIdentity,
+      expectedIdentities: [
+        reservedCollisionIdentity,
+        { ...reservedCollisionIdentity, instance: "parser-4" },
+        { ...reservedCollisionIdentity, instance: "parser-5" },
+        { ...reservedCollisionIdentity, instance: "parser-2" },
+        { ...reservedCollisionIdentity, instance: "parser-3" },
+      ],
+    },
+  ];
+  for (const collisionCase of collisionCases) {
+    const collisionInput = { ...input, findings: collisionCase.findings };
+    await recordFreshScanDraft(context, collisionInput);
+    const standardFindings = (await readJson(root, "findings.json")).findings;
+    assert.deepEqual(
+      standardFindings.map((item) => item.identity),
+      collisionCase.findings.map((item) => item.identity ?? collisionCase.originalIdentity),
+      `${collisionCase.label} identity collisions retain the existing Standard shape`,
+    );
+    assert.deepEqual(
+      standardFindings.map((item) => item.provenance),
+      collisionCase.findings.map((item) => item.provenance),
+    );
+
+    const deepIdentityContext = { ...context, mode: "deep" };
+    await recordFreshScanDraft(deepIdentityContext, collisionInput);
+    const deepFindings = (await readJson(root, "findings.json")).findings;
+    const deepIdentities = deepFindings.map((item) => item.identity);
+    assert.equal(deepFindings.length, collisionCase.findings.length, `${collisionCase.label} identity collisions must retain every Deep finding`);
+    assert.deepEqual(
+      deepIdentities,
+      collisionCase.expectedIdentities ?? collisionCase.findings.map((_, index) => (
+        index === 0 ? collisionCase.originalIdentity : {
+          ...collisionCase.originalIdentity,
+          instance: `${collisionCase.originalIdentity.instance ?? "saved"}-${index + 1}`,
+        }
+      )),
+      `${collisionCase.label} collisions receive successive numeric suffixes without replacing authored identities`,
+    );
+    assert.deepEqual(
+      deepFindings.map((item) => item.provenance),
+      collisionCase.findings.map((item, index) => (
+        index === 1 || index === 2 ? {
+          ...item.provenance, preservedIdentity: collisionCase.originalIdentity,
+        } : item.provenance
+      )),
+    );
+    assert.deepEqual(
+      deepFindings.map((item) => item.locations),
+      collisionCase.findings.map((item) => item.locations),
+    );
+
+    await recordCodexSecurityScanDraft(deepIdentityContext, collisionInput);
+    assert.deepEqual(
+      (await readJson(root, "findings.json")).findings.map((item) => item.identity),
+      deepIdentities,
+      `${collisionCase.label} Deep finding identities remain stable when the accepted aggregate is republished`,
+    );
+  }
 
   const completeCodeEvidence = {
     ...incompleteCodeEvidence,
