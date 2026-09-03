@@ -94,8 +94,48 @@ function worker(root: string): Record<string, boolean> {
   ];
   assert.deepEqual(
     files.entries(widePath(".")).map(pathText).sort(),
-    [...names, "empty", "trailing", "trailing.", "space", "space "].sort(),
+    [
+      ...names,
+      "empty",
+      "trailing",
+      "trailing.",
+      "space",
+      "space ",
+      "directory-\udc80",
+      "file-link",
+      "directory-link",
+      "denied-\udfff",
+    ].sort(),
   );
+  const listed = files.entriesWithTypes(widePath("."));
+  assert.deepEqual(
+    listed.map((entry) => pathText(entry.name)).sort(),
+    files.entries(widePath(".")).map(pathText).sort(),
+  );
+  const directories = listed
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => pathText(entry.name))
+    .sort();
+  assert.deepEqual(directories, [
+    "directory-link",
+    "directory-\udc80",
+    "empty",
+  ]);
+  assert.throws(() => files.stat(widePath("denied-\udfff")), { winerror: 5 });
+  assert.equal(
+    listed
+      .find((entry) => entry.name.equals(widePath("denied-\udfff")))
+      ?.isDirectory(),
+    false,
+  );
+  assert.deepEqual(native.windowsDirectoryEntries(widePath("empty")), {
+    error: 0,
+    value: [],
+  });
+  assert.deepEqual(native.windowsDirectoryEntries(widePath("missing")), {
+    error: 3,
+    value: [],
+  });
   assert.deepEqual(native.windowsDirectoryNames(widePath("empty")), {
     error: 0,
     value: [],
@@ -190,12 +230,14 @@ function worker(root: string): Record<string, boolean> {
     assert.throws(() => native.windowsEnvironment(malformed));
     assert.throws(() => native.windowsAbsolutePath(malformed));
     assert.throws(() => native.windowsDirectoryNames(malformed));
+    assert.throws(() => native.windowsDirectoryEntries(malformed));
   }
   return {
     rawArgumentsAndCrtQuoting: true,
     rawEnvironmentEmptyAndUnset: true,
     rawCwdAndDriveRelativePaths: true,
     completeWideDirectoryIteration: true,
+    cachedDirectoryAttributesWithoutFileAccess: true,
     distinctRawAndReplacementFiles: true,
     canonicalPathsBoundedReadsAndTruncation: true,
     verbatimTrailingDotsAndSpaces: true,

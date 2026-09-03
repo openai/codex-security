@@ -73,13 +73,20 @@ export function windowsFileSystem(native: WindowsBinding) {
   }
 
   function realpath(path: Buffer): Buffer {
+    // Match CPython's Windows normalization of UNC and device prefixes.
     const textPath = pathText(path).replaceAll("/", "\\");
-    const normalized = widePath(
-      textPath.slice(0, 8).toUpperCase() === "\\\\?\\UNC\\"
-        ? textPath.slice(0, 8) +
-            win32.normalize(`\\\\${textPath.slice(8)}`).slice(2)
-        : win32.normalize(textPath),
-    );
+    let normalizedText = textPath;
+    if (textPath.startsWith("\\\\")) {
+      const first = textPath.indexOf("\\", 2);
+      const end = first === -1 ? -1 : textPath.indexOf("\\", first + 1);
+      if (end !== -1) {
+        const tail = textPath.slice(end + 1).replace(/^\\+/u, "");
+        normalizedText =
+          textPath.slice(0, end + 1) +
+          win32.normalize(`\\${tail}`).slice(1).replace(/\\+$/u, "");
+      }
+    } else normalizedText = win32.normalize(textPath);
+    const normalized = widePath(normalizedText);
     const resolved = finalPath(normalized);
     if (pathText(normalized).startsWith("\\\\?\\")) return resolved;
     const text = pathText(resolved);
@@ -129,6 +136,15 @@ export function windowsFileSystem(native: WindowsBinding) {
     const result = native.windowsDirectoryNames(operationPath(path));
     check(result.error, path);
     return result.value;
+  }
+
+  function entriesWithTypes(path: Buffer) {
+    const result = native.windowsDirectoryEntries(operationPath(path));
+    check(result.error, path);
+    return result.value.map(({ name, isDirectory }) => ({
+      name,
+      isDirectory: () => isDirectory,
+    }));
   }
 
   function mkdir(path: Buffer): void {
@@ -191,5 +207,14 @@ export function windowsFileSystem(native: WindowsBinding) {
     }
   }
 
-  return { absolute, realpath, stat, entries, mkdir, readInto, writeFile };
+  return {
+    absolute,
+    realpath,
+    stat,
+    entries,
+    entriesWithTypes,
+    mkdir,
+    readInto,
+    writeFile,
+  };
 }
