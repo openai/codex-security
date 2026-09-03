@@ -277,7 +277,7 @@ export async function publishScanInternal(
 
   const preparedScan = await (dependencies.prepare ?? prepareScanPublication)(
     scanDirectory,
-    options,
+    { ...options, environment },
   );
   let prepared = preparedScan;
   options.signal?.throwIfAborted();
@@ -591,7 +591,7 @@ export async function checkScanPublicationInternal(
   const linearApiKey = publicationApiKey(options, environment);
   const prepared = await (dependencies.prepare ?? prepareScanPublication)(
     scanDirectory,
-    options,
+    { ...options, environment },
   );
   options.signal?.throwIfAborted();
   const recorded = await (

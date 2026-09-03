@@ -63,6 +63,16 @@ export interface SeverityClassification {
   assessments: SeverityAssessment[];
 }
 
+/** @internal Per-finding persistence used by saved-scan classification. */
+export interface SeverityClassificationCheckpoint {
+  load(result: SeverityClassification): Promise<SeverityAssessment[]>;
+  save(
+    finding: SeverityClassificationFinding,
+    assessment: SeverityAssessment,
+    result: SeverityClassification,
+  ): Promise<void>;
+}
+
 const levelSchema = z.enum([
   "critical",
   "high",
@@ -116,6 +126,7 @@ export async function classifySeverityInternal(
   findings: readonly SeverityClassificationFinding[],
   options: ClassifySeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
+  checkpoint?: SeverityClassificationCheckpoint,
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
   const ids = new Set<string>();
@@ -141,9 +152,23 @@ export async function classifySeverityInternal(
     knowledgeBaseSha256: knowledge === null ? null : workflowDigest(knowledge),
     assessments: [],
   };
+  const cached = new Map(
+    (await checkpoint?.load(result))?.map((assessment) => [
+      assessment.findingId,
+      assessment,
+    ]),
+  );
   for (const finding of findings) {
     options.signal?.throwIfAborted();
     const inputSha256 = workflowDigest(finding);
+    const previous = cached.get(finding.findingId);
+    if (previous?.inputSha256 === inputSha256) {
+      validateSeverityClassification({ ...result, assessments: [previous] }, [
+        finding,
+      ]);
+      result.assessments.push(previous);
+      continue;
+    }
     let decision: z.infer<typeof decisionSchema>;
     if (rubric === null) {
       const parsed = levelSchema.safeParse(finding.severity?.level);
@@ -203,12 +228,14 @@ export async function classifySeverityInternal(
         );
       }
     }
-    result.assessments.push({
+    const assessment: SeverityAssessment = {
       ...decision,
       occurrenceId: finding.occurrenceId ?? null,
       inputSha256,
       source: rubric === null ? "existing-severity" : "rubric",
-    });
+    };
+    await checkpoint?.save(finding, assessment, result);
+    result.assessments.push(assessment);
   }
   options.signal?.throwIfAborted();
   return result;

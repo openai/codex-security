@@ -170,6 +170,7 @@ const distFiles = new Set(
     "cli",
     "classify-severity",
     "classify-scan-severity",
+    "severity-store",
     "cloud-publish",
     "codex-prompt",
     "component-plan",

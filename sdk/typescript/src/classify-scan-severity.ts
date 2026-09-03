@@ -1,15 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { lstat, rename, rm, writeFile } from "node:fs/promises";
+import { rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { z } from "incur";
 import {
   classifySeverityInternal,
-  severityClassificationSchema,
   validateSeverityClassification,
   type ClassifySeverityOptions,
   type SeverityClassification,
 } from "./classify-severity.js";
-import { loadContractWithScanDirectory, readScanFile } from "./contract.js";
+import { loadContractWithScanDirectory } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
 import type { Finding } from "./models.js";
 import {
@@ -22,11 +20,9 @@ import {
   resolveCompletedScan,
   type SavedScanDependencies,
 } from "./saved-scan.js";
+import { SeverityStore } from "./severity-store.js";
 
 const CLASSIFICATION_FILE = "severity-classification.json";
-const scanClassificationSchema = severityClassificationSchema.extend({
-  scanId: z.string().min(1),
-}) satisfies z.ZodType<ScanSeverityClassification>;
 export interface ScanSeverityClassification extends SeverityClassification {
   scanId: string;
 }
@@ -34,6 +30,8 @@ export interface ScanSeverityClassification extends SeverityClassification {
 export interface ClassifyScanSeverityOptions extends ClassifySeverityOptions {
   /** Exact selection, such as dedupe's uniqueFindingIds. Omit to classify all findings. */
   findingIds?: readonly string[];
+  /** Reclassify selected findings even when their saved assessment matches the inputs. */
+  reprocess?: boolean;
   expectedScanId?: string;
 }
 
@@ -117,8 +115,22 @@ export async function classifyScanDirectorySeverityInternal(
     contract.findings.findings,
     options.findingIds,
   );
+  const store = new SeverityStore(
+    options.environment ?? process.env,
+    scanDirectory,
+    options.signal,
+  );
   const result: ScanSeverityClassification = {
-    ...(await classifySeverityInternal(findings, options, surface)),
+    ...(await classifySeverityInternal(
+      findings,
+      options,
+      surface,
+      store.checkpoint(
+        contract.manifest.scan.id,
+        findings.map(({ findingId }) => findingId),
+        options.reprocess ?? false,
+      ),
+    )),
     scanId: contract.manifest.scan.id,
   };
   options.signal?.throwIfAborted();
@@ -162,30 +174,14 @@ export async function readScanSeverityClassification(
   scanId: string,
   findings: readonly Finding[],
   signal?: AbortSignal,
+  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<SeverityClassification | undefined> {
-  try {
-    await lstat(join(scanDirectory, CLASSIFICATION_FILE));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-  const { scanId: assessedScanId, ...classification } =
-    scanClassificationSchema.parse(
-      JSON.parse(
-        (
-          await readScanFile(
-            scanDirectory,
-            CLASSIFICATION_FILE,
-            "severity classification",
-            signal,
-          )
-        ).toString("utf8"),
-      ),
-    );
-  if (assessedScanId !== scanId) {
-    throw new CodexSecurityError(
-      "Severity classification belongs to a different scan.",
-    );
-  }
-  return validateSeverityClassification(classification, findings);
+  const classification = await new SeverityStore(
+    environment,
+    scanDirectory,
+    signal,
+  ).read(scanId);
+  return classification === undefined
+    ? undefined
+    : validateSeverityClassification(classification, findings);
 }

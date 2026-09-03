@@ -26,6 +26,7 @@ test.each(["latest", "scan_prefix"])(
         resolve(deps.currentDirectory(), "context.md"),
       ]);
       expect(options!.findingIds).toEqual(["finding-one", "finding-two"]);
+      expect(options!.reprocess).toBe(true);
       expect(options!.model).toBe("synthetic-model");
       expect(options!.reasoningEffort).toBe("high");
       expect(history?.runWorkbench).toBe(deps.runWorkbench);
@@ -50,6 +51,7 @@ test.each(["latest", "scan_prefix"])(
           "synthetic-model",
           "--effort",
           "high",
+          "--reprocess",
           "--json",
         ],
         stdout.stream,
@@ -68,6 +70,7 @@ test("classify-severity accepts external scan directories and defaults to existi
     called = true;
     expect(directory).toBe(resolve(deps.currentDirectory(), "saved scan"));
     expect(options!.rubricPath).toBeUndefined();
+    expect(options!.reprocess).toBe(false);
     expect(options!.findingIds).toBeUndefined();
     expect(surface).toBe("cli");
     return result;

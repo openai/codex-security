@@ -3180,6 +3180,12 @@ export async function main(
       destructive: true,
       mcp: false,
       options: z.object({
+        reprocess: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Reclassify selected findings even when a matching assessment is saved.",
+          ),
         scan: optionValue("--scan")
           .optional()
           .describe("Saved scan ID, unique prefix, or latest."),
@@ -3240,6 +3246,7 @@ export async function main(
             ),
             findingIds:
               options.findingId.length === 0 ? undefined : options.findingId,
+            reprocess: options.reprocess,
             model: options.model,
             reasoningEffort: options.effort,
           };

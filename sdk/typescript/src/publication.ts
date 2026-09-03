@@ -34,6 +34,7 @@ export interface PrepareScanPublicationOptions {
   teamId: string;
   projectId?: string;
   uploadedAt?: string;
+  environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   expectedScanId?: string;
   /** Publish only these finding IDs (for example dedupe's uniqueFindingIds). */
@@ -120,6 +121,7 @@ export async function prepareScanPublication(
       scanId,
       contract.findings.findings,
       options.signal,
+      options.environment,
     );
   }
   const assessments = new Map(

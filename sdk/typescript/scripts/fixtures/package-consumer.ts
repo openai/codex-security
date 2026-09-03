@@ -46,6 +46,7 @@ export async function classify(
   });
   await classifyScanDirectorySeverity(scanDirectory, {
     expectedScanId: saved.scanId,
+    reprocess: true,
     findingIds: findings.map(({ findingId }) => findingId),
     signal,
   });

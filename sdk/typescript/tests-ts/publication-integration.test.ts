@@ -354,6 +354,7 @@ describe("database-backed Linear publication integration", () => {
     };
     for (const finding of completed.findings) {
       await classifyScanDirectorySeverity(completed.scanDirectory, {
+        environment: completed.environment,
         rubricPath,
         findingIds: [finding.findingId],
         codex: {
