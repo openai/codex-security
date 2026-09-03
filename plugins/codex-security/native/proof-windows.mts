@@ -17,6 +17,8 @@ import { basename, join, win32 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { setImmediate } from "node:timers/promises";
+import { wideProcessProof } from "./proof-windows-wide.mjs";
+import { windowsFileSystem } from "./windows-files.mjs";
 import {
   loadWindowsBinding,
   windowsFlags as flags,
@@ -282,6 +284,14 @@ function handleProof(root: string) {
     assert(attributes.attributes & flags.FILE_ATTRIBUTE_REPARSE_POINT);
     assert(attributes.attributes & flags.FILE_ATTRIBUTE_DIRECTORY);
     assert.equal(attributes.reparseTag, 0xa0000003);
+    const files = windowsFileSystem(native);
+    const junctionStat = files.stat(pathBytes(ancestor), false);
+    assert(junctionStat.isDirectory());
+    assert(junctionStat.isReparsePoint());
+    assert(!junctionStat.isSymbolicLink());
+    const targetStat = files.stat(pathBytes(ancestor));
+    assert(targetStat.isDirectory());
+    assert(!targetStat.isReparsePoint());
     samePath(
       checked(junction.finalPath(flags.FILE_NAME_OPENED)).path,
       ancestor,
@@ -662,6 +672,7 @@ if (process.argv[2] === "worker") {
           architecture: process.arch,
           nodeApi: 8,
           handles: handleProof(root),
+          wideProcessAndPaths: wideProcessProof(root),
           garbageCollectionClosesHandle: await ownershipProof(root),
           locks: await lockProof(root),
           pythonCompatibility:

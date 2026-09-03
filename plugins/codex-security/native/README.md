@@ -39,6 +39,8 @@ Windows uses `windows-binding.mts` and the same Rust crate. `WindowsHandle` owns
 
 The binding exposes synchronous file and directory creation, attributes and reparse tags, identity and final/opened names, read/write/seek/size/EOF/flush, exact-handle rename and deletion, and exclusive whole-file locking. Rust's `File` supplies ordinary I/O, cursor-preserving truncation, `sync_all` for flush, and locks. Calls return numeric Windows errors, including 6 for closed handles and 33 for nonblocking lock contention. Buffer ranges, path encoding, and 64-bit seek arguments are checked before use. Overlapped handles are unsupported because pending operations could retain native buffers beyond the call. Path authorization, ancestor traversal, and reparse-point policy remain the caller's responsibility.
 
+Four additional operations avoid Node's lossy Windows string conversions. `windowsArguments` returns the complete OS argument vector, including the executable and Node options, using Rust's CRT-compatible parser. `windowsEnvironment` reads one wide environment name and distinguishes an absent value (`null`) from an empty buffer. `windowsAbsolutePath` resolves against the native current directory and drive directories without requiring the destination to exist. `windowsDirectoryNames` returns every name as UTF-16LE; iteration failures return their Windows error and an empty array. `windows-files.mts` composes these operations and the existing handles into typed filesystem helpers; product commands do not use this adapter yet.
+
 Build on Windows after compiling the TypeScript tools, then run:
 
 ```sh
@@ -52,6 +54,8 @@ The `native-windows` workflow builds x64 and arm64 with MSVC and a static CRT. I
 ```sh
 node --expose-gc plugins/codex-security/native/proof-windows.mjs python plugins/codex-security/scripts
 ```
+
+The build also compiles the test-only `windows-wide-launcher` Rust example. It starts a Node proof child with lone surrogates in arguments, environment values, and its working directory. That child checks complete directory iteration, distinct surrogate and replacement-character files, canonical paths, bounded reads, output truncation, and recursive long paths through the typed adapter. The launcher cleans up the wide fixtures and is never included in the uploaded or bundled native payloads.
 
 ## Package inputs
 
