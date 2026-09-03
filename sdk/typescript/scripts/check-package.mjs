@@ -188,6 +188,7 @@ const distFiles = new Set(
     "linear",
     "models",
     "multiscan",
+    "mock-scan",
     "patch-tui",
     "publication",
     "publication-events",

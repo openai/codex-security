@@ -366,6 +366,7 @@ describe("CodexSecurity finding validation", () => {
           model: "test-model",
           model_reasoning_effort: "high",
           approval_policy: "never",
+          analytics: { enabled: false },
         },
       },
       {
@@ -452,6 +453,7 @@ describe("CodexSecurity finding validation", () => {
           model: "test-model",
           model_reasoning_effort: "high",
           features: { plugins: false },
+          analytics: { enabled: false },
           responses_api_metadata: { codex_security_surface: "sdk" },
         },
       });
