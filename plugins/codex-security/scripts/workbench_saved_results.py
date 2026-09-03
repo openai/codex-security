@@ -47,6 +47,9 @@ _PUBLISHED_OUTPUTS = (
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
 )
+_UNVERIFIED_COVERAGE_WARNING = (
+    "Saved scan source is incomplete or has unverified coverage; coverage remains partial."
+)
 
 
 @dataclass(frozen=True)
@@ -472,6 +475,11 @@ def merge_saved_results(
     if frozen_source_digests is None or allow_frozen_legacy_parent:
         try:
             parent_manifest, parent = _read_saved_parent_result(scan_dir, scan_id)
+            if (
+                parent.get("complete", True) is not True
+                and _UNVERIFIED_COVERAGE_WARNING not in warnings
+            ):
+                warnings.append(_UNVERIFIED_COVERAGE_WARNING)
         except (ContractError, OSError, ValueError) as exc:
             if not stopped:
                 raise
@@ -503,6 +511,7 @@ def merge_saved_results(
     paths: dict[str, str | None] = {}
     reducer_paths: set[str] = set()
     current_results: set[str] = set()
+    required_results: set[str] = set()
     reducer_outputs: list[tuple[Any, str, list[str], int]] = []
     reducer = _latest_successful_reducer(workers)
     latest_reducer: str | None = None
@@ -510,6 +519,7 @@ def merge_saved_results(
         try:
             latest_reducer = Path(reducer["result_manifest_path"]).relative_to(scan_dir).as_posix()
             paths[latest_reducer] = None
+            required_results.add(latest_reducer)
             reducer_paths.add(latest_reducer)
         except ValueError:
             warnings.append("Skipped a reducer result outside the scan directory.")
@@ -570,6 +580,8 @@ def merge_saved_results(
                 current_path = Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix()
                 paths[current_path] = worker["id"]
                 current_results.add(current_path)
+                if worker["status"] == "succeeded":
+                    required_results.add(current_path)
             except ValueError:
                 warnings.append("Skipped a worker result outside the scan directory.")
 
@@ -597,6 +609,8 @@ def merge_saved_results(
         except (ContractError, OSError, ValueError) as exc:
             if (scan_dir / relative).exists():
                 warnings.append(f"Preserved unreadable checkpoint {relative}: {exc}")
+            elif relative in required_results and _UNVERIFIED_COVERAGE_WARNING not in warnings:
+                warnings.append(_UNVERIFIED_COVERAGE_WARNING)
     if frozen_source_digests is not None:
         if frozen_source_digests.keys() - source_digests.keys():
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.")
@@ -781,7 +795,7 @@ def merge_saved_results(
         superseded = (
             worker_id is None
             and parent is not None
-            and parent.get("complete") is not False
+            and parent.get("complete", True) is True
             and relative != "parent"
             and (not stopped_parent_seal or relative in parent_preserved_sources)
         ) or (
@@ -789,20 +803,37 @@ def merge_saved_results(
             and any(
                 saved_worker == worker_id
                 and saved_path in current_results
-                and current.get("complete") is not False
+                and current.get("complete", True) is True
                 for saved_path, current, saved_worker in sources
             )
         )
-        if (
-            (relative != "parent" or not parent_manifest)
-            and not superseded
-            and (
-                draft.get("complete") is False
-                or draft["coverage"].get("completeness") != "complete"
-            )
-            and coverage.get("completeness") in {"complete", "unknown"}
+        if relative in required_results or (
+            (relative != "parent" or not parent_manifest) and not superseded
         ):
-            coverage["completeness"] = "partial"
+            source_coverage = draft["coverage"]
+            source_completeness = source_coverage.get("completeness")
+            source_complete = draft.get("complete", True) is True
+            if (
+                not source_complete
+                or (
+                    source_completeness != "complete"
+                    and (
+                        worker_id is not None
+                        or relative in required_results
+                        or source_completeness != "partial"
+                        or coverage.get("completeness") == "unknown"
+                    )
+                )
+                or any(
+                    not isinstance(source_coverage.get(field), list)
+                    for field in ("surfaces", "explicitExclusions", "deferred")
+                )
+            ) and _UNVERIFIED_COVERAGE_WARNING not in warnings:
+                warnings.append(_UNVERIFIED_COVERAGE_WARNING)
+            if (not source_complete or source_completeness != "complete") and coverage.get(
+                "completeness"
+            ) in {"complete", "unknown"}:
+                coverage["completeness"] = "partial"
         if (
             superseded
             and not stopped
@@ -1031,7 +1062,11 @@ def merge_saved_results(
             used.add(item["id"])
             if field == "surfaces":
                 item.setdefault("receiptRefs", [])
-    if stopped or any(warning not in initial_warnings for warning in warnings):
+    if (
+        stopped
+        or _UNVERIFIED_COVERAGE_WARNING in warnings
+        or any(warning not in initial_warnings for warning in warnings)
+    ):
         coverage["completeness"] = "partial"
     if stopped:
         if not isinstance(coverage.get("deferred"), list):

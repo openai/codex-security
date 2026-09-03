@@ -1967,8 +1967,10 @@ describe("plugin runtime preparation", () => {
     "0.1.59",
     "0.1.60",
     "0.1.79",
+    "0.1.83",
     "0.1.92",
     "0.1.93",
+    "0.1.94",
   ])(
     "upgrades a cached %s plugin and restores with the SDK-owned helper",
     async (previousVersion) => {
@@ -1977,6 +1979,10 @@ describe("plugin runtime preparation", () => {
       await writeFile(
         join(previous, "scripts", "workbench_scan_history.py"),
         "print('previous bundled scan history')\n",
+      );
+      await writeFile(
+        join(previous, "scripts", "finalize_scan_contract.py"),
+        "# stale synthetic validator\n",
       );
       await writeFile(
         join(previous, ".mcp.json"),
@@ -2016,6 +2022,12 @@ describe("plugin runtime preparation", () => {
 
       const options = { codexCommand: command, environment };
       const stale = await bootstrapPlugin(home, previous, options);
+      expect(
+        await readFile(
+          join(stale.installedRoot, "scripts", "finalize_scan_contract.py"),
+          "utf8",
+        ),
+      ).toBe("# stale synthetic validator\n");
       const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
 
       expect(stale.version).toBe(previousVersion);
@@ -2030,6 +2042,7 @@ describe("plugin runtime preparation", () => {
           "workbench_target.py",
           "finalize_scan_contract.py",
           "workbench_scan_history.py",
+          "workbench_saved_results.py",
         ]) {
           expect(await readFile(join(pluginRoot, "scripts", script))).toEqual(
             await readFile(join(PLUGIN_ROOT, "scripts", script)),
