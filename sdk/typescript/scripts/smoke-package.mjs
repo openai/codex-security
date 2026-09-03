@@ -400,7 +400,7 @@ try {
       "--input-type=module",
       "--eval",
       `const sdk = await import(${JSON.stringify(packageManifest.name)});
-      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "matchScanFindings"]) {
+      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings"]) {
         if (typeof sdk[name] !== "function") {
           throw new Error("The installed package does not export " + name + ".");
         }
