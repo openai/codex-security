@@ -1,5 +1,5 @@
 [package]
-name = "codex-security-native-unix"
+name = "codex-security-native"
 version = "0.0.0"
 edition = "2021"
 rust-version = "1.97"
@@ -12,7 +12,12 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "=3.12.2", default-features = false, features = ["napi8"] }
 napi-derive = "=3.6.3"
+
+[target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [build-dependencies]
 napi-build = "=2.4.1"
