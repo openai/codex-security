@@ -70,6 +70,10 @@ Pass literal text or a JSON-serializable object as `finding`, not a file path.
 Validation uses the client's settings and credentials without changing
 repository files or adding a scan to history.
 
+To disable Codex usage analytics and built-in metrics, create the client with
+`new CodexSecurity({ codexOverrides: { analytics: { enabled: false } } })`.
+This setting also applies to scans run by the same client.
+
 Results include `disposition` (`reportable`, `suppressed`, `not_applicable`,
 or `deferred`), a Markdown `report`, `threadId`, and evidence `outputDir`.
 `reportable` may rely on static analysis; `deferred` means insufficient evidence.
@@ -516,8 +520,29 @@ or `features.plugins` are rejected, including in profiles. Multi-agent v2 must
 stay enabled: `agents.max_threads` and
 `features.multi_agent_v2.enabled=false` are rejected.
 
-`validate` and `patch` accept `--effort` and the `model` and
-`model_reasoning_effort` keys in `--codex`, but no other runtime overrides.
+`validate`, `patch`, and `verify-fix` accept `--effort` and the `model`,
+`model_reasoning_effort`, and `analytics.enabled` keys in `--codex`, but no
+other runtime overrides.
+
+Use `--codex 'analytics.enabled=false'` to disable Codex usage analytics and
+built-in metrics for a command:
+
+```bash
+npx @openai/codex-security validate "Candidate finding" --codex 'analytics.enabled=false'
+npx @openai/codex-security patch "Security issue" --codex 'analytics.enabled=false'
+npx @openai/codex-security verify-fix "Security issue" --codex 'analytics.enabled=false'
+```
+
+The same setting works for `scan` and `bulk-scan`. An explicit setting is
+preserved when `scan --patch` starts remediation and when
+`patch --assess-patch-risk` starts its follow-up assessment. Boolean `true`
+is also accepted; omitting the setting preserves the command's existing
+configuration and Codex defaults. Validation continues to ignore user
+configuration, while patching and verification retain their existing ambient
+configuration and project-trust behavior.
+
+This setting does not control explicitly configured OpenTelemetry log or trace
+exporters, authentication, integrations, or CLI update checks.
 
 See [Local security model](#local-security-model) for approval and filesystem
 restrictions.

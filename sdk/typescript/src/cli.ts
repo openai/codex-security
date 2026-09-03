@@ -3763,7 +3763,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
+            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
           ),
       }),
       async run({ options }) {
@@ -3819,7 +3819,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
+            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -4042,7 +4042,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
+            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -5634,12 +5634,19 @@ async function runSkill(
 ): Promise<number> {
   const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
   if (
-    Object.keys(overrides).some(
-      (key) => key !== "model" && key !== "model_reasoning_effort",
+    Object.entries(overrides).some(
+      ([key, value]) =>
+        key !== "model" &&
+        key !== "model_reasoning_effort" &&
+        !(
+          key === "analytics" &&
+          isJsonObject(value) &&
+          Object.keys(value).every((key) => key === "enabled")
+        ),
     )
   ) {
     throw new CodexSecurityError(
-      "Validation and patching only support model and model_reasoning_effort overrides.",
+      "Skill commands only support model, model_reasoning_effort, and analytics.enabled overrides.",
     );
   }
   const { model, reasoningEffort } = scanModelConfiguration(
@@ -5794,6 +5801,12 @@ async function runSkill(
       `model=${JSON.stringify(model)}`,
       "--config",
       `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
+      ...codexOverrides
+        .filter(
+          (value) =>
+            value.startsWith("analytics.") || value.startsWith("analytics="),
+        )
+        .flatMap((value) => ["--config", value]),
       ...(options.provider === undefined
         ? []
         : ["--config", `model_provider=${JSON.stringify(options.provider)}`]),
@@ -6444,6 +6457,7 @@ async function executeScan(
   let effectiveReasoningEffort =
     DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
   let providerOptions: SkillRunOptions = {};
+  let patchAnalyticsOverride: string | undefined;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
@@ -6479,6 +6493,14 @@ async function executeScan(
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
     const provider = scanModelProvider(effectiveConfiguration);
+    const analytics = effectiveConfiguration["analytics"];
+    if (
+      analytics !== undefined &&
+      isJsonObject(analytics) &&
+      analytics["enabled"] !== undefined
+    ) {
+      patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
+    }
     const auth =
       !arguments_.dryRun && !arguments_.mock && interactive
         ? await chooseInteractiveAuthentication(
@@ -7079,7 +7101,12 @@ async function executeScan(
     try {
       patches = await runFindingPatches(
         selected,
-        [`model=${JSON.stringify(effectiveModel)}`],
+        [
+          `model=${JSON.stringify(effectiveModel)}`,
+          ...(patchAnalyticsOverride === undefined
+            ? []
+            : [patchAnalyticsOverride]),
+        ],
         effectiveReasoningEffort as ScanReasoningEffort,
         errorOutput,
         dependencies,
