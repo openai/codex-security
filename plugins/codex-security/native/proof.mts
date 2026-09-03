@@ -17,7 +17,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
+import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -63,6 +64,41 @@ const readLinkAt = (fd: number, path: string | Buffer) =>
   checked(native.readLinkAt(fd, bytes(path))).value;
 const rawPath = (parent: string, name: Buffer) =>
   Buffer.concat([Buffer.from(parent + "/"), name]);
+// APFS requires valid UTF-8 names; Linux also exercises undecodable bytes.
+const fixtureName = (prefix: string, byte: number) =>
+  process.platform === "darwin"
+    ? Buffer.from(`${prefix}-é`)
+    : Buffer.from([prefix.charCodeAt(0), byte]);
+
+function accountProof() {
+  let currentHomeMatches: boolean | null = null;
+  try {
+    const current = userInfo({ encoding: "buffer" });
+    assert.deepEqual(
+      checked(native.userHome(current.username)).value,
+      current.homedir,
+    );
+    currentHomeMatches = true;
+  } catch (error) {
+    // A container can run a numeric UID with no account database entry.
+    const system = error as { code?: string; info?: { code?: string } };
+    assert.equal(system.code, "ERR_SYSTEM_ERROR");
+    assert.equal(system.info?.code, "ENOENT");
+  }
+  const other = checked(native.userHome(Buffer.from("root"))).value;
+  assert(other !== null && other[0] === 0x2f);
+  assert.equal(
+    checked(native.userHome(Buffer.from(`codex-${randomUUID().slice(0, 8)}`)))
+      .value,
+    null,
+  );
+  assert.throws(() => native.userHome(Buffer.from([0])));
+  return {
+    currentHomeMatches,
+    namedHomeWithoutGit: true,
+    missingAccount: true,
+  };
+}
 
 const directoryFlags =
   constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
@@ -109,8 +145,8 @@ function descriptorProof(root: string) {
     const originalParent = keep(openAt(rootFd, "artifacts", directoryFlags));
     const parentFd = keep(duplicate(originalParent));
     close(originalParent);
-    const unreadable = Buffer.from([0x75, 0xff]);
-    const rawLink = Buffer.from([0x6c, 0xfe]);
+    const unreadable = fixtureName("u", 0xff);
+    const rawLink = fixtureName("l", 0xfe);
     const rawTarget = Buffer.concat([
       Buffer.from("component/".repeat(80)),
       Buffer.from([0xff]),
@@ -154,9 +190,9 @@ function descriptorProof(root: string) {
     assert.equal(readLinkAt(rootFd, "artifacts").toString(), outside);
     mkdirAt(parentFd, "nested", 0o700);
 
-    const rawDirectory = Buffer.from([0x64, 0xfd]);
-    const rawSource = Buffer.from([0x73, 0xfc]);
-    const rawDestination = Buffer.from([0x74, 0xfb]);
+    const rawDirectory = fixtureName("d", 0xfd);
+    const rawSource = fixtureName("s", 0xfc);
+    const rawDestination = fixtureName("t", 0xfb);
     mkdirAt(parentFd, rawDirectory, 0o700);
     assert.equal(statAt(parentFd, rawDirectory).mode & 0o777, 0o700);
     const rawDirectoryFd = keep(openAt(parentFd, rawDirectory, directoryFlags));
@@ -445,6 +481,7 @@ if (process.argv[2] === "lock-worker") {
   const root = mkdtempSync(join(tmpdir(), "codex-security-native-"));
   try {
     const descriptors = descriptorProof(root);
+    const accounts = accountProof();
     const locks = await lockProof(root);
     const pythonCompatibility =
       python && scripts ? await lockProof(root, python, scripts) : undefined;
@@ -456,6 +493,7 @@ if (process.argv[2] === "lock-worker") {
           architecture: process.arch,
           nodeApi: 8,
           descriptors,
+          accounts,
           locks,
           pythonCompatibility,
           fixture: basename(root),

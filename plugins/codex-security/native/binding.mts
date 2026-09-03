@@ -43,6 +43,7 @@ export interface UnixBinding {
     unlock: boolean,
     nonblocking: boolean,
   ): SyscallResult;
+  userHome(username: Buffer): { errno: number; value: Buffer | null };
 }
 
 export function loadBinding(): UnixBinding {
