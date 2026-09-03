@@ -165,12 +165,14 @@ pub fn create_windows_directory(path: Buffer) -> napi::Result<u32> {
 
 #[napi]
 impl WindowsHandle {
+    #[napi]
     pub fn close(&mut self) -> u32 {
         self.handle.take().map_or(0, |handle| {
             status(unsafe { CloseHandle(handle.into_raw_handle()) })
         })
     }
 
+    #[napi]
     pub fn attributes(&self) -> AttributesResult {
         let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
         let error = status(unsafe {
@@ -188,6 +190,7 @@ impl WindowsHandle {
         }
     }
 
+    #[napi]
     pub fn identity(&self) -> IdentityResult {
         let mut info = FILE_ID_INFO::default();
         let error = status(unsafe {
@@ -205,6 +208,7 @@ impl WindowsHandle {
         }
     }
 
+    #[napi]
     pub fn file_type(&self) -> WindowsResult {
         unsafe { SetLastError(0) };
         let value = unsafe { GetFileType(self.raw()) };
@@ -218,6 +222,7 @@ impl WindowsHandle {
         }
     }
 
+    #[napi]
     pub fn final_path(&self, flags: u32) -> napi::Result<PathResult> {
         let mut path = vec![0_u16; 256];
         loop {
@@ -246,6 +251,7 @@ impl WindowsHandle {
         }
     }
 
+    #[napi]
     pub fn read(
         &self,
         mut buffer: Buffer,
@@ -266,6 +272,7 @@ impl WindowsHandle {
         Ok(WindowsResult { error, value })
     }
 
+    #[napi]
     pub fn write(&self, buffer: Buffer, offset: f64, length: f64) -> napi::Result<WindowsResult> {
         let (offset, length) = io_range(&buffer, offset, length)?;
         let mut value = 0;
@@ -281,6 +288,7 @@ impl WindowsHandle {
         Ok(WindowsResult { error, value })
     }
 
+    #[napi]
     pub fn seek(&self, distance: BigInt, origin: u32) -> napi::Result<PositionResult> {
         let (distance, lossless) = distance.get_i64();
         if !lossless {
@@ -294,6 +302,7 @@ impl WindowsHandle {
         })
     }
 
+    #[napi]
     pub fn size(&self) -> PositionResult {
         let mut value = 0;
         let error = status(unsafe { GetFileSizeEx(self.raw(), &mut value) });
@@ -303,14 +312,17 @@ impl WindowsHandle {
         }
     }
 
+    #[napi]
     pub fn set_end_of_file(&self) -> u32 {
         status(unsafe { SetEndOfFile(self.raw()) })
     }
 
+    #[napi]
     pub fn flush(&self) -> u32 {
         status(unsafe { FlushFileBuffers(self.raw()) })
     }
 
+    #[napi]
     pub fn rename(&self, destination: Buffer, replace: bool) -> napi::Result<u32> {
         let path = wide_path(destination)?;
         let name_bytes = (path.len() - 1) * size_of::<u16>();
@@ -343,6 +355,7 @@ impl WindowsHandle {
         }))
     }
 
+    #[napi]
     pub fn set_disposition(&self, delete: bool) -> u32 {
         let info = FILE_DISPOSITION_INFO { DeleteFile: delete };
         status(unsafe {
@@ -355,6 +368,7 @@ impl WindowsHandle {
         })
     }
 
+    #[napi]
     pub fn lock(
         &self,
         offset: BigInt,
@@ -385,6 +399,7 @@ impl WindowsHandle {
         }))
     }
 
+    #[napi]
     pub fn unlock(&self, offset: BigInt, length: BigInt) -> napi::Result<u32> {
         let mut position = overlapped(unsigned(offset)?);
         let length = unsigned(length)?;
