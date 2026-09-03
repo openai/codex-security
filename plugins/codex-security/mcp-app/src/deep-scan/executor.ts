@@ -2,7 +2,7 @@ import { accessSync, constants as fsConstants, existsSync, promises as fs, readd
 import { createRequire } from "node:module";
 import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { Codex } from "@openai/codex-sdk";
-import { executablePathForSpawn } from "./executable-path.js";
+import { executablePathForSpawn } from "../executable-path.js";
 import {
   classifyCodexWorkerError,
   DeepScanNonRetryableError

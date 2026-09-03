@@ -51,6 +51,7 @@ await testEarlyExecutableExitIsNotVersionError();
 await testNonVersionJsonRpcFailureIsSafe();
 await testRuntimeFallbackWarningClassification();
 await testSpawnErrorFailsClosed();
+await testTransientSpawnErrorRemainsRetryable();
 await testAbortKillsPreflightChild();
 
 async function testAllowedProfileAndRawArgv() {
@@ -96,6 +97,8 @@ async function testAllowedProfileAndRawArgv() {
       "config/read",
       "permissionProfile/list"
     ]);
+    assert.equal(calls[0].params.clientInfo.name, "codex_security_deep_scan");
+    assert.equal(calls[0].params.clientInfo.title, "Codex Security Deep Scan");
     assert.deepEqual(calls[0].params.capabilities, { experimentalApi: true });
     assert.deepEqual(calls[2].params, { cwd, includeLayers: false });
     assert.deepEqual(calls[3].params, { cwd });
@@ -396,6 +399,32 @@ async function testSpawnErrorFailsClosed() {
   );
 }
 
+async function testTransientSpawnErrorRemainsRetryable() {
+  await withFakeCodex({ hangAt: "initialize" }, async ({ codexPath, cwd }) => {
+    const spawnError = Object.assign(new Error("fixture temporary spawn failure"), {
+      code: "EMFILE"
+    });
+    const originalSpawn = childProcess.spawn;
+    childProcess.spawn = (command, args, options) => {
+      const child = originalSpawn(command, args, options);
+      queueMicrotask(() => child.emit("error", spawnError));
+      return child;
+    };
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(preflight(codexPath, cwd), (error) => {
+        assert.equal(error?.name, "Error");
+        assert.equal(error.cause, spawnError);
+        assert.ok(error.message.includes("could not start (EMFILE)"));
+        return true;
+      });
+    } finally {
+      childProcess.spawn = originalSpawn;
+      syncBuiltinESMExports();
+    }
+  });
+}
+
 async function testRuntimeFallbackWarningClassification() {
   const warning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`enterprise-default\`.`;
   const error = deepScanPermissionProfileFallbackError(warning, profileId);
@@ -422,23 +451,32 @@ async function testRuntimeFallbackWarningClassification() {
 }
 
 async function testAbortKillsPreflightChild() {
-  await withFakeCodex({
-    hangAt: "config/read"
-  }, async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
-    const controller = new AbortController();
-    const running = preflightDeepScanWorkerPermissionProfile({
-      codexPath,
-      cwd,
-      profileId,
-      configOverrides: rawOverrides,
-      expectedProfile,
-      signal: controller.signal
+  for (const reason of [
+    new DOMException("fixture aborted", "AbortError"),
+    new Error("fixture cancellation reason")
+  ]) {
+    await withFakeCodex({
+      hangAt: "config/read"
+    }, async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
+      const controller = new AbortController();
+      const running = preflightDeepScanWorkerPermissionProfile({
+        codexPath,
+        cwd,
+        profileId,
+        configOverrides: rawOverrides,
+        expectedProfile,
+        signal: controller.signal
+      });
+      await waitForFile(readyPath);
+      controller.abort(reason);
+      await assert.rejects(running, (error) => {
+        assert.equal(error, reason);
+        assert.equal(error.name, reason.name);
+        return true;
+      });
+      await assertPreflightStopped(children, terminatedPath);
     });
-    await waitForFile(readyPath);
-    controller.abort(new DOMException("fixture aborted", "AbortError"));
-    await assert.rejects(running, (error) => error?.name === "AbortError");
-    await assertPreflightStopped(children, terminatedPath);
-  });
+  }
 }
 
 async function assertPreflightStopped(children, terminatedPath) {

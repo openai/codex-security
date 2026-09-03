@@ -126,6 +126,8 @@ await withFakeCodex(
         "model/list",
       ],
     );
+    assert.equal(calls[0].params.clientInfo.name, "codex_security_deep_scan");
+    assert.equal(calls[0].params.clientInfo.title, "Codex Security Deep Scan");
     assert.deepEqual(calls[2].params, { refreshToken: false });
     assert.deepEqual(calls[3].params, {
       cwd: options.cwd,
@@ -201,20 +203,33 @@ for (const scenario of [
       { data: [], nextCursor: "repeat" },
     ],
   },
-  { failAt: "model/list" },
 ]) {
   await withFakeCodex(scenario, async ({ options }) => {
     await assert.rejects(readModelCatalog(options));
   });
 }
 
+await withFakeCodex({ failAt: "model/list" }, async ({ options }) => {
+  await assert.rejects(readModelCatalog(options), (error) => {
+    assert.equal(error.name, "AppServerError");
+    assert.deepEqual(error.failure, {
+      kind: "rpc",
+      method: "model/list",
+      code: -32601,
+    });
+    assert.doesNotMatch(error.message, /Deep Scan|permission.profile/);
+    return true;
+  });
+});
+
 await withFakeCodex(
   { hangAt: "model/list" },
   async ({ options, controller, ready }) => {
     const reading = readModelCatalog(options);
     await ready;
-    controller.abort(new Error("Fixture cancellation"));
-    await assert.rejects(reading);
+    const reason = new Error("Fixture cancellation");
+    controller.abort(reason);
+    await assert.rejects(reading, (error) => error === reason);
   },
 );
 

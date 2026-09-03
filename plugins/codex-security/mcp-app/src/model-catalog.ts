@@ -1,7 +1,7 @@
 import {
-  AppServerPreflightClient,
-  type AppServerPreflightClientOptions,
-} from "./deep-scan/permission-profile-preflight.js";
+  AppServerClient,
+  type AppServerClientOptions,
+} from "./app-server-client.js";
 
 export interface CatalogModel {
   readonly id: string;
@@ -17,12 +17,15 @@ export interface CatalogModel {
 
 /** Read Codex picker metadata using the supplied launch context, without starting a turn. */
 export async function readModelCatalog(
-  options: AppServerPreflightClientOptions,
+  options: AppServerClientOptions,
 ): Promise<readonly CatalogModel[] | undefined> {
   options.signal.throwIfAborted();
-  const client = new AppServerPreflightClient(options);
+  const client = new AppServerClient(options);
   try {
-    await client.initialize();
+    await client.initialize({
+      name: "codex_security_deep_scan",
+      title: "Codex Security Deep Scan",
+    });
     const account = await client.request("account/read", {
       refreshToken: false,
     });
