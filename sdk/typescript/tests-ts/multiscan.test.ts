@@ -2223,4 +2223,145 @@ describe("multiscan", () => {
       { id: "complete", status: "completed", attempt: 1, coverage: "complete" },
     ]);
   });
+
+  test("preserves scan failure and writes receipt when checkout cleanup fails", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "cleanup-fail-scan-fail");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\ncleanup-fail,${source.path},${source.revision}\n`,
+    );
+    const checkoutDir = join(paths.output, "checkouts", "cleanup-fail");
+    const originalRm = filesystem.rm;
+    let rmAttempts = 0;
+    const rmSpy = spyOn(filesystem, "rm").mockImplementation(
+      async (path, options) => {
+        if (String(path) === checkoutDir && options?.recursive === true) {
+          rmAttempts += 1;
+          if (rmAttempts >= 2) {
+            throw Object.assign(
+              new Error("EACCES: permission denied, rm checkout"),
+              { code: "EACCES" },
+            );
+          }
+        }
+        return await originalRm(path, options);
+      },
+    );
+
+    const progressEvents: unknown[] = [];
+    const security = client(async () => {
+      throw new Error("ORIGINAL_SCAN_FAILURE");
+    });
+
+    try {
+      const summary = await runMultiscan(
+        options(paths, security, {
+          maxAttempts: 1,
+          onProgress: (event) => progressEvents.push(event),
+        }),
+      );
+
+      expect(summary).toMatchObject({
+        total: 1,
+        completed: 0,
+        incomplete: 0,
+        failed: 1,
+      });
+      const recordedResults = await results(summary.resultsPath);
+      expect(recordedResults).toMatchObject([
+        {
+          id: "cleanup-fail",
+          status: "failed",
+          attempt: 1,
+          error: "ORIGINAL_SCAN_FAILURE",
+        },
+      ]);
+      expect(
+        progressEvents.some(
+          (event: any) =>
+            event.status === "started" &&
+            typeof event.warning === "string" &&
+            event.warning.includes("Failed to remove checkout directory"),
+        ),
+      ).toBe(true);
+      expect(
+        progressEvents.some(
+          (event: any) =>
+            event.status === "failed" &&
+            event.error === "ORIGINAL_SCAN_FAILURE",
+        ),
+      ).toBe(true);
+    } finally {
+      rmSpy.mockRestore();
+    }
+  });
+
+  test("preserves scan success and writes receipt when checkout cleanup fails", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "cleanup-fail-scan-success");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\ncleanup-success,${source.path},${source.revision}\n`,
+    );
+    const checkoutDir = join(paths.output, "checkouts", "cleanup-success");
+    const originalRm = filesystem.rm;
+    let rmAttempts = 0;
+    const rmSpy = spyOn(filesystem, "rm").mockImplementation(
+      async (path, options) => {
+        if (String(path) === checkoutDir && options?.recursive === true) {
+          rmAttempts += 1;
+          if (rmAttempts >= 2) {
+            throw Object.assign(new Error("EBUSY: resource busy or locked"), {
+              code: "EBUSY",
+            });
+          }
+        }
+        return await originalRm(path, options);
+      },
+    );
+
+    const progressEvents: unknown[] = [];
+    const security = client(async (_repo, scanOptions = {}) =>
+      completedScan(scanOptions.outputDir!),
+    );
+
+    try {
+      const summary = await runMultiscan(
+        options(paths, security, {
+          maxAttempts: 1,
+          onProgress: (event) => progressEvents.push(event),
+        }),
+      );
+
+      expect(summary).toMatchObject({
+        total: 1,
+        completed: 1,
+        incomplete: 0,
+        failed: 0,
+      });
+      const recordedResults = await results(summary.resultsPath);
+      expect(recordedResults).toMatchObject([
+        {
+          id: "cleanup-success",
+          status: "completed",
+          attempt: 1,
+          coverage: "complete",
+        },
+      ]);
+      expect(
+        progressEvents.some(
+          (event: any) =>
+            event.status === "started" &&
+            typeof event.warning === "string" &&
+            event.warning.includes("Failed to remove checkout directory"),
+        ),
+      ).toBe(true);
+      expect(
+        progressEvents.some((event: any) => event.status === "completed"),
+      ).toBe(true);
+    } finally {
+      rmSpy.mockRestore();
+    }
+  });
 });
