@@ -852,6 +852,139 @@ Options include `projectId`, `skipExisting`, `linearApiKey` for direct API
 publication, and `assigneeId` (user ID or email). `checkScanPublication` accepts
 the same destination options for a read-only check.
 
+### Classify finding severity
+
+Classify findings after a scan or dedupe without repeating discovery or changing
+the original severity, evidence, or sealed scan artifacts:
+
+```bash
+codex-security classify-severity --scan SCAN_ID --rubric /path/to/policy.md --json
+codex-security classify-severity --scan latest --rubric /path/to/policy.md --json
+codex-security classify-severity --scan-dir /path/to/completed-scan --json
+```
+
+`--scan` accepts a saved scan ID, unique prefix, or `latest` for the current
+repository, matching `dedupe` and `publish scan`. `--scan-dir` accepts an external
+completed scan without requiring local history. Supply exactly one selector.
+Omitting `--rubric` inherits each finding's existing severity without a model call.
+
+`--rubric PATH` supplies the classification policy. Repeat `--knowledge-base PATH`
+to provide supporting architecture, deployment, or business context. Both accept
+the same Markdown, text, PDF, DOCX, and directory inputs as scan knowledge bases.
+Rubric classification uses the full supplied report and context in a separate
+read-only Codex turn per finding, without source inspection, tools, or new
+validation. `--model` and `--effort` select the classification model and reasoning
+effort; otherwise Codex's configured model and the helper's medium effort apply.
+
+The result contains one assessment per selected finding:
+
+- `decision`: `assessed` or `excluded`; policy exclusions do not become Low.
+- `level`: `critical`, `high`, `medium`, `low`, or `informational`; null for exclusions.
+- `rubricLabel`: the policy's original label, such as `URGENT`, normalized to
+  `critical`; null for inherited severity or exclusions.
+- `rationale`, separate `confidence`, and `reviewTrigger` describing a missing
+  fact that would change the classification. Inherited severity has no new
+  classification-confidence judgment.
+- `findingId`, `occurrenceId`, and `inputSha256` binding the assessment to the
+  report. Top-level metadata includes `assessedAt`, `rubricSha256`, and
+  `knowledgeBaseSha256` for the supplied policy and context snapshots.
+
+Scan classification saves each successful finding immediately in the local
+workbench SQLite database. Rerunning skips assessments with matching finding
+evidence, rubric, and knowledge-base hashes, including exclusions, and returns
+both reused and newly generated assessments. Changed inputs are classified again.
+Use `--reprocess` to rerun every selected finding regardless of its saved
+assessment; each row is replaced only after its new assessment succeeds. A failed
+or canceled run keeps completed checkpoints, so a normal retry resumes missing
+work. Changing only the model or effort requires `--reprocess`.
+
+SQLite is authoritative. A successful run also exports the complete selected
+result to `severity-classification.json` alongside the sealed artifacts. The file
+is replaced atomically and is not read for reuse or publication. The scan's
+original findings and severity are unchanged. The database stores the requested
+selection and policy/context hashes; publication rejects an incomplete selection
+or assessments whose inputs no longer match. Rubric documents are read at
+classification time, not again at publication time.
+
+```bash
+codex-security classify-severity --scan latest --rubric /path/to/policy.md --reprocess
+```
+
+Use repeatable `--finding-id ID` to classify a selected set, such as the
+`uniqueFindingIds` returned by dedupe. With a saved classification, Linear
+publication defaults to that selection, omits excluded records, and uses assessed
+severity for issue priority and title. The description retains original scan
+severity and adds classification reasoning. Without a saved classification,
+publication retains its existing severity mapping and selection behavior.
+Publication rejects assessments whose IDs or evidence hashes no longer match.
+
+```bash
+codex-security classify-severity --scan SCAN_ID --rubric /path/to/policy.md \
+  --finding-id FINDING_ID --json
+codex-security publish scan --scan SCAN_ID --to linear --linear-team TEAM_ID \
+  --dry-run --json
+codex-security publish scan --scan SCAN_ID --to linear --linear-team TEAM_ID \
+  --skip-existing --json
+```
+
+`publish scan --to linear` also accepts repeatable `--finding-id ID` to select a
+subset directly. If a classification exists, every explicitly selected finding
+must have an assessment. Classification does not change existing Linear tickets;
+`--skip-existing` preserves recorded tickets and any human priority edits. It
+retains the existing limitations around unrecorded or concurrent publications.
+
+The SDK exposes the same operations:
+
+```ts
+import {
+  classifySeverity,
+  classifyScanSeverity,
+  classifyScanDirectorySeverity,
+  publishScan,
+} from "@openai/codex-security";
+
+// Supplied reports from any source: returns an assessment without writing files.
+const classification = await classifySeverity(findings, {
+  rubricPath: "/path/to/policy.md",
+  knowledgeBasePaths: ["/path/to/context.md"],
+});
+
+// Saved IDs (including prefixes/latest), or sealed directories; saves an assessment.
+await classifyScanSeverity("SCAN_ID", { rubricPath: "/path/to/policy.md" });
+await classifyScanDirectorySeverity(scanDirectory, {
+  rubricPath: "/path/to/policy.md",
+  findingIds: dedupeResult.uniqueFindingIds,
+});
+
+await publishScan(scanDirectory, {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  skipExisting: true,
+});
+
+// Alternatively supply a classification directly, without a saved assessment.
+await publishScan(scanDirectory, {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  classification,
+  findingIds: classification.assessments.map(({ findingId }) => findingId),
+  dryRun: true,
+});
+```
+
+`classifySeverity` accepts reports with `findingId`, `title`, and `summary`, plus
+their available evidence and metadata. Original `severity` and `occurrenceId`
+may be absent for imported reports; reports without severity require a rubric.
+`classifySeverity` remains an in-memory operation without database persistence.
+The scan wrappers use the local state database (also for external scan
+directories), accept `reprocess: true`, and accept `findingIds: []` as an
+intentionally empty selection. Rows outside the selected set are retained.
+Use the same `CODEX_SECURITY_STATE_DIR` for classification and publication.
+JSON exports from versions without database checkpoints must be reclassified
+once before they can be reused.
+Pass `signal` to cancel any classification operation. Keep human overrides in the
+calling workflow or issue tracker; assessments remain separate recommendations.
+
 ### Scan history and reruns
 
 Commands default to the current repository. Select scans by full ID or a

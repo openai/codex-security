@@ -67,6 +67,10 @@ import { accountStatus } from "./auth.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import {
+  classifyScanSeverityInternal,
+  classifyScanDirectorySeverityInternal,
+} from "./classify-scan-severity.js";
+import {
   resolveCompletedScan,
   resolveWorkflowScan,
   type SavedScan,
@@ -254,6 +258,8 @@ const VALUE_OPTIONS = new Set([
   "--component",
   "--components-file",
   "--knowledge-base",
+  "--rubric",
+  "--finding-id",
   "--scan-prompt-file",
   "--validation-prompt-file",
   "--post-scan-prompt-file",
@@ -1139,6 +1145,8 @@ interface CliDependencies {
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
   deduplicateScan?: typeof deduplicateScanInternal;
+  classifyScanSeverity?: typeof classifyScanSeverityInternal;
+  classifyScanDirectorySeverity?: typeof classifyScanDirectorySeverityInternal;
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
   publishScanToCustom?: typeof publishScanToCustom;
@@ -2096,6 +2104,12 @@ export async function main(
         .describe("Completed scan directory; omit to select a saved scan."),
     }),
     options: PUBLICATION_DESTINATION_OPTIONS.extend({
+      findingId: z
+        .array(optionValue("--finding-id"))
+        .default([])
+        .describe(
+          "Publish only this finding ID; repeat to select deduplicated findings (Linear only).",
+        ),
       workflowId: optionValue("--workflow-id")
         .optional()
         .describe(
@@ -2208,6 +2222,11 @@ export async function main(
       };
       try {
         const currentDirectory = dependencies.currentDirectory();
+        if (options.findingId.length > 0 && options.to !== "linear") {
+          throw new CodexSecurityError(
+            "--finding-id is only supported with --to linear.",
+          );
+        }
         const csvPath =
           options.csv === undefined
             ? undefined
@@ -2617,6 +2636,9 @@ export async function main(
             resolveCliPath(currentDirectory, scanDir),
             {
               ...destination!,
+              ...(options.findingId.length === 0
+                ? {}
+                : { findingIds: options.findingId }),
               ...(selectedScans[0]?.scanId === undefined
                 ? {}
                 : { expectedScanId: selectedScans[0].scanId }),
@@ -3152,6 +3174,110 @@ export async function main(
     .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
+    .command("classify-severity", {
+      description:
+        "Classify saved findings using an optional rubric and save a separate severity assessment.",
+      destructive: true,
+      mcp: false,
+      options: z.object({
+        reprocess: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Reclassify selected findings even when a matching assessment is saved.",
+          ),
+        scan: optionValue("--scan")
+          .optional()
+          .describe("Saved scan ID, unique prefix, or latest."),
+        scanDir: optionValue("--scan-dir")
+          .optional()
+          .describe("External completed scan directory."),
+        rubric: optionValue("--rubric")
+          .optional()
+          .describe(
+            "Classification policy document; omit to inherit existing severity without a model call.",
+          ),
+        knowledgeBase: z
+          .array(optionValue("--knowledge-base"))
+          .default([])
+          .describe(
+            "Supporting security context; repeat for more files or directories.",
+          ),
+        findingId: z
+          .array(optionValue("--finding-id"))
+          .default([])
+          .describe(
+            "Classify only this finding ID; repeat to select deduplicated findings.",
+          ),
+        model: optionValue("--model")
+          .optional()
+          .describe("Model for rubric classification."),
+        effort: effortOption().describe(
+          "Classification reasoning effort (default: medium).",
+        ),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ options }) {
+        const controller = new AbortController();
+        const onInterrupt = () => controller.abort("SIGINT");
+        const onTerminate = () => controller.abort("SIGTERM");
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          if (
+            (options.scan === undefined) ===
+            (options.scanDir === undefined)
+          ) {
+            throw new CodexSecurityError(
+              "Severity classification requires exactly one of --scan or --scan-dir.",
+            );
+          }
+          const currentDirectory = dependencies.currentDirectory();
+          const settings = {
+            environment: dependencies.environment,
+            workingDirectory: currentDirectory,
+            signal: controller.signal,
+            rubricPath:
+              options.rubric === undefined
+                ? undefined
+                : resolveCliPath(currentDirectory, options.rubric),
+            knowledgeBasePaths: options.knowledgeBase.map((path) =>
+              resolveCliPath(currentDirectory, path),
+            ),
+            findingIds:
+              options.findingId.length === 0 ? undefined : options.findingId,
+            reprocess: options.reprocess,
+            model: options.model,
+            reasoningEffort: options.effort,
+          };
+          const result =
+            options.scan !== undefined
+              ? await (
+                  dependencies.classifyScanSeverity ??
+                  classifyScanSeverityInternal
+                )(options.scan, settings, dependencies, "cli")
+              : await (
+                  dependencies.classifyScanDirectorySeverity ??
+                  classifyScanDirectorySeverityInternal
+                )(
+                  resolveCliPath(currentDirectory, options.scanDir!),
+                  settings,
+                  "cli",
+                );
+          return { ...result };
+        } catch (error) {
+          const signal = controller.signal.reason;
+          errorOutput.write(
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : safeErrorMessage(error)}\n`,
+          );
+          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          return undefined;
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command("dedupe", {
       description:
         "Review a saved scan with local Codex and save duplicate groups to the findings API.",

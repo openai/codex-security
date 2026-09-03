@@ -408,7 +408,7 @@ try {
       `
         import assert from "node:assert/strict";
         const sdk = await import(${JSON.stringify(packageManifest.name)});
-        for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan"]) {
+        for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity"]) {
           assert.equal(typeof sdk[name], "function", "The installed package must export " + name + ".");
         }
         assert.equal(sdk.VERSION, ${JSON.stringify(packageManifest.version)});
