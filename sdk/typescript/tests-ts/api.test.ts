@@ -92,6 +92,8 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
     const environment = {
       PATH: process.env["PATH"],
       SystemRoot: process.env["SystemRoot"],
+      TEMP: process.env["TEMP"],
+      TMP: process.env["TMP"],
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     };
     const workflowId = "durable-scan";
@@ -340,11 +342,12 @@ async function writeUsageSession(
   threadId: string,
   usage: Record<string, number>,
   parentThreadId?: string,
-): Promise<void> {
+): Promise<string> {
   const directory = join(codexHome, "sessions", "2026", "07", "26");
   await mkdir(directory, { recursive: true });
+  const path = join(directory, `rollout-${threadId}.jsonl`);
   await writeFile(
-    join(directory, `rollout-${threadId}.jsonl`),
+    path,
     [
       JSON.stringify({
         type: "session_meta",
@@ -364,6 +367,22 @@ async function writeUsageSession(
       }),
       "",
     ].join("\n"),
+  );
+  return path;
+}
+
+async function appendUsage(path: string, inputTokens: number): Promise<void> {
+  await appendFile(
+    path,
+    `${JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: { input_tokens: inputTokens, output_tokens: 0 },
+        },
+      },
+    })}\n`,
   );
 }
 
@@ -421,6 +440,7 @@ describe("CodexSecurity finding validation", () => {
           model: "test-model",
           model_reasoning_effort: "high",
           approval_policy: "never",
+          analytics: { enabled: false },
         },
       },
       {
@@ -507,6 +527,7 @@ describe("CodexSecurity finding validation", () => {
           model: "test-model",
           model_reasoning_effort: "high",
           features: { plugins: false },
+          analytics: { enabled: false },
           responses_api_metadata: { codex_security_surface: "sdk" },
         },
       });
@@ -813,7 +834,8 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const source = join(repository, "src");
     const output = join(root, "scan");
-    await mkdir(source, { recursive: true });
+    await mkdir(repository, { mode: 0o700 });
+    await mkdir(source, { mode: 0o700 });
     let runtimeStarted = false;
     const client = new TestClient(
       { pythonPath: "/definitely/missing/python" },
@@ -2106,7 +2128,7 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const normal = join(root, "normal");
     const linked = join(root, "linked");
-    await mkdir(normal);
+    await mkdir(normal, { mode: 0o700 });
     execFileSync("git", ["init", "-q", normal]);
     await writeFile(join(normal, "tracked.txt"), "tracked\n");
     execFileSync("git", ["-C", normal, "add", "."]);
@@ -2131,6 +2153,7 @@ describe("CodexSecurity orchestration", () => {
       "linked",
       linked,
     ]);
+    if (process.platform !== "win32") await fsPromises.chmod(linked, 0o700);
 
     for (const worktree of [normal, linked]) {
       const repository = join(worktree, "packages", "service");
@@ -4283,6 +4306,265 @@ describe("CodexSecurity orchestration", () => {
           : [],
       );
       await client.close();
+    },
+  );
+
+  test("raises a live budget twice without restarting or resetting accumulated usage", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+    const approvals = new Map<number, () => void>();
+    const firstApproval = new Promise<void>((resolve) =>
+      approvals.set(0.01, resolve),
+    );
+    const secondApproval = new Promise<void>((resolve) =>
+      approvals.set(0.02, resolve),
+    );
+    const requests: number[] = [];
+    const commands: Array<readonly string[]> = [];
+    let starts = 0;
+    let budgetSignal: AbortSignal | undefined;
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options, args, input) => {
+          commands.push(args);
+          return mockWorkbench(args, input);
+        },
+        createCodex: () => ({
+          startThread: () => {
+            starts += 1;
+            return {
+              id: null,
+              async runStreamed() {
+                async function* events(): AsyncGenerator<ThreadEvent> {
+                  yield { type: "thread.started", thread_id: "scan-thread" };
+                  const path = await writeUsageSession(
+                    codexHome,
+                    "scan-thread",
+                    { input_tokens: 800, output_tokens: 0 },
+                  );
+                  await writeUsageSession(
+                    codexHome,
+                    "worker-thread",
+                    { input_tokens: 100, output_tokens: 0 },
+                    "scan-thread",
+                  );
+                  await firstApproval;
+                  await appendUsage(path, 1_700);
+                  await secondApproval;
+                  await copyCompletedScan(root);
+                  yield {
+                    type: "turn.completed",
+                    usage: {
+                      input_tokens: 2_500,
+                      cached_input_tokens: 0,
+                      cache_write_input_tokens: 0,
+                      output_tokens: 0,
+                      reasoning_output_tokens: 0,
+                    },
+                  };
+                }
+                return { events: events() };
+              },
+            };
+          },
+        }),
+      },
+    );
+    const keepAlive = setTimeout(() => {}, 10_000);
+    try {
+      const result = await client.run(repository, {
+        maxCostUsd: 0.005,
+        signal: AbortSignal.timeout(5_000),
+        onBudgetApproaching: ({ maxCostUsd, signal }) => {
+          requests.push(maxCostUsd);
+          budgetSignal = signal;
+          return maxCostUsd * 2;
+        },
+        onCost: (_cost, limit) => {
+          if (limit !== undefined) approvals.get(limit)?.();
+        },
+      });
+      expect(result.cost).toMatchObject({
+        inputTokens: 2_600,
+        estimatedUsd: 0.013,
+      });
+      expect(starts).toBe(1);
+      expect(requests).toEqual([0.005, 0.01]);
+      expect(
+        commands
+          .filter(([command]) => command === "set-scan-cost-limit")
+          .map((args) => args.at(-1)),
+      ).toEqual(["0.01", "0.02"]);
+      expect(commands.some(([command]) => command === "fail-scan")).toBe(false);
+      expect(budgetSignal?.aborted).toBe(true);
+    } finally {
+      clearTimeout(keepAlive);
+      await client.close();
+    }
+  });
+
+  test.each([
+    "declined",
+    "pending",
+    "saving",
+    "invalid",
+    "save-failed",
+    "completed",
+    "canceled",
+  ] as const)(
+    "keeps the original budget enforceable when an increase is %s",
+    async (scenario) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+      let requested!: () => void;
+      const requestStarted = new Promise<void>((resolve) => {
+        requested = resolve;
+      });
+      let observed!: () => void;
+      const nextCost = new Promise<void>((resolve) => {
+        observed = resolve;
+      });
+      let answer!: (limit: number) => void;
+      const lateAnswer = new Promise<number>((resolve) => {
+        answer = resolve;
+      });
+      const controller = new AbortController();
+      const commands: Array<readonly string[]> = [];
+      const warnings: string[] = [];
+      let requestCount = 0;
+      let reportedLimit: number | undefined;
+      let budgetSignal: AbortSignal | undefined;
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_options, args, input) => {
+            commands.push(args);
+            if (scenario === "save-failed" && args[0] === "set-scan-cost-limit")
+              throw new Error("Synthetic save failure");
+            if (scenario === "saving" && args[0] === "set-scan-cost-limit")
+              await lateAnswer;
+            return mockWorkbench(args, input);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed(
+                _input: string,
+                { signal }: { signal: AbortSignal },
+              ) {
+                async function* events(): AsyncGenerator<ThreadEvent> {
+                  yield { type: "thread.started", thread_id: "scan-thread" };
+                  const path = await writeUsageSession(
+                    codexHome,
+                    "scan-thread",
+                    { input_tokens: 900, output_tokens: 0 },
+                  );
+                  await requestStarted;
+                  if (scenario === "completed") {
+                    await copyCompletedScan(root);
+                    yield {
+                      type: "turn.completed",
+                      usage: {
+                        input_tokens: 900,
+                        cached_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        output_tokens: 0,
+                        reasoning_output_tokens: 0,
+                      },
+                    };
+                    return;
+                  }
+                  await appendUsage(path, 950);
+                  await nextCost;
+                  if (scenario === "canceled") controller.abort();
+                  else await appendUsage(path, 1_200);
+                  await new Promise<void>((resolve) => {
+                    if (signal.aborted) resolve();
+                    else
+                      signal.addEventListener("abort", () => resolve(), {
+                        once: true,
+                      });
+                  });
+                  await appendUsage(path, 2_000);
+                  throw new DOMException("aborted", "AbortError");
+                }
+                return { events: events() };
+              },
+            }),
+          }),
+        },
+      );
+      const keepAlive = setTimeout(() => {}, 10_000);
+      try {
+        const scan = client.run(repository, {
+          maxCostUsd: 0.005,
+          signal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(5_000),
+          ]),
+          onBudgetApproaching: ({ signal }) => {
+            requestCount += 1;
+            budgetSignal = signal;
+            requested();
+            if (scenario === "declined") return undefined;
+            if (scenario === "invalid") return 0.005;
+            if (scenario === "save-failed" || scenario === "saving")
+              return 0.02;
+            return lateAnswer;
+          },
+          onCost: (cost, limit) => {
+            reportedLimit = limit;
+            if (cost.inputTokens === 950) observed();
+          },
+          onWarning: (warning) => warnings.push(warning),
+        });
+        if (scenario === "completed")
+          await expect(scan).resolves.toMatchObject({
+            cost: { estimatedUsd: 0.0045 },
+          });
+        else if (scenario === "canceled")
+          await expect(scan).rejects.toBeInstanceOf(ScanInterruptedError);
+        else
+          await expect(scan).rejects.toMatchObject({
+            name: ScanCostLimitExceededError.name,
+            maxCostUsd: 0.005,
+            cost: { estimatedUsd: 0.01 },
+          });
+        answer(0.02);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(requestCount).toBe(1);
+        expect(reportedLimit).toBe(0.005);
+        expect(budgetSignal?.aborted).toBe(true);
+        expect(
+          commands.filter(([command]) => command === "set-scan-cost-limit"),
+        ).toHaveLength(
+          scenario === "save-failed" || scenario === "saving" ? 1 : 0,
+        );
+        if (scenario === "invalid" || scenario === "save-failed")
+          expect(warnings).toContainEqual(
+            expect.stringContaining("Could not increase scan cost limit"),
+          );
+      } finally {
+        clearTimeout(keepAlive);
+        await client.close();
+      }
     },
   );
 

@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget } from "../src/index.js";
 import { main } from "../src/cli.js";
+import type { ScanComparisonInput } from "../src/scan-comparison.js";
 import {
   capture,
   dependencies,
@@ -436,11 +437,22 @@ describe("CLI workbench", () => {
               }
               if (args[0] === "save-scan-comparison") comparisonInput = input;
               return args[0] === "compare-scans"
-                ? { matchingCached: false, matchingInputs: { before, after } }
+                ? {
+                    matchingCached: false,
+                    matchingInputs: {
+                      before,
+                      after,
+                      knownFindingGroups: [["known-a", "known-b"]],
+                    },
+                  }
                 : { summary: { persisting: 1 } };
             },
             onMatch: async (input) => {
-              expect(input).toEqual({ before, after });
+              expect(input).toEqual({
+                before,
+                after,
+                knownFindingGroups: [["known-a", "known-b"]],
+              });
               return matching;
             },
           }),
@@ -634,6 +646,127 @@ describe("CLI workbench", () => {
     });
   });
 
+  test("preserves confirmed groups and related pairs while matching all scans", async () => {
+    const before = [{ occurrenceId: "before", findingId: "known-a" }];
+    const after = [{ occurrenceId: "after", findingId: "other" }];
+    const knownFindingGroups = [["known-a", "known-b"]];
+    const related = {
+      beforeOccurrenceId: "before",
+      afterOccurrenceId: "after",
+      reason: "Separate controls share a nearby trust boundary.",
+    };
+    let saved: string | undefined;
+
+    expect(
+      await main(
+        ["scans", "match", "--all", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args, input): JsonObject => {
+            if (args[0] === "save-scan-comparison") saved = input;
+            return args[0] === "list-unmatched-scan-pairs"
+              ? {
+                  repository: "/current/repository",
+                  scanCount: 2,
+                  unavailableScans: 0,
+                  skippedPairs: 0,
+                  batches: [
+                    {
+                      afterScanId: "later-scan",
+                      afterFindings: after,
+                      beforeScans: [
+                        { scanId: "earlier-scan", findings: before },
+                      ],
+                      knownFindingGroups,
+                    },
+                  ],
+                }
+              : {};
+          },
+          onMatch: async (input) => {
+            expect(input).toEqual({ before, after, knownFindingGroups });
+            return { matches: [], uncertain: [], related: [related] };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(saved!)).toEqual({
+      matches: [],
+      uncertain: [],
+      related: [related],
+    });
+  });
+
+  test("unions overlapping confirmed identities before later matching batches", async () => {
+    const first = { occurrenceId: "first", findingId: "identity-a" };
+    const second = { occurrenceId: "second", findingId: "identity-b" };
+    const third = { occurrenceId: "third", findingId: "identity-c" };
+    const fourth = { occurrenceId: "fourth", findingId: "identity-d" };
+    const existingGroups = [
+      [first.findingId, second.findingId],
+      [third.findingId, fourth.findingId],
+    ];
+    const matchedInputs: ScanComparisonInput[] = [];
+
+    expect(
+      await main(
+        ["scans", "match", "--all", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject =>
+            args[0] === "list-unmatched-scan-pairs"
+              ? {
+                  repository: "/current/repository",
+                  scanCount: 4,
+                  unavailableScans: 0,
+                  skippedPairs: 0,
+                  batches: [
+                    {
+                      afterScanId: "third-scan",
+                      afterFindings: [third],
+                      beforeScans: [
+                        { scanId: "first-scan", findings: [first] },
+                      ],
+                      knownFindingGroups: existingGroups,
+                    },
+                    {
+                      afterScanId: "fourth-scan",
+                      afterFindings: [fourth],
+                      beforeScans: [
+                        { scanId: "second-scan", findings: [second] },
+                      ],
+                      knownFindingGroups: existingGroups,
+                    },
+                  ],
+                }
+              : {},
+          onMatch: async (input) => {
+            matchedInputs.push(input);
+            return matchedInputs.length === 1
+              ? {
+                  matches: [
+                    {
+                      beforeOccurrenceIds: [first.occurrenceId],
+                      afterOccurrenceIds: [third.occurrenceId],
+                      confidence: "high",
+                      reason: "These confirmed identities describe one issue.",
+                    },
+                  ],
+                  uncertain: [],
+                }
+              : { matches: [], uncertain: [] };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(matchedInputs).toHaveLength(2);
+    expect(matchedInputs[1]!.knownFindingGroups).toEqual([
+      [first.findingId, second.findingId, third.findingId, fourth.findingId],
+    ]);
+  });
+
   test("saves empty comparisons without starting Codex", async () => {
     const calls: Array<readonly string[]> = [];
     let comparisonInput: string | undefined;
@@ -737,6 +870,11 @@ describe("CLI workbench", () => {
 
   test("force recomputes saved matches", async () => {
     const calls: Array<readonly string[]> = [];
+    const matchingInputs = {
+      before: [{ occurrenceId: "before", findingId: "identity-a" }],
+      after: [{ occurrenceId: "after", findingId: "identity-b" }],
+      knownFindingGroups: [["identity-a", "identity-c", "identity-b"]],
+    };
     expect(
       await main(
         ["scans", "match", "before", "after", "--force"],
@@ -748,9 +886,13 @@ describe("CLI workbench", () => {
             return args[0] === "compare-scans"
               ? {
                   matchingCached: true,
-                  matchingInputs: { before: [], after: [] },
+                  matchingInputs,
                 }
               : {};
+          },
+          onMatch: async (input) => {
+            expect(input).toEqual(matchingInputs);
+            return { matches: [], uncertain: [] };
           },
         }),
       ),

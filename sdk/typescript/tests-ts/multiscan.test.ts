@@ -95,7 +95,7 @@ async function completedScan(
   outputDir: string,
   completeness: "complete" | "partial" | "unknown" = "complete",
 ): Promise<ScanResult> {
-  await mkdir(outputDir, { recursive: true });
+  await mkdir(outputDir, { recursive: true, mode: 0o700 });
   await Promise.all(
     ["scan-manifest.json", "findings.json", "coverage.json", "report.md"].map(
       (name) => writeFile(join(outputDir, name), "{}\n"),
@@ -1839,7 +1839,7 @@ describe("multiscan", () => {
       const preserved = join(external, "victim", "keep.txt");
       await mkdir(join(external, "victim"), { recursive: true });
       await writeFile(preserved, "preserved\n");
-      if (directory) await mkdir(paths.output);
+      if (directory) await mkdir(paths.output, { mode: 0o700 });
       await symlink(
         external,
         directory ? join(paths.output, directory) : paths.output,
@@ -1872,7 +1872,10 @@ describe("multiscan", () => {
     const external = join(paths.root, "external");
     await mkdir(external);
     await writeFile(join(external, "preserved.txt"), "preserved\n");
-    await mkdir(join(paths.output, "artifacts"), { recursive: true });
+    await mkdir(join(paths.output, "artifacts"), {
+      recursive: true,
+      mode: 0o700,
+    });
     await symlink(
       external,
       join(paths.output, "artifacts", "victim"),
@@ -1911,7 +1914,10 @@ describe("multiscan", () => {
     );
     const external = join(paths.root, "external");
     await completedScan(join(external, "attempt-1"));
-    await mkdir(join(paths.output, "artifacts"), { recursive: true });
+    await mkdir(join(paths.output, "artifacts"), {
+      recursive: true,
+      mode: 0o700,
+    });
     await symlink(
       external,
       join(paths.output, "artifacts", "victim"),
@@ -2070,7 +2076,7 @@ describe("multiscan", () => {
     );
     const canonicalParent = join(paths.root, "campaigns");
     const linkedParent = join(paths.root, "linked-campaigns");
-    await mkdir(canonicalParent);
+    await mkdir(canonicalParent, { mode: 0o700 });
     await symlink(
       canonicalParent,
       linkedParent,
@@ -2119,8 +2125,11 @@ describe("multiscan", () => {
     const canonicalParent = join(paths.root, "campaigns");
     const redirectedParent = join(paths.root, "redirected");
     const linkedParent = join(paths.root, "linked-campaigns");
-    await mkdir(canonicalParent);
-    await mkdir(join(redirectedParent, "results"), { recursive: true });
+    await mkdir(canonicalParent, { mode: 0o700 });
+    await mkdir(join(redirectedParent, "results"), {
+      recursive: true,
+      mode: 0o700,
+    });
     await writeFile(
       join(redirectedParent, "results", "preserved.txt"),
       "preserved\n",
