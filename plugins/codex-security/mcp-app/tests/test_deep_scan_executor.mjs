@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import childProcess, { spawnSync } from "node:child_process";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -130,6 +131,7 @@ try {
   await testWindowsNpmPackageResolution();
   await testWindowsNpmPackageResolution("managed");
   if (process.platform === "win32") {
+    await testWindowsLongExecutableLaunches();
     await testWindowsRootRelativePathsStayBoundToOriginalDrive();
     await testWindowsWorkerEnvironmentPreservesMixedCaseKeys();
     await testWindowsLauncherSkipsExtensionlessNpmShim();
@@ -207,6 +209,84 @@ async function testWindowsRootRelativePathsStayBoundToOriginalDrive() {
     });
   } finally {
     process.chdir(previousCwd);
+    restoreEnv("CODEX_HOME", previousCodexHome);
+  }
+}
+
+async function testWindowsLongExecutableLaunches() {
+  const fixture = await fakeCodexFixture();
+  const executable = path.join(
+    fixture.root,
+    ...Array(10).fill("nested executable directory"),
+    "node.exe"
+  );
+  const promptPath = path.join(fixture.root, "prompt.md");
+  const workingDirectory = path.join(fixture.root, "artifacts");
+  const codexHome = path.join(fixture.root, "codex-home");
+  await Promise.all([
+    mkdir(path.dirname(executable), { recursive: true }),
+    mkdir(workingDirectory),
+    mkdir(codexHome),
+    writeFile(promptPath, "fixture long executable worker\n")
+  ]);
+  await copyFile(process.execPath, executable);
+  assert.ok(executable.length > 260);
+  const previousCodexPath = process.env.CODEX_CLI_PATH;
+  const previousCodexHome = process.env.CODEX_HOME;
+  const originalSpawn = childProcess.spawn;
+  const launchedCommands = [];
+  const children = [];
+  childProcess.spawn = (command, args, options) => {
+    if (command !== executable && command !== path.toNamespacedPath(executable)) {
+      return originalSpawn(command, args, options);
+    }
+    // Keep the production executable argument intact at Node's Windows spawn boundary.
+    launchedCommands.push(command);
+    const child = originalSpawn(command, [fixture.executablePath, ...args], options);
+    children.push(child);
+    return child;
+  };
+  syncBuiltinESMExports();
+  try {
+    process.env.CODEX_HOME = codexHome;
+    for (const configured of [executable, path.toNamespacedPath(executable)]) {
+      process.env.CODEX_CLI_PATH = configured;
+      assert.equal((await snapshotWorkerEnvironment()).CODEX_CLI_PATH, configured);
+      const result = await new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox
+      }).run({
+        kind: "discovery",
+        promptPath,
+        workingDirectory,
+        subagents: 0,
+        signal: new AbortController().signal
+      });
+      assert.equal(result.threadId, "fixture-thread-id");
+      assert.equal(result.finalResponse, "fixture final response");
+      const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+      assert.deepEqual(invocation.argv.slice(0, 2), ["exec", "--experimental-json"]);
+      assertReadOnlyWorkerPolicy(invocation.argv);
+      assert.equal(invocation.codexHome, await realpath(codexHome));
+      const preflight = JSON.parse(await readFile(fixture.preflightMarkerPath, "utf8"));
+      assert.deepEqual(preflight.requests.map((request) => request.method), [
+        "config/read", "permissionProfile/list"
+      ]);
+      assert.equal(process.env.CODEX_CLI_PATH, configured);
+    }
+    assert.deepEqual(launchedCommands, Array(4).fill(path.toNamespacedPath(executable)));
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    // The SDK removes child listeners when its event iterator closes.
+    await Promise.all(children.map((child) => {
+      if (child.stdout.closed && child.stderr.closed
+        && (child.exitCode !== null || child.signalCode !== null)) return;
+      return new Promise((resolve) => {
+        child.once("close", resolve);
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+      });
+    }));
+    restoreEnv("CODEX_CLI_PATH", previousCodexPath);
     restoreEnv("CODEX_HOME", previousCodexHome);
   }
 }

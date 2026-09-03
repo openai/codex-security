@@ -218,6 +218,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
         projected_core = bounded_json_value(
             core,
             [FINDING_DETAILS_PREVIEW_BYTES - reserved],
+            max_depth=5,
         )
         if all(key in projected_core for key in core):
             break
@@ -225,6 +226,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     bounded = bounded_json_value(
         {**projected_core, **ordered_guidance, **extras},
         [FINDING_DETAILS_PREVIEW_BYTES],
+        max_depth=5,
     )
     return bounded if isinstance(bounded, dict) else {}
 
@@ -324,10 +326,16 @@ def bounded_code_evidence(value: Any) -> Any:
     return bounded
 
 
-def bounded_json_value(value: Any, budget: list[int], *, depth: int = 0) -> Any:
+def bounded_json_value(
+    value: Any,
+    budget: list[int],
+    *,
+    depth: int = 0,
+    max_depth: int = 4,
+) -> Any:
     if budget[0] <= 0:
         return None
-    if depth >= 4:
+    if depth >= max_depth:
         consume_json_budget(budget, 4)
         return None
     if isinstance(value, str):
@@ -346,7 +354,12 @@ def bounded_json_value(value: Any, budget: list[int], *, depth: int = 0) -> Any:
             separator = 0 if not result else 1
             if not consume_json_budget(budget, separator):
                 break
-            bounded_item = bounded_json_value(item, budget, depth=depth + 1)
+            bounded_item = bounded_json_value(
+                item,
+                budget,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
             size = len(json.dumps(bounded_item, separators=(",", ":")).encode("utf-8"))
             if separator + size > remaining or (
                 isinstance(item, str) and item and bounded_item == ""
@@ -401,7 +414,12 @@ def bounded_json_value(value: Any, budget: list[int], *, depth: int = 0) -> Any:
                         if budget[0] >= minimum_tests + reserved:
                             item_budget = [budget[0] - reserved]
                             break
-            bounded_item = bounded_json_value(item, item_budget, depth=depth + 1)
+            bounded_item = bounded_json_value(
+                item,
+                item_budget,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
             size = (
                 separator
                 + key_size

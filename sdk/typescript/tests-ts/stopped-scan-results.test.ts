@@ -83,6 +83,7 @@ const stoppedScanProbe = [
   "    workbench_db.cancel_scan_locked(connection, argparse.Namespace(scan_id=scan_id, thread_id=None))",
   "    workbench_db.saved_results._write_prepared_scan_finalization = original_write",
   "    connection.close()",
+  "    run('preserve-scan-results', '--scan-id', scan_id, '--thread-id', 'stopped-result-owner')",
   "    stored = run('get-scan', '--scan-id', scan_id)['scan']",
   "    findings_path = scan_dir / 'findings.json'",
   "    findings = json.loads(findings_path.read_text(encoding='utf-8'))['findings'] if findings_path.exists() else []",
@@ -250,14 +251,19 @@ test("retries a legacy stopped seal after transient publication failure", () => 
     { encoding: "utf8" },
   );
   expect(result.status, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({
+  const recovered = JSON.parse(result.stdout);
+  expect(recovered).toMatchObject({
     firstFailed: true,
     frozenAfterFailure: "{}",
     retryPublished: true,
-    frozenAfterSuccess: {},
     status: "failed",
     findingCount: 1,
   });
+  const frozenSources = Object.entries(recovered.frozenAfterSuccess);
+  expect(frozenSources).toHaveLength(1);
+  const [checkpointPath, checkpointDigest] = frozenSources[0]!;
+  expect(checkpointDigest).toMatch(/^[0-9a-f]{64}$/);
+  expect(checkpointPath).toBe(`checkpoints/${checkpointDigest}.json`);
 }, 30_000);
 
 test("preserves distinct instances from one worker candidate", () => {

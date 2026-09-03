@@ -37,6 +37,16 @@ A sealed manifest records the terminal timestamp and hashes for the canonical do
 
 Only `completed` supports a completed-scan conclusion. For every stopped outcome, consumers must preserve retained findings and coverage while treating absence of findings as inconclusive.
 
+### Stopped Result Recovery
+
+To validate and republish retained checkpoints for a failed, non-canceled workbench scan, run:
+
+```text
+<python_command> <plugin_dir>/scripts/workbench_db.py recover-scan-results --scan-id <scan_id>
+```
+
+Recovery can add only checkpoints that pass the stopped-scan source-integrity checks. It is not available for running, completed, or canceled scans. After cancellation, the owning continuation may retry publication only from the source set frozen at cancellation through `preserve-scan-results`; it cannot admit later checkpoints.
+
 ## Target Snapshots
 
 Choose the target kind based on the reviewed content, not the scan invocation:
@@ -94,9 +104,13 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 ## Coverage
 
-`coverage.json` prevents downstream consumers from confusing `not observed` with `not scanned`.
+`coverage.json` records scan scope and completion information. Standard and diff summaries also describe reviewed surfaces and outstanding work.
 
-Record:
+For a Deep parent scan, the host copies the configured paths into `includePaths` and `excludePaths` and sets `completeness` from the coordinator's outcome. A successful aggregate uses `complete`; `surfaces`, `explicitExclusions`, and `deferred` are empty arrays, and `openQuestions` is omitted. If the configured time limit expires before any review completes, the coordinator writes `partial` and records the explanation in `deferred`. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
+
+Each Deep worker writes an ordinary Standard result, including its own coverage. A reducer submits `record_codex_security_deep_reduction({ scanId, findings, scope?, threatModel? })`; its saved results and checkpoints contain the accepted findings and optional scope and threat-model context.
+
+For Standard and diff scans, record:
 
 - scan mode and inventory strategy
 - included and excluded paths
@@ -130,7 +144,7 @@ For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repe
 | `directory` | Deterministic non-Git directory inventory |
 | `custom` | Producer-defined inventory described by detailed receipts |
 
-Use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
+For Standard and diff scans, use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
 
 Map detailed ledger closure into completed surface summaries in this order:
 

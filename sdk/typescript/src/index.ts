@@ -14,6 +14,7 @@ export type {
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost, ScanSessionEvent } from "./cost.js";
+export type { DeepScanProgress } from "./deep-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export type {
@@ -21,6 +22,7 @@ export type {
   DeepScanOptions,
   ScanAuthMode,
   ScanAuthentication,
+  ScanBudget,
   ScanOptions,
   ScanPreflight,
   ScanReconnectDetails,
@@ -43,6 +45,7 @@ export {
   CodexSecurityError,
   ConfigurationError,
   ContractValidationError,
+  DeduplicationReviewError,
   IncompleteScanError,
   InvalidTargetError,
   OutputDirectoryError,
@@ -53,7 +56,12 @@ export {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
-export type { ProtectedScanPathKind } from "./errors.js";
+export type {
+  DeduplicationReviewFailureCategory,
+  DeduplicationReviewFailureMetadata,
+  DeduplicationReviewStage,
+  ProtectedScanPathKind,
+} from "./errors.js";
 export {
   DEFAULT_CODEX_CONFIG,
   mergedCodexConfig,
@@ -64,6 +72,20 @@ export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
 export { checkScanPublication, publishScan } from "./publish.js";
+export { publishScanToCustom } from "./custom-publish.js";
+export type {
+  PublishScanToCustomOptions,
+  CustomPublicationResult,
+} from "./custom-publish.js";
+export {
+  deduplicateScan,
+  deduplicateScanDirectory,
+} from "./deduplication/scan.js";
+export type {
+  DeduplicateScanDirectoryOptions,
+  DeduplicateScanOptions,
+  DeduplicateScanResult,
+} from "./deduplication/scan.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,

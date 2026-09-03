@@ -132,6 +132,8 @@ Treat failed requests, incomplete exact-identifier searches, unread plausible ma
 
 ### 4. Preview The Exact Writes
 
+Follow the Writing Rules in `../../references/finding-detail-fields.md`. Explain the problem, how to reproduce it, the cause, the proposed fix, and validation. Put source locations and scan identifiers last.
+
 Present a compact review before any mutation. For every finding show:
 
 - finding id and fingerprint

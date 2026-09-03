@@ -478,6 +478,7 @@ async function testDeepScanStdioLifecycle() {
     assert.deepEqual(paused.scan.progress.independentReviews, {
       completed: 1,
       active: 0,
+      maximum: 2,
       consolidating: false
     });
     assert.deepEqual(

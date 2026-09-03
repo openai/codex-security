@@ -25,6 +25,14 @@ def test_all_scripts_support_help() -> None:
         assert "usage:" in result.stdout.lower(), script.name
 
 
+def test_recover_scan_results_help_describes_its_contract() -> None:
+    result = run_script("workbench_db.py", "recover-scan-results", "--help")
+
+    assert result.returncode == 0, result.stderr
+    assert "failed, non-canceled scan" in result.stdout
+    assert "retained checkpoints" in result.stdout
+
+
 def test_finalizer_cli_completes_checked_in_scan_bundle(tmp_path: Path) -> None:
     scan_dir = tmp_path / "completed-scan"
     shutil.copytree(PLUGIN_ROOT / "examples" / "completed-scan", scan_dir)

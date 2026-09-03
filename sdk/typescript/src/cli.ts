@@ -27,7 +27,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -51,6 +51,9 @@ import {
   classifyConnectionFailure,
   CodexSecurity,
   createSecurityInternal,
+  environmentValue,
+  formatEnvironmentVariableRemovalGuidance,
+  initialCredentialsAvailable,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
@@ -61,6 +64,13 @@ import {
   type ScanPreflight,
 } from "./api.js";
 import { accountStatus } from "./auth.js";
+import { publishScanToCustom } from "./custom-publish.js";
+import { deduplicateScanInternal } from "./deduplication/scan.js";
+import {
+  resolveCompletedScan,
+  resolveWorkflowScan,
+  type SavedScan,
+} from "./saved-scan.js";
 import {
   publishFindingsCsvToCloud,
   publishScanToCloud,
@@ -126,6 +136,7 @@ import {
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
+  executablePathForSpawn,
   expandHome,
   prepareCodexSecurityCredentialHome,
   pythonUtf8Environment,
@@ -136,9 +147,12 @@ import {
   type CodexCommand,
 } from "./runtime.js";
 import {
+  comparisonFindingGroups,
   matchScanFindingsInternal,
+  unionFindingGroups,
   type matchScanFindings,
   type ScanComparisonInput,
+  type ScanComparisonResult,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
 import {
@@ -198,7 +212,6 @@ type Writable = Pick<NodeJS.WriteStream, "write"> & {
 };
 type SignalName = "SIGINT" | "SIGTERM";
 type FailureSeverity = Exclude<SeverityLevel, "informational">;
-type SavedScan = JsonObject & { scanId: string; scanDir: string };
 
 const REPORTABLE_SEVERITIES: readonly FailureSeverity[] = [
   "critical",
@@ -233,6 +246,8 @@ const EXPORT_DEFAULT_OUTPUTS = {
   sarif: "results.sarif",
 } as const;
 const VALUE_OPTIONS = new Set([
+  "--port",
+  "--workflow-id",
   "--auth",
   "--safety-identifier",
   "--path",
@@ -283,6 +298,7 @@ const VALUE_OPTIONS = new Set([
   "--scan-root",
   "--reason",
   "--to",
+  "--findings-url",
   "--linear-team",
   "--linear-api-key",
   "--project",
@@ -962,6 +978,8 @@ export function resolveCliPath(directory: string, value: string): string {
 }
 
 interface ScanArguments extends DeepScanOptions {
+  mock?: boolean;
+  workflowId?: string;
   auth?: ScanAuthMode;
   safetyIdentifier?: string;
   verbose?: boolean;
@@ -1014,6 +1032,7 @@ interface MatchingBatch {
   afterScanId: string;
   afterFindings: ScanComparisonInput["after"];
   beforeScans: { scanId: string; findings: ScanComparisonInput["before"] }[];
+  knownFindingGroups?: ScanComparisonInput["knownFindingGroups"];
 }
 
 type MatchingPlan = JsonObject & {
@@ -1114,12 +1133,15 @@ interface CliDependencies {
   ) => Promise<string>;
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
+  scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select"> &
     Partial<Pick<BulkScanPrompt, "checkbox">>;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
+  deduplicateScan?: typeof deduplicateScanInternal;
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
+  publishScanToCustom?: typeof publishScanToCustom;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
     repository: string,
@@ -1331,7 +1353,10 @@ export async function runCodexSkillCommand(
   processEnvironment: NodeJS.ProcessEnv = process.env,
   input?: string,
 ): Promise<number> {
-  const configuredHome = processEnvironment["CODEX_HOME"];
+  const configuredHome =
+    process.platform === "win32"
+      ? environmentValue(processEnvironment, "CODEX_HOME")
+      : processEnvironment["CODEX_HOME"];
   const environment = { ...processEnvironment };
   for (const name of Object.keys(environment)) {
     if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
@@ -1341,7 +1366,7 @@ export async function runCodexSkillCommand(
       expandHome(configuredHome, processEnvironment),
     );
   }
-  const invocation = spawn(command.command, [...args], {
+  const invocation = spawn(executablePathForSpawn(command.command), [...args], {
     env: environment,
     cwd: output?.appServer?.directory ?? parse(process.execPath).root,
     stdio:
@@ -2071,25 +2096,41 @@ export async function main(
         .describe("Completed scan directory; omit to select a saved scan."),
     }),
     options: PUBLICATION_DESTINATION_OPTIONS.extend({
+      workflowId: optionValue("--workflow-id")
+        .optional()
+        .describe(
+          "Resume the named local scan, custom publication, and dedupe workflow.",
+        ),
       scan: z
         .array(optionValue("--scan"))
         .default([])
         .describe(
-          "Saved scan ID, unique prefix, or latest; repeat for multiple scans (Linear accepts one).",
+          "Saved scan ID, unique prefix, or latest; Linear and custom accept one scan.",
         ),
       scanDir: z
         .array(optionValue("--scan-dir"))
         .default([])
         .describe(
-          "External completed scan directory; repeat for multiple scans (Linear accepts one).",
+          "External completed scan directory; Linear and custom accept one scan.",
         ),
       // Cloud remains an internal destination, omitted from public discovery.
       to: z
         .string()
-        .refine((value) => value === "linear" || value === "cloud", {
-          message: "Unsupported publication destination. Use --to linear.",
-        })
-        .describe("Publication destination (linear)."),
+        .refine(
+          (value) =>
+            value === "linear" || value === "cloud" || value === "custom",
+          {
+            message:
+              "Unsupported publication destination. Use --to linear or --to custom.",
+          },
+        )
+        .describe("Publication destination (linear or custom)."),
+      findingsUrl: optionValue("--findings-url")
+        .url()
+        .optional()
+        .describe(
+          "Findings API base URL; required with --to custom (for example http://localhost:3000).",
+        ),
       dryRun: z
         .boolean()
         .default(false)
@@ -2210,7 +2251,7 @@ export async function main(
           );
         }
         if (
-          options.to === "cloud" &&
+          options.to !== "linear" &&
           (options.skipExisting ||
             [
               options.linearTeam,
@@ -2221,7 +2262,22 @@ export async function main(
             ].some((value) => value !== undefined))
         ) {
           throw new CodexSecurityError(
-            "Cloud publication cannot be combined with Linear options.",
+            `${options.to === "cloud" ? "Cloud" : "Custom"} publication cannot be combined with Linear options.`,
+          );
+        }
+        if (options.to === "custom" && options.findingsUrl === undefined) {
+          throw new CodexSecurityError(
+            "Custom publication requires --findings-url, for example http://localhost:3000.",
+          );
+        }
+        if (options.to !== "custom" && options.findingsUrl !== undefined) {
+          throw new CodexSecurityError(
+            "--findings-url is only supported with --to custom.",
+          );
+        }
+        if (options.workflowId !== undefined && options.to !== "custom") {
+          throw new CodexSecurityError(
+            "--workflow-id is only supported with --to custom.",
           );
         }
         const destination =
@@ -2231,7 +2287,7 @@ export async function main(
                 dependencies.environment,
               )
             : undefined;
-        if (options.to === "cloud") {
+        if (options.to !== "linear") {
           dependencies.addSignalListener("SIGINT", onInterrupt);
           dependencies.addSignalListener("SIGTERM", onTerminate);
           observingSignals = true;
@@ -2250,10 +2306,15 @@ export async function main(
           directories.map((scanDir) => ({ scanDir }));
         for (const requestedId of new Set(options.scan)) {
           controller.signal.throwIfAborted();
-          const scan = await resolvePublicationScan(requestedId, dependencies);
+          const scan = await resolveCompletedScan(requestedId, dependencies);
           if (!selectedScans.some(({ scanId }) => scanId === scan.scanId)) {
             selectedScans.push(scan);
           }
+        }
+        if (options.workflowId !== undefined && selectedScans.length === 0) {
+          selectedScans.push(
+            await resolveWorkflowScan(options.workflowId, dependencies),
+          );
         }
         let scanDir = selectedScans[0]?.scanDir;
         let publicationRepository =
@@ -2520,6 +2581,24 @@ export async function main(
           return { ...result };
         }
 
+        if (options.to === "custom") {
+          const result = await (
+            dependencies.publishScanToCustom ?? publishScanToCustom
+          )(resolveCliPath(currentDirectory, scanDir), {
+            findingsUrl: options.findingsUrl!,
+            ...(options.workflowId === undefined
+              ? {}
+              : { workflowId: options.workflowId }),
+            dryRun: options.dryRun,
+            signal: controller.signal,
+            ...(selectedScans[0]?.scanId === undefined
+              ? {}
+              : { expectedScanId: selectedScans[0].scanId }),
+          });
+          controller.signal.throwIfAborted();
+          return { ...result };
+        }
+
         const progress = new PublicationProgressPresenter(
           errorOutput,
           dependencies,
@@ -2732,6 +2811,11 @@ export async function main(
       }),
       options: z
         .object({
+          workflowId: optionValue("--workflow-id")
+            .optional()
+            .describe(
+              "Reuse completed work in the named local findings workflow.",
+            ),
           auth: z
             .enum(SCAN_AUTH_MODES)
             .default("auto")
@@ -2831,7 +2915,9 @@ export async function main(
             .number()
             .positive()
             .optional()
-            .describe("Stop the scan if estimated USD cost exceeds AMOUNT."),
+            .describe(
+              "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
+            ),
           headless: z
             .boolean()
             .default(false)
@@ -2842,6 +2928,12 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Validate local scan inputs without starting a scan."),
+          mock: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Save synthetic Standard scan findings without calling an LLM.",
+            ),
         })
         .refine(
           (options) =>
@@ -2882,6 +2974,12 @@ export async function main(
           message: "--patch cannot be combined with --dry-run.",
         })
         .refine(
+          (options) => !options.mock || (!options.dryRun && !options.patch),
+          {
+            message: "--mock cannot be combined with --dry-run or --patch.",
+          },
+        )
+        .refine(
           (options) =>
             options.mode === "deep" ||
             (options.workers === undefined &&
@@ -2921,6 +3019,7 @@ export async function main(
         const outcome = await runScan(
           {
             auth: options.auth,
+            workflowId: options.workflowId,
             safetyIdentifier: options.safetyIdentifier,
             verbose: options.verbose,
             repository: args.repository,
@@ -2954,6 +3053,7 @@ export async function main(
             maxCostUsd: options.maxCost,
             headless: options.headless,
             dryRun: options.dryRun,
+            mock: options.mock,
           },
           errorOutput,
           dependencies,
@@ -3052,6 +3152,93 @@ export async function main(
     .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
+    .command("dedupe", {
+      description:
+        "Review a saved scan with local Codex and save duplicate groups to the findings API.",
+      destructive: true,
+      mcp: false,
+      options: z.object({
+        workflowId: optionValue("--workflow-id")
+          .optional()
+          .describe(
+            "Resume the named local findings workflow; reuses its saved scan.",
+          ),
+        scan: optionValue("--scan")
+          .optional()
+          .describe("Saved scan ID, unique prefix, or latest."),
+        allRepositories: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Search all repositories instead of only the saved scan's repository.",
+          ),
+        findingsUrl: z
+          .string()
+          .url()
+          .describe(
+            "Findings API base URL; the scan's findings must already be indexed.",
+          ),
+      }),
+      output: z
+        .object({
+          scanId: z.string(),
+          uniqueFindingIds: z.array(z.string()),
+          duplicateGroups: z.array(z.array(z.string())),
+          deduplicationStatus: z.literal("completed"),
+        })
+        .optional(),
+      async run({ options }) {
+        const controller = new AbortController();
+        const onInterrupt = () => controller.abort("SIGINT");
+        const onTerminate = () => controller.abort("SIGTERM");
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          const scanId =
+            options.scan ??
+            (options.workflowId === undefined
+              ? undefined
+              : (await resolveWorkflowScan(options.workflowId, dependencies))
+                  .scanId);
+          if (scanId === undefined)
+            throw new CodexSecurityError(
+              "Deduplication requires --scan or --workflow-id.",
+            );
+          return await (
+            dependencies.deduplicateScan ?? deduplicateScanInternal
+          )(
+            scanId,
+            {
+              findingsUrl: options.findingsUrl,
+              ...(options.workflowId === undefined
+                ? {}
+                : { workflowId: options.workflowId }),
+              allRepositories: options.allRepositories,
+              signal: controller.signal,
+            },
+            {
+              environment: dependencies.environment,
+              currentDirectory: dependencies.currentDirectory,
+              runWorkbench: dependencies.runWorkbench,
+            },
+          );
+        } catch (error) {
+          const signal = controller.signal.reason;
+          errorOutput.write(
+            `codex-security: ${
+              signal === "SIGINT" || signal === "SIGTERM"
+                ? "Deduplication canceled. Findings are unchanged."
+                : safeErrorMessage(error)
+            }\n`,
+          );
+          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          return undefined;
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command(imports)
     .command("scan-components", {
       description:
@@ -3576,7 +3763,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
+            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
           ),
       }),
       async run({ options }) {
@@ -3632,7 +3819,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
+            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -3855,7 +4042,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
+            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -4102,6 +4289,16 @@ export async function main(
             : await prepareCodexSecurityCredentialHome(
                 dependencies.environment,
               );
+        if (args.action === "status" && existsSync(credentialHome)) {
+          const ambientHome =
+            environmentValue(dependencies.environment, "CODEX_HOME") ??
+            join(homedir(), ".codex");
+          await initialCredentialsAvailable(
+            dependencies.environment,
+            ambientHome,
+            credentialHome,
+          );
+        }
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
@@ -4135,7 +4332,7 @@ export async function main(
               `Effective scan authentication: API key from ${authentication.source}.\n`,
             );
             errorOutput.write(
-              "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.\n",
+              `To use a ChatGPT sign-in, ${formatEnvironmentVariableRemovalGuidance(["OPENAI_API_KEY", "CODEX_API_KEY"])}.\n`,
             );
           }
         } else if (exitCode === 0 && !options.withApiKey) {
@@ -4160,8 +4357,8 @@ export async function main(
               : "your ChatGPT sign-in";
             errorOutput.write(
               loginWarning +
-                `To use ${storedCredentials}, pass '--auth chatgpt' or run ` +
-                `'unset ${configuredApiKeyVariables.join(" ")}'.\n`,
+                `To use ${storedCredentials}, pass '--auth chatgpt' or ` +
+                `${formatEnvironmentVariableRemovalGuidance(configuredApiKeyVariables)}.\n`,
             );
           }
         }
@@ -4194,6 +4391,37 @@ export async function main(
           dependencies.prepareAuthenticationHome !== undefined
         ) {
           await setCodexSecurityCredentialLogout(credentialHome, true);
+        }
+      },
+    })
+    .command("serve", {
+      description:
+        "Start the findings HTTP service (HOST=127.0.0.1, PORT=3000). CODEX_SECURITY_EMBEDDINGS_URL overrides the embeddings endpoint (default: https://api.openai.com/v1/embeddings).",
+      destructive: true,
+      mcp: false,
+      options: z.object({
+        port: z
+          .number()
+          .int()
+          .min(0)
+          .max(65535)
+          .optional()
+          .describe(
+            "Listen port (default: PORT or 3000; 0 picks a free port).",
+          ),
+      }),
+      async run({ options }) {
+        try {
+          const { serveFindings } = await import("./server/serve.js");
+          await serveFindings(
+            options.port === undefined
+              ? dependencies.environment
+              : { ...dependencies.environment, PORT: String(options.port) },
+            output,
+          );
+        } catch (error) {
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          exitCode = 1;
         }
       },
     })
@@ -4448,6 +4676,7 @@ function scanArgumentsFromRecipe(
     maxCostUsd,
     dryRun: false,
     parentScanId,
+    ...(recipe["mock"] === true ? { mock: true } : {}),
     expectedPluginVersion:
       typeof recipe["pluginVersion"] === "string"
         ? recipe["pluginVersion"]
@@ -4476,6 +4705,7 @@ function validateCliArguments(
       "patch",
       "login",
       "logout",
+      "serve",
       "info",
     ].includes(value),
   );
@@ -4494,7 +4724,7 @@ function validateCliArguments(
   );
   if (
     structuredOutput &&
-    ["validate", "login", "logout"].includes(command) &&
+    ["validate", "login", "logout", "serve"].includes(command) &&
     !argv.includes("--schema")
   ) {
     return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
@@ -4607,7 +4837,7 @@ function validateCliArguments(
     command !== "verify-fix" &&
     command !== "patch" &&
     positionals.length >
-      (command === "logout" || command === "info"
+      (command === "logout" || command === "info" || command === "serve"
         ? 0
         : subcommand === "compare" || subcommand === "match"
           ? 2
@@ -4632,15 +4862,29 @@ async function matchAllScans(
 
   let matchedPairs = 0;
   let findingMatches = 0;
-  for (const { afterScanId, afterFindings, beforeScans } of batches) {
+  const newlyMatchedGroups: string[][] = [];
+  for (const {
+    afterScanId,
+    afterFindings,
+    beforeScans,
+    knownFindingGroups = [],
+  } of batches) {
     const before = beforeScans.flatMap(({ findings }) => findings);
-    const matching =
+    const knownGroups = unionFindingGroups([
+      ...knownFindingGroups,
+      ...newlyMatchedGroups,
+    ]);
+    const input: ScanComparisonInput = {
+      before,
+      after: afterFindings,
+      ...(knownGroups.length === 0 ? {} : { knownFindingGroups: knownGroups }),
+    };
+    const matching: ScanComparisonResult =
       before.length === 0 || afterFindings.length === 0
         ? { matches: [], uncertain: [] }
-        : await dependencies.matchFindings(
-            { before, after: afterFindings },
-            { allowHistoricalUncertainty: true },
-          );
+        : await dependencies.matchFindings(input, {
+            allowHistoricalUncertainty: true,
+          });
     const comparisons = beforeScans.map(({ scanId, findings }) => {
       const beforeIds = new Set(
         findings.map(({ occurrenceId }) => occurrenceId),
@@ -4656,6 +4900,9 @@ async function matchAllScans(
       const uncertain = matching.uncertain.filter(({ beforeOccurrenceId }) =>
         beforeIds.has(beforeOccurrenceId),
       );
+      const related = matching.related?.filter(({ beforeOccurrenceId }) =>
+        beforeIds.has(beforeOccurrenceId),
+      );
       const matchedAfter = new Set(
         matches.flatMap(({ afterOccurrenceIds }) => afterOccurrenceIds),
       );
@@ -4668,9 +4915,9 @@ async function matchAllScans(
           "Scan matching returned conflicting confirmed and uncertain findings.",
         );
       }
-      return { scanId, matches, uncertain };
+      return { scanId, matches, uncertain, related };
     });
-    for (const { scanId, matches, uncertain } of comparisons) {
+    for (const { scanId, matches, uncertain, related } of comparisons) {
       await dependencies.runWorkbench(
         [
           "save-scan-comparison",
@@ -4680,7 +4927,7 @@ async function matchAllScans(
           afterScanId,
           "--matches-json-stdin",
         ],
-        JSON.stringify({ matches, uncertain }),
+        JSON.stringify({ matches, uncertain, related }),
       );
       matchedPairs += 1;
       findingMatches += matches.reduce(
@@ -4689,6 +4936,7 @@ async function matchAllScans(
         0,
       );
     }
+    newlyMatchedGroups.push(...comparisonFindingGroups(input, matching));
   }
   return {
     repository,
@@ -4743,71 +4991,6 @@ async function* workbenchFindings(
     yield* page.findings;
     offset = typeof page.nextOffset === "number" ? page.nextOffset : undefined;
   } while (offset !== undefined);
-}
-
-async function resolvePublicationScan(
-  requestedId: string,
-  dependencies: CliDependencies,
-): Promise<SavedScan> {
-  let scanId = requestedId;
-  if (scanId === "latest") {
-    const history = await dependencies.runWorkbench([
-      "list-scans",
-      "--repository",
-      resolve(dependencies.currentDirectory()),
-      "--status",
-      "complete",
-    ]);
-    const scans = history["scans"];
-    const latest = Array.isArray(scans) ? scans[0] : undefined;
-    if (
-      latest === undefined ||
-      !isJsonObject(latest) ||
-      typeof latest["scanId"] !== "string"
-    ) {
-      throw new CodexSecurityError(
-        "No completed saved scan was found for this repository.",
-      );
-    }
-    scanId = latest["scanId"];
-  }
-  const context = await dependencies.runWorkbench([
-    "get-scan",
-    "--scan-id",
-    scanId,
-  ]);
-  const scan = context["scan"];
-  if (
-    scan === undefined ||
-    !isJsonObject(scan) ||
-    typeof scan["scanId"] !== "string"
-  ) {
-    throw new CodexSecurityError(`Could not read saved scan ${scanId}.`);
-  }
-  scanId = scan["scanId"];
-  const progress = scan["progress"];
-  if (
-    progress === undefined ||
-    !isJsonObject(progress) ||
-    progress["status"] !== "complete"
-  ) {
-    throw new CodexSecurityError(`Scan ${scanId} is not complete.`);
-  }
-  const storedDirectory = scan["scanDir"];
-  const scanDir =
-    typeof storedDirectory === "string" && storedDirectory.length > 0
-      ? resolveCliPath(dependencies.currentDirectory(), storedDirectory)
-      : undefined;
-  const metadata =
-    scanDir === undefined
-      ? undefined
-      : await lstat(scanDir).catch(() => undefined);
-  if (scanDir === undefined || metadata?.isDirectory() !== true) {
-    throw new CodexSecurityError(
-      `Artifacts for scan ${scanId} are unavailable. Restore the completed scan artifacts or run a new scan.`,
-    );
-  }
-  return { ...scan, scanId, scanDir };
 }
 
 async function selectSavedFindings(
@@ -5451,12 +5634,19 @@ async function runSkill(
 ): Promise<number> {
   const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
   if (
-    Object.keys(overrides).some(
-      (key) => key !== "model" && key !== "model_reasoning_effort",
+    Object.entries(overrides).some(
+      ([key, value]) =>
+        key !== "model" &&
+        key !== "model_reasoning_effort" &&
+        !(
+          key === "analytics" &&
+          isJsonObject(value) &&
+          Object.keys(value).every((key) => key === "enabled")
+        ),
     )
   ) {
     throw new CodexSecurityError(
-      "Validation and patching only support model and model_reasoning_effort overrides.",
+      "Skill commands only support model, model_reasoning_effort, and analytics.enabled overrides.",
     );
   }
   const { model, reasoningEffort } = scanModelConfiguration(
@@ -5611,6 +5801,12 @@ async function runSkill(
       `model=${JSON.stringify(model)}`,
       "--config",
       `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
+      ...codexOverrides
+        .filter(
+          (value) =>
+            value.startsWith("analytics.") || value.startsWith("analytics="),
+        )
+        .flatMap((value) => ["--config", value]),
       ...(options.provider === undefined
         ? []
         : ["--config", `model_provider=${JSON.stringify(options.provider)}`]),
@@ -6164,6 +6360,7 @@ async function executeScan(
   interactive = true,
 ): Promise<ScanOutcome> {
   let scanDir: string | null = null;
+  const scanInput = dependencies.scanInput ?? process.stdin;
   let requestedSignal: SignalName | null = null;
   let firstSignalAt = 0;
   let progress: Progress | null = null;
@@ -6173,6 +6370,7 @@ async function executeScan(
   let workerCapacity: { planned: number; started: number } | null = null;
   let fileProgress: ScanProgress | null = null;
   let runningCost: Readonly<ScanCost> | null = null;
+  let maxCostUsd = arguments_.maxCostUsd;
   let phase: string | null = null;
   const targetWarnings: string[] = [];
   const configuredLogLevel =
@@ -6259,6 +6457,7 @@ async function executeScan(
   let effectiveReasoningEffort =
     DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
   let providerOptions: SkillRunOptions = {};
+  let patchAnalyticsOverride: string | undefined;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
@@ -6294,8 +6493,16 @@ async function executeScan(
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
     const provider = scanModelProvider(effectiveConfiguration);
+    const analytics = effectiveConfiguration["analytics"];
+    if (
+      analytics !== undefined &&
+      isJsonObject(analytics) &&
+      analytics["enabled"] !== undefined
+    ) {
+      patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
+    }
     const auth =
-      !arguments_.dryRun && interactive
+      !arguments_.dryRun && !arguments_.mock && interactive
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
@@ -6317,11 +6524,9 @@ async function executeScan(
         )?.[provider],
       };
     }
-    selectedAuthentication = scanAuthentication(
-      dependencies.environment,
-      auth,
-      provider,
-    );
+    selectedAuthentication = arguments_.mock
+      ? null
+      : scanAuthentication(dependencies.environment, auth, provider);
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
@@ -6339,6 +6544,7 @@ async function executeScan(
               : "repository",
       requested_auth: auth ?? "auto",
       dry_run: arguments_.dryRun,
+      mock: arguments_.mock,
       profile:
         typeof selectedProfileName === "string"
           ? selectedProfileName
@@ -6365,7 +6571,7 @@ async function executeScan(
         clock: dependencies,
         color: dependencies.environment["NO_COLOR"] === undefined,
         sanitize: safeErrorMessage,
-        input: process.stdin,
+        input: scanInput,
         onInterrupt,
       });
     }
@@ -6413,7 +6619,16 @@ async function executeScan(
       }
     }
     security = dependencies.createSecurity(config);
+    if (arguments_.mock) {
+      errorOutput.write(
+        "codex-security: Mock scan: generating synthetic findings; no security analysis or LLM calls.\n",
+      );
+    }
     const options: ScanOptions = {
+      ...(arguments_.mock ? { mock: true } : {}),
+      ...(arguments_.workflowId === undefined
+        ? {}
+        : { workflowId: arguments_.workflowId }),
       auth,
       safetyIdentifier: arguments_.safetyIdentifier,
       target,
@@ -6431,7 +6646,11 @@ async function executeScan(
       expectedPluginVersion: arguments_.expectedPluginVersion,
       failureSeverity: arguments_.failOnSeverity,
       maxCostUsd: arguments_.maxCostUsd,
-      onCost: (cost) => {
+      onCost: (cost, limit = maxCostUsd) => {
+        if (limit !== maxCostUsd && limit !== undefined) {
+          dashboard?.note(`Total cost limit increased to ${formatUsd(limit)}.`);
+        }
+        maxCostUsd = limit;
         diagnostic("cost.updated", {
           model: cost.model,
           estimated_usd: cost.estimatedUsd,
@@ -6439,15 +6658,15 @@ async function executeScan(
           cached_input_tokens: cost.cachedInputTokens,
           cache_write_input_tokens: cost.cacheWriteInputTokens,
           output_tokens: cost.outputTokens,
-          max_cost_usd: arguments_.maxCostUsd,
+          max_cost_usd: maxCostUsd,
         });
         runningCost = cost;
         if (dashboard !== null) {
-          dashboard.setCost(cost);
+          dashboard.setCost(cost, maxCostUsd);
           return;
         }
         progress?.stopTimer();
-        if (arguments_.maxCostUsd === undefined) {
+        if (maxCostUsd === undefined) {
           const tokens = formatTokenUsage({
             input_tokens: cost.inputTokens,
             cached_input_tokens: cost.cachedInputTokens,
@@ -6458,16 +6677,17 @@ async function executeScan(
           );
         } else {
           progress?.stage(
-            `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(arguments_.maxCostUsd)} limit`,
+            `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(maxCostUsd)} limit`,
           );
         }
-        if (
-          arguments_.maxCostUsd === undefined ||
-          cost.estimatedUsd <= arguments_.maxCostUsd
-        ) {
+        if (maxCostUsd === undefined || cost.estimatedUsd <= maxCostUsd) {
           progress?.startTimer(runningMessage());
         }
       },
+      onBudgetApproaching:
+        scanInput.isTTY === true
+          ? dashboard?.requestBudgetIncrease.bind(dashboard)
+          : undefined,
       onOutputArchived: (archiveDir) => {
         diagnostic("scan.output_archived", { archive_dir: archiveDir });
         if (dashboard !== null) {
@@ -6492,9 +6712,7 @@ async function executeScan(
           requested: auth ?? "auto",
           method: authentication.method,
           source:
-            authentication.method !== "stored_credentials"
-              ? authentication.source
-              : undefined,
+            "source" in authentication ? authentication.source : undefined,
           verified: authentication.verified,
         });
         if (dashboard !== null) {
@@ -6503,7 +6721,9 @@ async function executeScan(
               ? `Using API key from ${authentication.source}`
               : authentication.method === "aws_credentials"
                 ? `Using AWS credentials from ${authentication.source}`
-                : "Using stored Codex credentials",
+                : authentication.method === "command"
+                  ? "Using native Codex command authentication"
+                  : "Using stored Codex credentials",
           );
           return;
         }
@@ -6519,6 +6739,8 @@ async function executeScan(
           progress?.stage(
             `Authentication: AWS credentials from ${authentication.source}.`,
           );
+        } else if (authentication.method === "command") {
+          progress?.stage("Authentication: native Codex command.");
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
         }
@@ -6577,7 +6799,7 @@ async function executeScan(
         }
       },
       onSessionEvent:
-        process.stdin.isTTY === true
+        scanInput.isTTY === true
           ? dashboard?.recordDetails.bind(dashboard)
           : undefined,
       onProgress: (update) => {
@@ -6743,7 +6965,7 @@ async function executeScan(
       reasoning_effort: effectivePreflight.reasoningEffort,
       method: effectivePreflight.authentication.method,
       source:
-        effectivePreflight.authentication.method !== "stored_credentials"
+        "source" in effectivePreflight.authentication
           ? effectivePreflight.authentication.source
           : undefined,
       verified: effectivePreflight.authentication.verified,
@@ -6773,7 +6995,7 @@ async function executeScan(
   if (arguments_.mode === "deep") {
     deepScanStop = (await readDeepScanStop(
       result,
-      arguments_.maxCostUsd,
+      maxCostUsd,
       dependencies.runWorkbench,
     ).catch(() => undefined)) ?? {
       reason: "Stop reason unavailable. See the report for details.",
@@ -6820,6 +7042,7 @@ async function executeScan(
     : undefined;
   let patchSelection: PatchSelection | null = null;
   if (
+    !arguments_.mock &&
     actionableFindings.length > 0 &&
     arguments_.patchSeverity === undefined &&
     progress?.interactive === true &&
@@ -6878,7 +7101,12 @@ async function executeScan(
     try {
       patches = await runFindingPatches(
         selected,
-        [`model=${JSON.stringify(effectiveModel)}`],
+        [
+          `model=${JSON.stringify(effectiveModel)}`,
+          ...(patchAnalyticsOverride === undefined
+            ? []
+            : [patchAnalyticsOverride]),
+        ],
         effectiveReasoningEffort as ScanReasoningEffort,
         errorOutput,
         dependencies,
@@ -7003,6 +7231,9 @@ function scanFailureMessage(
   }
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
+      if (authentication?.method === "command") {
+        return "Native Codex command authentication failed. Check the configured provider auth command.";
+      }
       if (authentication?.method === "aws_credentials") {
         return (
           `Authentication failed using AWS credentials from ${authentication.source}. ` +
@@ -7015,6 +7246,9 @@ function scanFailureMessage(
         : "Authentication failed using stored ChatGPT credentials. " +
             "Sign in again with 'codex-security login' or provide a valid API key.";
     case "forbidden":
+      if (authentication?.method === "command") {
+        return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
+      }
       if (authentication?.method === "aws_credentials") {
         return (
           `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +

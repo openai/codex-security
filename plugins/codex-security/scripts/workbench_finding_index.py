@@ -8,6 +8,44 @@ import sqlite3
 from typing import Any
 
 
+def upsert_finding(
+    connection: sqlite3.Connection,
+    finding: dict[str, Any],
+    timestamp: str,
+    repository_id: str | None = None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO findings (
+            id, fingerprint, rule_id, identity_anchor, identity_instance,
+            details_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            fingerprint = excluded.fingerprint,
+            rule_id = excluded.rule_id,
+            identity_anchor = excluded.identity_anchor,
+            identity_instance = excluded.identity_instance,
+            details_json = excluded.details_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            finding["findingId"],
+            finding["fingerprints"]["primary"],
+            finding["ruleId"],
+            finding["identity"]["anchor"],
+            finding["identity"].get("instance"),
+            json.dumps(finding, allow_nan=False, sort_keys=True),
+            timestamp,
+            timestamp,
+        ),
+    )
+    if repository_id is not None:
+        connection.execute(
+            "INSERT OR IGNORE INTO finding_repositories (repository_id, finding_id) VALUES (?, ?)",
+            (repository_id, finding["findingId"]),
+        )
+
+
 def index_findings(
     connection: sqlite3.Connection,
     scan_id: str,
@@ -17,35 +55,15 @@ def index_findings(
     findings = document.get("findings")
     if not isinstance(findings, list):
         raise SystemExit("findings.json must contain a findings array.")
+    repository_id = connection.execute(
+        "SELECT target_id FROM scans WHERE id = ?", (scan_id,)
+    ).fetchone()["target_id"]
     for finding in findings:
         if not isinstance(finding, dict):
             raise SystemExit("findings.json entries must be objects.")
-        identity = finding["identity"]
-        fingerprints = finding["fingerprints"]
         severity = finding["severity"]
         confidence = finding["confidence"]
-        connection.execute(
-            """
-            INSERT INTO findings (
-                id, fingerprint, rule_id, identity_anchor, identity_instance, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                fingerprint = excluded.fingerprint,
-                rule_id = excluded.rule_id,
-                identity_anchor = excluded.identity_anchor,
-                identity_instance = excluded.identity_instance,
-                updated_at = excluded.updated_at
-            """,
-            (
-                finding["findingId"],
-                fingerprints["primary"],
-                finding["ruleId"],
-                identity["anchor"],
-                identity.get("instance"),
-                timestamp,
-                timestamp,
-            ),
-        )
+        upsert_finding(connection, finding, timestamp, repository_id)
         connection.execute(
             """
             INSERT INTO finding_occurrences (

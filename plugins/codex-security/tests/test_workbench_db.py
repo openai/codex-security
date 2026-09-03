@@ -20,6 +20,7 @@ from workbench_test_support import (
     initialize_git_repository,
     run_workbench,
     stable_target_id,
+    start_delivered_scan,
     write_completed_contract,
 )
 
@@ -58,11 +59,17 @@ EXPECTED_TABLES = {
     "deep_scan_runs",
     "deep_scan_workers",
     "finding_decisions",
+    "finding_dedupe_group_members",
+    "finding_dedupe_groups",
+    "finding_embeddings",
     "finding_locations",
     "finding_occurrences",
     "finding_publications",
     "finding_remediation_attempts",
+    "finding_repositories",
     "finding_triage",
+    "finding_workflow_reviews",
+    "finding_workflows",
     "findings",
     "scan_artifacts",
     "scan_comparison_matches",
@@ -171,6 +178,54 @@ def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -
         "--message",
         BUDGET_WARNING,
         check=check,
+    )
+
+
+def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
+    tmp_path: Path,
+) -> None:
+    state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path)
+    original = run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]
+    for limit in (0.0055, 0.006):
+        run_workbench(
+            state_dir,
+            "set-scan-cost-limit",
+            "--scan-id",
+            scan_id,
+            "--max-cost-usd",
+            str(limit),
+        )
+    saved = run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]
+    assert saved == {**original, "maxCostUsd": 0.006}
+    assert complete_budget_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "complete"
+    stopped = run_workbench(
+        state_dir,
+        "set-scan-cost-limit",
+        "--scan-id",
+        scan_id,
+        "--max-cost-usd",
+        "1",
+        check=False,
+    )
+    assert stopped["returncode"] != 0
+
+
+@pytest.mark.parametrize("limit", ["0", "-1", "nan", "inf", "0.004", "0.005"])
+def test_cost_limit_rejects_invalid_or_nonincreasing_totals(tmp_path: Path, limit: str) -> None:
+    state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path, mode="standard")
+    result = run_workbench(
+        state_dir,
+        "set-scan-cost-limit",
+        "--scan-id",
+        scan_id,
+        "--max-cost-usd",
+        limit,
+        check=False,
+    )
+    assert result["returncode"] != 0
+    assert (
+        run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]["maxCostUsd"]
+        == 0.005
     )
 
 
@@ -580,9 +635,8 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
         "--mode",
         "deep",
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -634,9 +688,8 @@ def test_completion_warns_after_plain_directory_changes(tmp_path: Path) -> None:
     source = target / "app.py"
     source.write_text("version = 1\n")
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -667,9 +720,8 @@ def test_completion_warns_when_scanned_directory_becomes_unavailable(tmp_path: P
     target.mkdir()
     (target / "app.py").write_text("version = 1\n")
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -715,9 +767,8 @@ def test_workbench_serializes_concurrent_scan_completion(tmp_path: Path) -> None
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -757,9 +808,8 @@ def test_workbench_persists_scan_model_and_updates_it_from_progress(tmp_path: Pa
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--model",
@@ -990,7 +1040,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (32,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (40,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -1000,9 +1050,8 @@ def test_completed_findings_are_summarized_and_sorted_by_severity(tmp_path: Path
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1067,9 +1116,8 @@ def test_completed_finding_triage_and_remediation_persist(
     source = target / "source.txt"
     source.write_bytes(f"vulnerable{line_ending}".encode())
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1645,9 +1693,8 @@ def test_completed_scan_disables_remediation_after_checkout_revision_changes(
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     saved = create_saved_git_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1692,9 +1739,8 @@ def assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
     target.mkdir()
     (target / "source.txt").write_text("vulnerable\n")
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1761,9 +1807,8 @@ def test_finding_management_rejects_invalid_state_transitions(tmp_path: Path) ->
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -1984,9 +2029,8 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
         "--mode",
         "standard",
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -2160,9 +2204,8 @@ def test_finding_remediation_rejects_delayed_update_after_superseding_patch(tmp_
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -2248,9 +2291,8 @@ def test_finding_remediation_rejects_unversioned_directory_changes(tmp_path: Pat
     source = target / "source.txt"
     source.write_text("original\n")
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(saved["id"]),
         "--scan-root",
@@ -2782,7 +2824,7 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
     target = tmp_path / "target"
     target.mkdir()
     workspace = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(workspace["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
 
     updated = run_workbench(
@@ -3066,9 +3108,8 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
         "--diff-base-revision",
         revision,
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -3133,9 +3174,8 @@ def test_workbench_warns_after_working_tree_head_changes(
         "--diff-base-revision",
         revision,
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -3204,9 +3244,8 @@ def test_workbench_can_validate_legacy_nested_working_tree_scan(tmp_path: Path) 
         "--diff-base-revision",
         revision,
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -3272,9 +3311,8 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
         "--diff-content-digest",
         str(diff_target["contentDigest"]),
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -3369,9 +3407,8 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
         revision,
     )
     diff_target = saved["diffTarget"]
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -3802,7 +3839,7 @@ def test_workbench_rejects_progress_completed_above_total(tmp_path: Path) -> Non
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     failed = run_workbench(
         state_dir,
         "update-progress",
@@ -3823,7 +3860,7 @@ def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     run_workbench(
         state_dir,
@@ -3890,7 +3927,7 @@ def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None
         "--mode",
         "deep",
     )
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     assert started["results"]["progress"]["reviewPass"] is None
 
@@ -3926,9 +3963,8 @@ def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None
     standard_target = tmp_path / "standard-target"
     standard_target.mkdir()
     standard = create_saved_workspace(state_dir, standard_target)
-    standard_scan = run_workbench(
+    standard_scan = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         str(standard["id"]),
     )
@@ -3950,7 +3986,7 @@ def test_workbench_updates_progress_timestamp_for_phase_and_failure(tmp_path: Pa
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     started_at = str(started["results"]["progress"]["updatedAt"])
     time.sleep(0.001)
@@ -3974,7 +4010,7 @@ def test_workbench_preserves_scan_when_git_revision_cannot_be_rechecked(tmp_path
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute("UPDATE scans SET target_revision = 'deadbeef' WHERE id = ?", (scan_id,))
@@ -3999,7 +4035,7 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(tmp_path: Pat
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
@@ -4057,7 +4093,7 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
         text=True,
     ).stdout.strip()
     saved = create_saved_git_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     assert started["results"]["contract"]["target"]["allowedKinds"] == ["git_revision"]
     assert "requiredSnapshotDigest" not in started["results"]["contract"]["target"]
@@ -4095,7 +4131,7 @@ def test_workbench_preserves_in_flight_git_scan_during_migration_normalization(
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     saved = create_saved_git_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     allowed_kinds = started["results"]["contract"]["target"]["allowedKinds"]
     database = state_dir / "workbench.sqlite3"
@@ -4134,7 +4170,7 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
     dirty_content = "fixture\nlocal change\n"
     (target / "README.md").write_text(dirty_content)
     saved = create_saved_git_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     contract = started["results"]["contract"]["target"]
     assert contract["allowedKinds"] == ["git_worktree"]
@@ -4160,7 +4196,7 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
         == "running"
     )
 
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     snapshot_digest = str(started["results"]["contract"]["target"]["requiredSnapshotDigest"])
 
@@ -4188,7 +4224,7 @@ def test_workbench_generates_reports_during_completion(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
@@ -4210,7 +4246,7 @@ def test_workbench_omits_unsafe_symlink_source_path_without_hiding_finding(tmp_p
     outside.mkdir()
     (target / "src").symlink_to(outside, target_is_directory=True)
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     write_completed_contract(Path(str(started["results"]["scanDir"])), scan_id, target)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
@@ -4224,7 +4260,7 @@ def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)

@@ -21,11 +21,7 @@ def windows_stream_component(path: Path) -> str | None:
     if os.name != "nt":
         return None
     return next(
-        (
-            component
-            for component in path.parts
-            if component != path.anchor and ":" in component
-        ),
+        (component for component in path.parts if component != path.anchor and ":" in component),
         None,
     )
 
@@ -49,9 +45,7 @@ def resolve_scope(repository: Path, value: str) -> str:
     requested = Path(value).expanduser()
     stream = windows_stream_component(requested)
     if stream is not None:
-        raise InventoryError(
-            f"--scope: NTFS alternate data streams are not supported: {stream}"
-        )
+        raise InventoryError(f"--scope: NTFS alternate data streams are not supported: {stream}")
     scope = requested if requested.is_absolute() else repository / requested
     try:
         resolved = scope.resolve(strict=True)
