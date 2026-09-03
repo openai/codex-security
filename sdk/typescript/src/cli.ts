@@ -124,6 +124,8 @@ import {
 } from "./linear.js";
 import type { Finding, SeverityLevel } from "./models.js";
 import { runMultiscan } from "./multiscan.js";
+import { createScanModelSelector } from "./cli-model-selection.js";
+import type { ScanModelSelector } from "./scan-model-selection.js";
 import { componentPlanSchema, planComponents } from "./component-plan.js";
 import { runComponentScans } from "./component-scan.js";
 import {
@@ -1132,6 +1134,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
+    selectScanModel?: ScanModelSelector,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
   environment: NodeJS.ProcessEnv;
   prepareAuthenticationHome?: (
@@ -1139,6 +1142,7 @@ interface CliDependencies {
   ) => Promise<string>;
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
+  scanModelPrompt?: Pick<BulkScanPrompt, "isInteractive" | "confirm">;
   scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select"> &
     Partial<Pick<BulkScanPrompt, "checkbox">>;
@@ -1191,8 +1195,8 @@ interface CliDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
-  createSecurity: (config) =>
-    createSecurityInternal(config, { surface: "cli" }),
+  createSecurity: (config, selectScanModel) =>
+    createSecurityInternal(config, { surface: "cli", selectScanModel }),
   environment: process.env,
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
@@ -1955,7 +1959,7 @@ export async function main(
           .describe("Print scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, options }) {
+      async run({ args, error: incurError, format, options }) {
         const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
         if (scanId === undefined) return;
         let scanArguments: ScanArguments;
@@ -1981,7 +1985,13 @@ export async function main(
             exitCode,
           });
         }
-        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        const outcome = await runScan(
+          scanArguments,
+          errorOutput,
+          dependencies,
+          true,
+          format !== "json" && format !== "jsonl",
+        );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           return incurError({
@@ -3463,7 +3473,7 @@ export async function main(
           },
         ),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, options }) {
+      async run({ args, format, options }) {
         const controller = new AbortController();
         let dashboard: ScanDashboard | null = null;
         const stopDashboard = (): void => {
@@ -3535,6 +3545,30 @@ export async function main(
               } catch {}
             }
           }
+          const selectModel = scanModelSelectorForCli(
+            errorOutput,
+            dependencies,
+            {
+              interactive:
+                !options.headless && format !== "json" && format !== "jsonl",
+              maxCostUsd: options.maxCost,
+              onInterrupt,
+            },
+          );
+          const chooseModel: ScanModelSelector = async (...args) => {
+            stopDashboard();
+            try {
+              const selected = await selectModel(...args);
+              dashboard?.setModel(selected);
+              return selected;
+            } finally {
+              if (!args[2].aborted) {
+                try {
+                  dashboard?.start();
+                } catch {}
+              }
+            }
+          };
           const result = await runComponentScans({
             repository,
             outputDir: resolveCliPath(directory, options.outputDir),
@@ -3557,7 +3591,8 @@ export async function main(
                 ? {}
                 : { maxCostUsd: options.maxCost }),
             },
-            createSecurity: dependencies.createSecurity,
+            createSecurity: (config) =>
+              dependencies.createSecurity(config, chooseModel),
             planComponents: dependencies.planComponents,
             matchFindings: dependencies.matchFindings,
             onPlan: (components) => dashboard?.setComponents(components),
@@ -3705,7 +3740,7 @@ export async function main(
         "--output-dir /path/outside/repositories/results " +
         "--workers 4 --max-attempts 3",
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, options }) {
+      async run({ args, format, options }) {
         const controller = new AbortController();
         const onInterrupt = (): void => controller.abort("SIGINT");
         const onTerminate = (): void => controller.abort("SIGTERM");
@@ -3757,6 +3792,15 @@ export async function main(
             inputPath = resolveCliPath(currentDirectory, args.input);
             outputDir = resolveCliPath(currentDirectory, options.outputDir);
           }
+          const selectModel = scanModelSelectorForCli(
+            errorOutput,
+            dependencies,
+            {
+              interactive: format !== "json" && format !== "jsonl",
+              maxCostUsd: options.maxCost,
+              onInterrupt,
+            },
+          );
           const result = await runMultiscan({
             inputPath,
             outputDir,
@@ -3779,7 +3823,8 @@ export async function main(
                 options.provider,
               ),
             },
-            createSecurity: dependencies.createSecurity,
+            createSecurity: (config) =>
+              dependencies.createSecurity(config, selectModel),
             signal: controller.signal,
             onProgress: ({ repository, status, attempt, error, warning }) => {
               const detail = error ?? warning;
@@ -6382,6 +6427,47 @@ function diagnosticValue(value: unknown): string {
   );
 }
 
+function scanModelSelectorForCli(
+  errorOutput: Writable,
+  dependencies: CliDependencies,
+  options: {
+    interactive: boolean;
+    maxCostUsd?: number;
+    onInterrupt(): void;
+  },
+): ScanModelSelector {
+  const selectModel = createScanModelSelector({
+    interactive:
+      options.interactive &&
+      errorOutput.isTTY === true &&
+      dependencies.environment["CI"] === undefined &&
+      dependencies.environment["TERM"] !== "dumb",
+    maxCostUsd: options.maxCostUsd,
+    prompt:
+      dependencies.scanModelPrompt ??
+      createBulkScanDiscoveryDependencies({
+        output: errorOutput,
+        now: dependencies.now,
+        currentDirectory: dependencies.currentDirectory,
+      }).prompt,
+    write: (message) => errorOutput.write(message),
+  });
+  return async (...args) => {
+    try {
+      return await selectModel(...args);
+    } catch (error) {
+      if (
+        !args[2].aborted &&
+        error instanceof Error &&
+        error.name === "ExitPromptError"
+      ) {
+        options.onInterrupt();
+      }
+      throw error;
+    }
+  };
+}
+
 async function chooseInteractiveAuthentication(
   options: {
     auth: ScanAuthMode | undefined;
@@ -6447,9 +6533,16 @@ async function runScan(
   errorOutput: Writable,
   dependencies: CliDependencies,
   interactive = true,
+  modelGuidanceInteractive = interactive,
 ): Promise<ScanOutcome> {
   return await withTerminalErrorsHandled(errorOutput, () =>
-    executeScan(arguments_, errorOutput, dependencies, interactive),
+    executeScan(
+      arguments_,
+      errorOutput,
+      dependencies,
+      interactive,
+      modelGuidanceInteractive,
+    ),
   );
 }
 
@@ -6484,6 +6577,7 @@ async function executeScan(
   errorOutput: Writable,
   dependencies: CliDependencies,
   interactive = true,
+  modelGuidanceInteractive = interactive,
 ): Promise<ScanOutcome> {
   let scanDir: string | null = null;
   const scanInput = dependencies.scanInput ?? process.stdin;
@@ -6744,7 +6838,28 @@ async function executeScan(
         progress.startTimer("Preparing scan");
       }
     }
-    security = dependencies.createSecurity(config);
+    const selectModel = scanModelSelectorForCli(errorOutput, dependencies, {
+      interactive: modelGuidanceInteractive && !arguments_.headless,
+      maxCostUsd: arguments_.maxCostUsd,
+      onInterrupt,
+    });
+    security = dependencies.createSecurity(config, async (...args) => {
+      stopPresentation();
+      try {
+        const selected = await selectModel(...args);
+        effectiveModel = selected.model;
+        effectiveReasoningEffort = selected.reasoningEffort;
+        dashboard?.setModel(selected);
+        return selected;
+      } finally {
+        if (!args[2].aborted) {
+          try {
+            if (dashboard !== null) dashboard.start();
+            else progress?.startTimer("Preparing scan");
+          } catch {}
+        }
+      }
+    });
     if (arguments_.mock) {
       errorOutput.write(
         "codex-security: Mock scan: generating synthetic findings; no security analysis or LLM calls.\n",
