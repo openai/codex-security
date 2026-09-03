@@ -31,6 +31,18 @@ export function windowsFileSystem(native: WindowsBinding) {
     return result.value;
   }
 
+  function operationPath(path: Buffer): Buffer {
+    const resolved = absolute(path);
+    const text = pathText(resolved);
+    if (text.startsWith("\\\\?\\") || text.startsWith("\\\\.\\"))
+      return resolved;
+    return widePath(
+      text.startsWith("\\\\")
+        ? `\\\\?\\UNC\\${text.slice(2)}`
+        : `\\\\?\\${text}`,
+    );
+  }
+
   function open(
     path: Buffer,
     access = 0,
@@ -38,7 +50,7 @@ export function windowsFileSystem(native: WindowsBinding) {
     follow = true,
   ): WindowsHandle {
     const result = native.openWindowsFile(
-      absolute(path),
+      operationPath(path),
       access,
       flags.FILE_SHARE_READ | flags.FILE_SHARE_WRITE | flags.FILE_SHARE_DELETE,
       disposition,
@@ -114,7 +126,7 @@ export function windowsFileSystem(native: WindowsBinding) {
   }
 
   function entries(path: Buffer): Buffer[] {
-    const result = native.windowsDirectoryNames(absolute(path));
+    const result = native.windowsDirectoryNames(operationPath(path));
     check(result.error, path);
     return result.value;
   }
@@ -122,10 +134,10 @@ export function windowsFileSystem(native: WindowsBinding) {
   function mkdir(path: Buffer): void {
     const resolved = absolute(path);
     const parent = widePath(win32.dirname(pathText(resolved)));
-    let error = native.createWindowsDirectory(resolved);
+    let error = native.createWindowsDirectory(operationPath(resolved));
     if (error === 3 && !parent.equals(resolved)) {
       mkdir(parent);
-      error = native.createWindowsDirectory(resolved);
+      error = native.createWindowsDirectory(operationPath(resolved));
     }
     if (error !== 0) {
       try {
