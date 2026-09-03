@@ -1,10 +1,14 @@
 use napi::bindgen_prelude::{BigInt, Buffer};
 use napi_derive::napi;
 use std::{
+    ffi::OsString,
     fs::{File, TryLockError},
     io::{self, Read, Seek, SeekFrom, Write},
     mem::{offset_of, size_of, MaybeUninit},
-    os::windows::io::{AsRawHandle, FromRawHandle},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        io::{AsRawHandle, FromRawHandle},
+    },
     ptr::{copy_nonoverlapping, null, null_mut},
 };
 use windows_sys::Win32::{
@@ -61,6 +65,85 @@ fn wide_path(bytes: Buffer) -> napi::Result<Vec<u16>> {
     }
     path.push(0);
     Ok(path)
+}
+
+fn wide_bytes(units: impl IntoIterator<Item = u16>) -> Buffer {
+    units
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn os_string(bytes: Buffer) -> napi::Result<OsString> {
+    let path = wide_path(bytes)?;
+    Ok(OsString::from_wide(&path[..path.len() - 1]))
+}
+
+#[napi(object)]
+pub struct BufferResult {
+    pub error: u32,
+    pub value: Buffer,
+}
+
+#[napi(object)]
+pub struct DirectoryResult {
+    pub error: u32,
+    pub value: Vec<Buffer>,
+}
+
+#[napi]
+pub fn windows_arguments() -> Vec<Buffer> {
+    std::env::args_os()
+        .map(|argument| wide_bytes(argument.encode_wide()))
+        .collect()
+}
+
+#[napi]
+pub fn windows_environment(name: Buffer) -> napi::Result<Option<Buffer>> {
+    Ok(std::env::var_os(os_string(name)?).map(|value| wide_bytes(value.encode_wide())))
+}
+
+#[napi]
+pub fn windows_absolute_path(path: Buffer) -> napi::Result<BufferResult> {
+    let path = wide_path(path)?;
+    let mut absolute = vec![0_u16; 256];
+    loop {
+        let capacity = u32::try_from(absolute.len())
+            .map_err(|_| invalid("Absolute path exceeds the Win32 buffer size"))?;
+        let length =
+            unsafe { GetFullPathNameW(path.as_ptr(), capacity, absolute.as_mut_ptr(), null_mut()) };
+        if length == 0 {
+            return Ok(BufferResult {
+                error: unsafe { GetLastError() },
+                value: Vec::new().into(),
+            });
+        }
+        if length < capacity {
+            return Ok(BufferResult {
+                error: 0,
+                value: wide_bytes(absolute[..length as usize].iter().copied()),
+            });
+        }
+        absolute.resize(length as usize + 1, 0);
+    }
+}
+
+#[napi]
+pub fn windows_directory_names(path: Buffer) -> napi::Result<DirectoryResult> {
+    let path = os_string(path)?;
+    let names = std::fs::read_dir(path).and_then(|entries| {
+        entries
+            .map(|entry| entry.map(|entry| wide_bytes(entry.file_name().encode_wide())))
+            .collect::<std::io::Result<Vec<_>>>()
+    });
+    Ok(match names {
+        Ok(value) => DirectoryResult { error: 0, value },
+        Err(error) => DirectoryResult {
+            error: error.raw_os_error().unwrap() as u32,
+            value: Vec::new(),
+        },
+    })
 }
 
 fn io_range(buffer: &Buffer, offset: f64, length: f64) -> napi::Result<(usize, u32)> {

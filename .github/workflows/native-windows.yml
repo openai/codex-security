@@ -51,7 +51,7 @@ jobs:
         run: |
           cargo fmt --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo clippy --locked --target ${{ matrix.target }} -- -D warnings
+          cargo clippy --locked --target ${{ matrix.target }} --lib --example windows-wide-launcher -- -D warnings
       - name: Build and verify with Node.js 22
         run: |
           node build.mjs

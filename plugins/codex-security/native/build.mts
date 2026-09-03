@@ -40,7 +40,14 @@ const flags = [
 ];
 const target = resolve(root, process.env["CARGO_TARGET_DIR"] ?? "target");
 const args = ["build", "--release", "--locked"];
-if (windowsTarget !== undefined) args.push("--target", windowsTarget);
+if (windowsTarget !== undefined)
+  args.push(
+    "--target",
+    windowsTarget,
+    "--lib",
+    "--example",
+    "windows-wide-launcher",
+  );
 execFileSync("cargo", args, {
   cwd: root,
   stdio: "inherit",
@@ -63,4 +70,15 @@ const library = join(
 checkPrivatePaths(readFileSync(library), [root, cargoHome, sysroot, target]);
 mkdirSync(output, { recursive: true });
 copyFileSync(library, binaryPath);
+if (windowsTarget !== undefined)
+  copyFileSync(
+    join(
+      target,
+      windowsTarget,
+      "release",
+      "examples",
+      "windows-wide-launcher.exe",
+    ),
+    join(output, "windows-wide-launcher.exe"),
+  );
 console.log(`Built ${nativeTarget} Node-API 8 primitives.`);
