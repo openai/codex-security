@@ -173,7 +173,10 @@ def parse_args(description: str) -> argparse.Namespace:
     compare_scans.add_argument("--include-matching-inputs", action="store_true")
     compare_scans.add_argument("--require-matches", action="store_true")
 
-    save_scan_comparison = subparsers.add_parser("save-scan-comparison")
+    save_scan_comparison = subparsers.add_parser(
+        "save-scan-comparison",
+        description="Comparison payload supports related findings.",
+    )
     save_scan_comparison.add_argument("--before-scan-id", required=True)
     save_scan_comparison.add_argument("--after-scan-id", required=True)
     matches = save_scan_comparison.add_mutually_exclusive_group(required=True)

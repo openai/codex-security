@@ -57,7 +57,7 @@ interface PreparedScanDraft {
 
 type PublishScanDraft = (
   draft: PreparedScanDraft,
-  expectedDigest: string,
+  expectedDigest: string | undefined,
   checkpoint: ScanDraftInput,
 ) => Promise<void>;
 
@@ -88,7 +88,11 @@ export async function recordCodexSecurityScanDraft(
 
   for (;;) {
     signal?.throwIfAborted();
-    const preserved = await preserveScanDraft(context, parsed, false);
+    // Deep results are ready to save. Do not merge older drafts or
+    // checkpoints into them.
+    const preserved = context.mode === "deep" && parsed.complete !== false
+      ? { input: parsed, previousDigest: undefined }
+      : await preserveScanDraft(context, parsed, false);
     const reconciled = preserved.input;
     const contract = requireObject(
       context.targetContract,
@@ -104,7 +108,7 @@ export async function recordCodexSecurityScanDraft(
     );
     const target = buildTarget(context, contract, trustedTarget);
     const scope = buildScope(context, trustedScope, reconciled.scope);
-    const findings = buildFindings(reconciled.findings);
+    const findings = buildFindings(reconciled.findings, context.mode);
     const coverage = buildCoverage(
       context,
       contract,
@@ -190,9 +194,10 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
           draftPath,
           "--checkpoint-path",
           checkpointPath,
-          "--expected-draft-digest",
-          expectedDigest,
         ];
+        if (expectedDigest !== undefined) {
+          arguments_.push("--expected-draft-digest", expectedDigest);
+        }
         if (context.handoffClaimToken) {
           arguments_.push("--claim-token", context.handoffClaimToken);
         }
@@ -268,7 +273,7 @@ export async function recordCodexSecurityWorkerScanDraft(
 /** Keep the semantic input before any replaceable worker or canonical artifact. */
 export async function saveScanDraftCheckpoint(
   context: ArtifactContext,
-  input: ScanDraftInput,
+  input: Omit<ScanDraftInput, "coverage">,
   updateHead = true,
 ): Promise<void> {
   const { handoffClaimToken: _claim, ...snapshot } = input;
@@ -514,7 +519,7 @@ async function readCurrentCheckpoints(
   return checkpoints.map(({ input }) => input);
 }
 
-function scanDraftCheckpointName(input: ScanDraftInput): string {
+function scanDraftCheckpointName(input: Omit<ScanDraftInput, "coverage">): string {
   const { handoffClaimToken: _claim, ...snapshot } = input;
   return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") + ".json";
 }
@@ -1388,7 +1393,7 @@ function buildScope(
   };
 }
 
-function buildFindings(findings: JsonObject[]): JsonObject[] {
+function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   const generatedIdentities = findings.map((finding, index) => {
     if (finding.identity !== undefined) return undefined;
     const candidateId = (finding.extensions as JsonObject | undefined)
@@ -1421,7 +1426,7 @@ function buildFindings(findings: JsonObject[]): JsonObject[] {
     );
   }
 
-  return findings.map((finding, index) => {
+  const identified: JsonObject[] = findings.map((finding, index) => {
     const generatedIdentity = generatedIdentities[index];
     if (generatedIdentity === undefined) return { ...finding };
     const identity: JsonObject = { anchor: generatedIdentity.anchor };
@@ -1440,6 +1445,36 @@ function buildFindings(findings: JsonObject[]): JsonObject[] {
       ...finding,
       identity,
     };
+  });
+  if (mode !== "deep") return identified;
+
+  // Keep both findings when workers reuse an ID.
+  // Add a numeric suffix to make each ID unique.
+  const reserved = new Set(identified.map(scanFindingIdentity));
+  const used = new Set<string>();
+  return identified.map((finding) => {
+    const key = scanFindingIdentity(finding);
+    if (!used.has(key)) {
+      used.add(key);
+      return finding;
+    }
+    const identity = finding.identity as JsonObject;
+    const baseInstance = identity.instance ?? "saved";
+    let suffix = 2;
+    const distinct: JsonObject & { identity: JsonObject } = {
+      ...finding, identity: { ...identity },
+    };
+    do {
+      distinct.identity.instance = `${baseInstance}-${suffix}`;
+      suffix += 1;
+    } while (reserved.has(scanFindingIdentity(distinct)) || used.has(scanFindingIdentity(distinct)));
+    const provenance = finding.provenance as JsonObject;
+    distinct.provenance = {
+      ...provenance,
+      preservedIdentity: provenance.preservedIdentity ?? structuredClone(identity),
+    };
+    used.add(scanFindingIdentity(distinct));
+    return distinct;
   });
 }
 
