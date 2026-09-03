@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
@@ -20,6 +20,19 @@ export async function buildMcpApp({ output }) {
   await mkdir(mcpDir, { recursive: true });
 
   await writeRuntime("server", "main.ts");
+  for (const target of [
+    "darwin-arm64", "darwin-x64",
+    "linux-arm64-gnu", "linux-arm64-musl", "linux-x64-gnu", "linux-x64-musl",
+    "win32-arm64", "win32-x64"
+  ]) {
+    const name = target.startsWith("win32-") ? "windows.node" : "unix.node";
+    const destination = join(mcpDir, "native", target);
+    await mkdir(destination, { recursive: true });
+    await copyFile(
+      join(root, "../native/prebuilt", target, name),
+      join(destination, name)
+    );
+  }
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");

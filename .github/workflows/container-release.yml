@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - .dockerignore
+      - .github/workflows/native-*.yml
+      - .github/actions/download-native/**
       - .github/workflows/container-release.yml
       - Dockerfile
       - Dockerfile.dockerignore
@@ -27,7 +29,12 @@ permissions:
   contents: read
 
 jobs:
+  native:
+    if: github.repository == 'openai/codex-security'
+    uses: ./.github/workflows/native-artifacts.yml
+
   validate:
+    needs: native
     if: github.repository == 'openai/codex-security'
     name: validate-linux-${{ matrix.architecture }}
     runs-on: ${{ matrix.runner }}
@@ -46,6 +53,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -353,6 +362,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
