@@ -7,6 +7,19 @@ Historical releases may contain generated notes only. The release tag and npm
 package use the same stable version: `npm-vX.Y.Z` and
 `@openai/codex-security@X.Y.Z`.
 
+Starting with `0.2.0`, the CLI, TypeScript SDK, bundled plugin, and MCP server
+share one release version. The findings service and dashboards ship in that
+same package and container image. `sdk/typescript/package.json` is the version
+source; the plugin manifest, private MCP package, and Python test-tooling
+metadata are synchronized copies. The Python metadata does not represent a
+separate published SDK.
+
+Keep Codex runtime dependencies, artifact schemas, database migrations, and
+test fixture versions independent. Existing public version fields remain
+available, and a custom plugin still reports its own producer version. External
+Codex catalogs control their own publication versions. Historical releases and
+saved scan artifacts retain their original versions.
+
 ## Pull request titles and categories
 
 Pull request titles must follow this form:
@@ -160,7 +173,11 @@ Generated PRs leave the disclosure attestations unchecked for maintainer review.
 ## Prepare a release
 
 1. Choose the next stable version and update `sdk/typescript/package.json`.
-   Keep the lockfile version in sync when it records the package version.
+   Run `pnpm --dir sdk/typescript run sync:versions` to update the component
+   manifests. Keep the lockfile version in sync when it records the package
+   version. Every product release advances the bundled plugin version, including
+   releases without plugin changes, so cached plugin installations refresh on
+   upgrade.
 2. Update `.github/release-notes.md`. Its first line must be
    `<!-- release-version: X.Y.Z -->` with the exact package version.
 3. Summarize the changes a user will notice. Call out required migration or
@@ -171,6 +188,13 @@ Generated PRs leave the disclosure attestations unchecked for maintainer review.
 5. Run the checks required by the changed files and record the results in the
    pull request. Do not merge until required CI, review, and public disclosure
    checks pass on the current commit.
+
+`pnpm --dir sdk/typescript run check:versions` checks synchronization without
+writing files. It also runs during `prepack`, including CI and Docker builds.
+Package checks verify that the bundled plugin manifest matches the package;
+the installed-package smoke check verifies the public SDK exports, CLI version,
+and MCP server version. Do not synchronize dependency versions or rewrite
+historical fixtures as part of a release bump.
 
 Review the summary with the same standard as product documentation. Keep it
 specific, describe behavior before implementation, and do not include private
@@ -196,6 +220,11 @@ do not prepare a release by editing or committing files there.
 
 Monitor all three workflows. A version bump is not a completed release until
 the npm package and GitHub release both exist and match the tag.
+
+Container publication is a separate protected workflow. Create `container-vX.Y.Z`
+at the same commit as `npm-vX.Y.Z`, or dispatch from `main` while it still points
+to that exact release commit. Matching version strings on different commits are
+not sufficient. See [container publishing](docker/README.md#publishing).
 
 ## Verify
 

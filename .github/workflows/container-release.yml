@@ -291,6 +291,8 @@ jobs:
             exit 1
           fi
 
+          sh docker/verify-container-release-source.sh "$version" "$GITHUB_SHA"
+
           printf 'image=ghcr.io/%s\n' "${GITHUB_REPOSITORY_OWNER,,}/codex-security" >> "$GITHUB_OUTPUT"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 

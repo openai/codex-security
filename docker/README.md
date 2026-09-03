@@ -82,9 +82,13 @@ and [package access settings](https://docs.github.com/en/packages/learn-github-p
 
 ## Publishing
 
-After merging to `main`, push `container-v<version>` matching the SDK package
-version or run `container-release` manually on `main`. Releases require a commit
-on protected `main`; pull requests only build and test.
+After the npm release tag exists, create `container-v<version>` at the same
+commit as `npm-v<version>` and push the container tag. Both tags must match the
+SDK package version. You can also run `container-release` manually on `main`
+while it still points to that exact npm release commit. If `main` has advanced,
+use the matching container tag; a later commit with the same package version is
+not the same release. Releases must remain on protected `main` history; pull
+requests only build and test.
 
 If a release fails, fix the cause and rerun only failed jobs; do not overwrite
 an existing stable version. `bootstrap` and
