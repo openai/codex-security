@@ -336,7 +336,7 @@ def display_locations(repository: Path) -> dict:
         patch.object(db, "finding_triage_result", return_value=None),
         patch.object(db.scan_history, "finding_matches", return_value=([], None, [])),
     ):
-        result = db.finding_result(connection, record, occurrence)
+        result = db.finding_result(connection, record, occurrence, related=[])
     assert [item["path"] for item in result["locations"]] == selected[:8]
     assert result["sourceExcerpt"] == "1  source 0"
     connection.close()
@@ -924,7 +924,7 @@ def migration(_: Path) -> dict:
     from workbench_schema import MIGRATIONS, apply_migrations
 
     timestamp = "2026-08-01T00:00:00Z"
-    historical = tuple(item for item in MIGRATIONS if item[0] < 40)
+    historical = tuple(item for item in MIGRATIONS if item[0] < 41)
     for conflict in (False, True):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
@@ -951,7 +951,7 @@ def migration(_: Path) -> dict:
         )
         if conflict:
             connection.execute(
-                "INSERT INTO schema_migrations VALUES (40, ?, ?)",
+                "INSERT INTO schema_migrations VALUES (41, ?, ?)",
                 ("unrelated migration", timestamp),
             )
         connection.commit()
@@ -985,12 +985,12 @@ def migration(_: Path) -> dict:
             assert [
                 tuple(row)
                 for row in connection.execute(
-                    "SELECT * FROM schema_migrations WHERE version < 40 ORDER BY version"
+                    "SELECT * FROM schema_migrations WHERE version < 41 ORDER BY version"
                 )
             ] == before
             assert (
                 connection.execute(
-                    "SELECT name FROM schema_migrations WHERE version=40"
+                    "SELECT name FROM schema_migrations WHERE version=41"
                 ).fetchone()[0]
                 == "persist authorized source excerpt scopes"
             )

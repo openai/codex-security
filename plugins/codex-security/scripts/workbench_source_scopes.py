@@ -20,8 +20,24 @@ from workbench_target import (
     git_bytes,
     git_worktree_context,
 )
+from workbench_validation import reject_non_finite_json
 
 OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+
+
+def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
+    if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        target = recipe["target"]
+        if target["kind"] == "paths":
+            return target["paths"]
+    return [scan["scope"]]
+
+
+def public_scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
+    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+    recipe.pop("_codexSecurityFileScopes", None)
+    return recipe
 
 
 def normalized_path_component(value: str) -> str:

@@ -1884,6 +1884,7 @@ def finish_deep_scan_locked(
             """
             SELECT 1 FROM deep_scan_workers AS failed
             WHERE failed.scan_id = ? AND failed.status = 'failed'
+                AND (? != 'saturated' OR failed.kind != 'discovery')
                 AND (
                     failed.kind != 'dedup'
                     OR NOT EXISTS (
@@ -1909,10 +1910,14 @@ def finish_deep_scan_locked(
                 )
             LIMIT 1
             """,
-            (scan_id,),
+            (scan_id, args.terminal_reason),
         ).fetchone()
         if failed_worker is not None and not failure_capped:
             raise SystemExit("Deep Scan cannot finish after a worker has failed.")
+        if args.terminal_reason == "saturated":
+            # Mark any remaining workers canceled, including those whose own
+            # cancellation writes failed, so they cannot block completion.
+            cancel_active_workers(connection, scan_id, now())
         active_worker = connection.execute(
             """
             SELECT 1 FROM deep_scan_workers

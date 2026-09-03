@@ -827,6 +827,17 @@ MIGRATIONS = (
     ),
     (
         40,
+        "index finding identity and comparison history",
+        """
+        CREATE INDEX finding_occurrences_by_finding
+        ON finding_occurrences(finding_id, id);
+
+        CREATE INDEX scan_comparisons_by_after_scan
+        ON scan_comparisons(after_scan_id, before_scan_id);
+        """,
+    ),
+    (
+        41,
         "persist authorized source excerpt scopes",
         """
         ALTER TABLE scans ADD COLUMN source_scopes_json TEXT;
@@ -976,14 +987,14 @@ def apply_migrations(
                         "publication_error_message",
                         "TEXT",
                     )
-                elif version == 40:
+                elif version == 41:
                     add_column_if_missing(connection, "scans", "source_scopes_json", "TEXT")
                 continue
             if version == 6:
                 repair_thread_scoped_workspaces_migration(connection)
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
-            elif version == 40:
+            elif version == 41:
                 add_column_if_missing(connection, "scans", "source_scopes_json", "TEXT")
             else:
                 for statement in sql_statements(sql):
@@ -1118,11 +1129,11 @@ def normalize_pre_release_execution_profile_migrations(
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
     connection.execute(
-        "UPDATE schema_migrations SET version = 40 WHERE version = 34 AND name = ?",
+        "UPDATE schema_migrations SET version = 41 WHERE version IN (34, 40) AND name = ?",
         ("persist authorized source excerpt scopes",),
     )
     source_scope_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 40"
+        "SELECT name FROM schema_migrations WHERE version = 41"
     ).fetchone()
     if (
         source_scope_migration is not None
@@ -1131,6 +1142,10 @@ def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: 
         raise SystemExit(
             "The Codex Security database has an unsupported source-scope migration history."
         )
+    connection.execute(
+        "UPDATE schema_migrations SET version = 40 WHERE version = 33 AND name = ?",
+        ("index finding identity and comparison history",),
+    )
 
     completion_warning_migration = connection.execute(
         "SELECT name FROM schema_migrations WHERE version = 25"
