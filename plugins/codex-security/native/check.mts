@@ -66,6 +66,13 @@ if (
       const dependencies = [
         ...dynamic.matchAll(/\(NEEDED\)[^\n]*\[([^\]]+)\]/gu),
       ].map((match) => match[1]!);
+      // libgcc uses GLIBC_2.0 for its own compatibility exports on aarch64.
+      const requiresGlibc = [
+        ...versions.matchAll(/\bFile:\s+(\S+)([\s\S]*?)(?=\bFile:|$)/gu),
+      ].some(
+        (match) =>
+          match[1] !== "libgcc_s.so.1" && /\bName:\s+GLIBC_/u.test(match[2]!),
+      );
       if (
         architecture === undefined ||
         bytes.toString("latin1", 0, 4) !== "\x7fELF" ||
@@ -73,7 +80,7 @@ if (
         bytes[5] !== 1 ||
         bytes.readUInt16LE(18) !== architecture.machine ||
         !dependencies.includes(`libc.musl-${architecture.name}.so.1`) ||
-        /\bGLIBC_/u.test(versions)
+        requiresGlibc
       ) {
         throw new Error(
           "Native payload is not a musl ELF image for this architecture, or imports glibc.",
