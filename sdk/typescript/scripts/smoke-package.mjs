@@ -402,7 +402,7 @@ try {
       "--eval",
       [
         `const sdk = await import(${JSON.stringify(packageManifest.name)});`,
-        `for (const name of ${JSON.stringify(["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "securityPolicyDiff"])}) {`,
+        `for (const name of ${JSON.stringify(["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "securityPolicyDiff"])}) {`,
         '  if (typeof sdk[name] !== "function") throw new Error(`The installed package does not export ${name}.`);',
         "}",
         'if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function") throw new Error("The installed package does not export generatePolicy.");',

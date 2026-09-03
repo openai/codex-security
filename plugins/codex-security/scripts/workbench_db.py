@@ -40,6 +40,7 @@ import workbench_remediation as remediation
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
+import workbench_severity as severity
 from filesystem_identity import (
     serialize_filesystem_identity as serialize_filesystem_identity,
 )
@@ -3453,6 +3454,10 @@ def main() -> None:
         result = inspect_setup(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
+    if args.command == "read-severity-classification":
+        result = severity.read_classification(database_path(), args.scan_id)
+        print(json.dumps(result, allow_nan=False, sort_keys=True))
+        return
     if args.command == "inspect-linear-publication":
         result = inspect_linear_publication(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
@@ -3623,6 +3628,8 @@ def main() -> None:
             result = export_findings(connection, args)
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
+        elif args.command == "severity-classification":
+            result = severity.checkpoint(connection, json.load(sys.stdin), now())
         elif args.command == "finding-workflow":
             result = finding_workflow(connection, json.load(sys.stdin), now())
         elif args.command == "dashboard":
