@@ -1,4 +1,5 @@
 import { PassThrough, Writable } from "node:stream";
+import { join, resolve } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { describe, expect, test } from "bun:test";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
@@ -14,11 +15,57 @@ import {
 } from "./cli-fixtures.js";
 import { BUNDLED_PLUGIN_VERSION, VERSION } from "../src/version.js";
 
+const commandInputs: Record<string, object> = {
+  "bulk-scan": {
+    args: { input: "repositories.csv" },
+    options: { outputDir: "/synthetic/bulk" },
+  },
+  export: {
+    args: { scanDir: "/synthetic/scan" },
+    options: { exportFormat: "csv", output: "-" },
+  },
+  "findings_false-positive": {
+    args: { occurrenceId: "occ_example" },
+    options: { reason: "Reviewed synthetic fixture" },
+  },
+  findings_list: {},
+  import_github: { args: { repository: "example/repository" } },
+  "install-hook": { args: { repository: "/synthetic/repo" } },
+  login: { args: { action: "status" } },
+  logout: {},
+  patch: { args: { issues: ["Review the synthetic issue."] } },
+  publish_check: {
+    args: { scanDir: "/synthetic/scan" },
+    options: { to: "linear" },
+  },
+  publish_scan: {
+    args: { scanDir: "/synthetic/scan" },
+    options: { to: "linear", dryRun: true },
+  },
+  "scan-components": {
+    args: { repository: "/synthetic/repo" },
+    options: {
+      component: ["src"],
+      outputDir: "/synthetic/components",
+      planOnly: true,
+    },
+  },
+  scans_compare: {},
+  scans_list: {},
+  scans_logs: { args: { scanId: "scan_example" } },
+  scans_match: { options: { all: true } },
+  scans_rerun: { args: { scanId: "scan_example" } },
+  scans_show: { args: { scanId: "scan_example" } },
+  validate: { args: { findings: ["Review the synthetic finding."] } },
+  "verify-fix": { args: { findings: ["occ_example"] } },
+};
+
 async function connect(
   deps = dependencies(),
   finishWrite: (callback: (error?: Error | null) => void) => void = (
     callback,
   ) => callback(),
+  diagnostics?: Writable,
 ) {
   const input = new PassThrough();
   const stderr = capture(true);
@@ -45,7 +92,7 @@ async function connect(
       finishWrite(callback);
     },
   });
-  const serving = main(["--mcp"], output, stderr.stream, {
+  const serving = main(["--mcp"], output, diagnostics ?? stderr.stream, {
     ...deps,
     mcpInput: input,
   });
@@ -96,12 +143,127 @@ async function connect(
 }
 
 describe("CLI MCP scans", () => {
+  test("anchors inherited runtime paths while preserving environment names and values", async () => {
+    const serverDirectory = resolve("synthetic server");
+    const environment = {
+      CODEX_SECURITY_STATE_DIR: " state directory ",
+      CodeX_Home: "codex home",
+      CODEX_CLI_PATH: " ",
+      codex_cli_path: "bin/codex.exe",
+      PyThOn: "../runtime/python3",
+      PATH: "unchanged-relative-bin",
+      OPENAI_API_KEY: "synthetic-key",
+    };
+    const originalEnvironment = { ...environment };
+    const deps = dependencies({
+      currentDirectory: serverDirectory,
+      environment,
+    });
+    const calls: { cwd: string; environment: NodeJS.ProcessEnv }[] = [];
+    deps.runMcpCommand = async (_command, _input, options) => {
+      calls.push({ cwd: options.cwd, environment: options.environment });
+      return { exitCode: 0 };
+    };
+    const session = await connect(deps);
+    try {
+      await session.call("scans_list", { workingDirectory: "first repository" })
+        .result;
+      await session.call("findings_list", {
+        workingDirectory: "second repository",
+      }).result;
+      expect(calls.map(({ cwd }) => cwd)).toEqual([
+        resolve(serverDirectory, "first repository"),
+        resolve(serverDirectory, "second repository"),
+      ]);
+      for (const call of calls) {
+        expect(call.environment).toEqual({
+          ...originalEnvironment,
+          CODEX_SECURITY_STATE_DIR: resolve(serverDirectory, "state directory"),
+          CodeX_Home: resolve(serverDirectory, "codex home"),
+          codex_cli_path: resolve(serverDirectory, "bin/codex.exe"),
+          PyThOn: resolve(serverDirectory, "../runtime/python3"),
+        });
+      }
+      expect(environment).toEqual(originalEnvironment);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test.each([
+    ["HOME", "python3"],
+    ["USERPROFILE", ".python3"],
+  ])(
+    "expands inherited runtime paths using %s and preserves bare PYTHON %s",
+    async (homeVariable, python) => {
+      const home = resolve("synthetic home");
+      const environment = {
+        [homeVariable]: home,
+        CODEX_SECURITY_STATE_DIR: "~/state directory",
+        CODEX_HOME: "~\\codex home",
+        CODEX_CLI_PATH: join(home, "bin", "codex.exe"),
+        PYTHON: python,
+      };
+      const deps = dependencies({ environment });
+      let received: NodeJS.ProcessEnv | undefined;
+      deps.runMcpCommand = async (_command, _input, options) => {
+        received = options.environment;
+        return { exitCode: 0 };
+      };
+      const session = await connect(deps);
+      try {
+        await session.call("scans_list", {
+          workingDirectory: "other repository",
+        }).result;
+        expect(received).toEqual({
+          ...environment,
+          CODEX_SECURITY_STATE_DIR: join(home, "state directory"),
+          CODEX_HOME: join(home, "codex home"),
+        });
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
+  test("resolves each command working directory without changing server state", async () => {
+    const deps = dependencies();
+    const serverDirectory = deps.currentDirectory();
+    const processDirectory = process.cwd();
+    const directories: string[] = [];
+    deps.runMcpCommand = async (_command, _input, options) => {
+      directories.push(options.cwd);
+      return { exitCode: 0, data: { directory: options.cwd } };
+    };
+    const session = await connect(deps);
+    try {
+      const first = session.call("scans_list", {
+        workingDirectory: "first repository",
+      });
+      const second = session.call("findings_list", {
+        workingDirectory: "second repository",
+      });
+      await Promise.all([first.result, second.result]);
+      await session.call("scans_list").result;
+      expect(directories).toEqual([
+        resolve(serverDirectory, "first repository"),
+        resolve(serverDirectory, "second repository"),
+        resolve(serverDirectory),
+      ]);
+      expect(process.cwd()).toBe(processDirectory);
+      expect(deps.currentDirectory()).toBe(serverDirectory);
+    } finally {
+      await session.close();
+    }
+  });
   test("advertises scan-only inputs and read-only metadata", async () => {
     const session = await connect();
     try {
       const { tools } = await session.request<{ tools: Tool[] }>("tools/list")
         .result;
-      expect(tools.map((tool) => tool.name).sort()).toEqual(["info", "scan"]);
+      expect(tools.map((tool) => tool.name).sort()).toEqual(
+        ["info", "scan", ...Object.keys(commandInputs)].sort(),
+      );
       const scan = tools.find((tool) => tool.name === "scan")!;
       expect(scan.inputSchema.properties).toMatchObject({
         repository: { type: "string" },
@@ -140,6 +302,166 @@ describe("CLI MCP scans", () => {
       await session.close();
     }
   });
+
+  test("dispatches every remaining command with typed inputs and independent results", async () => {
+    const calls: {
+      name: string;
+      input: unknown;
+      jsonOutput: boolean | undefined;
+    }[] = [];
+    const deps = dependencies();
+    deps.runMcpCommand = async (command, input, options) => {
+      calls.push({ name: command.name, input, jsonOutput: options.jsonOutput });
+      options.onStderr?.("Command progress.\n");
+      return command.name === "import_github"
+        ? { exitCode: 0, data: [{ number: 1 }] }
+        : command.name === "export"
+          ? { exitCode: 0, output: "id,title\nexample,Synthetic finding\n" }
+          : { exitCode: 0, data: { command: command.name } };
+    };
+    const session = await connect(deps);
+    try {
+      for (const [name, input] of Object.entries(commandInputs)) {
+        const result = await session.call(name, input).result;
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({ exitCode: 0 });
+        expect(
+          JSON.parse((result.content[0] as { text: string }).text),
+        ).toEqual(result.structuredContent);
+        expect(calls.at(-1)).toMatchObject({ name, input });
+        if (name === "import_github")
+          expect(result.structuredContent).toMatchObject({
+            data: [{ number: 1 }],
+          });
+        if (name === "export")
+          expect(result.structuredContent).toMatchObject({
+            output: "id,title\nexample,Synthetic finding\n",
+          });
+      }
+      expect(calls.find(({ name }) => name === "patch")?.jsonOutput).toBe(
+        false,
+      );
+      await session.call("patch", { args: { issues: ["occ_example"] } }).result;
+      expect(calls.at(-1)?.jsonOutput).toBe(true);
+      await session.call("patch", { options: { resumePr: "patch_example" } })
+        .result;
+      expect(calls.at(-1)?.jsonOutput).toBe(true);
+      expect(session.stderr.text()).toContain("Command progress.");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("preserves command errors and validates nested schemas before starting a command", async () => {
+    const deps = dependencies();
+    let started = 0;
+    deps.runMcpCommand = async () => {
+      started++;
+      return {
+        exitCode: 2,
+        data: { partial: true },
+        error: "Synthetic command failure.",
+      };
+    };
+    const session = await connect(deps);
+    try {
+      for (const [name, input] of [
+        ["validate", { args: { findings: [] } }],
+        ["validate", { args: { findings: "not an array" } }],
+        ["publish_scan", { options: { to: "unsupported" } }],
+        ["publish_scan", { options: { findingsUrl: "http://localhost:3000" } }],
+        ["publish_scan", { options: { workflowId: "synthetic-workflow" } }],
+        ["login", {}],
+        [
+          "login",
+          { args: { action: "status" }, options: { withApiKey: true } },
+        ],
+        ["scans_list", { unexpected: true }],
+      ] as const) {
+        const result = await session.call(name, input).result;
+        expect(result.isError).toBe(true);
+      }
+      expect(started).toBe(0);
+      const failed = await session.call("scans_list").result;
+      expect(failed.isError).toBe(true);
+      expect(failed.structuredContent).toEqual({
+        exitCode: 2,
+        data: { partial: true },
+        error: "Synthetic command failure.",
+      });
+      expect(started).toBe(1);
+      expect((await session.call("info").result).isError).not.toBe(true);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test.each(["command-request", 0, ""])(
+    "cancels command request %s without cancelling another command",
+    async (requestId) => {
+      const deps = dependencies();
+      let announceStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        announceStarted = resolve;
+      });
+      let finishCleanup!: () => void;
+      const cleanup = new Promise<void>((resolve) => {
+        finishCleanup = resolve;
+      });
+      let aborted = false;
+      deps.runMcpCommand = async (_command, input, options) => {
+        if (input.args?.["scanId"] !== "cancel-me")
+          return { exitCode: 0, data: { independent: true } };
+        const cancelled = new Promise<void>((resolve) => {
+          options.signal!.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              resolve();
+            },
+            { once: true },
+          );
+        });
+        announceStarted();
+        await cancelled;
+        await cleanup;
+        return { exitCode: 130, error: "Command cancelled." };
+      };
+      const session = await connect(deps);
+      try {
+        session.call(
+          "scans_rerun",
+          { args: { scanId: "cancel-me" } },
+          requestId,
+        );
+        await started;
+        session.cancel(requestId);
+        const other = await session.call(
+          "scans_show",
+          { args: { scanId: "other" } },
+          "other-request",
+        ).result;
+        expect(other.structuredContent).toMatchObject({
+          exitCode: 0,
+          data: { independent: true },
+        });
+        expect(aborted).toBe(true);
+        let exited = false;
+        session.serving.then(() => {
+          exited = true;
+        });
+        session.input.end();
+        await setImmediate();
+        expect(exited).toBe(false);
+        finishCleanup();
+        await session.close();
+        expect(session.responses.has(requestId)).toBe(false);
+      } finally {
+        finishCleanup();
+        await session.close();
+      }
+    },
+  );
 
   test("runs scans with shared options, noninteractive auth and protocol-safe progress", async () => {
     const calls: unknown[] = [];
@@ -276,7 +598,7 @@ describe("CLI MCP scans", () => {
         expect((await session.call("scan", input).result).isError).toBe(true);
       }
       expect(started).toBe(0);
-      expect(await session.call("patch").result).toMatchObject({
+      expect(await session.call("unknown-command").result).toMatchObject({
         code: -32602,
       });
     } finally {
@@ -428,6 +750,60 @@ describe("CLI MCP scans", () => {
       } finally {
         await session.close();
       }
+    },
+  );
+
+  test.each(["during command", "after shutdown"] as const)(
+    "keeps asynchronous diagnostic failures nonfatal %s",
+    async (phase) => {
+      const pendingWrite =
+        Promise.withResolvers<(error?: Error | null) => void>();
+      const finishCommand = Promise.withResolvers<void>();
+      const stream = new Writable({
+        write(chunk, _encoding, callback) {
+          if (chunk.length > 0) pendingWrite.resolve(callback);
+          else callback();
+        },
+      });
+      const deps = dependencies();
+      deps.runMcpCommand = async (_command, _input, options) => {
+        options.onStderr?.("Command progress.\n");
+        if (phase === "during command") await finishCommand.promise;
+        return { exitCode: 0, data: { completed: true } };
+      };
+      const session = await connect(deps, undefined, stream);
+      let closed = false;
+      try {
+        const call = session.call("scans_list");
+        const finishWrite = await pendingWrite.promise;
+        if (phase === "after shutdown") {
+          expect((await call.result).isError).not.toBe(true);
+          await session.close();
+          closed = true;
+        }
+        const protection = new Promise<number>((resolve) => {
+          stream.once("error", () => resolve(stream.listenerCount("error")));
+        });
+        finishWrite(
+          Object.assign(new Error("Synthetic broken diagnostic pipe."), {
+            code: "EPIPE",
+          }),
+        );
+        expect(await protection).toBeGreaterThan(0);
+        finishCommand.resolve();
+        if (phase === "during command") {
+          expect((await call.result).structuredContent).toMatchObject({
+            exitCode: 0,
+            data: { completed: true },
+          });
+          expect((await session.call("info").result).isError).not.toBe(true);
+        }
+      } finally {
+        finishCommand.resolve();
+        if (!closed) await session.close();
+      }
+      await setImmediate();
+      expect(stream.listenerCount("error")).toBe(0);
     },
   );
 

@@ -47,6 +47,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
 import type { Transport } from "@modelcontextprotocol/server";
+import type {
+  CliMcpInput,
+  CliMcpManifest,
+  runCliMcpCommand,
+} from "./cli-mcp-commands.js";
 import { parse as parseToml } from "smol-toml";
 import {
   classifyConnectionFailure,
@@ -1126,6 +1131,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 
 interface CliDependencies {
   mcpInput?: Readable;
+  runMcpCommand?: typeof runCliMcpCommand;
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
@@ -1576,6 +1582,37 @@ export function exportEnvironment(
   );
 }
 
+function mcpCommandMetadata(command: string) {
+  const readOnly = [
+    "scans list",
+    "scans show",
+    "scans logs",
+    "findings list",
+    "import github",
+    "publish check",
+    "login",
+  ].includes(command);
+  const local = [
+    "scans list",
+    "scans show",
+    "scans logs",
+    "findings list",
+    "findings false-positive",
+    "install-hook",
+    "export",
+    "login",
+    "logout",
+  ].includes(command);
+  return {
+    annotations: {
+      readOnlyHint: readOnly,
+      destructiveHint: !readOnly,
+      idempotentHint: readOnly,
+      openWorldHint: !local,
+    },
+  };
+}
+
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   output: Writable = process.stdout,
@@ -1724,7 +1761,7 @@ export async function main(
   }).command("false-positive", {
     description: "Mark a finding as a false positive for future scans.",
     destructive: true,
-    mcp: false,
+    mcp: mcpCommandMetadata("findings false-positive"),
     args: z.object({
       occurrenceId: z
         .string()
@@ -1758,7 +1795,7 @@ export async function main(
   });
   findingFeedback.command("list", {
     description: "List open findings for a repository across its scans.",
-    mcp: false,
+    mcp: mcpCommandMetadata("findings list"),
     args: z.object({
       repository: z
         .string()
@@ -1800,7 +1837,7 @@ export async function main(
   })
     .command("list", {
       description: "List saved scans for a repository or scan root.",
-      mcp: false,
+      mcp: mcpCommandMetadata("scans list"),
       args: z.object({
         repository: z
           .string()
@@ -1845,7 +1882,7 @@ export async function main(
     })
     .command("show", {
       description: "Show the results and saved configuration for a scan.",
-      mcp: false,
+      mcp: mcpCommandMetadata("scans show"),
       args: z.object({
         scanId: z
           .string()
@@ -1880,7 +1917,7 @@ export async function main(
     })
     .command("logs", {
       description: "Show saved activity for a scan and its workers.",
-      mcp: false,
+      mcp: mcpCommandMetadata("scans logs"),
       args: z.object({
         scanId: z
           .string()
@@ -1930,7 +1967,7 @@ export async function main(
     .command("rerun", {
       description: "Rerun a saved scan with its original configuration.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("scans rerun"),
       args: z.object({
         scanId: z
           .string()
@@ -1991,7 +2028,7 @@ export async function main(
     .command("match", {
       description: "Match findings by root cause across saved scans.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("scans match"),
       args: z.object({
         beforeId: z
           .string()
@@ -2039,7 +2076,7 @@ export async function main(
     .command("compare", {
       description: "Match and compare findings and coverage between scans.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("scans compare"),
       args: z.object({
         beforeId: z
           .string()
@@ -2091,7 +2128,7 @@ export async function main(
   }).command("scan", {
     description: "Publish findings from a completed scan or CSV.",
     destructive: true,
-    mcp: false,
+    mcp: mcpCommandMetadata("publish scan"),
     args: z.object({
       scanDir: z
         .string()
@@ -2677,7 +2714,7 @@ export async function main(
   publication.command("check", {
     description:
       "Check saved scan history and Linear access without creating issues.",
-    mcp: false,
+    mcp: mcpCommandMetadata("publish check"),
     args: z.object({
       scanDir: z.string().describe("Completed scan directory."),
     }),
@@ -2712,7 +2749,7 @@ export async function main(
   }).command("github", {
     description: "Import GitHub code scanning alerts without changing GitHub.",
     destructive: false,
-    mcp: false,
+    mcp: mcpCommandMetadata("import github"),
     args: z.object({
       repository: z
         .string()
@@ -3031,7 +3068,7 @@ export async function main(
     nextStep: "codex-security scan . --dry-run",
   });
   const mcpInstructions =
-    "Use info for SDK metadata and scan to run security scans. Scans use local credentials, can make billable model calls, and write artifacts. Only scan repositories the user has authorized. Patching and other commands remain CLI-only.";
+    "Use info for SDK metadata and scan to run security scans. Other command tools accept args and options matching the CLI. Commands use local credentials and can make billable model calls, modify files or scan history, and publish external issues or pull requests. Only perform operations the user has authorized. Supply explicit inputs for commands that otherwise use a terminal picker. Authentication setup and CLI integration installers remain local operator actions.";
   const scanMcpAnnotations = {
     readOnlyHint: false,
     destructiveHint: true,
@@ -3107,7 +3144,7 @@ export async function main(
     .command("install-hook", {
       description: "Install a Git pre-commit security scan.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("install-hook"),
       args: z.object({
         repository: z
           .string()
@@ -3271,7 +3308,7 @@ export async function main(
       description:
         "Run standard scans for project components and combine the results.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("scan-components"),
       args: z.object({
         repository: z
           .string()
@@ -3518,7 +3555,7 @@ export async function main(
       description:
         "Discover repositories and run resumable bulk security scans.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("bulk-scan"),
       args: z.object({
         input: z
           .string()
@@ -3710,7 +3747,7 @@ export async function main(
       description:
         "Export findings from a completed scan as CSV, JSON, or SARIF.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("export"),
       args: z.object({
         scanDir: z
           .string()
@@ -3777,7 +3814,7 @@ export async function main(
     .command("validate", {
       description: "Validate one or more candidate security findings.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("validate"),
       args: z.object({
         "findings...": z
           .string()
@@ -3814,7 +3851,7 @@ export async function main(
       description:
         "Verify existing security fixes without changing the repository.",
       destructive: false,
-      mcp: false,
+      mcp: mcpCommandMetadata("verify-fix"),
       args: z.object({
         "findings...": z
           .string()
@@ -4030,7 +4067,7 @@ export async function main(
     .command("patch", {
       description: "Patch one or more security issues.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("patch"),
       args: z.object({
         "issues...": z
           .string()
@@ -4289,7 +4326,7 @@ export async function main(
     .command("login", {
       description: "Sign in with ChatGPT or store credentials.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("login"),
       args: z.object({
         action: z.enum(["status"]).optional().describe("Show login status."),
       }),
@@ -4394,7 +4431,7 @@ export async function main(
     .command("logout", {
       description: "Remove the stored sign-in.",
       destructive: true,
-      mcp: false,
+      mcp: mcpCommandMetadata("logout"),
       async run() {
         const credentialHome =
           dependencies.prepareAuthenticationHome !== undefined
@@ -4468,18 +4505,26 @@ export async function main(
 
   if (argv.includes("--mcp")) {
     // incur's MCP adapter does not pass request cancellation to commands.
-    const [{ McpServer }, { StdioServerTransport }] = await Promise.all([
-      import("@modelcontextprotocol/server"),
-      import("@modelcontextprotocol/server/stdio"),
-    ]);
+    const [{ McpServer, fromJsonSchema }, { StdioServerTransport }, commands] =
+      await Promise.all([
+        import("@modelcontextprotocol/server"),
+        import("@modelcontextprotocol/server/stdio"),
+        import("./cli-mcp-commands.js"),
+      ]);
     const server = new McpServer(
       { name: "codex-security", version: VERSION },
       { instructions: mcpInstructions },
     );
-    const pending = new Set<Promise<ScanOutcome>>();
+    const pending = new Set<Promise<unknown>>();
     // The SDK ignores cancellation for request IDs 0 and "". Track those
     // requests before async tool validation so immediate cancellation works too.
-    const scanCancellation = new Map<string | number, AbortController>();
+    const requestCancellation = new Map<string | number, AbortController>();
+    const requestSignal = (id: string | number, signal: AbortSignal) => {
+      const cancellation = requestCancellation.get(id);
+      return cancellation === undefined
+        ? signal
+        : AbortSignal.any([signal, cancellation.signal]);
+    };
     server.registerTool(
       "info",
       {
@@ -4532,12 +4577,7 @@ export async function main(
             errorOutput,
             dependencies,
             false,
-            scanCancellation.has(context.mcpReq.id)
-              ? AbortSignal.any([
-                  context.mcpReq.signal,
-                  scanCancellation.get(context.mcpReq.id)!.signal,
-                ])
-              : context.mcpReq.signal,
+            requestSignal(context.mcpReq.id, context.mcpReq.signal),
           );
           pending.add(operation);
           try {
@@ -4553,6 +4593,91 @@ export async function main(
         };
       },
     );
+    let manifest = "";
+    await cli.serve(["--llms-full", "--format", "json"], {
+      env: dependencies.environment,
+      stdout: (value) => {
+        manifest += value;
+      },
+      exit: (code) => {
+        throw new Error(`CLI command discovery exited with status ${code}.`);
+      },
+    });
+    const commandOutput = z.object({
+      exitCode: z.number(),
+      data: z.unknown().optional(),
+      output: z.string().optional(),
+      error: z.string().optional(),
+      diagnostics: z.string().optional(),
+    });
+    const serverDirectory = dependencies.currentDirectory();
+    const commandEnvironment = { ...dependencies.environment };
+    for (const [name, value] of Object.entries(commandEnvironment)) {
+      const configured = value?.trim();
+      if (
+        configured &&
+        (["CODEX_SECURITY_STATE_DIR", "CODEX_HOME", "CODEX_CLI_PATH"].includes(
+          name.toUpperCase(),
+        ) ||
+          (name.toUpperCase() === "PYTHON" &&
+            (configured.includes("/") || configured.includes("\\"))))
+      ) {
+        // A tool's repository must not change the server's state or runtime.
+        commandEnvironment[name] = resolve(
+          serverDirectory,
+          expandHome(configured, dependencies.environment),
+        );
+      }
+    }
+    for (const command of commands.buildCliMcpCommands(
+      JSON.parse(manifest) as CliMcpManifest,
+    )) {
+      server.registerTool(
+        command.name,
+        {
+          description: command.description,
+          inputSchema: fromJsonSchema(command.inputSchema),
+          outputSchema: commandOutput,
+          ...mcpCommandMetadata(command.path.join(" ")),
+        },
+        async (value, context) => {
+          const input = value as CliMcpInput;
+          const issues = input.args?.["issues"];
+          const jsonOutput =
+            command.name === "patch"
+              ? input.options?.["resumePr"] !== undefined ||
+                input.options?.["scan"] !== undefined ||
+                (Array.isArray(issues) &&
+                  issues.length > 0 &&
+                  issues.every(isFindingIdentifier))
+              : command.jsonOutput;
+          const operation = (
+            dependencies.runMcpCommand ?? commands.runCliMcpCommand
+          )(command, input, {
+            executable: process.execPath,
+            entrypoint: fileURLToPath(import.meta.url),
+            cwd: resolveCliPath(serverDirectory, input.workingDirectory ?? "."),
+            environment: commandEnvironment,
+            signal: requestSignal(context.mcpReq.id, context.mcpReq.signal),
+            jsonOutput,
+            onStderr: (chunk) => {
+              errorOutput.write(chunk);
+            },
+          });
+          pending.add(operation);
+          try {
+            const outcome = await operation;
+            return {
+              content: [{ type: "text", text: JSON.stringify(outcome) }],
+              structuredContent: { ...outcome },
+              ...(outcome.exitCode === 0 ? {} : { isError: true }),
+            };
+          } finally {
+            pending.delete(operation);
+          }
+        },
+      );
+    }
     const input = dependencies.mcpInput ?? process.stdin;
     const protocolOutput =
       output instanceof NodeWritable
@@ -4570,17 +4695,16 @@ export async function main(
             "id" in message &&
             (message.id === 0 || message.id === "") &&
             "method" in message &&
-            message.method === "tools/call" &&
-            message.params?.["name"] === "scan"
+            message.method === "tools/call"
           ) {
-            scanCancellation.set(message.id, new AbortController());
+            requestCancellation.set(message.id, new AbortController());
           } else if (
             "method" in message &&
             message.method === "notifications/cancelled"
           ) {
             const requestId = message.params?.["requestId"];
             if (requestId === 0 || requestId === "") {
-              scanCancellation.get(requestId)?.abort();
+              requestCancellation.get(requestId)?.abort();
             }
           }
           transport.onmessage?.(message);
@@ -4596,8 +4720,8 @@ export async function main(
           message.id !== undefined &&
           message.id !== null
         ) {
-          const cancellation = scanCancellation.get(message.id);
-          scanCancellation.delete(message.id);
+          const cancellation = requestCancellation.get(message.id);
+          requestCancellation.delete(message.id);
           if (cancellation?.signal.aborted) return;
         }
         await stdio.send(message);
@@ -4633,6 +4757,15 @@ export async function main(
     // Writes can fail after EOF and after main returns. Keep the error handler
     // for the output stream's lifetime, without waiting on a blocked writer.
     protocolOutput.on("error", stop);
+    if (errorOutput instanceof NodeWritable) {
+      // Diagnostics can fail after a command or the server has returned too.
+      // Keep these failures nonfatal until the diagnostic stream closes.
+      const ignoreDiagnosticError = (): void => {};
+      errorOutput.on("error", ignoreDiagnosticError);
+      errorOutput.once("close", () => {
+        errorOutput.off("error", ignoreDiagnosticError);
+      });
+    }
     dependencies.addSignalListener("SIGINT", onInterrupt);
     dependencies.addSignalListener("SIGTERM", onTerminate);
     try {

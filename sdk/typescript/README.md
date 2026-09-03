@@ -989,8 +989,8 @@ command manifest, `scan --schema --format json` for a command schema, and
 `skills add` syncs agent skills; `mcp add` registers the CLI as an MCP server.
 Start the server with `codex-security --mcp` (or
 `npx --yes @openai/codex-security --mcp`). It uses stdin/stdout and exposes
-`info` for read-only metadata and `scan` for security scans. For example, an
-MCP client can launch it with:
+`info` for read-only metadata, `scan` for security scans, and the application
+command tools listed below. For example, an MCP client can launch it with:
 
 ```json
 {
@@ -1013,8 +1013,9 @@ working directory. First check local inputs without starting a model:
 ```
 
 Then call `scan` with `dryRun` omitted or false to run the scan. Standard,
-Deep, path, and Git diff scans are supported. MCP does not support `patch`,
-`patchSeverity`, or `createPr`; patching and other commands remain CLI-only.
+Deep, path, and Git diff scans are supported. The `scan` tool does not accept
+`patch`, `patchSeverity`, or `createPr`; use the separate `patch` tool after
+scanning.
 
 Scans run noninteractively with the same local credentials and `auth`
 selection as the CLI. Sign in with `codex-security login` before starting the
@@ -1035,6 +1036,87 @@ the client or stopping the server cancels active scans and waits for cleanup;
 partial artifacts remain available at the output directory. Canceled MCP
 requests do not receive a result. This server is separate from the bundled
 security plugin's MCP server used internally during scans.
+
+The following additional application commands are available as MCP tools:
+
+| CLI command                              | MCP tool                                 | Behavior                                                                    |
+| ---------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------- |
+| `scan-components`                        | `scan-components`                        | Plan or scan explicit project components.                                   |
+| `bulk-scan`                              | `bulk-scan`                              | Run a resumable batch from an explicit repository CSV.                      |
+| `scans list`, `scans show`, `scans logs` | `scans_list`, `scans_show`, `scans_logs` | Read saved scans and activity.                                              |
+| `scans rerun`                            | `scans_rerun`                            | Run a saved scan again.                                                     |
+| `scans match`, `scans compare`           | `scans_match`, `scans_compare`           | Match findings and compare scans; may call models and persist matches.      |
+| `findings list`                          | `findings_list`                          | Read saved findings.                                                        |
+| `findings false-positive`                | `findings_false-positive`                | Update finding triage and future scan feedback.                             |
+| `import github`                          | `import_github`                          | Read GitHub code scanning alerts.                                           |
+| `export`                                 | `export`                                 | Export CSV, JSON, or SARIF to a file or tool output.                        |
+| `validate`, `verify-fix`                 | `validate`, `verify-fix`                 | Validate findings or verify existing fixes.                                 |
+| `patch`                                  | `patch`                                  | Patch findings; optionally assess risk or create a draft PR.                |
+| `publish check`, `publish scan`          | `publish_check`, `publish_scan`          | Check publication inputs or publish findings to the documented destination. |
+| `install-hook`                           | `install-hook`                           | Install the pre-commit scan hook.                                           |
+| `login status`, `logout`                 | `login`, `logout`                        | Inspect or remove the server's stored sign-in.                              |
+
+These tools use `args` for positional arguments and `options` for named CLI
+options, with camelCase names and unchanged CLI defaults. Variadic positional
+arguments become arrays without the trailing `...`. For example:
+
+```json
+{ "args": { "scanId": "scan_example_001" } }
+```
+
+calls `scans_show`, and:
+
+```json
+{
+  "args": { "scanDir": "/path/to/completed-scan" },
+  "options": { "exportFormat": "csv", "output": "-" }
+}
+```
+
+calls `export`. A `validate` call uses
+`{ "args": { "findings": ["/path/to/finding.md"] } }`. Keeping `args` and
+`options` separate preserves commands such as `publish scan`, whose positional
+`scanDir` and repeated `--scan-dir` option have different meanings.
+
+Set the optional outer `workingDirectory` field when the command should run in
+a different repository. It defaults to the server's working directory;
+relative values resolve from that directory. For example, call `validate` with
+`{ "workingDirectory": "/path/to/repository", "args": { "findings": ["/path/to/finding.md"] } }`.
+This sets only that command process's directory and is not a new CLI flag.
+Relative paths in `CODEX_SECURITY_STATE_DIR`, `CODEX_HOME`, `CODEX_CLI_PATH`,
+and `PYTHON` resolve from the server's directory, keeping its state, credentials,
+and configured executables shared across command working directories.
+A bare `PYTHON` name such as `python3` still uses `PATH`.
+
+The new tools return `{ "exitCode": 0, "data": ... }` for structured CLI
+results, including arrays. Commands that produce plain text or exported
+content return `output` instead of `data`; successful commands with no stdout
+return just their exit code. CLI diagnostics are included as `diagnostics`
+and also sent to stderr. Nonzero exits set `isError`, include an `error`, and
+retain any result or output. No output is silently truncated.
+
+Each command runs as a separate CLI process with the selected working directory
+and the server's environment, credentials, and filesystem access. Request cancellation or a
+disconnect requests termination of that command's process tree and waits for the
+CLI's own subprocess cleanup to finish. On Windows, termination uses the existing
+process-tree termination behavior. Completed artifacts are retained, but cancellation
+does not roll back file changes, credential changes, or external publication.
+
+Supply explicit inputs instead of relying on terminal pickers: a repository CSV
+for `bulk-scan`, scan identifiers/directories for publication, and component
+selection for `scan-components`. As with the CLI, positional inputs beginning
+with `-` cannot be passed as literal arguments; use a file for such finding text,
+or prefix a relative file path with `./`. A later positional argument cannot be
+supplied while an earlier one is omitted.
+
+For login status, call `login` with `{ "args": { "action": "status" } }`.
+Browser/device sign-in and credential entry must be completed with the CLI
+before using the server; MCP transport input is never used as credential stdin.
+Shell completions and the `mcp`/`skills` installation helpers remain CLI-only.
+They configure the local client rather than execute security workflows.
+The findings service (`serve`), deduplication (`dedupe`), and publication to
+Cloud or custom findings services also remain CLI-only; `publish_scan` exposes
+Linear publication.
 
 ## Findings service (preview)
 
