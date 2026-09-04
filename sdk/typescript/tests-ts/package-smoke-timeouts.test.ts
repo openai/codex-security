@@ -21,10 +21,10 @@ describe("npm package smoke timeouts", () => {
     }
   });
 
-  test("allows the Windows npm install to complete", () => {
+  test("allows Windows package checks to follow a slow npm install", () => {
     expect(packageSmokeTimeouts("win32")).toEqual({
       commandTimeoutMs: 180_000,
-      processTimeoutMs: 210_000,
+      processTimeoutMs: 390_000,
     });
   });
 
@@ -33,7 +33,7 @@ describe("npm package smoke timeouts", () => {
       const { commandTimeoutMs, processTimeoutMs } =
         packageSmokeTimeouts(platform);
 
-      expect(processTimeoutMs).toBe(commandTimeoutMs + 30_000);
+      expect(processTimeoutMs).toBeGreaterThan(commandTimeoutMs);
     }
   });
 
