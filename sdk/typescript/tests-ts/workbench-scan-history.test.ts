@@ -722,6 +722,60 @@ print(json.dumps({'withLinks': with_links, 'withoutLinks': collect_history()}))
   });
 });
 
+test("resolves missing findings only inside a complete later scope", async () => {
+  const python = await resolvePluginPython();
+  const probe = [
+    "import argparse, json, sqlite3, sys",
+    "sys.path.insert(0, sys.argv[1])",
+    "import workbench_scan_history as history",
+    "db = sqlite3.connect(':memory:')",
+    "db.row_factory = sqlite3.Row",
+    "db.executescript('''",
+    "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT);",
+    "CREATE TABLE scan_comparison_matches (before_occurrence_id TEXT, after_occurrence_id TEXT, before_scan_id TEXT, after_scan_id TEXT);",
+    "CREATE TABLE finding_occurrences (id TEXT, finding_id TEXT, scan_id TEXT, severity TEXT, title TEXT);",
+    "CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);",
+    "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
+    "''')",
+    "scans = {name: {'id': name, 'status': 'complete', 'target_id': 'target', 'target_path': '/synthetic/repository'} for name in ('before', 'after')}",
+    "paths = ['src/parser/input.ts', 'src/parser-other/input.ts', 'src/parser/generated/code.ts', 'src/parser/test_fixture.ts']",
+    "for index, path in enumerate(paths):",
+    "    key = str(index)",
+    "    db.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?)', (key, key, 'before', 'high', 'Synthetic finding'))",
+    "    db.execute('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', (key, path, 'root_control', 0))",
+    "coverage = {'mode': 'scoped_path', 'completeness': 'complete', 'includePaths': ['src/parser'], 'excludePaths': ['src/parser/generated'], 'explicitExclusions': [{'pattern': 'src/parser/test_*', 'reason': 'Excluded test fixtures'}]}",
+    "args = argparse.Namespace(before_scan_id='before', after_scan_id='after')",
+    "def compare():",
+    "    result = history.compare_scans(db, args, require_scan=lambda _, key: scans[key], read_coverage=lambda _: coverage)",
+    "    return {item['path']: item['status'] for item in result['findings']}",
+    "complete = compare()",
+    "coverage['completeness'] = 'partial'",
+    "print(json.dumps({'complete': complete, 'partial': compare()}))",
+  ].join("\n");
+  const result = await runCodexCommand(
+    { command: python },
+    ["-I", "-B", "-", join(PLUGIN_ROOT, "scripts")],
+    process.env,
+    probe,
+    AbortSignal.timeout(10_000),
+  );
+  expect(result.exitCode, result.stderr).toBe(0);
+  expect(result.stderr).toBe("");
+  const output = JSON.parse(result.stdout);
+  expect(output.complete).toEqual({
+    "src/parser/input.ts": "resolved",
+    "src/parser-other/input.ts": "unknown",
+    "src/parser/generated/code.ts": "unknown",
+    "src/parser/test_fixture.ts": "unknown",
+  });
+  expect(Object.values(output.partial)).toEqual([
+    "unknown",
+    "unknown",
+    "unknown",
+    "unknown",
+  ]);
+});
+
 test("loads oversized comparison matches from stdin", async () => {
   const python = await resolvePluginPython();
 

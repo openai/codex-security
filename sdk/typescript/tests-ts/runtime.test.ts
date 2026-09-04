@@ -1707,9 +1707,9 @@ describe("plugin runtime preparation", () => {
     }
   });
 
-  test("refreshes the prior bundle before using new runtime helpers", async () => {
+  test("refreshes cached bundled plugins before a scan", async () => {
     const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "0.1.22");
+    const previous = await plugin(join(root, "previous"), "0.1.60");
     await writeFile(
       join(previous, ".mcp.json"),
       JSON.stringify({
@@ -1752,7 +1752,7 @@ describe("plugin runtime preparation", () => {
     };
 
     expect((await bootstrapPlugin(home, previous, options)).version).toBe(
-      "0.1.22",
+      "0.1.60",
     );
     const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
     const configuration = JSON.parse(
@@ -1762,8 +1762,22 @@ describe("plugin runtime preparation", () => {
       ),
     ) as { mcpServers: Record<string, { env_vars: string[] }> };
 
+    expect(
+      await readFile(
+        join(
+          marketplace,
+          "plugins",
+          "codex-security",
+          "references",
+          "core-scan.md",
+        ),
+        "utf8",
+      ),
+    ).toBe(
+      await readFile(join(PLUGIN_ROOT, "references", "core-scan.md"), "utf8"),
+    );
     expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
-    expect(upgraded.version).not.toBe("0.1.22");
+    expect(upgraded.version).not.toBe("0.1.60");
     expect(configuration.mcpServers["codex-security"]?.env_vars).toContain(
       "CODEX_SECURITY_SURFACE",
     );

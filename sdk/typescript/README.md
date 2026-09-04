@@ -282,9 +282,16 @@ runs local preflight checks.
 
 ### Scan options and output
 
-`--path` scopes a scan to one or more paths, `--diff` scans committed changes,
-and `--working-tree` scans staged and unstaged changes. Deep scans support
-repository and path targets.
+`--path` selects one or more files or directories. A completed scoped scan
+covers those paths, not the rest of the repository. `--diff` scans committed
+changes, and `--working-tree` scans staged and unstaged changes. Deep scans
+support repository and path targets. Human-readable output quotes ambiguous
+path names; JSON retains the original strings.
+
+`coverage.deferred` records unfinished requested work and blocks completion;
+`coverage.openQuestions` records optional follow-up. Static-only review can be
+complete without live reproduction. A completed `scan . --path src/parser`
+exits 0 in report-only mode even when other paths were not selected.
 
 Working-tree snapshots include files from untracked nested Git repositories.
 Initialized submodules must be clean and checked out at the commit recorded by
@@ -1047,6 +1054,9 @@ npx @openai/codex-security scan . \
 Scan exit codes are `0` for a completed report-only scan or passing policy,
 `1` for a policy violation, `2` for invalid input, incomplete coverage, or a
 runtime/export error, `130` for interruption, and `143` for termination.
+Exit 2 can still include a valid partial report on stdout and a coverage warning
+on stderr. Check the manifest, coverage completeness, requested paths, and
+deferred work before treating it as a missing report.
 JSON scans do not use interactive controls. `validate`, `login`, and `logout`
 reject `--json`.
 

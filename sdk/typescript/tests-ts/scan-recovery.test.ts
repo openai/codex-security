@@ -63,11 +63,18 @@ type ScanSummary = {
 
 type SarifDocument = {
   runs: Array<{
-    properties: { codexSecurityCoverageCompleteness?: string };
+    automationDetails: { id: string };
+    properties: {
+      codexSecurityCoverageCompleteness?: string;
+      codexSecurityCoverageMode?: string;
+      codexSecurityIncludePaths?: string[];
+      codexSecurityExcludePaths?: string[];
+      codexSecurityExplicitExclusions?: unknown[];
+    };
     results: Array<{ properties: { severity: string } }>;
     invocations?: Array<{
       executionSuccessful: boolean;
-      toolExecutionNotifications: Array<{
+      toolExecutionNotifications?: Array<{
         level: string;
         message: { text: string };
       }>;
@@ -123,7 +130,13 @@ async function workbench(
 
 async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
-  recipeFromStdin = false,
+  {
+    paths,
+    recipeFromStdin = false,
+  }: {
+    paths?: readonly string[];
+    recipeFromStdin?: boolean;
+  } = {},
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
@@ -188,7 +201,7 @@ async function startDraftScan(
     config: {},
     mode: "standard",
     repository: target,
-    target: { kind: "repository", paths: [] },
+    target: { kind: paths ? "paths" : "repository", paths: paths ?? [] },
   });
   const registration = await workbench(
     fixture,
@@ -250,8 +263,220 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("malformed scan artifact recovery", () => {
+  test("seals complete scoped reviews with optional follow-up and exports their scope", async () => {
+    const fixture = await startDraftScan("directory", {
+      paths: ["src", "src/extract.py"],
+    });
+    const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+    const manifest = await readJson<{
+      scan: { scope: Record<string, unknown> };
+    }>(manifestPath);
+    Object.assign(manifest.scan.scope, {
+      validationMode: "static source review",
+      runtimeStatus: "not requested",
+      limitations: ["Live testing was outside the requested review."],
+    });
+    await writeJson(manifestPath, manifest);
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    coverage["openQuestions"] = [
+      { question: "Consider a separate deployment review." },
+    ];
+    coverage.explicitExclusions = [
+      {
+        pattern: "src/generated/**",
+        reason: "Generated source was excluded by policy.",
+      },
+    ];
+    await writeJson(coveragePath, coverage);
+
+    const completed = await completeScan(fixture);
+    expect(completed.progress.status).toBe("complete");
+    expect(await readJson<CoverageDocument>(coveragePath)).toMatchObject({
+      completeness: "complete",
+      mode: "scoped_path",
+      includePaths: ["src", "src/extract.py"],
+      openQuestions: coverage["openQuestions"],
+    });
+    const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
+    expect(report).toContain("Consider a separate deployment review.");
+    const sarif = await readJson<SarifDocument>(
+      join(fixture.scanDir, "exports", "results.sarif"),
+    );
+    expect(sarif.runs[0]).toMatchObject({
+      automationDetails: { id: fixture.scanId },
+      properties: {
+        codexSecurityCoverageMode: "scoped_path",
+        codexSecurityCoverageCompleteness: "complete",
+        codexSecurityIncludePaths: ["src", "src/extract.py"],
+        codexSecurityExcludePaths: [],
+        codexSecurityExplicitExclusions: coverage.explicitExclusions,
+      },
+    });
+    expect(sarif.runs[0]?.invocations).toEqual([{ executionSuccessful: true }]);
+
+    const history = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect(history["scan"]).toMatchObject({
+      coverage: {
+        mode: "scoped_path",
+        completeness: "complete",
+        includePaths: ["src", "src/extract.py"],
+        excludePaths: [],
+        explicitExclusions: coverage.explicitExclusions,
+      },
+    });
+    expect(history["workspace"]).not.toHaveProperty("results.coverage");
+    for (const artifactPath of [coveragePath, manifestPath]) {
+      const sealed = await readFile(artifactPath, "utf8");
+      for (const modified of [`${sealed}\n`, "{}\n"]) {
+        await writeFile(artifactPath, modified);
+        try {
+          const unavailable = await workbench(fixture, [
+            "get-scan",
+            "--scan-id",
+            fixture.scanId,
+          ]);
+          expect(
+            (unavailable["scan"] as Record<string, unknown>)["coverage"],
+          ).toBeUndefined();
+          expect(await readFile(artifactPath, "utf8")).toBe(modified);
+        } finally {
+          await writeFile(artifactPath, sealed);
+        }
+      }
+    }
+  });
+
+  test("reads sealed history coverage without loading unrelated findings", async () => {
+    const fixture = await startDraftScan("directory", { paths: ["src"] });
+    await completeScan(fixture);
+    await writeFile(join(fixture.scanDir, "findings.json"), "not available\n");
+    const history = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect(history["scan"]).toMatchObject({
+      coverage: {
+        mode: "scoped_path",
+        completeness: "complete",
+        includePaths: ["src"],
+        excludePaths: [],
+      },
+    });
+  });
+
+  test("keeps saved history when scan directory resolution finds a symlink loop", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import argparse, json, pathlib, runpy, sys",
+      "from unittest import mock",
+      "namespace = runpy.run_path(str(pathlib.Path(sys.argv[1]) / 'scripts' / 'workbench_db.py'))",
+      "get_scan = namespace['get_scan']",
+      "args = argparse.Namespace(scan_id='scan-1', occurrence_id=None)",
+      "context = {'scan': {'progress': {'status': 'complete'}, 'findingCount': 2}}",
+      "scan = {'seal_manifest_digest': 'sealed', 'scan_dir': 'scan'}",
+      "resolve = mock.Mock(side_effect=RuntimeError('Symlink loop'))",
+      "with mock.patch.dict(get_scan.__globals__, {'scan_context': lambda *_: context, 'require_scan': lambda *_: scan, 'require_canonical_scan_directory': resolve}):",
+      "    result = get_scan(None, args)",
+      "resolve.assert_called_once_with(pathlib.Path('scan'))",
+      "print(json.dumps(result))",
+    ].join("\n");
+    const result = spawnSync(python!, ["-I", "-B", "-c", script, PLUGIN_ROOT], {
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      scan: { progress: { status: "complete" }, findingCount: 2 },
+    });
+  });
+
+  test("does not attach completed coverage to an earlier running status", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import argparse, json, pathlib, runpy, sys",
+      "from unittest import mock",
+      "namespace = runpy.run_path(str(pathlib.Path(sys.argv[1]) / 'scripts' / 'workbench_db.py'))",
+      "get_scan = namespace['get_scan']",
+      "args = argparse.Namespace(scan_id='scan-1', occurrence_id=None)",
+      "coverage = {'completeness': 'complete'}",
+      "def read_status(status):",
+      "    context = {'scan': {'progress': {'status': status}}}",
+      "    with mock.patch.dict(get_scan.__globals__, {'scan_context': lambda *_: context, 'require_scan': lambda *_: {'status': 'complete'}, 'coverage_summary_for_history': lambda _: coverage}):",
+      "        return get_scan(None, args)",
+      "print(json.dumps([read_status('running'), read_status('complete')]))",
+    ].join("\n");
+    const result = spawnSync(python!, ["-I", "-B", "-c", script, PLUGIN_ROOT], {
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([
+      { scan: { progress: { status: "running" } } },
+      {
+        scan: {
+          progress: { status: "complete" },
+          coverage: { completeness: "complete" },
+        },
+      },
+    ]);
+  });
+
+  test.each(["deferred", "surface"] as const)(
+    "keeps an in-scope %s blocker separate from optional follow-up",
+    async (kind) => {
+      const fixture = await startDraftScan("directory", { paths: ["src"] });
+      const coveragePath = join(fixture.scanDir, "coverage.json");
+      const coverage = await readJson<CoverageDocument>(coveragePath);
+      const blocker =
+        "An essential in-scope source question remains unresolved.";
+      const optionalQuestion = "Consider a separate deployment review.";
+      coverage["openQuestions"] = [{ question: optionalQuestion }];
+      if (kind === "deferred") {
+        coverage.deferred = [
+          {
+            id: "source-review",
+            reason: blocker,
+            paths: ["src/extract.py"],
+          },
+        ];
+      } else {
+        Object.assign((coverage.surfaces as CoverageSurface[])[0]!, {
+          disposition: "needs_follow_up",
+          notes: blocker,
+        });
+      }
+      await writeJson(coveragePath, coverage);
+      await completeScan(fixture);
+
+      expect(
+        (await readJson<CoverageDocument>(coveragePath)).completeness,
+      ).toBe("partial");
+      const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
+      const blockerPosition = report.indexOf(blocker);
+      const optionalPosition = report.indexOf(optionalQuestion);
+      expect(blockerPosition).toBeGreaterThan(0);
+      expect(optionalPosition).toBeGreaterThan(blockerPosition);
+      const history = await workbench(fixture, [
+        "get-scan",
+        "--scan-id",
+        fixture.scanId,
+      ]);
+      expect(history["scan"]).toMatchObject({
+        coverage: { completeness: "partial" },
+      });
+    },
+  );
+
   test("registers a Unicode scan recipe delivered through stdin", async () => {
-    const fixture = await startDraftScan("directory", true);
+    const fixture = await startDraftScan("directory", {
+      recipeFromStdin: true,
+    });
     expect(fixture.registration).toMatchObject({
       scanDir: fixture.scanDir,
       targetRevision: "unversioned",
@@ -1053,7 +1278,6 @@ describe("malformed scan artifact recovery", () => {
       { id: "discarded-finding-1", reason: completed.warnings[0] },
     ]);
     const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
-    expect(report).toContain("| Coverage | partial |");
     expect(report).toContain("Skipped malformed finding 1");
     const sarif = await readJson<SarifDocument>(
       join(fixture.scanDir, "exports", "results.sarif"),
@@ -1063,7 +1287,7 @@ describe("malformed scan artifact recovery", () => {
     );
     expect(sarif.runs[0]?.invocations).toEqual([
       {
-        executionSuccessful: true,
+        executionSuccessful: false,
         toolExecutionNotifications: [
           { level: "warning", message: { text: completed.warnings[0]! } },
         ],

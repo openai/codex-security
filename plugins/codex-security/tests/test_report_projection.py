@@ -630,7 +630,7 @@ def test_projection_escapes_markdown_link_syntax_in_finding_title() -> None:
     assert "[Parser ](https://example.com) [boundary](" not in markdown
 
 
-def test_projection_normalizes_target_and_scope_paths() -> None:
+def test_projection_preserves_scope_paths_without_injecting_headings() -> None:
     manifest, findings, coverage = canonical_documents()
     manifest["scan"]["target"]["displayName"] = "repo\n## Injected target heading"
     manifest["scan"]["scope"]["includePaths"] = ["src\n## Injected path heading"]
@@ -641,7 +641,7 @@ def test_projection_normalizes_target_and_scope_paths() -> None:
     assert "\n## Injected target heading" not in markdown
     assert "\n## Injected path heading" not in markdown
     assert "# Security Review: repo ## Injected target heading" in markdown
-    assert "- Included paths: src ## Injected path heading" in markdown
+    assert r'- Included paths: `"src\n## Injected path heading"`' in markdown
 
 
 def test_projection_includes_exact_target_identity() -> None:
@@ -742,16 +742,16 @@ def test_projection_explains_unvalidated_findings_after_cost_limit(reason: str) 
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
     assert "| Reportable findings | 0 |" in markdown
-    assert "| Coverage | partial |" in markdown
+    assert "| Coverage | partial for requested scope |" in markdown
     assert (
         "No findings were validated before the scan reached its cost limit. "
-        "Review the deferred candidates in Open Questions And Follow Up."
+        "Review the deferred candidates in Incomplete Requested Work."
     ) in markdown
     assert "No reportable findings survived" not in markdown
-    assert "## Open Questions And Follow Up" in markdown
+    assert "## Incomplete Requested Work" in markdown
     assert reason in markdown
     assert "Review deferred unit candidate-parser" in markdown
-    assert "Paths: src/parser.py." in markdown
+    assert "Paths: `src/parser.py`" in markdown
 
 
 @pytest.mark.parametrize(
@@ -801,13 +801,13 @@ def test_projection_explains_timeout_before_source_review() -> None:
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
     assert "| Reportable findings | 0 |" in markdown
-    assert "| Coverage | partial |" in markdown
+    assert "| Coverage | partial for requested scope |" in markdown
     assert (
         "No source review completed before the configured time limit. "
         "No vulnerability conclusion can be drawn."
     ) in markdown
     assert "No reportable findings survived" not in markdown
-    assert "## Open Questions And Follow Up" in markdown
+    assert "## Incomplete Requested Work" in markdown
 
 
 @pytest.mark.parametrize(
@@ -866,8 +866,14 @@ def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
     assert "Is production authentication enabled?" in markdown
     assert "Parser review incomplete." in markdown
     assert "Review deferred unit parser-review" in markdown
-    assert "Paths: src/parser.py." in markdown
+    assert "Paths: `src/parser.py`" in markdown
     assert "Surfaces: parser-surface." in markdown
+    assert (
+        markdown.index("## Incomplete Requested Work")
+        < markdown.index("Parser review incomplete.")
+        < markdown.index("## Open Questions And Follow Up")
+        < markdown.index("Is production authentication enabled?")
+    )
 
 
 def test_projection_includes_surface_evidence_receipts() -> None:

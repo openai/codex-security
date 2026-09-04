@@ -1,5 +1,9 @@
 import { basename, relative } from "node:path";
 import type { JsonObject } from "./config.js";
+import {
+  formatCoverageScopeParts,
+  type CoverageSummary,
+} from "./coverage-presentation.js";
 
 export type HistoryCommand =
   | "list"
@@ -80,11 +84,18 @@ export function renderScanHistory(
     `  ${accent("━".repeat(width - 4))}`,
   ];
 
-  const wrap = (value: string, indent: number, prefix?: string): void => {
+  const wrap = (
+    value: string | readonly string[],
+    indent: number,
+    prefix?: string,
+  ): void => {
     const available = width - indent - 2;
     let line = "";
     let first = true;
-    for (const word of clean(value).split(/\s+/)) {
+    // Scope paths arrive as whole entries because whitespace can be part of a filename.
+    const words =
+      typeof value === "string" ? clean(value).split(/\s+/) : value.map(clean);
+    for (const word of words) {
       if (line.length > 0 && line.length + word.length + 1 > available) {
         lines.push(`${first && prefix ? prefix : " ".repeat(indent)}${line}`);
         first = false;
@@ -201,7 +212,7 @@ export function renderScanHistory(
     );
     if (wide) {
       lines.push(
-        `  ${strong("SCAN".padEnd(36))} ${strong("DATE".padEnd(10))} ${strong("MODE".padEnd(8))}${multipleRepositories ? ` ${strong("REPOSITORY".padEnd(18))}` : ""} ${strong("FINDINGS")} ${strong("STATUS")}`,
+        `  ${strong("SCAN".padEnd(36))} ${strong("DATE".padEnd(10))} ${strong("MODE".padEnd(8))}${multipleRepositories ? ` ${strong("REPOSITORY".padEnd(18))}` : ""} ${strong("FINDINGS")} ${strong("EXECUTION")}`,
       );
     }
     for (const scan of scans) {
@@ -209,7 +220,7 @@ export function renderScanHistory(
       const complete = status === "complete";
       const statusColor = complete ? 32 : status === "running" ? 36 : 31;
       const statusLabel = paint(
-        `${complete ? "✓" : "●"} ${status.toUpperCase()}`,
+        complete ? "✓ FINISHED" : `● ${status.toUpperCase()}`,
         statusColor,
       );
       const started = clean(scan["startedAt"]).slice(0, 10);
@@ -244,8 +255,21 @@ export function renderScanHistory(
       status === "complete" ? 32 : status === "running" ? 36 : 31;
     lines.push(
       `  ${strong(clean(basename(result["targetPath"] as string)))}  ${accent("·")}  ${clean(result["scanId"])}`,
-      `  ${paint(`${status === "complete" ? "✓" : "●"} ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
+      `  ${paint(status === "complete" ? "✓ FINISHED" : `● ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
     );
+    const canonicalCoverage = result["coverage"] as CoverageSummary | undefined;
+    if (canonicalCoverage) {
+      wrap(
+        formatCoverageScopeParts(canonicalCoverage),
+        11,
+        `  ${strong("SCOPE")}  `,
+      );
+      lines.push(
+        `  ${strong("COVERAGE")}  ${canonicalCoverage.completeness} for requested scope`,
+      );
+    } else if (status === "complete") {
+      lines.push(`  ${strong("COVERAGE")}  not available`);
+    }
     if (result["failureMessage"]) {
       wrap(String(result["failureMessage"]), 11, `  ${paint("ERROR", 31)}  `);
     }
@@ -306,7 +330,7 @@ export function renderScanHistory(
       ];
       if (parts.length > 0) {
         lines.push(
-          `  ${strong("COVERAGE")}  ${parts.join(`  ${accent("·")}  `)}`,
+          `  ${strong("REVIEW PROGRESS")}  ${parts.join(`  ${accent("·")}  `)}`,
         );
       }
     }

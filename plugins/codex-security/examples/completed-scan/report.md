@@ -10,7 +10,7 @@ The scan reviewed the canonical include paths and exclusions listed below.
 - Revision: deadbeef
 - Snapshot digest: codex-security-snapshot/v1:sha256:ed88f96a4c1a06603a41b3f261f59c3de2555c367ef6ad3bb8b9e483495d34eb
 - Inventory strategy: repository
-- Included paths: .
+- Included paths: `.`
 - Excluded paths: none
 - Runtime or test status: not recorded
 
@@ -21,7 +21,7 @@ The scan reviewed the canonical include paths and exclusions listed below.
 | Reportable findings | 1 |
 | Severity mix | high: 1 |
 | Confidence mix | high: 1 |
-| Coverage | complete |
+| Coverage | complete for requested scope |
 | Validation mode | not recorded |
 
 Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.

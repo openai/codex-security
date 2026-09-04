@@ -1631,7 +1631,7 @@ async function executeWorkbench(
       ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
       : process.env,
     encoding: "utf8" as const,
-    maxBuffer: 4 * 1024 * 1024,
+    maxBuffer: Infinity,
     timeout: [
       "begin-deep-scan",
       "claim-deep-scan-dedup",

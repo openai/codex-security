@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import unicodedata
 from collections import Counter
 from typing import Any
 
@@ -19,6 +21,20 @@ DISPOSITION_LABELS = {
     "needs_follow_up": "Needs follow-up",
 }
 WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
+
+SCOPE_PATH_QUOTING_RE = re.compile(r"""[\s,;'"\\\x00-\x1f]""")
+SCOPE_PATH_NON_ASCII_RE = re.compile(r"[^\x20-\x7e]")
+# Unicode 17 General_Category=Format, Default_Ignorable_Code_Point, C1 controls,
+# non-ASCII whitespace, and line separators.
+SCOPE_PATH_CONTROLS_RE = re.compile(
+    r"[\x7f-\x9f\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000"
+    r"\u00ad\u034f\u0600-\u0605\u061c\u06dd\u070f"
+    r"\u0890-\u0891\u08e2\u115f-\u1160\u17b4-\u17b5"
+    r"\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f"
+    r"\ufeff\uffa0\ufff0-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f"
+    r"\U0001bca0-\U0001bca3\U0001d173-\U0001d17a"
+    r"\U000e0000-\U000e0fff]"
+)
 
 
 class ReportProjectionError(ValueError):
@@ -57,6 +73,37 @@ def _strings(value: Any) -> list[str]:
         if text:
             normalized.append(text)
     return normalized
+
+
+def _scope_path(value: Any, fallback: str = "unspecified") -> str:
+    path = value if isinstance(value, str) else fallback
+    rendered = path
+    normalization_sensitive = unicodedata.normalize("NFC", path) != path
+    if (
+        not path
+        or normalization_sensitive
+        or SCOPE_PATH_QUOTING_RE.search(path)
+        or SCOPE_PATH_CONTROLS_RE.search(path)
+    ):
+        escaped_characters = SCOPE_PATH_NON_ASCII_RE
+        if not normalization_sensitive:
+            escaped_characters = SCOPE_PATH_CONTROLS_RE
+        rendered = escaped_characters.sub(
+            lambda match: json.dumps(match.group(0))[1:-1],
+            json.dumps(path, ensure_ascii=False),
+        )
+    longest_run = max((len(match.group(0)) for match in re.finditer(r"`+", rendered)), default=0)
+    fence = "`" * (longest_run + 1)
+    padding = " " if rendered.startswith("`") or rendered.endswith("`") else ""
+    return f"{fence}{padding}{rendered}{padding}{fence}"
+
+
+def _scope_paths(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [_scope_path(item) for item in value if isinstance(item, str)]
 
 
 def _cell(value: Any) -> str:
@@ -774,6 +821,22 @@ def _linked_finding_section(number: int, finding: dict[str, Any], report_path: s
     return lines
 
 
+def _append_questions(lines: list[str], heading: str, questions: list[Any]) -> None:
+    if not questions:
+        return
+    lines.extend(["", heading, ""])
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        lines.append(f"- {_text(question.get('question'), 'Unspecified open question.')}")
+        prompt = _text(question.get("followUpPrompt"), "")
+        if prompt:
+            lines.append(f"  - Follow-up prompt: {prompt}")
+        paths = _scope_paths(question.get("paths"))
+        if paths:
+            lines.append("  - Paths: " + ", ".join(paths))
+
+
 def build_report_markdown(
     manifest: dict[str, Any], findings_document: dict[str, Any], coverage: dict[str, Any]
 ) -> str:
@@ -803,8 +866,8 @@ def build_report_markdown(
     deep_presentation = _uses_deep_presentation(coverage, findings)
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
-    include_paths = _strings(coverage.get("includePaths", scope.get("includePaths", [])))
-    exclude_paths = _strings(coverage.get("excludePaths", scope.get("excludePaths", [])))
+    include_paths = _scope_paths(coverage.get("includePaths", scope.get("includePaths", [])))
+    exclude_paths = _scope_paths(coverage.get("excludePaths", scope.get("excludePaths", [])))
     limitations = _strings(scope.get("limitations"))
     explicit_exclusions = coverage.get("explicitExclusions", [])
     lines = [
@@ -824,7 +887,7 @@ def build_report_markdown(
         f"- Excluded paths: {', '.join(exclude_paths) or 'none'}",
         f"- Runtime or test status: {_text(scope.get('runtimeStatus'), 'not recorded')}",
     ]
-    artifacts_reviewed = _strings(scope.get("artifactsReviewed"))
+    artifacts_reviewed = _scope_paths(scope.get("artifactsReviewed"))
     if artifacts_reviewed:
         lines.extend(["- Artifacts reviewed: " + ", ".join(artifacts_reviewed)])
     context = _text(scope.get("context"), "")
@@ -833,7 +896,7 @@ def build_report_markdown(
     for exclusion in explicit_exclusions:
         if isinstance(exclusion, dict):
             limitations.append(
-                f"Excluded {_text(exclusion.get('pattern'), 'unspecified')}: "
+                f"Excluded {_scope_path(exclusion.get('pattern'))}: "
                 f"{_text(exclusion.get('reason'), 'reason not recorded')}"
             )
     if limitations:
@@ -861,7 +924,7 @@ def build_report_markdown(
             "| --- | --- |",
             f"| Scan outcome | {scan.get('status', 'completed')} |",
             *summary_count_lines,
-            f"| Coverage | {coverage['completeness']} |",
+            f"| Coverage | {coverage['completeness']} for requested scope |",
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
             "",
             "Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.",
@@ -987,7 +1050,7 @@ def build_report_markdown(
                         if no_source_review
                         else (
                             "No findings were validated before the scan reached its cost limit. "
-                            "Review the deferred candidates in Open Questions And Follow Up."
+                            "Review the deferred candidates in Incomplete Requested Work."
                             if budget_exhausted
                             else "No reportable findings survived the canonical discovery, validation, "
                             "and reportability gates."
@@ -1008,6 +1071,7 @@ def build_report_markdown(
             ]
         )
     surfaces = coverage.get("surfaces", [])
+    surfaces = surfaces if isinstance(surfaces, list) else []
     if surfaces:
         lines.extend(
             [
@@ -1037,17 +1101,21 @@ def build_report_markdown(
                 )
                 + " |"
             )
-    open_questions = coverage.get("openQuestions", [])
-    questions = list(open_questions) if isinstance(open_questions, list) else []
     deferred = coverage.get("deferred", [])
-    if isinstance(deferred, list):
-        questions.extend(
+    deferred = deferred if isinstance(deferred, list) else []
+    blockers = []
+    deferred_surface_ids = set()
+    for item in deferred:
+        if not isinstance(item, dict):
+            continue
+        deferred_surface_ids.update(item.get("surfaceIds", []))
+        blockers.append(
             {
-                "question": item.get("reason", "Deferred review requires follow-up."),
+                "question": item.get("reason", "Requested review work remains unfinished."),
+                "paths": item.get("paths", []),
                 "followUpPrompt": " ".join(
                     (
                         f"Review deferred unit {item.get('id', 'unknown')} and close its stated proof gap.",
-                        f"Paths: {', '.join(item.get('paths', []))}." if item.get("paths") else "",
                         (
                             f"Surfaces: {', '.join(item.get('surfaceIds', []))}."
                             if item.get("surfaceIds")
@@ -1056,18 +1124,33 @@ def build_report_markdown(
                     )
                 ).strip(),
             }
-            for item in deferred
-            if isinstance(item, dict)
         )
-    if questions:
-        lines.extend(["", "## Open Questions And Follow Up", ""])
-        for question in questions:
-            if not isinstance(question, dict):
-                continue
-            lines.append(f"- {_text(question.get('question'), 'Unspecified open question.')}")
-            prompt = _text(question.get("followUpPrompt"), "")
-            if prompt:
-                lines.append(f"  - Follow-up prompt: {prompt}")
+    for surface in surfaces:
+        if (
+            isinstance(surface, dict)
+            and surface.get("disposition") == "needs_follow_up"
+            and surface.get("id") not in deferred_surface_ids
+        ):
+            blockers.append(
+                {
+                    "question": f"{surface.get('label', 'Unresolved surface')}: "
+                    f"{surface.get('notes') or 'Essential in-scope review remains unfinished.'}"
+                }
+            )
+    if not blockers and coverage["completeness"] != "complete":
+        blockers.append(
+            {
+                "question": f"Requested-scope coverage is {coverage['completeness']}; "
+                "no specific remaining work was recorded."
+            }
+        )
+    _append_questions(lines, "## Incomplete Requested Work", blockers)
+    open_questions = coverage.get("openQuestions", [])
+    _append_questions(
+        lines,
+        "## Open Questions And Follow Up",
+        open_questions if isinstance(open_questions, list) else [],
+    )
     return "\n".join(lines).rstrip() + "\n"
 
 

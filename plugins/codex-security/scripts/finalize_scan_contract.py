@@ -2431,18 +2431,31 @@ def build_sarif_projection(
             raise ContractError("source root: expected an existing directory")
     manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
     sarif = build_sarif(manifest, findings, source_root)
-    execution_successful = manifest["scan"]["status"] == "completed"
-    if not execution_successful or coverage["completeness"] != "complete":
-        run = sarif["runs"][0]
-        run["properties"]["codexSecurityCoverageCompleteness"] = coverage["completeness"]
-        run["invocations"] = [
-            {
-                "executionSuccessful": execution_successful,
-                "toolExecutionNotifications": [
-                    {"level": "warning", "message": {"text": item["reason"]}}
-                    for item in coverage["deferred"]
-                ],
-            }
+    run = sarif["runs"][0]
+    completeness = coverage["completeness"]
+    run["properties"].update(
+        {
+            "codexSecurityCoverageMode": coverage["mode"],
+            "codexSecurityCoverageCompleteness": completeness,
+            "codexSecurityIncludePaths": coverage["includePaths"],
+            "codexSecurityExcludePaths": coverage["excludePaths"],
+            "codexSecurityExplicitExclusions": coverage["explicitExclusions"],
+        }
+    )
+    scan_status = manifest["scan"]["status"]
+    execution_successful = scan_status == "completed" and completeness == "complete"
+    run["invocations"] = [{"executionSuccessful": execution_successful}]
+    if not execution_successful:
+        run["properties"]["codexSecurityCoverageCompleteness"] = completeness
+        reasons = [item["reason"] for item in coverage["deferred"]]
+        if not reasons:
+            reasons = [
+                f"Scan status is {scan_status}; results may be incomplete."
+                if scan_status != "completed"
+                else f"Scan coverage is {completeness}; results may be incomplete."
+            ]
+        run["invocations"][0]["toolExecutionNotifications"] = [
+            {"level": "warning", "message": {"text": reason}} for reason in reasons
         ]
     _validate_sarif(sarif)
     return sarif
