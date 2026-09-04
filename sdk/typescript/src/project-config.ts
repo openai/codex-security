@@ -1,8 +1,10 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import {
   dirname,
   extname,
   isAbsolute,
+  join,
   relative,
   resolve,
   sep,
@@ -173,53 +175,83 @@ function projectConfigExtension(path: string): string {
   return extension;
 }
 
+const SCHEMA_MODULE_PATH = join(
+  "node_modules",
+  "@openai",
+  "codex-security",
+  "schemas",
+  "project-config.schema.json",
+);
+
+/** Prefer an installed schema so hoisted workspaces get a resolvable hint. */
+function installedSchemaPath(from: string, fallback: string): string {
+  for (let directory = from; ; directory = dirname(directory)) {
+    const candidate = join(directory, SCHEMA_MODULE_PATH);
+    if (existsSync(candidate)) return candidate;
+    if (dirname(directory) === directory) return fallback;
+  }
+}
+
+export interface ProjectConfigStarter {
+  contents: string;
+  /** Guidance a format cannot carry inline, written to stderr. */
+  notes: readonly string[];
+}
+
 export function projectConfigStarter(
   path: string,
   directory = process.cwd(),
-): string {
-  const schemaPath = resolve(
-    directory,
-    "node_modules/@openai/codex-security/schemas/project-config.schema.json",
+): ProjectConfigStarter {
+  const fileDirectory = dirname(resolve(directory, path));
+  const schemaPath = installedSchemaPath(
+    fileDirectory,
+    resolve(directory, SCHEMA_MODULE_PATH),
   );
-  const relativeSchema = relative(
-    dirname(resolve(directory, path)),
-    schemaPath,
-  );
+  const relativeSchema = relative(fileDirectory, schemaPath);
   const schema = isAbsolute(relativeSchema)
     ? pathToFileURL(schemaPath).href
     : `${relativeSchema.startsWith(".") ? "" : "./"}${relativeSchema
         .split(sep)
         .join("/")}`;
   if (projectConfigExtension(path) === ".json")
-    return `${JSON.stringify({ $schema: schema }, null, 2)}\n`;
-  return [
-    "# This file is trusted like CLI options. Keep it outside untrusted inputs.",
-    `$schema: ${schema}`,
-    "",
-    "# Uncomment the settings you want to override. Defaults remain unpinned.",
-    `# auth: ${DEFAULT_SCAN_AUTH}`,
-    "# scan:",
-    `#   mode: ${DEFAULT_SCAN_MODE}`,
-    "#   scope:",
-    "#     paths: [src] # Relative to each selected repository.",
-    "#   knowledge_base: [] # Paths relative to this file.",
-    "#   instructions_file: instructions.md",
-    "#   validation_file: validation.md # Standard mode only.",
-    "#   deep: # Used when mode is deep.",
-    ...DEEP_SCAN_SETTINGS.map(
-      ([name, , key]) => `#     ${key}: ${DEFAULT_DEEP_SCAN_SETTINGS[name]}`,
-    ),
-    "# codex:",
-    `#   model: ${DEFAULT_CODEX_CONFIG["model"]}`,
-    `#   model_reasoning_effort: ${DEFAULT_CODEX_CONFIG["model_reasoning_effort"]}`,
-    "# limits:",
-    "#   max_cost_usd_per_scan: 10 # Optional limit per scan attempt.",
-    "# policy:",
-    "#   fail_on_severity: high # Omitted by default (report only).",
-    "# output:",
-    "#   directory: ../scan-results # Outside the selected repositories.",
-    "",
-  ].join("\n");
+    return {
+      contents: `${JSON.stringify({ $schema: schema }, null, 2)}\n`,
+      notes: [
+        "JSON starters cannot carry comments describing the available settings.",
+        "Run codex-security init codex-security.yaml for a commented template.",
+      ],
+    };
+  return {
+    contents: [
+      "# This file is trusted like CLI options. Keep it outside untrusted inputs.",
+      `$schema: ${schema}`,
+      "",
+      "# Uncomment the settings you want to override. Defaults remain unpinned.",
+      `# auth: ${DEFAULT_SCAN_AUTH}`,
+      "# scan:",
+      `#   mode: ${DEFAULT_SCAN_MODE}`,
+      "#   scope:",
+      "#     paths: [src] # Relative to each selected repository.",
+      "#   knowledge_base: [] # Paths relative to this file.",
+      "#   instructions_file: instructions.md",
+      "#   validation_file: validation.md # Standard mode only.",
+      "#   deep: # Used when mode is deep.",
+      ...DEEP_SCAN_SETTINGS.map(
+        ([name, , key]) => `#     ${key}: ${DEFAULT_DEEP_SCAN_SETTINGS[name]}`,
+      ),
+      "# codex:",
+      `#   model: ${DEFAULT_CODEX_CONFIG["model"]}`,
+      `#   model_reasoning_effort: ${DEFAULT_CODEX_CONFIG["model_reasoning_effort"]}`,
+      "# limits:",
+      "#   max_cost_usd_per_scan: 10 # Optional limit per scan attempt.",
+      "# policy:",
+      "#   fail_on_severity: high # Omitted by default (report only).",
+      "# output:",
+      "#   directory: ../scan-results # Outside the selected repositories.",
+      "",
+    ].join("\n"),
+    notes: [],
+  };
 }
 
 function requireProjectConfig(

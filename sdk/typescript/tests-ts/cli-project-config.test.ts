@@ -4,6 +4,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -79,10 +80,88 @@ test.each([
       $schema: `${modules}/@openai/codex-security/schemas/project-config.schema.json`,
     });
     const contents = await readFile(path, "utf8");
-    expect(await main(args, capture().stream, capture().stream, deps)).toBe(2);
+    const refused = capture();
+    expect(await main(args, capture().stream, refused.stream, deps)).toBe(2);
     expect(await readFile(path, "utf8")).toBe(contents);
+    expect(refused.text()).toContain(`${path} already exists.`);
+    expect(refused.text()).not.toContain("EEXIST");
   },
 );
+
+test("init leaves starter permissions to the umask", async () => {
+  const input = await fixture({});
+  const output = capture();
+  const deps = dependencies({
+    currentDirectory: input.root,
+    onConfig: () => {
+      throw new Error("No runtime for init");
+    },
+  });
+  expect(
+    await main(["init", "--json"], output.stream, capture().stream, deps),
+  ).toBe(0);
+  // Tracked configuration should match an ordinary write, not a private file.
+  const reference = join(input.root, "reference.yaml");
+  await writeFile(reference, "");
+  expect((await stat(join(input.root, "codex-security.yaml"))).mode).toBe(
+    (await stat(reference)).mode,
+  );
+});
+
+test("init explains the settings a JSON starter cannot carry inline", async () => {
+  const input = await fixture({});
+  const notes = capture();
+  expect(
+    await main(
+      ["init", "starter.json", "--json"],
+      capture().stream,
+      notes.stream,
+      dependencies({
+        currentDirectory: input.root,
+        onConfig: () => {
+          throw new Error("No runtime for init");
+        },
+      }),
+    ),
+  ).toBe(0);
+  expect(notes.text()).toContain("cannot carry comments");
+  expect(notes.text()).toContain("init codex-security.yaml");
+});
+
+test("init points the editor hint at an installed schema above the file", async () => {
+  const input = await fixture({});
+  const installed = join(
+    input.root,
+    "node_modules",
+    "@openai",
+    "codex-security",
+    "schemas",
+  );
+  await mkdir(installed, { recursive: true });
+  await writeFile(join(installed, "project-config.schema.json"), "{}");
+  const nested = join(input.root, "packages", "app");
+  await mkdir(nested, { recursive: true });
+  expect(
+    await main(
+      ["init", "packages/app/codex-security.yaml", "--json"],
+      capture().stream,
+      capture().stream,
+      dependencies({
+        currentDirectory: input.root,
+        onConfig: () => {
+          throw new Error("No runtime for init");
+        },
+      }),
+    ),
+  ).toBe(0);
+  // Hoisted workspaces resolve upward instead of emitting a broken sibling path.
+  expect(
+    (await readProjectConfig(join(nested, "codex-security.yaml"))).input,
+  ).toEqual({
+    $schema:
+      "../../node_modules/@openai/codex-security/schemas/project-config.schema.json",
+  });
+});
 
 test("info resolves a config and its sources without a target, prompt reads, or runtime", async () => {
   const input = await fixture({

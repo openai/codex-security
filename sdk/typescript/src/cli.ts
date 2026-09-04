@@ -4545,20 +4545,25 @@ export async function main(
       }),
       output: z.object({ path: z.string() }).optional(),
       async run({ args }) {
+        const file = args.file ?? "codex-security.yaml";
+        let path = file;
         try {
           const directory = dependencies.currentDirectory();
-          const path = resolveCliPath(
-            directory,
-            args.file ?? "codex-security.yaml",
-          );
-          await writeFile(path, projectConfigStarter(path, directory), {
-            flag: "wx",
-            mode: 0o600,
-          });
+          path = resolveCliPath(directory, file);
+          const starter = projectConfigStarter(path, directory);
+          // Tracked configuration, so let the umask decide who can read it.
+          await writeFile(path, starter.contents, { flag: "wx" });
+          for (const note of starter.notes) errorOutput.write(`${note}\n`);
           return { path };
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(
+            `codex-security: ${
+              (error as NodeJS.ErrnoException).code === "EEXIST"
+                ? `${path} already exists. Edit it, or select it with --config ${file}.`
+                : errorMessage(error)
+            }\n`,
+          );
         }
       },
     })

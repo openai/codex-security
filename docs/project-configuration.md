@@ -32,8 +32,11 @@ codex-security info -c codex-security.yaml --json
 `init [file]` defaults to `codex-security.yaml`, refuses to overwrite an existing
 file, and accepts `.yaml`, `.yml`, or `.json`. YAML starters show current defaults
 as comments so future releases can still update defaults you have not overridden.
-The editor hint is relative to the chosen file and expects the package to be
-installed in the invocation directory's `node_modules`.
+The editor hint is relative to the chosen file and points at the nearest
+installed `@openai/codex-security`, searching upward from that file so hoisted
+workspaces resolve. With nothing installed yet, it falls back to the invocation
+directory's `node_modules`. JSON starters carry only `$schema`, so `init`
+prints the settings guidance that YAML keeps in comments.
 
 For a project with a `src` directory:
 
