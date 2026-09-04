@@ -305,7 +305,7 @@ const findingsExportSchema = {
   scanId: z.string().uuid()
 };
 const collectionPageSchema = {
-  limit: z.number().int().positive().max(50).optional(),
+  limit: z.number().int().positive().optional(),
   offset: z.number().int().nonnegative().optional()
 };
 const findingCollectionFiltersSchema = {
@@ -323,9 +323,8 @@ const findingsPageSchema = {
   scanId: z.string().uuid()
 };
 const globalFindingsPageSchema = {
+  ...collectionPageSchema,
   ...findingCollectionFiltersSchema,
-  limit: z.number().int().positive().max(20).optional(),
-  offset: z.number().int().nonnegative().optional(),
   targetId: z.string().trim().min(1).max(256).optional()
 };
 const scanListSchema = {

@@ -72,7 +72,7 @@ def complete_scan(
     ("completeness", "include_paths"),
     [("complete", None), ("partial", None), ("complete", ["docs"])],
 )
-def test_later_scans_preserve_global_findings_and_repository_counts(
+def test_later_scans_resolve_findings_only_with_complete_matching_coverage(
     tmp_path: Path, completeness: str, include_paths: list[str] | None
 ) -> None:
     state_dir = tmp_path / "state"
@@ -91,11 +91,14 @@ def test_later_scans_preserve_global_findings_and_repository_counts(
     )
 
     findings = run_workbench(state_dir, "list-global-findings")["findings"]
-    assert len(findings) == 1
-    assert findings[0]["scanId"] == original["scanId"]
-    assert findings[0]["status"] == "open"
+    expected_count = 0 if completeness == "complete" and include_paths is None else 1
+    assert len(findings) == expected_count
+    if findings:
+        assert findings[0]["scanId"] == original["scanId"]
+        assert findings[0]["status"] == "open"
     assert (
-        run_workbench(state_dir, "list-repositories")["repositories"][0]["openFindingsCount"] == 1
+        run_workbench(state_dir, "list-repositories")["repositories"][0]["openFindingsCount"]
+        == expected_count
     )
 
 
@@ -110,7 +113,13 @@ def test_global_findings_apply_pagination_to_historical_findings(
         target.mkdir()
 
     historical = complete_scan(state_dir, historical_target, identity_anchor="historical-finding")
-    complete_scan(state_dir, historical_target, identity_anchor="clean-scan", finding=False)
+    complete_scan(
+        state_dir,
+        historical_target,
+        identity_anchor="incomplete-follow-up",
+        finding=False,
+        completeness="partial",
+    )
     first_active = complete_scan(
         state_dir, first_active_target, identity_anchor="first-active-finding"
     )
@@ -147,6 +156,7 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
     first_target_id = stable_target_id(first_target)
     second_target_id = stable_target_id(second_target)
     older_first = complete_scan(state_dir, first_target, identity_anchor="shared-finding")
+    latest_first = complete_scan(state_dir, first_target, identity_anchor="shared-finding")
     run_workbench(
         state_dir,
         "set-finding-triage",
@@ -159,7 +169,6 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
         "--note",
         "Fixture close decision.",
     )
-    latest_first = complete_scan(state_dir, first_target, identity_anchor="shared-finding")
     distinct_first = complete_scan(
         state_dir,
         first_target,
@@ -286,7 +295,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     second = repositories_by_target[second_target_id]
     assert first["checkoutAvailable"] is True
     assert first["latestScan"]["scanId"] == distinct_first["scanId"]
-    assert first["openFindingsCount"] == 1
+    assert first["openFindingsCount"] == 2
     assert first["scanCount"] == 4
     assert second["checkoutAvailable"] is False
     assert second["latestScan"]["scanId"] == latest_second["scanId"]

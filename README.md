@@ -20,6 +20,10 @@ codex-security scan /path/to/directory
 
 For CI, set `OPENAI_API_KEY` instead of signing in.
 
+Use `findings list` to browse saved findings across scans, `findings list --scan SCAN_ID`
+to inspect a previous scan, or `findings show OCCURRENCE_ID` for its details and history.
+See the [scan history guide](sdk/typescript/README.md#scan-history-and-reruns) for filters and pagination.
+
 ## TypeScript SDK
 
 Codex Security is a Javascript package:

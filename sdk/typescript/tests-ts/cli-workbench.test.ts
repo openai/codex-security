@@ -16,21 +16,21 @@ import {
 describe("CLI workbench", () => {
   test("lists and summarizes open findings for the current repository", async () => {
     const repository = resolve("/current/repository");
-    const stdout = capture();
+    const stdout = capture(true);
     const calls: Array<readonly string[]> = [];
     const responses: JsonObject[] = [
       {
-        repositories: [
-          { targetId: "other", targetPath: `${repository}-clone` },
-          { targetId: "selected", targetPath: repository },
-        ],
+        findings: [{ title: "Finding 1", severity: { level: "high" } }],
+        nextOffset: 1,
       },
-      { findings: [{ title: "Finding 1" }], nextOffset: 1 },
-      { findings: [{ title: "Finding 2" }], nextOffset: null },
+      {
+        findings: [{ title: "Finding 2", severity: { level: "high" } }],
+        nextOffset: null,
+      },
     ];
     expect(
       await main(
-        ["findings", "list", "--json"],
+        ["findings", "list"],
         stdout.stream,
         capture().stream,
         dependencies({
@@ -38,27 +38,16 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(0);
-    expect(calls[0]).toEqual(["list-repositories"]);
-    expect(calls[1]).toEqual([
+    expect(calls[0]).toEqual([
       "list-global-findings",
-      "--target-id",
-      "selected",
+      "--repository",
+      repository,
       "--status",
       "open",
     ]);
-    expect(calls[2]).toEqual([...calls[1]!, "--offset", "1"]);
-    expect(JSON.parse(stdout.text())).toEqual({
-      repository,
-      findings: [{ title: "Finding 1" }, { title: "Finding 2" }],
-    });
-    expect(
-      await main(
-        ["findings", "--json"],
-        capture().stream,
-        capture().stream,
-        dependencies({ onWorkbench: () => ({ repositories: [] }) }),
-      ),
-    ).toBe(0);
+    expect(calls[1]).toEqual([...calls[0]!, "--offset", "1"]);
+    expect(stdout.text()).toContain("Finding 1");
+    expect(stdout.text()).toContain("Finding 2");
     for (const confirmed of [[true, false], []]) {
       const result = fakeResult(["high"]);
       Object.assign(result, {

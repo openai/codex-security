@@ -1690,6 +1690,7 @@ def test_filesystem_identity_serialization_supports_windows_stat_values() -> Non
 
 def test_completed_scan_disables_remediation_after_checkout_revision_changes(
     tmp_path: Path,
+    workbench_api,
 ) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -1720,9 +1721,16 @@ def test_completed_scan_disables_remediation_after_checkout_revision_changes(
             "UPDATE scans SET target_device = target_device + 1 WHERE id = ?",
             (scan_id,),
         )
-    remounted = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert remounted["remediationAvailable"] is True
-    assert remounted["findings"][0]["locations"][0]["absolutePath"] == str(target / "README.md")
+    remounted = run_workbench(state_dir, "get-scan", "--scan-id", scan_id, check=False)
+    assert remounted["returncode"] != 0
+    assert "checkout owner" in remounted["stderr"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        assert workbench_api["remediation_availability"](scan) == (True, None)
+        connection.execute(
+            "UPDATE scans SET target_device = target_device - 1 WHERE id = ?", (scan_id,)
+        )
 
     (target / "README.md").write_text("new revision\n")
     subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
@@ -1734,7 +1742,7 @@ def test_completed_scan_disables_remediation_after_checkout_revision_changes(
 
 
 def assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
-    tmp_path: Path, *, replacement_kind: str
+    tmp_path: Path, workbench_api, *, replacement_kind: str
 ) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -1770,10 +1778,15 @@ def assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
         target.mkdir()
         (target / "source.txt").write_text("vulnerable\n")
 
-    refreshed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert refreshed["remediationAvailable"] is False
-    assert "checkout path was replaced" in refreshed["remediationUnavailableReason"]
-    assert "absolutePath" not in refreshed["findings"][0]["locations"][0]
+    refreshed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id, check=False)
+    assert refreshed["returncode"] != 0
+    assert "checkout owner" in refreshed["stderr"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        available, reason = workbench_api["remediation_availability"](scan)
+    assert available is False
+    assert "checkout path was replaced" in reason
     rejected = run_workbench(
         state_dir,
         "request-finding-remediation",
@@ -1790,17 +1803,19 @@ def assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
 
 def test_completed_scan_disables_remediation_after_checkout_directory_is_replaced(
     tmp_path: Path,
+    workbench_api,
 ) -> None:
     assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
-        tmp_path, replacement_kind="directory"
+        tmp_path, workbench_api, replacement_kind="directory"
     )
 
 
 def test_completed_scan_disables_remediation_after_checkout_symlink_is_replaced(
     tmp_path: Path,
+    workbench_api,
 ) -> None:
     assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
-        tmp_path, replacement_kind="symlink"
+        tmp_path, workbench_api, replacement_kind="symlink"
     )
 
 

@@ -1554,7 +1554,6 @@ try {
   assert.equal(listGlobalFindings.annotations.readOnlyHint, true);
   assert.deepEqual(listGlobalFindings._meta.ui.visibility, ["app"]);
   assert.deepEqual(listGlobalFindings.inputSchema.required ?? [], []);
-  assert.equal(listGlobalFindings.inputSchema.properties.limit.maximum, 20);
   assert.ok(listGlobalFindings.inputSchema.properties.offset);
   assert.equal(listRepositories.annotations.readOnlyHint, true);
   assert.deepEqual(listRepositories._meta.ui.visibility, ["app"]);
@@ -2813,10 +2812,11 @@ try {
       query: "SRC/A.PY",
       severity: "high",
       status: "open",
-      limit: 1,
+      limit: 100,
     },
   });
   assertNoError(filteredFindingsPage);
+  assert.equal(filteredFindingsPage.result.structuredContent.findingsPage.limit, 100);
   assert.deepEqual(
     filteredFindingsPage.result.structuredContent.findingsPage.findings.map(
       (finding) => finding.occurrenceId,
@@ -3081,11 +3081,11 @@ try {
   assert.match(indexedFinding.targetId, /^target_sha256_[0-9a-f]{64}$/);
   const globalFindingsNext = await requestAndWait(2215, "tools/call", {
     name: "list_codex_security_global_findings",
-    arguments: { limit: 20, offset: 1 },
+    arguments: { limit: 100, offset: 1 },
   });
   assertNoError(globalFindingsNext);
   assert.equal(globalFindingsNext.result.structuredContent.findings.length, 1);
-  assert.equal(globalFindingsNext.result.structuredContent.limit, 20);
+  assert.equal(globalFindingsNext.result.structuredContent.limit, 100);
   assert.equal(globalFindingsNext.result.structuredContent.offset, 1);
   assert.equal(globalFindingsNext.result.structuredContent.nextOffset, null);
   const filteredGlobalFindings = await requestAndWait(94002, "tools/call", {

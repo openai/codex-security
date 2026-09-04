@@ -117,12 +117,37 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       expect(pair[0]!.findingId).not.toBe(pair[1]!.findingId);
       expect(pair[0]!.locations).toEqual(pair[1]!.locations);
     }
-    expect(second.repositoryFindings).toHaveLength(16);
+    expect(second.repositoryFindings).toHaveLength(12);
+    expect(second.repositoryFindings).toEqual(
+      expect.arrayContaining(
+        second.findings.findings.map((finding) =>
+          expect.objectContaining({ findingId: finding.findingId }),
+        ),
+      ),
+    );
     expect(
       second.repositoryFindings?.filter(
         (finding) => finding.knownScanIds?.length === 2,
       ),
     ).toHaveLength(8);
+    const allHistory = await runWorkbench(
+      { python, pluginRoot: PLUGIN_ROOT, environment },
+      [
+        "list-global-findings",
+        "--repository",
+        repository,
+        "--include-resolved",
+      ],
+    );
+    expect(allHistory["findings"]).toHaveLength(16);
+    expect(allHistory["findings"]).toEqual(
+      expect.arrayContaining(
+        [...first.findings.findings, ...second.findings.findings].map(
+          (finding) =>
+            expect.objectContaining({ findingId: finding.findingId }),
+        ),
+      ),
+    );
     expect(await readdir(repository)).toEqual(["example.ts"]);
     expect(await readFile(join(repository, "example.ts"), "utf8")).toBe(
       "export const example = 1;\n",

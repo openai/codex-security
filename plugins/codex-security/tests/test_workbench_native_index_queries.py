@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ntpath
 from argparse import Namespace
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -102,7 +103,10 @@ def indexed_collections(workbench_db, tmp_path):
 
 def test_global_finding_filters_apply_before_pagination(workbench_api, indexed_collections):
     connection, targets = indexed_collections
-    query = workbench_api["native_indexes"].list_global_findings
+    query = partial(
+        workbench_api["native_indexes"].list_global_findings,
+        read_coverage=workbench_api["coverage_for_comparison"],
+    )
     filters = {"query": "NeEdLe", "severity": "high", "status": "open"}
     first = query(connection, query_args(**filters, limit=1))
     second = query(connection, query_args(**filters, limit=1, offset=1))
@@ -167,7 +171,10 @@ def test_collection_filters_apply_before_pagination(
     query = (
         workbench_api["scan_history"].list_scans
         if command == "list-scans"
-        else workbench_api["native_indexes"].list_repositories
+        else partial(
+            workbench_api["native_indexes"].list_repositories,
+            read_coverage=workbench_api["coverage_for_comparison"],
+        )
     )
     filters = {"query": "NeEdLe", "status": status}
     if command == "list-scans":
@@ -203,12 +210,12 @@ def test_scan_list_returns_lightweight_running_first_summaries(workbench_api, in
     )
     scans = workbench_api["scan_history"].list_scans(connection)["scans"]
 
-    assert [scan["scanId"] for scan in scans] == [SCAN_IDS[1], SCAN_IDS[0], SCAN_IDS[2]]
+    assert [scan["scanId"] for scan in scans] == [SCAN_IDS[1], SCAN_IDS[2], SCAN_IDS[0]]
     assert scans[0]["targetPath"] == str(targets[1])
     assert scans[0]["targetRevision"] == "synthetic-revision"
     assert scans[0]["progress"]["status"] == "running"
     assert scans[0]["progress"]["phase"] == "preflight"
-    assert scans[1]["progress"]["status"] == "canceled"
+    assert scans[2]["progress"]["status"] == "canceled"
     assert "artifacts" not in scans[0]
     assert "findings" not in scans[0]
 
@@ -254,6 +261,5 @@ def test_scan_list_probes_requested_repository_once(
 
     assert [scan["scanId"] for scan in result["scans"]] == [SCAN_IDS[0]]
     assert [arguments for target, arguments in probes if target == targets[0]] == [
-        ("rev-parse", "--path-format=absolute", "--git-common-dir"),
-        ("remote", "get-url", "origin"),
+        ("rev-parse", "--show-toplevel"),
     ]

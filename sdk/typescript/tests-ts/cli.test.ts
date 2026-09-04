@@ -236,6 +236,10 @@ describe("CLI", () => {
     expect(manifest.text()).toContain(
       "codex-security findings false-positive <occurrenceId>",
     );
+    expect(manifest.text()).toContain("codex-security findings list");
+    expect(manifest.text()).toContain(
+      "codex-security findings show <occurrenceId>",
+    );
     expect(manifest.text()).toContain("codex-security scans list [repository]");
     expect(manifest.text()).toContain("codex-security scans show [scanId]");
     expect(manifest.text()).toContain("codex-security scans rerun [scanId]");
@@ -276,6 +280,8 @@ describe("CLI", () => {
       ["scans", "rerun"],
       ["scans", "match"],
       ["scans", "compare"],
+      ["findings", "list"],
+      ["findings", "show"],
       ["findings", "false-positive"],
     ] as const;
 
@@ -1273,7 +1279,7 @@ describe("CLI", () => {
     const findings: JsonObject[] = [
       {
         findingId: "internal-finding-id",
-        occurrenceId: "internal-occurrence-id",
+        occurrenceId: "occ_saved_finding",
         severity: { level: "critical" },
         title: "Login SQL injection bypasses authentication",
         locations: [{ path: "routes/login.ts", startLine: 34 }],
@@ -1342,7 +1348,7 @@ describe("CLI", () => {
       expect(text).toContain("New basket authorization bypass");
       expect(text).toContain("/demo/threat-models");
       expect(text).not.toContain("internal-finding-id");
-      expect(text).not.toContain("internal-occurrence-id");
+      expect(text).toContain("ID occ_saved_finding");
       if (showLinkedFindings) {
         expect(text).toContain("LINKED FINDINGS");
         expect(text).toContain("MATCHED SCAN");
