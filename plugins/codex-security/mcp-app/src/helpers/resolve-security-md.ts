@@ -408,6 +408,7 @@ export function resolveSecurityMdCommand(
       let arg = args[index]!;
       if (arg === "--") throw new Error("Unexpected argument '--'");
       if (arg.startsWith("-h")) {
+        if (/^-h+-/u.test(arg)) throw new Error(`Unexpected argument '${arg}'`);
         if (/^-h+=/u.test(arg)) parseArgs({ args: [arg], options });
         arg = "--help";
       }
