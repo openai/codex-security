@@ -1560,7 +1560,7 @@ use another workflow ID for a fresh review rather than changing that saved resul
 2. Screen each nonempty neighborhood with `gpt-5.6-luna` at `xhigh` reasoning
    effort. The review covers every anchor-neighbor pair; nominations between
    neighbors are rejected.
-3. Independently review each nominated pair once with `gpt-5.6-sol` at `xhigh`
+3. Independently review each nominated pair once with `gpt-5.6-sol` at `high`
    reasoning effort. Only accepted pairs contribute to duplicate groups.
 4. Group accepted duplicate pairs transitively unless a Luna or Sol `DISTINCT`
    decision contradicts the resulting component. Contradicted components are
