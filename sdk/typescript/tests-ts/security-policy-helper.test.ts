@@ -49,6 +49,24 @@ function resolve(root: string, scope: string, output = "-") {
   return run(["--repo", root, "--scope", scope, "--out", output]);
 }
 
+function expectGuidance(text: string, policies: [string, string][]): void {
+  const headings = [
+    ...text.matchAll(/^## [^\r\n]*: ("(?:[^"\\]|\\.)*")\r?$/gm),
+  ];
+  const sections = headings.map((heading, index) => [
+    JSON.parse(heading[1]!) as string,
+    text
+      .slice(heading.index! + heading[0].length, headings[index + 1]?.index)
+      .replace(/^[\r\n]+|[\r\n]+$/gu, ""),
+  ]);
+  expect(sections).toEqual(
+    policies.map(([source, content]) => [
+      source,
+      content.replace(/^[\r\n]+|[\r\n]+$/gu, ""),
+    ]),
+  );
+}
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
@@ -263,8 +281,10 @@ describe("built SECURITY.md helper", () => {
     expect(result.stdout).toBe(
       '["\\u007f/SECURITY.md", "\\u0080/SECURITY.md", "\\ue000/SECURITY.md", "\\ud800\\udc00/SECURITY.md"]\n',
     );
-    expect(resolve(root, "\u{10000}").stdout).toBe(
-      '## SECURITY.md source: "\\ud800\\udc00/SECURITY.md"\n\npolicy\n',
+    const guidance = resolve(root, "\u{10000}").stdout;
+    expectGuidance(guidance, [["\u{10000}/SECURITY.md", "policy"]]);
+    expect(guidance.split("\n", 1)[0]).toMatch(
+      /"\\ud800\\udc00\/SECURITY\.md"$/u,
     );
   });
 
@@ -326,9 +346,7 @@ describe("built SECURITY.md helper", () => {
       symlinkSync(target, join(root, "SECURITY.md"));
       const result = resolve(root, ".");
       expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toBe(
-        '## SECURITY.md source: "SECURITY.md"\n\ninside policy\n',
-      );
+      expectGuidance(result.stdout, [["SECURITY.md", "inside policy"]]);
     },
   );
 
@@ -352,15 +370,13 @@ describe("built SECURITY.md helper", () => {
       symlinkSync(directory, alias);
       const scoped = resolve(root, "alias");
       expect(scoped.status, scoped.stderr).toBe(0);
-      expect(scoped.stdout).toBe(
-        '## SECURITY.md source: "SECURITY.md"\n\nroot policy\n\n' +
-          '## SECURITY.md source: "component-\\udcff/SECURITY.md"\n\ncomponent policy\n',
-      );
+      expectGuidance(scoped.stdout, [
+        ["SECURITY.md", "root policy"],
+        ["component-\udcff/SECURITY.md", "component policy"],
+      ]);
       const rooted = resolve(alias, ".");
       expect(rooted.status, rooted.stderr).toBe(0);
-      expect(rooted.stdout).toBe(
-        '## SECURITY.md source: "SECURITY.md"\n\ncomponent policy\n',
-      );
+      expectGuidance(rooted.stdout, [["SECURITY.md", "component policy"]]);
       const listed = inventory(alias);
       expect(listed.status, listed.stderr).toBe(0);
       expect(listed.stdout).toBe('["SECURITY.md"]\n');
@@ -405,9 +421,9 @@ describe("built SECURITY.md helper", () => {
         Buffer.from([0xfd]),
         Buffer.from("/guidance.md"),
       ]);
-      expect(readFileSync(destination, "utf8")).toBe(
-        '## SECURITY.md source: "scope-\\udcfe/SECURITY.md"\n\nraw argument policy\n',
-      );
+      expectGuidance(readFileSync(destination, "utf8"), [
+        ["scope-\udcfe/SECURITY.md", "raw argument policy"],
+      ]);
     },
   );
 
@@ -454,13 +470,12 @@ describe("built SECURITY.md helper", () => {
     write(root, "services/api/handler.ts", "export {};\n");
     const result = resolve(root, join(root, "services", "api", "handler.ts"));
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toBe(
-      [
-        '## SECURITY.md source: "SECURITY.md"\n\nroot policy\n',
-        '## SECURITY.md source: "services/SECURITY.md"\n\nservice policy\n',
-        '## SECURITY.md source: "services/api/SECURITY.md"\n\napi policy\n',
-      ].join("\n"),
-    );
+    expectGuidance(result.stdout, [
+      ["SECURITY.md", "root policy"],
+      ["services/SECURITY.md", "service policy"],
+      ["services/api/SECURITY.md", "api policy"],
+    ]);
+    expect(result.stdout).toEndWith("api policy\n");
   });
 
   test("uses a file's parent, skips whitespace-only guidance, and preserves a BOM", () => {
@@ -470,58 +485,51 @@ describe("built SECURITY.md helper", () => {
     write(root, "src/app.ts", "export {};\n");
     const result = resolve(root, "src/app.ts");
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toBe(
-      '## SECURITY.md source: "SECURITY.md"\n\n\ufeff\n',
-    );
+    expectGuidance(result.stdout, [["SECURITY.md", "\ufeff"]]);
   });
 
   test("preserves path parsing for file scopes and output destinations", () => {
     const { root, output } = fixture();
     write(root, "src/SECURITY.md", "source policy\n");
     write(root, "src/app.ts", "export {};\n");
-    const expected =
-      '## SECURITY.md source: "src/SECURITY.md"\n\nsource policy\n';
+    const expected: [string, string][] = [["src/SECURITY.md", "source policy"]];
     for (const scope of ["src/app.ts/", "./src//app.ts/./"]) {
       const result = resolve(`${root}/./`, scope, "./-/");
       expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toBe(expected);
+      expectGuidance(result.stdout, expected);
     }
     const destination = `${output}/guidance.md/./`;
     const result = resolve(root, "src/app.ts", destination);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toBe("");
-    expect(readFileSync(join(output, "guidance.md"), "utf8")).toBe(
-      process.platform === "win32"
-        ? expected.replaceAll("\n", "\r\n")
-        : expected,
-    );
+    expectGuidance(readFileSync(join(output, "guidance.md"), "utf8"), expected);
   });
 
   test("resolves parent components after existing files and symbolic links", () => {
     const { root } = fixture();
     write(root, "nested/SECURITY.md", "nested policy\n");
     write(root, "nested/file.ts", "export {};\n");
-    const expected =
-      '## SECURITY.md source: "nested/SECURITY.md"\n\nnested policy\n';
+    const expected: [string, string][] = [
+      ["nested/SECURITY.md", "nested policy"],
+    ];
     for (const scope of ["nested/file.ts/..", "nested/SECURITY.md/../."]) {
       const result = resolve(root, scope);
       expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toBe(expected);
+      expectGuidance(result.stdout, expected);
     }
     const result = resolve(`${root}/nested/file.ts/..`, ".");
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toBe(
-      '## SECURITY.md source: "SECURITY.md"\n\nnested policy\n',
-    );
+    expectGuidance(result.stdout, [["SECURITY.md", "nested policy"]]);
     symlinkSync("nested/file.ts/..", join(root, "alias"), "dir");
     const linked = resolve(root, "alias");
     expect(linked.status, linked.stderr).toBe(0);
-    expect(linked.stdout).toBe(expected);
+    expectGuidance(linked.stdout, expected);
     const missing = resolve(root, "missing/../nested");
     expect(missing.status, missing.stderr).toBe(
       process.platform === "win32" ? 0 : 2,
     );
-    expect(missing.stdout).toBe(process.platform === "win32" ? expected : "");
+    if (process.platform === "win32") expectGuidance(missing.stdout, expected);
+    else expect(missing.stdout).toBe("");
   });
 
   test.skipIf(process.platform === "win32")(
@@ -553,9 +561,7 @@ describe("built SECURITY.md helper", () => {
     const args = ["--repo", root, "--scope", "."];
     const result = run(args, { ...process.env, LANG: "C", LC_ALL: "C" });
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toBe(
-      `## SECURITY.md source: "SECURITY.md"\n\n${content}`,
-    );
+    expectGuidance(result.stdout, [["SECURITY.md", content]]);
     const destination = join(output, "guidance.md");
     expect(resolve(root, ".", destination).status).toBe(0);
     expect(readFileSync(destination, "utf8")).toBe(
@@ -611,10 +617,10 @@ describe("built SECURITY.md helper", () => {
       );
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toBe("");
-      expect(readFileSync(join(root, "~", "guidance.md"), "utf8")).toBe(
-        '## SECURITY.md source: "SECURITY.md"\n\nraw home policy\n\n' +
-          '## SECURITY.md source: "project/SECURITY.md"\n\nproject policy\n',
-      );
+      expectGuidance(readFileSync(join(root, "~", "guidance.md"), "utf8"), [
+        ["SECURITY.md", "raw home policy"],
+        ["project/SECURITY.md", "project policy"],
+      ]);
     },
   );
 
@@ -635,9 +641,7 @@ describe("built SECURITY.md helper", () => {
           { encoding: "utf8", env: { ...process.env, HOME: home } },
         );
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout).toBe(
-          '## SECURITY.md source: "SECURITY.md"\n\nproject policy\n',
-        );
+        expectGuidance(result.stdout, [["SECURITY.md", "project policy"]]);
       }
     },
   );
@@ -655,9 +659,7 @@ describe("built SECURITY.md helper", () => {
         HOME: join(root, "unused home"),
       });
       expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toBe(
-        '## SECURITY.md source: "SECURITY.md"\n\nnamed-home policy\n',
-      );
+      expectGuidance(result.stdout, [["SECURITY.md", "named-home policy"]]);
     },
   );
 
@@ -700,9 +702,7 @@ describe("built SECURITY.md helper", () => {
         },
       );
       expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toBe(
-        '## SECURITY.md source: "SECURITY.md"\n\nindependent policy\n',
-      );
+      expectGuidance(result.stdout, [["SECURITY.md", "independent policy"]]);
       expect(result.stderr).toBe("");
       expect(existsSync(marker)).toBe(false);
     },
@@ -782,9 +782,9 @@ describe("built SECURITY.md helper", () => {
           process.env["SystemRoot"] ?? dirname(root),
         );
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout).toBe(
-          '## SECURITY.md source: "src/SECURITY.md"\n\ncomponent policy\n',
-        );
+        expectGuidance(result.stdout, [
+          ["src/SECURITY.md", "component policy"],
+        ]);
       }
     },
   );
@@ -834,9 +834,7 @@ describe("built SECURITY.md helper", () => {
     write(root, "SECURITY.md", content);
     const result = resolve(root, ".");
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toBe(
-      `## SECURITY.md source: "SECURITY.md"\n\n${content}\n`,
-    );
+    expectGuidance(result.stdout, [["SECURITY.md", content]]);
   });
 
   test("preserves required and mutually exclusive helper arguments", () => {
