@@ -31,7 +31,6 @@ export interface WindowsBinding {
   windowsArguments(): Buffer[];
   windowsEnvironment(name: Buffer): Buffer | null;
   windowsAbsolutePath(path: Buffer): WindowsResult<Buffer>;
-  windowsDirectoryNames(path: Buffer): WindowsResult<Buffer[]>;
   windowsDirectoryEntries(
     path: Buffer,
   ): WindowsResult<

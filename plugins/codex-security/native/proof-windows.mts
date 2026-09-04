@@ -291,7 +291,7 @@ function handleProof(root: string) {
         entry.name.equals(Buffer.from(basename(ancestor), "utf16le")),
       );
     assert(junctionEntry?.isDirectory());
-    assert.equal(junctionEntry?.isSymbolicLink(), false);
+    assert.equal(junctionEntry?.isSymbolicLink(), true);
     const junctionStat = files.stat(pathBytes(ancestor), false);
     assert(junctionStat.isDirectory());
     assert(junctionStat.isReparsePoint());

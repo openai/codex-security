@@ -2,21 +2,20 @@ use napi::bindgen_prelude::{BigInt, Buffer};
 use napi_derive::napi;
 use std::{
     ffi::OsString,
-    fs::{File, TryLockError},
+    fs::{self, File, TryLockError},
     io::{self, Read, Seek, SeekFrom, Write},
     mem::{offset_of, size_of, MaybeUninit},
     os::windows::{
         ffi::{OsStrExt, OsStringExt},
+        fs::FileTypeExt,
         io::{AsRawHandle, FromRawHandle},
     },
-    path::Path,
     ptr::{copy_nonoverlapping, null, null_mut},
 };
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, SetLastError, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE,
-        ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION, ERROR_NO_MORE_FILES,
-        ERROR_PATH_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE,
+        GetLastError, SetLastError, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER,
+        ERROR_LOCK_VIOLATION, HANDLE, INVALID_HANDLE_VALUE,
     },
     Storage::FileSystem::*,
 };
@@ -89,12 +88,6 @@ pub struct BufferResult {
 }
 
 #[napi(object)]
-pub struct DirectoryResult {
-    pub error: u32,
-    pub value: Vec<Buffer>,
-}
-
-#[napi(object)]
 pub struct DirectoryEntry {
     pub name: Buffer,
     pub is_directory: bool,
@@ -145,119 +138,30 @@ pub fn windows_absolute_path(path: Buffer) -> napi::Result<BufferResult> {
 }
 
 #[napi]
-pub fn windows_directory_names(path: Buffer) -> napi::Result<DirectoryResult> {
-    let result = windows_directory_entries(path)?;
-    Ok(DirectoryResult {
-        error: result.error,
-        value: result.value.into_iter().map(|entry| entry.name).collect(),
-    })
-}
-
-#[napi]
 pub fn windows_directory_entries(path: Buffer) -> napi::Result<DirectoryEntriesResult> {
     let path = os_string(path)?;
-    let failure = |error| DirectoryEntriesResult {
-        error,
-        value: Vec::new(),
+    let entries = || -> io::Result<Vec<DirectoryEntry>> {
+        fs::read_dir(path)?
+            .map(|entry| {
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                Ok(DirectoryEntry {
+                    name: wide_bytes(entry.file_name().encode_wide()),
+                    is_directory: kind.is_dir() || kind.is_symlink_dir(),
+                    is_symbolic_link: kind.is_symlink(),
+                })
+            })
+            .collect()
     };
-    if path.is_empty() {
-        return Ok(failure(ERROR_PATH_NOT_FOUND));
+    match entries() {
+        Ok(value) => Ok(DirectoryEntriesResult { error: 0, value }),
+        Err(error) => Ok(DirectoryEntriesResult {
+            error: error
+                .raw_os_error()
+                .ok_or_else(|| invalid(&error.to_string()))? as u32,
+            value: Vec::new(),
+        }),
     }
-    let pattern = Path::new(&path).join("*");
-    let pattern = directory_search_path(wide_bytes(pattern.as_os_str().encode_wide()))?;
-    if pattern.error != 0 {
-        return Ok(failure(pattern.error));
-    }
-    let pattern = wide_path(pattern.value)?;
-    let mut data = WIN32_FIND_DATAW::default();
-    let handle = unsafe { FindFirstFileW(pattern.as_ptr(), &mut data) };
-    if handle == INVALID_HANDLE_VALUE {
-        let error = unsafe { GetLastError() };
-        // Like read_dir, a successful empty search is an empty iterator.
-        return Ok(failure(if error == ERROR_FILE_NOT_FOUND {
-            0
-        } else {
-            error
-        }));
-    }
-    struct FindHandle(HANDLE);
-    impl Drop for FindHandle {
-        fn drop(&mut self) {
-            unsafe { FindClose(self.0) };
-        }
-    }
-    let handle = FindHandle(handle);
-    let mut value = Vec::new();
-    loop {
-        let end = data.cFileName.iter().position(|unit| *unit == 0).unwrap();
-        let name = &data.cFileName[..end];
-        if name != [b'.' as u16] && name != [b'.' as u16, b'.' as u16] {
-            value.push(DirectoryEntry {
-                name: wide_bytes(name.iter().copied()),
-                is_directory: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
-                is_symbolic_link: data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                    && data.dwReserved0 == 0xa000000c,
-            });
-        }
-        if unsafe { FindNextFileW(handle.0, &mut data) } == 0 {
-            let error = unsafe { GetLastError() };
-            return Ok(if error == ERROR_NO_MORE_FILES {
-                DirectoryEntriesResult { error: 0, value }
-            } else {
-                failure(error)
-            });
-        }
-    }
-}
-
-fn directory_search_path(path: Buffer) -> napi::Result<BufferResult> {
-    const SEP: u16 = b'\\' as u16;
-    const ALT: u16 = b'/' as u16;
-    const COLON: u16 = b':' as u16;
-    const DOT: u16 = b'.' as u16;
-    const QUERY: u16 = b'?' as u16;
-    let units = wide_path(path.to_vec().into())?;
-    let verbatim =
-        units.starts_with(&[SEP, SEP, QUERY, SEP]) || units.starts_with(&[SEP, QUERY, QUERY, SEP]);
-    let short_absolute = units.len() < 248
-        && (matches!(units.as_slice(), [drive, COLON, SEP | ALT, ..] if ![SEP, ALT].contains(drive))
-            || matches!(units.as_slice(), [SEP | ALT, SEP | ALT, ..]));
-    if verbatim || short_absolute {
-        return Ok(BufferResult {
-            error: 0,
-            value: path,
-        });
-    }
-    // Match read_dir's conversion of relative and long search paths to verbatim paths.
-    let absolute = windows_absolute_path(path)?;
-    if absolute.error != 0 {
-        return Ok(absolute);
-    }
-    let units = wide_path(absolute.value)?;
-    let units = &units[..units.len() - 1];
-    let (prefix, rest): (&[u16], &[u16]) = match units {
-        [_, COLON, SEP, ..] => (&[SEP, SEP, QUERY, SEP], units),
-        [SEP, SEP, DOT, SEP, rest @ ..] => (&[SEP, SEP, QUERY, SEP], rest),
-        [SEP, SEP, QUERY, SEP, ..] | [SEP, QUERY, QUERY, SEP, ..] => (&[], units),
-        [SEP, SEP, rest @ ..] => (
-            &[
-                SEP,
-                SEP,
-                QUERY,
-                SEP,
-                b'U' as u16,
-                b'N' as u16,
-                b'C' as u16,
-                SEP,
-            ],
-            rest,
-        ),
-        _ => (&[], units),
-    };
-    Ok(BufferResult {
-        error: 0,
-        value: wide_bytes(prefix.iter().chain(rest).copied()),
-    })
 }
 
 fn io_range(buffer: &Buffer, offset: f64, length: f64) -> napi::Result<(usize, u32)> {

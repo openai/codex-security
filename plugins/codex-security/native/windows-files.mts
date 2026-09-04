@@ -73,33 +73,23 @@ export function windowsFileSystem(native: WindowsBinding) {
   }
 
   function realpath(path: Buffer): Buffer {
-    // Match CPython's Windows normalization of UNC and device prefixes.
-    const textPath = pathText(path).replaceAll("/", "\\");
-    let normalizedText = textPath;
-    if (textPath.startsWith("\\\\")) {
-      const first = textPath.indexOf("\\", 2);
-      const end = first === -1 ? -1 : textPath.indexOf("\\", first + 1);
-      if (end !== -1) {
-        const tail = textPath.slice(end + 1).replace(/^\\+/u, "");
-        normalizedText =
-          textPath.slice(0, end + 1) +
-          win32.normalize(`\\${tail}`).slice(1).replace(/\\+$/u, "");
-      }
-    } else {
-      if (textPath[1] === ":" && textPath.slice(2, 4) === ".\\") {
-        // Windows normpath retains the first drive-relative dot until a parent consumes it.
-        const parts = ["."];
-        for (const part of textPath.slice(4).split("\\")) {
-          if (part === "" || part === ".") continue;
-          if (part === ".." && parts.length && parts.at(-1) !== "..")
-            parts.pop();
-          else parts.push(part);
-        }
-        normalizedText = textPath.slice(0, 2) + parts.join("\\");
-      } else normalizedText = win32.normalize(textPath);
-      const root = win32.parse(normalizedText).root;
+    let normalizedText: string;
+    if (pathText(path).startsWith("\\\\?\\")) {
+      // Verbatim paths bypass Win32 dot parsing; normalize only below their root.
+      const text = pathText(path).replaceAll("/", "\\");
+      const root =
+        /^\\\\\?\\(?:UNC\\[^\\]+\\[^\\]+(?:\\|$)|[^\\]+\\)/iu.exec(text)?.[0] ??
+        win32.parse(text).root;
       normalizedText =
-        root + normalizedText.slice(root.length).replace(/\\+$/u, "");
+        root +
+        win32
+          .normalize(`\\${text.slice(root.length)}`)
+          .slice(1)
+          .replace(/\\+$/u, "");
+    } else {
+      const text = pathText(absolute(path));
+      const root = win32.parse(text).root;
+      normalizedText = root + text.slice(root.length).replace(/\\+$/u, "");
     }
     const normalized = widePath(normalizedText);
     const resolved = finalPath(normalized);
@@ -145,12 +135,6 @@ export function windowsFileSystem(native: WindowsBinding) {
     } finally {
       check(handle.close(), path);
     }
-  }
-
-  function entries(path: Buffer): Buffer[] {
-    const result = native.windowsDirectoryNames(operationPath(path));
-    check(result.error, path);
-    return result.value;
   }
 
   function entriesWithTypes(path: Buffer) {
@@ -227,7 +211,6 @@ export function windowsFileSystem(native: WindowsBinding) {
     absolute,
     realpath,
     stat,
-    entries,
     entriesWithTypes,
     mkdir,
     readInto,
