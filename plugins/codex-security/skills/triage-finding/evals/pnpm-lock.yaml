@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  '@openai/codex-sdk': 0.151.0
   '@opencode-ai/sdk': 1.14.33
 
 importers:
@@ -12,8 +13,8 @@ importers:
   .:
     dependencies:
       '@openai/codex-sdk':
-        specifier: 0.137.0
-        version: 0.137.0
+        specifier: 0.151.0
+        version: 0.151.0
       '@opencode-ai/sdk':
         specifier: 1.14.33
         version: 1.14.33
@@ -986,92 +987,47 @@ packages:
     peerDependencies:
       zod: ^4.0.0
 
-  '@openai/codex-sdk@0.130.0':
-    resolution: {integrity: sha512-ICKaZ5zrIDg71AiQcsUToVoe5Icmrc3LwSM5+2z7Cf8F1x6nOaY7/ucpFlr4aH8oDe7t3dangc+MsWZTkdvDFw==}
+  '@openai/codex-sdk@0.151.0':
+    resolution: {integrity: sha512-vI4gr5ipvVwH4YHW9DGUmaUI1hJzJOCO/0d5NYFnAECsQGEvBmuTocPzRP8yGzLtsYklMnrtGtm2TyBicihVxw==}
     engines: {node: '>=18'}
 
-  '@openai/codex-sdk@0.137.0':
-    resolution: {integrity: sha512-KYNY7shsKYOLRNV+kjOoaBaLVHy+FUolHPFraOU4JGeyNR1pORxINTAlwHSxDcuXTibj/3OC6jMGDl7X0q4MUw==}
-    engines: {node: '>=18'}
-
-  '@openai/codex@0.130.0':
-    resolution: {integrity: sha512-WGDj+RZ3TXWC/7MlwprgLWOqzpwatPIINPhP3IRzHA0ni+o3QZ4i4xrS2uWwGmHUJ395J5JHwoZAAZYyfJyz6w==}
+  '@openai/codex@0.151.0':
+    resolution: {integrity: sha512-mhtWmOZRdmWD1jPbLDnQb59BsaVP/V+lXe/OFNR9ZcLZU0UCiBwn98Fcav1ss7sDIlHkuqj6nWd44IPeXoOhJA==}
     engines: {node: '>=16'}
     hasBin: true
 
-  '@openai/codex@0.130.0-darwin-arm64':
-    resolution: {integrity: sha512-R9pkGC7kwC8yQ8el5hvBlmugQlcsG/pHMEFgZluu03X9fD2TezGxdq3KqRDRCZuMYl07ILamVEoqknuJ0cq7MA==}
+  '@openai/codex@0.151.0-darwin-arm64':
+    resolution: {integrity: sha512-g7YzpaCZGCw19R/gly3vRPjnLqaW7JcBAu2WQQ6e8PIlvBPmS/gMplIUURMgNO6gi8LsPzdlQtLqkwoeOOlIdg==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [darwin]
 
-  '@openai/codex@0.130.0-darwin-x64':
-    resolution: {integrity: sha512-gJ+7J8djevgtdra+NgDAiQQPW+O3KTsgGfE3E5dpDfww3zS5OCeV0V2dhxqnJdlOjOSDw99o0P2LqBv19mhpRw==}
+  '@openai/codex@0.151.0-darwin-x64':
+    resolution: {integrity: sha512-0y+g8TVpP+Fn10mjoKYXER6qYjn29w7xBUsbPXJ6Accu/FoM4Qp4WbKXQPmE0G0yUACTQVZRjzTSsdWUezNgkg==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [darwin]
 
-  '@openai/codex@0.130.0-linux-arm64':
-    resolution: {integrity: sha512-tFtH0V9/hEI3d9y7zP92BXI9FM4Z3+STNQaOR52Czv18TRtCFUp7CbIUYaToopuq6UBfnE1VKr8RLhwT5FcbmA==}
+  '@openai/codex@0.151.0-linux-arm64':
+    resolution: {integrity: sha512-CsLgFeX4TQ6I2Gdrxd2r5UbgIbDLCdtcLAlnMYjr06bCL057MTNGec7Ewb3+Z2DBiMuXCljdTBGqLOePkMV0sQ==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [linux]
 
-  '@openai/codex@0.130.0-linux-x64':
-    resolution: {integrity: sha512-3VcNlez99xdnEf+kB1IOpWv9fICYV9PiGj4sLCO4TCcShLnyxe+YBGa3poknkvXLnMG0qiN9SMnYS2FGrMxQcA==}
+  '@openai/codex@0.151.0-linux-x64':
+    resolution: {integrity: sha512-xcVyY1FtwvVYhh2JBmz8fX8CQqFAxO/lxJ2IXsh8x5uwxZVHVl5fZHFHf8JdRaOGG0vpkYmu/DKKVoLd56/DDQ==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [linux]
 
-  '@openai/codex@0.130.0-win32-arm64':
-    resolution: {integrity: sha512-vdpmiNp57L/arZabltLXn8TyEtNa7W1meOEkr+3R6W/8ZyBt++wuqz1Orv134OT2grrcFJsIVCAIPiqUxCvBkA==}
+  '@openai/codex@0.151.0-win32-arm64':
+    resolution: {integrity: sha512-zDWzOoh9wHm+Om1Nhn7os47rAVeSGPh0SnM3YOttdq6iPJz2zn4vBnbGUZjeih1qW/3mvNF3Oyd4owlaHmphmg==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [win32]
 
-  '@openai/codex@0.130.0-win32-x64':
-    resolution: {integrity: sha512-FzMznm7fr5/nbjZgOujZ9Y9AbdGm7ji1FOoWiY3U+srqauvZaTgn6o6aCheSL7kuymu7nTLOO/cAyWV6NuesqQ==}
-    engines: {node: '>=16'}
-    cpu: [x64]
-    os: [win32]
-
-  '@openai/codex@0.137.0':
-    resolution: {integrity: sha512-1jUsCnzDBwv7Z4VFZajIlsz41fC18qg6d5qK4PEZhiUk0zJHS90/uGBA70aQPUJLTUZShvyKVAANjw6J/D9eYQ==}
-    engines: {node: '>=16'}
-    hasBin: true
-
-  '@openai/codex@0.137.0-darwin-arm64':
-    resolution: {integrity: sha512-YjKmre7DlKslQVhSfocHscgxntZKaZc1LQySKh7q+hNL8jdK+c8nSWSePi583yKFNIxZ8Z/zCkewtjFNvOpQiQ==}
-    engines: {node: '>=16'}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@openai/codex@0.137.0-darwin-x64':
-    resolution: {integrity: sha512-zjzrFV80LZby9et44dan82e3cwUd46U7u1LSVXTIz5AUcY4y1KZpAeN6cSLVKMZuOHXTDpi15MUQdRwzdeqIOg==}
-    engines: {node: '>=16'}
-    cpu: [x64]
-    os: [darwin]
-
-  '@openai/codex@0.137.0-linux-arm64':
-    resolution: {integrity: sha512-R3ZZymQQA1qpp6OpowN49XJ4scHwSckq7CjVvgmLv3bIs3X+F0XXK3xPFkC9vs2mX3wPekPi3ONpxx+yPAsJ6Q==}
-    engines: {node: '>=16'}
-    cpu: [arm64]
-    os: [linux]
-
-  '@openai/codex@0.137.0-linux-x64':
-    resolution: {integrity: sha512-n+26MUj8rekbEDUeYTGoD6HXuGS0MmLHn2LOn0i5qTNYIJvXV82B7cCLSTzVKF/RJxRMRl22se9Q0Z035JIVng==}
-    engines: {node: '>=16'}
-    cpu: [x64]
-    os: [linux]
-
-  '@openai/codex@0.137.0-win32-arm64':
-    resolution: {integrity: sha512-Cofktt213TycdQ/v+nAUuwXUBzjMWfA/ZkXyqefyXxDgw0TMtaiM3cgDna3I8YdXnR0PM9AMbx4t7VloJ3ZZYQ==}
-    engines: {node: '>=16'}
-    cpu: [arm64]
-    os: [win32]
-
-  '@openai/codex@0.137.0-win32-x64':
-    resolution: {integrity: sha512-g9qZ9ERrm5OWXMWJOgojYv1kOc5jajTKq37PBMSe56aJfAr9Jk/qBvIOy7LKq3rABdXuz8k+W65PIt2E1hXilw==}
+  '@openai/codex@0.151.0-win32-x64':
+    resolution: {integrity: sha512-sLT7xvID3jhU6tkzcwRPnMEclKRwUPbpo0mtfxIF9KpdZH3VJV7sM2/kXWXyvUM7Zt/YeyOaeATTEysbRz8Yog==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [win32]
@@ -4758,68 +4714,35 @@ snapshots:
       - ws
     optional: true
 
-  '@openai/codex-sdk@0.130.0':
+  '@openai/codex-sdk@0.151.0':
     dependencies:
-      '@openai/codex': 0.130.0
-    optional: true
+      '@openai/codex': 0.151.0
 
-  '@openai/codex-sdk@0.137.0':
-    dependencies:
-      '@openai/codex': 0.137.0
-
-  '@openai/codex@0.130.0':
+  '@openai/codex@0.151.0':
     optionalDependencies:
-      '@openai/codex-darwin-arm64': '@openai/codex@0.130.0-darwin-arm64'
-      '@openai/codex-darwin-x64': '@openai/codex@0.130.0-darwin-x64'
-      '@openai/codex-linux-arm64': '@openai/codex@0.130.0-linux-arm64'
-      '@openai/codex-linux-x64': '@openai/codex@0.130.0-linux-x64'
-      '@openai/codex-win32-arm64': '@openai/codex@0.130.0-win32-arm64'
-      '@openai/codex-win32-x64': '@openai/codex@0.130.0-win32-x64'
+      '@openai/codex-darwin-arm64': '@openai/codex@0.151.0-darwin-arm64'
+      '@openai/codex-darwin-x64': '@openai/codex@0.151.0-darwin-x64'
+      '@openai/codex-linux-arm64': '@openai/codex@0.151.0-linux-arm64'
+      '@openai/codex-linux-x64': '@openai/codex@0.151.0-linux-x64'
+      '@openai/codex-win32-arm64': '@openai/codex@0.151.0-win32-arm64'
+      '@openai/codex-win32-x64': '@openai/codex@0.151.0-win32-x64'
+
+  '@openai/codex@0.151.0-darwin-arm64':
     optional: true
 
-  '@openai/codex@0.130.0-darwin-arm64':
+  '@openai/codex@0.151.0-darwin-x64':
     optional: true
 
-  '@openai/codex@0.130.0-darwin-x64':
+  '@openai/codex@0.151.0-linux-arm64':
     optional: true
 
-  '@openai/codex@0.130.0-linux-arm64':
+  '@openai/codex@0.151.0-linux-x64':
     optional: true
 
-  '@openai/codex@0.130.0-linux-x64':
+  '@openai/codex@0.151.0-win32-arm64':
     optional: true
 
-  '@openai/codex@0.130.0-win32-arm64':
-    optional: true
-
-  '@openai/codex@0.130.0-win32-x64':
-    optional: true
-
-  '@openai/codex@0.137.0':
-    optionalDependencies:
-      '@openai/codex-darwin-arm64': '@openai/codex@0.137.0-darwin-arm64'
-      '@openai/codex-darwin-x64': '@openai/codex@0.137.0-darwin-x64'
-      '@openai/codex-linux-arm64': '@openai/codex@0.137.0-linux-arm64'
-      '@openai/codex-linux-x64': '@openai/codex@0.137.0-linux-x64'
-      '@openai/codex-win32-arm64': '@openai/codex@0.137.0-win32-arm64'
-      '@openai/codex-win32-x64': '@openai/codex@0.137.0-win32-x64'
-
-  '@openai/codex@0.137.0-darwin-arm64':
-    optional: true
-
-  '@openai/codex@0.137.0-darwin-x64':
-    optional: true
-
-  '@openai/codex@0.137.0-linux-arm64':
-    optional: true
-
-  '@openai/codex@0.137.0-linux-x64':
-    optional: true
-
-  '@openai/codex@0.137.0-win32-arm64':
-    optional: true
-
-  '@openai/codex@0.137.0-win32-x64':
+  '@openai/codex@0.151.0-win32-x64':
     optional: true
 
   '@opencode-ai/sdk@1.14.33':
@@ -6980,7 +6903,7 @@ snapshots:
       '@ibm-generative-ai/node-sdk': 3.2.4
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
       '@openai/agents': 0.11.6(ws@8.21.0)(zod@4.4.3)
-      '@openai/codex-sdk': 0.130.0
+      '@openai/codex-sdk': 0.151.0
       '@opencode-ai/sdk': 1.14.33
       '@playwright/browser-chromium': 1.60.0
       '@rollup/rollup-linux-x64-gnu': 4.60.4
