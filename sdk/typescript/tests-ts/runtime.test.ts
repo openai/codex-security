@@ -69,6 +69,7 @@ import {
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
+  pluginHelperEnvironment,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
@@ -80,10 +81,12 @@ import {
   requireSecureCredentialHome,
   requireSecureOutputAncestry,
   requireTrustedOutputAncestor,
+  resolvePluginPythonCommand,
   runWorkbench,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
+import * as trustedExecutables from "../src/trusted-executable.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
@@ -5717,6 +5720,98 @@ describe("runtime directories and plugin Python boundary", () => {
       } finally {
         process.umask(previousUmask);
       }
+    }
+  });
+
+  test("carries the accepted Python environment through every protected root", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "carries the accepted Python environment through every protected root",
+      )
+    ) {
+      return;
+    }
+    const available = Bun.which("python3") ?? Bun.which("python");
+    expect(available).not.toBeNull();
+    const interpreter = await realpath(available!);
+    const roots = ["invoking", "campaign", "source"].map((name) =>
+      join(tmpdir(), `codex-security-${name}`),
+    );
+    const environment = pluginHelperEnvironment({
+      PATH: "initial-lookup",
+      KEEP: "preserved",
+      OPENAI_API_KEY: "synthetic-openai",
+      CODEX_API_KEY: "synthetic-codex",
+      OPENROUTER_API_KEY: "synthetic-openrouter",
+      FIREWORKS_API_KEY: "synthetic-fireworks",
+      ...(process.env["SystemRoot"] === undefined
+        ? {}
+        : { SystemRoot: process.env["SystemRoot"] }),
+    });
+    const filtered = roots.map((_root, index) => ({
+      ...environment,
+      PATH:
+        index === roots.length - 1 ? dirname(interpreter) : `filtered-${index}`,
+    }));
+    const calls: Array<{
+      candidate: string;
+      environment: Readonly<Record<string, string | undefined>>;
+      root: string;
+    }> = [];
+    const resolveCommand = spyOn(
+      trustedExecutables,
+      "resolveTrustedExecutable",
+    ).mockImplementation(async (candidate, currentEnvironment, root) => {
+      calls.push({ candidate, environment: currentEnvironment, root });
+      return {
+        executable: interpreter,
+        environment: filtered[calls.length - 1]!,
+      };
+    });
+    const selection = {
+      configuredPath: "python3",
+      environment,
+      protectedRoot: roots[0]!,
+      additionalProtectedRoots: roots.slice(1),
+    };
+    try {
+      expect(await resolvePluginPythonCommand(selection)).toEqual({
+        executable: interpreter,
+        environment: filtered.at(-1)!,
+      });
+      expect(calls).toEqual(
+        roots.map((root, index) => ({
+          candidate: "python3",
+          environment: index === 0 ? environment : filtered[index - 1]!,
+          root,
+        })),
+      );
+      expect(environment).not.toHaveProperty("OPENAI_API_KEY");
+      expect(environment).not.toHaveProperty("CODEX_API_KEY");
+      expect(environment).not.toHaveProperty("OPENROUTER_API_KEY");
+      expect(environment).not.toHaveProperty("FIREWORKS_API_KEY");
+
+      calls.length = 0;
+      resolveCommand.mockImplementation(
+        async (candidate, currentEnvironment, root) => {
+          calls.push({ candidate, environment: currentEnvironment, root });
+          return root === roots.at(-1)
+            ? null
+            : {
+                executable: interpreter,
+                environment: filtered[calls.length - 1]!,
+              };
+        },
+      );
+      await expect(resolvePluginPythonCommand(selection)).rejects.toThrow(
+        PluginPythonUnavailableError,
+      );
+      expect(calls.map(({ candidate, root }) => ({ candidate, root }))).toEqual(
+        roots.map((root) => ({ candidate: "python3", root })),
+      );
+    } finally {
+      resolveCommand.mockRestore();
     }
   });
 
