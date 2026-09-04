@@ -282,8 +282,10 @@ runs local preflight checks.
 ### Scan options and output
 
 `--path` scopes a scan to one or more paths, `--diff` scans committed changes,
-and `--working-tree` scans staged and unstaged changes. Deep scans support
-repository and path targets.
+and `--working-tree` scans staged and unstaged changes. These selectors are
+mutually exclusive. `--head` requires `--diff`; `--base` requires
+`--working-tree`. Deep scans support repository and path targets, and deep-scan
+settings require `--mode deep`.
 
 Working-tree snapshots include files from untracked nested Git repositories.
 Initialized submodules must be clean and checked out at the commit recorded by
@@ -993,6 +995,8 @@ calling workflow or issue tracker; assessments remain separate recommendations.
 Commands default to the current repository. Select scans by full ID or a
 unique prefix of at least eight characters.
 
+`--scan-root` filters indexed artifact paths; it does not import report directories.
+
 | Command                                               | Purpose                                                                                                     |
 | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `scans list [REPOSITORY]`                             | List scans. Filter by artifact root with `--scan-root DIR`.                                                 |
@@ -1085,11 +1089,21 @@ npx @openai/codex-security scan . \
   --fail-on-severity high > "$SCAN_ROOT/findings.json"
 ```
 
+`scan --json` writes results to stdout and progress to stderr. Result fields are
+`manifest`, `findings`, `coverage`, `repositoryFindings`, `scanDir`, `reportPath`,
+`artifactsDir`, `sarifPath`, `threadId`, `cost`, and `turn`. `sarifPath` and `cost`
+may be null; `repositoryFindings` may be absent. `findings` describes this scan;
+`repositoryFindings` includes open findings across scans when available.
+A changed target adds `warnings` and exits with code `2`; the saved results
+do not describe the current checkout.
+
 Scan exit codes are `0` for a completed report-only scan or passing policy,
-`1` for a policy violation, `2` for invalid input, incomplete coverage, or a
-runtime/export error, `130` for interruption, and `143` for termination.
-JSON scans do not use interactive controls. `validate`, `login`, and `logout`
-reject `--json`.
+`1` for a policy violation, `2` for invalid input, incomplete coverage, a changed
+target, or a runtime/export error, `130` for interruption, and `143` for termination.
+JSON scans do not use interactive controls. `verify-fix`, saved-finding patches,
+and resumed patch publication support JSON and JSONL results; literal issue and
+file patches do not. `validate`, `login`, and `logout` reject structured result
+output. These restrictions do not apply to manifest or schema discovery.
 
 `install-hook` scans staged and unstaged changes before each commit. It blocks
 on high-severity findings or failed scans, respects `core.hooksPath`, and leaves
@@ -1180,10 +1194,17 @@ inconclusive or couldn't finish.
 
 ### Command discovery and integrations
 
-The CLI uses [Incur](https://github.com/wevm/incur). Use `--llms` for the
-command manifest, `scan --schema --format json` for a command schema, and
-`completions bash|zsh|fish` for shell completions. Scan output supports
-`--format toon|json|yaml|jsonl` and `--full-output`.
+The CLI uses [Incur](https://github.com/wevm/incur). Use `--llms` for a command
+index and `--llms-full` for a Markdown reference generated from the live schemas
+and this operating guide. Scope the reference to a command or group, such as
+`scans --llms-full`; scoped references omit the operating guide. Add
+`--format json` for the original structured manifest. Its property names are
+parsed option keys; command-line flags use kebab-case.
+
+Use `scan --schema --format json` for a command schema and
+`completions bash|zsh|fish` for shell completions. Scan results support
+`--format toon|json|yaml|jsonl` and `--full-output`, but not Markdown or
+`--filter-output`.
 
 `skills add` syncs agent skills; `mcp add` registers the CLI as an MCP server.
 MCP exposes only the read-only `info` command because the transport cannot
