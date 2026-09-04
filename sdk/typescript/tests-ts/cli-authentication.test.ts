@@ -902,7 +902,12 @@ describe("CLI authentication", () => {
   });
 
   test("replaces permanent stored sign-in refresh details with recovery steps", async () => {
-    for (const auth of ["chatgpt", "api-key"] as const) {
+    for (const [auth, storedCredentialType] of [
+      ["chatgpt", undefined],
+      ["api-key", undefined],
+      [undefined, "chatgpt"],
+      [undefined, "api_key"],
+    ] as const) {
       for (const detail of [
         "Your access token could not be refreshed.",
         "Your access token could not be refreshed because your refresh token has expired.",
@@ -912,7 +917,19 @@ describe("CLI authentication", () => {
         const stdout = capture();
         const stderr = capture(false);
         const deps = dependencies({
-          environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
+          environment:
+            auth === undefined
+              ? {}
+              : { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
+          onTurn: (_repository, options) => {
+            if (storedCredentialType !== undefined) {
+              (options as ScanOptions).onAuthentication?.({
+                method: "stored_credentials",
+                credentialType: storedCredentialType,
+                verified: false,
+              });
+            }
+          },
           onRun: () => {
             throw new CodexSecurityError(
               `Codex Exec exited with code 1: Error: ${detail} Please log out and sign in again. PRIVATE_UPSTREAM_DETAIL`,
@@ -922,17 +939,27 @@ describe("CLI authentication", () => {
 
         expect(
           await main(
-            ["scan", ".", "--auth", auth, "--json"],
+            [
+              "scan",
+              ".",
+              ...(auth === undefined ? [] : ["--auth", auth]),
+              "--json",
+            ],
             stdout.stream,
             stderr.stream,
             deps,
           ),
         ).toBe(2);
         expect(stdout.text()).toBe("");
-        expect(stderr.text()).toContain("workspace-managed policies");
-        expect(stderr.text()).toContain(
-          "API key is selected for model authentication",
-        );
+        if (auth === "api-key" || storedCredentialType === "api_key") {
+          expect(stderr.text()).toContain("workspace-managed policies");
+          expect(stderr.text()).toContain(
+            "API key is selected for model authentication",
+          );
+        } else {
+          expect(stderr.text()).not.toContain("workspace-managed policies");
+          expect(stderr.text()).not.toContain("API key");
+        }
         expect(stderr.text()).toContain(
           "npx @openai/codex-security login status",
         );

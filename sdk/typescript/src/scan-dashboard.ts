@@ -312,6 +312,13 @@ export class ScanDashboard {
     this.#refresh();
   }
 
+  public setModel(model: ScanModelConfiguration): void {
+    this.#options.model = model;
+    for (const component of this.#components)
+      component.dashboard.setModel(model);
+    this.#refresh();
+  }
+
   public setComponents(receipts: readonly ComponentReceipt[]): void {
     this.#components = receipts.map((receipt) => {
       const dashboard = new ScanDashboard(this.#stream, {

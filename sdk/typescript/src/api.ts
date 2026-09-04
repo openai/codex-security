@@ -59,10 +59,15 @@ import {
   scanApprovalPolicy,
   scanModelConfiguration,
   scanModelProvider,
+  withScanModelConfiguration,
   type CodexSecurityConfig,
   type JsonObject,
   writeCodexConfig,
 } from "./config.js";
+import {
+  availableScanModels,
+  type ScanModelSelector,
+} from "./scan-model-selection.js";
 import {
   estimateScanCost,
   ScanCostTracker,
@@ -399,6 +404,7 @@ export type CodexSecuritySurface = "cli" | "sdk";
 
 interface CodexSecurityRuntimeOptions {
   surface: CodexSecuritySurface;
+  selectScanModel?: ScanModelSelector;
 }
 
 interface ClientDependencies {
@@ -445,6 +451,7 @@ export class CodexSecurity {
 
   readonly #dependencies: ClientDependencies;
   readonly #surface: CodexSecuritySurface;
+  readonly #selectScanModel: ScanModelSelector | undefined;
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
@@ -469,6 +476,7 @@ export class CodexSecurity {
     this.config = structuredClone(config);
     this.#dependencies = dependencies;
     this.#surface = runtimeOptions.surface;
+    this.#selectScanModel = runtimeOptions.selectScanModel;
   }
 
   public async run(
@@ -849,6 +857,38 @@ export class CodexSecurity {
         temporaryRoot,
         mode === "deep",
       );
+      releaseCredentialHome = session.releaseCredentialHome;
+      if (this.#selectScanModel !== undefined) {
+        const selected = await this.#selectScanModel(
+          scanModelConfiguration(session.effectiveConfig),
+          () =>
+            availableScanModels({
+              command: this.#codexCommand(),
+              environment: session.runtime.environment,
+              config: session.sessionConfig,
+              apiKey: session.apiKey,
+              signal,
+            }),
+          signal,
+        );
+        session.effectiveConfig = withScanModelConfiguration(
+          session.effectiveConfig,
+          selected,
+        );
+        session.preflightConfig = scanPreflightCodexConfig(
+          session.effectiveConfig,
+        );
+        session.sessionConfig = scanRuntimeCodexConfig(
+          session.effectiveConfig,
+          session.runtimeHome,
+        );
+        if (session.runtime.configPath !== undefined) {
+          await writeCodexConfig(
+            session.runtime.configPath,
+            session.preflightConfig,
+          );
+        }
+      }
       const {
         runtime,
         runtimeHome,
@@ -859,7 +899,6 @@ export class CodexSecurity {
         approvalPolicy,
         python,
       } = session;
-      releaseCredentialHome = session.releaseCredentialHome;
       const deepScanConfigPath =
         mode === "deep"
           ? runtime.deepScanConfigPath ??
@@ -1281,17 +1320,22 @@ export class CodexSecurity {
         );
       }
       checkOpen();
-      const basePrompt = scanPrompt(
-        normalized,
-        mode,
-        skillName,
-        scanId,
-        runtime.configPath !== undefined,
-        knowledgeBase !== null,
-        options.scanPrompt,
-        options.maxCostUsd !== undefined,
-        discoveryPrompt,
-      );
+      const basePrompt = [
+        scanPrompt(
+          normalized,
+          mode,
+          skillName,
+          scanId,
+          runtime.configPath !== undefined,
+          knowledgeBase !== null,
+          options.scanPrompt,
+          options.maxCostUsd !== undefined,
+          discoveryPrompt,
+        ),
+        ...(this.#selectScanModel === undefined
+          ? []
+          : ["The launcher has already handled model and reasoning guidance."]),
+      ].join("\n");
       checkOpen();
       const feedback = await workbench(
         {
