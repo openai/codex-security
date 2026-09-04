@@ -122,9 +122,12 @@ const securityPolicyStageSchema = z
   })
   .strict();
 
-export type SecurityPolicyStageResult = z.infer<
-  typeof securityPolicyStageSchema
->;
+export interface SecurityPolicyStageResult {
+  markdown: string;
+  questions: string[];
+  reviewNotes: string[];
+  blockedReason: string | null;
+}
 
 export function securityPolicyStageOutputSchema(): Record<string, unknown> {
   return z.toJSONSchema(securityPolicyStageSchema, {
