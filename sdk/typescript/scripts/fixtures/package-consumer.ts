@@ -11,7 +11,6 @@ import {
   type PublishScanResult,
   planComponents,
   publishScanToCustom,
-  publishScan,
   runComponentScans,
   type ComponentScanOptions,
   type DeduplicateScanResult,
