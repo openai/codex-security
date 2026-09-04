@@ -207,6 +207,39 @@ do not prepare a release by editing or committing files there.
 Monitor all three workflows. A version bump is not a completed release until
 the npm package and GitHub release both exist and match the tag.
 
+## Version identity
+
+Codex Security releases expose several version fields. They are related, but
+they do not all identify the same thing:
+
+- `npm-vX.Y.Z`, the npm package version, `sdkVersion`, and `cliVersion` identify
+  the TypeScript package release.
+- `sdk/typescript/_bundled_plugin/.codex-plugin/plugin.json` contains the
+  bundled plugin manifest version. It is metadata for the bundled plugin and
+  is not a substitute for the package version or the bundled content hash.
+- `bundledPluginVersion` in `codex-security info --json` reports the version
+  compiled into the CLI for the bundled plugin.
+- `codexVersion` and `codexSdkVersion` report the Codex runtime dependencies
+  used by the package. They are not release tags for this repository.
+
+For byte-for-byte provenance, use the release tag, commit, and bundled-plugin
+tree together:
+
+```bash
+release_version=0.1.18
+git rev-parse "npm-v${release_version}"
+git rev-parse "npm-v${release_version}:sdk/typescript/_bundled_plugin"
+git show "npm-v${release_version}:sdk/typescript/_bundled_plugin/.codex-plugin/plugin.json" \
+  | jq -r .version
+```
+
+The first command identifies the release commit, the second identifies the
+exact bundled-plugin tree, and the third reports the manifest's version field.
+For a published installation, `npx @openai/codex-security info --json` shows
+the package and runtime fields together. An external Codex catalog version is
+not derived from this repository and must be documented by the catalog that
+publishes it.
+
 ## Verify
 
 Check the published state before announcing the release:
