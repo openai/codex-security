@@ -323,7 +323,9 @@ const PROVIDER_OPTION = z
 const CREATE_PR_OPTION = z
   .boolean()
   .default(false)
-  .describe("Create a draft GitHub pull request after verified patches.");
+  .describe(
+    "Create a draft GitHub pull request or GitLab merge request after verified patches.",
+  );
 const ASSESS_PATCH_RISK_OPTION = z
   .boolean()
   .default(false)
@@ -1174,7 +1176,7 @@ interface CliDependencies {
     input?: string,
   ): Promise<number>;
   runRepositoryCommand(
-    command: "git" | "gh",
+    command: "git" | "gh" | "glab",
     args: readonly string[],
     repository: string,
     options?: { trim?: boolean; environment?: NodeJS.ProcessEnv },
@@ -5367,36 +5369,90 @@ async function publishPatchBranch(
   stderr: Writable,
   dependencies: CliDependencies,
 ): Promise<{ branch: string; url: string }> {
-  const run = (command: "git" | "gh", args: string[]) =>
+  const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
   try {
-    let url = await run("gh", [
-      "pr",
-      "list",
-      "--head",
-      branch,
-      "--state",
-      "all",
-      "--json",
-      "url",
-      "--jq",
-      ".[0].url // empty",
-    ]);
+    const remote = await run("git", ["remote", "get-url", "--push", "origin"]);
+    const host = patchRemoteHost(remote);
+    const gitlabHost =
+      dependencies.environment["GITLAB_HOST"] ||
+      dependencies.environment["GITLAB_URI"] ||
+      dependencies.environment["GL_HOST"];
+    const gitlab =
+      host === "gitlab.com" ||
+      (host !== undefined &&
+        gitlabHost !== undefined &&
+        host ===
+          patchRemoteHost(
+            gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
+          ));
+    const command = gitlab ? "glab" : "gh";
+    let url = await run(
+      command,
+      gitlab
+        ? [
+            "mr",
+            "list",
+            "--all",
+            "--source-branch",
+            branch,
+            "--output",
+            "json",
+            "--jq",
+            ".[0].web_url // empty",
+            "--repo",
+            remote,
+          ]
+        : [
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--json",
+            "url",
+            "--jq",
+            ".[0].url // empty",
+          ],
+    );
     if (!url) {
       await run("git", ["push", "--set-upstream", "origin", branch]);
-      url = await run("gh", [
-        "pr",
-        "create",
-        "--draft",
-        "--head",
-        branch,
-        "--title",
-        PATCH_PR_TITLE,
-        "--body",
-        body,
-      ]);
+      url = await run(
+        command,
+        gitlab
+          ? [
+              "mr",
+              "create",
+              "--draft",
+              "--head",
+              remote,
+              "--source-branch",
+              branch,
+              "--title",
+              PATCH_PR_TITLE,
+              "--description",
+              body,
+              "--yes",
+              "--repo",
+              remote,
+            ]
+          : [
+              "pr",
+              "create",
+              "--draft",
+              "--head",
+              branch,
+              "--title",
+              PATCH_PR_TITLE,
+              "--body",
+              body,
+            ],
+      );
     }
-    stderr.write(`Pull request: ${safePatchText(url)}\n`);
+    stderr.write(
+      `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url)}\n`,
+    );
     return { branch, url };
   } catch (error) {
     stderr.write(
@@ -5404,6 +5460,11 @@ async function publishPatchBranch(
     );
     throw error;
   }
+}
+
+function patchRemoteHost(remote: string): string | undefined {
+  if (remote.includes("://")) return new URL(remote).hostname.toLowerCase();
+  return /^(?:[^@/]+@)?([^:/]+):[^/]/u.exec(remote)?.[1]?.toLowerCase();
 }
 
 async function resumePatchPullRequest(
@@ -5484,14 +5545,14 @@ async function createPatchPullRequest(
 
   const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
   const body = patchPullRequestBody(patchRiskSummary, introduction);
-  const run = (command: "git" | "gh", args: string[]) =>
-    dependencies.runRepositoryCommand(command, args, repository);
+  const run = (args: string[]) =>
+    dependencies.runRepositoryCommand("git", args, repository);
   stderr.write(
-    "Creating a draft GitHub pull request for verified patches...\n",
+    "Creating a draft pull request or merge request for verified patches...\n",
   );
-  await run("git", ["switch", "-c", branch]);
-  await run("git", ["--literal-pathspecs", "add", "--", ...files]);
-  await run("git", [
+  await run(["switch", "-c", branch]);
+  await run(["--literal-pathspecs", "add", "--", ...files]);
+  await run([
     "--literal-pathspecs",
     "commit",
     "--only",
@@ -5500,14 +5561,9 @@ async function createPatchPullRequest(
     "--",
     ...files,
   ]);
-  const commit = await run("git", ["rev-parse", "HEAD"]);
-  await run("git", ["config", "--local", patchCommitKey(branch), commit]);
-  await run("git", [
-    "config",
-    "--local",
-    patchPullRequestBodyKey(branch),
-    body,
-  ]);
+  const commit = await run(["rev-parse", "HEAD"]);
+  await run(["config", "--local", patchCommitKey(branch), commit]);
+  await run(["config", "--local", patchPullRequestBodyKey(branch), body]);
   return publishPatchBranch(repository, branch, body, stderr, dependencies);
 }
 

@@ -101,7 +101,7 @@ describe("interactive patch finding browser", () => {
     expect(app.lastFrame()).toContain("PATCH INSTRUCTIONS");
     expect(app.lastFrame()).toContain("Add instructions for this finding.");
     expect(app.lastFrame()).toContain(
-      "[ ] Create draft GitHub pull request after patching",
+      "[ ] Create draft pull request or merge request after patching",
     );
     expect(app.lastFrame()).toContain("3/3 selected");
     expect(app.lastFrame()).toContain("SUMMARY");
@@ -316,12 +316,12 @@ describe("interactive patch finding browser", () => {
     );
 
     expect(app.lastFrame()).toContain(
-      "[ ] Create draft GitHub pull request after patching",
+      "[ ] Create draft pull request or merge request after patching",
     );
     app.stdin.write("r");
     await settle();
     expect(app.lastFrame()).toContain(
-      "[✓] Create draft GitHub pull request after patching",
+      "[✓] Create draft pull request or merge request after patching",
     );
     app.stdin.write("\r");
     await settle();
