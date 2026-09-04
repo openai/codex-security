@@ -152,6 +152,7 @@ test("publication forwards selected finding IDs only to Linear", async () => {
     return {
       scanId: "scan-example",
       uploadId: "scan-example",
+      payloadDigest: "a".repeat(64),
       destination: { type: "linear", teamId: "team-example" },
       created: [],
       failed: [],

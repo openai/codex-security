@@ -59,6 +59,7 @@ function publicationResult(
   return {
     scanId: "scan-123",
     uploadId: "scan-123",
+    payloadDigest: "a".repeat(64),
     destination: {
       type: "linear" as const,
       teamId: "team-from-flags",
@@ -434,6 +435,64 @@ describe("publish check", () => {
 });
 
 describe("publish scan", () => {
+  test("advertises executable finding selection and digest flags", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["publish", "scan", "--llms-full"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(stdout.text()).toContain("`--finding`");
+    expect(stdout.text()).toContain("`--expect-digest`");
+    expect(stdout.text()).not.toContain("`--expectDigest`");
+    expect(stderr.text()).toBe("");
+  });
+
+  test("forwards repeated finding selections and the reviewed payload digest", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    let selected: Record<string, unknown> | undefined;
+    const digest = "a".repeat(64);
+    deps.publishScan = async (_directory, options) => {
+      selected = { ...options };
+      return { ...publicationResult(), payloadDigest: digest };
+    };
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--finding",
+          "finding-3",
+          "--finding",
+          "finding-1",
+          "--expect-digest",
+          digest,
+          "--dry-run",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(selected).toMatchObject({
+      findingIds: ["finding-3", "finding-1"],
+      expectedDigest: digest,
+      dryRun: true,
+    });
+    expect(JSON.parse(stdout.text()).payloadDigest).toBe(digest);
+    expect(stderr.text()).toBe("");
+  });
   test("forwards opt-in retry and reports skipped issues separately", async () => {
     for (const dryRun of [false, true]) {
       const stdout = capture();
@@ -2308,6 +2367,26 @@ describe("publish scan", () => {
   test("requires an explicit supported destination and team with valid optional flags", async () => {
     const cases: ReadonlyArray<[readonly string[], string]> = [
       [["publish", "scan", "completed-scan"], "to"],
+      [
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--finding",
+        ],
+        "Missing value for flag: --finding",
+      ],
+      [
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--expect-digest",
+        ],
+        "Missing value for flag: --expect-digest",
+      ],
       [["publish", "scan", "completed-scan", "--to", "azure"], "linear"],
       [
         ["publish", "scan", "completed-scan", "--to", "linear"],

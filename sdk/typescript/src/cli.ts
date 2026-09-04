@@ -309,6 +309,8 @@ const VALUE_OPTIONS = new Set([
   "--linear-api-key",
   "--project",
   "--linear-assignee",
+  "--finding",
+  "--expect-digest",
 ]);
 const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
@@ -2127,6 +2129,15 @@ export async function main(
         .describe(
           "External completed scan directory; Linear and custom accept one scan.",
         ),
+      finding: z
+        .array(optionValue("--finding"))
+        .optional()
+        .describe(
+          "Finding ID to publish; repeat to select several. Defaults to all findings.",
+        ),
+      "expect-digest": optionValue("--expect-digest")
+        .optional()
+        .describe("Require the payload digest from a reviewed dry run."),
       // Cloud remains an internal destination, omitted from public discovery.
       to: z
         .string()
@@ -2272,6 +2283,8 @@ export async function main(
         if (
           options.to !== "linear" &&
           (options.skipExisting ||
+            options.finding !== undefined ||
+            options["expect-digest"] !== undefined ||
             [
               options.linearTeam,
               options.linearApiKey,
@@ -2643,6 +2656,12 @@ export async function main(
                 ? {}
                 : { expectedScanId: selectedScans[0].scanId }),
               dryRun: options.dryRun,
+              ...(options.finding === undefined
+                ? {}
+                : { findingIds: options.finding }),
+              ...(options["expect-digest"] === undefined
+                ? {}
+                : { expectedDigest: options["expect-digest"] }),
               signal: controller.signal,
               ...(options.skipExisting ? { skipExisting: true } : {}),
               ...(options.dryRun

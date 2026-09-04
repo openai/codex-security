@@ -100,7 +100,6 @@ export async function prepareScanPublication(
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       expectedScanId: options.expectedScanId,
     });
-  const uploadedAt = options.uploadedAt ?? new Date().toISOString();
   const scanId = contract.manifest.scan.id;
   let classification: SeverityClassification | undefined;
   if (options.classification !== undefined) {
@@ -174,12 +173,7 @@ export async function prepareScanPublication(
           findingId: finding.findingId,
           occurrenceId: finding.occurrenceId,
           title: `[Codex Security][${level.toUpperCase()}] ${finding.title}`,
-          description: renderFindingDescription(
-            contract,
-            finding,
-            uploadedAt,
-            assessment,
-          ),
+          description: renderFindingDescription(contract, finding, assessment),
           ...(priority === undefined ? {} : { priority }),
         };
       }),
@@ -189,7 +183,6 @@ export async function prepareScanPublication(
 function renderFindingDescription(
   contract: LoadedContract,
   finding: Finding,
-  uploadedAt: string,
   assessment?: SeverityAssessment,
 ): string {
   const { coverage } = contract;
@@ -282,7 +275,6 @@ function renderFindingDescription(
     `**Scan mode:** ${scanMode(coverage.mode)}`,
     `**Started:** ${scan.startedAt}`,
     `**Completed:** ${scan.completedAt}`,
-    `**Uploaded:** ${uploadedAt}`,
     "",
     "### Affected locations",
     "",

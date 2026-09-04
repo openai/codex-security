@@ -401,6 +401,93 @@ describe("database-backed Linear publication integration", () => {
     expect(storedPublications(completed)).toHaveLength(2);
   });
 
+  test("publishes a reviewed subset without weakening full-scan history checks", async () => {
+    const completed = await fixture(3);
+    const sealed = await artifactDigests(completed.scanDirectory);
+    const selected = completed.findings[1]!;
+    const environment = {
+      ...completed.environment,
+      CODEX_SECURITY_LINEAR_API_KEY: "synthetic-key",
+    };
+    const preview = await publishScanInternal(
+      completed.scanDirectory,
+      {
+        ...OPTIONS,
+        findingIds: [selected.findingId],
+        dryRun: true,
+      },
+      { environment },
+    );
+    expect(preview.issues?.map((issue) => issue.findingId)).toEqual([
+      selected.findingId,
+    ]);
+    expect(storedPublications(completed)).toEqual([]);
+    const stdout = capture();
+    const stderr = capture();
+    const cli = dependencies({ environment });
+    type LinearClient = ReturnType<
+      NonNullable<PublishScanDependencies["linearClient"]>
+    >;
+    type IssueInput = Parameters<LinearClient["createIssue"]>[0];
+    let mutations = 0;
+    cli.publishScan = async (directory, options) =>
+      publishScanInternal(directory, options, {
+        environment,
+        linearClient: () =>
+          ({
+            createIssue: async (input: IssueInput) => {
+              mutations += 1;
+              expect(input.description).toBe(preview.issues![0]!.description);
+              return {
+                success: true,
+                issue: Promise.resolve({
+                  identifier: "SEC-SELECTED",
+                  url: "https://linear.app/example/issue/SEC-SELECTED",
+                }),
+              };
+            },
+          }) as unknown as LinearClient,
+      });
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          completed.scanDirectory,
+          "--to",
+          "linear",
+          "--linear-team",
+          OPTIONS.teamId,
+          "--project",
+          OPTIONS.projectId,
+          "--finding",
+          selected.findingId,
+          "--expect-digest",
+          preview.payloadDigest,
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        cli,
+      ),
+    ).toBe(0);
+    const result = JSON.parse(stdout.text()) as PublishScanResult;
+    expect(result.payloadDigest).toBe(preview.payloadDigest);
+    expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+    expect(mutations).toBe(1);
+    expect(
+      storedPublications(completed).map((record) => [
+        record.finding_id,
+        record.external_id,
+      ]),
+    ).toEqual([[selected.findingId, "SEC-SELECTED"]]);
+    expect(JSON.parse(await readFile(receiptPath(completed), "utf8"))).toEqual(
+      result,
+    );
+    expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+  });
+
   test("checks and retries a partial publication without duplicating recorded successes", async () => {
     const completed = await fixture(2);
     const sealed = await artifactDigests(completed.scanDirectory);

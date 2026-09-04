@@ -3,7 +3,7 @@ import {
   spawnSync,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import {
   appendFile,
   mkdir,
@@ -73,6 +73,7 @@ export interface PublishScanOptions {
   projectId?: string;
   linearApiKey?: string;
   assigneeId?: string;
+  expectedDigest?: string;
   dryRun?: boolean;
   skipExisting?: boolean;
   signal?: AbortSignal;
@@ -127,6 +128,7 @@ export interface PublishScanResult {
   issues?: PreparedPublicationIssue[];
   indeterminate?: boolean;
   warnings?: string[];
+  payloadDigest: string;
 }
 
 export type CheckScanPublicationOptions = Pick<
@@ -274,39 +276,59 @@ export async function publishScanInternal(
   options.signal?.throwIfAborted();
   const environment = dependencies.environment ?? process.env;
   const linearApiKey = publicationApiKey(options, environment);
+  const approvedAssignee =
+    options.assigneeId === undefined
+      ? undefined
+      : { id: options.assigneeId, key: linearApiKey! };
 
   const preparedScan = await (dependencies.prepare ?? prepareScanPublication)(
     scanDirectory,
     { ...options, environment },
   );
-  let prepared = preparedScan;
   options.signal?.throwIfAborted();
+  let prepared = selectPublicationFindings(preparedScan, options.findingIds);
+  const findingCount = prepared.issues.length;
+  let skipped: PublishedScanIssue[] | undefined;
+  if (options.skipExisting) {
+    const selected = new Set(prepared.issues.map((issue) => issue.findingId));
+    skipped = (
+      await (dependencies.inspectPublicationStore ?? inspectPublicationStore)(
+        preparedScan,
+        environment,
+        options.signal,
+      )
+    ).filter((issue) => selected.has(issue.findingId));
+    const recorded = new Set(skipped.map((issue) => issue.findingId));
+    prepared = {
+      ...prepared,
+      issues: prepared.issues.filter((issue) => !recorded.has(issue.findingId)),
+    };
+    options.signal?.throwIfAborted();
+  }
+  const payloadDigest = publicationPayloadDigest(prepared, approvedAssignee);
+  if (
+    options.expectedDigest !== undefined &&
+    options.expectedDigest !== payloadDigest
+  ) {
+    throw new ConfigurationError(
+      "The prepared Linear publication does not match the expected digest. Review a new dry run before publishing.",
+    );
+  }
   const result: PublishScanResult = {
     scanId: prepared.scanId,
     uploadId: prepared.scanId,
     destination: prepared.destination,
+    payloadDigest,
     created: [],
     failed: [],
+    ...(skipped === undefined ? {} : { skipped }),
     counts: {
-      findings: prepared.issues.length,
+      findings: findingCount,
       created: 0,
       failed: 0,
+      ...(skipped === undefined ? {} : { skipped: skipped.length }),
     },
   };
-  if (options.skipExisting) {
-    result.skipped = await (
-      dependencies.inspectPublicationStore ?? inspectPublicationStore
-    )(preparedScan, environment, options.signal);
-    result.counts.skipped = result.skipped.length;
-    const recorded = new Set(result.skipped.map((issue) => issue.findingId));
-    prepared = {
-      ...preparedScan,
-      issues: preparedScan.issues.filter(
-        (issue) => !recorded.has(issue.findingId),
-      ),
-    };
-    options.signal?.throwIfAborted();
-  }
   const saveReceipt = dependencies.writeReceipt ?? writePublicationReceipt;
   if (options.dryRun) {
     return { ...result, dryRun: true, issues: prepared.issues };
@@ -572,6 +594,66 @@ export async function publishScanInternal(
     total: prepared.issues.length,
   });
   return result;
+}
+
+function selectPublicationFindings(
+  publication: PreparedScanPublication,
+  findingIds: readonly string[] | undefined,
+): PreparedScanPublication {
+  if (findingIds === undefined) return publication;
+  if (
+    !Array.isArray(findingIds) ||
+    findingIds.some((id) => typeof id !== "string" || !id.trim())
+  ) {
+    throw new ConfigurationError(
+      "Publication finding IDs must be nonempty strings.",
+    );
+  }
+  const selected = new Set(findingIds);
+  const known = new Set(publication.issues.map((issue) => issue.findingId));
+  for (const findingId of selected) {
+    if (!known.has(findingId)) {
+      throw new ConfigurationError(
+        `Unknown publication finding ID: ${JSON.stringify(findingId)}.`,
+      );
+    }
+  }
+  return {
+    ...publication,
+    issues: publication.issues.filter((issue) => selected.has(issue.findingId)),
+  };
+}
+
+function publicationPayloadDigest(
+  publication: PreparedScanPublication,
+  assignee: { id: string; key: string } | undefined,
+): string {
+  const { destination } = publication;
+  const digest =
+    assignee === undefined
+      ? createHash("sha256")
+      : createHmac("sha256", assignee.key);
+  return digest
+    .update(
+      JSON.stringify({
+        version: assignee === undefined ? 1 : 2,
+        scanId: publication.scanId,
+        destination: {
+          type: destination.type,
+          teamId: destination.teamId,
+          projectId: destination.projectId ?? null,
+        },
+        assigneeId: assignee?.id ?? null,
+        issues: publication.issues.map((issue) => ({
+          findingId: issue.findingId,
+          occurrenceId: issue.occurrenceId,
+          title: issue.title,
+          description: issue.description,
+          priority: issue.priority ?? null,
+        })),
+      }),
+    )
+    .digest("hex");
 }
 
 export async function checkScanPublication(

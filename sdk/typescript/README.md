@@ -794,6 +794,26 @@ a project. Destination flags override `CODEX_SECURITY_LINEAR_TEAM` and
 `CODEX_SECURITY_LINEAR_PROJECT`. `--dry-run` previews issue titles without
 contacting Linear; `--json` returns structured results.
 
+Repeat `--finding FINDING_ID` to select findings; omitting it publishes all
+findings. Review `--dry-run --json`, then pass its `payloadDigest` as
+`--expect-digest` to require the same pending issue payload:
+
+```bash
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear --linear-team TEAM_ID --finding csf_example --dry-run --json
+
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear --linear-team TEAM_ID --finding csf_example \
+  --expect-digest DIGEST_FROM_PREVIEW
+```
+
+The digest binds the scan, destination, pending issue content and requested
+assignee. A mismatch stops before publication writes. Assigned approvals require
+the same assignee and API credential; unassigned digests are credential-independent.
+The digest is not a permission check or remote readback. Keep previews private:
+they contain finding descriptions and source snippets. Descriptions omit the
+wall-clock upload timestamp so unchanged inputs produce stable previews.
+
 Sign in to Codex and connect Linear to publish with your existing Codex
 configuration; publication doesn't use the isolated scan home. To use the
 Linear API directly, set a personal API key:
@@ -851,6 +871,10 @@ console.log(publication.created.length);
 Options include `projectId`, `skipExisting`, `linearApiKey` for direct API
 publication, and `assigneeId` (user ID or email). `checkScanPublication` accepts
 the same destination options for a read-only check.
+
+Use `findingIds: ["csf_example"]` to select findings. With `dryRun: true`, the
+result includes selected `issues` and `payloadDigest`; pass that digest as
+`expectedDigest` when publishing.
 
 ### Classify finding severity
 

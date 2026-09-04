@@ -940,6 +940,8 @@ describe("publish scan to Cloud", () => {
       ["--linear-assignee", "synthetic-value"],
       ["--linear-api-key", "synthetic-value"],
       ["--skip-existing"],
+      ["--finding", "finding-example"],
+      ["--expect-digest", "0".repeat(64)],
     ]) {
       const deps = dependencies();
       let calls = 0;

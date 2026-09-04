@@ -6,9 +6,11 @@ import {
   classifyScanDirectorySeverity,
   deduplicateScan,
   estimateScanCost,
+  publishScan,
+  type PublishScanOptions,
+  type PublishScanResult,
   planComponents,
   publishScanToCustom,
-  publishScan,
   runComponentScans,
   type ComponentScanOptions,
   type DeduplicateScanResult,
@@ -118,6 +120,22 @@ export const cost: ScanCost | null = estimateScanCost("gpt-5.6-sol", {
   input_tokens: 10,
   output_tokens: 2,
 });
+
+const publicationOptions: PublishScanOptions = {
+  destination: "linear",
+  teamId: "team-example",
+  findingIds: ["finding-example"],
+  expectedDigest: "0".repeat(64),
+  dryRun: true,
+};
+
+export async function previewPublication(
+  scanDirectory: string,
+): Promise<PublishScanResult> {
+  const result = await publishScan(scanDirectory, publicationOptions);
+  result.payloadDigest satisfies string;
+  return result;
+}
 
 interface ImportedFinding {
   id: string;
