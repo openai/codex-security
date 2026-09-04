@@ -106,6 +106,7 @@ for (const cyber of [false, true]) {
           line.includes("keep going with your current settings"),
         );
       assert.equal(nudge.length, cyber || newer || lowerEffort ? 1 : 0);
+      assertDeliveryInstruction(guidance, cyber || newer || lowerEffort);
       assert.equal(
         (guidance.match(/\?/g) ?? []).length,
         newer || lowerEffort ? 1 : 0,
@@ -219,6 +220,7 @@ async function assertGuidanceRuntime(runtimeBundle) {
 
     for (const settings of [
       { model: "gpt-5.5-cyber-preview", reasoningEffort: "high" },
+      { model: "scan-current", reasoningEffort: "medium" },
       { model: "astra-cyber-preview", reasoningEffort: "xhigh" },
       { model: "gpt-5.6-sol", reasoningEffort: "ultra" },
       {},
@@ -241,8 +243,32 @@ async function assertGuidanceRuntime(runtimeBundle) {
         { type: "text", text: scanModelGuidance(settings) },
       ]);
       assert.equal(result.structuredContent, undefined);
+      const guidance = result.content[0].text;
+      assertDeliveryInstruction(
+        guidance,
+        settings.model === "gpt-5.5-cyber-preview" ||
+          settings.reasoningEffort === "medium",
+      );
     }
   } finally {
     await client.close();
+  }
+}
+
+function assertDeliveryInstruction(guidance, expected) {
+  const delivery =
+    /Send this nudge now in one user-visible commentary message before calling another scan tool:/;
+  if (expected) {
+    assert.match(guidance, delivery);
+    assert.match(
+      guidance,
+      /This tool result does not deliver the nudge to the user\./,
+    );
+    assert.match(
+      guidance,
+      /continue the scan without waiting for a reply or changing settings\./,
+    );
+  } else {
+    assert.doesNotMatch(guidance, delivery);
   }
 }

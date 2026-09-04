@@ -40,6 +40,11 @@ export function scanModelGuidance(
       ? `Current reasoning effort: ${reasoningEffort}.`
       : "The host did not provide the current reasoning effort.",
   ];
+  if (!catalog) {
+    messages.push(
+      "The available-model catalog could not be established. Do not claim a newer model is available without current host catalog evidence.",
+    );
+  }
   const nudge: string[] = [];
   if (model && isNonAstraCyberModel(current?.model ?? model)) {
     nudge.push(
@@ -72,15 +77,11 @@ export function scanModelGuidance(
     nudge.push(
       "You can change the model or reasoning selector, or keep going with your current settings.",
     );
-    messages.push(nudge.join(" "));
+    messages.push(
+      "Send this nudge now in one user-visible commentary message before calling another scan tool:",
+      nudge.join(" "),
+      "This tool result does not deliver the nudge to the user. After sending the commentary, continue the scan without waiting for a reply or changing settings.",
+    );
   }
-  messages.push(
-    ...(catalog
-      ? []
-      : [
-          "The available-model catalog could not be established. Do not claim a newer model is available without current host catalog evidence.",
-        ]),
-    "In the app, combine all applicable guidance into a single brief text nudge with at most one question. Do not emit separate warnings or questions for each setting. The user can change the model selector or keep going; do not change settings or wait for an answer.",
-  );
   return messages.join("\n");
 }

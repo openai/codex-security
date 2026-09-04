@@ -2,7 +2,7 @@
 
 Apply this guidance once when a Standard or Deep Security Scan owns the top-level workflow. An independent worker inherits its assigned scan context and must not repeat top-level setup, scan ownership, or completed phases.
 
-Read `model-guidance.md` once for the optional model and reasoning advisory before substantive scanning. This advisory is separate from capability preflight and never blocks scan startup.
+Read `model-guidance.md` once for model and reasoning guidance before substantive scanning. Send any applicable nudge as user-visible commentary before the next scan tool call; the guidance tool's result is not delivery. Then continue without waiting for a reply. This advisory is separate from capability preflight, and unavailable guidance never blocks scan startup.
 
 ## Setup and Scan Ownership
 
@@ -22,7 +22,7 @@ Only a top-level Standard scan reads `config-preflight.md` and runs its existing
 
 For a blocked, incomplete, or failed Standard preflight, report the exact reason and preserve any durable running scan while recovery remains possible. In an interactive session, present the helper-reported configuration path and exact remediation, then use the existing native input, MCP input, or plain-chat fallback before editing persistent configuration. In a headless or otherwise non-interactive session, apply only helper-provided ordinary patches to its reported `user_config_path`, rerun once, and continue only if the result becomes `ready`. Never guess the active configuration path or conceal a higher-precedence conflict with a lower-precedence change.
 
-A Deep scan has no parent capability preflight: do not load either preflight reference, inspect delegation capabilities, run the capability helper, request remediation, or publish preflight checks. The optional model advisory above still applies. Its coordinator validates the real scan ownership, target, scope, and sandbox and owns the existing transition from the durable `preflight` phase into discovery.
+A Deep scan has no parent capability preflight: do not load either preflight reference, inspect delegation capabilities, run the capability helper, request remediation, or publish preflight checks. The model advisory above still applies. Its coordinator validates the real scan ownership, target, scope, and sandbox and owns the existing transition from the durable `preflight` phase into discovery.
 
 ## Cancellation and Recovery
 
