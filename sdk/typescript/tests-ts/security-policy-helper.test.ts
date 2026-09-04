@@ -847,9 +847,13 @@ describe("built SECURITY.md helper", () => {
       [["--bogus", "--help"], 0],
       [["positional", "--help"], 0],
       [["-hfoo"], 0],
+      [["-hfoo-"], 0],
       [["--scope", "--help"], 2],
       [["--list=value", "--help"], 2],
       [["-h=foo"], 2],
+      [["-h-"], 2],
+      [["-hh-"], 2],
+      [["-h--help"], 2],
       [["--"], 2],
       [["--", "--help"], 2],
     ] as const) {
