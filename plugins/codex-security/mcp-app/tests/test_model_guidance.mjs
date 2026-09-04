@@ -100,20 +100,18 @@ for (const cyber of [false, true]) {
         },
         [selected, upgrade],
       );
-      const nudge = guidance
-        .split("\n")
-        .filter((line) =>
-          line.includes("keep going with your current settings"),
-        );
-      assert.equal(nudge.length, cyber || newer || lowerEffort ? 1 : 0);
-      assertDeliveryInstruction(guidance, cyber || newer || lowerEffort);
+      assertDeliveryInstruction(
+        guidance,
+        cyber || newer || lowerEffort,
+        newer || lowerEffort,
+      );
       assert.equal(
         (guidance.match(/\?/g) ?? []).length,
         newer || lowerEffort ? 1 : 0,
       );
-      if (cyber) assert.match(nudge[0], /dynamic exploitation/);
-      if (newer) assert.match(nudge[0], /use scan-upgrade/);
-      if (lowerEffort) assert.match(nudge[0], /xhigh reasoning/);
+      if (cyber) assert.match(guidance, /dynamic exploitation/);
+      if (newer) assert.match(guidance, /use scan-upgrade/);
+      if (lowerEffort) assert.match(guidance, /xhigh reasoning/);
     }
   }
 }
@@ -217,9 +215,16 @@ async function assertGuidanceRuntime(runtimeBundle) {
     assert.equal(tool.annotations.readOnlyHint, true);
     assert.equal(tool.annotations.destructiveHint, false);
     assert.deepEqual(tool.inputSchema.properties, {});
+    assert.match(tool.description, /one blocking user-input form/);
+    assert.match(
+      tool.description,
+      /before creating a new chat-started desktop scan/,
+    );
+    assert.doesNotMatch(tool.description, /continue without waiting/);
 
     for (const settings of [
       { model: "gpt-5.5-cyber-preview", reasoningEffort: "high" },
+      { model: "gpt-5.5-cyber-preview", reasoningEffort: "xhigh" },
       { model: "scan-current", reasoningEffort: "medium" },
       { model: "astra-cyber-preview", reasoningEffort: "xhigh" },
       { model: "gpt-5.6-sol", reasoningEffort: "ultra" },
@@ -248,6 +253,8 @@ async function assertGuidanceRuntime(runtimeBundle) {
         guidance,
         settings.model === "gpt-5.5-cyber-preview" ||
           settings.reasoningEffort === "medium",
+        settings.reasoningEffort === "medium" ||
+          settings.reasoningEffort === "high",
       );
     }
   } finally {
@@ -255,20 +262,22 @@ async function assertGuidanceRuntime(runtimeBundle) {
   }
 }
 
-function assertDeliveryInstruction(guidance, expected) {
-  const delivery =
-    /Send this nudge now in one user-visible commentary message before calling another scan tool:/;
-  if (expected) {
-    assert.match(guidance, delivery);
+function assertDeliveryInstruction(guidance, expected, actionable) {
+  if (actionable) {
+    assert.match(guidance, /Actionable model or reasoning guidance follows\./);
     assert.match(
       guidance,
-      /This tool result does not deliver the nudge to the user\./,
+      /ONE blocking native or MCP input form question before starting the scan/,
     );
-    assert.match(
-      guidance,
-      /continue the scan without waiting for a reply or changing settings\./,
-    );
+    assert.match(guidance, /do not send a separate commentary question/);
+    assert.match(guidance, /declarative advisory as commentary/);
+    assert.match(guidance, /Never infer that the user chose to continue/);
+    assert.doesNotMatch(guidance, /Warning-only guidance follows/);
+  } else if (expected) {
+    assert.match(guidance, /Warning-only guidance follows/);
+    assert.match(guidance, /continue without requesting input/);
+    assert.doesNotMatch(guidance, /ONE blocking/);
   } else {
-    assert.doesNotMatch(guidance, delivery);
+    assert.doesNotMatch(guidance, /guidance follows/);
   }
 }

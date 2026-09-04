@@ -366,7 +366,7 @@ export function createCodexSecurityServer(): McpServer {
 
   server.registerTool("get_codex_security_model_guidance", {
     title: "Get Codex Security Model Guidance",
-    description: "Read the current scan model, reasoning effort, and Codex model catalog for scan-quality guidance. Call once before a top-level scan. If a nudge is returned, send it as user-visible commentary before the next scan tool call, then continue without waiting. The tool result itself does not deliver the nudge. This does not start a scan or change settings.",
+    description: "Read the current scan model, reasoning effort, and Codex model catalog for scan-quality guidance. Call once before a top-level scan, before creating a new chat-started desktop scan. If an actionable model or effort suggestion is returned for a new interactive desktop scan, present its combined question through one blocking user-input form and wait for an explicit choice before starting. For warning-only advice, existing native scans, or headless hosts, deliver the advisory as commentary and continue. The tool result itself does not deliver guidance or change settings.",
     inputSchema: {},
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     _meta: modelActionMeta

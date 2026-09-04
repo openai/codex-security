@@ -74,14 +74,29 @@ export function scanModelGuidance(
     );
   }
   if (nudge.length > 0) {
-    nudge.push(
-      "You can change the model or reasoning selector, or keep going with your current settings.",
-    );
-    messages.push(
-      "Send this nudge now in one user-visible commentary message before calling another scan tool:",
-      nudge.join(" "),
-      "This tool result does not deliver the nudge to the user. After sending the commentary, continue the scan without waiting for a reply or changing settings.",
-    );
+    if (suggestions.length > 0) {
+      const question = [
+        ...nudge,
+        "You can change the model or reasoning selector, or keep going with your current settings.",
+      ].join(" ");
+      const advisory = [
+        ...nudge.slice(0, -1),
+        `For the best scanning results, consider using ${suggestions.join(" with ")}.`,
+      ].join(" ");
+      messages.push(
+        "Actionable model or reasoning guidance follows. For a new interactive desktop scan started in chat, present this complete text as the ONE blocking native or MCP input form question before starting the scan; the form is user-visible, so do not send a separate commentary question:",
+        question,
+        "If both input tools are unavailable, ask the same question in plain chat and stop for the user's reply. For an existing native Security tab scan, send the following declarative advisory as commentary and explain that selector changes would apply to a future scan, then continue that already-started scan. In a headless host, send the declarative advisory once and continue:",
+        advisory,
+        "This tool result does not itself deliver guidance to the user. Never infer that the user chose to continue a new interactive desktop scan.",
+      );
+    } else {
+      messages.push(
+        "Warning-only guidance follows. Send it as one user-visible commentary paragraph, then continue without requesting input:",
+        nudge.join(" "),
+        "This tool result does not itself deliver guidance to the user.",
+      );
+    }
   }
   return messages.join("\n");
 }

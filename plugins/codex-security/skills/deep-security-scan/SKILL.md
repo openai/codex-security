@@ -35,7 +35,7 @@ Do not repeat this guard after it passes, on later context loads, or after the s
 
 ## Shared Scan Setup
 
-After preserving any native continuation's scan context and applying its one-time concurrent-scan guard, read `../../references/scan-prologue.md` once, including its model guidance. When `get_codex_security_model_guidance` returns an applicable nudge, send it as user-visible commentary before the next scan tool call, then continue without waiting. Deep scans do not run a capability helper, inspect delegation capabilities, request configuration remediation, or publish preflight checks. The coordinator validates its own ownership, target, scope, and sandbox and manages its workers independently of this thread's delegation runtime and subagent allowance.
+After preserving any native continuation's scan context and applying its one-time concurrent-scan guard, read `../../references/scan-prologue.md` once, including its model guidance. For a new chat-started desktop Deep scan, present an actionable combined recommendation through the reference's single blocking input question before the first `start_codex_security_deep_scan` call. A warning without an actionable recommendation, an existing native continuation, and a headless scan follow their respective advisory paths. Deep scans do not run a capability helper, inspect delegation capabilities, request configuration remediation, or publish preflight checks. The coordinator validates its own ownership, target, scope, and sandbox and manages its workers independently of this thread's delegation runtime and subagent allowance.
 
 ## TAC Status Advisory
 

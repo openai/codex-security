@@ -2,7 +2,7 @@
 
 Apply this guidance once when a Standard or Deep Security Scan owns the top-level workflow. An independent worker inherits its assigned scan context and must not repeat top-level setup, scan ownership, or completed phases.
 
-Read `model-guidance.md` once for model and reasoning guidance before substantive scanning. Send any applicable nudge as user-visible commentary before the next scan tool call; the guidance tool's result is not delivery. Then continue without waiting for a reply. This advisory is separate from capability preflight, and unavailable guidance never blocks scan startup.
+Read `model-guidance.md` once for model and reasoning guidance before substantive scanning; for a new chat-started desktop scan, do so before creating the scan. Deliver applicable guidance through that reference's blocking form, commentary, or chat fallback as appropriate; the guidance tool's result is not delivery. If the guidance was already handled before loading the authoritative scan context, do not repeat it. This advisory is separate from capability preflight, and unavailable guidance never blocks scan startup.
 
 ## Setup and Scan Ownership
 
