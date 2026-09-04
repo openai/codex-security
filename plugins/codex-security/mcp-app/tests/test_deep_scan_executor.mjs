@@ -13,13 +13,7 @@ const bundle = await build({
   define: {
     "import.meta.url": JSON.stringify(executorSource.href)
   },
-  stdin: {
-    // Test the environment snapshot without adding a production export.
-    contents: `${await readFile(executorSource, "utf8")}\nexport { snapshotWorkerEnvironment };`,
-    loader: "ts",
-    resolveDir: path.dirname(fileURLToPath(executorSource)),
-    sourcefile: fileURLToPath(executorSource)
-  },
+  entryPoints: [fileURLToPath(executorSource)],
   format: "esm",
   platform: "node",
   write: false
