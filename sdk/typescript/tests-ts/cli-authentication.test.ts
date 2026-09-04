@@ -46,6 +46,7 @@ function dependencies(
   return cliDependencies({
     ...options,
     environment: {
+      CODEX_HOME: join(stateDirectory, "ambient-codex"),
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       ...options.environment,
     },
@@ -66,8 +67,7 @@ describe("CLI authentication", () => {
       const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
-      deps.prepareAuthenticationHome = async () =>
-        join(stateDirectory, "codex-home");
+      deps.prepareAuthenticationHome = prepareCodexSecurityCredentialHome;
       let forwarded: readonly string[] | undefined;
       deps.createSecurity = () => {
         throw new Error("must not initialize Codex Security");
@@ -1082,6 +1082,36 @@ describe("CLI authentication", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({ authentication });
     expect(`${stdout.text()}${stderr.text()}`).not.toContain("synthetic");
   });
+
+  test.skipIf(process.platform === "win32" || process.geteuid?.() === 0)(
+    "reports unreadable ambient credentials during login status",
+    async () => {
+      const ambientHome = join(stateDirectory, "ambient-codex");
+      const authPath = join(ambientHome, "auth.json");
+      await mkdir(ambientHome);
+      await writeFile(authPath, '{"auth_mode":"chatgpt"}\n', { mode: 0o000 });
+      const deps = dependencies({ environment: { CODEX_HOME: ambientHome } });
+      deps.runCodex = async () => {
+        throw new Error("Must not query Codex after an import failure");
+      };
+      const stderr = capture();
+      try {
+        expect(
+          await main(
+            ["login", "status"],
+            capture().stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toContain(
+          "Unable to copy ambient Codex authentication.",
+        );
+      } finally {
+        await chmod(authPath, 0o600);
+      }
+    },
+  );
 
   test("recognizes existing ambient Codex authentication on a fresh state directory during login status", async () => {
     const root = await realpath(

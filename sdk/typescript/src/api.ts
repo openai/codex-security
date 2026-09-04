@@ -1962,11 +1962,20 @@ export class CodexSecurity {
       const ambientHome =
         environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
         join(homedir(), ".codex");
-      await initialCredentialsAvailable(
-        this.#dependencies.environment,
-        ambientHome,
-        authentication.codexHome,
-      );
+      const releaseCredentialHome =
+        await acquireCodexSecurityCredentialHomeLock(
+          authentication.codexHome,
+          this.#abortController.signal,
+        );
+      try {
+        await initialCredentialsAvailable(
+          this.#dependencies.environment,
+          ambientHome,
+          authentication.codexHome,
+        );
+      } finally {
+        await releaseCredentialHome();
+      }
       return await accountStatus(
         this.#codexCommand(),
         authentication.environment,
@@ -1979,16 +1988,28 @@ export class CodexSecurity {
     await this.#trackOperation(async () => {
       const authentication = await this.#authentication();
       this.#requireOpen();
-      await codexLogout(
-        this.#codexCommand(),
-        authentication.environment,
-        this.#abortController.signal,
-      );
-      if (
-        this.#runtime === null ||
-        this.#runtime.persistentCredentialHome === true
-      ) {
-        await setCodexSecurityCredentialLogout(authentication.codexHome, true);
+      const releaseCredentialHome =
+        await acquireCodexSecurityCredentialHomeLock(
+          authentication.codexHome,
+          this.#abortController.signal,
+        );
+      try {
+        await codexLogout(
+          this.#codexCommand(),
+          authentication.environment,
+          this.#abortController.signal,
+        );
+        if (
+          this.#runtime === null ||
+          this.#runtime.persistentCredentialHome === true
+        ) {
+          await setCodexSecurityCredentialLogout(
+            authentication.codexHome,
+            true,
+          );
+        }
+      } finally {
+        await releaseCredentialHome();
       }
       if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
       this.#runtimeCredentialSource = null;

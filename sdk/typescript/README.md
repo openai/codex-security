@@ -229,9 +229,11 @@ npx @openai/codex-security scan C:\code\repository
 Login, logout, and scans share a private credential home:
 `$CODEX_SECURITY_STATE_DIR/codex-home`, or
 `$CODEX_HOME/state/plugins/codex-security/codex-home`. Codex uses the configured
-file or keyring storage and managed-device policies. If this home has no
-credentials, it imports an existing file-based Codex sign-in. Logout disables
-imports until you log in again.
+file or keyring storage and managed-device policies. Without an overriding
+environment API key, scans and status checks import existing file-based Codex
+credentials when this home is empty. Import errors make `login status` exit with
+code 2 and SDK `account()` reject its promise. Logout disables imports until you
+log in again.
 
 Finish operations using older versions before upgrading. Runtime preparation
 holds the credential-home lock through pauses; exit or crash releases it.

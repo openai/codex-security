@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanup, render } from "ink-testing-library";
-import { createElement } from "react";
+import { act, createElement } from "react";
 import type { Finding, SeverityLevel } from "../src/index.js";
 import { PatchTui, type PatchSelection } from "../src/patch-tui.js";
 import { fakeResult } from "./cli-fixtures.js";
@@ -81,7 +81,19 @@ function findings(severities: readonly SeverityLevel[]): Finding[] {
 }
 
 async function settle(): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, 60));
+  const environment = globalThis as typeof globalThis & {
+    IS_REACT_ACT_ENVIRONMENT?: boolean;
+  };
+  const previous = environment.IS_REACT_ACT_ENVIRONMENT;
+  environment.IS_REACT_ACT_ENVIRONMENT = true;
+  try {
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 60));
+    });
+  } finally {
+    if (previous === undefined) delete environment.IS_REACT_ACT_ENVIRONMENT;
+    else environment.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
 }
 
 describe("interactive patch finding browser", () => {

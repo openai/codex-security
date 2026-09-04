@@ -139,6 +139,7 @@ import {
 } from "./publish.js";
 import type { ScanResult } from "./result.js";
 import {
+  acquireCodexSecurityCredentialHomeLock,
   bundledPluginRoot,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
@@ -4493,15 +4494,25 @@ export async function main(
             : await prepareCodexSecurityCredentialHome(
                 dependencies.environment,
               );
-        if (args.action === "status" && existsSync(credentialHome)) {
+        if (
+          args.action === "status" &&
+          existsSync(credentialHome) &&
+          scanAuthentication(dependencies.environment).method !== "api_key"
+        ) {
           const ambientHome =
             environmentValue(dependencies.environment, "CODEX_HOME") ??
             join(homedir(), ".codex");
-          await initialCredentialsAvailable(
-            dependencies.environment,
-            ambientHome,
-            credentialHome,
-          );
+          const releaseCredentialHome =
+            await acquireCodexSecurityCredentialHomeLock(credentialHome);
+          try {
+            await initialCredentialsAvailable(
+              dependencies.environment,
+              ambientHome,
+              credentialHome,
+            );
+          } finally {
+            await releaseCredentialHome();
+          }
         }
         const authenticationEnvironment = {
           ...dependencies.environment,
@@ -4585,16 +4596,22 @@ export async function main(
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
         };
-        exitCode = await dependencies.runCodex(
-          ["logout"],
-          undefined,
-          authenticationEnvironment,
-        );
-        if (
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
-          await setCodexSecurityCredentialLogout(credentialHome, true);
+        const releaseCredentialHome =
+          await acquireCodexSecurityCredentialHomeLock(credentialHome);
+        try {
+          exitCode = await dependencies.runCodex(
+            ["logout"],
+            undefined,
+            authenticationEnvironment,
+          );
+          if (
+            exitCode === 0 &&
+            dependencies.prepareAuthenticationHome !== undefined
+          ) {
+            await setCodexSecurityCredentialLogout(credentialHome, true);
+          }
+        } finally {
+          await releaseCredentialHome();
         }
       },
     })
