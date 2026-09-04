@@ -14,6 +14,7 @@ import { createInterface } from "node:readline";
 import { afterEach, describe, expect, test } from "bun:test";
 import { loadContract } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runNormalizer } from "./support/normalize-candidates.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -389,12 +390,8 @@ describe("compact diff scan", () => {
       inventory,
     ];
 
-    expect(python("normalize_candidates.py", ...args).status).toBe(2);
-    const accepted = python(
-      "normalize_candidates.py",
-      ...args,
-      "--allow-missing-in-scope",
-    );
+    expect(runNormalizer(args).status).toBe(2);
+    const accepted = runNormalizer([...args, "--allow-missing-in-scope"]);
     expect(accepted.status, accepted.stderr).toBe(0);
     const contents = readFileSync(output, "utf8");
     expect(contents).toContain("Résumé: missing guard");
@@ -408,11 +405,7 @@ describe("compact diff scan", () => {
     ]);
 
     writeFileSync(inventory, "../escaped.py\nsrc/handler.py\n");
-    const escaped = python(
-      "normalize_candidates.py",
-      ...args,
-      "--allow-missing-in-scope",
-    );
+    const escaped = runNormalizer([...args, "--allow-missing-in-scope"]);
     expect(escaped.status).toBe(2);
     expect(escaped.stderr).toContain("in-scope file row 1");
   });
