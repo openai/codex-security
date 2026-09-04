@@ -4021,25 +4021,13 @@ describe("GitHub release workflow safeguards", () => {
       expect(workflow.jobs[gate]?.steps[0]?.run).toBe("exit 1");
     }
 
-    const renderName = (template: string, values: Record<string, string>) => {
-      let name = template;
-      for (const [key, value] of Object.entries(values)) {
-        name = name.replaceAll("${{ matrix." + key + " }}", value);
-      }
-      return name.replace(
-        "${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
-        values["node"] === "22.13.0" ? "22" : values["node"] ?? "",
-      );
-    };
     const unixJob = workflow.jobs["required-test"];
     const windowsJob = workflow.jobs["windows"];
     const fullNames = [
       ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob?.name ?? "", { os }),
+        (unixJob?.name ?? "").replace("${{ matrix.os }}", os),
       ),
-      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob?.name ?? "", { node }),
-      ),
+      windowsJob?.name ?? "",
     ];
     const requiredContexts = new Set([
       "ubuntu-latest / node-22",

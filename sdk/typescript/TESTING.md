@@ -95,8 +95,8 @@ Typechecking and formatting run once in an independent required job, so package
 consumers do not wait for those checks. Package compilation and archive
 validation still finish before the test jobs start.
 
-The full Bun suite runs once per OS under Node 22: three file shards on Linux
-and macOS, and seven on Windows. The other Node versions run the installed
+The full Bun suite runs once per OS under Node 22: two file shards on Linux
+and macOS, and six on Windows. The other Node versions run the installed
 package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
@@ -106,8 +106,8 @@ with work stealing; worker crashes fail the run without automatic restarts.
 Every new test file is included automatically with a one-second estimate.
 Refresh those estimates from the uploaded reports when adding or splitting
 expensive files; estimates affect scheduling, never whether a test runs.
-To reproduce one Windows shard locally after building the plugin, run
-`node scripts/run-ci-tests.mjs 3/7 --seed=12345`.
+To reproduce one shard on Windows after building the plugin, run
+`node scripts/run-ci-tests.mjs 3/6 --seed=12345`.
 
 Every Bun lane uploads JUnit; Linux lanes also upload LCOV per shard. Python
 reports include case durations, and the MCP runner can upload its JUnit report.
