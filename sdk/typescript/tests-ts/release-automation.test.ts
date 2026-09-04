@@ -4164,23 +4164,12 @@ describe("GitHub release workflow safeguards", () => {
 
   test.skipIf(process.platform === "win32")(
     "rejects oversized plugin Markdown in reduced CI",
-    () => {
+    async () => {
       const workspace = mkdtempSync(
         join(tmpdir(), "release-ci-plugin-source-"),
       );
       const pluginRoot = join(workspace, "plugins", "codex-security");
-      const scripts = join(workspace, ".github", "scripts");
-      mkdirSync(scripts, { recursive: true });
       mkdirSync(pluginRoot, { recursive: true });
-      writeFileSync(
-        join(scripts, "check_plugin_source_compatibility.py"),
-        readFileSync(
-          new URL(
-            "../../../.github/scripts/check_plugin_source_compatibility.py",
-            import.meta.url,
-          ),
-        ),
-      );
       writeFileSync(join(pluginRoot, "README.md"), "x".repeat(150_001));
       spawnSync("git", ["init", "--quiet", workspace]);
       spawnSync("git", [
@@ -4188,10 +4177,22 @@ describe("GitHub release workflow safeguards", () => {
         workspace,
         "add",
         "--",
-        ".github/scripts/check_plugin_source_compatibility.py",
         "plugins/codex-security/README.md",
       ]);
       try {
+        const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+        const build = await runCommand(
+          "node",
+          [
+            join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
+            "--project",
+            join(packageRoot, "tsconfig.ci.json"),
+            "--outDir",
+            workspace,
+          ],
+          { timeout: 30_000 },
+        );
+        expect(build.status, build.stdout + build.stderr).toBe(0);
         const result = spawnSync(
           bash,
           [

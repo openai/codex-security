@@ -1244,7 +1244,7 @@ describe("CLI", () => {
   });
 
   test.each([false, true])(
-    "does not emit an ok: true envelope for a failed structured history command with full output %s",
+    "does not emit an ok: true envelope for a failed structured history command with full output %p",
     async (fullOutput) => {
       for (const argv of [
         ["scans", "show", "--json"],
@@ -4805,7 +4805,7 @@ describe("CLI", () => {
     [[], {}, false, true, false],
     [[], {}, true, false, false],
   ] as const)(
-    "gates budget interaction for flags %j, environment %j, input TTY %s, output TTY %s",
+    "gates budget interaction for flags %j, environment %j, input TTY %p, output TTY %p",
     async (flags, environment, inputTty, outputTty, expected) => {
       const input = Object.assign(new PassThrough(), { isTTY: inputTty });
       let budgetCallback: ScanOptions["onBudgetApproaching"];

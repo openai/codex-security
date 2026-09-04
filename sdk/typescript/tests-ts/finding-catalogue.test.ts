@@ -281,7 +281,7 @@ describe("finding catalogue", () => {
   );
 
   test.each([false, true])(
-    "reconciles known after identities with historical uncertainty set to %s",
+    "reconciles known after identities with historical uncertainty set to %p",
     async (allowHistoricalUncertainty) => {
       const uncertain = [
         {

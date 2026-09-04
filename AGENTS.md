@@ -18,9 +18,11 @@ When changing `plugins/codex-security`, run its portable source checks before
 submitting the change:
 
 ```bash
-python -m ruff check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
-python -m ruff format --check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
-python .github/scripts/check_plugin_source_compatibility.py
+python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
+python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
+pnpm --dir sdk/typescript run build:ci
+node .github/scripts/check_plugin_source_compatibility.mjs
+node --test .github/scripts/test_check_plugin_source_compatibility.mjs
 ```
 
 ## Avoid speculative defenses

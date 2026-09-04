@@ -755,7 +755,7 @@ describe("pre-1.0 release policy", () => {
     change("fix: correct behavior", 1, {
       labels: ["breaking-change", "skip-release-notes"],
     }),
-  ])("uses a minor for a breaking change: $title", (breaking) => {
+  ])("uses a minor for a breaking change (%#): $title", (breaking) => {
     expect(
       nextReleaseVersion("0.1.23", [change("fix: first fix"), breaking]),
     ).toBe("0.2.0");
@@ -1292,7 +1292,7 @@ describe("rolling release reconciliation", () => {
   test.each([
     { "sdk/typescript/src/example.ts": "Human implementation changes.\n" },
     { [packagePath]: packageText("0.1.24", { example: "1.0.0" }) },
-  ])("pauses instead of losing unrelated human edits", async (files) => {
+  ])("pauses instead of losing unrelated human edits (%#)", async (files) => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
     const first = await fixture.run();
