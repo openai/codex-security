@@ -587,16 +587,20 @@ describe("CodexSecurity policy API", () => {
     for (const kind of [
       "root",
       "component",
+      "component_sibling",
       "git_metadata",
       "reporting_directory",
     ]) {
       let prepared = false;
       const f = await setup({ onPrepare: () => (prepared = true) });
       policyGit(f.repository, "init", "--quiet");
-      const scope = kind === "component" ? "component" : ".";
+      const scope = kind.startsWith("component") ? "component" : ".";
       const child = join(f.repository, scope, "child");
       await mkdir(child, { recursive: true });
-      const outside = join(f.root, "outside-policy.md");
+      const outside = join(
+        kind === "component_sibling" ? f.repository : f.root,
+        "outside-policy.md",
+      );
       await writeFile(outside, "# Private synthetic policy\n");
       if (kind === "reporting_directory") {
         const directory = join(f.root, "reporting");
@@ -618,7 +622,11 @@ describe("CodexSecurity policy API", () => {
       }
       const options = { path: scope, outputDir: f.outputDir };
       const message =
-        kind === "git_metadata" ? "Git metadata" : "outside the repository";
+        kind === "git_metadata"
+          ? "Git metadata"
+          : kind === "component_sibling"
+            ? "outside the selected component"
+            : "outside the repository";
       await expect(
         f.security.preflightPolicy(f.repository, options),
       ).rejects.toThrow(message);
@@ -721,7 +729,7 @@ describe("CodexSecurity policy API", () => {
     const component = join(f.repository, "component");
     await mkdir(join(component, "child"), { recursive: true });
     policyGit(join(component, "child"), "init", "--quiet");
-    const ownerPolicy = join(f.repository, "owner-policy.md");
+    const ownerPolicy = join(component, "owner-policy.md");
     await writeFile(ownerPolicy, "# Owner policy\n");
     await symlink(ownerPolicy, join(component, "child", "SECURITY.md"), "file");
     const outside = join(f.root, "outside");
@@ -758,6 +766,31 @@ describe("CodexSecurity policy API", () => {
     ).toContain("# Owner policy");
     expect(f.prompts[0]).not.toContain("linked-directory/SECURITY.md");
     expect(f.prompts[0]).not.toContain("Unlisted synthetic policy");
+    await f.security.close();
+  });
+
+  test("includes inherited and descendant guidance once per policy path", async () => {
+    const f = await setup();
+    const policies = [
+      [".", "ROOT_GUIDANCE"],
+      ["component", "COMPONENT_GUIDANCE"],
+      ["component/child", "CHILD_GUIDANCE"],
+      ["component/child/nested", "NESTED_GUIDANCE"],
+      ["component/sibling", "SIBLING_GUIDANCE"],
+      [".github", "REPORTING_GUIDANCE"],
+    ] as const;
+    for (const [scope, marker] of policies) {
+      const directory = join(f.repository, scope);
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "SECURITY.md"), `# ${marker}\n`);
+    }
+    await f.security.generatePolicy(f.repository, {
+      path: "component",
+      outputDir: f.outputDir,
+    });
+    for (const prompt of f.prompts)
+      for (const [, marker] of policies)
+        expect(prompt.split(marker)).toHaveLength(2);
     await f.security.close();
   });
 
@@ -1049,19 +1082,50 @@ describe("CodexSecurity policy API", () => {
     targetPath = join(f.repository, "SECURITY.md");
     const original = "# Original policy\n";
     await writeFile(targetPath, original);
-    const draft = await f.security.generatePolicy(f.repository, {
-      outputDir: f.outputDir,
-    });
-    expect(draft.previousContent).toBe(original);
+    await expect(
+      f.security.generatePolicy(f.repository, { outputDir: f.outputDir }),
+    ).rejects.toThrow("changed after");
     expect(f.prompts[0]).toContain(original.trim());
     expect(
       await readFile(join(f.outputDir, "previous-SECURITY.md"), "utf8"),
     ).toBe(original);
-    await expect(securityPolicyDiff(draft, PYTHON)).rejects.toThrow(
-      "changed after",
-    );
+    expect(await readdir(f.outputDir)).not.toContain("policy-draft.json");
     await f.security.close();
   });
+
+  test.each([".", "component"])(
+    "rejects governing policy changes during generation for %s and preserves documents",
+    async (scope) => {
+      let policyPath = "";
+      const f = await setup({
+        stream: async function* (stage) {
+          if (stage === "policy")
+            await writeFile(policyPath, "# Concurrent policy\n");
+          yield* events(stage);
+        },
+      });
+      await mkdir(join(f.repository, "component"));
+      policyPath = join(f.repository, "SECURITY.md");
+      await writeFile(policyPath, "# Original policy\n");
+      await expect(
+        f.security.generatePolicy(f.repository, {
+          path: scope,
+          outputDir: f.outputDir,
+        }),
+      ).rejects.toThrow("changed after");
+      expect(f.threads).toHaveLength(3);
+      expect((await readdir(f.outputDir)).sort()).toEqual([
+        "SECURITY.md",
+        "THREAT_MODEL.md",
+        "previous-SECURITY.md",
+        "project-spec.md",
+      ]);
+      expect(await readFile(join(f.outputDir, "SECURITY.md"), "utf8")).toBe(
+        POLICY,
+      );
+      await f.security.close();
+    },
+  );
 
   test("rejects an incomplete policy plugin before starting model work", async () => {
     const f = await setup();

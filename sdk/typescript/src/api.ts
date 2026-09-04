@@ -959,25 +959,14 @@ export class CodexSecurity {
         options.onObserverError,
         outputDir,
       );
-      let guidance = await resolveSecurityPolicyGuidance(
+      const guidance = await resolveSecurityPolicyGuidance(
         target,
         python,
         runtime.plugin.pluginRoot,
         session.scanEnvironment,
         signal,
+        inputs.policyPaths,
       );
-      for (const path of inputs.policyPaths) {
-        const targetPath = join(target.repository, path);
-        if (targetPath === target.targetPath) continue;
-        const policyGuidance = await resolveSecurityPolicyGuidance(
-          { ...target, targetPath },
-          python,
-          runtime.plugin.pluginRoot,
-          session.scanEnvironment,
-          signal,
-        );
-        guidance += `\n\nGuidance for repository-relative scope ${JSON.stringify(dirname(path))}:\n${policyGuidance}`;
-      }
       await requireUnchangedSecurityPolicy(target, snapshot, signal);
       await requireSecurityPolicyRepositoryBinding(target, signal);
       const policyPython = await pluginPythonRuntime(python, {

@@ -551,19 +551,35 @@ export async function inspectSecurityPolicyPaths(
     [target.repository],
     signal,
   )) {
-    const alias = await policyLinkSnapshot(path, target.repository, signal);
-    if (alias.status === "cycle")
-      throw new CodexSecurityError(
-        `Security-policy link contains a cycle: ${path}`,
-      );
-    const destination = await policyLinkDestination(target.repository, alias);
-    if (alias.status !== "resolved" || destination === null) continue;
-    if ((await stat(destination)).isFile()) {
-      await readPolicyFile(destination);
+    if ((await readPolicyEvidence(path, target, signal)) !== null)
       paths.push(policyRelativePath(target.repository, path));
-    }
   }
   return paths.sort();
+}
+
+async function readPolicyEvidence(
+  path: string,
+  target: SecurityPolicyTarget,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const alias = await policyLinkSnapshot(path, target.repository, signal);
+  if (alias.status === "cycle")
+    throw new CodexSecurityError(
+      `Security-policy link contains a cycle: ${path}`,
+    );
+  const destination = await policyLinkDestination(target.repository, alias);
+  if (alias.status !== "resolved" || destination === null) return null;
+  const component = dirname(target.targetPath);
+  if (
+    !relativePathIsOutside(relative(component, path)) &&
+    relativePathIsOutside(relative(component, destination))
+  )
+    throw new InvalidTargetError(
+      `Security-policy link is outside the selected component: ${path}`,
+    );
+  return (await stat(destination)).isFile()
+    ? await readPolicyFile(destination)
+    : null;
 }
 
 async function requirePolicyOutsideGitMetadata(
@@ -629,6 +645,7 @@ export async function resolveSecurityPolicyGuidance(
   pluginRoot: string,
   environment?: ProcessEnvironment,
   signal?: AbortSignal,
+  policyPaths: readonly string[] = [],
 ): Promise<string> {
   const { stdout } = await execFileAsync(
     python,
@@ -644,7 +661,17 @@ export async function resolveSecurityPolicyGuidance(
     ],
     { encoding: "utf8", maxBuffer: Infinity, env: environment, signal },
   );
-  return stdout;
+  const sections = [stdout];
+  for (const path of policyPaths) {
+    const absolute = join(target.repository, path);
+    if (absolute === target.targetPath) continue;
+    const content = await readPolicyEvidence(absolute, target, signal);
+    if (content?.trim())
+      sections.push(
+        `## SECURITY.md source: ${JSON.stringify(path)}\n\n${content}`,
+      );
+  }
+  return sections.join("\n\n");
 }
 
 export async function runSecurityPolicyStages(options: {
@@ -797,6 +824,7 @@ export async function runSecurityPolicyStages(options: {
       ...threatModel.questions,
     ]),
   ];
+  await requireUnchangedSecurityPolicy(target, options.snapshot, signal);
   const manifest: PolicyManifest = {
     documentType: "codex-security.policy-draft",
     schemaVersion: "1.0",

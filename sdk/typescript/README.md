@@ -272,8 +272,9 @@ vulnerability scan, change application settings, or install the draft in the
 checkout. It uses the scan runtime and authentication, requesting read-only
 access to the selected repository or component and required tools. Network access,
 web search, apps, and MCP servers are disabled. Drafts stay outside the checkout.
-Inherited and linked policy guidance is resolved by the host. The model cannot
-read sibling components or external Git metadata.
+The host resolves inherited guidance once and includes each checked descendant
+policy separately. Descendant policy links must stay within the selected component.
+The model cannot read sibling components or external Git metadata.
 Knowledge-base text stays with the private review artifacts during generation
 and is removed afterward.
 
@@ -322,8 +323,10 @@ links from `.github/SECURITY.md` or `docs/SECURITY.md`: copying can change their
 guidance too. Preserve reporting instructions and obtain owner approval for
 exclusions, accepted risks, and severity decisions. Later scans read this policy.
 
-Preview rejects changes to the selected or inherited policies. Other source
-files are not frozen; regenerate if relevant source or neighboring policies change.
+Generation and preview reject changes to the selected or inherited policies.
+If governing guidance changes during generation, completed documents remain for
+inspection, but no completed-draft manifest is written. Other source files are not
+frozen; regenerate if relevant source or neighboring policies change.
 
 Use `--headless` or an explicit output format to skip questions. Unanswered
 questions remain in the review notes. Drafts default to the Codex Security state
