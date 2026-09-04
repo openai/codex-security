@@ -440,7 +440,7 @@ def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
     if scan["target_snapshot_digest"] is None:
         return ["git_worktree", "git_revision"]
     if scan["target_snapshot_digest"] == clean_worktree_content_digest():
-        return ["git_revision"]
+        return ["git_revision", "git_worktree"]
     return ["git_worktree"]
 
 
@@ -460,14 +460,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
         "displayName": target.name,
         "targetId": scan["target_id"],
     }
-    if (
-        scan["mode"] != "diff"
-        and scan["target_snapshot_digest"]
-        and (
-            scan["target_revision"] == "unversioned"
-            or scan["target_snapshot_digest"] != clean_worktree_content_digest()
-        )
-    ):
+    if scan["mode"] != "diff" and scan["target_snapshot_digest"]:
         target_contract["requiredSnapshotDigest"] = scan["target_snapshot_digest"]
     return {
         "diffTarget": stored_diff_target(scan),
@@ -503,7 +496,18 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
     return "deep_repository" if scan["mode"] == "deep" else "repository"
 
 
-def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[str, Any]:
+def manifest_target_kind(manifest: dict[str, Any]) -> str | None:
+    scan = manifest.get("scan")
+    target = scan.get("target") if isinstance(scan, dict) else None
+    kind = target.get("kind") if isinstance(target, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
+def workbench_completion_binding(
+    scan: sqlite3.Row,
+    completed_at: str,
+    target_kind: str | None = None,
+) -> dict[str, Any]:
     contract = scan_contract(scan)
     target_contract = contract["target"]
     plugin_manifest = read_json_object(
@@ -524,7 +528,9 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     else:
         if scan["target_revision"] != "unversioned":
             target["revision"] = scan["target_revision"]
-        if "requiredSnapshotDigest" in target_contract:
+        if target_kind is None:
+            target_kind = target_contract["allowedKinds"][0]
+        if "requiredSnapshotDigest" in target_contract and target_kind != "git_revision":
             target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
 
     scope: dict[str, Any] = {
@@ -1484,24 +1490,22 @@ def complete_scan_locked(
     add_warning()
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
-    completion_binding = workbench_completion_binding(scan, completion_timestamp)
     current_manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-    if current_manifest_path is not None:
-        current_manifest = read_json_object(current_manifest_path)
-        if (
-            isinstance(current_manifest.get("scan"), dict)
-            and current_manifest["scan"].get("complete") is False
-        ):
-            raise SystemExit(
-                "The latest saved scan draft is incomplete; continue the scan before completing it."
-            )
-    already_sealed = (
-        current_manifest_path is not None
-        and isinstance(current_manifest.get("scan"), dict)
-        and (
-            current_manifest["scan"].get("sealedAt") is not None
-            or current_manifest["scan"].get("artifacts") is not None
+    current_manifest = (
+        read_json_object(current_manifest_path) if current_manifest_path is not None else {}
+    )
+    target_kind = manifest_target_kind(current_manifest)
+    completion_binding = workbench_completion_binding(scan, completion_timestamp, target_kind)
+    if (
+        isinstance(current_manifest.get("scan"), dict)
+        and current_manifest["scan"].get("complete") is False
+    ):
+        raise SystemExit(
+            "The latest saved scan draft is incomplete; continue the scan before completing it."
         )
+    already_sealed = isinstance(current_manifest.get("scan"), dict) and (
+        current_manifest["scan"].get("sealedAt") is not None
+        or current_manifest["scan"].get("artifacts") is not None
     )
     if scan["recipe_json"] is not None:
         draft_artifacts: dict[str, Path] = {}
@@ -3406,6 +3410,7 @@ _WORKBENCH_DB_CONTEXT = saved_results.WorkbenchDbContext(
     expected_coverage_mode=expected_coverage_mode,
     handoff=handoff,
     index_findings=index_findings,
+    manifest_target_kind=manifest_target_kind,
     now=now,
     optional_text=optional_text,
     parse_scan_cost=parse_scan_cost,

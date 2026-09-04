@@ -70,6 +70,7 @@ class WorkbenchDbContext:
     scan_completion_lock: Callable[..., Any]
     scan_context: Callable[..., dict[str, Any]]
     verify_manifest_binding: Callable[..., None]
+    manifest_target_kind: Callable[..., str | None]
     workbench_completion_binding: Callable[..., dict[str, Any]]
     workspace_state: Callable[..., dict[str, Any]]
 
@@ -1210,7 +1211,11 @@ def preserve_scan_results_locked(
                 return True
             if recovery_source_digests is None:
                 raise ContractError("Stopped scan sources changed after terminal publication.")
-    binding = {**db.workbench_completion_binding(scan, scan["completed_at"]), "status": outcome}
+    target_kind = db.manifest_target_kind(existing_scan)
+    binding = {
+        **db.workbench_completion_binding(scan, scan["completed_at"], target_kind),
+        "status": outcome,
+    }
     documents = merge_saved_results(
         scan_dir,
         scan_id,
@@ -1385,7 +1390,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
-        binding = db.workbench_completion_binding(scan, db.now())
+        target_kind = db.manifest_target_kind(manifest)
+        binding = db.workbench_completion_binding(scan, db.now(), target_kind)
         # Validate on copies: saved canonical documents remain ordinary unsealed drafts.
         copied_manifest = copy.deepcopy(manifest)
         copied_findings = copy.deepcopy(findings)

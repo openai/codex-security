@@ -103,19 +103,18 @@ def test_cli_registration_returns_authoritative_target_contract(tmp_path: Path) 
         registered = register_cli_scan(state_dir, target, scan_dir)
 
         target_contract = registered["contract"]["target"]
-        assert target_contract["allowedKinds"] == ["git_worktree" if dirty else "git_revision"]
+        assert target_contract["allowedKinds"] == (
+            ["git_worktree"] if dirty else ["git_revision", "git_worktree"]
+        )
         assert target_contract["targetId"] == registered["targetId"]
         assert target_contract["displayName"] == name
         assert registered["targetRevision"] == revision
-        if dirty:
-            with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-                (snapshot_digest,) = connection.execute(
-                    "SELECT target_snapshot_digest FROM scans WHERE id = ?",
-                    (registered["scanId"],),
-                ).fetchone()
-            assert target_contract["requiredSnapshotDigest"] == snapshot_digest
-        else:
-            assert "requiredSnapshotDigest" not in target_contract
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            (snapshot_digest,) = connection.execute(
+                "SELECT target_snapshot_digest FROM scans WHERE id = ?",
+                (registered["scanId"],),
+            ).fetchone()
+        assert target_contract["requiredSnapshotDigest"] == snapshot_digest
 
 
 def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: Path) -> None:
@@ -226,6 +225,38 @@ def test_cli_completion_accepts_sealed_clean_git_revision_without_snapshot_diges
     assert sealed_manifest["scan"]["target"]["kind"] == "git_revision"
     assert sealed_manifest["scan"]["target"]["revision"] == revision
     assert "snapshotDigest" not in sealed_manifest["scan"]["target"]
+
+
+def test_cli_completion_binds_clean_git_worktree_to_recorded_snapshot_digest(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    revision = initialize_git_repository(target)
+    scan_dir = tmp_path / "scan"
+    registered = register_cli_scan(state_dir, target, scan_dir)
+    scan_id = str(registered["scanId"])
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        (snapshot_digest,) = connection.execute(
+            "SELECT target_snapshot_digest FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()
+
+    write_completed_contract(
+        scan_dir,
+        scan_id,
+        target,
+        relative_path="README.md",
+        target_kind="git_worktree",
+        target_revision=revision,
+        snapshot_digest=f"codex-security-snapshot/v1:sha256:{'b' * 64}",
+    )
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["target"]["kind"] == "git_worktree"
+    assert manifest["scan"]["target"]["snapshotDigest"] == snapshot_digest
 
 
 def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Path) -> None:
