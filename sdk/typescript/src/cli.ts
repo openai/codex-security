@@ -5545,14 +5545,14 @@ async function createPatchPullRequest(
 
   const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
   const body = patchPullRequestBody(patchRiskSummary, introduction);
-  const run = (command: "git", args: string[]) =>
-    dependencies.runRepositoryCommand(command, args, repository);
+  const run = (args: string[]) =>
+    dependencies.runRepositoryCommand("git", args, repository);
   stderr.write(
     "Creating a draft pull request or merge request for verified patches...\n",
   );
-  await run("git", ["switch", "-c", branch]);
-  await run("git", ["--literal-pathspecs", "add", "--", ...files]);
-  await run("git", [
+  await run(["switch", "-c", branch]);
+  await run(["--literal-pathspecs", "add", "--", ...files]);
+  await run([
     "--literal-pathspecs",
     "commit",
     "--only",
@@ -5561,14 +5561,9 @@ async function createPatchPullRequest(
     "--",
     ...files,
   ]);
-  const commit = await run("git", ["rev-parse", "HEAD"]);
-  await run("git", ["config", "--local", patchCommitKey(branch), commit]);
-  await run("git", [
-    "config",
-    "--local",
-    patchPullRequestBodyKey(branch),
-    body,
-  ]);
+  const commit = await run(["rev-parse", "HEAD"]);
+  await run(["config", "--local", patchCommitKey(branch), commit]);
+  await run(["config", "--local", patchPullRequestBodyKey(branch), body]);
   return publishPatchBranch(repository, branch, body, stderr, dependencies);
 }
 
