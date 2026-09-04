@@ -1244,7 +1244,7 @@ describe("CLI", () => {
   });
 
   test.each([false, true])(
-    "does not emit an ok: true envelope for a failed structured history command with full output %s",
+    "does not emit an ok: true envelope for a failed structured history command with full output %p",
     async (fullOutput) => {
       for (const argv of [
         ["scans", "show", "--json"],
