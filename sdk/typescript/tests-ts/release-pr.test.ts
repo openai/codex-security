@@ -633,6 +633,41 @@ describe("GitHub request transport", () => {
 
 describe("release workflow controls", () => {
   test.each([
+    { dryRun: "false", clientId: "", createsAppToken: false },
+    { dryRun: "false", clientId: "synthetic-app-id", createsAppToken: true },
+    { dryRun: "true", clientId: "", createsAppToken: false },
+    { dryRun: "true", clientId: "synthetic-app-id", createsAppToken: false },
+  ])(
+    "selects authentication for dry_run=$dryRun with client ID '$clientId'",
+    ({ dryRun, clientId, createsAppToken }) => {
+      const { jobs } = Bun.YAML.parse(workflow) as {
+        jobs: {
+          reconcile: {
+            permissions?: Record<string, string>;
+            steps: { id?: string; if?: string }[];
+          };
+        };
+      };
+      const appToken = jobs.reconcile.steps.find(
+        (step) => step.id === "app-token",
+      )!;
+      const evaluate = new Function("env", "vars", `return (${appToken.if});`);
+      expect(
+        evaluate(
+          { RELEASE_PR_DRY_RUN: dryRun },
+          { RELEASE_APP_CLIENT_ID: clientId },
+        ),
+      ).toBe(createsAppToken);
+      if (dryRun === "false" && !createsAppToken) {
+        expect(jobs.reconcile.permissions).toMatchObject({
+          contents: "write",
+          "pull-requests": "write",
+        });
+      }
+    },
+  );
+
+  test.each([
     { event: "push", enabled: undefined, dryRun: undefined, expected: true },
     { event: "push", enabled: "false", dryRun: undefined, expected: true },
     { event: "push", enabled: "true", dryRun: undefined, expected: false },
