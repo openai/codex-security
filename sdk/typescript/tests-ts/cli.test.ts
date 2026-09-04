@@ -2719,6 +2719,13 @@ describe("CLI", () => {
     expect(({} as Record<string, unknown>)["polluted"]).toBeUndefined();
   });
 
+  test("parses openai_base_url override through --codex", () => {
+    const result = parseCodexOverrides([
+      'openai_base_url="https://custom.api.example.com/v1"',
+    ]);
+    expect(result["openai_base_url"]).toBe("https://custom.api.example.com/v1");
+  });
+
   test("rejects invalid scan and export options before starting the SDK", async () => {
     const cases: ReadonlyArray<[readonly string[], string]> = [
       [["scan", ".", "--path", "src", "--diff", "HEAD"], "mutually exclusive"],

@@ -270,6 +270,7 @@ const VALUE_OPTIONS = new Set([
   "--model",
   "--effort",
   "--provider",
+  "--endpoint",
   "--output-dir",
   "--plugin-path",
   "--python",
@@ -1003,6 +1004,7 @@ interface ScanArguments extends DeepScanOptions {
   model?: string;
   effort?: ScanReasoningEffort;
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
+  endpoint?: string;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -2901,6 +2903,11 @@ export async function main(
             ),
           effort: effortOption(),
           provider: PROVIDER_OPTION,
+          endpoint: optionValue("--endpoint")
+            .optional()
+            .describe(
+              "Custom LLM API endpoint URL. Also settable via CODEX_ENDPOINT env var.",
+            ),
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
@@ -3028,6 +3035,13 @@ export async function main(
             ],
           },
         },
+        {
+          args: { repository: "." },
+          options: {
+            model: "gpt-5.6-terra",
+            endpoint: "https://custom.api.example.com/v1",
+          },
+        },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, format, options }) {
@@ -3063,6 +3077,7 @@ export async function main(
             model: options.model,
             effort: options.effort,
             provider: options.provider,
+            endpoint: options.endpoint,
             outputDir: options.outputDir,
             archiveExisting: options.archiveExisting,
             pluginPath: options.pluginPath,
@@ -3669,6 +3684,11 @@ export async function main(
           ),
         effort: effortOption(),
         provider: PROVIDER_OPTION,
+        endpoint: optionValue("--endpoint")
+          .optional()
+          .describe(
+            "Custom LLM API endpoint URL. Also settable via CODEX_ENDPOINT env var.",
+          ),
         maxAttempts: z
           .number()
           .int()
@@ -3697,6 +3717,14 @@ export async function main(
         {
           args: {},
           options: { model: "gpt-5.6-terra", effort: "high" },
+        },
+        {
+          args: {},
+          options: {
+            model: "gpt-5.6-terra",
+            effort: "high",
+            endpoint: "https://custom.api.example.com/v1",
+          },
         },
       ],
       hint:
@@ -3770,6 +3798,8 @@ export async function main(
             knowledgeBasePaths: options.knowledgeBase,
             ...prompts,
             config: {
+              endpoint:
+                options.endpoint ?? dependencies.environment["CODEX_ENDPOINT"],
               pluginPath: options.pluginPath,
               pythonPath: options.python,
               codexOverrides: parseCodexOverrides(
@@ -6600,6 +6630,8 @@ async function executeScan(
       arguments_.validationPromptFile,
     );
     const config: CodexSecurityConfig = {
+      endpoint:
+        arguments_.endpoint ?? dependencies.environment["CODEX_ENDPOINT"],
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
       codexOverrides:

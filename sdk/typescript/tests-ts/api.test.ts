@@ -43,6 +43,7 @@ import {
 import {
   classifyConnectionFailure,
   initialCredentialsAvailable,
+  scanPreflightCodexConfig,
 } from "../src/api.js";
 import {
   FIREWORKS_CODEX_PROVIDER,
@@ -731,6 +732,15 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     },
   );
+
+  test("preserves openai_base_url in sanitized preflight config", () => {
+    const config = scanPreflightCodexConfig({
+      openai_base_url: "https://custom.api.example.com/v1",
+      model: "gpt-5.6-sol",
+    });
+    expect(config["openai_base_url"]).toBe("https://custom.api.example.com/v1");
+  });
+
 
   test("selects a real-scan target in the active repository layout", async () => {
     await expect(
