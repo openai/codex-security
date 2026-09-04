@@ -732,6 +732,7 @@ test("resolves missing findings only inside a complete later scope", async () =>
     "db.row_factory = sqlite3.Row",
     "db.executescript('''",
     "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT);",
+    "CREATE TABLE scan_comparison_matches (before_occurrence_id TEXT, after_occurrence_id TEXT, before_scan_id TEXT, after_scan_id TEXT);",
     "CREATE TABLE finding_occurrences (id TEXT, finding_id TEXT, scan_id TEXT, severity TEXT, title TEXT);",
     "CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);",
     "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",

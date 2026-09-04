@@ -40,6 +40,7 @@ import workbench_remediation as remediation
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
+import workbench_severity as severity
 from filesystem_identity import (
     serialize_filesystem_identity as serialize_filesystem_identity,
 )
@@ -76,7 +77,6 @@ from workbench_constants import (
     FINDING_TITLE_BYTES,
     FINDINGS_PAGE_MAX,
     FINDINGS_RESULT_LIMIT,
-    PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_dashboard import dashboard
@@ -3261,48 +3261,9 @@ def finding_remediation_result(
 def patch_artifact_preview(
     scan_dir: Path, relative_path: str | None, expected_digest: str | None
 ) -> tuple[str | None, dict[str, int | bool] | None]:
-    if relative_path is None or expected_digest is None:
-        return None, None
-    digest = hashlib.sha256()
-    preview = bytearray()
-    additions = 0
-    deletions = 0
-    file_count = 0
-    old_headers = 0
-    new_headers = 0
-    at_line_start = True
-    try:
-        with open_scan_local_file(scan_dir, relative_path) as patch:
-            while chunk := patch.readline(1024 * 1024):
-                digest.update(chunk)
-                if len(preview) <= PATCH_PREVIEW_BYTES:
-                    preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
-                if at_line_start:
-                    if chunk.startswith(b"diff --git "):
-                        file_count += 1
-                    elif chunk.startswith(b"+++ "):
-                        new_headers += 1
-                    elif chunk.startswith(b"--- "):
-                        old_headers += 1
-                    elif chunk.startswith(b"+"):
-                        additions += 1
-                    elif chunk.startswith(b"-"):
-                        deletions += 1
-                at_line_start = chunk.endswith(b"\n")
-    except SystemExit:
-        return None, None
-    if f"sha256:{digest.hexdigest()}" != expected_digest:
-        return None, None
-    preview_truncated = len(preview) > PATCH_PREVIEW_BYTES
-    preview_text = preview[:PATCH_PREVIEW_BYTES].decode("utf-8", errors="replace")
-    if preview_truncated:
-        preview_text = f"{preview_text}\n... patch preview truncated ..."
-    return preview_text, {
-        "additions": additions,
-        "deletions": deletions,
-        "fileCount": file_count or min(old_headers, new_headers),
-        "previewTruncated": preview_truncated,
-    }
+    return remediation.patch_artifact_preview(
+        scan_dir, relative_path, expected_digest, open_scan_local_file
+    )
 
 
 def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
@@ -3466,6 +3427,10 @@ def main() -> None:
         return
     if args.command == "inspect-setup":
         result = inspect_setup(args)
+        print(json.dumps(result, allow_nan=False, sort_keys=True))
+        return
+    if args.command == "read-severity-classification":
+        result = severity.read_classification(database_path(), args.scan_id)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     if args.command == "inspect-linear-publication":
@@ -3638,6 +3603,8 @@ def main() -> None:
             result = export_findings(connection, args)
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
+        elif args.command == "severity-classification":
+            result = severity.checkpoint(connection, json.load(sys.stdin), now())
         elif args.command == "finding-workflow":
             result = finding_workflow(connection, json.load(sys.stdin), now())
         elif args.command == "dashboard":
