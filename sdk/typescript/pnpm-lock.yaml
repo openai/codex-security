@@ -14,6 +14,9 @@ importers:
       '@linear/sdk':
         specifier: 89.0.0
         version: 89.0.0(graphql@17.0.2)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0-beta.4
+        version: 2.0.0-beta.4
       '@octokit/core':
         specifier: 7.0.6
         version: 7.0.6

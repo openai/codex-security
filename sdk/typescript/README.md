@@ -1186,8 +1186,54 @@ command manifest, `scan --schema --format json` for a command schema, and
 `--format toon|json|yaml|jsonl` and `--full-output`.
 
 `skills add` syncs agent skills; `mcp add` registers the CLI as an MCP server.
-MCP exposes only the read-only `info` command because the transport cannot
-cancel active scans.
+Start the server with `codex-security --mcp` (or
+`npx --yes @openai/codex-security --mcp`). It uses stdin/stdout and exposes
+`info` for read-only metadata and `scan` for security scans. For example, an
+MCP client can launch it with:
+
+```json
+{
+  "mcpServers": {
+    "codex-security": {
+      "command": "npx",
+      "args": ["--yes", "@openai/codex-security", "--mcp"]
+    }
+  }
+}
+```
+
+The `scan` tool accepts the existing scan options using camelCase names:
+`repository`, `path`, `mode`, `diff`, `workingTree`, `outputDir`, `maxCost`,
+and so on. Defaults match the CLI. Relative paths resolve from the server's
+working directory. First check local inputs without starting a model:
+
+```json
+{ "repository": "/path/to/repository", "dryRun": true }
+```
+
+Then call `scan` with `dryRun` omitted or false to run the scan. Standard,
+Deep, path, and Git diff scans are supported. MCP does not support `patch`,
+`patchSeverity`, or `createPr`; patching and other commands remain CLI-only.
+
+Scans run noninteractively with the same local credentials and `auth`
+selection as the CLI. Sign in with `codex-security login` before starting the
+server, or supply `OPENAI_API_KEY`/`CODEX_API_KEY` in its environment. Scans
+can incur model costs, write local artifacts, and run repository tools. Only
+scan targets the user has authorized, and configure the MCP client's tool
+call timeout to allow the scan to finish.
+
+Results are returned as JSON in both text content and `structuredContent`:
+`{ "exitCode": 0, "data": { ... } }`. `data` is the same scan result or dry-run
+preflight data as CLI JSON output. Exit code `1` means the requested severity
+threshold was met; `2` means invalid inputs, incomplete results, or failure.
+Nonzero outcomes set MCP `isError` while preserving any available `data` and
+`error` message. Scan diagnostics go to stderr; stdout is reserved for MCP.
+
+MCP cancellation notifications stop the corresponding scan. Disconnecting
+the client or stopping the server cancels active scans and waits for cleanup;
+partial artifacts remain available at the output directory. Canceled MCP
+requests do not receive a result. This server is separate from the bundled
+security plugin's MCP server used internally during scans.
 
 ## Findings service (preview)
 

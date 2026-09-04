@@ -46,6 +46,7 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
+import type { Transport } from "@modelcontextprotocol/server";
 import { parse as parseToml } from "smol-toml";
 import {
   classifyConnectionFailure,
@@ -1129,6 +1130,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 }
 
 interface CliDependencies {
+  mcpInput?: Readable;
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
@@ -1612,6 +1614,7 @@ export async function main(
         "--llms",
         "--llms-full",
         "--schema",
+        "--mcp",
         "--dry-run",
       ].includes(argument),
     ) &&
@@ -2878,206 +2881,267 @@ export async function main(
       }
     },
   });
+  const scanArgsSchema = z.object({
+    repository: z
+      .string()
+      .optional()
+      .describe("Repository root to scan (default: current directory)."),
+  });
+  const scanOptionsSchema = z
+    .object({
+      workflowId: optionValue("--workflow-id")
+        .optional()
+        .describe("Reuse completed work in the named local findings workflow."),
+      auth: z
+        .enum(SCAN_AUTH_MODES)
+        .default("auto")
+        .describe(
+          "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+        ),
+      verbose: z
+        .boolean()
+        .default(false)
+        .describe("Print scan diagnostics to stderr."),
+      safetyIdentifier: optionValue("--safety-identifier")
+        .optional()
+        .describe(
+          "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
+        ),
+      path: z
+        .array(optionValue("--path"))
+        .default([])
+        .describe(
+          "Scan only PATH; repeat for multiple repository-relative paths.",
+        ),
+      knowledgeBase: z
+        .array(optionValue("--knowledge-base"))
+        .default([])
+        .describe(
+          "Add security-context files or directories; repeat for multiple paths.",
+        ),
+      scanPromptFile: optionValue("--scan-prompt-file")
+        .optional()
+        .describe("Append scan instructions from FILE."),
+      validationPromptFile: optionValue("--validation-prompt-file")
+        .optional()
+        .describe(
+          "Replace final validation with the workflow in FILE (not Deep).",
+        ),
+      postScanPromptFile: optionValue("--post-scan-prompt-file")
+        .optional()
+        .describe("Run FILE after each scan, including failures."),
+      diff: optionValue("--diff")
+        .optional()
+        .describe("Scan committed Git changes from BASE to --head."),
+      workingTree: z
+        .boolean()
+        .default(false)
+        .describe("Scan staged and unstaged changes against --base."),
+      head: optionValue("--head")
+        .optional()
+        .describe("Git head ref for --diff (default: HEAD)."),
+      base: optionValue("--base")
+        .optional()
+        .describe("Git base ref for --working-tree (default: HEAD)."),
+      mode: z
+        .enum(["standard", "deep"])
+        .default("standard")
+        .describe("Scan mode; deep supports repository and path targets."),
+      ...DEEP_SCAN_OPTION_SCHEMAS,
+      model: optionValue("--model")
+        .optional()
+        .describe(
+          `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+        ),
+      effort: effortOption(),
+      provider: PROVIDER_OPTION,
+      outputDir: optionValue("--output-dir")
+        .optional()
+        .describe(
+          "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+        ),
+      archiveExisting: z
+        .boolean()
+        .default(false)
+        .describe("Archive existing results; requires --output-dir."),
+      pluginPath: optionValue("--plugin-path")
+        .optional()
+        .describe(PLUGIN_PATH_DESCRIPTION),
+      python: optionValue("--python")
+        .optional()
+        .describe(PYTHON_PATH_DESCRIPTION),
+      codex: z
+        .array(optionValue("--codex"))
+        .default([])
+        .describe(CODEX_OVERRIDE_DESCRIPTION),
+      failOnSeverity: z
+        .enum(REPORTABLE_SEVERITIES)
+        .optional()
+        .describe("Exit 1 for findings at or above LEVEL."),
+      patch: z
+        .boolean()
+        .default(false)
+        .describe("Patch and verify confirmed findings after the scan."),
+      patchSeverity: z
+        .enum(REPORTABLE_SEVERITIES)
+        .optional()
+        .describe("Patch findings at or above LEVEL; requires --patch."),
+      createPr: CREATE_PR_OPTION,
+      maxCost: z
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
+        ),
+      headless: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Use plain text progress instead of the interactive dashboard.",
+        ),
+      dryRun: z
+        .boolean()
+        .default(false)
+        .describe("Validate local scan inputs without starting a scan."),
+      mock: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Save synthetic Standard scan findings without calling an LLM.",
+        ),
+    })
+    .refine(
+      (options) =>
+        Number(options.path.length > 0) +
+          Number(options.diff !== undefined) +
+          Number(options.workingTree) <=
+        1,
+      {
+        message: "--path, --diff, and --working-tree are mutually exclusive.",
+      },
+    )
+    .refine(
+      (options) => options.head === undefined || options.diff !== undefined,
+      { message: "--head requires --diff." },
+    )
+    .refine((options) => options.base === undefined || options.workingTree, {
+      message: "--base requires --working-tree.",
+    })
+    .refine(
+      (options) => !options.archiveExisting || options.outputDir !== undefined,
+      { message: "--archive-existing requires --output-dir." },
+    )
+    .refine((options) => options.patchSeverity === undefined || options.patch, {
+      message: "--patch-severity requires --patch.",
+    })
+    .refine((options) => !options.createPr || options.patch, {
+      message: "--create-pr requires --patch.",
+    })
+    .refine((options) => !options.patch || !options.dryRun, {
+      message: "--patch cannot be combined with --dry-run.",
+    })
+    .refine((options) => !options.mock || (!options.dryRun && !options.patch), {
+      message: "--mock cannot be combined with --dry-run or --patch.",
+    })
+    .refine(
+      (options) =>
+        options.mode === "deep" ||
+        (options.workers === undefined &&
+          options.subagents === undefined &&
+          options.stopAfterNoNew === undefined &&
+          options.maxDiscoveryRuns === undefined &&
+          options.maxTimeHours === undefined),
+      { message: "Deep scan settings require --mode deep." },
+    );
+  const scanArguments = (
+    repository: string | undefined,
+    options: z.infer<typeof scanOptionsSchema>,
+  ): ScanArguments => ({
+    auth: options.auth,
+    workflowId: options.workflowId,
+    safetyIdentifier: options.safetyIdentifier,
+    verbose: options.verbose,
+    repository: repository,
+    paths: options.path,
+    knowledgeBasePaths: options.knowledgeBase,
+    scanPromptFile: options.scanPromptFile,
+    validationPromptFile: options.validationPromptFile,
+    postScanPromptFile: options.postScanPromptFile,
+    diff: options.diff,
+    workingTree: options.workingTree,
+    head: options.head,
+    base: options.base,
+    mode: options.mode,
+    workers: options.workers,
+    subagents: options.subagents,
+    stopAfterNoNew: options.stopAfterNoNew,
+    maxDiscoveryRuns: options.maxDiscoveryRuns,
+    maxTimeHours: options.maxTimeHours,
+    model: options.model,
+    effort: options.effort,
+    provider: options.provider,
+    outputDir: options.outputDir,
+    archiveExisting: options.archiveExisting,
+    pluginPath: options.pluginPath,
+    pythonPath: options.python,
+    codex: options.codex,
+    failOnSeverity: options.failOnSeverity,
+    patch: options.patch,
+    patchSeverity: options.patchSeverity,
+    createPr: options.createPr,
+    maxCostUsd: options.maxCost,
+    headless: options.headless,
+    dryRun: options.dryRun,
+    mock: options.mock,
+  });
+  const infoSchema = z.object({
+    sdkVersion: z.string(),
+    bundledPluginVersion: z.string(),
+    scanMcp: z.literal(true),
+    cancellationNote: z.string(),
+    cliVersion: z.string(),
+    codexVersion: z.string(),
+    codexSdkVersion: z.string(),
+    model: z.string(),
+    reasoningEffort: z.string(),
+    nextStep: z.string(),
+  });
+  const metadata = () => ({
+    sdkVersion: VERSION,
+    bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
+    scanMcp: true as const,
+    cancellationNote:
+      "MCP request cancellation and client disconnects stop active scans and preserve partial output.",
+    cliVersion: VERSION,
+    codexVersion: CODEX_EXECUTABLE_VERSION,
+    codexSdkVersion: CODEX_SDK_VERSION,
+    ...scanModelConfiguration(DEFAULT_CODEX_CONFIG),
+    nextStep: "codex-security scan . --dry-run",
+  });
+  const mcpInstructions =
+    "Use info for SDK metadata and scan to run security scans. Scans use local credentials, can make billable model calls, and write artifacts. Only scan repositories the user has authorized. Patching and other commands remain CLI-only.";
+  const scanMcpAnnotations = {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: true,
+  };
   const cli = Cli.create("codex-security", {
     description:
       "Run, import, validate, patch, verify fixes, export, and publish Codex Security findings.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
-      instructions:
-        "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
+      instructions: mcpInstructions,
     },
   })
     .command("scan", {
       description: "Run a Codex Security scan.",
       destructive: true,
-      mcp: false,
-      args: z.object({
-        repository: z
-          .string()
-          .optional()
-          .describe("Repository root to scan (default: current directory)."),
-      }),
-      options: z
-        .object({
-          workflowId: optionValue("--workflow-id")
-            .optional()
-            .describe(
-              "Reuse completed work in the named local findings workflow.",
-            ),
-          auth: z
-            .enum(SCAN_AUTH_MODES)
-            .default("auto")
-            .describe(
-              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
-            ),
-          verbose: z
-            .boolean()
-            .default(false)
-            .describe("Print scan diagnostics to stderr."),
-          safetyIdentifier: optionValue("--safety-identifier")
-            .optional()
-            .describe(
-              "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
-            ),
-          path: z
-            .array(optionValue("--path"))
-            .default([])
-            .describe(
-              "Scan only PATH; repeat for multiple repository-relative paths.",
-            ),
-          knowledgeBase: z
-            .array(optionValue("--knowledge-base"))
-            .default([])
-            .describe(
-              "Add security-context files or directories; repeat for multiple paths.",
-            ),
-          scanPromptFile: optionValue("--scan-prompt-file")
-            .optional()
-            .describe("Append scan instructions from FILE."),
-          validationPromptFile: optionValue("--validation-prompt-file")
-            .optional()
-            .describe(
-              "Replace final validation with the workflow in FILE (not Deep).",
-            ),
-          postScanPromptFile: optionValue("--post-scan-prompt-file")
-            .optional()
-            .describe("Run FILE after each scan, including failures."),
-          diff: optionValue("--diff")
-            .optional()
-            .describe("Scan committed Git changes from BASE to --head."),
-          workingTree: z
-            .boolean()
-            .default(false)
-            .describe("Scan staged and unstaged changes against --base."),
-          head: optionValue("--head")
-            .optional()
-            .describe("Git head ref for --diff (default: HEAD)."),
-          base: optionValue("--base")
-            .optional()
-            .describe("Git base ref for --working-tree (default: HEAD)."),
-          mode: z
-            .enum(["standard", "deep"])
-            .default("standard")
-            .describe("Scan mode; deep supports repository and path targets."),
-          ...DEEP_SCAN_OPTION_SCHEMAS,
-          model: optionValue("--model")
-            .optional()
-            .describe(
-              `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-            ),
-          effort: effortOption(),
-          provider: PROVIDER_OPTION,
-          outputDir: optionValue("--output-dir")
-            .optional()
-            .describe(
-              "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
-            ),
-          archiveExisting: z
-            .boolean()
-            .default(false)
-            .describe("Archive existing results; requires --output-dir."),
-          pluginPath: optionValue("--plugin-path")
-            .optional()
-            .describe(PLUGIN_PATH_DESCRIPTION),
-          python: optionValue("--python")
-            .optional()
-            .describe(PYTHON_PATH_DESCRIPTION),
-          codex: z
-            .array(optionValue("--codex"))
-            .default([])
-            .describe(CODEX_OVERRIDE_DESCRIPTION),
-          failOnSeverity: z
-            .enum(REPORTABLE_SEVERITIES)
-            .optional()
-            .describe("Exit 1 for findings at or above LEVEL."),
-          patch: z
-            .boolean()
-            .default(false)
-            .describe("Patch and verify confirmed findings after the scan."),
-          patchSeverity: z
-            .enum(REPORTABLE_SEVERITIES)
-            .optional()
-            .describe("Patch findings at or above LEVEL; requires --patch."),
-          createPr: CREATE_PR_OPTION,
-          maxCost: z
-            .number()
-            .positive()
-            .optional()
-            .describe(
-              "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
-            ),
-          headless: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Use plain text progress instead of the interactive dashboard.",
-            ),
-          dryRun: z
-            .boolean()
-            .default(false)
-            .describe("Validate local scan inputs without starting a scan."),
-          mock: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Save synthetic Standard scan findings without calling an LLM.",
-            ),
-        })
-        .refine(
-          (options) =>
-            Number(options.path.length > 0) +
-              Number(options.diff !== undefined) +
-              Number(options.workingTree) <=
-            1,
-          {
-            message:
-              "--path, --diff, and --working-tree are mutually exclusive.",
-          },
-        )
-        .refine(
-          (options) => options.head === undefined || options.diff !== undefined,
-          { message: "--head requires --diff." },
-        )
-        .refine(
-          (options) => options.base === undefined || options.workingTree,
-          {
-            message: "--base requires --working-tree.",
-          },
-        )
-        .refine(
-          (options) =>
-            !options.archiveExisting || options.outputDir !== undefined,
-          { message: "--archive-existing requires --output-dir." },
-        )
-        .refine(
-          (options) => options.patchSeverity === undefined || options.patch,
-          {
-            message: "--patch-severity requires --patch.",
-          },
-        )
-        .refine((options) => !options.createPr || options.patch, {
-          message: "--create-pr requires --patch.",
-        })
-        .refine((options) => !options.patch || !options.dryRun, {
-          message: "--patch cannot be combined with --dry-run.",
-        })
-        .refine(
-          (options) => !options.mock || (!options.dryRun && !options.patch),
-          {
-            message: "--mock cannot be combined with --dry-run or --patch.",
-          },
-        )
-        .refine(
-          (options) =>
-            options.mode === "deep" ||
-            (options.workers === undefined &&
-              options.subagents === undefined &&
-              options.stopAfterNoNew === undefined &&
-              options.maxDiscoveryRuns === undefined &&
-              options.maxTimeHours === undefined),
-          { message: "Deep scan settings require --mode deep." },
-        ),
+      mcp: { annotations: scanMcpAnnotations },
+      args: scanArgsSchema,
+      options: scanOptionsSchema,
       examples: [
         { args: { repository: "." } },
         { args: { repository: "." }, options: { model: "gpt-5.6-terra" } },
@@ -3106,44 +3170,7 @@ export async function main(
           return;
         }
         const outcome = await runScan(
-          {
-            auth: options.auth,
-            workflowId: options.workflowId,
-            safetyIdentifier: options.safetyIdentifier,
-            verbose: options.verbose,
-            repository: args.repository,
-            paths: options.path,
-            knowledgeBasePaths: options.knowledgeBase,
-            scanPromptFile: options.scanPromptFile,
-            validationPromptFile: options.validationPromptFile,
-            postScanPromptFile: options.postScanPromptFile,
-            diff: options.diff,
-            workingTree: options.workingTree,
-            head: options.head,
-            base: options.base,
-            mode: options.mode,
-            workers: options.workers,
-            subagents: options.subagents,
-            stopAfterNoNew: options.stopAfterNoNew,
-            maxDiscoveryRuns: options.maxDiscoveryRuns,
-            maxTimeHours: options.maxTimeHours,
-            model: options.model,
-            effort: options.effort,
-            provider: options.provider,
-            outputDir: options.outputDir,
-            archiveExisting: options.archiveExisting,
-            pluginPath: options.pluginPath,
-            pythonPath: options.python,
-            codex: options.codex,
-            failOnSeverity: options.failOnSeverity,
-            patch: options.patch,
-            patchSeverity: options.patchSeverity,
-            createPr: options.createPr,
-            maxCostUsd: options.maxCost,
-            headless: options.headless,
-            dryRun: options.dryRun,
-            mock: options.mock,
-          },
+          scanArguments(args.repository, options),
           errorOutput,
           dependencies,
           format !== "json" && format !== "jsonl",
@@ -4639,33 +4666,195 @@ export async function main(
           openWorldHint: false,
         },
       },
-      output: z.object({
-        sdkVersion: z.string(),
-        bundledPluginVersion: z.string(),
-        scanMcp: z.literal(false),
-        cancellationNote: z.string(),
-        cliVersion: z.string(),
-        codexVersion: z.string(),
-        codexSdkVersion: z.string(),
-        model: z.string(),
-        reasoningEffort: z.string(),
-        nextStep: z.string(),
-      }),
-      run() {
+      output: infoSchema,
+      run: metadata,
+    });
+
+  if (argv.includes("--mcp")) {
+    // incur's MCP adapter does not pass request cancellation to commands.
+    const [{ McpServer }, { StdioServerTransport }] = await Promise.all([
+      import("@modelcontextprotocol/server"),
+      import("@modelcontextprotocol/server/stdio"),
+    ]);
+    const server = new McpServer(
+      { name: "codex-security", version: VERSION },
+      { instructions: mcpInstructions },
+    );
+    const pending = new Set<Promise<ScanOutcome>>();
+    // The SDK ignores cancellation for request IDs 0 and "". Track those
+    // requests before async tool validation so immediate cancellation works too.
+    const scanCancellation = new Map<string | number, AbortController>();
+    server.registerTool(
+      "info",
+      {
+        description: "Show read-only SDK and bundled-plugin metadata.",
+        outputSchema: infoSchema,
+        annotations: {
+          readOnlyHint: true,
+          idempotentHint: true,
+          destructiveHint: false,
+          openWorldHint: false,
+        },
+      },
+      () => {
+        const data = metadata();
         return {
-          sdkVersion: VERSION,
-          bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
-          scanMcp: false as const,
-          cancellationNote:
-            "Scans are CLI-only because the MCP transport cannot cancel active commands.",
-          cliVersion: VERSION,
-          codexVersion: CODEX_EXECUTABLE_VERSION,
-          codexSdkVersion: CODEX_SDK_VERSION,
-          ...scanModelConfiguration(DEFAULT_CODEX_CONFIG),
-          nextStep: "codex-security scan . --dry-run",
+          content: [{ type: "text", text: JSON.stringify(data) }],
+          structuredContent: data,
         };
       },
+    );
+    server.registerTool(
+      "scan",
+      {
+        description:
+          "Run a Codex Security scan and return its exit code and results. Uses local credentials, can incur model costs, and writes scan artifacts. Does not patch findings.",
+        inputSchema: z
+          .object(scanOptionsSchema.shape)
+          .omit({ patch: true, patchSeverity: true, createPr: true })
+          .extend(scanArgsSchema.shape)
+          .strict(),
+        outputSchema: z.object({
+          exitCode: z.number(),
+          data: z.record(z.string(), z.unknown()).optional(),
+          error: z.string().optional(),
+        }),
+        annotations: scanMcpAnnotations,
+      },
+      async (input, context) => {
+        // Parse the complete CLI schema too, preserving its cross-option refinements.
+        const parsed = scanOptionsSchema.safeParse(input);
+        let outcome: ScanOutcome;
+        if (!parsed.success) {
+          outcome = {
+            exitCode: 2,
+            error: parsed.error.issues.map((issue) => issue.message).join(" "),
+          };
+        } else {
+          const operation = runScan(
+            scanArguments(input.repository, parsed.data),
+            errorOutput,
+            dependencies,
+            false,
+            scanCancellation.has(context.mcpReq.id)
+              ? AbortSignal.any([
+                  context.mcpReq.signal,
+                  scanCancellation.get(context.mcpReq.id)!.signal,
+                ])
+              : context.mcpReq.signal,
+          );
+          pending.add(operation);
+          try {
+            outcome = await operation;
+          } finally {
+            pending.delete(operation);
+          }
+        }
+        return {
+          content: [{ type: "text", text: JSON.stringify(outcome) }],
+          structuredContent: { ...outcome },
+          ...(outcome.exitCode === 0 ? {} : { isError: true }),
+        };
+      },
+    );
+    const input = dependencies.mcpInput ?? process.stdin;
+    const protocolOutput =
+      output instanceof NodeWritable
+        ? output
+        : new NodeWritable({
+            write(chunk, _encoding, callback) {
+              writeCliOutput(output, chunk).then(() => callback(), callback);
+            },
+          });
+    const stdio = new StdioServerTransport(input, protocolOutput);
+    const transport: Transport = {
+      async start() {
+        stdio.onmessage = (message) => {
+          if (
+            "id" in message &&
+            (message.id === 0 || message.id === "") &&
+            "method" in message &&
+            message.method === "tools/call" &&
+            message.params?.["name"] === "scan"
+          ) {
+            scanCancellation.set(message.id, new AbortController());
+          } else if (
+            "method" in message &&
+            message.method === "notifications/cancelled"
+          ) {
+            const requestId = message.params?.["requestId"];
+            if (requestId === 0 || requestId === "") {
+              scanCancellation.get(requestId)?.abort();
+            }
+          }
+          transport.onmessage?.(message);
+        };
+        stdio.onclose = () => transport.onclose?.();
+        stdio.onerror = (error) => transport.onerror?.(error);
+        await stdio.start();
+      },
+      async send(message) {
+        if (
+          "id" in message &&
+          !("method" in message) &&
+          message.id !== undefined &&
+          message.id !== null
+        ) {
+          const cancellation = scanCancellation.get(message.id);
+          scanCancellation.delete(message.id);
+          if (cancellation?.signal.aborted) return;
+        }
+        await stdio.send(message);
+      },
+      close: () => stdio.close(),
+    };
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
     });
+    server.server.onclose = resolveClosed;
+    let closing: Promise<void> | undefined;
+    const stop = (): void => {
+      closing ??= server.close();
+      void closing.then(resolveClosed, resolveClosed);
+    };
+    const onInterrupt = (): void => {
+      exitCode = 130;
+      stop();
+    };
+    const onTerminate = (): void => {
+      exitCode = 143;
+      stop();
+    };
+    // StdioServerTransport does not close itself when its input reaches EOF.
+    input.once("end", stop);
+    input.once("close", stop);
+    input.once("error", stop);
+    protocolOutput.once("close", () => {
+      protocolOutput.off("error", stop);
+      stop();
+    });
+    // Writes can fail after EOF and after main returns. Keep the error handler
+    // for the output stream's lifetime, without waiting on a blocked writer.
+    protocolOutput.on("error", stop);
+    dependencies.addSignalListener("SIGINT", onInterrupt);
+    dependencies.addSignalListener("SIGTERM", onTerminate);
+    try {
+      await server.connect(transport);
+      await closed;
+      await Promise.allSettled(pending);
+      await closing;
+    } finally {
+      input.off("end", stop);
+      input.off("close", stop);
+      input.off("error", stop);
+      dependencies.removeSignalListener("SIGINT", onInterrupt);
+      dependencies.removeSignalListener("SIGTERM", onTerminate);
+      await server.close();
+      updateController.abort();
+    }
+    return exitCode;
+  }
 
   let notice: UpdateNotice | undefined;
   try {
@@ -6512,9 +6701,10 @@ async function runScan(
   errorOutput: Writable,
   dependencies: CliDependencies,
   interactive = true,
+  signal?: AbortSignal,
 ): Promise<ScanOutcome> {
   return await withTerminalErrorsHandled(errorOutput, () =>
-    executeScan(arguments_, errorOutput, dependencies, interactive),
+    executeScan(arguments_, errorOutput, dependencies, interactive, signal),
   );
 }
 
@@ -6549,6 +6739,7 @@ async function executeScan(
   errorOutput: Writable,
   dependencies: CliDependencies,
   interactive = true,
+  signal?: AbortSignal,
 ): Promise<ScanOutcome> {
   let scanDir: string | null = null;
   const scanInput = dependencies.scanInput ?? process.stdin;
@@ -6596,6 +6787,8 @@ async function executeScan(
     });
   };
   const preparationAbortController = new AbortController();
+  const scanSignal =
+    signal === undefined ? preparationAbortController.signal : signal;
   const stopPresentation = (): void => {
     try {
       dashboard?.stop();
@@ -6637,8 +6830,10 @@ async function executeScan(
     dependencies.removeSignalListener("SIGINT", onInterrupt);
     dependencies.removeSignalListener("SIGTERM", onTerminate);
   };
-  dependencies.addSignalListener("SIGINT", onInterrupt);
-  dependencies.addSignalListener("SIGTERM", onTerminate);
+  if (signal === undefined) {
+    dependencies.addSignalListener("SIGINT", onInterrupt);
+    dependencies.addSignalListener("SIGTERM", onTerminate);
+  }
 
   let security: Pick<CodexSecurity, "run" | "preflight" | "close"> | null =
     null;
@@ -6654,6 +6849,7 @@ async function executeScan(
   let failed = false;
   let failure: unknown;
   try {
+    scanSignal.throwIfAborted();
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
     const target = targetFromArguments(arguments_);
@@ -6699,7 +6895,7 @@ async function executeScan(
               auth: arguments_.auth,
               provider,
               command: "scan",
-              signal: preparationAbortController.signal,
+              signal: scanSignal,
             },
             errorOutput,
             dependencies,
@@ -6892,7 +7088,7 @@ async function executeScan(
           `Moved existing results to: ${errorMessage(archiveDir)}\n`,
         );
       },
-      signal: preparationAbortController.signal,
+      signal: scanSignal,
       onOutputDirReady: (path) => {
         scanDir = path;
         diagnostic("scan.output_ready", { scan_dir: path });
@@ -7102,6 +7298,15 @@ async function executeScan(
     removeSignalListeners();
   }
 
+  if (signal?.aborted) {
+    errorOutput.write("Scan canceled.\n");
+    if (scanDir !== null) {
+      errorOutput.write(
+        `Partial output was kept at ${errorMessage(scanDir)}.\n`,
+      );
+    }
+    return { exitCode: 130, error: "Scan canceled." };
+  }
   if (requestedSignal !== null) {
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
