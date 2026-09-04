@@ -215,7 +215,7 @@ def test_deep_publication_keeps_configured_scope_without_worker_observations(
     assert coverage["includePaths"] == [scope]
     assert coverage["excludePaths"] == []
     report = (scan.scan_dir / "report.md").read_text()
-    assert f"- Included paths: {scope}" in report
+    assert f"`{scope}`" in report
     assert "- Excluded paths: none" in report
     assert "## Reviewed Surfaces" not in report
     assert "Which deployment controls apply?" not in report
