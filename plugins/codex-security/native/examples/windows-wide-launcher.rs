@@ -8,89 +8,13 @@ fn main() -> std::io::Result<()> {
         env,
         ffi::OsString,
         fs, io,
-        mem::size_of,
-        os::windows::ffi::{OsStrExt, OsStringExt},
+        os::windows::{ffi::OsStringExt, fs::OpenOptionsExt},
         path::{Path, PathBuf},
         process::Command,
-        ptr::null_mut,
     };
-    use windows_sys::Win32::Security::*;
 
     fn raw(prefix: &str, unit: u16) -> OsString {
         OsString::from_wide(&prefix.encode_utf16().chain([unit]).collect::<Vec<_>>())
-    }
-
-    fn deny_file_access(path: &Path, operation: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
-        let path = path
-            .as_os_str()
-            .encode_wide()
-            .chain([0])
-            .collect::<Vec<_>>();
-        let mut length = 0;
-        unsafe {
-            GetFileSecurityW(
-                path.as_ptr(),
-                DACL_SECURITY_INFORMATION,
-                null_mut(),
-                0,
-                &mut length,
-            )
-        };
-        if length == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut saved = vec![0_usize; (length as usize).div_ceil(size_of::<usize>())];
-        let mut control = 0;
-        let mut revision = 0;
-        if unsafe {
-            GetFileSecurityW(
-                path.as_ptr(),
-                DACL_SECURITY_INFORMATION,
-                saved.as_mut_ptr().cast(),
-                length,
-                &mut length,
-            ) == 0
-                || GetSecurityDescriptorControl(
-                    saved.as_mut_ptr().cast(),
-                    &mut control,
-                    &mut revision,
-                ) == 0
-        } {
-            return Err(io::Error::last_os_error());
-        }
-        let mut acl = ACL::default();
-        let mut descriptor = SECURITY_DESCRIPTOR::default();
-        let descriptor = (&mut descriptor as *mut SECURITY_DESCRIPTOR).cast();
-        if unsafe {
-            InitializeAcl(&mut acl, size_of::<ACL>() as u32, ACL_REVISION) == 0
-                || InitializeSecurityDescriptor(descriptor, 1) == 0
-                || SetSecurityDescriptorDacl(descriptor, 1, &acl, 0) == 0
-                || SetFileSecurityW(
-                    path.as_ptr(),
-                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                    descriptor,
-                ) == 0
-        } {
-            return Err(io::Error::last_os_error());
-        }
-        let result = operation();
-        let protection = if control & SE_DACL_PROTECTED != 0 {
-            PROTECTED_DACL_SECURITY_INFORMATION
-        } else {
-            UNPROTECTED_DACL_SECURITY_INFORMATION
-        };
-        // Restore the owned fixture's original DACL even if the child proof fails.
-        if unsafe {
-            SetFileSecurityW(
-                path.as_ptr(),
-                DACL_SECURITY_INFORMATION | protection,
-                saved.as_mut_ptr().cast(),
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        result
     }
 
     fn run(node: OsString, script: OsString, root: &Path) -> io::Result<()> {
@@ -99,6 +23,10 @@ fn main() -> std::io::Result<()> {
         let replacement = root.join("cwd-\u{fffd}");
         fs::create_dir(&replacement)?;
         fs::write(replacement.join("sentinel"), "replacement cwd untouched")?;
+        fs::write(
+            replacement.join("high-\u{fffd}"),
+            "core replacement sentinel",
+        )?;
         let names = [
             raw("high-", 0xd800),
             raw("high-", 0xfffd),
@@ -119,8 +47,9 @@ fn main() -> std::io::Result<()> {
             raw("missing-", 0xdfff),
             cwd.join("dangling-directory-link"),
         )?;
-        let denied = cwd.join(raw("denied-", 0xdfff));
-        fs::write(&denied, "directory enumeration does not open this file")?;
+        let locked = cwd.join(raw("locked-", 0xdfff));
+        fs::write(&locked, "directory enumeration does not open this file")?;
+        fs::write(root.join(raw("parent-", 0xd800)), "parent sentinel")?;
         let verbatim = fs::canonicalize(&cwd)?;
         for (name, contents) in [
             ("trailing", "ordinary dot sibling"),
@@ -141,25 +70,27 @@ fn main() -> std::io::Result<()> {
             OsString::from("quoted \"value\" and trailing\\"),
             OsString::from("backslash\\\"quote"),
         ];
-        deny_file_access(&denied, || {
-            let status = Command::new(node)
-                .arg(script)
-                .arg("wide-worker")
-                .arg(root)
-                .args(arguments)
-                .current_dir(&cwd)
-                .env("CODEX_SECURITY_WIDE_VALUE", raw("value-", 0xd800))
-                .env("CODEX_SECURITY_WIDE_EMPTY", "")
-                .env_remove("CODEX_SECURITY_WIDE_ABSENT")
-                .env(raw("CODEX_SECURITY_WIDE_NAME_", 0xdfff), "wide name value")
-                .env("CODEX_SECURITY_WIDE_LONG", "x".repeat(1024))
-                .env("USERPROFILE", &cwd)
-                .status()?;
-            if !status.success() {
-                return Err(io::Error::other("Wide Windows child proof failed"));
-            }
-            Ok(())
-        })?;
+        let guard = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked)?;
+        let status = Command::new(node)
+            .arg(script)
+            .arg("wide-worker")
+            .arg(root)
+            .args(arguments)
+            .current_dir(&cwd)
+            .env("CODEX_SECURITY_WIDE_VALUE", raw("value-", 0xd800))
+            .env("CODEX_SECURITY_WIDE_EMPTY", "")
+            .env_remove("CODEX_SECURITY_WIDE_ABSENT")
+            .env(raw("CODEX_SECURITY_WIDE_NAME_", 0xdfff), "wide name value")
+            .env("CODEX_SECURITY_WIDE_LONG", "x".repeat(1024))
+            .env("USERPROFILE", &cwd)
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::other("Wide Windows child proof failed"));
+        }
+        drop(guard);
         if fs::read(replacement.join("sentinel"))? != b"replacement cwd untouched" {
             return Err(io::Error::other("Replacement cwd was changed"));
         }

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { join, win32 } from "node:path";
+import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { output } from "./binding.mjs";
 import { loadWindowsBinding } from "./windows-binding.mjs";
@@ -92,8 +93,9 @@ function worker(root: string): Record<string, boolean> {
     "tail-\ufffd",
     "unicode-🔐-東京",
   ];
+  const listed = files.entriesWithTypes(widePath("."));
   assert.deepEqual(
-    files.entries(widePath(".")).map(pathText).sort(),
+    listed.map((entry) => pathText(entry.name)).sort(),
     [
       ...names,
       "empty",
@@ -105,14 +107,17 @@ function worker(root: string): Record<string, boolean> {
       "file-link",
       "directory-link",
       "dangling-directory-link",
-      "denied-\udfff",
+      "locked-\udfff",
     ].sort(),
   );
-  const listed = files.entriesWithTypes(widePath("."));
-  assert.deepEqual(
-    listed.map((entry) => pathText(entry.name)).sort(),
-    files.entries(widePath(".")).map(pathText).sort(),
-  );
+  for (const spelling of [".", `${drive}.`, cwd, win32.toNamespacedPath(cwd)]) {
+    const result = native.windowsDirectoryEntries(widePath(spelling));
+    assert.equal(result.error, 0);
+    assert.deepEqual(
+      result.value.map((entry) => pathText(entry.name)).sort(),
+      listed.map((entry) => pathText(entry.name)).sort(),
+    );
+  }
   const directories = listed
     .filter((entry) => entry.isDirectory())
     .map((entry) => pathText(entry.name))
@@ -130,10 +135,13 @@ function worker(root: string): Record<string, boolean> {
       .sort(),
     ["dangling-directory-link", "directory-link", "file-link"],
   );
-  assert.throws(() => files.stat(widePath("denied-\udfff")), { winerror: 5 });
+  assert.throws(
+    () => files.readInto(widePath("locked-\udfff"), Buffer.alloc(1)),
+    { winerror: 32 },
+  );
   assert.equal(
     listed
-      .find((entry) => entry.name.equals(widePath("denied-\udfff")))
+      .find((entry) => entry.name.equals(widePath("locked-\udfff")))
       ?.isDirectory(),
     false,
   );
@@ -149,15 +157,7 @@ function worker(root: string): Record<string, boolean> {
     error: 3,
     value: [],
   });
-  assert.deepEqual(native.windowsDirectoryNames(widePath("empty")), {
-    error: 0,
-    value: [],
-  });
-  assert.deepEqual(native.windowsDirectoryNames(widePath("missing")), {
-    error: 3,
-    value: [],
-  });
-  const notDirectory = native.windowsDirectoryNames(widePath(names[0]!));
+  const notDirectory = native.windowsDirectoryEntries(widePath(names[0]!));
   assert.notEqual(notDirectory.error, 0);
   assert(Number.isInteger(notDirectory.error));
   assert.deepEqual(notDirectory.value, []);
@@ -172,13 +172,16 @@ function worker(root: string): Record<string, boolean> {
       `${name}/`,
       `${name}\\`,
       `${drive}${name}/`,
-      `${drive}.\\..\\${name}\\`,
       `${win32.join(cwd, name)}\\`,
     ]) {
       samePath(files.realpath(widePath(input)), win32.join(cwd, name));
     }
   }
   samePath(files.realpath(widePath(`${drive}///`)), `${drive}\\`);
+  samePath(
+    files.realpath(widePath(`${drive}.\\..\\parent-\ud800`)),
+    win32.join(root, "parent-\ud800"),
+  );
   assert(files.stat(widePath(".")).isDirectory());
   const bounded = Buffer.alloc(4);
   assert.equal(files.readInto(widePath(names[0]!), bounded), 4);
@@ -226,12 +229,15 @@ function worker(root: string): Record<string, boolean> {
       widePath(`${pathText(directory)}\\child`),
       Buffer.from("literal directory"),
     );
-    assert.deepEqual(files.entries(directory).map(pathText), ["child"]);
+    assert.deepEqual(
+      files.entriesWithTypes(directory).map((entry) => pathText(entry.name)),
+      ["child"],
+    );
     const ordinaryDirectory = widePath(
       win32.join(cwd, `directory-${name.slice(0, -1)}`),
     );
     files.mkdir(ordinaryDirectory);
-    assert.deepEqual(files.entries(ordinaryDirectory), []);
+    assert.deepEqual(files.entriesWithTypes(ordinaryDirectory), []);
   }
 
   const longDirectory = win32.join(
@@ -248,14 +254,65 @@ function worker(root: string): Record<string, boolean> {
   const longLength = files.readInto(longFile, contents);
   assert.equal(contents.subarray(0, longLength).toString(), "long raw path");
   samePath(files.realpath(longFile), pathText(longFile));
+  const longEntries = native.windowsDirectoryEntries(widePath(longDirectory));
+  assert.equal(longEntries.error, 0);
+  assert.deepEqual(
+    longEntries.value.map((entry) => pathText(entry.name)),
+    ["file-\udc80"],
+  );
 
   for (const malformed of [Buffer.from([0x61]), widePath("bad\0value")]) {
     assert.throws(() => native.windowsEnvironment(malformed));
     assert.throws(() => native.windowsAbsolutePath(malformed));
-    assert.throws(() => native.windowsDirectoryNames(malformed));
     assert.throws(() => native.windowsDirectoryEntries(malformed));
   }
+  // libuv's WTF-8 support does not bypass Node's JS string conversion.
+  assert.equal(
+    readFileSync(win32.join(cwd, "high-\ud800"), "utf8"),
+    "core replacement sentinel",
+  );
+  const rawName = Buffer.concat([
+    Buffer.from("high-"),
+    Buffer.from([0xed, 0xa0, 0x80]),
+  ]);
+  const rawCwd = Buffer.concat([
+    Buffer.from(win32.join(root, "cwd-")),
+    Buffer.from([0xed, 0xa0, 0x80]),
+  ]);
+  const rawFile = Buffer.concat([rawCwd, Buffer.from("\\"), rawName]);
+  function coreSupports(operation: () => boolean): boolean {
+    try {
+      return operation();
+    } catch (error) {
+      assert.equal(typeof (error as NodeJS.ErrnoException).code, "string");
+      return false;
+    }
+  }
+  const coreStringNames = coreSupports(() =>
+    readdirSync(rawCwd).includes("high-\ud800"),
+  );
+  const coreStringRealpath = coreSupports(
+    () => realpathSync.native(rawCwd) === cwd,
+  );
+  assert.equal(coreStringNames, false);
+  assert.equal(coreStringRealpath, false);
+  const coreBufferRead = coreSupports(
+    () => readFileSync(rawFile, "utf8") === "sentinel-0",
+  );
+  const coreBufferNames = coreSupports(() =>
+    readdirSync(rawCwd, { encoding: "buffer" }).some((name) =>
+      name.equals(rawName),
+    ),
+  );
+  const coreBufferRealpath = coreSupports(() =>
+    realpathSync.native(rawCwd, { encoding: "buffer" }).equals(rawCwd),
+  );
   return {
+    nodeStringPathsReadReplacementSibling: true,
+    nodeStringNamesAndRealpathLoseSurrogates: true,
+    nodeWtf8BufferReads: coreBufferRead,
+    nodeWtf8BufferDirectoryNames: coreBufferNames,
+    nodeWtf8BufferRealpath: coreBufferRealpath,
     rawArgumentsAndCrtQuoting: true,
     rawEnvironmentEmptyAndUnset: true,
     rawCwdAndDriveRelativePaths: true,
