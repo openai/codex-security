@@ -632,6 +632,19 @@ describe("GitHub request transport", () => {
 });
 
 describe("release workflow controls", () => {
+  const { permissions, jobs } = Bun.YAML.parse(workflow) as {
+    permissions: Record<string, string>;
+    jobs: Record<
+      string,
+      {
+        if: string;
+        permissions?: Record<string, string>;
+        env: { RELEASE_PR_DRY_RUN: string };
+        steps: { id?: string; if?: string }[];
+      }
+    >;
+  };
+
   test.each([
     { dryRun: "false", clientId: "", createsAppToken: false },
     { dryRun: "false", clientId: "synthetic-app-id", createsAppToken: true },
@@ -640,30 +653,22 @@ describe("release workflow controls", () => {
   ])(
     "selects authentication for dry_run=$dryRun with client ID '$clientId'",
     ({ dryRun, clientId, createsAppToken }) => {
-      const { jobs } = Bun.YAML.parse(workflow) as {
-        jobs: {
-          reconcile: {
-            permissions?: Record<string, string>;
-            steps: { id?: string; if?: string }[];
-          };
-        };
-      };
-      const appToken = jobs.reconcile.steps.find(
-        (step) => step.id === "app-token",
+      const job = Object.values(jobs).find(
+        ({ env }) => env.RELEASE_PR_DRY_RUN === dryRun,
       )!;
-      const evaluate = new Function("env", "vars", `return (${appToken.if});`);
-      expect(
-        evaluate(
-          { RELEASE_PR_DRY_RUN: dryRun },
-          { RELEASE_APP_CLIENT_ID: clientId },
-        ),
-      ).toBe(createsAppToken);
-      if (dryRun === "false" && !createsAppToken) {
-        expect(jobs.reconcile.permissions).toMatchObject({
-          contents: "write",
-          "pull-requests": "write",
-        });
-      }
+      const appToken = job.steps.find((step) => step.id === "app-token");
+      const evaluate = new Function(
+        "vars",
+        `return (${appToken?.if ?? "false"});`,
+      );
+      expect(evaluate({ RELEASE_APP_CLIENT_ID: clientId })).toBe(
+        createsAppToken,
+      );
+      const access = dryRun === "true" ? "read" : "write";
+      expect(job.permissions ?? permissions).toEqual({
+        contents: access,
+        "pull-requests": access,
+      });
     },
   );
 
@@ -704,22 +709,26 @@ describe("release workflow controls", () => {
   ])(
     "selects preview mode for $event with enabled=$enabled and dry_run=$dryRun",
     ({ event, enabled, dryRun, expected }) => {
-      const expression = workflow.match(
-        /RELEASE_PR_DRY_RUN: \$\{\{ (.+) \}\}/u,
-      )![1]!;
-      const evaluate = new Function(
-        "github",
-        "inputs",
-        "vars",
-        `return (${expression});`,
-      );
-      expect(
-        evaluate(
-          { event_name: event },
+      const selectedJobs = Object.values(jobs).filter((job) => {
+        const evaluate = new Function(
+          "github",
+          "inputs",
+          "vars",
+          `return (${job.if});`,
+        );
+        return evaluate(
+          {
+            event_name: event,
+            repository: "openai/codex-security",
+            ref: "refs/heads/main",
+          },
           { dry_run: dryRun },
           { RELEASE_PR_ENABLED: enabled },
-        ),
-      ).toBe(expected);
+        );
+      });
+      expect(selectedJobs.map((job) => job.env.RELEASE_PR_DRY_RUN)).toEqual([
+        String(expected),
+      ]);
     },
   );
 });

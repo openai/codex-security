@@ -145,7 +145,8 @@ under the repository's **Settings → Actions → General → Workflow permissio
 then manually dispatch the workflow with **dry_run** disabled. This permits a
 single write run while automatic updates remain disabled. The workflow uses
 the repository's `GITHUB_TOKEN` with **Contents: write** and **Pull requests: write**
-by default; no separate App credentials are required.
+by default; no separate App credentials are required. Preview runs use a separate
+job with read-only permissions for both scopes.
 
 Review the resulting draft and select **Approve workflows to run** in its merge
 box to start hosted CI. GitHub requires this approval for PRs created or updated
