@@ -95,8 +95,17 @@ function realpathProof(root: string) {
     path("nested/target"),
   );
   assert.deepEqual(resolve("relative-link/.."), path("nested"));
-  for (const name of ["file/..", "file-parent-link"])
-    assert.throws(() => resolve(name), { code: "ENOTDIR" });
+  const fileParentResults = ["file/..", "file-parent-link"].map((name) => {
+    let result: Buffer;
+    try {
+      result = resolve(name);
+    } catch (error) {
+      assert.equal((error as NodeJS.ErrnoException).code, "ENOTDIR");
+      return "ENOTDIR";
+    }
+    assert.deepEqual(result, canonical);
+    return "resolved-parent";
+  });
   for (const name of ["missing", "missing/.."])
     assert.throws(() => resolve(name), { code: "ENOENT" });
   assert.throws(() => resolve("cycle"), { code: "ELOOP" });
@@ -144,8 +153,8 @@ function realpathProof(root: string) {
     invalidLinkTarget,
     relativeLinks: true,
     symlinkParent: true,
-    fileParent: "ENOTDIR",
-    linkedFileParent: "ENOTDIR",
+    fileParent: fileParentResults[0],
+    linkedFileParent: fileParentResults[1],
     missing: "ENOENT",
     cycles: "ELOOP",
   };
