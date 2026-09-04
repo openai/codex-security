@@ -1982,6 +1982,39 @@ describe("live scan cost tracking", () => {
     expect(updates).toEqual([0.00625]);
   });
 
+  test.each([undefined, 100, 1_000, 1_500])(
+    "reconciles the parent receipt with worker usage when logged parent tokens are %s",
+    async (parentTokens) => {
+      const home = await codexHome();
+      if (parentTokens !== undefined) {
+        await writeSession(home, "scan-thread", {
+          input_tokens: parentTokens,
+          output_tokens: 0,
+        });
+      }
+      await writeSession(
+        home,
+        "worker-thread",
+        { input_tokens: 100, output_tokens: 0 },
+        "scan-thread",
+      );
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+      });
+      tracker.start("scan-thread");
+
+      const snapshot = await tracker.stop({
+        input_tokens: 1_000,
+        output_tokens: 0,
+      });
+
+      expect(snapshot.cost?.inputTokens).toBe(
+        Math.max(parentTokens ?? 0, 1_000) + 100,
+      );
+    },
+  );
+
   test("falls back to the completed turn when session logs are unavailable", async () => {
     const tracker = new ScanCostTracker({
       codexHome: await codexHome(),
@@ -1991,7 +2024,13 @@ describe("live scan cost tracking", () => {
     tracker.start("scan-thread");
 
     expect(await tracker.stop(usage)).toEqual({
-      usage,
+      usage: {
+        ...usage,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: 1_020,
+      },
       cost: {
         model: "gpt-5.6-luna",
         inputTokens: 1_000,
@@ -2002,4 +2041,30 @@ describe("live scan cost tracking", () => {
       },
     });
   });
+
+  test.each(["receipt", "receipt-and-log", "unknown"] as const)(
+    "accounts for a separate validation turn with %s usage",
+    async (source) => {
+      const home = await codexHome();
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+      });
+      tracker.start("scan-thread");
+      const usage = { input_tokens: 500, output_tokens: 0 };
+      tracker.recordUsage(
+        source === "unknown" ? null : usage,
+        "validation-thread",
+      );
+      if (source === "receipt-and-log")
+        await writeSession(home, "validation-thread", usage);
+      const snapshot = await tracker.stop({
+        input_tokens: 1_000,
+        output_tokens: 0,
+      });
+      if (source === "unknown")
+        expect(snapshot).toEqual({ usage: null, cost: null });
+      else expect(snapshot.cost?.inputTokens).toBe(1_500);
+    },
+  );
 });

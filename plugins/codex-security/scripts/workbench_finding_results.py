@@ -42,6 +42,7 @@ def finding_result(
     full_details: bool,
     indexed_finding: dict[str, Any] | None,
     remediation_state: dict[str, Any],
+    related: list[dict[str, Any]],
 ) -> dict[str, Any]:
     stored_details = read_finding_details(occurrence["details_json"])
     details = dict(stored_details if full_details else bounded_finding_details(stored_details))
@@ -52,6 +53,7 @@ def finding_result(
         "knownSince",
         "matches",
         "occurrenceCount",
+        "related",
         "scanDir",
         "scanId",
         "sourceExcerpt",
@@ -163,6 +165,8 @@ def finding_result(
             result["occurrenceCount"] = indexed_finding["occurrence_count"]
     elif scan["target_id"] is not None and scan["status"] == "complete":
         matches = []
+    if related:
+        result["related"] = related
     if matches:
         result["matches"] = matches
     if matches or result.get("occurrenceCount", 0) > 1:

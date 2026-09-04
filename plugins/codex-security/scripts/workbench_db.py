@@ -7,6 +7,7 @@ import argparse
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -40,6 +41,7 @@ import workbench_remediation as remediation
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
+import workbench_severity as severity
 from filesystem_identity import (
     serialize_filesystem_identity as serialize_filesystem_identity,
 )
@@ -66,7 +68,6 @@ from workbench_constants import (
     DIFF_TARGET_KINDS,
     EMPTY_GIT_TREE,
     FINDINGS_RESULT_LIMIT,
-    PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_dashboard import dashboard
@@ -123,7 +124,6 @@ from workbench_target import (
 )
 from workbench_target_state import backfill_security_targets, ensure_security_target
 from workbench_validation import (
-    bounded_output_text,
     optional_text,
     parse_scan_cost,
     path_within_scope,
@@ -1522,7 +1522,9 @@ def complete_scan_locked(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
             completion_binding=completion_binding,
-            completion_warnings=warnings,
+            # Save the finished Deep result as submitted. Worker drafts and
+            # recovery repairs belong to the stopped-scan path.
+            completion_warnings=warnings if scan["mode"] != "deep" else None,
             draft_documents=saved_results.merge_saved_results(
                 scan_dir,
                 scan["id"],
@@ -1535,7 +1537,7 @@ def complete_scan_locked(
                 stopped=False,
                 reason="",
             )
-            if current_manifest_path is not None and not already_sealed
+            if scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
             else None,
         )
         add_warning()
@@ -1775,6 +1777,31 @@ def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) ->
             (args.thread_id, now(), scan["id"]),
         )
     return {"scanId": scan["id"], "threadId": args.thread_id}
+
+
+def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    limit = args.max_cost_usd
+    if not math.isfinite(limit) or limit <= 0:
+        raise SystemExit("The scan cost limit must be a positive finite USD amount.")
+    with scan_completion_lock(scan_id), connection:
+        scan = require_scan(connection, scan_id)
+        if scan["status"] != "running" or scan["recipe_json"] is None:
+            raise SystemExit("Only a running CLI scan can increase its cost limit.")
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        previous = recipe.get("maxCostUsd")
+        if (
+            not isinstance(previous, (int, float))
+            or isinstance(previous, bool)
+            or limit <= previous
+        ):
+            raise SystemExit("The new cost limit must exceed the current limit.")
+        recipe["maxCostUsd"] = limit
+        connection.execute(
+            "UPDATE scans SET recipe_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(recipe, allow_nan=False), now(), scan["id"]),
+        )
+    return {"scanId": scan["id"], "maxCostUsd": limit}
 
 
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
@@ -2848,10 +2875,17 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
         values,
     ).fetchone()[0]
     next_offset = args.offset + len(rows)
+    relations = scan_history.finding_relations(connection, scan["id"], (row["id"] for row in rows))
     return {
         "findingsPage": {
             "findings": [
-                finding_result(connection, scan, row, indexed_finding=indexed.get(row["id"]))
+                finding_result(
+                    connection,
+                    scan,
+                    row,
+                    indexed_finding=indexed.get(row["id"]),
+                    related=relations.get(row["id"], []),
+                )
                 for row in rows
             ],
             "limit": limit,
@@ -2954,6 +2988,9 @@ def scan_result(
     current_target = connection.execute(
         "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
     ).fetchone()
+    relations = scan_history.finding_relations(
+        connection, scan["id"], (row["id"] for row in occurrence_rows)
+    )
     return {
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
@@ -2962,7 +2999,13 @@ def scan_result(
         "continuationThreadId": scan["continuation_thread_id"],
         "failureMessage": scan["failure_message"],
         "findings": [
-            finding_result(connection, scan, row, indexed_finding=indexed_findings.get(row["id"]))
+            finding_result(
+                connection,
+                scan,
+                row,
+                indexed_finding=indexed_findings.get(row["id"]),
+                related=relations.get(row["id"], []),
+            )
             for row in occurrence_rows
         ],
         "findingCount": finding_count,
@@ -3122,6 +3165,7 @@ def finding_result(
     *,
     full_details: bool = False,
     indexed_finding: dict[str, Any] | None = None,
+    related: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if full_details:
         indexed_finding = _indexed_scan_findings(connection, scan).get(occurrence["id"])
@@ -3132,6 +3176,13 @@ def finding_result(
         full_details=full_details,
         indexed_finding=indexed_finding,
         remediation_state=finding_remediation_result(connection, occurrence["id"]),
+        related=(
+            related
+            if related is not None
+            else scan_history.finding_relations(connection, scan["id"], (occurrence["id"],)).get(
+                occurrence["id"], []
+            )
+        ),
     )
 
 
@@ -3183,48 +3234,9 @@ def finding_remediation_result(
 def patch_artifact_preview(
     scan_dir: Path, relative_path: str | None, expected_digest: str | None
 ) -> tuple[str | None, dict[str, int | bool] | None]:
-    if relative_path is None or expected_digest is None:
-        return None, None
-    digest = hashlib.sha256()
-    preview = bytearray()
-    additions = 0
-    deletions = 0
-    file_count = 0
-    old_headers = 0
-    new_headers = 0
-    at_line_start = True
-    try:
-        with open_scan_local_file(scan_dir, relative_path) as patch:
-            while chunk := patch.readline(1024 * 1024):
-                digest.update(chunk)
-                if len(preview) <= PATCH_PREVIEW_BYTES:
-                    preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
-                if at_line_start:
-                    if chunk.startswith(b"diff --git "):
-                        file_count += 1
-                    elif chunk.startswith(b"+++ "):
-                        new_headers += 1
-                    elif chunk.startswith(b"--- "):
-                        old_headers += 1
-                    elif chunk.startswith(b"+"):
-                        additions += 1
-                    elif chunk.startswith(b"-"):
-                        deletions += 1
-                at_line_start = chunk.endswith(b"\n")
-    except SystemExit:
-        return None, None
-    if f"sha256:{digest.hexdigest()}" != expected_digest:
-        return None, None
-    preview_truncated = len(preview) > PATCH_PREVIEW_BYTES
-    preview_text = preview[:PATCH_PREVIEW_BYTES].decode("utf-8", errors="replace")
-    if preview_truncated:
-        preview_text = f"{preview_text}\n... patch preview truncated ..."
-    return preview_text, {
-        "additions": additions,
-        "deletions": deletions,
-        "fileCount": file_count or min(old_headers, new_headers),
-        "previewTruncated": preview_truncated,
-    }
+    return remediation.patch_artifact_preview(
+        scan_dir, relative_path, expected_digest, open_scan_local_file
+    )
 
 
 def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
@@ -3391,6 +3403,10 @@ def main() -> None:
         result = inspect_setup(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
+    if args.command == "read-severity-classification":
+        result = severity.read_classification(database_path(), args.scan_id)
+        print(json.dumps(result, allow_nan=False, sort_keys=True))
+        return
     if args.command == "inspect-linear-publication":
         result = inspect_linear_publication(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
@@ -3470,6 +3486,8 @@ def main() -> None:
             result = register_cli_scan(connection, args)
         elif args.command == "set-scan-thread":
             result = set_scan_thread(connection, args)
+        elif args.command == "set-scan-cost-limit":
+            result = set_scan_cost_limit(connection, args)
         elif args.command == "get-scan-recipe":
             result = get_scan_recipe(connection, args)
         elif args.command == "compare-scans":
@@ -3587,6 +3605,8 @@ def main() -> None:
             result = export_findings(connection, args)
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
+        elif args.command == "severity-classification":
+            result = severity.checkpoint(connection, json.load(sys.stdin), now())
         elif args.command == "finding-workflow":
             result = finding_workflow(connection, json.load(sys.stdin), now())
         elif args.command == "dashboard":

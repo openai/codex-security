@@ -10,8 +10,9 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -127,6 +128,7 @@ def git_command(
     input_data: str | bytes | None = None,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    stdout_file: BinaryIO | None = None,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
@@ -148,15 +150,20 @@ def git_command(
         command.extend(["--git-dir", str(git_dir), "--work-tree", str(work_tree)])
     full_command = [*command, *args]
     try:
+        output_options = (
+            {"capture_output": True}
+            if stdout_file is None
+            else {"stdout": stdout_file, "stderr": subprocess.PIPE}
+        )
         return subprocess.run(
             full_command,
             check=False,
-            capture_output=True,
             env=environment,
             text=text,
             encoding="utf-8" if text else None,
             errors="surrogateescape" if text else None,
             input=input_data,
+            **output_options,
         )
     except FileNotFoundError:
         # Git is optional for Codebase scans. Treat an unavailable executable like
@@ -165,11 +172,43 @@ def git_command(
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
 
 
-def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
+def _update_digest_field_header(digest: Any, label: bytes, value_size: int) -> None:
     digest.update(len(label).to_bytes(4, "big"))
     digest.update(label)
-    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value_size.to_bytes(8, "big"))
+
+
+def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
+    _update_digest_field_header(digest, label, len(value))
     digest.update(value)
+
+
+def _update_digest_field_from_git(
+    digest: Any,
+    label: bytes,
+    target: Path,
+    *args: str,
+    git_dir: Path | None = None,
+    work_tree: Path | None = None,
+) -> bool:
+    with tempfile.TemporaryFile() as output:
+        completed = git_command(
+            target,
+            *args,
+            text=False,
+            git_dir=git_dir,
+            work_tree=work_tree,
+            stdout_file=output,
+        )
+        if completed.returncode != 0:
+            return False
+        output.seek(0, os.SEEK_END)
+        value_size = output.tell()
+        _update_digest_field_header(digest, label, value_size)
+        output.seek(0)
+        for chunk in iter(lambda: output.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return True
 
 
 def worktree_content_digest(target: Path) -> str:
@@ -203,7 +242,11 @@ def worktree_content_digest_for_context(
     git_dir: Path | None = None,
     work_tree: Path | None = None,
 ) -> str:
-    tracked = git_bytes(
+    digest = hashlib.sha256()
+    update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
+    tracked_ok = _update_digest_field_from_git(
+        digest,
+        b"tracked-diff",
         repository,
         "diff",
         "--binary",
@@ -228,11 +271,8 @@ def worktree_content_digest_for_context(
         git_dir=git_dir,
         work_tree=work_tree,
     )
-    if tracked is None or untracked is None:
+    if not tracked_ok or untracked is None:
         raise SystemExit("Could not snapshot the selected working-tree changes.")
-    digest = hashlib.sha256()
-    update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
-    update_digest_field(digest, b"tracked-diff", tracked)
     for raw_path in sorted(path for path in untracked.split(b"\0") if path):
         relative_path = os.fsdecode(raw_path)
         path = (work_tree or repository) / relative_path
