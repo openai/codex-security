@@ -20,29 +20,9 @@ export async function buildMcpApp({ output }) {
   await mkdir(mcpDir, { recursive: true });
 
   await writeRuntime("server", "main.ts");
-  for (const target of [
-    "darwin-arm64",
-    "darwin-x64",
-    "linux-arm64-gnu",
-    "linux-arm64-musl",
-    "linux-x64-gnu",
-    "linux-x64-musl",
-    "win32-arm64",
-    "win32-x64"
-  ]) {
-    const name = target.startsWith("win32-") ? "windows.node" : "unix.node";
-    const destination = join(mcpDir, "native", target);
-    await mkdir(destination, { recursive: true });
-    await copyFile(
-      join(root, "../native/prebuilt", target, name),
-      join(destination, name)
-    );
-  }
-  for (const path of [
-    "THIRD_PARTY_NOTICES.txt", "COPYRIGHT-library.html",
-    "licenses/MIT.txt", "licenses/Apache-2.0.txt",
-    "licenses/Unicode-3.0.txt", "licenses/BSD-2-Clause.txt"
-  ]) {
+  const contract = JSON.parse(await readFile(join(root, "../plugin-files.json"), "utf8"));
+  for (const file of contract.shippedExact.filter((path) => path.startsWith("mcp/native/"))) {
+    const path = file.slice("mcp/native/".length);
     const destination = join(mcpDir, "native", path);
     await mkdir(dirname(destination), { recursive: true });
     await copyFile(join(root, "../native/prebuilt", path), destination);
