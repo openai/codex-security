@@ -2,11 +2,8 @@ import {
   mkdir,
   mkdtemp,
   readFile,
-  realpath,
-  rename,
   rm,
   stat,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,10 +23,9 @@ import {
   writeCodexConfig,
 } from "../src/index.js";
 import {
-  pluginPythonRuntime,
   prepareCodexSecurityCredentialHome,
   requireSecureCredentialHome,
-  resolvePluginPython,
+  resolveCodexCommand,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -509,16 +505,14 @@ describe("Codex configuration", () => {
   );
 
   test.skipIf(macOsSandboxUnavailable())(
-    "keeps policy workspace, state and credentials read-only",
+    "reads scoped policy source without exposing sibling files or changing host files",
     async () => {
       const { root, codexHome, workspace, stateDirectory, environment } =
         await scanSandboxFixture();
-      const python =
-        Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-      expect(python).not.toBeNull();
-      const policyPython = await pluginPythonRuntime(python!, {
-        protectedPaths: [root],
-      });
+      const source = join(root, "repository", "component");
+      await mkdir(source, { recursive: true });
+      const sourceFile = join(source, "fixture.txt");
+      await writeFile(sourceFile, "source");
       const config = scanRuntimeCodexConfig(
         await mergedCodexConfig({}),
         codexHome,
@@ -527,14 +521,13 @@ describe("Codex configuration", () => {
         string,
         { filesystem: Record<string, string> }
       >;
-      Object.assign(
-        permissions["codex_security_policy"]!.filesystem,
-        Object.fromEntries(
-          policyPython.readRoots.map((path) => [path, "read"]),
-        ),
-      );
+      permissions["codex_security_policy"]!.filesystem[source] = "read";
+      // The debug sandbox re-execs Codex, which may live outside OS read roots.
+      permissions["codex_security_policy"]!.filesystem[
+        resolveCodexCommand({}).command
+      ] = "read";
       await writeCodexConfig(join(codexHome, "config.toml"), config);
-      const sandbox = (arguments_: readonly string[]) =>
+      const sandbox = (operation: "read" | "write", path: string) =>
         runPinnedCodex(
           codexHome,
           [
@@ -545,20 +538,36 @@ describe("Codex configuration", () => {
             "codex_security_policy",
             "--cd",
             workspace,
-            policyPython.executable,
-            "-I",
-            "-B",
-            ...arguments_,
+            ...(process.platform === "win32"
+              ? [
+                  join(
+                    process.env["SystemRoot"] ?? "C:\\Windows",
+                    "System32",
+                    "WindowsPowerShell",
+                    "v1.0",
+                    "powershell.exe",
+                  ),
+                  "-NoLogo",
+                  "-NoProfile",
+                  "-NonInteractive",
+                  "-Command",
+                  operation === "read"
+                    ? "$ErrorActionPreference = 'Stop'; [Console]::Write((Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw))"
+                    : "$ErrorActionPreference = 'Stop'; [System.IO.File]::WriteAllText($env:POLICY_PROBE_PATH, 'probe')",
+                ]
+              : [
+                  "/bin/sh",
+                  "-c",
+                  operation === "read"
+                    ? 'cat "$POLICY_PROBE_PATH"'
+                    : 'printf probe > "$POLICY_PROBE_PATH"',
+                ]),
           ],
-          { ...environment, ...policyPython.environment },
+          { ...environment, POLICY_PROBE_PATH: path },
         );
       const evidence = join(workspace, "previous-SECURITY.md");
       await writeFile(evidence, "original");
-      const read = sandbox([
-        "-c",
-        "import sys;from pathlib import Path;sys.stdout.write(Path(sys.argv[1]).read_text())",
-        evidence,
-      ]);
+      const read = sandbox("read", evidence);
       if (read.exitCode !== 0) {
         const details = new TextDecoder().decode(read.stderr);
         if (
@@ -581,129 +590,39 @@ describe("Codex configuration", () => {
         );
       }
       expect(new TextDecoder().decode(read.stdout)).toBe("original");
+      const inspected = sandbox("read", sourceFile);
+      expect(
+        inspected.exitCode,
+        new TextDecoder().decode(inspected.stderr),
+      ).toBe(0);
+      expect(new TextDecoder().decode(inspected.stdout)).toBe("source");
       for (const path of [
+        join(root, "repository", "sibling.txt"),
+        join(stateDirectory, "private.txt"),
+        join(codexHome, "private.txt"),
+      ]) {
+        await writeFile(path, "SYNTHETIC_PRIVATE");
+        const denied = sandbox("read", path);
+        expect(denied.exitCode).not.toBe(0);
+        expect(new TextDecoder().decode(denied.stdout)).not.toContain(
+          "SYNTHETIC_PRIVATE",
+        );
+      }
+      for (const path of [
+        sourceFile,
         join(workspace, "inside.txt"),
         join(root, "outside.txt"),
         join(stateDirectory, "policy.txt"),
         join(codexHome, "policy.txt"),
         evidence,
       ]) {
-        const write = sandbox([
-          "-c",
-          "import sys;from pathlib import Path;Path(sys.argv[1]).write_text('probe')",
-          path,
-        ]);
-        expect(write.exitCode).not.toBe(0);
-        if (path === evidence)
+        sandbox("write", path);
+        if (path === sourceFile)
+          expect(await readFile(path, "utf8")).toBe("source");
+        else if (path === evidence)
           expect(await readFile(path, "utf8")).toBe("original");
         else await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
       }
-    },
-  );
-
-  test
-    .skipIf(process.platform !== "darwin" || macOsSandboxUnavailable())
-    .each(["directory", "bin", "launcher"])(
-    "runs a linked Python environment without granting its unrelated siblings (%s)",
-    async (linkType) => {
-      const { root, codexHome, workspace, environment } =
-        await scanSandboxFixture();
-      const runtimeRoot = await temporaryDirectory();
-      const installation = join(runtimeRoot, "installation");
-      const interpreter = Bun.which("python3") ?? Bun.which("python");
-      expect(interpreter).not.toBeNull();
-      const created = Bun.spawnSync(
-        [interpreter!, "-I", "-B", "-m", "venv", "--without-pip", installation],
-        { stdout: "pipe", stderr: "pipe" },
-      );
-      expect(created.exitCode, new TextDecoder().decode(created.stderr)).toBe(
-        0,
-      );
-      if (linkType === "bin") {
-        const binaries = join(runtimeRoot, "binaries");
-        await rename(join(installation, "bin"), binaries);
-        await symlink(binaries, join(installation, "bin"));
-      }
-      const aliases = join(runtimeRoot, "aliases");
-      await mkdir(aliases);
-      await symlink(installation, join(aliases, "venv"));
-      let python = join(aliases, "venv", "bin", "python");
-      if (linkType === "launcher") {
-        const launcher = join(runtimeRoot, "launcher");
-        await mkdir(launcher);
-        await symlink(python, join(launcher, "python3"));
-        python = await resolvePluginPython({
-          environment: { PATH: launcher },
-          protectedRoot: root,
-          homeDirectory: runtimeRoot,
-          managedRuntimeRoots: [],
-        });
-      }
-      const inspectPrefix = "import sys;print(sys.prefix)";
-      const original = Bun.spawnSync(
-        [python, "-I", "-B", "-c", inspectPrefix],
-        {
-          stdout: "pipe",
-          stderr: "pipe",
-        },
-      );
-      expect(original.exitCode, new TextDecoder().decode(original.stderr)).toBe(
-        0,
-      );
-      const unrelated = join(aliases, "unrelated.txt");
-      await writeFile(unrelated, "SYNTHETIC_UNRELATED");
-      const policyPython = await pluginPythonRuntime(python, {
-        protectedPaths: [root],
-      });
-      const config = scanRuntimeCodexConfig(
-        await mergedCodexConfig({}),
-        codexHome,
-      );
-      const permissions = config["permissions"] as Record<
-        string,
-        { filesystem: Record<string, string> }
-      >;
-      Object.assign(
-        permissions["codex_security_policy"]!.filesystem,
-        Object.fromEntries(
-          policyPython.readRoots.map((path) => [path, "read"]),
-        ),
-      );
-      await writeCodexConfig(join(codexHome, "config.toml"), config);
-      const sandbox = (script: string, ...args: string[]) =>
-        runPinnedCodex(
-          codexHome,
-          [
-            "sandbox",
-            "--permission-profile",
-            "codex_security_policy",
-            "--cd",
-            workspace,
-            policyPython.executable,
-            "-I",
-            "-B",
-            "-c",
-            script,
-            ...args,
-          ],
-          { ...environment, ...policyPython.environment },
-        );
-      const allowed = sandbox(inspectPrefix);
-      expect(allowed.exitCode, new TextDecoder().decode(allowed.stderr)).toBe(
-        0,
-      );
-      // The sandbox need not expose the parents of a framework's directory aliases.
-      expect(
-        await realpath(new TextDecoder().decode(allowed.stdout).trim()),
-      ).toBe(await realpath(new TextDecoder().decode(original.stdout).trim()));
-      const denied = sandbox(
-        "import sys;from pathlib import Path;print(Path(sys.argv[1]).read_text())",
-        unrelated,
-      );
-      expect(denied.exitCode).not.toBe(0);
-      expect(new TextDecoder().decode(denied.stdout)).not.toContain(
-        "SYNTHETIC_UNRELATED",
-      );
     },
   );
 

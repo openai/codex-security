@@ -37,7 +37,6 @@ export interface PolicyCommandDependencies {
   prompt: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
   errorOutput: Output;
-  writePreview(value: string, signal: AbortSignal): Promise<void>;
   now(): number;
   addSignalListener(signal: SignalName, listener: () => void): void;
   removeSignalListener(signal: SignalName, listener: () => void): void;
@@ -178,9 +177,7 @@ export async function runPolicyCommand(
               ...draft.reviewNotes.map((note) => `- ${display(note)}`),
             ]),
       ].join("\n");
-      if (interactive)
-        await dependencies.writePreview(`${preview}\n`, controller.signal);
-      else write(preview);
+      write(preview);
     }
     controller.signal.throwIfAborted();
     const status = changed ? "draft" : "unchanged";

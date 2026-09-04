@@ -1204,8 +1204,6 @@ interface CliDependencies {
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
     createSecurityInternal(config, { surface: "cli" }),
-  createPolicySecurity: (config) =>
-    createSecurityInternal(config, { surface: "cli" }),
   environment: process.env,
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
@@ -1532,7 +1530,6 @@ export async function runCodexSkillCommand(
 async function writeCliOutput(
   output: Writable,
   value: string | Uint8Array | AsyncIterable<Uint8Array>,
-  signal?: AbortSignal,
 ): Promise<void> {
   const destination = new NodeWritable({
     write(chunk, _encoding, callback) {
@@ -1563,7 +1560,6 @@ async function writeCliOutput(
         ? [value]
         : value,
       destination,
-      { signal },
     );
   } finally {
     if (output instanceof NodeWritable) {
@@ -3063,8 +3059,6 @@ export async function main(
                   }).prompt,
                 environment: dependencies.environment,
                 errorOutput,
-                writePreview: (value, signal) =>
-                  writeCliOutput(errorOutput, value, signal),
                 now: dependencies.now,
                 addSignalListener: dependencies.addSignalListener,
                 removeSignalListener: dependencies.removeSignalListener,

@@ -4,7 +4,6 @@ import {
   mkdir,
   readFile,
   readdir,
-  realpath,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -59,7 +58,6 @@ async function setup(
     secureOutput?: (path: string) => Promise<void>;
     surface?: "cli" | "sdk";
     config?: Record<string, unknown>;
-    python?: () => string;
   } = {},
 ) {
   const f = await policyFixture();
@@ -87,7 +85,7 @@ async function setup(
       },
       resolvePluginPython: async (selection: PluginPythonOptions) => {
         pythonSelections.push(selection);
-        return options.python?.() ?? PYTHON;
+        return PYTHON;
       },
       requirePrivatePolicyOutputDirectory: async (path: string) => {
         await options.secureOutput?.(path);
@@ -185,7 +183,7 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
-  test("keeps prompt data on one encoded line and binds plugin Python", async () => {
+  test("keeps prompt data on one encoded line", async () => {
     const marker = "source\u0085line\u2028separator\u2029end";
     const scope = `component-${marker}`;
     const f = await setup({
@@ -204,12 +202,9 @@ describe("CodexSecurity policy API", () => {
       outputDir: f.outputDir,
       answerQuestions: async () => marker,
     });
-    const python =
-      process.platform === "win32" ? '& "$env:PYTHON"' : '"$PYTHON"';
     for (const prompt of f.prompts) {
       expect(prompt).not.toMatch(/[\u0085\u2028\u2029]/u);
       expect(prompt).toContain("source\\u0085line\\u2028separator\\u2029end");
-      expect(prompt).toContain(`Use ${python} as <python_command>`);
     }
     expect(draft.reviewNotes).toContain(marker);
     await f.security.close();
@@ -554,33 +549,6 @@ describe("CodexSecurity policy API", () => {
       }
       await f.security.close();
     }
-  });
-
-  test("rejects Python runtime roots containing external Git metadata", async () => {
-    let python = PYTHON;
-    const f = await setup({ python: () => python });
-    const runtime = join(f.root, "python-runtime");
-    execFileSync(PYTHON, ["-I", "-B", "-m", "venv", "--without-pip", runtime], {
-      windowsHide: true,
-    });
-    python = join(
-      runtime,
-      process.platform === "win32" ? "Scripts" : "bin",
-      process.platform === "win32" ? "python.exe" : "python",
-    );
-    policyGit(
-      f.repository,
-      "init",
-      "--quiet",
-      "--separate-git-dir",
-      join(runtime, "git-data"),
-    );
-    policyGit(f.repository, "config", "core.worktree", f.repository);
-    await expect(
-      f.security.generatePolicy(f.repository, { outputDir: f.outputDir }),
-    ).rejects.toThrow("contains a protected path");
-    expect(f.threads).toHaveLength(0);
-    await f.security.close();
   });
 
   test("checks descendant policy links before starting Codex", async () => {
@@ -979,7 +947,7 @@ describe("CodexSecurity policy API", () => {
     const readRoots = f.threads[0]!.additionalDirectories;
     expect(readRoots).toContain(f.repository);
     expect(readRoots).toContain(PLUGIN_ROOT);
-    expect(readRoots).toContain(await realpath(dirname(PYTHON)));
+    expect(readRoots).toEqual([f.repository, PLUGIN_ROOT]);
     expect(readRoots).not.toContain(f.runtime.codexHome);
     expect(readRoots).not.toContain(join(f.root, "state"));
     for (const thread of f.threads) {
@@ -1151,11 +1119,11 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
-  test("removes external tools and wider sandbox settings from selected profiles", async () => {
+  test("resolves quoted profiles before applying policy settings", async () => {
     const f = await setup({
       config: {
         codexOverrides: {
-          profile: "selected",
+          profile: "team.prod",
           features: { apps: true, goals: false },
           mcp_servers: { synthetic: { command: "synthetic-tool" } },
           sandbox_workspace_write: {
@@ -1163,7 +1131,8 @@ describe("CodexSecurity policy API", () => {
             writable_roots: ["/synthetic"],
           },
           profiles: {
-            selected: {
+            unused: { "features.apps": true },
+            "team.prod": {
               model: "gpt-5.6-terra",
               model_reasoning_effort: "high",
               features: { apps: true, goals: true },
@@ -1175,6 +1144,7 @@ describe("CodexSecurity policy API", () => {
         },
       },
     });
+    await f.security.preflightPolicy(f.repository);
     await f.security.generatePolicy(f.repository, { outputDir: f.outputDir });
     expect(f.configuration()?.config).toMatchObject({
       model: "gpt-5.6-terra",
@@ -1201,8 +1171,10 @@ describe("CodexSecurity policy API", () => {
       { "features.plugins": true },
       { "mcp_servers.synthetic.command": "synthetic-tool" },
       { features: { '"apps"': true } },
-      { profiles: { selected: { "features.apps": true } } },
-      { profiles: { "selected.features": { apps: true } } },
+      {
+        profile: "selected",
+        profiles: { selected: { "features.apps": true } },
+      },
     ]) {
       let prepared = false;
       const f = await setup({

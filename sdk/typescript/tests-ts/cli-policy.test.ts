@@ -422,7 +422,7 @@ describe("policy CLI", () => {
     expect(JSON.parse(stdout.text()).status).toBe("draft");
   });
 
-  test("reports a failed interactive preview without changing source", async () => {
+  test("preserves a completed draft when the interactive preview fails", async () => {
     const f = await fixture();
     const draft = await f.generate();
     expect(
@@ -431,8 +431,10 @@ describe("policy CLI", () => {
         capture(true).stream,
         {
           isTTY: true,
-          write: () => {
-            throw new Error("Preview output failed");
+          write: (value: string) => {
+            if (value.includes("Policy target:"))
+              throw new Error("Preview output failed");
+            return true;
           },
         },
         policyDependencies(f, {
@@ -440,54 +442,9 @@ describe("policy CLI", () => {
           prompt: prompt({ isInteractive: () => true }),
         }),
       ),
-    ).toBe(2);
+    ).toBe(0);
+    expect(await readFile(draft.draftPath, "utf8")).toBe(POLICY);
     expect(await readdir(f.repository)).toEqual([]);
-  });
-
-  test("honors cancellation while the interactive preview is backpressured", async () => {
-    for (const [signal, exitCode] of [
-      ["SIGINT", 130],
-      ["SIGTERM", 143],
-    ] as const) {
-      const f = await fixture();
-      const draft = await f.generate();
-      const signals = new FakeSignals();
-      let interrupted = false;
-      let closed = false;
-      const stderr = Object.assign(
-        new Writable({
-          write(chunk, _encoding, callback) {
-            if (!interrupted && String(chunk).includes("\nPolicy target:")) {
-              interrupted = true;
-              queueMicrotask(() => {
-                signals.emit(signal);
-                queueMicrotask(callback);
-              });
-            } else callback();
-          },
-        }),
-        { isTTY: true },
-      );
-      expect(
-        await main(
-          ["policy"],
-          capture(true).stream,
-          stderr,
-          policyDependencies(f, {
-            draft,
-            signals,
-            prompt: prompt({ isInteractive: () => true }),
-            onClose: () => {
-              closed = true;
-            },
-          }),
-        ),
-      ).toBe(exitCode);
-      expect(interrupted).toBe(true);
-      expect(closed).toBe(true);
-      expect(signals.listeners.get(signal)?.size).toBe(0);
-      expect(await readdir(f.repository)).toEqual([]);
-    }
   });
 
   test("asks owner questions and previews the exact draft without writing source", async () => {

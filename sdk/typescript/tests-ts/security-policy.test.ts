@@ -175,6 +175,29 @@ describe("security policy generation", () => {
     );
   });
 
+  test("does not complete a draft after its Git binding changes during generation", async () => {
+    const f = await fixture();
+    policyGit(f.repository, "init", "--quiet");
+    await expect(
+      f.generate({
+        run: async (stage) => {
+          if (stage === "policy")
+            await rename(
+              join(f.repository, ".git"),
+              join(f.root, "previous-git"),
+            );
+          return stageResult(stage);
+        },
+      }),
+    ).rejects.toThrow("Git metadata changed");
+    expect((await readdir(f.outputDir)).sort()).toEqual([
+      "SECURITY.md",
+      "THREAT_MODEL.md",
+      "previous-SECURITY.md",
+      "project-spec.md",
+    ]);
+  });
+
   test("rejects Git configuration that redirects the selected checkout", async () => {
     for (const indirect of [false, true]) {
       for (const location of ["sibling", "ancestor"]) {

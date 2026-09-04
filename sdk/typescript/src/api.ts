@@ -162,7 +162,6 @@ import {
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
-  pluginPythonRuntime,
   pluginMetadata,
   planOutputArchive,
   prepareScanArtifactRestorer,
@@ -969,27 +968,14 @@ export class CodexSecurity {
       );
       await requireUnchangedSecurityPolicy(target, snapshot, signal);
       await requireSecurityPolicyRepositoryBinding(target, signal);
-      const policyPython = await pluginPythonRuntime(python, {
-        environment: session.scanEnvironment,
-        protectedPaths: [
-          homedir(),
-          inputs.stateDirectory,
-          runtime.codexHome,
-          ...inputs.protectedRoots,
-        ],
-        signal,
-      });
       const policyReadRoots = [
         dirname(target.targetPath),
         runtime.plugin.pluginRoot,
-        ...policyPython.readRoots,
         ...(knowledgeBase === null ? [] : [knowledgeBase.path]),
       ].filter((path, index, roots) => roots.indexOf(path) === index);
       const { codex } = this.#createSessionCodex(
         session,
         {
-          ...policyPython.environment,
-          PYTHON: policyPython.executable,
           CODEX_SECURITY_REPOSITORY: target.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
           CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
@@ -2888,7 +2874,7 @@ export class CodexSecurity {
     options: SecurityPolicyOptions,
     signal?: AbortSignal,
   ): Promise<LocalScanInputs & { policyPaths: string[] }> {
-    requirePolicyConfigKeys(this.config.codexOverrides);
+    policyCodexConfig(await mergedCodexConfig(this.config));
     const protectedRoots = await securityPolicyProtectedRoots(target, signal);
     const inputs = await this.#validateLocalInputs(
       target.repository,
@@ -4418,19 +4404,9 @@ function rethrowPolicyOutputError(error: unknown): never {
   throw error;
 }
 
-function requirePolicyConfigKeys(config: unknown): void {
-  if (!isRecord(config)) return;
+function requirePolicyConfigKeys(config: JsonObject): void {
   const tables = [config];
   if (isRecord(config["features"])) tables.push(config["features"]);
-  const profiles = config["profiles"];
-  if (isRecord(profiles)) {
-    tables.push(profiles);
-    for (const profile of Object.values(profiles)) {
-      if (!isRecord(profile)) continue;
-      tables.push(profile);
-      if (isRecord(profile["features"])) tables.push(profile["features"]);
-    }
-  }
   // The Codex SDK flattens these keys without quoting their components.
   if (
     tables.some((table) =>
@@ -4438,13 +4414,13 @@ function requirePolicyConfigKeys(config: unknown): void {
     )
   )
     throw new ConfigurationError(
-      "Policy generation does not accept dotted or quoted Codex override keys. Use nested objects and profile names with letters, numbers, underscores, or hyphens.",
+      "Policy generation does not accept dotted or quoted Codex override keys. Use nested objects instead.",
     );
 }
 
 function policyCodexConfig(config: JsonObject): JsonObject {
-  requirePolicyConfigKeys(config);
   const resolved = resolveCodexProfile(config);
+  requirePolicyConfigKeys(resolved);
   // The selected provider is already written as TOML. The SDK cannot quote
   // provider names when it flattens this table into command-line overrides.
   delete resolved["model_providers"];
