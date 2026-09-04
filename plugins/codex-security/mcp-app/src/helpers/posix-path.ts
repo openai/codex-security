@@ -39,8 +39,8 @@ export function encodePosixPath(value: string): Buffer {
 export class SymlinkLoopError extends Error {}
 
 export function resolvePosixPath(value: Buffer): Buffer {
-  // Native realpath preserves raw bytes, but rejects file/.. and links targeting
-  // file/.. with ENOTDIR. Retain the shipped pathlib contract for those inputs;
+  // GNU Linux native realpath rejects file/.. and links targeting it with
+  // ENOTDIR. Retain the shipped pathlib contract for those inputs;
   // native/proof.mts exercises the direct Node behavior on every Unix runtime.
   const seen = new Map<string, string | null>();
   // Latin-1 is a lossless internal representation of pathname bytes.
