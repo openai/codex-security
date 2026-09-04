@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
+import { ConfigurationError } from "../src/errors.js";
 import { prepareKnowledgeBase } from "../src/knowledge-base.js";
 import { expandHome } from "../src/runtime.js";
 
@@ -240,6 +241,28 @@ describe("scan knowledge bases", () => {
 
     expect(documents).toContain("Payment service boundary");
     expect(documents).toContain("SSRF & IDOR\n");
+  });
+
+  test("preserves the local origin and cause of document parser failures", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "network-security.pdf");
+    await writeFile(source, pdf("Network design"));
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const cause = new Error("Synthetic parser failure.");
+    const parser = spyOn(pdfjs, "getDocument").mockImplementation(() => {
+      throw cause;
+    });
+
+    try {
+      const prepared = prepareKnowledgeBase([source]);
+      await expect(prepared).rejects.toBeInstanceOf(ConfigurationError);
+      await expect(prepared).rejects.toMatchObject({
+        message: `Cannot extract text from knowledge base PDF: ${source}`,
+        cause: { cause },
+      });
+    } finally {
+      parser.mockRestore();
+    }
   });
 
   test("cleans up documents and rediscovers directory contents on later runs", async () => {

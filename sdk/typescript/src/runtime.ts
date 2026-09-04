@@ -49,6 +49,7 @@ import extractZip from "extract-zip";
 import { parse } from "smol-toml";
 import {
   CodexSecurityError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
@@ -2307,26 +2308,33 @@ export async function resolvePluginPath(
   workspace: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (pluginPath === undefined) {
-    return await bundledPluginRoot();
-  }
+  try {
+    if (pluginPath === undefined) {
+      return await bundledPluginRoot();
+    }
 
-  const path = resolve(expandHome(pluginPath));
-  const metadata = await lstat(path).catch(() => null);
-  if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
-    return await extractPluginZip(
-      path,
-      join(workspace, "extracted-plugin"),
-      signal,
+    const path = resolve(expandHome(pluginPath));
+    const metadata = await lstat(path).catch(() => null);
+    if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
+      return await extractPluginZip(
+        path,
+        join(workspace, "extracted-plugin"),
+        signal,
+      );
+    }
+    if (metadata?.isDirectory() && !metadata.isSymbolicLink()) {
+      throwIfSignalAborted(signal);
+      return await validatePluginRoot(path);
+    }
+    throw new PluginBootstrapError(
+      `Plugin path must be a directory or ZIP: ${path}`,
     );
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError) {
+      throw error;
+    }
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
   }
-  if (metadata?.isDirectory() && !metadata.isSymbolicLink()) {
-    throwIfSignalAborted(signal);
-    return await validatePluginRoot(path);
-  }
-  throw new PluginBootstrapError(
-    `Plugin path must be a directory or ZIP: ${path}`,
-  );
 }
 
 export async function createMarketplace(
@@ -2334,39 +2342,46 @@ export async function createMarketplace(
   pluginRoot: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  throwIfSignalAborted(signal);
-  const root = await realpath(pluginRoot);
-  const marketplace = join(codexHome, "sdk-marketplace");
-  const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
-  await copyPluginTree(root, pluginDestination, signal);
-  throwIfSignalAborted(signal);
-  const manifest = {
-    name: MARKETPLACE_NAME,
-    interface: { displayName: "Codex Security SDK" },
-    plugins: [
-      {
-        name: PLUGIN_NAME,
-        source: { source: "local", path: `./plugins/${PLUGIN_NAME}` },
-        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
-        category: "Security",
-      },
-    ],
-  };
-  const manifestPath = join(
-    marketplace,
-    ".agents",
-    "plugins",
-    "marketplace.json",
-  );
-  await mkdir(dirname(manifestPath), { recursive: true, mode: 0o700 });
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
-    encoding: "utf8",
-    flag: "wx",
-    mode: 0o600,
-    signal,
-  });
-  throwIfSignalAborted(signal);
-  return marketplace;
+  try {
+    throwIfSignalAborted(signal);
+    const root = await realpath(pluginRoot);
+    const marketplace = join(codexHome, "sdk-marketplace");
+    const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
+    await copyPluginTree(root, pluginDestination, signal);
+    throwIfSignalAborted(signal);
+    const manifest = {
+      name: MARKETPLACE_NAME,
+      interface: { displayName: "Codex Security SDK" },
+      plugins: [
+        {
+          name: PLUGIN_NAME,
+          source: { source: "local", path: `./plugins/${PLUGIN_NAME}` },
+          policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+          category: "Security",
+        },
+      ],
+    };
+    const manifestPath = join(
+      marketplace,
+      ".agents",
+      "plugins",
+      "marketplace.json",
+    );
+    await mkdir(dirname(manifestPath), { recursive: true, mode: 0o700 });
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+      signal,
+    });
+    throwIfSignalAborted(signal);
+    return marketplace;
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError) {
+      throw error;
+    }
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
+  }
 }
 
 export function resolveCodexCommand(
@@ -2456,7 +2471,7 @@ export async function bootstrapPlugin(
     throw error;
   });
   if (existing !== null && !existing.isDirectory()) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       `Codex Security plugin marketplace path must be a directory: ${marketplace}`,
     );
   }
@@ -2542,18 +2557,19 @@ export async function pluginMetadata(
     }
     manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   } catch (error) {
-    throw new PluginBootstrapError(`Invalid Codex plugin directory: ${root}`, {
-      cause: error,
-    });
+    throw new LocalPluginBootstrapError(
+      `Invalid Codex plugin directory: ${root}`,
+      { cause: error },
+    );
   }
   if (!isRecord(manifest) || manifest["name"] !== PLUGIN_NAME) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have name 'codex-security'.",
     );
   }
   const version = manifest["version"];
   if (typeof version !== "string" || version.trim().length === 0) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have a non-empty version.",
     );
   }

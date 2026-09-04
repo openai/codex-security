@@ -100,9 +100,12 @@ import {
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
 import {
+  AuthenticationRequiredError,
   CodexSecurityError,
   ConfigurationError,
+  ContractValidationError,
   InvalidTargetError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
@@ -1623,8 +1626,33 @@ export async function main(
   let exitCode = 0;
   let frameworkExit: number | undefined;
   let frameworkOutput = "";
+  let renderedScanFailure: string | undefined;
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
+  const startedAt = performance.now();
+  const scanFailure = (
+    command: "scan" | "scans rerun",
+    format: string,
+    code: "SCAN_FAILED" | "SCAN_REPLAY_UNAVAILABLE",
+    message: string,
+  ) => {
+    const error = { code, message };
+    if (format === "json" || format === "jsonl") {
+      // Keep failures complete and exclude framework invocation metadata.
+      const payload = argv.includes("--full-output")
+        ? {
+            ok: false,
+            error,
+            meta: {
+              command,
+              duration: `${Math.round(performance.now() - startedAt)}ms`,
+            },
+          }
+        : error;
+      renderedScanFailure = `${JSON.stringify(payload, null, format === "json" ? 2 : undefined)}\n`;
+    }
+    return { ...error, exitCode };
+  };
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
@@ -2026,40 +2054,46 @@ export async function main(
           .describe("Print scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, options }) {
-        const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
-        if (scanId === undefined) return;
-        let scanArguments: ScanArguments;
+      async run({ args, error: incurError, format, options }) {
+        let scanId = args.scanId;
+        let scanArguments: ScanArguments | undefined;
         try {
-          const { recipe } = await dependencies.runWorkbench([
-            "get-scan-recipe",
-            "--scan-id",
-            scanId,
-          ]);
-          scanArguments = scanArgumentsFromRecipe(
-            recipe,
-            scanId,
-            options.validationPromptFile,
-          );
-          scanArguments.verbose = options.verbose;
+          scanId ??= (await latestScans())?.[0]?.scanId;
+          if (scanId !== undefined) {
+            const { recipe } = await dependencies.runWorkbench([
+              "get-scan-recipe",
+              "--scan-id",
+              scanId,
+            ]);
+            scanArguments = scanArgumentsFromRecipe(
+              recipe,
+              scanId,
+              options.validationPromptFile,
+            );
+            scanArguments.verbose = options.verbose;
+          }
         } catch (error) {
-          const message = errorMessage(error);
-          errorOutput.write(`codex-security: ${message}\n`);
+          if (scanId !== undefined) {
+            errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          }
+        }
+        if (scanArguments === undefined) {
           exitCode = 2;
-          return incurError({
-            code: "SCAN_REPLAY_UNAVAILABLE",
-            message,
-            exitCode,
-          });
+          return incurError(
+            scanFailure(
+              "scans rerun",
+              format,
+              "SCAN_REPLAY_UNAVAILABLE",
+              "The saved scan could not be replayed.",
+            ),
+          );
         }
         const outcome = await runScan(scanArguments, errorOutput, dependencies);
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
+          return incurError(
+            scanFailure("scans rerun", format, "SCAN_FAILED", outcome.error),
+          );
         }
         return outcome.data;
       },
@@ -3150,11 +3184,9 @@ export async function main(
         );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
+          return incurError(
+            scanFailure("scan", format, "SCAN_FAILED", outcome.error),
+          );
         }
         if (
           !options.dryRun &&
@@ -4691,18 +4723,23 @@ export async function main(
     updateController.abort();
   }
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
-  if (frameworkExit !== undefined) {
+  if (frameworkExit !== undefined && renderedScanFailure === undefined) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
       `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
     );
     return 2;
   }
-  if (frameworkOutput.length === 0) return exitCode;
+  if (renderedScanFailure === undefined && frameworkOutput.length === 0) {
+    return exitCode;
+  }
   try {
     await writeCliOutput(
       output,
-      renderedPublication ?? renderedHistory ?? frameworkOutput,
+      renderedScanFailure ??
+        renderedPublication ??
+        renderedHistory ??
+        frameworkOutput,
     );
     return exitCode;
   } catch (error) {
@@ -7134,15 +7171,12 @@ async function executeScan(
       estimated_usd: costLimitFailure?.cost.estimatedUsd,
     });
     errorOutput.write(`${message}\n`);
-    if (failure instanceof ScanInterruptedError) {
-      return { exitCode: 2, error: message };
-    }
-    if (scanDir !== null) {
+    if (!(failure instanceof ScanInterruptedError) && scanDir !== null) {
       errorOutput.write(
         `Partial output was kept at ${errorMessage(scanDir)}.\n`,
       );
     }
-    return { exitCode: 2, error: message };
+    return { exitCode: 2, error: structuredScanFailureMessage(failure) };
   }
   if (preflight !== null) {
     const effectivePreflight: ScanPreflight = {
@@ -7377,6 +7411,7 @@ function isLocalScanFailure(error: unknown): boolean {
     error instanceof InvalidTargetError ||
     error instanceof OutputDirectoryError ||
     error instanceof ConfigurationError ||
+    error instanceof LocalPluginBootstrapError ||
     error instanceof PluginPythonUnavailableError
   ) {
     return true;
@@ -7457,6 +7492,42 @@ function scanFailureMessage(
     case "timeout":
     case "unknown":
       return diagnosticValue(error);
+  }
+}
+
+function structuredScanFailureMessage(error: unknown): string {
+  if (error instanceof OutputInsideProtectedRootError) {
+    return protectedRootErrorMessage(error, false);
+  }
+  if (error instanceof ScanCostLimitExceededError) {
+    return "The scan exceeded its configured cost limit.";
+  }
+  if (error instanceof ContractValidationError || isLocalScanFailure(error)) {
+    return "The scan could not complete because a local input or filesystem operation failed.";
+  }
+  if (error instanceof AuthenticationRequiredError) {
+    return "Authentication failed. Check the selected credentials.";
+  }
+  if (
+    /flagged for possible cybersecurity risk|trusted access for cyber|cybersecurity policy/iu.test(
+      errorMessage(error),
+    )
+  ) {
+    return "The scan was blocked by a cybersecurity policy. Trusted Access for Cyber may be required.";
+  }
+  switch (classifyConnectionFailure(error)) {
+    case "unauthorized":
+      return "Authentication failed. Check the selected credentials.";
+    case "forbidden":
+      return "The selected credentials cannot access the configured model.";
+    case "rate_limited":
+      return "The configured account reached its rate limit. Wait and retry.";
+    case "network_error":
+      return "The scan encountered a network or connection failure.";
+    case "timeout":
+      return "The scan timed out.";
+    case "unknown":
+      return "The scan failed. See stderr for details.";
   }
 }
 
@@ -7671,6 +7742,7 @@ function componentScanEventLine(
 
 function protectedRootErrorMessage(
   error: OutputInsideProtectedRootError,
+  includePaths = true,
 ): string {
   const description =
     error.pathKind === "output"
@@ -7682,6 +7754,9 @@ function protectedRootErrorMessage(
     error.pathKind === "output"
       ? "Scan artifacts cannot be written inside the protected scan root."
       : "Temporary and runtime files cannot be created inside the protected scan root.";
+  if (!includePaths) {
+    return `${description} must be outside the scanned directory and any enclosing Git worktree. ${reason}`;
+  }
   const suggestion = suggestedOutputDirectory(error.protectedRoot);
   const recovery =
     error.pathKind === "output"

@@ -165,6 +165,10 @@ and `maximum`. The maximum is a configured cap, not a percentage denominator.
 using the network. They don't authenticate, verify model access, resolve Python,
 inspect the plugin, or run scan-lifecycle callbacks. Dry runs print effective settings.
 
+`LocalPluginBootstrapError` identifies local plugin setup failures and extends
+`PluginBootstrapError`, so existing catches keep working. Knowledge-base
+preparation errors use `ConfigurationError`; wrapped diagnostics remain in `cause`.
+
 ## Authentication
 
 Sign in with ChatGPT:
@@ -1184,6 +1188,12 @@ The CLI uses [Incur](https://github.com/wevm/incur). Use `--llms` for the
 command manifest, `scan --schema --format json` for a command schema, and
 `completions bash|zsh|fish` for shell completions. Scan output supports
 `--format toon|json|yaml|jsonl` and `--full-output`.
+
+In JSON/JSONL mode, scan execution failures return `{ code, message }` with
+`SCAN_FAILED`, or `SCAN_REPLAY_UNAVAILABLE` when a saved scan cannot be loaded.
+`--full-output` wraps the error in `{ ok: false, error, meta }`. These error
+objects stay complete even with token limits; stdout omits diagnostic details,
+while stderr keeps normal diagnostics and the exit code remains nonzero.
 
 `skills add` syncs agent skills; `mcp add` registers the CLI as an MCP server.
 MCP exposes only the read-only `info` command because the transport cannot

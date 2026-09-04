@@ -12,7 +12,8 @@ import { delimiter, join, normalize } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { Formatter } from "incur";
 import { parse as parseToml } from "smol-toml";
 import type {
   CodexSecurityConfig,
@@ -21,12 +22,17 @@ import type {
   ScanPreflight,
 } from "../src/index.js";
 import {
+  AuthenticationRequiredError,
   BUNDLED_PLUGIN_VERSION,
   CodexSecurityError,
+  ConfigurationError,
+  ContractValidationError,
   DiffTarget,
   InvalidTargetError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
+  PluginBootstrapError,
   PluginPythonUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
@@ -3588,6 +3594,9 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("org-private");
     expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_KEY");
     expect(stderr.text()).not.toContain("SYNTHETIC_PROVIDER_SECRET");
+    expect(JSON.parse(stdout.text())).toMatchObject({ code: "SCAN_FAILED" });
+    expect(stdout.text()).not.toContain("org-private");
+    expect(stdout.text()).not.toContain("SYNTHETIC_PROVIDER_SECRET");
   });
 
   test("keeps unclassified provider context out of structured failure diagnostics", async () => {
@@ -3626,7 +3635,12 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Provider failed for");
     expect(stderr.text()).toContain("tenant-private");
     expect(stderr.text()).toContain("req-internal");
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toEqual({
+      code: "SCAN_FAILED",
+      message: "The scan failed. See stderr for details.",
+    });
+    expect(stdout.text()).not.toContain("tenant-private");
+    expect(stdout.text()).not.toContain("req-internal");
   });
 
   test("preserves provider identifier variants in scan failures", async () => {
@@ -3719,10 +3733,14 @@ describe("CLI", () => {
             deps,
           ),
         ).toBe(2);
-        expect(stdout.text()).toBe("");
+        expect(JSON.parse(stdout.text())).toEqual({
+          code: "SCAN_FAILED",
+          message: "The scan failed. See stderr for details.",
+        });
         expect(stderr.text()).toContain("Provider failed for");
         for (const identifier of identifiers) {
           expect(stderr.text()).toContain(identifier);
+          expect(stdout.text()).not.toContain(identifier);
         }
       }
     }
@@ -3939,7 +3957,12 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Cleanup failed for");
     expect(stderr.text()).toContain("tenant-private");
     expect(stderr.text()).toContain("req-internal");
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toEqual({
+      code: "SCAN_FAILED",
+      message: "The scan failed. See stderr for details.",
+    });
+    expect(stdout.text()).not.toContain("tenant-private");
+    expect(stdout.text()).not.toContain("req-internal");
   });
 
   test("reports reconnect progress on stderr and keeps JSON output clean", async () => {
@@ -4046,13 +4069,28 @@ describe("CLI", () => {
   });
 
   test("surfaces underlying scanner errors instead of inventing a model outage", async () => {
-    for (const message of [
-      "Could not save the Codex Security scan: UNIQUE constraint failed: scans.scan_dir",
-      "sandbox-exec: sandbox_apply: Operation not permitted during network setup.",
-      "network failure ECONNRESET while connecting to the model.",
-      "request timed out while reading the scanner response.",
-      "Local scan failed: project_directory=/tmp/project tenant_count=2 request_index=3.",
-    ]) {
+    for (const [message, safeMessage] of [
+      [
+        "Could not save the Codex Security scan: UNIQUE constraint failed: scans.scan_dir",
+        "The scan failed. See stderr for details.",
+      ],
+      [
+        "sandbox-exec: sandbox_apply: Operation not permitted during network setup.",
+        "The scan encountered a network or connection failure.",
+      ],
+      [
+        "network failure ECONNRESET while connecting to the model.",
+        "The scan encountered a network or connection failure.",
+      ],
+      [
+        "request timed out while reading the scanner response.",
+        "The scan timed out.",
+      ],
+      [
+        "Local scan failed: project_directory=/tmp/project tenant_count=2 request_index=3.",
+        "The scan failed. See stderr for details.",
+      ],
+    ] as const) {
       const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
@@ -4067,7 +4105,11 @@ describe("CLI", () => {
       expect(
         await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_FAILED",
+        message: safeMessage,
+      });
+      expect(stdout.text()).not.toContain("/tmp/project");
       expect(stderr.text()).toContain(`${message}\n`);
       expect(stderr.text()).not.toContain("codex-security:");
       expect(stderr.text()).not.toContain("model service could not be reached");
@@ -4103,12 +4145,26 @@ describe("CLI", () => {
         ),
       ],
       [
-        "path target naming a 403 directory",
-        new InvalidTargetError("Path target does not exist: src/403/client.ts"),
+        "path target naming policy and 403 directories",
+        new InvalidTargetError(
+          "Path target does not exist: src/cybersecurity policy/403/client.ts",
+        ),
       ],
       [
         "git ref naming a forbidden branch",
         new InvalidTargetError("unknown Git ref: origin/forbidden-paths"),
+      ],
+      [
+        "knowledge-base parser failure",
+        new ConfigurationError(
+          "Cannot extract text from knowledge base PDF: /documents/network-security.pdf",
+        ),
+      ],
+      [
+        "local plugin validation failure",
+        new LocalPluginBootstrapError(
+          "Invalid Codex plugin directory: /plugins/network-security",
+        ),
       ],
       [
         "python interpreter unavailable",
@@ -4132,12 +4188,17 @@ describe("CLI", () => {
 
       expect(
         await main(
-          ["scan", ".", "--verbose"],
+          ["scan", ".", "--verbose", "--json"],
           stdout.stream,
           stderr.stream,
           deps,
         ),
       ).toBe(2);
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_FAILED",
+        message:
+          "The scan could not complete because a local input or filesystem operation failed.",
+      });
       expect(stderr.text()).toContain((failure as Error).message);
       expect(stderr.text()).toContain('scan.failed classification="local"');
       expect(stderr.text()).not.toContain("cannot access the configured model");
@@ -4146,29 +4207,117 @@ describe("CLI", () => {
     }
   });
 
-  test("keeps model authorization advice for genuine transport failures", async () => {
-    // The bypass must not swallow real 401/403 handling, and the advice must
-    // still replace upstream text that can name the organization or project.
-    for (const [detail, expected] of [
-      ["401 invalid API key for org-private", "Authentication failed"],
+  test("classifies typed local and installer errors in structured output", async () => {
+    const cause = new Error("Plugin preparation detail.");
+    const localFailure = new LocalPluginBootstrapError(
+      "Plugin preparation failed.",
+      { cause },
+    );
+    const installerFailure = new PluginBootstrapError(
+      "Plugin connection failed.",
+    );
+    expect(localFailure).toBeInstanceOf(PluginBootstrapError);
+    expect(localFailure.cause).toBe(cause);
+    expect(installerFailure).not.toBeInstanceOf(LocalPluginBootstrapError);
+
+    for (const [failure, message, classification] of [
       [
-        "403 model access denied for org-private",
-        "cannot access the configured model",
+        new ContractValidationError("Contract validation failed."),
+        "The scan could not complete because a local input or filesystem operation failed.",
+        undefined,
+      ],
+      [
+        new AuthenticationRequiredError("Authentication is required."),
+        "Authentication failed. Check the selected credentials.",
+        undefined,
+      ],
+      [
+        localFailure,
+        "The scan could not complete because a local input or filesystem operation failed.",
+        "local",
+      ],
+      [
+        installerFailure,
+        "The scan encountered a network or connection failure.",
+        "network_error",
       ],
     ] as const) {
+      for (const format of ["json", "jsonl"] as const) {
+        const stdout = capture();
+        const stderr = capture();
+        const deps = dependencies({
+          onRun: () => {
+            throw failure;
+          },
+        });
+
+        expect(
+          await main(
+            ["scan", ".", "--verbose", "--format", format],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(JSON.parse(stdout.text())).toEqual({
+          code: "SCAN_FAILED",
+          message,
+        });
+        expect(stderr.text()).toContain(`${failure.message}\n`);
+        if (classification !== undefined) {
+          expect(stderr.text()).toContain(
+            `scan.failed classification="${classification}"`,
+          );
+        }
+      }
+    }
+  });
+
+  test("keeps model connection advice for genuine transport failures", async () => {
+    // The bypass must not swallow real 401/403 handling, and the advice must
+    // still replace upstream text that can name the organization or project.
+    for (const [failure, expected, safeMessage] of [
+      [
+        new CodexSecurityError("401 invalid API key for org-private"),
+        "Authentication failed",
+        "Authentication failed. Check the selected credentials.",
+      ],
+      [
+        new CodexSecurityError("403 model access denied for org-private"),
+        "cannot access the configured model",
+        "The selected credentials cannot access the configured model.",
+      ],
+      [
+        new CodexSecurityError("429 too many requests for org-private"),
+        "reached its rate limit",
+        "The configured account reached its rate limit. Wait and retry.",
+      ],
+      [
+        new PluginBootstrapError(
+          "Codex plugin bootstrap failed: network ECONNRESET",
+        ),
+        "network ECONNRESET",
+        "The scan encountered a network or connection failure.",
+      ],
+    ] as const) {
+      const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
         run: async () => {
-          throw new CodexSecurityError(detail);
+          throw failure;
         },
         preflight: async () => fakePreflight(),
         close: async () => {},
       });
 
       expect(
-        await main(["scan", "."], capture().stream, stderr.stream, deps),
+        await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
       ).toBe(2);
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_FAILED",
+        message: safeMessage,
+      });
       expect(stderr.text()).toContain(expected);
       expect(stderr.text()).not.toContain("org-private");
     }
@@ -4191,7 +4340,11 @@ describe("CLI", () => {
     expect(
       await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
     ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toEqual({
+      code: "SCAN_FAILED",
+      message: "The scan encountered a network or connection failure.",
+    });
+    expect(stdout.text()).not.toContain("SYNTHETIC_KEY_123");
     expect(stderr.text()).toContain(
       `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
     );
@@ -4898,7 +5051,11 @@ describe("CLI", () => {
         }),
       ),
     ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toEqual({
+      code: "SCAN_FAILED",
+      message: "The scan exceeded its configured cost limit.",
+    });
+    expect(stdout.text()).not.toContain("/tmp/scan");
     expect(stderr.text()).toContain(
       "Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at /tmp/scan.",
     );
@@ -5250,6 +5407,235 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("CodexSecurityError");
   });
 
+  test("emits structured policy failures for scans and reruns", async () => {
+    const policyMessage =
+      "This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber.";
+    for (const [arguments_, message, diagnostic] of [
+      [["scan", ".", "--json"], policyMessage, policyMessage],
+      [
+        ["scan", ".", "--format", "jsonl"],
+        "403 forbidden by cybersecurity policy for org-private",
+        "cannot access the configured model",
+      ],
+      [
+        ["scans", "rerun", "scan-original", "--json"],
+        policyMessage,
+        policyMessage,
+      ],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          arguments_,
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onWorkbench: () => ({
+              recipe: {
+                repository: "/original/repository",
+                target: { kind: "repository", paths: [] },
+                mode: "standard",
+                config: {},
+              },
+            }),
+            onTurn: (_repository, options) => {
+              (options as ScanOptions).onOutputDirReady?.("/tmp/partial-scan");
+              throw new CodexSecurityError(message);
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_FAILED",
+        message:
+          "The scan was blocked by a cybersecurity policy. Trusted Access for Cyber may be required.",
+      });
+      expect(stderr.text()).toContain(diagnostic);
+      expect(stderr.text()).not.toContain("org-private");
+      expect(stderr.text()).toContain(
+        "Partial output was kept at /tmp/partial-scan.",
+      );
+    }
+  });
+
+  test("keeps unavailable saved scan failures structured and private", async () => {
+    const sensitiveFailure =
+      "Workbench failed for customer-private org-private ACCOUNT_ID=account-private request_id=req-private /private/customer/repository token=sk-proj-SYNTHETIC_REPLAY_SECRET_123";
+    const cases = [
+      {
+        arguments: ["scan-original", "--json"],
+        onWorkbench: () => ({}),
+        detail: "This scan does not have a saved launch recipe.",
+      },
+      {
+        arguments: ["scan-original", "--format", "json"],
+        onWorkbench: () => ({ recipe: { repository: "" } }),
+        detail: "The saved scan recipe does not contain a repository.",
+      },
+      {
+        arguments: ["scan-original", "--format", "jsonl"],
+        onWorkbench: () => {
+          throw new Error(sensitiveFailure);
+        },
+        detail: sensitiveFailure,
+      },
+      {
+        arguments: ["--json"],
+        onWorkbench: () => ({ scans: [] }),
+        detail: "No completed scans found for the current repository.",
+      },
+      {
+        arguments: ["--format", "jsonl"],
+        onWorkbench: () => {
+          throw new Error(sensitiveFailure);
+        },
+        detail: sensitiveFailure,
+      },
+      {
+        arguments: [],
+        onWorkbench: () => ({ scans: [] }),
+        detail: "No completed scans found for the current repository.",
+      },
+    ];
+
+    for (const scenario of cases) {
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          ["scans", "rerun", ...scenario.arguments],
+          stdout.stream,
+          stderr.stream,
+          dependencies({ onWorkbench: scenario.onWorkbench }),
+        ),
+      ).toBe(2);
+      if (scenario.arguments.length === 0) {
+        expect(stdout.text()).toBe("");
+      } else {
+        expect(JSON.parse(stdout.text())).toEqual({
+          code: "SCAN_REPLAY_UNAVAILABLE",
+          message: "The saved scan could not be replayed.",
+        });
+      }
+      expect(stderr.text()).toBe(`codex-security: ${scenario.detail}\n`);
+    }
+  });
+
+  test("keeps structured scan failure envelopes free of framework metadata", async () => {
+    const originalFormat = Formatter.format;
+    const marker = "SYNTHETIC_FRAMEWORK_METADATA";
+    let decorated = 0;
+    const formatter = spyOn(Formatter, "format").mockImplementation(
+      (value, format) => {
+        if (typeof value !== "object" || value === null) {
+          return originalFormat(value, format);
+        }
+        const record = value as {
+          ok?: boolean;
+          code?: string;
+          error?: { code?: string };
+        };
+        const code = record.ok === false ? record.error?.code : record.code;
+        if (code !== "SCAN_FAILED" && code !== "SCAN_REPLAY_UNAVAILABLE") {
+          return originalFormat(value, format);
+        }
+        decorated += 1;
+        const cta = { description: marker, commands: [] };
+        return originalFormat(
+          {
+            ...record,
+            ...(record.ok === false
+              ? { meta: { command: marker, duration: marker, cta } }
+              : { cta }),
+            frameworkOnly: marker,
+          },
+          format,
+        );
+      },
+    );
+
+    try {
+      for (const [arguments_, command, unavailable] of [
+        [["scan", "."], "scan", false],
+        [["scans", "rerun", "scan-original"], "scans rerun", false],
+        [["scans", "rerun", "scan-original"], "scans rerun", true],
+      ] as const) {
+        for (const format of ["json", "jsonl"]) {
+          for (const [outputOptions, fullOutput] of [
+            [[], false],
+            [["--full-output"], true],
+            [["--token-count"], false],
+            [["--token-limit", "1"], false],
+            [["--full-output", "--token-offset", "1"], true],
+          ] as const) {
+            const stdout = capture();
+            const stderr = capture();
+            const expectedError = unavailable
+              ? {
+                  code: "SCAN_REPLAY_UNAVAILABLE",
+                  message: "The saved scan could not be replayed.",
+                }
+              : {
+                  code: "SCAN_FAILED",
+                  message: "The scan failed. See stderr for details.",
+                };
+            const before = decorated;
+            expect(
+              await main(
+                [...arguments_, "--format", format, ...outputOptions],
+                stdout.stream,
+                stderr.stream,
+                dependencies({
+                  onWorkbench: (): JsonObject =>
+                    unavailable
+                      ? {}
+                      : {
+                          recipe: {
+                            repository: "/original/repository",
+                            target: { kind: "repository", paths: [] },
+                            mode: "standard",
+                            config: {},
+                          },
+                        },
+                  onRun: () => {
+                    throw new CodexSecurityError("synthetic scan failure");
+                  },
+                }),
+              ),
+            ).toBe(2);
+            expect(decorated).toBeGreaterThan(before);
+            expect(JSON.parse(stdout.text())).toEqual(
+              fullOutput
+                ? {
+                    ok: false,
+                    error: expectedError,
+                    meta: {
+                      command,
+                      duration: expect.stringMatching(/^\d+ms$/u),
+                    },
+                  }
+                : expectedError,
+            );
+            expect(stdout.text()).not.toContain(marker);
+            expect(stdout.text().endsWith("\n")).toBe(true);
+            if (format === "jsonl") {
+              expect(stdout.text().trimEnd().split("\n")).toHaveLength(1);
+            }
+            expect(stderr.text()).toContain(
+              unavailable
+                ? "This scan does not have a saved launch recipe."
+                : "synthetic scan failure",
+            );
+          }
+        }
+      }
+    } finally {
+      formatter.mockRestore();
+    }
+  });
+
   test("does not emit a successful full-output envelope for a failed scan", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -5317,7 +5703,13 @@ describe("CLI", () => {
           failing,
         ),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_FAILED",
+        message:
+          "Scan output directory must be outside the scanned directory and any enclosing Git worktree. Scan artifacts cannot be written inside the protected scan root.",
+      });
+      expect(stdout.text()).not.toContain(output);
+      expect(stdout.text()).not.toContain(worktree);
       expect(stderr.text()).toContain(
         "Scan output directory must be outside the scanned directory and any enclosing Git worktree.",
       );
@@ -5424,7 +5816,13 @@ describe("CLI", () => {
         failing,
       ),
     ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toEqual({
+      code: "SCAN_FAILED",
+      message:
+        "Scan output directory must be outside the scanned directory and any enclosing Git worktree. Scan artifacts cannot be written inside the protected scan root.",
+    });
+    expect(stdout.text()).not.toContain("SYNTHETIC_ROOT_KEY");
+    expect(stdout.text()).not.toContain("SYNTHETIC_OUTPUT_KEY");
     expect(stderr.text()).toContain(`Resolved path:  ${output}`);
     expect(stderr.text()).toContain(`Protected root: ${protectedRoot}`);
   });
@@ -5460,32 +5858,44 @@ describe("CLI", () => {
 
   test("preserves retained partial-output paths", async () => {
     const path = "/private/tmp/scan_sk-proj-SYNTHETIC_PATH_KEY_123/results";
-    for (const [signal, expectedExit] of [
-      [null, 2],
-      ["SIGINT", 130],
-      ["SIGTERM", 143],
+    for (const [signal, expectedExit, message] of [
+      [null, 2, "The scan failed. See stderr for details."],
+      ["SIGINT", 130, "Scan canceled by Ctrl-C."],
+      ["SIGTERM", 143, "Scan terminated by SIGTERM."],
     ] as const) {
-      const signals = new FakeSignals();
-      const stdout = capture();
-      const stderr = capture();
-      const deps = dependencies({
-        signals,
-        onTurn: (_repository, options) => {
-          (
-            options as { onOutputDirReady?: (scanDir: string) => void }
-          ).onOutputDirReady?.(path);
-        },
-        onRun: () => {
-          if (signal !== null) signals.emit(signal);
-          throw new Error("runtime failed");
-        },
-      });
+      for (const json of [false, true]) {
+        const signals = new FakeSignals();
+        const stdout = capture();
+        const stderr = capture();
+        const deps = dependencies({
+          signals,
+          onTurn: (_repository, options) => {
+            (options as ScanOptions).onOutputDirReady?.(path);
+          },
+          onRun: () => {
+            if (signal !== null) signals.emit(signal);
+            throw new Error("runtime failed");
+          },
+        });
 
-      expect(
-        await main(["scan", "."], stdout.stream, stderr.stream, deps),
-      ).toBe(expectedExit);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(`Partial output was kept at ${path}.`);
+        expect(
+          await main(
+            json ? ["scan", ".", "--json"] : ["scan", "."],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(expectedExit);
+        if (json) {
+          expect(JSON.parse(stdout.text())).toEqual({
+            code: "SCAN_FAILED",
+            message,
+          });
+        } else {
+          expect(stdout.text()).toBe("");
+        }
+        expect(stderr.text()).toContain(`Partial output was kept at ${path}.`);
+      }
     }
   }, 30_000);
 
@@ -5505,7 +5915,14 @@ describe("CLI", () => {
           }),
         ),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      if (json) {
+        expect(JSON.parse(stdout.text())).toEqual({
+          code: "SCAN_FAILED",
+          message: "The scan failed. See stderr for details.",
+        });
+      } else {
+        expect(stdout.text()).toBe("");
+      }
       expect(stderr.text()).toContain("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED");
       expect(stderr.text()).toContain("Partial output was kept at /tmp/scan.");
     }

@@ -903,12 +903,24 @@ describe("CLI authentication", () => {
 
   test("replaces permanent stored sign-in refresh details with recovery steps", async () => {
     for (const auth of ["chatgpt", "api-key"] as const) {
-      for (const detail of [
-        "Your access token could not be refreshed.",
-        "Your access token could not be refreshed because your refresh token has expired.",
-        "Your access token could not be refreshed because your refresh token was already used.",
-        "Your access token could not be refreshed because your refresh token was revoked.",
-      ]) {
+      for (const [detail, message] of [
+        [
+          "Your access token could not be refreshed.",
+          "The scan failed. See stderr for details.",
+        ],
+        [
+          "Your access token could not be refreshed because your refresh token has expired.",
+          "Authentication failed. Check the selected credentials.",
+        ],
+        [
+          "Your access token could not be refreshed because your refresh token was already used.",
+          "The scan failed. See stderr for details.",
+        ],
+        [
+          "Your access token could not be refreshed because your refresh token was revoked.",
+          "The scan failed. See stderr for details.",
+        ],
+      ] as const) {
         const stdout = capture();
         const stderr = capture(false);
         const deps = dependencies({
@@ -928,7 +940,10 @@ describe("CLI authentication", () => {
             deps,
           ),
         ).toBe(2);
-        expect(stdout.text()).toBe("");
+        expect(JSON.parse(stdout.text())).toEqual({
+          code: "SCAN_FAILED",
+          message,
+        });
         expect(stderr.text()).toContain("workspace-managed policies");
         expect(stderr.text()).toContain(
           "API key is selected for model authentication",
@@ -963,7 +978,10 @@ describe("CLI authentication", () => {
       expect(
         await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_FAILED",
+        message: "The scan failed. See stderr for details.",
+      });
       expect(stderr.text()).toContain(`${message}\n`);
       expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
       expect(stderr.text()).not.toContain("npx @openai/codex-security logout");
