@@ -86,7 +86,7 @@ export function scanModelGuidance(
       messages.push(
         "Actionable model or reasoning guidance follows. For a new interactive desktop scan started in chat, present this complete text as the ONE blocking native or MCP input form question before starting the scan; the form is user-visible, so do not send a separate commentary question:",
         question,
-        "If both input tools are unavailable, ask the same question in plain chat and stop for the user's reply. For an existing native Security tab scan, send the following declarative advisory as commentary and explain that selector changes would apply to a future scan, then continue that already-started scan. In a headless host, send the declarative advisory once and continue:",
+        "If both input tools are unavailable, ask the same question in plain chat and stop for the user's reply. For an existing native Security tab scan whose launch instructions did not already handle guidance, send the following declarative advisory as commentary and explain that selector changes would apply to a future scan, then continue that already-started scan. In a headless host, send the declarative advisory once and continue:",
         advisory,
         "This tool result does not itself deliver guidance to the user. Never infer that the user chose to continue a new interactive desktop scan.",
       );
