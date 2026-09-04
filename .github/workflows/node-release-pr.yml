@@ -19,12 +19,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  reconcile:
-    if: github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main'
-    name: maintain draft release PR
+  preview:
+    if: >-
+      github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.dry_run) ||
+      (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED != 'true'))
+    name: preview draft release PR
     runs-on: ubuntu-latest
     env:
-      RELEASE_PR_DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) || (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED != 'true') }}
+      RELEASE_PR_DRY_RUN: "true"
+
+    steps:
+      - name: Checkout main, never the release PR
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+
+      - name: Preview the rolling release proposal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node sdk/typescript/scripts/release-pr.mjs
+
+  reconcile:
+    if: >-
+      github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'workflow_dispatch' && !inputs.dry_run) ||
+      (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED == 'true'))
+    name: maintain draft release PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      RELEASE_PR_DRY_RUN: "false"
 
     steps:
       - name: Checkout main, never the release PR
@@ -41,7 +75,7 @@ jobs:
 
       - name: Create repository-scoped release App token
         id: app-token
-        if: env.RELEASE_PR_DRY_RUN == 'false'
+        if: vars.RELEASE_APP_CLIENT_ID != ''
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}

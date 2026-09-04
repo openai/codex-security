@@ -474,9 +474,7 @@ test.each([
       }),
       scanInput: input,
       createSecurity: client(async (_repository, options) => {
-        expect(typeof options.onProgress).toBe(
-          presentation === "dashboard" ? "function" : "undefined",
-        );
+        expect(typeof options.onProgress).toBe("function");
         expect(stderr.text()).not.toContain("\u001B[?1049h");
         options.onScanStarted?.();
         options.onProgress?.({
@@ -496,6 +494,14 @@ test.each([
           status: "completed",
           description: "Read component source",
           paths: ["apps/api/app.ts"],
+        });
+        options.onCost?.({
+          model: "gpt-5.6",
+          inputTokens: 100,
+          cachedInputTokens: 10,
+          cacheWriteInputTokens: 0,
+          outputTokens: 20,
+          estimatedUsd: 0.00123,
         });
         return completed(options);
       }),
@@ -522,6 +528,12 @@ test.each([
     );
   } else {
     expect(stderr.text()).toContain("apps/api completed");
+    expect(stderr.text()).toContain(
+      "apps/api validating findings | Files: 2/2",
+    );
+    expect(stderr.text()).toContain(
+      "apps/api | Tokens: 100 input, 10 cached, 20 output | Cost: $0.00123",
+    );
     expect(stderr.text()).not.toContain("\u001B");
   }
   expect(

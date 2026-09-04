@@ -39,9 +39,8 @@ try {
 ```
 
 `result.findings` contains this scan's findings; `repositoryFindings` also
-includes earlier open findings when available. Matching earlier findings uses
-additional model calls, with large inputs split into batches. These calls are
-outside the scan's recorded cost and `maxCostUsd` limit.
+includes earlier open findings when available. Matching earlier findings can
+make extra model calls; see [Progress and cost](#progress-and-cost).
 
 Keep results outside the repository and restrict access: reports can contain
 source code, vulnerability details, and reproduction steps.
@@ -607,6 +606,10 @@ discovery has finished, the scan returns a sealed partial report without more
 model calls and lists unvalidated candidates as follow-up work. Bulk scans
 apply the limit per repository attempt.
 
+With `--max-cost`, automatic finding-history matching makes at most one extra
+model call. If it needs more context, the completed scan is kept and a warning
+directs you to run `scans match --all` explicitly.
+
 For a single scan in the interactive dashboard, reaching 80% of the limit
 offers a higher **total** USD limit. Enter a larger amount to approve it, or
 press Enter with an empty input or Escape to keep the current limit. The scan
@@ -1020,6 +1023,44 @@ Matching requires sealed artifacts and reuses saved matches unless you pass
 or unknown. Missing findings aren't resolved if the later scan is incomplete
 or excludes their original scope. With one ID, `scans compare` compares it
 to the latest completed scan.
+
+Use `scans match --all --force` to rebuild comparisons chronologically while
+retaining stable finding identities. Ctrl-C keeps comparisons already saved.
+Only high-confidence duplicates are grouped; uncertain and independently
+related findings stay separate. Matching preserves triage and sealed artifacts.
+
+Codex is called only when a new decision is needed, using existing authentication.
+Scans without sealed artifacts are skipped, but their confirmed links can still
+be reused. Older custom plugins save confirmed and uncertain matches; use the
+bundled plugin for related links and large comparisons.
+
+SDK callers can compare findings without saving a workbench comparison:
+
+```ts
+import { readFile } from "node:fs/promises";
+import {
+  matchScanFindings,
+  type FindingsDocument,
+} from "@openai/codex-security";
+
+const before = JSON.parse(
+  await readFile("/path/to/earlier-scan/findings.json", "utf8"),
+) as FindingsDocument;
+const after = JSON.parse(
+  await readFile("/path/to/later-scan/findings.json", "utf8"),
+) as FindingsDocument;
+
+const comparison = await matchScanFindings(
+  { before: before.findings, after: after.findings },
+  { workingDirectory: "/path/to/repository" },
+);
+console.log(comparison.matches, comparison.uncertain, comparison.related ?? []);
+```
+
+Pass `knownFindingGroups` to reuse confirmed groups of stable `findingId` values
+from your store. Results identify the original `occurrenceId` values. Options
+include model, reasoning effort, `AbortSignal`, and an optional `onProgress`
+callback whose errors do not interrupt matching.
 
 History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. The CLI and
@@ -1532,7 +1573,7 @@ use another workflow ID for a fresh review rather than changing that saved resul
 2. Screen each nonempty neighborhood with `gpt-5.6-luna` at `xhigh` reasoning
    effort. The review covers every anchor-neighbor pair; nominations between
    neighbors are rejected.
-3. Independently review each nominated pair once with `gpt-5.6-sol` at `xhigh`
+3. Independently review each nominated pair once with `gpt-5.6-sol` at `high`
    reasoning effort. Only accepted pairs contribute to duplicate groups.
 4. Group accepted duplicate pairs transitively unless a Luna or Sol `DISTINCT`
    decision contradicts the resulting component. Contradicted components are

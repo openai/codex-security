@@ -86,6 +86,12 @@ import {
 } from "../src/runtime.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import {
+  lowerUuid7Turn,
+  ownedPythonUsage,
+  ownershipRollout,
+  readPythonRolloutUsage,
+} from "./support/usage-rollout.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
@@ -1969,6 +1975,7 @@ describe("plugin runtime preparation", () => {
     "0.1.79",
     "0.1.92",
     "0.1.93",
+    "0.1.94",
   ])(
     "upgrades a cached %s plugin and restores with the SDK-owned helper",
     async (previousVersion) => {
@@ -1985,6 +1992,10 @@ describe("plugin runtime preparation", () => {
       await copyFile(
         join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
         join(previous, "scripts", "workbench_target.py"),
+      );
+      await writeFile(
+        join(previous, "scripts", "workbench_scan_usage.py"),
+        "raise RuntimeError('stale collector must be replaced')\n",
       );
       const home = join(root, "home");
       const unrelatedProject = join(root, "unrelated-project");
@@ -2030,6 +2041,7 @@ describe("plugin runtime preparation", () => {
           "workbench_target.py",
           "finalize_scan_contract.py",
           "workbench_scan_history.py",
+          "workbench_scan_usage.py",
         ]) {
           expect(await readFile(join(pluginRoot, "scripts", script))).toEqual(
             await readFile(join(PLUGIN_ROOT, "scripts", script)),
@@ -2082,6 +2094,20 @@ describe("plugin runtime preparation", () => {
       await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
       await restorer.restore(artifact, expected);
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
+
+      const rolloutPath = join(root, "cached-rollout.jsonl");
+      await writeFile(
+        rolloutPath,
+        ownershipRollout([lowerUuid7Turn])
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+      expect(
+        readPythonRolloutUsage(upgraded.installedRoot, rolloutPath),
+      ).toEqual({
+        usage: ownedPythonUsage,
+        warnings: [],
+      });
     },
   );
 

@@ -185,6 +185,7 @@ const distFiles = new Set(
     "custom-publish",
     "deep-progress",
     "errors",
+    "finding-catalogue",
     "github",
     "index",
     "knowledge-base",

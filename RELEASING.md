@@ -140,15 +140,25 @@ writes. Its JSON output includes the proposed files and any reason the
 updater would pause. After the workflow is on `main`, use its **Run workflow**
 form with **dry_run** enabled to test the hosted read-only path.
 
-To test writes, configure a GitHub App installed on this repository
-with **Contents: write** and **Pull requests: write**, set the
-`RELEASE_APP_CLIENT_ID` repository variable and `RELEASE_APP_PRIVATE_KEY`
-secret, then manually dispatch the workflow with **dry_run** disabled.
-This permits a single write run while automatic updates remain disabled.
-Review the resulting draft, its hosted CI, and the Codex review request.
-The workflow requests an App token scoped to this repository so CI on the
-bot's PR does not need the approval required for PR events created by
-`GITHUB_TOKEN`. See [GitHub's token documentation](https://docs.github.com/en/actions/concepts/security/github_token).
+To test writes, enable **Allow GitHub Actions to create and approve pull requests**
+under the repository's **Settings → Actions → General → Workflow permissions**,
+then manually dispatch the workflow with **dry_run** disabled. This permits a
+single write run while automatic updates remain disabled. The workflow uses
+the repository's `GITHUB_TOKEN` with **Contents: write** and **Pull requests: write**
+by default; no separate App credentials are required. Preview runs use a separate
+job with read-only permissions for both scopes.
+
+Review the resulting draft and select **Approve workflows to run** in its merge
+box to start hosted CI. GitHub requires this approval for PRs created or updated
+with `GITHUB_TOKEN`. Check the Codex review on the current head as well, and
+request it manually if the automated request has not started a review.
+
+For CI to start without this approval, optionally configure a GitHub App
+installed on this repository with **Contents: write** and **Pull requests: write**.
+Set the `RELEASE_APP_CLIENT_ID` repository variable and `RELEASE_APP_PRIVATE_KEY`
+secret. When the Client ID is configured, write runs request an App token scoped
+to this repository; a missing or invalid private key fails the run. Previews
+always use `GITHUB_TOKEN`. See [GitHub's token documentation](https://docs.github.com/en/actions/concepts/security/github_token).
 
 After the manual write run is verified, set the `RELEASE_PR_ENABLED`
 repository variable to `true` to allow updates after pushes to `main`.
