@@ -673,8 +673,8 @@ def _pre_release_repository_identities(identity: GitRepositoryIdentity) -> set[s
 
 def _timestamp_ns(value: str) -> int | None:
     try:
-        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (AttributeError, ValueError):
+        timestamp = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
         return None
     if timestamp.tzinfo is None:
         return None

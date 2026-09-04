@@ -827,6 +827,48 @@ MIGRATIONS = (
     ),
     (
         40,
+        "index finding identity and comparison history",
+        """
+        CREATE INDEX finding_occurrences_by_finding
+        ON finding_occurrences(finding_id, id);
+
+        CREATE INDEX scan_comparisons_by_after_scan
+        ON scan_comparisons(after_scan_id, before_scan_id);
+        """,
+    ),
+    (
+        41,
+        "checkpoint finding severity assessments",
+        """
+        CREATE TABLE finding_severity_assessments (
+            finding_id TEXT PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,
+            occurrence_id TEXT,
+            input_sha256 TEXT NOT NULL,
+            rubric_sha256 TEXT,
+            knowledge_base_sha256 TEXT,
+            assessed_at TEXT NOT NULL,
+            source TEXT NOT NULL CHECK (source IN ('existing-severity', 'rubric')),
+            decision TEXT NOT NULL CHECK (decision IN ('assessed', 'excluded')),
+            level TEXT CHECK (level IN ('critical', 'high', 'medium', 'low', 'informational')),
+            rubric_label TEXT,
+            rationale TEXT NOT NULL,
+            confidence TEXT CHECK (confidence IN ('high', 'medium', 'low')),
+            review_trigger TEXT,
+            CHECK ((decision = 'assessed' AND level IS NOT NULL)
+                OR (decision = 'excluded' AND level IS NULL AND rubric_label IS NULL))
+        );
+
+        CREATE TABLE scan_severity_classifications (
+            scan_id TEXT PRIMARY KEY,
+            finding_ids_json TEXT NOT NULL,
+            assessed_at TEXT NOT NULL,
+            rubric_sha256 TEXT,
+            knowledge_base_sha256 TEXT
+        );
+        """,
+    ),
+    (
+        42,
         "persist repository identities",
         """
         ALTER TABLE security_targets
@@ -1014,7 +1056,7 @@ def apply_migrations(
                         "publication_error_message",
                         "TEXT",
                     )
-                elif version == 40:
+                elif version == 42:
                     should_backfill_targets = (
                         repair_repository_identity_migration(connection) or should_backfill_targets
                     )
@@ -1023,7 +1065,7 @@ def apply_migrations(
                 repair_thread_scoped_workspaces_migration(connection)
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
-            elif version == 40:
+            elif version == 42:
                 repair_repository_identity_migration(connection)
                 should_backfill_targets = True
             else:
@@ -1159,8 +1201,12 @@ def normalize_pre_release_execution_profile_migrations(
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
     connection.execute(
-        "UPDATE schema_migrations SET version = 40 WHERE version IN (30, 31, 33) AND name = ?",
+        "UPDATE schema_migrations SET version = 42 WHERE version IN (30, 31, 33, 40) AND name = ?",
         ("persist repository identities",),
+    )
+    connection.execute(
+        "UPDATE schema_migrations SET version = 40 WHERE version = 33 AND name = ?",
+        ("index finding identity and comparison history",),
     )
 
     completion_warning_migration = connection.execute(
@@ -1570,7 +1616,7 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
     if (
         "repository_identity" in columns
         and connection.execute(
-            "SELECT 1 FROM schema_migrations WHERE version = 40 AND name = ?",
+            "SELECT 1 FROM schema_migrations WHERE version = 42 AND name = ?",
             ("persist repository identities",),
         ).fetchone()
         is not None
@@ -1582,7 +1628,7 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
         from workbench_target_state import normalize_pre_release_repository_identities
 
         normalize_pre_release_repository_identities(connection)
-    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 40)
+    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 42)
     for statement in sql_statements(migration_sql):
         if statement.startswith("ALTER TABLE security_targets"):
             add_column_if_missing(connection, "security_targets", "repository_identity", "TEXT")

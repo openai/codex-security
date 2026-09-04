@@ -165,7 +165,8 @@ published = tuple(
     migration for migration in MIGRATIONS
     if migration[0] < (
         31 if scenario == "pre-release-identity-version31" else
-        33 if scenario == "pre-release-identity-version33" else identity_version
+        33 if scenario == "pre-release-identity-version33" else
+        40 if scenario == "pre-release-identity-version40" else identity_version
     )
 )
 apply_migrations(
@@ -218,12 +219,12 @@ elif scenario in ("pre-release-identity-version", "pre-release-identity-version3
     connection.execute(
         "UPDATE security_targets SET repository_identity = 'synthetic-identity'"
     )
-elif scenario == "pre-release-identity-version33":
+elif scenario in ("pre-release-identity-version33", "pre-release-identity-version40"):
     for statement in sql_statements(identity_migration[2]):
         connection.execute(statement)
     connection.execute(
         "INSERT INTO schema_migrations VALUES (?, ?, ?)",
-        (33, identity_migration[1], timestamp),
+        (int(scenario.rsplit("version", 1)[1]), identity_migration[1], timestamp),
     )
     connection.execute(
         "UPDATE security_targets SET repository_identity = 'synthetic-identity'"
@@ -412,6 +413,10 @@ describe("stable workbench target migration", () => {
       "pre-release-identity-version33",
       "preserves the previous identity migration and installs the current findings schema",
     ],
+    [
+      "pre-release-identity-version40",
+      "preserves the previous identity migration alongside published history and severity migrations",
+    ],
   ] as const)("%s: %s", (scenario) => {
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -459,7 +464,7 @@ describe("stable workbench target migration", () => {
         : 1,
       hasRepositoryIdentityColumn: true,
       hasRepositoryIdentityIndex: true,
-      identityVersion: 40,
+      identityVersion: 42,
       hasCurrentFindingsSchema: true,
       migrationName: "persist repository identities",
       publicationMigrations: {
@@ -478,7 +483,8 @@ describe("stable workbench target migration", () => {
         "scans_assign_updated_completion_sequence",
       ],
       targetIdentity:
-        scenario === "pre-release-identity-version33"
+        scenario === "pre-release-identity-version33" ||
+        scenario === "pre-release-identity-version40"
           ? "synthetic-identity"
           : null,
       targetId: "target-existing",
