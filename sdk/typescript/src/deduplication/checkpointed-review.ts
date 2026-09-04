@@ -18,7 +18,7 @@ import {
 } from "./deduplication-prompts.js";
 
 // Increment when validation or review execution changes without a prompt/schema change.
-const REVIEW_CONTRACT_VERSION = 1;
+const REVIEW_CONTRACT_VERSION = 3;
 
 export async function reviewSettingsDigest(
   environment: NodeJS.ProcessEnv,
@@ -72,6 +72,7 @@ export class CheckpointedReviewRunner {
       codexVersion: CODEX_EXECUTABLE_VERSION,
       source: this.source,
       scope: this.scope,
+      stage: review.stage,
       model: review.model,
       effort: review.effort,
       settingsDigest: this.settingsDigest,
