@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { PassThrough } from "node:stream";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
@@ -105,12 +106,16 @@ async function runWorkflow(
   fixtures: Parameters<typeof dependencies>[0] = {},
   options: {
     interactive?: boolean;
+    inputTty?: boolean;
     review?: boolean;
     configure?: (value: ReturnType<typeof dependencies>) => void;
   } = {},
 ) {
   const stdout = capture();
   const stderr = capture(options.interactive);
+  const input = Object.assign(new PassThrough(), {
+    isTTY: options.inputTty ?? options.interactive === true,
+  });
   const current = dependencies({
     currentDirectory: CURRENT_REPOSITORY,
     onCodex: (args, output) => {
@@ -119,6 +124,7 @@ async function runWorkflow(
     },
     ...fixtures,
   });
+  current.scanInput = input;
   if (options.interactive) {
     current.confirmPatchReview = async (question) => {
       stderr.stream.write(`\n${question} (y/N)\n`);
@@ -126,11 +132,15 @@ async function runWorkflow(
     };
   }
   options.configure?.(current);
-  return {
-    exitCode: await main(arguments_, stdout.stream, stderr.stream, current),
-    stdout: stdout.text(),
-    stderr: stderr.text(),
-  };
+  try {
+    return {
+      exitCode: await main(arguments_, stdout.stream, stderr.stream, current),
+      stdout: stdout.text(),
+      stderr: stderr.text(),
+    };
+  } finally {
+    input.destroy();
+  }
 }
 
 describe("scan and patch workflow", () => {
@@ -1215,6 +1225,36 @@ describe("scan and patch workflow", () => {
       expect(opened).toBe(review);
       expect(patched).toBe(review);
     }
+  });
+
+  test("does not offer interactive patch review with piped input", async () => {
+    let offered = false;
+    let opened = false;
+    const outcome = await runWorkflow(
+      ["scan"],
+      { result: resultWithFindings(["high"]) },
+      {
+        interactive: true,
+        inputTty: false,
+        configure: (value) => {
+          value.confirmPatchReview = async () => {
+            offered = true;
+            return true;
+          };
+          value.patchEditor = async () => {
+            opened = true;
+            return null;
+          };
+        },
+      },
+    );
+
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.stderr).toContain("FINDINGS  1 (1 high)");
+    expect(outcome.stderr).not.toContain("Review and patch these findings?");
+    expect(outcome.stderr).not.toContain("\u001B");
+    expect(offered).toBe(false);
+    expect(opened).toBe(false);
   });
 
   test("does not offer patch review when there are no actionable findings", async () => {
