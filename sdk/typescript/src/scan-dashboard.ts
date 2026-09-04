@@ -561,7 +561,9 @@ export class ScanDashboard {
     const files =
       this.#files === null
         ? "waiting for inventory"
-        : `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`;
+        : this.#files.filesCompleted > 0
+          ? `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`
+          : `${formatCount(this.#files.filesTotal)} in scope`;
     const tokens =
       this.#cost === null
         ? "waiting for usage"
