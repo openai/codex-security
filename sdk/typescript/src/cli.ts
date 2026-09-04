@@ -125,7 +125,10 @@ import {
 import type { Finding, SeverityLevel } from "./models.js";
 import { runMultiscan } from "./multiscan.js";
 import { componentPlanSchema, planComponents } from "./component-plan.js";
-import { runComponentScans } from "./component-scan.js";
+import {
+  runComponentScans,
+  type ComponentScanEvent,
+} from "./component-scan.js";
 import {
   checkScanPublication,
   forceTerminatePublicationProcesses as terminatePublishers,
@@ -152,11 +155,13 @@ import {
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
+  comparisonForScan,
   matchScanFindingsInternal,
   unionFindingGroups,
   type matchScanFindings,
   type ScanComparisonInput,
-  type ScanComparisonResult,
+  type ScanComparisonOptions,
+  type ScanMatchingBatch,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
 import {
@@ -209,6 +214,7 @@ const OUTPUT_OPTION =
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
 const CHILD_TERMINATION_GRACE_MS = 1_000;
+const DUPLICATE_SIGNAL_WINDOW_MS = 500;
 const PUBLICATION_GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
@@ -1040,19 +1046,12 @@ interface ExportArguments {
   pythonPath?: string;
 }
 
-interface MatchingBatch {
-  afterScanId: string;
-  afterFindings: ScanComparisonInput["after"];
-  beforeScans: { scanId: string; findings: ScanComparisonInput["before"] }[];
-  knownFindingGroups?: ScanComparisonInput["knownFindingGroups"];
-}
-
 type MatchingPlan = JsonObject & {
   repository: string;
   scanCount: number;
   unavailableScans: number;
   skippedPairs: number;
-  batches: (JsonObject & MatchingBatch)[];
+  batches: (JsonObject & ScanMatchingBatch)[];
 };
 
 type SkillThreadSource = Extract<
@@ -1193,7 +1192,11 @@ interface CliDependencies {
   planComponents?: typeof planComponents;
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
-  runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
+  runWorkbench(
+    args: readonly string[],
+    input?: string,
+    signal?: AbortSignal,
+  ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
 }
@@ -1343,17 +1346,18 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     }
     return undefined;
   },
-  runWorkbench: async (args, input) => {
+  runWorkbench: async (args, input, signal) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
     };
-    const python = await resolvePluginPython({ environment });
+    const python = await resolvePluginPython({ environment, signal });
     return await runWorkbench(
       {
         python,
         pluginRoot: await bundledPluginRoot(),
         environment,
+        signal,
         failureMessage: "Could not read Codex Security scan history",
       },
       args,
@@ -1676,39 +1680,106 @@ export async function main(
     );
     return result?.["scans"] as SavedScan[] | undefined;
   };
+  const runMatching = async (
+    operation: (options: ScanComparisonOptions) => Promise<JsonObject>,
+  ): Promise<JsonObject> => {
+    const controller = new AbortController();
+    let firstSignalAt = 0;
+    const cancel = (signal: SignalName): void => {
+      if (controller.signal.aborted) {
+        if (
+          signal === controller.signal.reason &&
+          dependencies.now() - firstSignalAt < DUPLICATE_SIGNAL_WINDOW_MS
+        ) {
+          return;
+        }
+        removeListeners();
+        dependencies.forceExit(signal);
+      } else {
+        firstSignalAt = dependencies.now();
+        controller.abort(signal);
+      }
+    };
+    const onInterrupt = (): void => cancel("SIGINT");
+    const onTerminate = (): void => cancel("SIGTERM");
+    const removeListeners = (): void => {
+      dependencies.removeSignalListener("SIGINT", onInterrupt);
+      dependencies.removeSignalListener("SIGTERM", onTerminate);
+    };
+    dependencies.addSignalListener("SIGINT", onInterrupt);
+    dependencies.addSignalListener("SIGTERM", onTerminate);
+    let previousProgress = "";
+    try {
+      const result = await operation({
+        environment: dependencies.environment,
+        workingDirectory: dependencies.currentDirectory(),
+        signal: controller.signal,
+        onProgress(progress) {
+          if (errorOutput.isTTY !== true || progress.phase === "complete")
+            return;
+          const message =
+            progress.phase === "evidence"
+              ? "Reading selected finding evidence."
+              : `Matching ${progress.afterFindings} findings against ${progress.beforeIssues} known issues${(progress.pages ?? 1) > 1 ? ` (catalogue page ${progress.page}/${progress.pages})` : ""}.`;
+          if (message === previousProgress) return;
+          previousProgress = message;
+          errorOutput.write(`codex-security: ${message}\n`);
+        },
+      });
+      controller.signal.throwIfAborted();
+      return result;
+    } catch (error) {
+      const interrupted = controller.signal.reason;
+      exitCode =
+        interrupted === "SIGINT" ? 130 : interrupted === "SIGTERM" ? 143 : 2;
+      const message =
+        interrupted === "SIGINT"
+          ? "Finding matching canceled by Ctrl-C. Saved comparisons are preserved."
+          : interrupted === "SIGTERM"
+            ? "Finding matching terminated by SIGTERM. Saved comparisons are preserved."
+            : errorMessage(error);
+      errorOutput.write(`codex-security: ${message}\n`);
+      throw error;
+    } finally {
+      removeListeners();
+    }
+  };
   const matchScanPair = async (
     beforeId: string,
     afterId: string,
     force = false,
-  ): Promise<JsonObject | undefined> =>
-    history(
-      [
-        "compare-scans",
-        "--before-scan-id",
-        beforeId,
-        "--after-scan-id",
-        afterId,
-        "--include-matching-inputs",
-      ],
-      async ({ matchingCached, matchingInputs, ...comparison }) => {
-        if (matchingCached && !force) return comparison;
-        return await dependencies.runWorkbench(
+  ): Promise<JsonObject> =>
+    runMatching(async (options) => {
+      const { matchingCached, matchingInputs, ...comparison } =
+        await dependencies.runWorkbench(
           [
-            "save-scan-comparison",
+            "compare-scans",
             "--before-scan-id",
             beforeId,
             "--after-scan-id",
             afterId,
-            "--matches-json-stdin",
+            "--include-matching-inputs",
           ],
-          JSON.stringify(
-            await dependencies.matchFindings(
-              matchingInputs as JsonObject & ScanComparisonInput,
-            ),
-          ),
+          undefined,
+          options.signal,
         );
-      },
-    );
+      if (matchingCached && !force) return comparison;
+      const input = matchingInputs as JsonObject & ScanComparisonInput;
+      const matching = await dependencies.matchFindings(input, options);
+      options.signal?.throwIfAborted();
+      return await dependencies.runWorkbench(
+        [
+          "save-scan-comparison",
+          "--before-scan-id",
+          beforeId,
+          "--after-scan-id",
+          afterId,
+          "--matches-json-stdin",
+        ],
+        JSON.stringify(matching),
+        options.signal,
+      );
+    });
   const presentHistory = (
     result: JsonObject | undefined,
     command: HistoryCommand,
@@ -2036,24 +2107,20 @@ export async function main(
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
-        try {
-          if (options.all) {
-            return presentHistory(
-              await matchAllScans(dependencies, options.force),
-              "match-all",
-              format,
-            );
-          }
+        if (options.all) {
           return presentHistory(
-            await matchScanPair(args.beforeId!, args.afterId!, options.force),
-            "compare",
+            await runMatching((matchingOptions) =>
+              matchAllScans(dependencies, options.force, matchingOptions),
+            ),
+            "match-all",
             format,
           );
-        } catch (error) {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
-          exitCode = 2;
-          throw error;
         }
+        return presentHistory(
+          await matchScanPair(args.beforeId!, args.afterId!, options.force),
+          "compare",
+          format,
+        );
       },
     })
     .command("compare", {
@@ -3676,6 +3743,7 @@ export async function main(
       async run({ args, options }) {
         const controller = new AbortController();
         let dashboard: ScanDashboard | null = null;
+        const componentNames = new Map<string, string>();
         const stopDashboard = (): void => {
           try {
             dashboard?.stop();
@@ -3770,10 +3838,20 @@ export async function main(
             createSecurity: dependencies.createSecurity,
             planComponents: dependencies.planComponents,
             matchFindings: dependencies.matchFindings,
-            onPlan: (components) => dashboard?.setComponents(components),
+            onPlan: (components) => {
+              for (const component of components)
+                componentNames.set(component.id, component.name);
+              dashboard?.setComponents(components);
+            },
             onScanEvent:
               dashboard === null
-                ? undefined
+                ? (event) => {
+                    const componentName =
+                      componentNames.get(event.componentId) ??
+                      event.componentId;
+                    const line = componentScanEventLine(componentName, event);
+                    if (line !== null) errorOutput.write(line);
+                  }
                 : (event) => dashboard?.recordComponentEvent(event),
             onDeduplicationStarted: () => {
               if (dashboard !== null)
@@ -5201,18 +5279,25 @@ function validateCliArguments(
 async function matchAllScans(
   dependencies: CliDependencies,
   force: boolean,
+  options: ScanComparisonOptions = {},
 ): Promise<JsonObject> {
-  const result = (await dependencies.runWorkbench([
-    "list-unmatched-scan-pairs",
-    "--repository",
-    dependencies.currentDirectory(),
-    ...(force ? ["--force"] : []),
-  ])) as MatchingPlan;
+  const result = (await dependencies.runWorkbench(
+    [
+      "list-unmatched-scan-pairs",
+      "--repository",
+      dependencies.currentDirectory(),
+      ...(force ? ["--force"] : []),
+    ],
+    undefined,
+    options.signal,
+  )) as MatchingPlan;
   const { repository, scanCount, unavailableScans, skippedPairs, batches } =
     result;
 
   let matchedPairs = 0;
   let findingMatches = 0;
+  let relatedPairs = 0;
+  let uncertainPairs = 0;
   const newlyMatchedGroups: string[][] = [];
   for (const {
     afterScanId,
@@ -5220,6 +5305,7 @@ async function matchAllScans(
     beforeScans,
     knownFindingGroups = [],
   } of batches) {
+    options.signal?.throwIfAborted();
     const before = beforeScans.flatMap(({ findings }) => findings);
     const knownGroups = unionFindingGroups([
       ...knownFindingGroups,
@@ -5230,45 +5316,19 @@ async function matchAllScans(
       after: afterFindings,
       ...(knownGroups.length === 0 ? {} : { knownFindingGroups: knownGroups }),
     };
-    const matching: ScanComparisonResult =
+    const matching =
       before.length === 0 || afterFindings.length === 0
         ? { matches: [], uncertain: [] }
         : await dependencies.matchFindings(input, {
+            ...options,
             allowHistoricalUncertainty: true,
           });
-    const comparisons = beforeScans.map(({ scanId, findings }) => {
-      const beforeIds = new Set(
-        findings.map(({ occurrenceId }) => occurrenceId),
-      );
-      const matches = matching.matches.flatMap((match) => {
-        const beforeOccurrenceIds = match.beforeOccurrenceIds.filter((id) =>
-          beforeIds.has(id),
-        );
-        return beforeOccurrenceIds.length === 0
-          ? []
-          : [{ ...match, beforeOccurrenceIds }];
-      });
-      const uncertain = matching.uncertain.filter(({ beforeOccurrenceId }) =>
-        beforeIds.has(beforeOccurrenceId),
-      );
-      const related = matching.related?.filter(({ beforeOccurrenceId }) =>
-        beforeIds.has(beforeOccurrenceId),
-      );
-      const matchedAfter = new Set(
-        matches.flatMap(({ afterOccurrenceIds }) => afterOccurrenceIds),
-      );
-      if (
-        uncertain.some(({ afterOccurrenceId }) =>
-          matchedAfter.has(afterOccurrenceId),
-        )
-      ) {
-        throw new CodexSecurityError(
-          "Scan matching returned conflicting confirmed and uncertain findings.",
-        );
-      }
-      return { scanId, matches, uncertain, related };
-    });
-    for (const { scanId, matches, uncertain, related } of comparisons) {
+    const comparisons = beforeScans.map(({ scanId, findings }) => ({
+      scanId,
+      comparison: comparisonForScan(matching, findings),
+    }));
+    for (const { scanId, comparison } of comparisons) {
+      options.signal?.throwIfAborted();
       await dependencies.runWorkbench(
         [
           "save-scan-comparison",
@@ -5278,14 +5338,17 @@ async function matchAllScans(
           afterScanId,
           "--matches-json-stdin",
         ],
-        JSON.stringify({ matches, uncertain, related }),
+        JSON.stringify(comparison),
+        options.signal,
       );
       matchedPairs += 1;
-      findingMatches += matches.reduce(
+      findingMatches += comparison.matches.reduce(
         (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
           count + beforeOccurrenceIds.length * afterOccurrenceIds.length,
         0,
       );
+      relatedPairs += comparison.related?.length ?? 0;
+      uncertainPairs += comparison.uncertain.length;
     }
     newlyMatchedGroups.push(...comparisonFindingGroups(input, matching));
   }
@@ -5296,6 +5359,8 @@ async function matchAllScans(
     matchedPairs,
     skippedPairs,
     findingMatches,
+    relatedPairs,
+    uncertainPairs,
   };
 }
 
@@ -6770,7 +6835,7 @@ async function executeScan(
       // A later repeated signal intentionally restores the conventional escape hatch.
       if (
         signal === requestedSignal &&
-        dependencies.now() - firstSignalAt < 500
+        dependencies.now() - firstSignalAt < DUPLICATE_SIGNAL_WINDOW_MS
       ) {
         return;
       }
@@ -7809,6 +7874,24 @@ function formatTokenUsage(usage: unknown): string | null {
       .filter((value): value is string => value !== null)
       .join(", ") || null
   );
+}
+
+function componentScanEventLine(
+  componentName: string,
+  event: ComponentScanEvent,
+): string | null {
+  if (event.type === "progress") {
+    const progress = event.value;
+    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | Files: ${progress.filesCompleted.toLocaleString("en-US")}/${progress.filesTotal.toLocaleString("en-US")}\n`;
+  }
+  if (event.type !== "cost") return null;
+  const cost = event.value;
+  const tokens = formatTokenUsage({
+    input_tokens: cost.inputTokens,
+    cached_input_tokens: cost.cachedInputTokens,
+    output_tokens: cost.outputTokens,
+  });
+  return `codex-security: ${componentName} | ${tokens === null ? "" : `Tokens: ${tokens} | `}Cost: ${formatUsd(cost.estimatedUsd)}\n`;
 }
 
 function protectedRootErrorMessage(

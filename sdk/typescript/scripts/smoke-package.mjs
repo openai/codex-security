@@ -400,13 +400,19 @@ try {
     [
       "--input-type=module",
       "--eval",
-      [
-        `const sdk = await import(${JSON.stringify(packageManifest.name)});`,
-        `for (const name of ${JSON.stringify(["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "securityPolicyDiff"])}) {`,
-        '  if (typeof sdk[name] !== "function") throw new Error(`The installed package does not export ${name}.`);',
-        "}",
-        'if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function") throw new Error("The installed package does not export generatePolicy.");',
-      ].join("\n"),
+      `const sdk = await import(${JSON.stringify(packageManifest.name)});
+      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff"]) {
+        if (typeof sdk[name] !== "function") {
+          throw new Error("The installed package does not export " + name + ".");
+        }
+      }
+      if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function") {
+        throw new Error("The installed package does not export generatePolicy.");
+      }
+      const result = await sdk.matchScanFindings({ before: [], after: [] });
+      if (result.matches.length !== 0 || result.uncertain.length !== 0) {
+        throw new Error("Empty finding comparison did not return an empty result.");
+      }`,
     ],
     { cwd: consumer },
   );

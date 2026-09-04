@@ -51,6 +51,7 @@ import {
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
+import { matchScanFindingsInternal } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
@@ -3640,6 +3641,11 @@ describe("CodexSecurity orchestration", () => {
     ["the repository index fails", "index", "index unavailable"],
     ["a cost limit still allows false-positive matching", "budget", undefined],
     [
+      "cost-limited matching needs additional context",
+      "budget-context",
+      "scans match --all",
+    ],
+    [
       "dismissed history survives missing reviewer feedback",
       "dismissed",
       undefined,
@@ -3647,6 +3653,7 @@ describe("CodexSecurity orchestration", () => {
   ] as const)(
     "keeps a completed scan when %s",
     async (_scenario, failure, warning) => {
+      const limited = failure === "budget" || failure === "budget-context";
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -3672,6 +3679,8 @@ describe("CodexSecurity orchestration", () => {
       const warnings: string[] = [];
       const commands: (readonly string[])[] = [];
       let modelCalled = false;
+      let matchingTurns = 0;
+      let observedSingleTurn: boolean | undefined;
       let matched = false;
       let savedComparisonInput: string | undefined;
       const client = new TestClient(
@@ -3692,7 +3701,7 @@ describe("CodexSecurity orchestration", () => {
               return {
                 scanId: "scan_example_001",
                 targetId: "target_sha256_example",
-                falsePositives: failure === "budget" ? [falsePositive] : [],
+                falsePositives: limited ? [falsePositive] : [],
               };
             }
             if (args[0] === "list-unmatched-scan-pairs") {
@@ -3730,9 +3739,40 @@ describe("CodexSecurity orchestration", () => {
             }
             return mockWorkbench(args, input);
           },
-          async matchFindings() {
+          async matchFindings(input, options, runtimeOptions) {
             modelCalled = true;
+            observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");
+            if (failure === "budget-context") {
+              return await matchScanFindingsInternal(
+                input,
+                {
+                  ...options,
+                  codex: {
+                    startThread() {
+                      return {
+                        async run() {
+                          matchingTurns += 1;
+                          return {
+                            finalResponse: JSON.stringify({
+                              matches: [],
+                              uncertain: [],
+                              request: {
+                                kind: "evidence",
+                                beforeOccurrenceIds: [previous.occurrenceId],
+                                afterOccurrenceIds: [current.occurrenceId],
+                                offset: 0,
+                              },
+                            }),
+                          };
+                        },
+                      };
+                    },
+                  },
+                },
+                runtimeOptions,
+              );
+            }
             return {
               matches: [
                 {
@@ -3758,7 +3798,7 @@ describe("CodexSecurity orchestration", () => {
       );
 
       const result = await client.run(repository, {
-        ...(failure === "budget" ? { maxCostUsd: 1 } : {}),
+        ...(limited ? { maxCostUsd: 1 } : {}),
         onWarning: (message) => warnings.push(message),
       });
       expect(result.threadId).toBe("thread-1");
@@ -3772,11 +3812,16 @@ describe("CodexSecurity orchestration", () => {
             : undefined,
       );
       expect(warnings).toEqual(
-        warning === undefined
-          ? []
-          : [`Could not update repository findings: ${warning}`],
+        warning === undefined ? [] : [expect.stringContaining(warning)],
       );
       expect(modelCalled).toBe(failure !== "index");
+      expect(observedSingleTurn).toBe(
+        failure === "index" ? undefined : limited,
+      );
+      if (failure === "budget-context") {
+        expect(matchingTurns).toBe(1);
+        expect(matched).toBe(false);
+      }
       expect(commands.some(([command]) => command === "complete-scan")).toBe(
         true,
       );

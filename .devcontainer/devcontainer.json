@@ -1,4 +1,17 @@
 {
   "name": "Ona",
-  "image": "mcr.microsoft.com/devcontainers/universal:4.0.1-noble"
+  // devcontainers/universal publishes a linux/amd64 manifest only, so it cannot
+  // run natively on arm64 hosts. base:noble keeps the Ubuntu Noble userland the
+  // Ona automations expect and supplies the toolchains through features.
+  "image": "mcr.microsoft.com/devcontainers/base:noble",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:4": { "moby": false },
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:2": {
+      "version": "22",
+      "pnpmVersion": "none"
+    },
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.12" }
+  },
+  "onCreateCommand": "sh .devcontainer/install.sh"
 }
