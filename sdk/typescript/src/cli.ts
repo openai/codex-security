@@ -3475,11 +3475,28 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         const controller = new AbortController();
+        const scanInput = dependencies.scanInput ?? process.stdin;
         let dashboard: ScanDashboard | null = null;
+        let dashboardStarted = false;
         const stopDashboard = (): void => {
           try {
             dashboard?.stop();
           } catch {}
+        };
+        const startDashboard = (): void => {
+          if (
+            dashboard === null ||
+            dashboardStarted ||
+            controller.signal.aborted
+          )
+            return;
+          dashboardStarted = true;
+          try {
+            dashboard.start();
+          } catch {
+            stopDashboard();
+            dashboard = null;
+          }
         };
         const onInterrupt = (): void => controller.abort("SIGINT");
         const onTerminate = (): void => controller.abort("SIGTERM");
@@ -3518,6 +3535,9 @@ export async function main(
           if (
             !options.headless &&
             !options.planOnly &&
+            format !== "json" &&
+            format !== "jsonl" &&
+            scanInput.isTTY === true &&
             errorOutput.isTTY === true &&
             dependencies.environment["CI"] === undefined &&
             dependencies.environment["TERM"] !== "dumb"
@@ -3530,20 +3550,16 @@ export async function main(
               clock: dependencies,
               color: dependencies.environment["NO_COLOR"] === undefined,
               sanitize: safeErrorMessage,
-              input: process.stdin,
+              input: scanInput,
               onInterrupt,
             });
             candidate.setStage(
               options.auto ? "Planning components" : "Preparing components",
             );
-            try {
-              candidate.start();
-              dashboard = candidate;
-            } catch {
-              try {
-                candidate.stop();
-              } catch {}
-            }
+            dashboard = candidate;
+            errorOutput.write(
+              `codex-security: ${options.auto ? "Planning components" : "Preparing components"}...\n`,
+            );
           }
           const selectModel = scanModelSelectorForCli(
             errorOutput,
@@ -3556,18 +3572,9 @@ export async function main(
             },
           );
           const chooseModel: ScanModelSelector = async (...args) => {
-            stopDashboard();
-            try {
-              const selected = await selectModel(...args);
-              dashboard?.setModel(selected);
-              return selected;
-            } finally {
-              if (!args[2].aborted) {
-                try {
-                  dashboard?.start();
-                } catch {}
-              }
-            }
+            const selected = await selectModel(...args);
+            dashboard?.setModel(selected);
+            return selected;
           };
           const result = await runComponentScans({
             repository,
@@ -3599,11 +3606,29 @@ export async function main(
             onScanEvent:
               dashboard === null
                 ? undefined
-                : (event) => dashboard?.recordComponentEvent(event),
+                : (event) => {
+                    dashboard?.recordComponentEvent(event);
+                    if (
+                      event.type === "warning" &&
+                      (dashboard === null || !dashboardStarted)
+                    ) {
+                      errorOutput.write(
+                        `codex-security: warning: ${safeErrorMessage(event.value)}\n`,
+                      );
+                    }
+                    if (
+                      event.type === "activity" ||
+                      (event.type === "progress" &&
+                        event.value.phase !== "preflight") ||
+                      (event.type === "workers" &&
+                        event.value.kind === "dispatch")
+                    ) {
+                      startDashboard();
+                    }
+                  },
             onDeduplicationStarted: () => {
-              if (dashboard !== null)
-                dashboard.showComponents("Combining duplicate findings");
-              else
+              dashboard?.showComponents("Combining duplicate findings");
+              if (dashboard === null || !dashboardStarted)
                 errorOutput.write(
                   "codex-security: Matching component findings by root cause...\n",
                 );
@@ -3611,8 +3636,8 @@ export async function main(
             environment: dependencies.environment,
             signal: controller.signal,
             onProgress: (component) => {
-              if (dashboard !== null) dashboard.updateComponent(component);
-              else
+              dashboard?.updateComponent(component);
+              if (dashboard === null || !dashboardStarted)
                 errorOutput.write(
                   `codex-security: ${component.name} ${component.status}${component.error === undefined ? "" : `: ${component.error}`}\n`,
                 );
@@ -6439,6 +6464,7 @@ function scanModelSelectorForCli(
   const selectModel = createScanModelSelector({
     interactive:
       options.interactive &&
+      (dependencies.scanInput ?? process.stdin).isTTY === true &&
       errorOutput.isTTY === true &&
       dependencies.environment["CI"] === undefined &&
       dependencies.environment["TERM"] !== "dumb",
@@ -6585,6 +6611,7 @@ async function executeScan(
   let firstSignalAt = 0;
   let progress: Progress | null = null;
   let dashboard: ScanDashboard | null = null;
+  let dashboardStarted = false;
   let lastWorkerUpdate = "";
   let lastProgressUpdate = "";
   let workerCapacity: { planned: number; started: number } | null = null;
@@ -6776,6 +6803,7 @@ async function executeScan(
       errorOutput,
       dependencies,
       interactive &&
+        scanInput.isTTY === true &&
         !arguments_.headless &&
         dependencies.environment["CI"] === undefined &&
         dependencies.environment["TERM"] !== "dumb",
@@ -6830,35 +6858,41 @@ async function executeScan(
         arguments_.dryRun ? "Validating scan inputs" : "Preparing scan",
       );
     } else {
+      progress.stage("Preparing scan");
+    }
+    const startDashboard = (): void => {
+      if (
+        dashboard === null ||
+        dashboardStarted ||
+        preparationAbortController.signal.aborted
+      )
+        return;
+      dashboardStarted = true;
+      try {
+        progress?.stopTimer();
+      } catch {}
       try {
         dashboard.start();
       } catch {
         dashboard = null;
         progress = new Progress(errorOutput, dependencies, false);
-        progress.startTimer("Preparing scan");
+        progress.startTimer(runningMessage());
       }
-    }
+    };
     const selectModel = scanModelSelectorForCli(errorOutput, dependencies, {
       interactive: modelGuidanceInteractive && !arguments_.headless,
       maxCostUsd: arguments_.maxCostUsd,
       onInterrupt,
     });
     security = dependencies.createSecurity(config, async (...args) => {
-      stopPresentation();
       try {
-        const selected = await selectModel(...args);
-        effectiveModel = selected.model;
-        effectiveReasoningEffort = selected.reasoningEffort;
-        dashboard?.setModel(selected);
-        return selected;
-      } finally {
-        if (!args[2].aborted) {
-          try {
-            if (dashboard !== null) dashboard.start();
-            else progress?.startTimer("Preparing scan");
-          } catch {}
-        }
-      }
+        progress?.stopTimer();
+      } catch {}
+      const selected = await selectModel(...args);
+      effectiveModel = selected.model;
+      effectiveReasoningEffort = selected.reasoningEffort;
+      dashboard?.setModel(selected);
+      return selected;
     });
     if (arguments_.mock) {
       errorOutput.write(
@@ -6926,8 +6960,11 @@ async function executeScan(
         }
       },
       onBudgetApproaching:
-        scanInput.isTTY === true
-          ? dashboard?.requestBudgetIncrease.bind(dashboard)
+        dashboard !== null
+          ? (budget) => {
+              startDashboard();
+              return dashboard?.requestBudgetIncrease(budget);
+            }
           : undefined,
       onOutputArchived: (archiveDir) => {
         diagnostic("scan.output_archived", { archive_dir: archiveDir });
@@ -6935,7 +6972,7 @@ async function executeScan(
           dashboard.note(
             `Moved existing results to: ${errorMessage(archiveDir)}`,
           );
-          return;
+          if (dashboardStarted) return;
         }
         progress?.stopTimer();
         errorOutput.write(
@@ -6966,7 +7003,7 @@ async function executeScan(
                   ? "Using native Codex command authentication"
                   : "Using stored Codex credentials",
           );
-          return;
+          if (dashboardStarted) return;
         }
         progress?.stopTimer();
         if (authentication.method === "api_key") {
@@ -6985,7 +7022,7 @@ async function executeScan(
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
         }
-        progress?.startTimer("Preparing scan");
+        if (dashboard === null) progress?.startTimer("Preparing scan");
       },
       onTrustedAccessStatus: (status) => {
         if (status === "granted") {
@@ -7027,10 +7064,10 @@ async function executeScan(
                   : `Codex connection interrupted; retrying (${attempt}/${maxAttempts})`;
         if (dashboard !== null) {
           dashboard.note(message);
-          return;
+          if (dashboardStarted) return;
         }
         progress?.stage(message);
-        progress?.startTimer(runningMessage());
+        if (dashboard === null) progress?.startTimer(runningMessage());
       },
       onActivity: (activity) => {
         if (dashboard === null) return;
@@ -7038,6 +7075,7 @@ async function executeScan(
         if (activity.paths.length > 0 && phase === "preflight") {
           dashboard.setStage("inspecting repository files");
         }
+        startDashboard();
       },
       onSessionEvent:
         scanInput.isTTY === true
@@ -7054,6 +7092,7 @@ async function executeScan(
           dashboard.setFiles(update);
           dashboard.setStage(phase);
           if (previousPhase !== phase) dashboard.note(`Started ${phase}`);
+          if (update.phase !== "preflight") startDashboard();
           return;
         }
         if (progress === null) return;
@@ -7090,6 +7129,7 @@ async function executeScan(
             dashboard.setStage(scanPhase(status.phase));
           }
           if (message !== null) dashboard.note(message);
+          if (status.kind === "dispatch") startDashboard();
           return;
         }
         if (message === null || progress === null) return;
@@ -7113,12 +7153,11 @@ async function executeScan(
           classification: classifyConnectionFailure(error),
         });
         const warning = `${observer} observer failed: ${diagnosticValue(error)}`;
-        if (dashboard === null) {
+        dashboard?.note(`Warning: ${warning}`);
+        if (dashboard === null || !dashboardStarted) {
           writeAboveProgress(() => {
             errorOutput.write(`codex-security: warning: ${warning}\n`);
           });
-        } else {
-          dashboard.note(`Warning: ${warning}`);
         }
       },
     };
@@ -7465,7 +7504,11 @@ function scanFailureMessage(
   ) {
     return (
       "Codex Security's stored ChatGPT sign-in could not be refreshed. " +
-      "Codex may still need it to load workspace-managed policies when an API key is selected for model authentication. " +
+      (authentication?.method === "api_key" ||
+      (authentication?.method === "stored_credentials" &&
+        authentication.credentialType === "api_key")
+        ? "Codex may still need it to load workspace-managed policies when an API key is selected for model authentication. "
+        : "") +
       "If the sign-in recently changed, check 'npx @openai/codex-security login status' and retry. " +
       "Otherwise run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
     );

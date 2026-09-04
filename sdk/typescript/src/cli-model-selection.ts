@@ -1,6 +1,7 @@
 import type { BulkScanPrompt } from "./bulk-scan-discovery.js";
 import type { ScanModelConfiguration } from "./config.js";
 import { estimateScanCost } from "./cost.js";
+import { AuthenticationRequiredError } from "./errors.js";
 import { getScanModelAdvice } from "./model-advice.js";
 import type { CatalogModel } from "./model-catalog.js";
 import type { ScanModelSelector } from "./scan-model-selection.js";
@@ -32,8 +33,9 @@ export function createScanModelSelector(options: {
     const warnings: string[] = [];
     try {
       availableModels = await loadModels();
-    } catch {
+    } catch (error) {
       signal.throwIfAborted();
+      if (error instanceof AuthenticationRequiredError) throw error;
       warnings.push(
         "Could not check available scan models. Continuing with the configured model.",
       );
@@ -77,17 +79,7 @@ export function createScanModelSelector(options: {
       warnings.push(
         `The configured reasoning effort is ${configuration.reasoningEffort}. Use xhigh for the best scanning results.`,
       );
-      const model = availableModels?.find(
-        (candidate) =>
-          candidate.model === proposed.model || candidate.id === proposed.model,
-      );
-      if (
-        model?.supportedReasoningEfforts.some(
-          ({ reasoningEffort }) => reasoningEffort === "xhigh",
-        )
-      ) {
-        proposed.reasoningEffort = "xhigh";
-      }
+      proposed.reasoningEffort = "xhigh";
     }
     if (warnings.length > 0) {
       try {

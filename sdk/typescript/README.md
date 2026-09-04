@@ -503,8 +503,11 @@ one combined warning. An interactive terminal offers one confirmation, defaultin
 to No, to apply all suggested model and effort changes for the current command.
 Headless, JSON, and CI runs print the combined warning to stderr without prompting
 and keep the configured settings. If model availability cannot be checked, the
-scan continues without changing its model or effort. Dry runs do not contact the
-model catalog.
+CLI keeps the configured model and can still offer the requested `xhigh` effort;
+it does not offer `xhigh` when the catalog explicitly lists it as unsupported.
+Detected ChatGPT sign-in failures are reported before model guidance. Preparation
+and confirmation stay in the normal terminal; the dashboard opens once scan
+activity begins. Dry runs do not contact the model catalog.
 
 Use `--model` to choose a model and `--effort minimal|low|medium|high|xhigh|max`
 for reasoning effort. Repeat `--codex KEY=VALUE` for other TOML settings:

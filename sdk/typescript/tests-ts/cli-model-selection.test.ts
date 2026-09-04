@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { BulkScanPrompt } from "../src/bulk-scan-discovery.js";
 import { createScanModelSelector } from "../src/cli-model-selection.js";
 import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
+import { AuthenticationRequiredError } from "../src/errors.js";
 import type { CatalogModel } from "../src/model-catalog.js";
 
 function catalogModel(
@@ -172,6 +173,38 @@ describe("CLI scan model selection", () => {
     expect(confirmations[0]?.question).not.toContain("model-current");
   });
 
+  test.each([
+    { models: undefined },
+    { models: [] },
+    { models: [catalogModel("model-current", { isDefault: true })] },
+  ])(
+    "offers xhigh when the selected model is missing from the catalog: %j",
+    async ({ models }) => {
+      for (const accepted of [false, true]) {
+        const { select, warnings, confirmations, controller } = fixture({
+          answers: [accepted],
+        });
+        expect(
+          await select(
+            { model: "model-old-cyber", reasoningEffort: "high" },
+            async () => models,
+            controller.signal,
+          ),
+        ).toEqual({
+          model: "model-old-cyber",
+          reasoningEffort: accepted ? "xhigh" : "high",
+        });
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("dynamic exploitation");
+        expect(confirmations).toHaveLength(1);
+        expect(confirmations[0]?.question).toBe(
+          "Use xhigh reasoning for this scan?",
+        );
+        expect(confirmations[0]?.defaultValue).toBe(false);
+      }
+    },
+  );
+
   test("writes warnings without prompting in headless or noninteractive terminals", async () => {
     for (const options of [
       { interactive: false, terminalInteractive: true },
@@ -205,7 +238,7 @@ describe("CLI scan model selection", () => {
     expect(confirmations).toHaveLength(0);
   });
 
-  test("discovery failures preserve settings and warn without interrupting the scan", async () => {
+  test("discovery failures preserve the model and offer an effort change without blocking the scan", async () => {
     for (const reasoningEffort of ["high", "custom-effort"]) {
       const { select, warnings, confirmations, controller } = fixture({
         answers: [true],
@@ -219,15 +252,34 @@ describe("CLI scan model selection", () => {
           },
           controller.signal,
         ),
-      ).toEqual(configuration);
+      ).toEqual({
+        model: configuration.model,
+        reasoningEffort: reasoningEffort === "high" ? "xhigh" : reasoningEffort,
+      });
       expect(warnings).toHaveLength(1);
       expect(warnings.join(" ")).toContain(
         "Could not check available scan models",
       );
       expect(warnings[0]).toContain("dynamic exploitation");
       expect(warnings[0]?.includes("xhigh")).toBe(reasoningEffort === "high");
-      expect(confirmations).toHaveLength(0);
+      expect(confirmations).toHaveLength(reasoningEffort === "high" ? 1 : 0);
     }
+  });
+
+  test("reports a required sign-in failure before warnings or confirmation", async () => {
+    const { select, warnings, confirmations, controller } = fixture();
+    const failure = new AuthenticationRequiredError("Sign in again.");
+    await expect(
+      select(
+        { model: "model-cyber", reasoningEffort: "high" },
+        async () => {
+          throw failure;
+        },
+        controller.signal,
+      ),
+    ).rejects.toBe(failure);
+    expect(warnings).toHaveLength(0);
+    expect(confirmations).toHaveLength(0);
   });
 
   test("preserves higher and unknown effort settings when accepting a model upgrade", async () => {

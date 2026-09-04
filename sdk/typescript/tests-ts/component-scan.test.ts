@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, expect, test } from "bun:test";
 import type { ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
@@ -435,73 +436,113 @@ test("forwards scan events with their component identity without letting observe
   }
 });
 
-test.each(["dashboard", "headless", "ci"])(
-  "CLI component presentation: %s",
-  async (presentation) => {
-    const paths = await fixture();
-    const stdout = capture();
-    const stderr = capture(true);
-    const signals = new FakeSignals();
-    const code = await main(
-      [
-        "scan-components",
-        paths.repository,
-        "--component",
-        "apps/api",
-        "--output-dir",
-        paths.outputDir,
-        ...(presentation === "headless" ? ["--headless"] : []),
-        "--json",
-      ],
-      stdout.stream,
-      stderr.stream,
-      {
-        ...dependencies({
-          currentDirectory: paths.root,
-          signals,
-          environment:
-            presentation === "ci" ? { CI: "true" } : { NO_COLOR: "1" },
-        }),
-        createSecurity: client(async (_repository, options) => {
-          expect(typeof options.onProgress).toBe(
-            presentation === "dashboard" ? "function" : "undefined",
-          );
-          options.onProgress?.({
-            phase: "validation",
-            filesCompleted: 2,
-            filesTotal: 2,
-          });
-          return completed(options);
-        }),
-      },
-    );
-    expect(code).toBe(0);
+test.each([
+  "dashboard",
+  "headless",
+  "ci",
+  "json",
+  "jsonl",
+  "piped-input",
+  "nonterminal",
+])("CLI component presentation: %s", async (presentation) => {
+  const paths = await fixture();
+  const stdout = capture();
+  const stderr = capture(presentation !== "nonterminal");
+  const input = Object.assign(new PassThrough(), {
+    isTTY: presentation !== "piped-input",
+  });
+  const signals = new FakeSignals();
+  const code = await main(
+    [
+      "scan-components",
+      paths.repository,
+      "--component",
+      "apps/api",
+      "--output-dir",
+      paths.outputDir,
+      ...(presentation === "headless" ? ["--headless"] : []),
+      ...(presentation === "json" ? ["--json"] : []),
+      ...(presentation === "jsonl" ? ["--format", "jsonl"] : []),
+    ],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...dependencies({
+        currentDirectory: paths.root,
+        signals,
+        environment: presentation === "ci" ? { CI: "true" } : { NO_COLOR: "1" },
+      }),
+      scanInput: input,
+      createSecurity: client(async (_repository, options) => {
+        expect(typeof options.onProgress).toBe(
+          presentation === "dashboard" ? "function" : "undefined",
+        );
+        expect(stderr.text()).not.toContain("\u001B[?1049h");
+        options.onScanStarted?.();
+        options.onProgress?.({
+          phase: "preflight",
+          filesCompleted: 0,
+          filesTotal: 2,
+        });
+        expect(stderr.text()).not.toContain("\u001B[?1049h");
+        options.onProgress?.({
+          phase: "validation",
+          filesCompleted: 2,
+          filesTotal: 2,
+        });
+        options.onActivity?.({
+          id: "read-source",
+          kind: "command",
+          status: "completed",
+          description: "Read component source",
+          paths: ["apps/api/app.ts"],
+        });
+        return completed(options);
+      }),
+    },
+  );
+  expect(code).toBe(0);
+  if (presentation === "json" || presentation === "jsonl") {
     expect(JSON.parse(stdout.text())).toMatchObject({
       completed: 1,
       findingCount: 1,
     });
-    expect(stderr.text().includes("\u001B[?1049h")).toBe(
-      presentation === "dashboard",
+  }
+  expect(stderr.text()).toContain("1 complete, 0 incomplete, 0 failed");
+  expect(stderr.text()).toContain("1 findings → 1 groups");
+  expect(stderr.text().includes("\u001B[?1049h")).toBe(
+    presentation === "dashboard",
+  );
+  expect(stderr.text()).toContain("Report:");
+  if (presentation === "dashboard") {
+    expect(stderr.text().split("\u001B[?1049h")).toHaveLength(2);
+    expect(stderr.text()).toContain("validating findings");
+    expect(stderr.text().indexOf("\u001B[?1049l")).toBeLessThan(
+      stderr.text().indexOf("Component scans:"),
     );
-    expect(stderr.text()).toContain("Report:");
-    if (presentation === "dashboard") {
-      expect(stderr.text()).toContain("validating findings");
-      expect(stderr.text().indexOf("\u001B[?1049l")).toBeLessThan(
-        stderr.text().indexOf("Component scans:"),
-      );
-    } else expect(stderr.text()).toContain("apps/api completed");
-    expect(
-      [...signals.listeners.values()].every(
-        (listeners) => listeners.size === 0,
-      ),
-    ).toBe(true);
-  },
-);
+  } else {
+    expect(stderr.text()).toContain("apps/api completed");
+    expect(stderr.text()).not.toContain("\u001B");
+  }
+  expect(
+    [...signals.listeners.values()].every((listeners) => listeners.size === 0),
+  ).toBe(true);
+  expect(input.listenerCount("data")).toBe(0);
+  input.destroy();
+});
 
-test("CLI restores the dashboard and reports saved partial results on cancellation", async () => {
+test("CLI reports component warnings and failures before activity without entering the dashboard", async () => {
   const paths = await fixture();
   const stdout = capture();
   const stderr = capture(true);
+  const rawModes: boolean[] = [];
+  const input = Object.assign(new PassThrough(), {
+    isTTY: true,
+    setRawMode(value: boolean) {
+      rawModes.push(value);
+      return input;
+    },
+  });
   const signals = new FakeSignals();
   const code = await main(
     [
@@ -515,13 +556,72 @@ test("CLI restores the dashboard and reports saved partial results on cancellati
       "1",
       "--output-dir",
       paths.outputDir,
-      "--json",
     ],
     stdout.stream,
     stderr.stream,
     {
       ...dependencies({ currentDirectory: paths.root, signals }),
+      scanInput: input,
       createSecurity: client(async (_repository, options) => {
+        expect(stderr.text()).not.toContain("\u001B");
+        if (String(options.target) === "apps/api") {
+          options.onWarning?.("Component credentials need refreshing.");
+          expect(stderr.text()).toContain(
+            "warning: Component credentials need refreshing.",
+          );
+          throw new Error("Sign in again before retrying the component.");
+        }
+        expect(stderr.text()).toContain(
+          "apps/api failed: Sign in again before retrying the component.",
+        );
+        return completed(options);
+      }),
+    },
+  );
+  expect(code).toBe(2);
+  expect(stderr.text()).toContain("1 complete, 0 incomplete, 1 failed");
+  expect(stderr.text()).toContain("Retry with --components-file");
+  expect(stderr.text()).not.toContain("\u001B");
+  expect(rawModes).toEqual([]);
+  expect(input.listenerCount("data")).toBe(0);
+  expect(
+    [...signals.listeners.values()].every((listeners) => listeners.size === 0),
+  ).toBe(true);
+  input.destroy();
+});
+
+test("CLI restores the dashboard and reports saved partial results on cancellation", async () => {
+  const paths = await fixture();
+  const stdout = capture();
+  const stderr = capture(true);
+  const input = Object.assign(new PassThrough(), { isTTY: true });
+  const signals = new FakeSignals();
+  const code = await main(
+    [
+      "scan-components",
+      paths.repository,
+      "--component",
+      "apps/api",
+      "--component",
+      "apps/web",
+      "--workers",
+      "1",
+      "--output-dir",
+      paths.outputDir,
+    ],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...dependencies({ currentDirectory: paths.root, signals }),
+      scanInput: input,
+      createSecurity: client(async (_repository, options) => {
+        options.onActivity?.({
+          id: "read-source",
+          kind: "command",
+          status: "completed",
+          description: "Read component source",
+          paths: ["apps/api/app.ts"],
+        });
         const result = await completed(options);
         signals.emit("SIGINT");
         return result;
@@ -534,12 +634,16 @@ test("CLI restores the dashboard and reports saved partial results on cancellati
   });
   expect(stderr.text()).toContain("1 complete, 0 incomplete, 1 failed");
   expect(stderr.text()).toContain("Retry with --components-file");
+  expect(stderr.text()).toContain("\u001B[?1049h");
+  expect(stderr.text()).toContain("\u001B[?1049l");
   expect(stderr.text().indexOf("\u001B[?1049l")).toBeLessThan(
     stderr.text().indexOf("Component scans:"),
   );
   expect(
     [...signals.listeners.values()].every((listeners) => listeners.size === 0),
   ).toBe(true);
+  expect(input.listenerCount("data")).toBe(0);
+  input.destroy();
 });
 
 test("merges confirmed root causes with complete evidence and the highest severity", async () => {

@@ -13,6 +13,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
+import { AuthenticationRequiredError } from "../src/errors.js";
 import { readModelCatalog, type CatalogModel } from "../src/model-catalog.js";
 
 const temporaryDirectories: string[] = [];
@@ -77,9 +78,13 @@ for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
   appendFileSync(transcript, JSON.stringify(request) + "\\n");
   if (request.method === "initialized") continue;
-  if (request.method === "account/read") {
-    send({ id: request.id, result: { account: mode === "signed-out"
-      ? null : { type: mode === "stored-api-key" ? "apiKey" : "chatgpt" } } });
+  if (request.method === "getAuthStatus") {
+    send({ id: request.id, result: { authMethod: mode === "signed-out" ? null
+      : mode === "header-auth" ? "headers" : mode === "stored-api-key" ? "apiKey" : "chatgpt",
+      authToken: null, requiresOpenaiAuth: true } });
+  } else if (request.method === "account/read") {
+    send({ id: request.id, result: { account: mode === "signed-out" || mode === "header-auth" || mode === "expired-chatgpt"
+      ? null : { type: mode === "stored-api-key" ? "apiKey" : "chatgpt" }, requiresOpenaiAuth: true } });
   } else if (request.method === "model/list") {
     if (mode === "error") {
       send({ id: request.id, error: { code: -32603, message: "Catalog unavailable" } });
@@ -138,19 +143,24 @@ describe("Codex model catalog", () => {
     expect(requests.map((request) => request.method)).toEqual([
       "initialize",
       "initialized",
+      "getAuthStatus",
       "account/read",
       "model/list",
       "model/list",
     ]);
-    expect(requests[2].params).toEqual({ refreshToken: false });
-    expect(requests[3].params).toEqual({ includeHidden: true });
-    expect(requests[4].params).toEqual({
+    expect(requests[2].params).toEqual({
+      includeToken: false,
+      refreshToken: false,
+    });
+    expect(requests[3].params).toEqual({ refreshToken: false });
+    expect(requests[4].params).toEqual({ includeHidden: true });
+    expect(requests[5].params).toEqual({
       includeHidden: true,
       cursor: "next-page",
     });
   });
 
-  test.each(["stored-api-key", "signed-out"])(
+  test.each(["stored-api-key", "signed-out", "header-auth"])(
     "does not claim account availability for %s credentials",
     async (mode) => {
       const fake = await fakeCodex(mode);
@@ -161,10 +171,25 @@ describe("Codex model catalog", () => {
       expect(requests.map((request) => request.method)).toEqual([
         "initialize",
         "initialized",
+        "getAuthStatus",
         "account/read",
       ]);
     },
   );
+
+  test("surfaces a native ChatGPT authentication failure before loading catalog advice", async () => {
+    const fake = await fakeCodex("expired-chatgpt");
+    await expect(
+      readModelCatalog(fake.command, fake.environment),
+    ).rejects.toBeInstanceOf(AuthenticationRequiredError);
+    const [, ...requests] = await fake.requests();
+    expect(requests.map((request) => request.method)).toEqual([
+      "initialize",
+      "initialized",
+      "getAuthStatus",
+      "account/read",
+    ]);
+  });
 
   test("authenticates API keys through stdin using only ephemeral storage", async () => {
     const fake = await fakeCodex();

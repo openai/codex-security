@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { configuredCodexHome } from "./auth.js";
 import { codexConfigOverrides, type JsonObject } from "./config.js";
+import { AuthenticationRequiredError } from "./errors.js";
 import {
   executablePathForSpawn,
   type CodexCommand,
@@ -23,6 +24,11 @@ export interface CatalogModel {
 interface CatalogPage {
   data: CatalogModel[];
   nextCursor?: string | null;
+}
+
+interface AccountState {
+  account?: { type: string } | null;
+  requiresOpenaiAuth?: boolean;
 }
 
 interface Message {
@@ -115,9 +121,26 @@ export async function readModelCatalog(
     if (apiKey !== undefined) {
       await request("account/login/start", { type: "apiKey", apiKey });
     } else {
+      // Let Codex perform its normal conditional refresh before showing advice.
+      // account/read alone reads cached identity; the follow-up exposes a
+      // permanent refresh failure without requesting tokens or forcing refresh.
+      const authStatus = (await request("getAuthStatus", {
+        includeToken: false,
+        refreshToken: false,
+      })) as { authMethod?: string } | undefined;
       const account = (await request("account/read", {
         refreshToken: false,
-      })) as { account?: { type: string } | null } | undefined;
+      })) as AccountState | undefined;
+      if (
+        authStatus?.authMethod === "chatgpt" &&
+        account?.account === null &&
+        account.requiresOpenaiAuth === true
+      ) {
+        throw new AuthenticationRequiredError(
+          "Codex Security's stored ChatGPT sign-in is no longer available. " +
+            "Run 'codex-security login' and retry.",
+        );
+      }
       if (account?.account?.type !== "chatgpt") {
         throw new Error(
           "Account-specific model availability could not be determined.",

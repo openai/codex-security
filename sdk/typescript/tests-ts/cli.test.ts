@@ -1795,6 +1795,7 @@ describe("CLI", () => {
     const deps = dependencies({
       environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_TTY_SECRET_123" },
     });
+    deps.scanInput = Object.assign(new PassThrough(), { isTTY: true });
     deps.setInterval = () => {
       const timer = {} as NodeJS.Timeout;
       activeTimers.add(timer);
@@ -1874,6 +1875,7 @@ describe("CLI", () => {
       const stderr = capture(true);
       let timers = 0;
       const deps = dependencies();
+      deps.scanInput = Object.assign(new PassThrough(), { isTTY: true });
       deps.setInterval = () => {
         timers += 1;
         return {} as NodeJS.Timeout;
@@ -1899,37 +1901,48 @@ describe("CLI", () => {
   test.each([false, true])(
     "subscribes to session details only with TTY stdin: %p",
     async (stdinTTY) => {
-      const descriptor = Object.getOwnPropertyDescriptor(
-        process.stdin,
-        "isTTY",
-      );
+      const input = Object.assign(new PassThrough(), { isTTY: stdinTTY });
       const stderr = capture(true);
       let subscribed = false;
       try {
-        Object.defineProperty(process.stdin, "isTTY", {
-          configurable: true,
-          value: stdinTTY,
+        const deps = dependencies({
+          onTurn: (_repository, options) => {
+            const scanOptions = options as ScanOptions;
+            subscribed = typeof scanOptions.onSessionEvent === "function";
+            expect(stderr.text()).not.toContain("CODEX SECURITY");
+            scanOptions.onScanStarted?.();
+            expect(stderr.text()).not.toContain("CODEX SECURITY");
+            scanOptions.onActivity?.({
+              id: "read-1",
+              kind: "command",
+              status: "running",
+              description: "read src/index.ts",
+              paths: ["src/index.ts"],
+            });
+            expect(stderr.text().includes("CODEX SECURITY")).toBe(stdinTTY);
+          },
         });
+        deps.scanInput = input;
         const code = await main(
           ["scan", "."],
           capture().stream,
           stderr.stream,
-          dependencies({
-            onTurn: (_repository, options) => {
-              subscribed =
-                typeof (options as ScanOptions).onSessionEvent === "function";
-            },
-          }),
+          deps,
         );
         expect(code).toBe(0);
-        expect(stderr.text()).toContain("CODEX SECURITY");
         expect(subscribed).toBe(stdinTTY);
-      } finally {
-        if (descriptor === undefined) {
-          Reflect.deleteProperty(process.stdin, "isTTY");
+        if (stdinTTY) {
+          expect(stderr.text()).toContain("CODEX SECURITY");
         } else {
-          Object.defineProperty(process.stdin, "isTTY", descriptor);
+          expect(stderr.text()).toContain("Preparing scan");
+          expect(stderr.text()).toContain("Running scan");
+          expect(stderr.text()).not.toContain("CODEX SECURITY");
+          expect(stderr.text()).not.toContain("\u001B");
+          expect(stderr.text()).not.toContain("\r");
         }
+        expect(input.listenerCount("data")).toBe(0);
+      } finally {
+        input.destroy();
       }
     },
   );
@@ -1960,6 +1973,7 @@ describe("CLI", () => {
           { kind: "dispatch", phase: "file_review", planned: 2, started: 2 },
         ],
       });
+      deps.scanInput = Object.assign(new PassThrough(), { isTTY: true });
       deps.setInterval = () => {
         timers += 1;
         return {} as NodeJS.Timeout;
@@ -2028,6 +2042,7 @@ describe("CLI", () => {
     let closed = 0;
     let timers = 0;
     const deps = dependencies({
+      scanProgress: [{ phase: "discovery", filesCompleted: 0, filesTotal: 1 }],
       onRun: () => {
         scans += 1;
       },
@@ -2035,6 +2050,7 @@ describe("CLI", () => {
         closed += 1;
       },
     });
+    deps.scanInput = Object.assign(new PassThrough(), { isTTY: true });
     deps.setInterval = () => {
       timers += 1;
       throw new Error("Dashboard timer unavailable.");
@@ -2056,26 +2072,30 @@ describe("CLI", () => {
     const write = stderr.stream.write;
     const signals = new FakeSignals();
     let closed = 0;
+    let cleanupAttempted = false;
     stderr.stream.write = (chunk) => {
       if (chunk.toString().includes("\u001B[?25h\u001B[?1049l")) {
+        cleanupAttempted = true;
         throw new Error("Terminal cleanup failed.");
       }
       return write.call(stderr.stream, chunk);
     };
 
     expect(
-      await main(
-        ["scan", "."],
-        stdout.stream,
-        stderr.stream,
-        dependencies({
+      await main(["scan", "."], stdout.stream, stderr.stream, {
+        ...dependencies({
           signals,
+          scanProgress: [
+            { phase: "discovery", filesCompleted: 0, filesTotal: 1 },
+          ],
           onClose: () => {
             closed += 1;
           },
         }),
-      ),
+        scanInput: Object.assign(new PassThrough(), { isTTY: true }),
+      }),
     ).toBe(0);
+    expect(cleanupAttempted).toBe(true);
     expect(closed).toBe(1);
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
@@ -2104,61 +2124,70 @@ describe("CLI", () => {
         ],
         stdout.stream,
         stderr.stream,
-        dependencies({
-          environment: { NO_COLOR: "1" },
-          result,
-          activities: [
-            {
-              id: "read-1",
-              kind: "command",
-              status: "running",
-              description:
-                'nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
-              paths: ["routes/login.ts"],
-            },
-            {
-              id: "worker-1:read-1",
-              kind: "command",
-              status: "running",
-              description:
-                'rg -n "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
-              paths: ["routes/login.ts"],
-              worker: 1,
-            },
-            {
-              id: "worker-1:thinking-1",
-              kind: "reasoning",
-              status: "completed",
-              description: "Following the login request into the SQL query.",
-              paths: [],
-              worker: 1,
-            },
-            {
-              id: "worker-1:message-1",
-              kind: "message",
-              status: "completed",
-              description: "The request reaches the query without validation.",
-              paths: [],
-              worker: 1,
-            },
-            {
-              id: "request-1",
-              kind: "command",
-              status: "running",
-              description:
-                'curl -H "Authorization: Bearer sk-proj-SYNTHETIC_OPENAI_VALUE_123"',
-              paths: [],
-            },
-          ],
-          costUpdates: [result.cost!],
-          scanProgress: [
-            { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
-            { phase: "discovery", filesCompleted: 3, filesTotal: 1_258 },
-          ],
-          workerStatuses: [
-            { kind: "dispatch", phase: "file_review", planned: 6, started: 3 },
-          ],
-        }),
+        {
+          scanInput: Object.assign(new PassThrough(), { isTTY: true }),
+          ...dependencies({
+            environment: { NO_COLOR: "1" },
+            result,
+            activities: [
+              {
+                id: "read-1",
+                kind: "command",
+                status: "running",
+                description:
+                  'nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
+                paths: ["routes/login.ts"],
+              },
+              {
+                id: "worker-1:read-1",
+                kind: "command",
+                status: "running",
+                description:
+                  'rg -n "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
+                paths: ["routes/login.ts"],
+                worker: 1,
+              },
+              {
+                id: "worker-1:thinking-1",
+                kind: "reasoning",
+                status: "completed",
+                description: "Following the login request into the SQL query.",
+                paths: [],
+                worker: 1,
+              },
+              {
+                id: "worker-1:message-1",
+                kind: "message",
+                status: "completed",
+                description:
+                  "The request reaches the query without validation.",
+                paths: [],
+                worker: 1,
+              },
+              {
+                id: "request-1",
+                kind: "command",
+                status: "running",
+                description:
+                  'curl -H "Authorization: Bearer sk-proj-SYNTHETIC_OPENAI_VALUE_123"',
+                paths: [],
+              },
+            ],
+            costUpdates: [result.cost!],
+            scanProgress: [
+              { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
+              { phase: "discovery", filesCompleted: 3, filesTotal: 1_258 },
+            ],
+            workerStatuses: [
+              {
+                kind: "dispatch",
+                phase: "file_review",
+                planned: 6,
+                started: 3,
+              },
+            ],
+          }),
+        },
       ),
     ).toBe(0);
 
@@ -2211,24 +2240,27 @@ describe("CLI", () => {
         ["scan", "/code/juice-shop", "--mode", "deep"],
         stdout.stream,
         stderr.stream,
-        dependencies({
-          environment: { NO_COLOR: "1" },
-          result,
-          activities: [
-            {
-              id: "worker-1:read-1",
-              kind: "command",
-              status: "completed",
-              description: "read routes/login.ts",
-              paths: ["routes/login.ts"],
-              worker: 1,
-            },
-          ],
-          costUpdates: [result.cost!],
-          scanProgress: [
-            { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
-          ],
-        }),
+        {
+          scanInput: Object.assign(new PassThrough(), { isTTY: true }),
+          ...dependencies({
+            environment: { NO_COLOR: "1" },
+            result,
+            activities: [
+              {
+                id: "worker-1:read-1",
+                kind: "command",
+                status: "completed",
+                description: "read routes/login.ts",
+                paths: ["routes/login.ts"],
+                worker: 1,
+              },
+            ],
+            costUpdates: [result.cost!],
+            scanProgress: [
+              { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
+            ],
+          }),
+        },
       ),
     ).toBe(0);
 
@@ -4264,15 +4296,10 @@ describe("CLI", () => {
       const stdout = capture();
       const stderr = capture(true);
       const result = fakeResult(["medium"]);
+      const deps = dependencies({ environment, result });
+      deps.scanInput = Object.assign(new PassThrough(), { isTTY: true });
 
-      expect(
-        await main(
-          ["scan"],
-          stdout.stream,
-          stderr.stream,
-          dependencies({ environment, result }),
-        ),
-      ).toBe(0);
+      expect(await main(["scan"], stdout.stream, stderr.stream, deps)).toBe(0);
 
       if (color) {
         expect(stderr.text()).toContain("\u001B[1;36mREPORT\u001B[0m");
@@ -4821,6 +4848,64 @@ describe("CLI", () => {
       input.destroy();
     },
   );
+
+  test("opens the dashboard for a budget increase before the first scan activity", async () => {
+    const input = Object.assign(new PassThrough(), { isTTY: true });
+    const stdout = capture();
+    const stderr = capture(true);
+    const result = fakeResult([], "complete", {
+      input_tokens: 100,
+      output_tokens: 1,
+    });
+    const cost = { ...result.cost!, estimatedUsd: 16 };
+    const deps = dependencies({ environment: { NO_COLOR: "1" } });
+    deps.scanInput = input;
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onScanStarted?.();
+        options?.onCost?.(cost);
+        expect(stderr.text()).not.toContain("\u001B[?1049h");
+        const answer = options?.onBudgetApproaching?.({
+          maxCostUsd: 20,
+          cost,
+          signal: new AbortController().signal,
+        });
+        expect(stderr.text()).toContain("Raise total USD limit:");
+        expect(stderr.text().match(/\u001B\[\?1049h/g)).toHaveLength(1);
+        input.emit("data", "30\r");
+        expect(await answer).toBe(30);
+
+        options?.onCost?.(cost, 30);
+        options?.onActivity?.({
+          id: "read-1",
+          kind: "command",
+          status: "running",
+          description: "read src/index.ts",
+          paths: ["src/index.ts"],
+        });
+        expect(stderr.text()).toContain("$16.00 / $30.00");
+        expect(stderr.text().match(/\u001B\[\?1049h/g)).toHaveLength(1);
+        return result;
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    try {
+      expect(
+        await main(
+          ["scan", ".", "--max-cost", "20"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(input.listenerCount("data")).toBe(0);
+      expect(stderr.text().match(/\u001B\[\?1049l/g)).toHaveLength(1);
+    } finally {
+      input.destroy();
+    }
+  });
 
   test("reports the running cost against the scan budget", async () => {
     const stdout = capture();

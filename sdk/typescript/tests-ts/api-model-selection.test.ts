@@ -11,7 +11,10 @@ import {
   type CodexSecurityConfig,
   type JsonObject,
 } from "../src/config.js";
-import { ScanInterruptedError } from "../src/errors.js";
+import {
+  AuthenticationRequiredError,
+  ScanInterruptedError,
+} from "../src/errors.js";
 import type { ScanModelSelector } from "../src/scan-model-selection.js";
 import { mockWorkbench } from "./support/api-client.js";
 import {
@@ -247,6 +250,27 @@ describe("CLI scan model selection integration", () => {
         scan.client.run(scan.repository, { signal: controller.signal }),
       ).rejects.toBeInstanceOf(ScanInterruptedError);
       expect(selectorCalls).toBe(1);
+      expect(scan.observed.threadsStarted).toBe(0);
+      expect(scan.observed.codexOptions).toBeUndefined();
+      expect(scan.observed.recipe).toBeUndefined();
+    } finally {
+      await scan.client.close();
+    }
+    expect(existsSync(scan.codexHome)).toBe(false);
+  });
+
+  test("a sign-in failure during model preparation does not register or start a scan", async () => {
+    const failure = new AuthenticationRequiredError("Sign in again.");
+    const scan = await createScan(
+      {
+        codexOverrides: { model: "gpt-5.4", model_reasoning_effort: "medium" },
+      },
+      async () => {
+        throw failure;
+      },
+    );
+    try {
+      await expect(scan.client.run(scan.repository)).rejects.toBe(failure);
       expect(scan.observed.threadsStarted).toBe(0);
       expect(scan.observed.codexOptions).toBeUndefined();
       expect(scan.observed.recipe).toBeUndefined();
