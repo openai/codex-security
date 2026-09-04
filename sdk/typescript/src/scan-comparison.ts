@@ -471,6 +471,8 @@ export async function matchCompletedScan(
     "list-unmatched-scan-pairs",
     "--repository",
     options.repository,
+    "--after-scan-id",
+    options.scanId,
   ])) as {
     batches?: {
       afterScanId: string;

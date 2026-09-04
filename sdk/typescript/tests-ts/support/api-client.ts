@@ -43,6 +43,7 @@ export function mockWorkbench(
   args: readonly string[],
   input?: string,
 ): JsonObject {
+  if (args[0] === "list-scans") return { scans: [] };
   if (args[0] === "register-cli-scan") {
     return mockScanRegistration(args, input);
   }

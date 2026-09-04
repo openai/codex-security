@@ -20,6 +20,10 @@ codex-security scan /path/to/directory
 
 For CI, set `OPENAI_API_KEY` instead of signing in.
 
+Linked Git worktrees share scan history and saved findings when they use the same
+Codex Security state directory. Keep `CODEX_SECURITY_STATE_DIR` stable to retain
+that shared history and sign-in scope. See the [scan history guide](sdk/typescript/README.md#scan-history-and-reruns).
+
 ## TypeScript SDK
 
 Codex Security is a Javascript package:

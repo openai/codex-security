@@ -19,12 +19,6 @@ describe("CLI workbench", () => {
     const stdout = capture();
     const calls: Array<readonly string[]> = [];
     const responses: JsonObject[] = [
-      {
-        repositories: [
-          { targetId: "other", targetPath: `${repository}-clone` },
-          { targetId: "selected", targetPath: repository },
-        ],
-      },
       { findings: [{ title: "Finding 1" }], nextOffset: 1 },
       { findings: [{ title: "Finding 2" }], nextOffset: null },
     ];
@@ -38,15 +32,14 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(0);
-    expect(calls[0]).toEqual(["list-repositories"]);
-    expect(calls[1]).toEqual([
+    expect(calls[0]).toEqual([
       "list-global-findings",
-      "--target-id",
-      "selected",
+      "--repository",
+      repository,
       "--status",
       "open",
     ]);
-    expect(calls[2]).toEqual([...calls[1]!, "--offset", "1"]);
+    expect(calls[1]).toEqual([...calls[0]!, "--offset", "1"]);
     expect(JSON.parse(stdout.text())).toEqual({
       repository,
       findings: [{ title: "Finding 1" }, { title: "Finding 2" }],
@@ -56,7 +49,7 @@ describe("CLI workbench", () => {
         ["findings", "--json"],
         capture().stream,
         capture().stream,
-        dependencies({ onWorkbench: () => ({ repositories: [] }) }),
+        dependencies({ onWorkbench: () => ({ findings: [] }) }),
       ),
     ).toBe(0);
     for (const confirmed of [[true, false], []]) {
@@ -78,9 +71,118 @@ describe("CLI workbench", () => {
       ).toBe(0);
       expect(stderr.text()).toContain(
         confirmed.length
-          ? "FINDINGS  2 (1 confirmed this scan; 1 previously found; 2 high)"
+          ? "FINDINGS  2 (1 confirmed in latest repository scan; 1 previously found; 2 high)"
           : "FINDINGS  0\n",
       );
+    }
+  });
+
+  test("uses sealed scan findings when the repository projection is unavailable", async () => {
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan"],
+        capture().stream,
+        stderr.stream,
+        dependencies({ result: fakeResult(["high"]) }),
+      ),
+    ).toBe(0);
+    expect(stderr.text()).toMatch(/FINDINGS\s+1\b/u);
+    expect(stderr.text()).toContain("1 high");
+  });
+
+  test("preserves the original findings requester instead of selecting a historical alias", async () => {
+    const repository = resolve("/current/repository");
+    const findings: JsonObject[] = [
+      { occurrenceId: "requested-finding", status: "open" },
+      { occurrenceId: "linked-finding", status: "open" },
+    ];
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    expect(
+      await main(
+        ["findings", "list", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            return { findings, nextOffset: null };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([
+      ["list-global-findings", "--repository", repository, "--status", "open"],
+    ]);
+    expect(JSON.parse(stdout.text())).toEqual({ repository, findings });
+  });
+
+  test("returns no findings when no related repository has been scanned", async () => {
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    const repository = resolve("/current/repository");
+    expect(
+      await main(
+        ["findings", "list", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => {
+            calls.push(args);
+            return {
+              findings: [],
+              nextOffset: null,
+              projectionAvailable: true,
+            };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([
+      ["list-global-findings", "--repository", repository, "--status", "open"],
+    ]);
+    expect(JSON.parse(stdout.text())).toEqual({ repository, findings: [] });
+  });
+
+  test("reports unavailable findings on any page instead of claiming an empty repository", async () => {
+    for (const laterPage of [false, true]) {
+      for (const json of [false, true]) {
+        const stdout = capture(!json);
+        const stderr = capture();
+        const responses: JsonObject[] = [
+          ...(laterPage
+            ? [
+                {
+                  findings: [{ title: "Synthetic finding" }],
+                  nextOffset: 1,
+                  projectionAvailable: true,
+                },
+              ]
+            : []),
+          {
+            findings: [],
+            nextOffset: null,
+            projectionAvailable: false,
+          },
+        ];
+        const calls: Array<readonly string[]> = [];
+        expect(
+          await main(
+            ["findings", "list", ...(json ? ["--json"] : [])],
+            stdout.stream,
+            stderr.stream,
+            dependencies({
+              onWorkbench: (args) => responses[calls.push(args) - 1]!,
+            }),
+          ),
+        ).toBe(2);
+        expect(calls).toHaveLength(laterPage ? 2 : 1);
+        expect(stderr.text()).toContain("findings are unavailable");
+        expect(stdout.text()).not.toContain("0 open findings");
+        expect(stdout.text()).not.toContain("Synthetic finding");
+        expect(stdout.text()).not.toContain('"findings": []');
+      }
     }
   });
 
@@ -931,6 +1033,7 @@ describe("CLI workbench", () => {
 
   test("reruns the latest completed scan by default", async () => {
     let parentScanId: unknown;
+    let rerunRepository: string | undefined;
 
     expect(
       await main(
@@ -938,7 +1041,8 @@ describe("CLI workbench", () => {
         capture().stream,
         capture().stream,
         dependencies({
-          onTurn: (_repository, options) => {
+          onTurn: (repository, options) => {
+            rerunRepository = repository;
             parentScanId = (options as { parentScanId?: string }).parentScanId;
           },
           onWorkbench: (args): JsonObject =>
@@ -946,7 +1050,7 @@ describe("CLI workbench", () => {
               ? { scans: [{ scanId: "latest-scan" }] }
               : {
                   recipe: {
-                    repository: "/current/repository",
+                    repository: "/removed/linked-worktree",
                     target: { kind: "repository", paths: [] },
                     mode: "standard",
                     config: {},
@@ -956,6 +1060,7 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(parentScanId).toBe("latest-scan");
+    expect(rerunRepository).toBe("/current/repository");
   });
 
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {

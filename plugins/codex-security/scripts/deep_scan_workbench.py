@@ -27,6 +27,7 @@ from workbench_target import (
     git_revision,
     worktree_content_digest,
 )
+from workbench_target_state import RegisteredRepositoryTarget, require_scan_checkout_owner
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
 DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
@@ -146,7 +147,7 @@ class DeepScanDependencies:
     require_remediation_target: Callable[[str], Path]
     require_scannable_target: Callable[[Path], None]
     require_scope: Callable[[str, str, Path], str]
-    ensure_security_target: Callable[[sqlite3.Connection, str], str]
+    register_security_target: Callable[[sqlite3.Connection, str], RegisteredRepositoryTarget]
     require_canonical_scan_directory: Callable[[Path], Path]
     safe_segment: Callable[[str], str]
     compact_timestamp: Callable[[], str]
@@ -234,8 +235,10 @@ def require_scope(scope: str, mode: str, target: Path) -> str:
     return dependencies().require_scope(scope, mode, target)
 
 
-def ensure_security_target(connection: sqlite3.Connection, target_path: str) -> str:
-    return dependencies().ensure_security_target(connection, target_path)
+def register_security_target(
+    connection: sqlite3.Connection, target_path: str
+) -> RegisteredRepositoryTarget:
+    return dependencies().register_security_target(connection, target_path)
 
 
 def require_canonical_scan_directory(scan_dir: Path) -> Path:
@@ -687,6 +690,7 @@ def begin_deep_scan_for_scan(
 ) -> dict[str, Any]:
     scan_id = require_uuid(scan_id, "scan-id")
     candidate = require_scan(connection, scan_id)
+    require_scan_checkout_owner(connection, candidate)
     workspace = require_workspace(connection, candidate["workspace_id"])
     if (
         candidate["mode"] == "deep"
@@ -748,6 +752,7 @@ def begin_deep_scan_for_scan(
     connection.execute("BEGIN IMMEDIATE")
     try:
         scan, _ = require_owned_scan(connection, scan_id, thread_id)
+        require_scan_checkout_owner(connection, scan)
         require_current_continuation(
             scan,
             args.claim_token,
@@ -787,6 +792,7 @@ def begin_deep_scan_for_target(
     try:
         existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
         if existing is not None:
+            require_scan_checkout_owner(connection, existing)
             existing_run = connection.execute(
                 "SELECT 1 FROM deep_scan_runs WHERE scan_id = ?", (existing["id"],)
             ).fetchone()
@@ -822,6 +828,7 @@ def begin_deep_scan_for_target(
             target_inode,
         )
         if terminal is not None:
+            require_scan_checkout_owner(connection, terminal)
             connection.commit()
             return deep_scan_result(
                 connection,
@@ -845,7 +852,8 @@ def begin_deep_scan_for_target(
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
         timestamp = now()
-        target_id = ensure_security_target(connection, target_path)
+        registration = register_security_target(connection, target_path)
+        target_id = registration.target_id
         scan_dir = Path(
             tempfile.mkdtemp(
                 prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
@@ -874,17 +882,19 @@ def begin_deep_scan_for_target(
         connection.execute(
             """
             INSERT INTO scans (
-                id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
+                id, workspace_id, target_id, repository_generation, target_path,
+                target_revision, target_snapshot_digest,
                 target_device, target_inode, scope, mode, user_context,
                 deep_scan_owner_thread_id, scan_dir, model, reasoning_effort, status, phase,
                 handoff_status, started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'deep', ?, ?, ?, ?, ?,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'deep', ?, ?, ?, ?, ?,
                 'running', 'preflight', 'delivered', ?, ?, ?)
             """,
             (
                 scan_id,
                 workspace_id,
                 target_id,
+                registration.repository_generation,
                 target_path,
                 revision,
                 target_snapshot_digest,

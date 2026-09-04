@@ -52,6 +52,62 @@ const simulatedPathProbe = [
   "print(json.dumps({'accepted': accepted, 'nativePathEquality': path_type(supplied) == path_type(resolved), 'resolvedPath': result}))",
 ].join("\n");
 
+const caseSensitiveWindowsHistoryProbe = [
+  "import json, sqlite3, sys",
+  "from pathlib import PureWindowsPath",
+  "from types import SimpleNamespace",
+  "sys.path.insert(0, sys.argv[1])",
+  "import workbench_scan_history as history",
+  "import workbench_target_state as target_state",
+  "class WindowsPath(PureWindowsPath):",
+  "    def expanduser(self):",
+  "        return self",
+  "    def resolve(self, strict=False):",
+  "        return self",
+  "history.Path = WindowsPath",
+  "connection = sqlite3.connect(':memory:')",
+  "connection.row_factory = sqlite3.Row",
+  "connection.executescript('''",
+  "CREATE TABLE security_targets (id TEXT, current_path TEXT, repository_identity TEXT);",
+  "CREATE TABLE scans (id TEXT, target_id TEXT, target_path TEXT, repository_generation TEXT, status TEXT, started_at TEXT);",
+  "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT);",
+  "''')",
+  "def target(identifier, path, identity):",
+  "    return connection.execute('SELECT ? AS target_id, ? AS target_path, ? AS repository_identity, ? AS repository_generation', (identifier, str(WindowsPath(path)), identity, identity)).fetchone()",
+  "upper_root = target('upper-root', 'D:/Repository', 'root-upper')",
+  "lower_root = target('lower-root', 'D:/repository', 'root-lower')",
+  "upper_scope = target('upper-scope', 'D:/Repository/Service', 'scope-upper')",
+  "lower_scope = target('lower-scope', 'D:/Repository/service', 'scope-lower')",
+  "linked_scope = target('linked-scope', 'E:/Linked/Service', 'scope-upper')",
+  "clone_scope = target('clone-scope', 'D:/Clone/Service', 'scope-clone')",
+  "same_path = target('same-path', 'D:/Repository/Service', None)",
+  "targets = [upper_root, lower_root, upper_scope, lower_scope, linked_scope, clone_scope]",
+  "identities = {entry['target_path']: entry['repository_identity'] for entry in targets}",
+  "def inspect(database, target_id, path, stored, **kwargs):",
+  "    identity = identities.get(path)",
+  "    repository = target_state.GitRepositoryIdentity(identity, WindowsPath(path).name, 'synthetic', 1, 2, 3) if identity else None",
+  "    return target_state.RepositoryTargetState(target_id, path, stored, resolved_path=str(WindowsPath(path)), repository=repository, ownership_matches=True, strict_owner_matches=True)",
+  "target_state._inspect_repository_target = inspect",
+  "target_state.repository_origin = lambda path: ('example.test', 'synthetic/repository')",
+  "for entry in targets:",
+  "    connection.execute('INSERT INTO security_targets VALUES (?, ?, ?)', (entry['target_id'], entry['target_path'], entry['repository_identity']))",
+  "cache = history.RepositoryIdentityCache(connection)",
+  "checks = {",
+  "    'nativeWindowsScopeEquality': WindowsPath(upper_scope['target_path']) == WindowsPath(lower_scope['target_path']),",
+  "    'nativeWindowsRootEquality': WindowsPath(upper_root['target_path']) == WindowsPath(lower_root['target_path']),",
+  "    'caseSensitiveScopesMatch': cache.scope(lower_scope['target_id']).generation == cache.scope(upper_scope['target_id']).generation,",
+  "    'caseSensitiveRootsMatch': cache.scope(lower_root['target_id']).generation == cache.scope(upper_root['target_id']).generation,",
+  "    'linkedWorktreeMatches': cache.scope(linked_scope['target_id']).generation == cache.scope(upper_scope['target_id']).generation,",
+  "    'sameOriginCloneMatches': cache.scope(clone_scope['target_id']).generation == cache.scope(upper_scope['target_id']).generation,",
+  "    'exactResolvedPathMatches': history._same_repository(connection, same_path, upper_scope, identities=cache),",
+  "}",
+  "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?)', ('lower-scan', lower_scope['target_id'], lower_scope['target_path'], lower_scope['repository_generation'], 'complete', '2026-08-15T00:00:00Z'))",
+  "history._same_repository = lambda *args, **kwargs: False",
+  "selected = history.list_unmatched_scan_pairs(connection, SimpleNamespace(repository=upper_scope['target_path'], force=False), backfill_finding_details=lambda *args: None, read_coverage=lambda scan: {})",
+  "checks['caseSensitiveUnmatchedScanCount'] = selected['scanCount']",
+  "print(json.dumps(checks))",
+].join("\n");
+
 const realFilesystemProbe = [
   "import json, sys",
   "from pathlib import Path",
@@ -203,6 +259,19 @@ describe("bundled workbench canonical paths", () => {
     expect(runPythonProbe(simulatedPathProbe, "posix")).toMatchObject({
       accepted: false,
       nativePathEquality: false,
+    });
+  });
+
+  test("keeps case-sensitive Windows repository roots and scopes distinct", () => {
+    expect(runPythonProbe(caseSensitiveWindowsHistoryProbe)).toEqual({
+      nativeWindowsScopeEquality: true,
+      nativeWindowsRootEquality: true,
+      caseSensitiveScopesMatch: false,
+      caseSensitiveRootsMatch: false,
+      linkedWorktreeMatches: true,
+      sameOriginCloneMatches: false,
+      exactResolvedPathMatches: true,
+      caseSensitiveUnmatchedScanCount: 0,
     });
   });
 

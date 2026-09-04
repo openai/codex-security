@@ -87,13 +87,17 @@ test("keeps inline and stdin comparison transports compatible", async () => {
 test("keeps unrelated legacy repositories out of matching inputs", async () => {
   const observed = await runPythonProbe(
     `
-import argparse, json, sqlite3, sys
+import argparse, json, sqlite3, sys, tempfile
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import workbench_scan_history as history
 connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
+directory = tempfile.TemporaryDirectory(prefix='codex-security-legacy-fixture-')
+for name in ('selected', 'unrelated'):
+    (Path(directory.name) / name).mkdir()
 connection.executescript('''
+CREATE TABLE security_targets (id TEXT, current_path TEXT);
 CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_path TEXT, status TEXT, started_at TEXT);
 CREATE TABLE finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT);
 CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);
@@ -106,7 +110,7 @@ for index, (scan, repository) in enumerate([
     ('before', 'selected'), ('after', 'selected')
 ]):
     connection.execute('INSERT INTO scans VALUES (?, NULL, ?, ?, ?)',
-                       (scan, str(Path(sys.argv[2]) / repository), 'complete', str(index)))
+                       (scan, str(Path(directory.name) / repository), 'complete', str(index)))
 connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?)', [
     ('unrelated-first', 'unrelated-identity-a', 'unrelated-before'),
     ('unrelated-second', 'unrelated-identity-b', 'unrelated-after')
@@ -305,9 +309,112 @@ print(json.dumps({'unchanged': rows() == original, 'comparisons': len(original),
   ).toBe(true);
 });
 
+test("orders automatic matching by completion while loading each scan once", async () => {
+  const probe = [
+    "import argparse, json, sqlite3, sys",
+    "from pathlib import Path",
+    "sys.path.insert(0, sys.argv[1])",
+    "import workbench_scan_history as history",
+    "repository = str(Path(sys.argv[2]).resolve())",
+    "connection = sqlite3.connect(':memory:')",
+    "connection.row_factory = sqlite3.Row",
+    "connection.executescript('''",
+    "CREATE TABLE security_targets (id TEXT, current_path TEXT);",
+    "CREATE TABLE scans (id TEXT, target_path TEXT, target_id TEXT, status TEXT, started_at TEXT, completed_at TEXT);",
+    "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT);",
+    "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT);",
+    "CREATE TABLE finding_occurrences (id TEXT, finding_id TEXT, scan_id TEXT, details_json TEXT, remediation TEXT, severity TEXT, summary TEXT, title TEXT);",
+    "CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);",
+    "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
+    "''')",
+    "connection.execute('INSERT INTO security_targets VALUES (?, ?)', ('target', repository))",
+    "for index in range(3):",
+    "    scan = f'scan-{index}'",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?)', (scan, repository, 'target', 'complete', f'2026-08-01T0{index}:00:00Z', f'2026-08-01T0{index + 3}:00:00Z'))",
+    "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))",
+    "queries = []",
+    "connection.set_trace_callback(queries.append)",
+    "backfilled = []",
+    "result = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=repository, force=False), backfill_finding_details=lambda _connection, scan: backfilled.append(scan['id']), read_coverage=lambda _scan: {})",
+    "finding_queries = sum('FROM finding_occurrences AS occurrences' in query for query in queries)",
+    "def planned(focus=None):",
+    "    value = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=repository, force=False, after_scan_id=focus), backfill_finding_details=lambda *_: None, read_coverage=lambda _: {})",
+    "    return {'batches': [{'after': batch['afterScanId'], 'before': [scan['scanId'] for scan in batch['beforeScans']]} for batch in value['batches']], 'skipped': value['skippedPairs']}",
+    "connection.execute(\"UPDATE scans SET status = 'running', completed_at = NULL WHERE id = 'scan-0'\")",
+    "later_completed_first = planned('scan-2')",
+    "connection.execute(\"UPDATE scans SET status = 'complete', completed_at = '2026-08-01T06:00:00Z' WHERE id = 'scan-0'\")",
+    "earlier_completed_last = planned('scan-0')",
+    "excludes_later_completion = planned('scan-2')",
+    "def automatic_pairs():",
+    "    return [[before, batch['after']] for index in range(3) for batch in planned(f'scan-{index}')['batches'] for before in batch['before']]",
+    "completion_pairs = automatic_pairs()",
+    "connection.execute(\"INSERT INTO scan_comparisons VALUES ('scan-2', 'scan-0')\")",
+    "reverse_cached, chronological = planned('scan-0'), planned()",
+    "connection.execute('DELETE FROM scan_comparisons')",
+    "connection.execute(\"UPDATE scans SET completed_at = CASE id WHEN 'scan-0' THEN NULL WHEN 'scan-1' THEN '2026-08-01T05:00:00+01:00' ELSE '2026-08-01T04:00:00Z' END\")",
+    "legacy = dict(connection.execute(\"SELECT * FROM scans WHERE id = 'scan-0'\").fetchone())",
+    "legacy_without_completed = {key: value for key, value in legacy.items() if key != 'completed_at'}",
+    "print(json.dumps({'result': result, 'backfilled': backfilled, 'findingQueries': finding_queries, 'laterCompletedFirst': later_completed_first, 'earlierCompletedLast': earlier_completed_last, 'excludesLaterCompletion': excludes_later_completion, 'completionPairs': completion_pairs, 'reverseCached': reverse_cached, 'chronological': chronological, 'tiedPairs': automatic_pairs(), 'legacyFallback': history._scan_completion_order(legacy) == history._scan_completion_order(legacy_without_completed)}))",
+  ].join("\n");
+
+  const observed = await runPythonProbe(
+    probe,
+    join(tmpdir(), "codex-security-matching-fixture"),
+  );
+  expect(observed).toMatchObject({
+    backfilled: ["scan-0", "scan-1", "scan-2"],
+    findingQueries: 3,
+    laterCompletedFirst: {
+      batches: [{ after: "scan-2", before: ["scan-1"] }],
+      skipped: 0,
+    },
+    earlierCompletedLast: {
+      batches: [{ after: "scan-0", before: ["scan-1", "scan-2"] }],
+      skipped: 0,
+    },
+    excludesLaterCompletion: {
+      batches: [{ after: "scan-2", before: ["scan-1"] }],
+      skipped: 0,
+    },
+    completionPairs: [
+      ["scan-1", "scan-0"],
+      ["scan-2", "scan-0"],
+      ["scan-1", "scan-2"],
+    ],
+    tiedPairs: [
+      ["scan-0", "scan-1"],
+      ["scan-0", "scan-2"],
+      ["scan-1", "scan-2"],
+    ],
+    legacyFallback: true,
+    reverseCached: {
+      batches: [{ after: "scan-0", before: ["scan-1"] }],
+      skipped: 1,
+    },
+    chronological: {
+      batches: [
+        { after: "scan-1", before: ["scan-0"] },
+        { after: "scan-2", before: ["scan-1"] },
+      ],
+      skipped: 1,
+    },
+    result: {
+      scanCount: 3,
+      batches: [
+        { afterScanId: "scan-1", beforeScans: [{ scanId: "scan-0" }] },
+        {
+          afterScanId: "scan-2",
+          beforeScans: [{ scanId: "scan-0" }, { scanId: "scan-1" }],
+        },
+      ],
+    },
+  });
+});
+
 test("loads each scan once and scopes saved links to uncached history", async () => {
   const probe = [
     "import argparse, json, sqlite3, sys",
+    "from pathlib import Path",
     "sys.path.insert(0, sys.argv[1])",
     "import workbench_scan_history as history",
     "connection = sqlite3.connect(':memory:')",
@@ -321,18 +428,20 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);",
     "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
     "''')",
+    "repository = str(Path(sys.argv[2]).resolve())",
+    "connection.execute('INSERT INTO security_targets VALUES (?, ?)', ('target', repository))",
     "for index in range(3):",
     "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?)', (scan, repository, 'target', 'complete', str(index)))",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "queries = []",
     "connection.set_trace_callback(queries.append)",
     "backfilled = []",
-    "result = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda _connection, scan: backfilled.append(scan['id']), read_coverage=lambda _scan: {})",
+    "result = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=repository, force=False), backfill_finding_details=lambda _connection, scan: backfilled.append(scan['id']), read_coverage=lambda _scan: {})",
     "finding_queries = sum('FROM finding_occurrences AS occurrences' in query for query in queries)",
     "connection.executemany('INSERT INTO scan_comparisons VALUES (?, ?)', [('scan-0', 'scan-1'), ('scan-0', 'scan-2'), ('scan-1', 'scan-2')])",
     "queries.clear()",
-    "cached = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda _scan: {})",
+    "cached = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=repository, force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda _scan: {})",
     "cached_link_queries = sum('FROM scan_comparison_matches' in query for query in queries)",
     "for name in ('foreign-a', 'foreign-b'):",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (name, name, name, '{}', 'fix', 'high', 'summary', 'title'))",
@@ -342,14 +451,14 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "link_queries = [query for query in queries if 'FROM scan_comparison_matches' in query]",
     "for index in (3, 4):",
     "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?)', (scan, repository, 'target', 'complete', str(index)))",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, f'scan-{index - 3}', scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "def coverage(scan):",
     "    if scan['id'] in {'scan-0', 'scan-1', 'scan-2'}:",
     "        raise SystemExit('Synthetic unavailable artifacts')",
     "    return {}",
-    "unavailable = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda *_: None, read_coverage=coverage)",
-    "forced = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=True), backfill_finding_details=lambda *_: None, read_coverage=coverage)",
+    "unavailable = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=repository, force=False), backfill_finding_details=lambda *_: None, read_coverage=coverage)",
+    "forced = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=repository, force=True), backfill_finding_details=lambda *_: None, read_coverage=coverage)",
     "connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?)', [('scan-1', 'scan-2', 'scan-1', 'scan-2'), ('scan-2', 'scan-0', 'scan-2', 'scan-0'), ('scan-0', 'foreign-a', 'scan-0', 'foreign-a'), ('foreign-a', 'scan-1', 'foreign-a', 'scan-1')])",
     "limited = hasattr(connection, 'setlimit')",
     "if limited:",

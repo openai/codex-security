@@ -43,6 +43,7 @@ import {
 import {
   classifyConnectionFailure,
   initialCredentialsAvailable,
+  listRepositoryFindings,
 } from "../src/api.js";
 import {
   FIREWORKS_CODEX_PROVIDER,
@@ -1860,7 +1861,7 @@ describe("CodexSecurity orchestration", () => {
               falsePositives: [],
             };
           }
-          if (args[0] !== "register-cli-scan") return {};
+          if (args[0] !== "register-cli-scan") return mockWorkbench(args);
           registration = args;
           return mockScanRegistration(args, input);
         },
@@ -1902,6 +1903,153 @@ describe("CodexSecurity orchestration", () => {
     await expect(stat(output)).resolves.toBeDefined();
     await client.close();
   });
+
+  test.each([
+    ["preparation failure", "prepare", "previous", "restored", false],
+    ["registration refusal", "register", "previous", "restored", false],
+    ["unrecorded previous output", "register", null, "restored", false],
+    [
+      "lost registration acknowledgement",
+      "register",
+      "previous",
+      "already-recorded",
+      false,
+    ],
+    ["changed output owner", "register", "previous", "ownership-changed", true],
+    ["recovery failure", "register", "previous", "error", true],
+    [
+      "malformed recovery acknowledgement",
+      "register",
+      "previous",
+      "malformed",
+      true,
+    ],
+    [
+      "acknowledged invalid registration",
+      "acknowledged",
+      "previous",
+      null,
+      false,
+    ],
+    ["acknowledged registration", "started", "previous", null, false],
+  ] as const)(
+    "reconciles archived output through the workbench after %s",
+    async (_label, failureStage, previousScanId, disposition, warns) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const output = join(root, "scan");
+      const archive = `${output}.previous-synthetic`;
+      await Promise.all([
+        mkdir(repository),
+        mkdir(codexHome),
+        mkdir(output, { mode: 0o700 }),
+      ]);
+      const failure = new Error("synthetic registration failure");
+      const commands: string[] = [];
+      const warnings: string[] = [];
+      let recoveryArgs: readonly string[] | undefined;
+      let recoverySignal: AbortSignal | undefined;
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          repositoryRevision: async () => null,
+          prepareOutputDir: async (
+            requested: string | undefined,
+            _name: string,
+            _root: string | undefined,
+            _validate: ((path: string) => void) | undefined,
+            archiveExisting: boolean | undefined,
+            onArchived: ((path: string) => void) | undefined,
+          ) => {
+            commands.push("prepare-output");
+            expect(requested).toBe(output);
+            expect(archiveExisting).toBe(true);
+            onArchived?.(archive);
+            if (failureStage === "prepare") throw failure;
+            return output;
+          },
+          runWorkbench: async (
+            workbenchOptions: { signal?: AbortSignal },
+            args: readonly string[],
+            input?: string,
+          ) => {
+            commands.push(args[0]!);
+            if (args[0] === "list-scans") {
+              expect(args).toEqual(["list-scans", "--scan-root", output]);
+              return {
+                scans: [
+                  { scanId: "child", scanDir: join(output, "child") },
+                  ...(previousScanId === null
+                    ? []
+                    : [{ scanId: previousScanId, scanDir: output }]),
+                ],
+              };
+            }
+            if (args[0] === "register-cli-scan") {
+              if (failureStage === "acknowledged") return {};
+              if (failureStage === "started")
+                return mockScanRegistration(args, input);
+              throw failure;
+            }
+            if (args[0] === "restore-cli-scan-archive") {
+              recoveryArgs = args;
+              recoverySignal = workbenchOptions.signal;
+              if (disposition === "error")
+                throw new Error("synthetic recovery failure");
+              if (disposition === "malformed") return {};
+              return { disposition, scanDir: output, archivedScanDir: archive };
+            }
+            return mockWorkbench(args, input);
+          },
+          createCodex: () => {
+            if (failureStage === "started") throw failure;
+            throw new Error("model execution must not start");
+          },
+        },
+      );
+
+      const operation = client.run(repository, {
+        outputDir: output,
+        archiveExisting: true,
+        onWarning: (warning) => warnings.push(warning),
+      });
+      if (failureStage === "acknowledged") {
+        await expect(operation).rejects.toThrow("invalid scan registration");
+        expect(recoveryArgs).toBeUndefined();
+      } else if (failureStage === "started") {
+        await expect(operation).rejects.toBe(failure);
+        expect(recoveryArgs).toBeUndefined();
+      } else {
+        await expect(operation).rejects.toBe(failure);
+        expect(recoveryArgs).toEqual([
+          "restore-cli-scan-archive",
+          "--scan-dir",
+          output,
+          "--archived-scan-dir",
+          archive,
+          ...(previousScanId === null
+            ? ["--previous-scan-absent"]
+            : ["--previous-scan-id", previousScanId]),
+        ]);
+        expect(recoverySignal).toBeUndefined();
+      }
+      expect(commands.slice(0, 2)).toEqual(["list-scans", "prepare-output"]);
+      expect(commands.includes("register-cli-scan")).toBe(
+        failureStage !== "prepare",
+      );
+      await Promise.resolve();
+      expect(
+        warnings.some((warning) =>
+          warning.startsWith("Could not restore previous scan output:"),
+        ),
+      ).toBe(warns);
+      await client.close();
+    },
+  );
 
   test("reports the real scan failure when scan cleanup also fails", async () => {
     const root = await temporaryDirectory();
@@ -3635,9 +3783,38 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test("discards partial findings when a repository projection becomes unavailable", async () => {
+    const pages: JsonObject[] = [
+      { findings: [{ findingId: "first-page" }], nextOffset: 1 },
+      { findings: [], projectionAvailable: false, nextOffset: null },
+    ];
+    const commands: Array<readonly string[]> = [];
+    expect(
+      await listRepositoryFindings(async (args) => {
+        commands.push(args);
+        return pages[commands.length - 1]!;
+      }, "target_sha256_example"),
+    ).toBeUndefined();
+    expect(commands).toHaveLength(2);
+    expect(commands[1]).toEqual([...commands[0]!, "--offset", "1"]);
+    expect(
+      await listRepositoryFindings(
+        async () => ({ findings: [], projectionAvailable: true }),
+        "target_sha256_example",
+      ),
+    ).toEqual([]);
+    expect(
+      await listRepositoryFindings(
+        async () => ({ findings: [] }),
+        "target_sha256_example",
+      ),
+    ).toEqual([]);
+  });
+
   test.each([
     ["semantic matching fails", "matcher", "matcher unavailable"],
     ["the repository index fails", "index", "index unavailable"],
+    ["the repository projection is unavailable", "projection", undefined],
     ["a cost limit still allows false-positive matching", "budget", undefined],
     [
       "dismissed history survives missing reviewer feedback",
@@ -3708,6 +3885,9 @@ describe("CodexSecurity orchestration", () => {
             }
             if (args[0] === "list-global-findings") {
               if (failure === "index") throw new Error("index unavailable");
+              if (failure === "projection") {
+                return { findings: [], projectionAvailable: false };
+              }
               if (failure === "dismissed") {
                 return {
                   findings: args.includes("--status")
@@ -3776,7 +3956,12 @@ describe("CodexSecurity orchestration", () => {
           ? []
           : [`Could not update repository findings: ${warning}`],
       );
-      expect(modelCalled).toBe(failure !== "index");
+      expect(modelCalled).toBe(failure !== "index" && failure !== "projection");
+      if (failure === "projection") {
+        expect(
+          result.findings.findings.map(({ findingId }) => findingId),
+        ).toContain(current.findingId);
+      }
       expect(commands.some(([command]) => command === "complete-scan")).toBe(
         true,
       );

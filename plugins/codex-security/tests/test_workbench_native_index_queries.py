@@ -117,7 +117,8 @@ def test_global_finding_filters_apply_before_pagination(workbench_api, indexed_c
     assert [finding["scanId"] for finding in targeted["findings"]] == [SCAN_IDS[0]]
     assert query(connection, query_args(query="needle", severity="low"))["findings"] == []
     unfiltered = query(connection, query_args())
-    assert set(unfiltered) == {"findings", "limit", "nextOffset", "offset"}
+    assert set(unfiltered) == {"findings", "limit", "nextOffset", "offset", "projectionAvailable"}
+    assert unfiltered["projectionAvailable"] is True
     assert len(unfiltered["findings"]) == 3
 
 
@@ -240,20 +241,21 @@ def test_scan_root_filter_matches_windows_path_aliases(
 def test_scan_list_probes_requested_repository_once(
     workbench_api, indexed_collections, monkeypatch
 ):
+    import workbench_target_state as target_state
+
     connection, targets = indexed_collections
     history = workbench_api["scan_history"]
     probes = []
-    git_output = history.git_output
+    git_bytes = target_state.git_bytes
 
-    def record_git_output(target, *arguments):
+    def record_git_bytes(target, *arguments):
         probes.append((target, arguments))
-        return git_output(target, *arguments)
+        return git_bytes(target, *arguments)
 
-    monkeypatch.setattr(history, "git_output", record_git_output)
+    monkeypatch.setattr(target_state, "git_bytes", record_git_bytes)
     result = history.list_scans(connection, query_args(repository=str(targets[0]), limit=1))
 
     assert [scan["scanId"] for scan in result["scans"]] == [SCAN_IDS[0]]
     assert [arguments for target, arguments in probes if target == targets[0]] == [
         ("rev-parse", "--path-format=absolute", "--git-common-dir"),
-        ("remote", "get-url", "origin"),
     ]

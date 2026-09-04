@@ -77,7 +77,6 @@ from workbench_constants import (
     FINDING_TITLE_BYTES,
     FINDINGS_PAGE_MAX,
     FINDINGS_RESULT_LIMIT,
-    PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_dashboard import dashboard
@@ -96,6 +95,7 @@ from workbench_scan_start import (
     archive_scan,
     compact_timestamp,
     insert_running_scan,
+    restore_cli_scan_archive,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -132,7 +132,13 @@ from workbench_target import (
     worktree_content_digest,
     worktree_content_digest_for_context,
 )
-from workbench_target_state import backfill_security_targets, ensure_security_target
+from workbench_target_state import (
+    RepositoryScanScope,
+    backfill_security_targets,
+    ensure_security_target,
+    register_security_target,
+    require_scan_checkout_owner,
+)
 from workbench_validation import (
     bounded_output_text,
     optional_text,
@@ -828,6 +834,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             (workspace["id"],),
         ).fetchone()
         if active is not None:
+            require_scan_checkout_owner(connection, active)
             return workspace_state(connection, workspace["id"])
         workspace_version = workspace["updated_at"]
         scan_id = str(uuid.uuid4())
@@ -872,6 +879,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             (workspace["id"],),
         ).fetchone()
         if active is not None:
+            require_scan_checkout_owner(connection, active)
             if manages_transaction:
                 connection.commit()
             return workspace_state(connection, workspace["id"])
@@ -898,6 +906,11 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                     "This Codex thread already has an active Deep Scan for the selected "
                     "target and scope. Rejoin that scan instead of starting another one."
                 )
+        registration = register_security_target(connection, str(current_target))
+        if registration.target_id != workspace["target_id"]:
+            raise SystemExit(
+                "The saved workspace no longer matches the selected repository target."
+            )
         insert_running_scan(
             connection,
             scan_id=scan_id,
@@ -906,6 +919,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            repository_generation=registration.repository_generation,
             target_root=target_root,
             target_summary=target_summary,
             scope_file_count=scope_file_count,
@@ -1022,6 +1036,7 @@ def _start_prompt_driven_scan(
             ),
         ).fetchone()
         if existing is not None:
+            require_scan_checkout_owner(connection, existing)
             connection.commit()
             return {
                 **scan_context(connection, existing["id"]),
@@ -1031,7 +1046,8 @@ def _start_prompt_driven_scan(
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
         timestamp = now()
-        target_id = ensure_security_target(connection, target_path)
+        registration = register_security_target(connection, target_path)
+        target_id = registration.target_id
         connection.execute(
             """
             INSERT INTO workspaces (
@@ -1064,6 +1080,7 @@ def _start_prompt_driven_scan(
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            repository_generation=registration.repository_generation,
             target_root=target_root,
             target_summary=target_summary,
             scope_file_count=scope_file_count,
@@ -1714,12 +1731,19 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
 
     connection.execute("BEGIN IMMEDIATE")
     try:
-        archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
-        target_id = ensure_security_target(connection, str(repository))
+        registration = register_security_target(connection, str(repository))
+        target_id = registration.target_id
         if parent_scan_id is not None:
             parent = require_scan(connection, parent_scan_id)
-            if parent["target_id"] != target_id:
+            if not RepositoryScanScope(registration.repository_generation, target_id).contains(
+                parent
+            ):
                 raise SystemExit("A rerun must belong to the same repository as its parent scan.")
+
+        scan_dir = require_canonical_scan_directory(scan_dir)
+        if next(scan_dir.iterdir(), None) is not None:
+            raise SystemExit("The scan artifact directory must be empty before the scan starts.")
+        archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
 
         connection.execute(
             """
@@ -1750,6 +1774,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            repository_generation=registration.repository_generation,
             target_root=scan_dir.parent,
             target_summary=None,
             scope_file_count=scope_file_count,
@@ -3247,48 +3272,9 @@ def finding_remediation_result(
 def patch_artifact_preview(
     scan_dir: Path, relative_path: str | None, expected_digest: str | None
 ) -> tuple[str | None, dict[str, int | bool] | None]:
-    if relative_path is None or expected_digest is None:
-        return None, None
-    digest = hashlib.sha256()
-    preview = bytearray()
-    additions = 0
-    deletions = 0
-    file_count = 0
-    old_headers = 0
-    new_headers = 0
-    at_line_start = True
-    try:
-        with open_scan_local_file(scan_dir, relative_path) as patch:
-            while chunk := patch.readline(1024 * 1024):
-                digest.update(chunk)
-                if len(preview) <= PATCH_PREVIEW_BYTES:
-                    preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
-                if at_line_start:
-                    if chunk.startswith(b"diff --git "):
-                        file_count += 1
-                    elif chunk.startswith(b"+++ "):
-                        new_headers += 1
-                    elif chunk.startswith(b"--- "):
-                        old_headers += 1
-                    elif chunk.startswith(b"+"):
-                        additions += 1
-                    elif chunk.startswith(b"-"):
-                        deletions += 1
-                at_line_start = chunk.endswith(b"\n")
-    except SystemExit:
-        return None, None
-    if f"sha256:{digest.hexdigest()}" != expected_digest:
-        return None, None
-    preview_truncated = len(preview) > PATCH_PREVIEW_BYTES
-    preview_text = preview[:PATCH_PREVIEW_BYTES].decode("utf-8", errors="replace")
-    if preview_truncated:
-        preview_text = f"{preview_text}\n... patch preview truncated ..."
-    return preview_text, {
-        "additions": additions,
-        "deletions": deletions,
-        "fileCount": file_count or min(old_headers, new_headers),
-        "previewTruncated": preview_truncated,
-    }
+    return remediation.patch_artifact_preview(
+        scan_dir, relative_path, expected_digest, open_scan_local_file
+    )
 
 
 def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
@@ -3438,7 +3424,7 @@ def main() -> None:
             require_remediation_target=require_remediation_target,
             require_scannable_target=require_scannable_target,
             require_scope=require_scope,
-            ensure_security_target=ensure_security_target,
+            register_security_target=register_security_target,
             require_canonical_scan_directory=require_canonical_scan_directory,
             safe_segment=safe_segment,
             compact_timestamp=compact_timestamp,
@@ -3513,6 +3499,8 @@ def main() -> None:
             )
         elif args.command == "register-cli-scan":
             result = register_cli_scan(connection, args)
+        elif args.command == "restore-cli-scan-archive":
+            result = restore_cli_scan_archive(connection, args, require_canonical_scan_directory)
         elif args.command == "set-scan-thread":
             result = set_scan_thread(connection, args)
         elif args.command == "set-scan-cost-limit":

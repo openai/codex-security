@@ -990,6 +990,16 @@ calling workflow or issue tracker; assessments remain separate recommendations.
 Commands default to the current repository. Select scans by full ID or a
 unique prefix of at least eight characters.
 
+Linked Git worktrees share scans, findings, and reviewer decisions when their
+scans record the same repository generation in the selected state database.
+Older scans without this evidence remain target-local. Removed worktrees retain
+their recorded history; a reused checkout path does not inherit its previous
+owner's history. Separately verified clones can still be compared explicitly,
+but their finding histories remain separate.
+
+Finding confirmation and automatic post-scan matching follow completion order
+in the workbench, without changing sealed report timestamps.
+
 | Command                                               | Purpose                                                                                                     |
 | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `scans list [REPOSITORY]`                             | List scans. Filter by artifact root with `--scan-root DIR`.                                                 |
@@ -997,7 +1007,7 @@ unique prefix of at least eight characters.
 | `scans logs [SCAN_ID]`                                | Show session events; defaults to the latest scan, including active scans.                                   |
 | `scans rerun [SCAN_ID]`                               | Repeat a scan on the current checkout; defaults to the latest completed scan.                               |
 | `scans match BEFORE AFTER`                            | Link findings with the same root cause.                                                                     |
-| `scans match --all`                                   | Match completed scans across the repository's worktrees and clones.                                         |
+| `scans match --all`                                   | Match completed scans in this repository generation, including linked worktrees.                            |
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to the latest two completed scans.                                                  |
 | `findings list [REPOSITORY]`                          | List open findings. `findings` is an alias.                                                                 |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Mark a false positive. Later scans dismiss matches only while the reason applies.                           |
@@ -1012,6 +1022,10 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. The CLI and
 workbench maintain the database and its journal files as the current user.
 Keep state private, writable, and outside the scanned repository.
+
+Keep the same state directory across linked worktrees. Changing it selects
+separate history, artifacts, and a dedicated Codex sign-in. `--scan-root`
+filters recorded artifact paths; it does not import another directory's scans.
 
 On Windows, an older sandboxed run can leave an invalid credential-home ancestor
 ACL. Preserve that state and its reports, and select a **new**, private

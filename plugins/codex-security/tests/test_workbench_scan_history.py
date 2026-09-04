@@ -595,7 +595,7 @@ def test_scan_history_resolves_unique_prefixes_and_rejects_ambiguity(tmp_path: P
     )
 
 
-def test_scan_list_includes_related_git_worktrees_and_clones(tmp_path: Path) -> None:
+def test_scan_list_shares_worktree_history_without_including_clones(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     worktree = tmp_path / "worktree"
@@ -621,15 +621,14 @@ def test_scan_list_includes_related_git_worktrees_and_clones(tmp_path: Path) -> 
     clone_scan = create_cli_scan(state_dir, root / "clone", clone, complete=False)
     unrelated_scan = create_cli_scan(state_dir, root / "unrelated", unrelated, complete=False)
 
-    for target in (repository, worktree, clone):
+    for target in (repository, worktree):
         scans = run_workbench(state_dir, "list-scans", "--repository", str(target))["scans"]
         assert [scan["scanId"] for scan in scans] == [
-            clone_scan["scanId"],
             worktree_scan["scanId"],
             original_scan["scanId"],
         ]
 
-    for offset, expected in enumerate((clone_scan, worktree_scan, original_scan)):
+    for offset, expected in enumerate((worktree_scan, original_scan)):
         page = run_workbench(
             state_dir,
             "list-scans",
@@ -641,12 +640,14 @@ def test_scan_list_includes_related_git_worktrees_and_clones(tmp_path: Path) -> 
             str(offset),
         )
         assert [scan["scanId"] for scan in page["scans"]] == [expected["scanId"]]
-        assert page["nextOffset"] == (offset + 1 if offset < 2 else None)
+        assert page["nextOffset"] == (offset + 1 if offset < 1 else None)
 
     queried = run_workbench(
         state_dir, "list-scans", "--repository", str(repository), "--query", "clone"
     )["scans"]
-    assert [scan["scanId"] for scan in queried] == [clone_scan["scanId"]]
+    assert queried == []
+    clone_history = run_workbench(state_dir, "list-scans", "--repository", str(clone))["scans"]
+    assert [scan["scanId"] for scan in clone_history] == [clone_scan["scanId"]]
 
     scoped = run_workbench(
         state_dir,
@@ -1196,9 +1197,8 @@ def test_semantic_scan_comparison_accepts_matching_git_origins(tmp_path: Path) -
     )
     for target in (before_repository, after_repository):
         pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(target))
-        assert pending["scanCount"] == 2
-        assert pending["batches"][0]["afterScanId"] == after["scanId"]
-        assert pending["batches"][0]["beforeScans"][0]["scanId"] == before["scanId"]
+        assert pending["scanCount"] == 1
+        assert pending["batches"] == []
 
     compared = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
     assert compared["summary"]["new"] == 1
