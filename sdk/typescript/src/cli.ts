@@ -264,6 +264,7 @@ const VALUE_OPTIONS = new Set([
   "--component",
   "--components-file",
   "--knowledge-base",
+  "--apply",
   "--rubric",
   "--finding-id",
   "--scan-prompt-file",
@@ -1141,6 +1142,7 @@ interface CliDependencies {
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
+  resolvePolicyPython?: typeof resolvePluginPython;
   environment: NodeJS.ProcessEnv;
   prepareAuthenticationHome?: (
     environment: NodeJS.ProcessEnv,
@@ -2838,7 +2840,7 @@ export async function main(
   })
     .command("policy", {
       description:
-        "Draft SECURITY.md guidance for future scans and owner review.",
+        "Draft or review SECURITY.md guidance; write only after approval.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -2849,69 +2851,113 @@ export async function main(
             "Repository or component directory (default: current directory).",
           ),
       }),
-      options: z.object({
-        path: optionValue("--path")
-          .optional()
-          .describe(
-            "Generate SECURITY.md for this repository-relative component directory.",
+      options: z
+        .object({
+          path: optionValue("--path")
+            .optional()
+            .describe(
+              "Select this repository-relative component for generation or saved-draft review.",
+            ),
+          knowledgeBase: z
+            .array(optionValue("--knowledge-base"))
+            .default([])
+            .describe(
+              "Add architecture or security-context files; repeat for multiple paths.",
+            ),
+          outputDir: optionValue("--output-dir")
+            .optional()
+            .describe(
+              "Private artifact directory outside the repository (default: Codex Security state).",
+            ),
+          apply: optionValue("--apply")
+            .optional()
+            .describe(
+              "Load a saved draft without Codex; offer to write in a terminal.",
+            ),
+          write: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Apply the reviewed --apply draft without an interactive confirmation.",
+            ),
+          headless: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Skip owner questions, authentication prompts, and write prompts.",
+            ),
+          dryRun: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Validate local generation inputs without starting Codex.",
+            ),
+          auth: z
+            .enum(["auto", "chatgpt", "api-key"])
+            .default("auto")
+            .describe("Select ChatGPT, API-key, or automatic authentication."),
+          model: optionValue("--model")
+            .optional()
+            .describe(
+              `Model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+            ),
+          effort: effortOption(),
+          provider: PROVIDER_OPTION.describe(
+            "Inference provider for policy generation.",
           ),
-        knowledgeBase: z
-          .array(optionValue("--knowledge-base"))
-          .default([])
-          .describe(
-            "Add architecture or security-context files; repeat for multiple paths.",
-          ),
-        outputDir: optionValue("--output-dir")
-          .optional()
-          .describe(
-            "Private artifact directory outside the repository (default: Codex Security state).",
-          ),
-        headless: z
-          .boolean()
-          .default(false)
-          .describe("Skip owner questions and authentication prompts."),
-        dryRun: z
-          .boolean()
-          .default(false)
-          .describe("Validate local generation inputs without starting Codex."),
-        auth: z
-          .enum(["auto", "chatgpt", "api-key"])
-          .default("auto")
-          .describe("Select ChatGPT, API-key, or automatic authentication."),
-        model: optionValue("--model")
-          .optional()
-          .describe(
-            `Model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-          ),
-        effort: effortOption(),
-        provider: PROVIDER_OPTION.describe(
-          "Inference provider for policy generation.",
+          maxCost: z
+            .number()
+            .positive()
+            .optional()
+            .describe(
+              "Stop when estimated total USD cost across all three stages exceeds AMOUNT.",
+            ),
+          pluginPath: optionValue("--plugin-path")
+            .optional()
+            .describe(PLUGIN_PATH_DESCRIPTION),
+          python: optionValue("--python")
+            .optional()
+            .describe(PYTHON_PATH_DESCRIPTION),
+          codex: z
+            .array(optionValue("--codex"))
+            .default([])
+            .describe(CODEX_OVERRIDE_DESCRIPTION),
+        })
+        .refine((options) => !options.write || options.apply !== undefined, {
+          message:
+            "--write requires --apply. Generate and review a draft first.",
+        })
+        .refine(
+          (options) =>
+            options.apply === undefined ||
+            (!options.dryRun &&
+              options.outputDir === undefined &&
+              options.knowledgeBase.length === 0 &&
+              options.auth === "auto" &&
+              options.model === undefined &&
+              options.effort === undefined &&
+              options.provider === "openai" &&
+              options.maxCost === undefined &&
+              options.codex.length === 0),
+          {
+            message: "--apply cannot be combined with generation options.",
+          },
         ),
-        maxCost: z
-          .number()
-          .positive()
-          .optional()
-          .describe(
-            "Stop when estimated total USD cost across all three stages exceeds AMOUNT.",
-          ),
-        pluginPath: optionValue("--plugin-path")
-          .optional()
-          .describe(PLUGIN_PATH_DESCRIPTION),
-        python: optionValue("--python")
-          .optional()
-          .describe(PYTHON_PATH_DESCRIPTION),
-        codex: z
-          .array(optionValue("--codex"))
-          .default([])
-          .describe(CODEX_OVERRIDE_DESCRIPTION),
-      }),
       examples: [
         { args: { repository: "." } },
         { args: { repository: "." }, options: { path: "services/api" } },
+        {
+          args: { repository: "." },
+          options: { apply: "/path/outside/repository/policy" },
+        },
       ],
       hint:
-        "Save a draft for review:\n" +
-        "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json",
+        "Generate a draft with Codex:\n" +
+        "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json\n" +
+        "Review a saved draft without writing:\n" +
+        "  codex-security policy . --apply /path/outside/repository/policy --headless\n" +
+        "Apply a reviewed saved draft:\n" +
+        "  codex-security policy . --apply /path/outside/repository/policy --write",
       output: z
         .union([z.record(z.string(), z.unknown()), z.string()])
         .optional(),
@@ -2963,6 +3009,11 @@ export async function main(
                       : resolveCliPath(directory, options.outputDir),
                   maxCostUsd: options.maxCost,
                 },
+                apply:
+                  options.apply === undefined
+                    ? undefined
+                    : resolve(directory, expandHome(options.apply)),
+                write: options.write,
                 headless: options.headless || explicitOutput,
                 dryRun: options.dryRun,
                 format,
@@ -3002,11 +3053,15 @@ export async function main(
                 addSignalListener: dependencies.addSignalListener,
                 removeSignalListener: dependencies.removeSignalListener,
                 forceExit: dependencies.forceExit,
+                resolvePython: dependencies.resolvePolicyPython,
               },
             ),
           );
           exitCode = outcome.exitCode;
-          if (exitCode !== 0) {
+          if (
+            exitCode !== 0 &&
+            (policyFullOutput || outcome.data === undefined)
+          ) {
             return fail(outcome.error ?? "Policy command failed.", exitCode);
           }
           if (

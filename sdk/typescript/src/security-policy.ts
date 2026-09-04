@@ -1,22 +1,44 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
+  chmod,
+  copyFile,
+  link,
   lstat,
   open,
+  readFile,
   readdir,
   readlink,
   realpath,
+  rename,
+  rm,
   stat,
+  unlink,
+  writeFile,
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "incur";
 import type { ScanAuthentication, ScanOptions } from "./api.js";
 import { jsonForPrompt, pluginPythonCommand } from "./codex-prompt.js";
 import type { ScanCost } from "./cost.js";
-import { CodexSecurityError, InvalidTargetError } from "./errors.js";
-import { resolvePluginPython, type ProcessEnvironment } from "./runtime.js";
+import { requireScanFile } from "./contract.js";
+import {
+  CodexSecurityError,
+  InvalidTargetError,
+  SecurityPolicyRecoveryError,
+  SecurityPolicyVerificationError,
+} from "./errors.js";
+import {
+  cleanupSdkDirectory,
+  createIsolatedHome,
+  requireOutputOutsideRepositories,
+  resolvePluginPath,
+  resolvePluginPython,
+  type ProcessEnvironment,
+} from "./runtime.js";
 import {
   abortable,
   enclosingGitWorktreeRoot,
@@ -177,6 +199,12 @@ export interface SecurityPolicyDraft
   pluginPath?: string;
   reviewNotes: string[];
   cost: Readonly<ScanCost> | null;
+}
+
+export interface SecurityPolicyApplication {
+  status: "written" | "unchanged";
+  targetPath: string;
+  recoveryPath: string | null;
 }
 
 const execFileAsync = promisify(execFile);
@@ -437,15 +465,22 @@ function policyPathsMatch(
   );
 }
 
+interface SecurityPolicyPath {
+  path: string;
+  repository: string;
+  reportingPolicy: boolean;
+  isSymbolicLink: boolean;
+}
+
 async function securityPolicyPaths(
   root: string,
   repositories: readonly string[],
   signal?: AbortSignal,
-): Promise<string[]> {
+): Promise<SecurityPolicyPath[]> {
   const knownRoots = new Set<string>();
   const gitDirectories = new Set<string>();
-  const policies: string[] = [];
-  const reportingPaths = new Set<string>();
+  const policies: SecurityPolicyPath[] = [];
+  const reportingPaths = new Map<string, string>();
   const isGitData = (path: string): boolean =>
     [...gitDirectories].some(
       (directory) => !relativePathIsOutside(relative(directory, path)),
@@ -472,7 +507,7 @@ async function securityPolicyPaths(
         directory = await realpath(directory);
         policyRelativePath(repository, directory);
       }
-      reportingPaths.add(join(directory, "SECURITY.md"));
+      reportingPaths.set(join(directory, "SECURITY.md"), repository);
     }
   };
   for (const repository of repositories) await addRoot(repository);
@@ -517,7 +552,12 @@ async function securityPolicyPaths(
       (metadata?.isFile() || metadata?.isSymbolicLink()) &&
       !reportingPaths.has(path)
     )
-      policies.push(path);
+      policies.push({
+        path,
+        repository,
+        reportingPolicy: false,
+        isSymbolicLink: metadata.isSymbolicLink(),
+      });
     // Match the plugin inventory: do not follow directory links or Git data.
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name === ".git") continue;
@@ -538,7 +578,20 @@ async function securityPolicyPaths(
     }
   }
   // A nested checkout can register a Git directory visited earlier in the walk.
-  return [...policies, ...reportingPaths].filter((path) => !isGitData(path));
+  for (const [path, repository] of reportingPaths) {
+    if (isGitData(path)) continue;
+    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+      throw error;
+    });
+    policies.push({
+      path,
+      repository,
+      reportingPolicy: true,
+      isSymbolicLink: metadata?.isSymbolicLink() ?? false,
+    });
+  }
+  return policies.filter((entry) => !isGitData(entry.path));
 }
 
 export async function inspectSecurityPolicyPaths(
@@ -546,21 +599,25 @@ export async function inspectSecurityPolicyPaths(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const paths: string[] = [];
-  for (const path of await securityPolicyPaths(
+  for (const entry of await securityPolicyPaths(
     dirname(target.targetPath),
     [target.repository],
     signal,
   )) {
-    const alias = await policyLinkSnapshot(path, target.repository, signal);
+    const alias = await policyLinkSnapshot(
+      entry.path,
+      target.repository,
+      signal,
+    );
     if (alias.status === "cycle")
       throw new CodexSecurityError(
-        `Security-policy link contains a cycle: ${path}`,
+        `Security-policy link contains a cycle: ${entry.path}`,
       );
     const destination = await policyLinkDestination(target.repository, alias);
     if (alias.status !== "resolved" || destination === null) continue;
     if ((await stat(destination)).isFile()) {
       await readPolicyFile(destination);
-      paths.push(policyRelativePath(target.repository, path));
+      paths.push(policyRelativePath(target.repository, entry.path));
     }
   }
   return paths.sort();
@@ -611,6 +668,13 @@ export async function requireUnchangedSecurityPolicy(
   signal?: AbortSignal,
 ): Promise<void> {
   const current = await readSecurityPolicySnapshot(target, signal);
+  requirePolicySnapshot(current, snapshot);
+}
+
+function requirePolicySnapshot(
+  current: SecurityPolicySnapshot,
+  snapshot: SecurityPolicySnapshot,
+): void {
   if (current.previousContent !== snapshot.previousContent) {
     throw new CodexSecurityError(
       "SECURITY.md changed after its contents were read. Reconcile the changes and generate a new draft before writing.",
@@ -621,6 +685,22 @@ export async function requireUnchangedSecurityPolicy(
       "An inherited SECURITY.md changed after the policy guidance was read. Generate a new draft before writing.",
     );
   }
+}
+
+async function readDraftContent(
+  target: SecurityPolicyTarget,
+  draft: SecurityPolicyDraft,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const current = await readSecurityPolicySnapshot(target, signal);
+  requirePolicySnapshot(current, {
+    previousContent:
+      current.previousContent === draft.content
+        ? draft.content
+        : draft.previousContent,
+    inheritedPolicySha256: draft.inheritedPolicySha256,
+  });
+  return current.previousContent;
 }
 
 export async function resolveSecurityPolicyGuidance(
@@ -781,7 +861,7 @@ export async function runSecurityPolicyStages(options: {
       "Retain their full repository-relative citations where they support policy decisions; do not shorten nested source paths.",
       ownerContext,
       `Threat-model questions and review notes (JSON data): ${jsonForPrompt({ questions: threatModel.questions, reviewNotes: threatModel.reviewNotes })}`,
-      "Use the define-security-policy skill to draft the complete SECURITY.md for the selected component. This request authorizes a draft only; the host will save it for owner review.",
+      "Use the define-security-policy skill to draft the complete SECURITY.md for the selected component. This request authorizes a draft only; the host will preview the exact diff and obtain approval before applying it.",
       "Preserve useful existing guidance, private-reporting instructions, and confirmed owner decisions. Write concise, source-backed scope, trust boundaries, named security invariants, reportability and severity context, owner-confirmed exclusions, limitations, and open decisions. Do not copy the full threat model, exploit narratives, or private artifact paths into SECURITY.md.",
       "Mark new or changed policy decisions as requiring owner review. Never turn an assumption or missing evidence into permission to suppress findings. List new exclusions, accepted risks, severity changes, and material unanswered questions in reviewNotes.",
     ].join("\n"),
@@ -836,6 +916,65 @@ export async function runSecurityPolicyStages(options: {
   };
 }
 
+export async function loadSecurityPolicyDraft(
+  repository: string,
+  outputDir: string,
+  options: Pick<SecurityPolicyOptions, "path" | "signal"> = {},
+): Promise<SecurityPolicyDraft> {
+  const target = await resolveSecurityPolicyTarget(
+    repository,
+    options.path,
+    options.signal,
+  );
+  const manifestPath = await requireScanFile(
+    outputDir,
+    MANIFEST_NAME,
+    MANIFEST_NAME,
+    options.signal,
+  );
+  const directory = dirname(manifestPath);
+  const file = (name: string) =>
+    requireScanFile(directory, name, name, options.signal);
+  const manifest = manifestSchema.parse(
+    JSON.parse(await readFile(manifestPath, "utf8")),
+  );
+  if (
+    manifest.repository !== target.repository ||
+    manifest.scope !== target.scope
+  ) {
+    throw new CodexSecurityError(
+      "The saved policy draft belongs to a different repository or component. Select its original target explicitly.",
+    );
+  }
+  const originalPath = await file(ORIGINAL_NAME);
+  const original = await readPolicyFile(originalPath);
+  if (
+    manifest.previousPolicySha256 === null
+      ? original !== ""
+      : digest(original) !== manifest.previousPolicySha256
+  ) {
+    throw new CodexSecurityError(
+      "The saved policy's original-content checkpoint has changed.",
+    );
+  }
+  const draftPath = await file("SECURITY.md");
+  const content = await readPolicyFile(draftPath);
+  validatePolicyContent(content);
+  return {
+    ...target,
+    outputDir: directory,
+    draftPath,
+    specificationPath: await file("project-spec.md"),
+    threatModelPath: await file("THREAT_MODEL.md"),
+    content,
+    previousContent: manifest.previousPolicySha256 === null ? null : original,
+    inheritedPolicySha256: manifest.inheritedPolicySha256,
+    customPlugin: manifest.customPlugin,
+    reviewNotes: manifest.reviewNotes,
+    cost: null,
+  };
+}
+
 /** Raw unified diff. A Python resolver is called only when there is a change.
  * Use CodexSecurity.previewPolicy() for terminal output. */
 export async function securityPolicyDiff(
@@ -845,8 +984,8 @@ export async function securityPolicyDiff(
 ): Promise<string> {
   draft = { ...draft };
   const target = await resolveDraftTarget(draft, signal);
-  await requireUnchangedSecurityPolicy(target, draft, signal);
-  if (draft.previousContent === draft.content) return "";
+  if ((await readDraftContent(target, draft, signal)) === draft.content)
+    return "";
   const selectedPython = typeof python === "function" ? await python() : python;
   const interpreter =
     selectedPython ??
@@ -890,12 +1029,1107 @@ export async function securityPolicyDiff(
       ]),
     );
   });
-  await requireUnchangedSecurityPolicy(
+  const current = await readDraftContent(
     await resolveDraftTarget(draft, signal),
     draft,
     signal,
   );
-  return diff;
+  return current === draft.content ? "" : diff;
+}
+
+async function validatePolicyLinks(
+  target: SecurityPolicyTarget,
+  signal?: AbortSignal,
+): Promise<void> {
+  const repositories = await enclosingGitWorktreeRoots(
+    target.repository,
+    signal,
+  );
+  if (repositories.length === 0) repositories.push(target.repository);
+  const protectedRoot = repositories.at(-1)!;
+  const component = dirname(target.targetPath);
+  const canonicalTarget = await realpath(target.targetPath).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    },
+  );
+  for (const entry of await securityPolicyPaths(
+    protectedRoot,
+    repositories,
+    signal,
+  )) {
+    if (!entry.reportingPolicy && !entry.isSymbolicLink) continue;
+    const boundary = repositories.find(
+      (root) => !relativePathIsOutside(relative(root, entry.path)),
+    )!;
+    const alias = await policyLinkSnapshot(entry.path, boundary, signal);
+    const destination = await policyLinkDestination(boundary, alias);
+    const reportingPolicy =
+      entry.reportingPolicy && entry.path !== target.targetPath;
+    const outsideScope =
+      entry.repository !== target.repository ||
+      relativePathIsOutside(relative(component, dirname(entry.path)));
+    if (
+      (outsideScope || reportingPolicy) &&
+      destination !== null &&
+      policyPathsMatch(
+        canonicalTarget ?? target.targetPath,
+        destination,
+        canonicalTarget === null && alias.status === "missing",
+      )
+    ) {
+      const policyPath = relative(protectedRoot, entry.path)
+        .split(sep)
+        .join("/");
+      throw new CodexSecurityError(
+        `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change ${reportingPolicy ? "a separate vulnerability-reporting policy" : "guidance outside the selected component"}. Fix the link before applying a policy.`,
+      );
+    }
+  }
+}
+
+export async function applySecurityPolicy(
+  draft: SecurityPolicyDraft,
+  options: {
+    pythonPath?: string;
+    pluginPath?: string;
+    environment?: ProcessEnvironment;
+    signal?: AbortSignal;
+  } = {},
+): Promise<SecurityPolicyApplication> {
+  draft = { ...draft };
+  validatePolicyContent(draft.content);
+  const target = await resolveDraftTarget(draft, options.signal);
+  let alreadyApplied = false;
+  let written = false;
+  let recoveryPath: string | null = null;
+  let verificationRecoveryPath: string | null = null;
+  let pluginWorkspace: string | undefined;
+  try {
+    alreadyApplied =
+      (await readDraftContent(target, draft, options.signal)) === draft.content;
+    written = alreadyApplied && draft.previousContent !== draft.content;
+    await validatePolicyLinks(target, options.signal);
+    if (draft.previousContent === draft.content)
+      return {
+        status: "unchanged",
+        targetPath: target.targetPath,
+        recoveryPath: null,
+      };
+    const protectedRoots = await securityPolicyProtectedRoots(
+      target,
+      options.signal,
+    );
+    const protectedRoot = protectedRoots[0]!;
+    const recoveryDirectory =
+      draft.previousContent === null
+        ? null
+        : dirname(
+            await requireScanFile(
+              draft.outputDir,
+              MANIFEST_NAME,
+              MANIFEST_NAME,
+              options.signal,
+            ),
+          );
+    if (recoveryDirectory !== null)
+      requireOutputOutsideRepositories(protectedRoots, recoveryDirectory);
+    if (alreadyApplied && recoveryDirectory !== null) {
+      const candidates: string[] = [];
+      for (const entry of await readdir(recoveryDirectory, {
+        withFileTypes: true,
+      })) {
+        if (
+          !entry.isFile() ||
+          !/^recovery-SECURITY-[0-9a-f-]{36}\.md$/u.test(entry.name)
+        )
+          continue;
+        const candidate = await requireScanFile(
+          recoveryDirectory,
+          entry.name,
+          "security policy recovery",
+          options.signal,
+        );
+        if ((await readSecurityPolicy(candidate)) === draft.previousContent)
+          candidates.push(candidate);
+      }
+      const targetDirectory = dirname(target.targetPath);
+      const canonicalTargetDirectory = await realpath(targetDirectory);
+      for (const entry of await readdir(targetDirectory, {
+        withFileTypes: true,
+      })) {
+        if (
+          !entry.isFile() ||
+          !/^\.SECURITY\.md\.[0-9a-f-]{36}\.tmp\.previous$/u.test(entry.name)
+        )
+          continue;
+        const candidate = join(targetDirectory, entry.name);
+        const metadata = await lstat(candidate);
+        if (
+          !metadata.isFile() ||
+          metadata.isSymbolicLink() ||
+          dirname(await realpath(candidate)) !== canonicalTargetDirectory
+        )
+          continue;
+        if ((await readSecurityPolicy(candidate)) === draft.previousContent)
+          candidates.push(candidate);
+      }
+      if (candidates.length !== 1) {
+        throw new CodexSecurityError(
+          "The installed SECURITY.md cannot be verified without its original recovery file.",
+        );
+      }
+      verificationRecoveryPath = candidates[0]!;
+    }
+    const pluginPath = options.pluginPath ?? draft.pluginPath;
+    if (draft.customPlugin && pluginPath === undefined) {
+      throw new CodexSecurityError(
+        "This draft used a custom plugin. Select it explicitly with --plugin-path or the SDK's pluginPath option before applying.",
+      );
+    }
+    const python = await resolvePluginPython({
+      configuredPath: options.pythonPath,
+      environment: options.environment,
+      protectedRoot,
+      signal: options.signal,
+    });
+    const pluginRoot = await resolvePluginPath(
+      pluginPath,
+      async () => {
+        const temporaryRoot = await realpath(tmpdir());
+        requireOutputOutsideRepositories(
+          protectedRoots,
+          temporaryRoot,
+          "temporary",
+        );
+        pluginWorkspace = await createIsolatedHome(temporaryRoot, (path) =>
+          requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
+        );
+        return pluginWorkspace;
+      },
+      options.signal,
+    );
+    if (!alreadyApplied) {
+      await resolveSecurityPolicyGuidance(
+        target,
+        python,
+        pluginRoot,
+        options.environment,
+        options.signal,
+      );
+      options.signal?.throwIfAborted();
+      const temporary = join(
+        dirname(target.targetPath),
+        `.SECURITY.md.${randomUUID()}.tmp`,
+      );
+      try {
+        const temporaryHandle = await open(
+          temporary,
+          "wx",
+          draft.previousContent === null ? 0o644 : 0o600,
+        );
+        try {
+          if (draft.previousContent !== null && process.platform === "win32") {
+            await chmod(
+              temporary,
+              (await stat(target.targetPath)).mode & 0o777,
+            );
+            await copyWindowsSecurityDescriptor(
+              target.targetPath,
+              temporary,
+              options.signal,
+            );
+          } else if (draft.previousContent !== null) {
+            await copyUnixPolicyFile(
+              target.targetPath,
+              temporary,
+              python,
+              options.signal,
+            );
+            await temporaryHandle.truncate(0);
+          }
+          await temporaryHandle.writeFile(draft.content, {
+            encoding: "utf8",
+            signal: options.signal,
+          });
+        } finally {
+          await temporaryHandle.close();
+        }
+        if (draft.previousContent !== null && process.platform !== "win32") {
+          await chmod(temporary, (await stat(target.targetPath)).mode & 0o7777);
+          await verifyUnixSecurityMetadata(
+            target.targetPath,
+            temporary,
+            python,
+            options.signal,
+          );
+        }
+        if (draft.previousContent === null && process.platform === "linux") {
+          await checkNewPolicySecurityContext(
+            temporary,
+            target.targetPath,
+            python,
+            options.signal,
+            true,
+          );
+        }
+        if (
+          (await realpath(dirname(target.targetPath))) !==
+          dirname(target.targetPath)
+        ) {
+          throw new CodexSecurityError(
+            "The security-policy destination changed. Review a new draft before writing.",
+          );
+        }
+        await resolveDraftTarget(draft, options.signal);
+        await validatePolicyLinks(target, options.signal);
+        await requireUnchangedSecurityPolicy(target, draft, options.signal);
+        options.signal?.throwIfAborted();
+        if (draft.previousContent === null) {
+          await installPolicyFile(temporary, target.targetPath, python);
+        } else
+          recoveryPath = await replaceExistingPolicy(
+            temporary,
+            target.targetPath,
+            draft.previousContent,
+            recoveryDirectory!,
+            python,
+            options.signal,
+          );
+        written = true;
+        if (recoveryPath !== null)
+          recoveryPath = await retainPolicyRecovery(
+            recoveryPath,
+            recoveryDirectory!,
+          );
+      } finally {
+        // Preserve the write or recovery outcome if temporary cleanup fails.
+        await rm(temporary, { force: true }).catch(() => undefined);
+      }
+    }
+    // SDK cancellation must not skip post-write checks. Process interruption
+    // can still leave a written policy that needs verification on retry.
+    if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
+      throw new CodexSecurityError(
+        "The written policy contents do not match the reviewed draft.",
+      );
+    }
+    const permissionsReference = recoveryPath ?? verificationRecoveryPath;
+    const installedGeneration = await securityPolicyFileGeneration(
+      target.targetPath,
+    );
+    const recoveryGeneration =
+      permissionsReference === null
+        ? null
+        : await securityPolicyFileGeneration(permissionsReference);
+    if (
+      permissionsReference !== null &&
+      (await readSecurityPolicy(permissionsReference)) !== draft.previousContent
+    ) {
+      throw new CodexSecurityError(
+        "The previous SECURITY.md changed while the replacement was being installed.",
+      );
+    }
+    await resolveSecurityPolicyGuidance(
+      target,
+      python,
+      pluginRoot,
+      options.environment,
+    );
+    await resolveDraftTarget(draft);
+    await validatePolicyLinks(target);
+    if (permissionsReference !== null) {
+      if (process.platform === "win32") {
+        if (
+          ((await stat(permissionsReference)).mode & 0o777) !==
+          ((await stat(target.targetPath)).mode & 0o777)
+        ) {
+          throw new CodexSecurityError(
+            "SECURITY.md permissions changed while the replacement was being installed.",
+          );
+        }
+        await copyWindowsSecurityDescriptor(
+          permissionsReference,
+          target.targetPath,
+          undefined,
+          true,
+        );
+      } else {
+        await verifyUnixSecurityMetadata(
+          permissionsReference,
+          target.targetPath,
+          python,
+        );
+      }
+      if (
+        (await readSecurityPolicy(permissionsReference)) !==
+        draft.previousContent
+      ) {
+        throw new CodexSecurityError(
+          "The previous SECURITY.md changed while the replacement was being installed.",
+        );
+      }
+    } else if (draft.previousContent === null && process.platform === "linux") {
+      await checkNewPolicySecurityContext(
+        target.targetPath,
+        target.targetPath,
+        python,
+      );
+    }
+    await requireUnchangedSecurityPolicy(target, {
+      previousContent: draft.content,
+      inheritedPolicySha256: draft.inheritedPolicySha256,
+    });
+    await validatePolicyLinks(target);
+    if (
+      permissionsReference !== null &&
+      (await securityPolicyFileGeneration(permissionsReference)) !==
+        recoveryGeneration
+    ) {
+      throw new CodexSecurityError(
+        "The previous SECURITY.md changed during final policy verification.",
+      );
+    }
+    if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
+      throw new CodexSecurityError(
+        "The written policy contents changed during final permission verification.",
+      );
+    }
+    if (
+      (await securityPolicyFileGeneration(target.targetPath)) !==
+      installedGeneration
+    ) {
+      throw new CodexSecurityError(
+        "The written policy metadata changed during final verification.",
+      );
+    }
+    return {
+      status: alreadyApplied ? "unchanged" : "written",
+      targetPath: target.targetPath,
+      recoveryPath,
+    };
+  } catch (error) {
+    if (
+      !written &&
+      draft.previousContent !== draft.content &&
+      (await readSecurityPolicy(target.targetPath).catch(() => null)) ===
+        draft.content
+    )
+      written = true;
+    if (written) {
+      const retainedRecovery =
+        recoveryPath ??
+        verificationRecoveryPath ??
+        (error instanceof SecurityPolicyRecoveryError
+          ? error.recoveryPath
+          : null);
+      throw new SecurityPolicyVerificationError(target.targetPath, {
+        cause: error,
+        ...(retainedRecovery === null
+          ? {}
+          : { recoveryPath: retainedRecovery }),
+      });
+    }
+    throw error;
+  } finally {
+    if (pluginWorkspace !== undefined)
+      await cleanupSdkDirectory(pluginWorkspace).catch(() => undefined);
+  }
+}
+
+async function installPolicyFile(
+  temporary: string,
+  targetPath: string,
+  python: string,
+): Promise<void> {
+  const windows = process.platform === "win32";
+  let linked = false;
+  if (!windows || ((await stat(temporary)).mode & 0o200) !== 0) {
+    try {
+      await link(temporary, targetPath);
+      linked = true;
+    } catch (error) {
+      if (
+        ![
+          "EPERM",
+          "ENOTSUP",
+          "EOPNOTSUPP",
+          "EXDEV",
+          "EMLINK",
+          "EISDIR",
+        ].includes((error as NodeJS.ErrnoException).code ?? "")
+      ) {
+        throw error;
+      }
+    }
+  }
+  if (linked) await unlink(temporary);
+  else if (windows) await moveWindowsPolicyFileNoClobber(temporary, targetPath);
+  else await moveUnixPolicyFileNoClobber(temporary, targetPath, python);
+}
+
+async function checkNewPolicySecurityContext(
+  temporary: string,
+  targetPath: string,
+  python: string,
+  signal?: AbortSignal,
+  prepare = false,
+): Promise<void> {
+  // An atomic rename or hard link keeps the temporary inode's SELinux label.
+  // Compute the final filename's creation label before publishing that inode.
+  const script = [
+    "import ctypes, errno, os, sys",
+    "temporary, target, creator, prepare = sys.argv[1:]",
+    "try:",
+    "    parent = os.getxattr(os.path.dirname(target), 'security.selinux')",
+    "except OSError as error:",
+    "    if error.errno in {errno.ENODATA, errno.ENOTSUP}:",
+    "        raise SystemExit(0)",
+    "    raise",
+    "selinux = ctypes.CDLL('libselinux.so.1', use_errno=True)",
+    "if selinux.is_selinux_enabled() == 0:",
+    "    raise SystemExit(0)",
+    "context_pointer = ctypes.POINTER(ctypes.c_char_p)",
+    "selinux.getpidcon_raw.argtypes = [ctypes.c_int, context_pointer]",
+    "selinux.string_to_security_class.argtypes = [ctypes.c_char_p]",
+    "selinux.string_to_security_class.restype = ctypes.c_ushort",
+    "selinux.security_compute_create_name_raw.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ushort, ctypes.c_char_p, context_pointer]",
+    "selinux.freecon.argtypes = [ctypes.c_void_p]",
+    "selinux.freecon.restype = None",
+    "source, context = ctypes.c_char_p(), ctypes.c_char_p()",
+    "def check(result):",
+    "    if result < 0:",
+    "        code = ctypes.get_errno()",
+    "        raise OSError(code, os.strerror(code))",
+    "try:",
+    "    check(selinux.getpidcon_raw(int(creator), ctypes.byref(source)))",
+    "    check(selinux.security_compute_create_name_raw(source, parent, selinux.string_to_security_class(b'file'), os.fsencode(os.path.basename(target)), ctypes.byref(context)))",
+    "    if prepare == 'true' and os.getxattr(temporary, 'security.selinux').rstrip(b'\\0') != context.value:",
+    "        os.setxattr(temporary, 'security.selinux', context.value + b'\\0')",
+    "    if os.getxattr(temporary, 'security.selinux').rstrip(b'\\0') != context.value:",
+    "        raise OSError('The staged policy has a different SELinux label.')",
+    "finally:",
+    "    selinux.freecon(source)",
+    "    selinux.freecon(context)",
+  ].join("\n");
+  try {
+    await execFileAsync(
+      python,
+      [
+        "-I",
+        "-c",
+        script,
+        temporary,
+        targetPath,
+        String(process.pid),
+        String(prepare),
+      ],
+      { encoding: "utf8", signal },
+    );
+  } catch (error) {
+    signal?.throwIfAborted();
+    throw new CodexSecurityError(
+      `Cannot ${prepare ? "prepare" : "verify"} the SELinux label for SECURITY.md.`,
+      { cause: error },
+    );
+  }
+}
+
+async function moveUnixPolicyFileNoClobber(
+  source: string,
+  destination: string,
+  python: string,
+): Promise<void> {
+  const script = [
+    "import ctypes, errno, os, sys",
+    "library = ctypes.CDLL(None, use_errno=True)",
+    "if sys.platform == 'darwin':",
+    "    operation, descriptor, flags = library.renameatx_np, -2, 4",
+    "elif sys.platform.startswith('linux'):",
+    "    operation, descriptor, flags = library.renameat2, -100, 1",
+    "else:",
+    "    raise OSError(errno.ENOTSUP, 'exclusive policy replacement is unsupported')",
+    "operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]",
+    "operation.restype = ctypes.c_int",
+    "if operation(descriptor, os.fsencode(sys.argv[1]), descriptor, os.fsencode(sys.argv[2]), flags) != 0:",
+    "    code = ctypes.get_errno()",
+    "    if code == errno.EEXIST:",
+    "        raise SystemExit(17)",
+    "    raise OSError(code, os.strerror(code))",
+  ].join("\n");
+  try {
+    await execFileAsync(python, ["-I", "-c", script, source, destination], {
+      encoding: "utf8",
+    });
+  } catch (error) {
+    if ((error as { code?: number }).code === 17) {
+      throw Object.assign(new Error("The policy destination already exists."), {
+        code: "EEXIST",
+      });
+    }
+    throw error;
+  }
+}
+
+async function moveWindowsPolicyFileNoClobber(
+  source: string,
+  destination: string,
+): Promise<void> {
+  const sourceVariable = "CODEX_SECURITY_POLICY_MOVE_SOURCE";
+  const destinationVariable = "CODEX_SECURITY_POLICY_MOVE_DESTINATION";
+  const systemDirectory = join(
+    process.env["SystemRoot"] ?? "C:\\Windows",
+    "System32",
+  );
+  const moveFile = [
+    '[System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint = "MoveFileExW", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]',
+    "public static extern bool MoveFile(string source, string destination, uint flags);",
+  ].join(" ");
+  try {
+    await execFileAsync(
+      join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        [
+          "$ErrorActionPreference = 'Stop'",
+          `Microsoft.PowerShell.Utility\\Add-Type -Name PolicyMove -Namespace CodexSecurity -MemberDefinition '${moveFile}'`,
+          `if (-not [CodexSecurity.PolicyMove]::MoveFile($env:${sourceVariable}, $env:${destinationVariable}, 0)) { $code = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error(); if ($code -eq 80 -or $code -eq 183) { exit 17 }; throw [System.ComponentModel.Win32Exception]::new($code) }`,
+        ].join("; "),
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...Object.fromEntries(
+            Object.entries(process.env).filter(
+              ([name]) =>
+                !["PSMODULEPATH", sourceVariable, destinationVariable].includes(
+                  name.toUpperCase(),
+                ),
+            ),
+          ),
+          [sourceVariable]: source,
+          [destinationVariable]: destination,
+          PSModulePath: join(
+            systemDirectory,
+            "WindowsPowerShell",
+            "v1.0",
+            "Modules",
+          ),
+        },
+        windowsHide: true,
+      },
+    );
+  } catch (error) {
+    if ((error as { code?: number }).code === 17) {
+      throw Object.assign(new Error("The policy destination already exists."), {
+        code: "EEXIST",
+      });
+    }
+    throw error;
+  }
+}
+
+async function copyWindowsSecurityDescriptor(
+  source: string,
+  destination: string,
+  signal?: AbortSignal,
+  verifyOnly = false,
+): Promise<void> {
+  const sourceVariable = "CODEX_SECURITY_POLICY_ACL_SOURCE";
+  const destinationVariable = "CODEX_SECURITY_POLICY_ACL_DESTINATION";
+  const inheritedEnvironment = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) =>
+        !["PSMODULEPATH", sourceVariable, destinationVariable].includes(
+          name.toUpperCase(),
+        ),
+    ),
+  );
+  const systemDirectory = join(
+    process.env["SystemRoot"] ?? "C:\\Windows",
+    "System32",
+  );
+  const integrityMethods = [
+    '[System.Runtime.InteropServices.DllImport("advapi32.dll", EntryPoint = "GetNamedSecurityInfoW", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]',
+    "public static extern uint GetNamedSecurityInfo(string path, uint type, uint information, System.IntPtr owner, System.IntPtr group, System.IntPtr dacl, System.IntPtr sacl, out System.IntPtr descriptor);",
+    '[System.Runtime.InteropServices.DllImport("advapi32.dll", EntryPoint = "GetSecurityDescriptorSacl", SetLastError = true)]',
+    "public static extern bool GetSecurityDescriptorSacl(System.IntPtr descriptor, out int present, out System.IntPtr sacl, out int defaulted);",
+    '[System.Runtime.InteropServices.DllImport("advapi32.dll", EntryPoint = "SetNamedSecurityInfoW", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]',
+    "public static extern uint SetNamedSecurityInfo(string path, uint type, uint information, System.IntPtr owner, System.IntPtr group, System.IntPtr dacl, System.IntPtr sacl);",
+    '[System.Runtime.InteropServices.DllImport("advapi32.dll", EntryPoint = "InitializeAcl", SetLastError = true)]',
+    "public static extern bool InitializeAcl(System.IntPtr acl, uint length, uint revision);",
+    '[System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint = "LocalFree")]',
+    "public static extern System.IntPtr LocalFree(System.IntPtr memory);",
+    [
+      "public static bool HasEntries(System.IntPtr acl) {",
+      "return acl != System.IntPtr.Zero && System.Runtime.InteropServices.Marshal.ReadInt16(acl, 4) != 0;",
+      "}",
+    ].join(" "),
+    [
+      "public static bool SameAcl(System.IntPtr left, System.IntPtr right) {",
+      "if (left == right) return true;",
+      "if (left == System.IntPtr.Zero || right == System.IntPtr.Zero) return false;",
+      "int size = (ushort)System.Runtime.InteropServices.Marshal.ReadInt16(left, 2);",
+      "if (size != (ushort)System.Runtime.InteropServices.Marshal.ReadInt16(right, 2)) return false;",
+      "for (int index = 0; index < size; index++) if (System.Runtime.InteropServices.Marshal.ReadByte(left, index) != System.Runtime.InteropServices.Marshal.ReadByte(right, index)) return false;",
+      "return true;",
+      "}",
+    ].join(" "),
+    [
+      "public static string ReadSecuritySection(string path, uint information, bool optional) {",
+      "System.IntPtr descriptor = System.IntPtr.Zero;",
+      "uint status = GetNamedSecurityInfo(path, 1, information, System.IntPtr.Zero, System.IntPtr.Zero, System.IntPtr.Zero, System.IntPtr.Zero, out descriptor);",
+      'if (status != 0) { if (optional && (status == 50 || status == 87)) return "unsupported:" + status; throw new System.ComponentModel.Win32Exception((int)status); }',
+      "try {",
+      "int present; int defaulted; System.IntPtr acl;",
+      "if (!GetSecurityDescriptorSacl(descriptor, out present, out acl, out defaulted)) throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());",
+      'if (present == 0 || acl == System.IntPtr.Zero) return "none";',
+      "int size = (ushort)System.Runtime.InteropServices.Marshal.ReadInt16(acl, 2);",
+      "byte[] bytes = new byte[size]; System.Runtime.InteropServices.Marshal.Copy(acl, bytes, 0, size);",
+      "return System.Convert.ToBase64String(bytes);",
+      "} finally { if (descriptor != System.IntPtr.Zero) LocalFree(descriptor); }",
+      "}",
+    ].join(" "),
+    [
+      "public static uint ClearLabel(string path) {",
+      "System.IntPtr empty = System.Runtime.InteropServices.Marshal.AllocHGlobal(8);",
+      "try {",
+      "if (!InitializeAcl(empty, 8, 2)) throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());",
+      "return SetNamedSecurityInfo(path, 1, 16, System.IntPtr.Zero, System.IntPtr.Zero, System.IntPtr.Zero, empty);",
+      "} finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(empty); }",
+      "}",
+    ].join(" "),
+  ].join(" ");
+  try {
+    await execFileAsync(
+      join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        [
+          "$ErrorActionPreference = 'Stop'",
+          `if (([System.IO.File]::GetAttributes($env:${sourceVariable}) -band [System.IO.FileAttributes]::Encrypted) -ne 0) { exit 78 }`,
+          `$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:${sourceVariable} -Audit`,
+          "$identityType = [System.Security.Principal.SecurityIdentifier]",
+          [
+            "$auditRules = { param($descriptor)",
+            "$rules = @($descriptor.GetAuditRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Microsoft.PowerShell.Core\\ForEach-Object { '{0}:{1}:{2}:{3}:{4}:{5}' -f $_.IdentityReference.Value, [int]$_.FileSystemRights, [int]$_.AuditFlags, [int]$_.InheritanceFlags, [int]$_.PropagationFlags, [int]$_.IsInherited } | Microsoft.PowerShell.Utility\\Sort-Object);",
+            "[string]::Join([System.Environment]::NewLine, [string[]]$rules)",
+            "}",
+          ].join(" "),
+          "$sourceAuditRules = & $auditRules $acl",
+          [
+            "$systemRules = { param($descriptor)",
+            "$system = [System.Security.AccessControl.RawSecurityDescriptor]::new($descriptor.GetSecurityDescriptorBinaryForm(), 0).SystemAcl;",
+            "if ($null -eq $system) { return 'none' };",
+            "$bytes = [byte[]]::new($system.BinaryLength); $system.GetBinaryForm($bytes, 0); [System.Convert]::ToBase64String($bytes)",
+            "}",
+          ].join(" "),
+          "$sourceSystemRules = & $systemRules $acl",
+          [
+            "$accessRules = { param($descriptor)",
+            "$access = [System.Security.AccessControl.RawSecurityDescriptor]::new($descriptor.GetSecurityDescriptorBinaryForm(), 0).DiscretionaryAcl;",
+            "if ($null -eq $access) { return 'none' };",
+            "$bytes = [byte[]]::new($access.BinaryLength); $access.GetBinaryForm($bytes, 0); [System.Convert]::ToBase64String($bytes)",
+            "}",
+          ].join(" "),
+          "$sourceAccessRules = & $accessRules $acl",
+          [
+            "$auditControlMask =",
+            "[System.Security.AccessControl.ControlFlags]::SystemAclPresent",
+            "-bor [System.Security.AccessControl.ControlFlags]::SystemAclDefaulted",
+            "-bor [System.Security.AccessControl.ControlFlags]::SystemAclAutoInheritRequired",
+            "-bor [System.Security.AccessControl.ControlFlags]::SystemAclAutoInherited",
+            "-bor [System.Security.AccessControl.ControlFlags]::SystemAclProtected",
+          ].join(" "),
+          "$auditControl = { param($descriptor) [System.Security.AccessControl.RawSecurityDescriptor]::new($descriptor.GetSecurityDescriptorBinaryForm(), 0).ControlFlags -band $auditControlMask }",
+          "$sourceAuditControl = & $auditControl $acl",
+          [
+            "$accessControlMask =",
+            "[System.Security.AccessControl.ControlFlags]::DiscretionaryAclPresent",
+            "-bor [System.Security.AccessControl.ControlFlags]::DiscretionaryAclDefaulted",
+            "-bor [System.Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInheritRequired",
+            "-bor [System.Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited",
+            "-bor [System.Security.AccessControl.ControlFlags]::DiscretionaryAclProtected",
+          ].join(" "),
+          "$accessControl = { param($descriptor) [System.Security.AccessControl.RawSecurityDescriptor]::new($descriptor.GetSecurityDescriptorBinaryForm(), 0).ControlFlags -band $accessControlMask }",
+          "$sourceAccessControl = & $accessControl $acl",
+          [
+            "$describe = { param([string]$path)",
+            "$lines = @(& ([System.IO.Path]::Combine($env:SystemRoot, 'System32', 'icacls.exe')) $path);",
+            "if ($LASTEXITCODE -ne 0 -or $lines.Count -eq 0 -or -not $lines[0].StartsWith($path, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Could not inspect the complete Windows security descriptor.' };",
+            "$lines[0] = $lines[0].Substring($path.Length);",
+            "$lines | Microsoft.PowerShell.Core\\ForEach-Object { $_.Trim() }",
+            "}",
+          ].join(" "),
+          `Microsoft.PowerShell.Utility\\Add-Type -Name PolicyIntegrity -Namespace CodexSecurity -MemberDefinition '${integrityMethods}'`,
+          [
+            "$nativeSystemRules = { param([string]$path)",
+            "$sections = @(32, 64, 128, 256 | Microsoft.PowerShell.Core\\ForEach-Object { '{0}:{1}' -f $_, [CodexSecurity.PolicyIntegrity]::ReadSecuritySection($path, [uint32]$_, ($_ -eq 128 -or $_ -eq 256)) });",
+            "[string]::Join([System.Environment]::NewLine, [string[]]$sections)",
+            "}",
+          ].join(" "),
+          `$sourceNativeSystemRules = & $nativeSystemRules $env:${sourceVariable}`,
+          [
+            "$alignLabels = {",
+            "$descriptor = [System.IntPtr]::Zero;",
+            `$status = [CodexSecurity.PolicyIntegrity]::GetNamedSecurityInfo($env:${sourceVariable}, 1, 16, [System.IntPtr]::Zero, [System.IntPtr]::Zero, [System.IntPtr]::Zero, [System.IntPtr]::Zero, [ref]$descriptor);`,
+            "if ($status -ne 0) { throw [System.ComponentModel.Win32Exception]::new([int]$status) };",
+            "$destinationLabelDescriptor = [System.IntPtr]::Zero;",
+            "try {",
+            "$present = 0; $label = [System.IntPtr]::Zero; $defaulted = 0;",
+            "if (-not [CodexSecurity.PolicyIntegrity]::GetSecurityDescriptorSacl($descriptor, [ref]$present, [ref]$label, [ref]$defaulted)) { throw [System.ComponentModel.Win32Exception]::new() };",
+            `$status = [CodexSecurity.PolicyIntegrity]::GetNamedSecurityInfo($env:${destinationVariable}, 1, 16, [System.IntPtr]::Zero, [System.IntPtr]::Zero, [System.IntPtr]::Zero, [System.IntPtr]::Zero, [ref]$destinationLabelDescriptor); if ($status -ne 0) { throw [System.ComponentModel.Win32Exception]::new([int]$status) };`,
+            "$destinationPresent = 0; $destinationLabel = [System.IntPtr]::Zero; $destinationDefaulted = 0;",
+            "if (-not [CodexSecurity.PolicyIntegrity]::GetSecurityDescriptorSacl($destinationLabelDescriptor, [ref]$destinationPresent, [ref]$destinationLabel, [ref]$destinationDefaulted)) { throw [System.ComponentModel.Win32Exception]::new() };",
+            "$sourceHasLabel = $present -ne 0 -and [CodexSecurity.PolicyIntegrity]::HasEntries($label); $destinationHasLabel = $destinationPresent -ne 0 -and [CodexSecurity.PolicyIntegrity]::HasEntries($destinationLabel);",
+            verifyOnly
+              ? "if ($sourceHasLabel -ne $destinationHasLabel -or ($sourceHasLabel -and -not [CodexSecurity.PolicyIntegrity]::SameAcl($label, $destinationLabel))) { throw 'The Windows integrity label changed during policy replacement.' }"
+              : `if ($sourceHasLabel) { if (-not [CodexSecurity.PolicyIntegrity]::SameAcl($label, $destinationLabel)) { $status = [CodexSecurity.PolicyIntegrity]::SetNamedSecurityInfo($env:${destinationVariable}, 1, 16, [System.IntPtr]::Zero, [System.IntPtr]::Zero, [System.IntPtr]::Zero, $label); if ($status -ne 0) { throw [System.ComponentModel.Win32Exception]::new([int]$status) } } } elseif ($destinationHasLabel) { $status = [CodexSecurity.PolicyIntegrity]::ClearLabel($env:${destinationVariable}); if ($status -ne 0) { throw [System.ComponentModel.Win32Exception]::new([int]$status) } }`,
+            "} finally { if ($destinationLabelDescriptor -ne [System.IntPtr]::Zero) { [void][CodexSecurity.PolicyIntegrity]::LocalFree($destinationLabelDescriptor) }; if ($descriptor -ne [System.IntPtr]::Zero) { [void][CodexSecurity.PolicyIntegrity]::LocalFree($descriptor) } }",
+            "}",
+          ].join(" "),
+          "& $alignLabels",
+          ...(verifyOnly
+            ? []
+            : [
+                `$staged = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:${destinationVariable} -Audit`,
+                [
+                  `if ($sourceAuditControl -eq (& $auditControl $staged) -and $acl.AreAuditRulesProtected -eq $staged.AreAuditRulesProtected -and $sourceAuditRules -eq (& $auditRules $staged) -and $sourceSystemRules -eq (& $systemRules $staged) -and $sourceNativeSystemRules -eq (& $nativeSystemRules $env:${destinationVariable})) {`,
+                  "$differentOwner = $acl.GetOwner($identityType).Value -ne $staged.GetOwner($identityType).Value;",
+                  "$differentGroup = $acl.GetGroup($identityType).Value -ne $staged.GetGroup($identityType).Value;",
+                  "$differentAccess = $sourceAccessRules -ne (& $accessRules $staged) -or $sourceAccessControl -ne (& $accessControl $staged) -or $acl.AreAccessRulesProtected -ne $staged.AreAccessRulesProtected;",
+                  `$sourceDescription = [string]::Join([System.Environment]::NewLine, (& $describe $env:${sourceVariable}));`,
+                  `$stagedDescription = [string]::Join([System.Environment]::NewLine, (& $describe $env:${destinationVariable}));`,
+                  "if ($differentOwner -or $differentGroup -or $differentAccess -or $sourceDescription -ne $stagedDescription) {",
+                  "$sections = [System.Security.AccessControl.AccessControlSections]::Access;",
+                  "if ($differentOwner) { $sections = $sections -bor [System.Security.AccessControl.AccessControlSections]::Owner };",
+                  "if ($differentGroup) { $sections = $sections -bor [System.Security.AccessControl.AccessControlSections]::Group };",
+                  "$access = [System.Security.AccessControl.FileSecurity]::new();",
+                  "$access.SetSecurityDescriptorBinaryForm($acl.GetSecurityDescriptorBinaryForm(), $sections);",
+                  `[System.IO.FileInfo]::new($env:${destinationVariable}).SetAccessControl($access)`,
+                  "}",
+                  `} else { Microsoft.PowerShell.Security\\Set-Acl -LiteralPath $env:${destinationVariable} -AclObject $acl }`,
+                ].join(" "),
+                "& $alignLabels",
+              ]),
+          `$copied = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:${destinationVariable} -Audit`,
+          "if ($acl.GetOwner($identityType).Value -ne $copied.GetOwner($identityType).Value -or $acl.GetGroup($identityType).Value -ne $copied.GetGroup($identityType).Value) { throw 'The copied Windows security descriptor owner or group differs.' }",
+          "if ($acl.AreAccessRulesProtected -ne $copied.AreAccessRulesProtected -or $sourceAccessControl -ne (& $accessControl $copied)) { throw 'The copied Windows discretionary access-control settings differ.' }",
+          "if ($sourceAccessRules -ne (& $accessRules $copied)) { throw 'The copied Windows discretionary access-control entries differ.' }",
+          "if ($acl.AreAuditRulesProtected -ne $copied.AreAuditRulesProtected) { throw 'The copied Windows audit inheritance settings differ.' }",
+          "if ($sourceAuditControl -ne (& $auditControl $copied)) { throw 'The copied Windows audit control settings differ.' }",
+          "$destinationAuditRules = & $auditRules $copied",
+          "if ($sourceAuditRules -ne $destinationAuditRules) { throw 'The copied Windows audit rules differ.' }",
+          "if ($sourceSystemRules -ne (& $systemRules $copied)) { throw 'The copied Windows system access-control entries differ.' }",
+          `if ($sourceNativeSystemRules -ne (& $nativeSystemRules $env:${destinationVariable})) { throw 'The copied Windows system access-control categories differ.' }`,
+          `$sourceDescriptor = [string]::Join([System.Environment]::NewLine, (& $describe $env:${sourceVariable}))`,
+          `$destinationDescriptor = [string]::Join([System.Environment]::NewLine, (& $describe $env:${destinationVariable}))`,
+          "if ($sourceDescriptor -ne $destinationDescriptor) { throw 'The copied Windows security descriptor or integrity label differs.' }",
+        ].join("; "),
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...inheritedEnvironment,
+          [sourceVariable]: source,
+          [destinationVariable]: destination,
+          PSModulePath: join(
+            systemDirectory,
+            "WindowsPowerShell",
+            "v1.0",
+            "Modules",
+          ),
+        },
+        signal,
+        windowsHide: true,
+      },
+    );
+  } catch (error) {
+    signal?.throwIfAborted();
+    if ((error as { code?: number }).code === 78) {
+      throw new CodexSecurityError(
+        "Automatic replacement of an EFS-encrypted SECURITY.md is not supported. Apply the reviewed draft with a tool that preserves its encryption settings.",
+        { cause: error },
+      );
+    }
+    throw new CodexSecurityError(
+      "Cannot preserve the existing SECURITY.md security descriptor and audit settings. Use a Windows account permitted to read and write those settings.",
+      { cause: error },
+    );
+  }
+}
+
+async function unixSecurityAccess(
+  path: string,
+  python: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (process.platform === "darwin") {
+    const { stdout } = await execFileAsync("/bin/ls", ["-ledn", path], {
+      encoding: "utf8",
+      signal,
+    });
+    return stdout.split(/\r?\n/u).slice(1).join("\n");
+  }
+  if (process.platform === "linux") {
+    const script = [
+      "import base64, errno, json, os, sys",
+      "values = []",
+      "for name in ('system.posix_acl_access', 'security.selinux', 'security.SMACK64'):",
+      "    try:",
+      "        value = os.getxattr(sys.argv[1], name, follow_symlinks=False)",
+      "    except OSError as error:",
+      "        if error.errno not in {errno.ENODATA, errno.ENOTSUP, getattr(errno, 'EOPNOTSUPP', errno.ENOTSUP)}:",
+      "            raise",
+      "        value = None",
+      "    values.append(None if value is None else base64.b64encode(value).decode('ascii'))",
+      "sys.stdout.write(json.dumps(values, separators=(',', ':')))",
+    ].join("\n");
+    const { stdout } = await execFileAsync(python, ["-I", "-c", script, path], {
+      encoding: "utf8",
+      signal,
+    });
+    return stdout;
+  }
+  return "";
+}
+
+async function copyUnixPolicyFile(
+  source: string,
+  destination: string,
+  python: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const arguments_ = ["-p"];
+  if (process.platform === "linux") {
+    const [sourceAccess, destinationAccess] = await Promise.all([
+      unixSecurityAccess(source, python, signal),
+      unixSecurityAccess(destination, python, signal),
+    ]);
+    const [, ...sourceContexts] = JSON.parse(sourceAccess) as (string | null)[];
+    const [, ...destinationContexts] = JSON.parse(destinationAccess) as (
+      | string
+      | null
+    )[];
+    if (
+      sourceContexts.some(
+        (context, index) =>
+          context !== null && context !== destinationContexts[index],
+      )
+    )
+      arguments_.push("--preserve=context");
+  }
+  await execFileAsync("/bin/cp", [...arguments_, source, destination], {
+    encoding: "utf8",
+    signal,
+  });
+}
+
+async function verifyUnixSecurityMetadata(
+  source: string,
+  destination: string,
+  python: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const [sourceMetadata, destinationMetadata, sourceAccess, destinationAccess] =
+    await Promise.all([
+      stat(source),
+      stat(destination),
+      unixSecurityAccess(source, python, signal),
+      unixSecurityAccess(destination, python, signal),
+    ]);
+  if (
+    sourceMetadata.uid !== destinationMetadata.uid ||
+    sourceMetadata.gid !== destinationMetadata.gid ||
+    (sourceMetadata.mode & 0o7777) !== (destinationMetadata.mode & 0o7777) ||
+    sourceAccess !== destinationAccess
+  ) {
+    throw new CodexSecurityError(
+      "SECURITY.md ownership, permissions, or access-control entries changed while the replacement was being installed.",
+    );
+  }
+}
+
+async function securityPolicyFileGeneration(path: string): Promise<string> {
+  const metadata = await stat(path, { bigint: true });
+  return [
+    metadata.dev,
+    metadata.ino,
+    metadata.ctimeNs,
+    metadata.mtimeNs,
+    metadata.size,
+    metadata.mode,
+    metadata.uid,
+    metadata.gid,
+  ].join(":");
+}
+
+async function replaceExistingPolicy(
+  temporary: string,
+  targetPath: string,
+  previousContent: string,
+  recoveryDirectory: string,
+  python: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const recoveryPath = `${temporary}.previous`;
+  await writeFile(recoveryPath, "", { flag: "wx", mode: 0o600 });
+  try {
+    signal?.throwIfAborted();
+    // Check the displaced file, then install without replacing a newer save.
+    await rename(targetPath, recoveryPath);
+  } catch (error) {
+    await rm(recoveryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  try {
+    if ((await readSecurityPolicy(recoveryPath)) !== previousContent) {
+      throw new CodexSecurityError(
+        "SECURITY.md changed while the policy was being applied. Review a new draft before writing.",
+      );
+    }
+    const mode = (await stat(recoveryPath)).mode & 0o777;
+    if (process.platform !== "win32")
+      await verifyUnixSecurityMetadata(recoveryPath, temporary, python, signal);
+    else if (((await stat(temporary)).mode & 0o777) !== mode) {
+      throw new CodexSecurityError(
+        "SECURITY.md permissions changed while the replacement was being installed.",
+      );
+    }
+    signal?.throwIfAborted();
+    if (process.platform === "win32")
+      await copyWindowsSecurityDescriptor(
+        recoveryPath,
+        temporary,
+        signal,
+        true,
+      );
+    signal?.throwIfAborted();
+    await installPolicyFile(temporary, targetPath, python);
+  } catch (error) {
+    let cause = error;
+    try {
+      const metadata = await lstat(recoveryPath);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        throw new CodexSecurityError(
+          "The recovery path is not a regular file.",
+        );
+      }
+      try {
+        await link(recoveryPath, targetPath);
+      } catch (restoreError) {
+        if (
+          ![
+            "EPERM",
+            "ENOTSUP",
+            "EOPNOTSUPP",
+            "EXDEV",
+            "EMLINK",
+            "EISDIR",
+          ].includes((restoreError as NodeJS.ErrnoException).code ?? "")
+        )
+          throw restoreError;
+        const windows = process.platform === "win32";
+        const restoreTemporary = `${recoveryPath}.restore`;
+        try {
+          if (!windows)
+            await writeFile(restoreTemporary, "", { flag: "wx", mode: 0o600 });
+          const recoveryContent = await readSecurityPolicy(recoveryPath);
+          let recoveryMode: number | undefined;
+          if (windows) {
+            recoveryMode = (await stat(recoveryPath)).mode & 0o777;
+            await copyFile(
+              recoveryPath,
+              restoreTemporary,
+              constants.COPYFILE_EXCL,
+            );
+            await chmod(restoreTemporary, recoveryMode);
+            await copyWindowsSecurityDescriptor(recoveryPath, restoreTemporary);
+          } else
+            await copyUnixPolicyFile(recoveryPath, restoreTemporary, python);
+          const recoveryGeneration =
+            await securityPolicyFileGeneration(recoveryPath);
+          const restoreGeneration =
+            await securityPolicyFileGeneration(restoreTemporary);
+          if (windows)
+            await copyWindowsSecurityDescriptor(
+              recoveryPath,
+              restoreTemporary,
+              undefined,
+              true,
+            );
+          else
+            await verifyUnixSecurityMetadata(
+              recoveryPath,
+              restoreTemporary,
+              python,
+            );
+          if (
+            recoveryContent === null ||
+            (windows &&
+              (((await stat(recoveryPath)).mode & 0o777) !== recoveryMode ||
+                ((await stat(restoreTemporary)).mode & 0o777) !==
+                  recoveryMode)) ||
+            (await readSecurityPolicy(restoreTemporary)) !== recoveryContent ||
+            (await readSecurityPolicy(recoveryPath)) !== recoveryContent ||
+            (await securityPolicyFileGeneration(restoreTemporary)) !==
+              restoreGeneration ||
+            (await securityPolicyFileGeneration(recoveryPath)) !==
+              recoveryGeneration
+          ) {
+            throw new CodexSecurityError(
+              "SECURITY.md changed while its recovery snapshot was being copied.",
+            );
+          }
+          if (windows)
+            await moveWindowsPolicyFileNoClobber(restoreTemporary, targetPath);
+          else
+            await moveUnixPolicyFileNoClobber(
+              restoreTemporary,
+              targetPath,
+              python,
+            );
+        } finally {
+          await rm(restoreTemporary, { force: true }).catch(() => undefined);
+        }
+      }
+    } catch (restoreError) {
+      cause = new AggregateError([error, restoreError]);
+    }
+    throw new SecurityPolicyRecoveryError(
+      targetPath,
+      await retainPolicyRecovery(recoveryPath, recoveryDirectory),
+      { cause },
+    );
+  }
+  return recoveryPath;
+}
+
+async function retainPolicyRecovery(
+  recoveryPath: string,
+  directory: string,
+): Promise<string> {
+  const retained = join(directory, `recovery-SECURITY-${randomUUID()}.md`);
+  try {
+    await writeFile(retained, "", { flag: "wx", mode: 0o600 });
+  } catch {
+    return recoveryPath;
+  }
+  try {
+    // Preserve the inode: copying it would lose writes through an open handle.
+    await rename(recoveryPath, retained);
+    return retained;
+  } catch {
+    await rm(retained, { force: true }).catch(() => undefined);
+    return recoveryPath;
+  }
 }
 
 export function formatSecurityPolicyText(

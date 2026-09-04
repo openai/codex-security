@@ -1,8 +1,20 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
+import { delimiter, dirname, join } from "node:path";
 import { Writable } from "node:stream";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
+import {
+  SecurityPolicyRecoveryError,
+  SecurityPolicyVerificationError,
+} from "../src/errors.js";
 import {
   securityPolicyDiff,
   type SecurityPolicyDraft,
@@ -10,11 +22,16 @@ import {
 } from "../src/index.js";
 import { formatSecurityPolicyText } from "../src/security-policy.js";
 import type { PolicyPrompt } from "../src/security-policy-cli.js";
+import { resolvePluginPython } from "../src/runtime.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   POLICY,
   PYTHON,
+  addPolicySubmodule,
   policyFixture,
+  policyGit,
+  policyPlugin,
   stageResult,
 } from "./support/security-policy.js";
 
@@ -33,6 +50,9 @@ function prompt(overrides: Partial<PolicyPrompt> = {}): PolicyPrompt {
     isInteractive: () => false,
     input: async () => {
       throw new Error("Unexpected input prompt");
+    },
+    confirm: async () => {
+      throw new Error("Unexpected confirmation");
     },
     ...overrides,
   };
@@ -60,8 +80,10 @@ function policyDependencies(
     ...dependencies({
       currentDirectory: f.repository,
       signals: options.signals,
+      environment: { PYTHON },
     }),
     policyPrompt: options.prompt ?? prompt(),
+    resolvePolicyPython: async () => PYTHON,
     createPolicySecurity: (config: unknown) => {
       options.onConfig?.(config);
       return {
@@ -128,13 +150,13 @@ describe("policy CLI", () => {
       ),
     ).toBe(0);
     expect(stdout.text()).toContain("SECURITY.md");
-    expect(stdout.text()).not.toContain("--apply");
-    expect(stdout.text()).not.toContain("--write");
+    expect(stdout.text()).toContain("--apply");
+    expect(stdout.text()).toContain("--write");
     expect(stdout.text()).toContain("--headless");
     expect(stdout.text()).not.toContain("--outputDir");
     expect(stdout.text()).not.toContain("--write true");
     expect(stdout.text()).toContain(
-      "--headless --output-dir /path/outside/repository/policy --json",
+      "--apply /path/outside/repository/policy --write",
     );
   });
 
@@ -199,6 +221,7 @@ describe("policy CLI", () => {
         draft,
         prompt: prompt({
           isInteractive: () => true,
+          confirm: async () => false,
         }),
         onGenerate: (_repository, options) => {
           selected = options.auth;
@@ -232,7 +255,7 @@ describe("policy CLI", () => {
     expect(await readdir(f.repository)).toEqual([]);
   });
 
-  test("does not choose credentials for automated, explicit policy requests", async () => {
+  test("does not choose credentials for automated, explicit, or saved policy requests", async () => {
     const f = await fixture();
     const draft = await f.generate();
     for (const scenario of [
@@ -243,6 +266,7 @@ describe("policy CLI", () => {
       { args: ["--auth", "chatgpt"] },
       { args: ["--auth", "api-key"] },
       { args: ["--provider", "openrouter", "--model", "vendor/model"] },
+      { args: ["--apply", f.outputDir] },
       { args: [], ci: true },
       { args: [], stored: false },
       { args: [], key: false },
@@ -254,6 +278,7 @@ describe("policy CLI", () => {
         draft,
         prompt: prompt({
           isInteractive: () => scenario.inputInteractive !== false,
+          confirm: async () => false,
         }),
       });
       deps.environment = {
@@ -422,12 +447,13 @@ describe("policy CLI", () => {
     expect(JSON.parse(stdout.text()).status).toBe("draft");
   });
 
-  test("reports a failed interactive preview without changing source", async () => {
+  test("does not offer an interactive write if the diff preview fails", async () => {
     const f = await fixture();
-    const draft = await f.generate();
+    await f.generate();
+    let asked = false;
     expect(
       await main(
-        ["policy"],
+        ["policy", "--apply", f.outputDir],
         capture(true).stream,
         {
           isTTY: true,
@@ -436,11 +462,17 @@ describe("policy CLI", () => {
           },
         },
         policyDependencies(f, {
-          draft,
-          prompt: prompt({ isInteractive: () => true }),
+          prompt: prompt({
+            isInteractive: () => true,
+            confirm: async () => {
+              asked = true;
+              return true;
+            },
+          }),
         }),
       ),
     ).toBe(2);
+    expect(asked).toBe(false);
     expect(await readdir(f.repository)).toEqual([]);
   });
 
@@ -490,7 +522,7 @@ describe("policy CLI", () => {
     }
   });
 
-  test("asks owner questions and previews the exact draft without writing source", async () => {
+  test("offers source-backed questions and shows the exact diff before approval", async () => {
     const f = await fixture();
     const stderr = capture(true);
     let asked = 0;
@@ -507,19 +539,46 @@ describe("policy CLI", () => {
               expect(question).toContain("internet-facing");
               return "Private service";
             },
+            confirm: async (_question, defaultValue) => {
+              expect(defaultValue).toBe(false);
+              expect(stderr.text()).toContain("--- /dev/null");
+              expect(stderr.text()).toContain("+Requests must be authorized");
+              expect(stderr.text()).toContain("Owner review:");
+              expect(await readdir(f.repository)).toEqual([]);
+              return true;
+            },
           }),
         }),
       ),
     ).toBe(0);
     expect(asked).toBe(1);
-    expect(stderr.text()).toContain("--- /dev/null");
-    expect(stderr.text()).toContain("+Requests must be authorized");
-    expect(stderr.text()).toContain("Owner review:");
-    expect(stderr.text()).toContain("No repository files changed");
-    expect(await readFile(join(f.outputDir, "SECURITY.md"), "utf8")).toBe(
+    expect(await readFile(join(f.repository, "SECURITY.md"), "utf8")).toBe(
       POLICY,
     );
+    expect(stderr.text()).toContain("Wrote and verified");
+  });
+
+  test("declining approval leaves the policy draft available", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    const stderr = capture(true);
+    expect(
+      await main(
+        ["policy"],
+        capture(true).stream,
+        stderr.stream,
+        policyDependencies(f, {
+          draft,
+          prompt: prompt({
+            isInteractive: () => true,
+            confirm: async () => false,
+          }),
+        }),
+      ),
+    ).toBe(0);
     expect(await readdir(f.repository)).toEqual([]);
+    expect(stderr.text()).toContain("No repository files changed");
+    expect(await readFile(draft.draftPath, "utf8")).toBe(POLICY);
   });
 
   test("preserves significant trailing spaces in the proposed diff", async () => {
@@ -542,6 +601,7 @@ describe("policy CLI", () => {
           draft,
           prompt: prompt({
             isInteractive: () => true,
+            confirm: async () => false,
           }),
         }),
       ),
@@ -549,7 +609,251 @@ describe("policy CLI", () => {
     expect(stderr.text()).toContain("+Last line  \n");
   });
 
-  test("preflights without generation", async () => {
+  test("uses the selected plugin when approving a generated policy", async () => {
+    const f = await fixture();
+    const log = join(f.root, "resolver.log");
+    const pluginPath = await policyPlugin(
+      f.root,
+      [
+        "import os, pathlib",
+        "with pathlib.Path(os.environ['POLICY_TEST_LOG']).open('a') as output: output.write('used\\n')",
+        "print('custom guidance')",
+      ].join("\n"),
+    );
+    const draft = await f.generate({ pluginPath });
+    const deps = policyDependencies(f, {
+      draft,
+      prompt: prompt({ isInteractive: () => true, confirm: async () => true }),
+    });
+    deps.environment = { ...deps.environment, POLICY_TEST_LOG: log };
+    expect(
+      await main(
+        ["policy", "--plugin-path", pluginPath],
+        capture(true).stream,
+        capture(true).stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect((await readFile(log, "utf8")).trimEnd().split(/\r?\n/u)).toEqual([
+      "used",
+      "used",
+    ]);
+    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+  });
+
+  test("applies a reviewed, edited saved draft without initializing Codex", async () => {
+    const f = await fixture();
+    await mkdir(join(f.repository, "component"));
+    const draft = await f.generate({ path: "component" });
+    const edited = `${POLICY}\nReviewed by the component owner.\n`;
+    await writeFile(draft.draftPath, edited);
+    const stdout = capture();
+    const deps = policyDependencies(f);
+    deps.createPolicySecurity = () => {
+      throw new Error("Must not initialize Codex for --apply");
+    };
+    expect(
+      await main(
+        [
+          "policy",
+          ".",
+          "--path",
+          "component",
+          "--apply",
+          f.outputDir,
+          "--write",
+          "--json",
+        ],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text()).status).toBe("written");
+    expect(await readFile(draft.targetPath, "utf8")).toBe(edited);
+  });
+
+  test("reports the retained previous file after updating a policy", async () => {
+    const f = await fixture();
+    const original = "# Original policy\n";
+    await writeFile(join(f.repository, "SECURITY.md"), original);
+    const draft = await f.generate();
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["policy", "--apply", f.outputDir, "--write", "--json"],
+        stdout.stream,
+        stderr.stream,
+        policyDependencies(f),
+      ),
+    ).toBe(0);
+    const result = JSON.parse(stdout.text());
+    expect(result.status).toBe("written");
+    expect(dirname(result.recoveryPath)).toBe(f.outputDir);
+    expect(stderr.text()).toContain(result.recoveryPath);
+    expect(await readFile(result.recoveryPath, "utf8")).toBe(original);
+    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+    expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
+  });
+
+  test("reports a written policy when verification fails after cancellation", async () => {
+    const name =
+      "reports a written policy when verification fails after cancellation";
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    const pluginPath = await policyPlugin(
+      f.root,
+      [
+        "import pathlib, sys",
+        "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
+        "if (root / 'SECURITY.md').exists(): raise SystemExit('synthetic verification failure')",
+        "print('preflight passed')",
+      ].join("\n"),
+    );
+    const draft = await f.generate({ pluginPath });
+    const signals = new FakeSignals();
+    const deps = policyDependencies(f, { signals });
+    deps.createPolicySecurity = () => {
+      throw new Error("Must not initialize Codex for --apply");
+    };
+    const originalLink = fsPromises.link;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      link: async (source: string, destination: string) => {
+        await originalLink(source, destination);
+        if (destination === draft.targetPath) signals.emit("SIGINT");
+      },
+    }));
+    try {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            "policy",
+            "--apply",
+            f.outputDir,
+            "--plugin-path",
+            pluginPath,
+            "--write",
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        status: "written_unverified",
+        targetPath: draft.targetPath,
+      });
+      expect(stderr.text()).toContain("was written");
+      expect(stderr.text()).not.toContain("canceled by Ctrl-C");
+      expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+      for (const flags of [
+        [],
+        [
+          "--plugin-path",
+          pluginPath,
+          "--python",
+          join(f.root, "missing-python"),
+        ],
+      ]) {
+        const failedRetry = capture();
+        expect(
+          await main(
+            ["policy", "--apply", f.outputDir, "--write", "--json", ...flags],
+            failedRetry.stream,
+            capture().stream,
+            {
+              ...policyDependencies(f),
+              resolvePolicyPython: resolvePluginPython,
+            },
+          ),
+        ).toBe(2);
+        expect(JSON.parse(failedRetry.text())).toMatchObject({
+          status: "written_unverified",
+          targetPath: draft.targetPath,
+        });
+      }
+      await writeFile(
+        join(pluginPath, "scripts", "resolve_security_md.py"),
+        "print('resolver accepted the policy')\n",
+      );
+      const retry = capture();
+      expect(
+        await main(
+          [
+            "policy",
+            "--apply",
+            f.outputDir,
+            "--plugin-path",
+            pluginPath,
+            "--write",
+            "--json",
+          ],
+          retry.stream,
+          capture().stream,
+          policyDependencies(f),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(retry.text()).status).toBe("unchanged");
+      expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        link: originalLink,
+      }));
+    }
+  });
+
+  test("rejects writing an unseen model-generated policy", async () => {
+    const f = await fixture();
+    const stderr = capture();
+    let generated = false;
+    expect(
+      await main(
+        ["policy", "--write"],
+        capture().stream,
+        stderr.stream,
+        policyDependencies(f, {
+          onGenerate: () => {
+            generated = true;
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("--write requires --apply");
+    expect(generated).toBe(false);
+  });
+
+  test("does not silently ignore generation options when applying a saved draft", async () => {
+    const f = await fixture();
+    const deps = policyDependencies(f);
+    deps.createPolicySecurity = () => {
+      throw new Error("Must not initialize Codex for --apply");
+    };
+    for (const option of [
+      ["--model", "gpt-5.6-terra"],
+      ["--auth", "chatgpt"],
+      ["--provider", "fireworks"],
+      ["--output-dir", f.outputDir],
+    ]) {
+      const stderr = capture();
+      expect(
+        await main(
+          ["policy", "--apply", f.outputDir, ...option],
+          capture().stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain("generation options");
+    }
+  });
+
+  test("preflights without generation or Python discovery", async () => {
     const f = await fixture();
     const stdout = capture();
     const deps = policyDependencies(f, {
@@ -557,6 +861,9 @@ describe("policy CLI", () => {
         throw new Error("Must not generate");
       },
     });
+    deps.resolvePolicyPython = async () => {
+      throw new Error("Must not resolve Python during preflight");
+    };
     expect(
       await main(
         ["policy", "--dry-run", "--json"],
@@ -568,6 +875,103 @@ describe("policy CLI", () => {
     expect(JSON.parse(stdout.text()).dryRun).toBe(true);
     expect(await readdir(f.outputDir)).toEqual([]);
   });
+
+  test("protects enclosing checkouts during CLI Python discovery", async () => {
+    const f = await fixture();
+    policyGit(f.repository, "init", "--quiet");
+    const nested = await addPolicySubmodule(
+      f.repository,
+      join(f.root, "submodule-source"),
+    );
+    await f.generate({ path: "services/api" });
+    const protectedRoots: (string | undefined)[] = [];
+    const deps = {
+      ...policyDependencies(f),
+      resolvePolicyPython: async (
+        options: Parameters<typeof resolvePluginPython>[0],
+      ) => {
+        protectedRoots.push(options?.protectedRoot);
+        return PYTHON;
+      },
+    };
+    for (const [repository, path] of [
+      [f.repository, "services/api"],
+      [nested, "."],
+    ] as const) {
+      expect(
+        await main(
+          [
+            "policy",
+            repository,
+            "--path",
+            path,
+            "--apply",
+            f.outputDir,
+            "--json",
+          ],
+          capture().stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+    }
+    expect(protectedRoots).toEqual([f.repository, f.repository]);
+    await expect(lstat(join(nested, "SECURITY.md"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "does not run an enclosing checkout's Python shim during preview",
+    async () => {
+      const f = await fixture();
+      policyGit(f.repository, "init", "--quiet");
+      const nested = await addPolicySubmodule(
+        f.repository,
+        join(f.root, "submodule-source"),
+      );
+      await f.generate({ path: "services/api" });
+      const unsafeBin = join(f.repository, ".venv", "bin");
+      const trustedBin = join(f.root, "trusted-bin");
+      const unsafePython = join(unsafeBin, "python3");
+      await mkdir(unsafeBin, { recursive: true });
+      await mkdir(trustedBin);
+      await writeFile(
+        unsafePython,
+        '#!/bin/sh\nprintf executed > "$0.executed"\nprintf "codex-security-python-ok\\n"\n',
+        { mode: 0o700 },
+      );
+      await symlink(PYTHON, join(trustedBin, "python3"), "file");
+      for (const explicit of [false, true]) {
+        const stdout = capture();
+        const deps = {
+          ...policyDependencies(f),
+          environment: {
+            PATH: [unsafeBin, trustedBin].join(delimiter),
+            ...(explicit ? { PYTHON: unsafePython } : {}),
+          },
+          resolvePolicyPython: async (
+            options: Parameters<typeof resolvePluginPython>[0],
+          ) =>
+            await resolvePluginPython({ ...options, managedRuntimeRoots: [] }),
+        };
+        const code = await main(
+          ["policy", nested, "--apply", f.outputDir, "--json", "--full-output"],
+          stdout.stream,
+          capture().stream,
+          deps,
+        );
+        expect(code).toBe(explicit ? 2 : 0);
+        expect(JSON.parse(stdout.text()).ok).toBe(!explicit);
+        await expect(lstat(`${unsafePython}.executed`)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
+      await expect(lstat(join(nested, "SECURITY.md"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    },
+  );
 
   test("propagates dry-run cancellation and never returns false success", async () => {
     for (const [signal, exitCode] of [
@@ -827,9 +1231,13 @@ describe("policy CLI", () => {
       throw new Error("Validation must finish before initializing Codex");
     };
     for (const [args, message] of [
-      [["policy", "--write"], "Unknown flag"],
+      [["policy", "--write"], "--write requires --apply"],
+      [
+        ["policy", "--apply", f.outputDir, "--model", "synthetic-model"],
+        "--apply cannot be combined",
+      ],
       [["policy", "--path"], "Missing value"],
-      [["policy", "--path", "--headless"], "Missing value"],
+      [["policy", "--path", "--write"], "Missing value"],
       [["policy", ".", "extra"], "Unexpected positional argument"],
       [["policy", "--unknown-policy-option"], "Unknown flag"],
       [["policy", "--max-cost", "0"], "Too small"],
@@ -854,6 +1262,66 @@ describe("policy CLI", () => {
     }
     expect(initialized).toBe(false);
     expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("preserves recovery records and useful sanitized error causes", async () => {
+    const f = await fixture();
+    const targetPath = join(f.repository, "SECURITY.md");
+    const recoveryPath = join(f.outputDir, "recovery-SECURITY.md");
+    for (const [cause, diagnostic] of [
+      [
+        new Error("synthetic resolver unavailable"),
+        "synthetic resolver unavailable",
+      ],
+      [new Error("api_key=synthetic-test-value"), "[redacted]"],
+    ] as const) {
+      for (const [error, status] of [
+        [
+          new SecurityPolicyVerificationError(targetPath, {
+            recoveryPath,
+            cause,
+          }),
+          "written_unverified",
+        ],
+        [
+          new SecurityPolicyRecoveryError(targetPath, recoveryPath, { cause }),
+          "recovery_required",
+        ],
+      ] as const) {
+        const deps = policyDependencies(f, {
+          onGenerate: () => {
+            throw error;
+          },
+        });
+        for (const fullOutput of [false, true]) {
+          const stdout = capture();
+          const stderr = capture();
+          expect(
+            await main(
+              ["policy", "--json", ...(fullOutput ? ["--full-output"] : [])],
+              stdout.stream,
+              stderr.stream,
+              deps,
+            ),
+          ).toBe(2);
+          expect(stderr.text()).toContain(diagnostic);
+          expect(stdout.text() + stderr.text()).not.toContain(
+            "synthetic-test-value",
+          );
+          const result = JSON.parse(stdout.text());
+          if (fullOutput) {
+            expect(result).toMatchObject({
+              ok: false,
+              error: { code: "POLICY_FAILED", message: error.message },
+            });
+            expect(result.error.message).toContain(diagnostic);
+            expect(result).not.toHaveProperty("data");
+          } else {
+            expect(result).toMatchObject({ status, targetPath, recoveryPath });
+          }
+        }
+      }
+    }
   });
 
   test("returns a full-output error when policy setup fails", async () => {
@@ -884,6 +1352,150 @@ describe("policy CLI", () => {
     });
   });
 
+  test("keeps the written and previous files after a full-output verification error", async () => {
+    const f = await fixture();
+    const original = "# Original policy\n";
+    await writeFile(join(f.repository, "SECURITY.md"), original);
+    const pluginPath = await policyPlugin(
+      f.root,
+      [
+        "import pathlib, sys",
+        "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
+        "if (root / 'SECURITY.md').read_text() != '# Original policy\\n': raise SystemExit('synthetic verification failure')",
+        "print('preflight passed')",
+      ].join("\n"),
+    );
+    const draft = await f.generate({ pluginPath });
+    const stdout = capture();
+    expect(
+      await main(
+        [
+          "policy",
+          "--apply",
+          f.outputDir,
+          "--plugin-path",
+          pluginPath,
+          "--write",
+          "--json",
+          "--full-output",
+        ],
+        stdout.stream,
+        capture().stream,
+        policyDependencies(f),
+      ),
+    ).toBe(2);
+    const result = JSON.parse(stdout.text());
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "POLICY_FAILED" },
+    });
+    expect(result.error.message).toContain(draft.targetPath);
+    const recovery = (await readdir(f.outputDir)).find((name) =>
+      name.startsWith("recovery-SECURITY-"),
+    );
+    expect(recovery).toBeDefined();
+    const recoveryPath = join(f.outputDir, recovery!);
+    expect(result.error.message).toContain(recoveryPath);
+    expect(await readFile(recoveryPath, "utf8")).toBe(original);
+    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+  });
+
+  test("reports an unchanged saved policy without starting Codex or Python", async () => {
+    for (const alreadyApplied of [false, true]) {
+      const f = await fixture();
+      const target = join(f.repository, "SECURITY.md");
+      if (!alreadyApplied) await writeFile(target, POLICY);
+      await f.generate();
+      if (alreadyApplied) await writeFile(target, POLICY);
+      const stdout = capture();
+      const deps = policyDependencies(f);
+      deps.createPolicySecurity = () => {
+        throw new Error("Must not initialize Codex for --apply");
+      };
+      deps.resolvePolicyPython = async () => {
+        throw new Error("Must not resolve Python for an unchanged preview");
+      };
+      expect(
+        await main(
+          [
+            "policy",
+            "--apply",
+            f.outputDir,
+            ...(alreadyApplied ? [] : ["--write"]),
+            "--python",
+            "missing-python",
+            "--json",
+          ],
+          stdout.stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text()).status).toBe("unchanged");
+      expect(await readFile(target, "utf8")).toBe(POLICY);
+    }
+  });
+
+  test("does not report an unchanged policy as verified when its scope changed", async () => {
+    const f = await fixture();
+    const component = join(f.repository, "component");
+    const target = join(component, "SECURITY.md");
+    await mkdir(component);
+    await writeFile(target, POLICY);
+    await f.generate({ path: "component" });
+    const alias = join(f.repository, "sibling", "SECURITY.md");
+    await mkdir(dirname(alias));
+    await symlink(target, alias, "file");
+
+    const stdout = capture();
+    const stderr = capture();
+    const deps = policyDependencies(f);
+    deps.createPolicySecurity = () => {
+      throw new Error("Must not initialize Codex for --apply");
+    };
+    deps.resolvePolicyPython = async () => {
+      throw new Error("Must not resolve Python for an unchanged draft");
+    };
+
+    expect(
+      await main(
+        ["policy", "--path", "component", "--apply", f.outputDir, "--write"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("outside the selected component");
+    expect(stdout.text()).not.toContain("Verified");
+    expect(await readFile(target, "utf8")).toBe(POLICY);
+  });
+
+  test("does not overwrite source edited during the confirmation", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    const stderr = capture(true);
+    expect(
+      await main(
+        ["policy", "--apply", f.outputDir],
+        capture(true).stream,
+        stderr.stream,
+        policyDependencies(f, {
+          prompt: prompt({
+            isInteractive: () => true,
+            confirm: async () => {
+              await writeFile(draft.targetPath, "# Concurrent change\n");
+              return true;
+            },
+          }),
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("changed after");
+    expect(await readFile(draft.targetPath, "utf8")).toBe(
+      "# Concurrent change\n",
+    );
+  });
+
   test("renders terminal controls visibly without changing reviewed bytes", async () => {
     const f = await fixture();
     const controls =
@@ -896,10 +1508,10 @@ describe("policy CLI", () => {
     const stderr = capture();
     expect(
       await main(
-        ["policy", "--path", scope],
+        ["policy", "--path", scope, "--apply", f.outputDir, "--write"],
         capture().stream,
         stderr.stream,
-        policyDependencies(f, { draft: { ...draft, content: controlled } }),
+        policyDependencies(f),
       ),
     ).toBe(0);
     expect(stderr.text()).not.toContain("\u001b");
@@ -909,8 +1521,7 @@ describe("policy CLI", () => {
       expect(stderr.text()).toContain(
         `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
       );
-    expect(await readFile(draft.draftPath, "utf8")).toBe(controlled);
-    expect(await readdir(dirname(draft.targetPath))).toEqual([]);
+    expect(await readFile(draft.targetPath, "utf8")).toBe(controlled);
   });
 
   test("returns the interrupt exit code and removes signal listeners", async () => {
@@ -943,18 +1554,140 @@ describe("policy CLI", () => {
     expect(await readdir(f.repository)).toEqual([]);
   });
 
+  test("lets a later interrupt escape post-write verification", async () => {
+    const name = "lets a later interrupt escape post-write verification";
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    const draft = await f.generate();
+    const signals = new FakeSignals();
+    const forced: string[] = [];
+    let now = 0;
+    const deps = policyDependencies(f, { signals });
+    deps.now = () => now;
+    deps.forceExit = (signal) => {
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      forced.push(signal);
+    };
+    const originalLink = fsPromises.link;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      link: async (source: string, destination: string) => {
+        await originalLink(source, destination);
+        if (destination !== draft.targetPath) return;
+        signals.emit("SIGINT");
+        signals.emit("SIGINT");
+        expect(forced).toEqual([]);
+        now = 1_000;
+        signals.emit("SIGINT");
+      },
+    }));
+    try {
+      const stderr = capture();
+      expect(
+        await main(
+          ["policy", "--apply", f.outputDir, "--write", "--json"],
+          capture().stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(forced).toEqual(["SIGINT"]);
+      expect(stderr.text()).toContain("recovery files before retrying");
+      expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        link: originalLink,
+      }));
+    }
+  });
+
+  test("reports recovery paths even when a conflict also receives cancellation", async () => {
+    const name =
+      "reports recovery paths even when a conflict also receives cancellation";
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    const original = "# Original policy\n";
+    const concurrent = "# Concurrent save\n";
+    await writeFile(join(f.repository, "SECURITY.md"), original);
+    const draft = await f.generate();
+    const signals = new FakeSignals();
+    const originalLink = fsPromises.link;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      link: async (source: string, destination: string) => {
+        if (destination === draft.targetPath && source.endsWith(".tmp")) {
+          await writeFile(destination, concurrent);
+          signals.emit("SIGINT");
+        }
+        await originalLink(source, destination);
+      },
+    }));
+    try {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["policy", "--apply", f.outputDir, "--write", "--json"],
+          stdout.stream,
+          stderr.stream,
+          policyDependencies(f, { signals }),
+        ),
+      ).toBe(2);
+      const result = JSON.parse(stdout.text());
+      expect(result.status).toBe("recovery_required");
+      expect(result.targetPath).toBe(draft.targetPath);
+      expect(stderr.text()).toContain(result.recoveryPath);
+      expect(await readFile(result.recoveryPath, "utf8")).toBe(original);
+      expect(await readFile(draft.targetPath, "utf8")).toBe(concurrent);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        link: originalLink,
+      }));
+    }
+  });
+
+  test("cancels a pending review prompt on SIGTERM", async () => {
+    const f = await fixture();
+    await f.generate();
+    const signals = new FakeSignals();
+    expect(
+      await main(
+        ["policy", "--apply", f.outputDir],
+        capture(true).stream,
+        capture(true).stream,
+        policyDependencies(f, {
+          signals,
+          prompt: prompt({
+            isInteractive: () => true,
+            confirm: async (_question, _defaultValue, signal) => {
+              expect(signal).toBeDefined();
+              signals.emit("SIGTERM");
+              signal!.throwIfAborted();
+              return true;
+            },
+          }),
+        }),
+      ),
+    ).toBe(143);
+    expect(await readdir(f.repository)).toEqual([]);
+  });
+
   test("treats Inquirer's Ctrl-C error as cancellation without a process signal", async () => {
     const f = await fixture();
+    await f.generate();
     const stderr = capture(true);
     expect(
       await main(
-        ["policy"],
+        ["policy", "--apply", f.outputDir],
         capture(true).stream,
         stderr.stream,
         policyDependencies(f, {
           prompt: prompt({
             isInteractive: () => true,
-            input: async () => {
+            confirm: async () => {
               throw Object.assign(new Error("Prompt closed"), {
                 name: "ExitPromptError",
               });

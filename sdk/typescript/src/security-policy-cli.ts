@@ -2,16 +2,29 @@ import type { CodexSecurity, ScanAuthMode } from "./api.js";
 import type { BulkScanPrompt } from "./bulk-scan-discovery.js";
 import type { CodexSecurityConfig } from "./config.js";
 import { formatUsd } from "./cost.js";
-import { safeErrorMessage } from "./errors.js";
 import {
+  SecurityPolicyRecoveryError,
+  SecurityPolicyVerificationError,
+  safeErrorMessage,
+} from "./errors.js";
+import {
+  applySecurityPolicy,
+  loadSecurityPolicyDraft,
   formatSecurityPolicyText as display,
+  securityPolicyDiff,
+  type SecurityPolicyDraft,
   type SecurityPolicyOptions,
   type SecurityPolicyStage,
 } from "./security-policy.js";
+import { resolvePluginPython } from "./runtime.js";
+import { enclosingGitWorktreeRoots } from "./targets.js";
 
 type SignalName = "SIGINT" | "SIGTERM";
 type Output = { write(value: string): unknown };
-export type PolicyPrompt = Pick<BulkScanPrompt, "isInteractive" | "input">;
+export type PolicyPrompt = Pick<
+  BulkScanPrompt,
+  "isInteractive" | "input" | "confirm"
+>;
 export type PolicySecurity = Pick<
   CodexSecurity,
   "generatePolicy" | "preflightPolicy" | "previewPolicy" | "close"
@@ -21,6 +34,8 @@ export interface PolicyCommandOptions {
   repository: string;
   config: CodexSecurityConfig;
   generation: SecurityPolicyOptions;
+  apply?: string;
+  write: boolean;
   headless: boolean;
   dryRun: boolean;
   format: string;
@@ -42,6 +57,7 @@ export interface PolicyCommandDependencies {
   addSignalListener(signal: SignalName, listener: () => void): void;
   removeSignalListener(signal: SignalName, listener: () => void): void;
   forceExit(signal: SignalName): void;
+  resolvePython?: typeof resolvePluginPython;
 }
 
 const STAGES: Record<SecurityPolicyStage, string> = {
@@ -69,6 +85,7 @@ export async function runPolicyCommand(
   const started = dependencies.now();
   let security: PolicySecurity | undefined;
   let outputDir: string | undefined;
+  let applyingTarget: string | undefined;
   const write = (message: string): void => {
     try {
       errorOutput.write(`${message}\n`);
@@ -83,6 +100,10 @@ export async function runPolicyCommand(
         dependencies.now() - firstSignalAt < 500
       )
         return;
+      if (applyingTarget !== undefined)
+        write(
+          `Policy application is being stopped. Check ${display(applyingTarget)}${outputDir === undefined ? "" : ` and saved artifacts at ${display(outputDir)}`} for recovery files before retrying.`,
+        );
       removeSignalListeners();
       dependencies.forceExit(signal);
       return;
@@ -99,70 +120,104 @@ export async function runPolicyCommand(
   dependencies.addSignalListener("SIGINT", interrupt);
   dependencies.addSignalListener("SIGTERM", terminate);
   try {
-    const auth =
-      interactive && !options.dryRun
-        ? await dependencies.chooseAuthentication(
-            options.config,
-            options.generation.auth,
-            controller.signal,
-          )
-        : options.generation.auth;
-    controller.signal.throwIfAborted();
-    security = dependencies.createSecurity(options.config);
-    if (options.dryRun) {
-      const preflight = await security.preflightPolicy(options.repository, {
-        ...options.generation,
+    let draft: SecurityPolicyDraft;
+    if (options.apply !== undefined) {
+      draft = await loadSecurityPolicyDraft(options.repository, options.apply, {
+        path: options.generation.path,
         signal: controller.signal,
       });
+      outputDir = draft.outputDir;
+    } else {
+      const auth =
+        interactive && !options.dryRun
+          ? await dependencies.chooseAuthentication(
+              options.config,
+              options.generation.auth,
+              controller.signal,
+            )
+          : options.generation.auth;
       controller.signal.throwIfAborted();
-      return {
-        exitCode: 0,
-        data: {
-          ...preflight,
-          dryRun: true,
+      security = dependencies.createSecurity(options.config);
+      if (options.dryRun) {
+        const preflight = await security.preflightPolicy(options.repository, {
+          ...options.generation,
+          signal: controller.signal,
+        });
+        controller.signal.throwIfAborted();
+        return {
+          exitCode: 0,
+          data: {
+            ...preflight,
+            dryRun: true,
+          },
+        };
+      }
+      draft = await security.generatePolicy(options.repository, {
+        ...options.generation,
+        auth,
+        signal: controller.signal,
+        onOutputDirReady: (directory) => {
+          outputDir = directory;
+          write(`Policy artifacts: ${display(directory)}`);
         },
-      };
-    }
-    const draft = await security.generatePolicy(options.repository, {
-      ...options.generation,
-      auth,
-      signal: controller.signal,
-      onOutputDirReady: (directory) => {
-        outputDir = directory;
-        write(`Policy artifacts: ${display(directory)}`);
-      },
-      onStage: (stage) => write(STAGES[stage]),
-      onWarning: (warning) =>
-        write(`codex-security: ${display(safeErrorMessage(warning))}`),
-      ...(interactive
-        ? {
-            answerQuestions: async (
-              questions: readonly string[],
-              signal: AbortSignal,
-            ) => {
-              write(
-                "A few details could change this policy. Leave an answer blank to keep it unresolved.",
-              );
-              const answers: string[] = [];
-              for (const question of questions) {
-                signal.throwIfAborted();
-                const answer = await prompt.input(
-                  display(question),
-                  undefined,
-                  signal,
+        onStage: (stage) => write(STAGES[stage]),
+        onWarning: (warning) =>
+          write(`codex-security: ${display(safeErrorMessage(warning))}`),
+        ...(interactive
+          ? {
+              answerQuestions: async (
+                questions: readonly string[],
+                signal: AbortSignal,
+              ) => {
+                write(
+                  "A few details could change this policy. Leave an answer blank to keep it unresolved.",
                 );
-                if (answer.trim()) answers.push(`${question}\n${answer}`);
-              }
-              return answers.join("\n\n");
-            },
-          }
-        : {}),
-    });
+                const answers: string[] = [];
+                for (const question of questions) {
+                  signal.throwIfAborted();
+                  const answer = await prompt.input(
+                    display(question),
+                    undefined,
+                    signal,
+                  );
+                  if (answer.trim()) answers.push(`${question}\n${answer}`);
+                }
+                return answers.join("\n\n");
+              },
+            }
+          : {}),
+      });
+    }
     controller.signal.throwIfAborted();
     const cost = draft.cost;
-    const diff = await security.previewPolicy(draft, {
-      signal: controller.signal,
-    });
+    let python: string | undefined;
+    const diff =
+      security === undefined
+        ? display(
+            await securityPolicyDiff(
+              draft,
+              async () =>
+                (python ??= await (
+                  dependencies.resolvePython ?? resolvePluginPython
+                )({
+                  configuredPath: options.config.pythonPath,
+                  environment: dependencies.environment,
+                  protectedRoot:
+                    (
+                      await enclosingGitWorktreeRoots(
+                        draft.repository,
+                        controller.signal,
+                      )
+                    ).at(-1) ?? draft.repository,
+                  signal: controller.signal,
+                })),
+              controller.signal,
+            ),
+            true,
+          )
+        : await security.previewPolicy(draft, {
+            signal: controller.signal,
+          });
     const changed = diff.length > 0;
     const humanOutput = options.format === "toon" && !options.explicitOutput;
     if (humanOutput) {
@@ -178,25 +233,55 @@ export async function runPolicyCommand(
               ...draft.reviewNotes.map((note) => `- ${display(note)}`),
             ]),
       ].join("\n");
-      if (interactive)
+      if (interactive && !options.write)
         await dependencies.writePreview(`${preview}\n`, controller.signal);
       else write(preview);
     }
     controller.signal.throwIfAborted();
-    const status = changed ? "draft" : "unchanged";
-    if (humanOutput) {
+    const approved =
+      options.write ||
+      (changed &&
+        interactive &&
+        (await prompt.confirm(
+          `Write this policy to ${display(draft.targetPath)}?`,
+          false,
+          controller.signal,
+        )));
+    controller.signal.throwIfAborted();
+    let status: "draft" | "written" | "unchanged" = changed
+      ? "draft"
+      : "unchanged";
+    let recoveryPath: string | null = null;
+    if (approved) {
+      applyingTarget = draft.targetPath;
+      const applied = await applySecurityPolicy(draft, {
+        pythonPath: python ?? options.config.pythonPath,
+        pluginPath: options.config.pluginPath,
+        environment: dependencies.environment,
+        signal: controller.signal,
+      });
+      recoveryPath = applied.recoveryPath;
+      status = applied.status;
+      write(
+        `${status === "written" ? "Wrote and verified" : "Verified"} ${display(draft.targetPath)}`,
+      );
+      if (recoveryPath !== null)
+        write(`Previous policy kept at ${display(recoveryPath)}`);
+    } else if (humanOutput) {
       write(`\nDraft: ${display(draft.draftPath)}`);
       write(`Architecture: ${display(draft.specificationPath)}`);
       write(`Threat model: ${display(draft.threatModelPath)}`);
       if (changed)
         write(
-          "No repository files changed. Review the saved SECURITY.md before copying it into the repository.",
+          "No repository files changed. To write this draft, use the same repository and --path with --apply <artifact-directory> --write.",
         );
     }
-    const seconds = Math.max(0, (dependencies.now() - started) / 1000);
-    write(
-      `Policy generation finished in ${seconds.toFixed(1)}s${cost === null ? "" : ` (${formatUsd(cost.estimatedUsd)} estimated)`}.`,
-    );
+    if (options.apply === undefined) {
+      const seconds = Math.max(0, (dependencies.now() - started) / 1000);
+      write(
+        `Policy generation finished in ${seconds.toFixed(1)}s${cost === null ? "" : ` (${formatUsd(cost.estimatedUsd)} estimated)`}.`,
+      );
+    }
     return {
       exitCode: 0,
       markdown: draft.content,
@@ -205,6 +290,7 @@ export async function runPolicyCommand(
         repository: draft.repository,
         scope: draft.scope,
         targetPath: draft.targetPath,
+        ...(recoveryPath === null ? {} : { recoveryPath }),
         outputDir: draft.outputDir,
         draftPath: draft.draftPath,
         specificationPath: draft.specificationPath,
@@ -215,17 +301,25 @@ export async function runPolicyCommand(
       },
     };
   } catch (error) {
+    const written = error instanceof SecurityPolicyVerificationError;
+    const recovery = error instanceof SecurityPolicyRecoveryError;
     const signal =
-      controller.signal.reason ??
+      (written || recovery ? undefined : controller.signal.reason) ??
       (error instanceof Error && error.name === "ExitPromptError"
         ? "SIGINT"
         : undefined);
     const exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+    const operation =
+      applyingTarget !== undefined
+        ? "application"
+        : options.apply === undefined
+          ? "generation"
+          : "review";
     const message =
       signal === "SIGINT"
-        ? "Policy generation canceled by Ctrl-C."
+        ? `Policy ${operation} canceled by Ctrl-C.`
         : signal === "SIGTERM"
-          ? "Policy generation terminated by SIGTERM."
+          ? `Policy ${operation} terminated by SIGTERM.`
           : display(safeErrorMessage(error));
     write(`codex-security: ${message}`);
     if (outputDir !== undefined)
@@ -233,6 +327,18 @@ export async function runPolicyCommand(
     return {
       exitCode,
       error: message,
+      ...(written || recovery
+        ? {
+            data: {
+              status: written ? "written_unverified" : "recovery_required",
+              targetPath: error.targetPath,
+              ...(error.recoveryPath === undefined
+                ? {}
+                : { recoveryPath: error.recoveryPath }),
+              ...(outputDir === undefined ? {} : { outputDir }),
+            },
+          }
+        : {}),
     };
   } finally {
     removeSignalListeners();

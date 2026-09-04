@@ -29,11 +29,18 @@ codex-security policy .
 codex-security policy . --path services/api --knowledge-base architecture.md
 ```
 
-The command saves a draft outside the checkout; it does not install it or run a
-vulnerability scan. Review the proposed diff before copying the policy. Supporting architecture,
-threat-model, and review documents stay outside the repository and may contain
-sensitive details. See the [SDK policy guide](sdk/typescript/README.md#generate-a-security-policy)
+In a terminal, the command shows the proposed diff and asks whether to install it;
+the write confirmation defaults to No. Add `--headless` to save a draft without
+write prompts. Generation does not run a vulnerability scan. Supporting
+architecture, threat-model, and review documents stay outside the repository and
+may contain sensitive details. See the [SDK policy guide](sdk/typescript/README.md#generate-a-security-policy)
 for headless generation, saved artifacts, and SDK usage.
+
+Use `codex-security policy . --apply /path/to/draft` to review and confirm a
+saved draft interactively. Add `--write` to apply the reviewed draft without
+another confirmation. Use the same repository and `--path` as generation.
+The command revalidates the draft and selected checkout
+before writing; see the SDK guide for recovery after an interrupted apply.
 
 ## TypeScript SDK
 

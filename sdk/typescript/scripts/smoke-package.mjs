@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -77,7 +78,13 @@ async function resolveArchive() {
 function run(
   command,
   args,
-  { cwd, env, capture = false, windowsVerbatimArguments = false } = {},
+  {
+    cwd,
+    env,
+    capture = false,
+    windowsVerbatimArguments = false,
+    expectedStatus = 0,
+  } = {},
 ) {
   const result = spawnSync(command, args, {
     cwd,
@@ -99,10 +106,10 @@ function run(
   if (result.error !== undefined) {
     throw new Error(`Failed to run ${command}.`, { cause: result.error });
   }
-  if (result.status !== 0) {
+  if (result.status !== expectedStatus) {
     const details = capture ? `\n${result.stderr.trim()}` : "";
     throw new Error(
-      `${command} exited with status ${result.status}.${details}`,
+      `${command} exited with status ${result.status} (expected ${expectedStatus}).${details}`,
     );
   }
 
@@ -402,7 +409,7 @@ try {
       "--eval",
       [
         `const sdk = await import(${JSON.stringify(packageManifest.name)});`,
-        `for (const name of ${JSON.stringify(["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "securityPolicyDiff"])}) {`,
+        `for (const name of ${JSON.stringify(["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "applySecurityPolicy", "loadSecurityPolicyDraft", "securityPolicyDiff", "SecurityPolicyRecoveryError", "SecurityPolicyVerificationError"])}) {`,
         '  if (typeof sdk[name] !== "function") throw new Error(`The installed package does not export ${name}.`);',
         "}",
         'if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function") throw new Error("The installed package does not export generatePolicy.");',
@@ -530,7 +537,194 @@ try {
     join(await realpath(policyTarget), "SECURITY.md"),
   );
   assert.equal(policyPreflight.dryRun, true);
+
+  const policyArtifacts = join(consumer, "policy-draft");
+  const policyMarkdown =
+    "# Security Policy\n\n## Security invariants\n\nCallers must authorize access to another account's records.\n";
+  await mkdir(policyArtifacts, { mode: 0o700 });
+  for (const [name, contents] of Object.entries({
+    "SECURITY.md": policyMarkdown,
+    "previous-SECURITY.md": "",
+    "project-spec.md": "# Synthetic architecture\n",
+    "THREAT_MODEL.md": "# Synthetic threat model\n",
+    "policy-draft.json": JSON.stringify({
+      documentType: "codex-security.policy-draft",
+      schemaVersion: "1.0",
+      repository: policyPreflight.repository,
+      scope: ".",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      revision: null,
+      previousPolicySha256: null,
+      inheritedPolicySha256: createHash("sha256").update("[]").digest("hex"),
+      model: "synthetic-model",
+      reasoningEffort: "high",
+      pluginVersion: packageManifest.version,
+      customPlugin: false,
+      reviewNotes: [],
+    }),
+  })) {
+    await writeFile(join(policyArtifacts, name), contents, { mode: 0o600 });
+  }
+  const savedPolicyEnvironment = {
+    ...process.env,
+    CODEX_CLI_PATH: join(consumer, "codex-must-not-run"),
+    OPENAI_API_KEY: "",
+    CODEX_API_KEY: "",
+    CODEX_SECURITY_STATE_DIR: join(consumer, "policy-state"),
+  };
+  const previewPolicy = (args) =>
+    run(
+      process.execPath,
+      [launcher, "policy", policyTarget, "--apply", policyArtifacts, ...args],
+      { cwd: consumer, capture: true, env: savedPolicyEnvironment },
+    );
+  assert.equal(previewPolicy(["--format", "md"]), policyMarkdown);
+  assert.match(previewPolicy(["--format=toon"]), /status: draft/u);
+  assert.equal(
+    JSON.parse(previewPolicy(["--json", "--filter-output", "status"])),
+    "draft",
+  );
+  for (const format of [[], ["--format", "md"]]) {
+    const count = previewPolicy([...format, "--token-count"]).trim();
+    assert.match(count, /^\d+$/u);
+    assert.ok(Number(count) > 0);
+    assert.match(
+      previewPolicy([...format, "--token-limit", "4"]),
+      /\[truncated: showing tokens /u,
+    );
+  }
+  assert.equal(
+    JSON.parse(previewPolicy(["--json", "--full-output"])).data.status,
+    "draft",
+  );
+  const failedPolicy = JSON.parse(
+    run(
+      process.execPath,
+      [
+        launcher,
+        "policy",
+        policyTarget,
+        "--apply",
+        join(consumer, "missing-policy-draft"),
+        "--json",
+        "--full-output",
+      ],
+      {
+        cwd: consumer,
+        capture: true,
+        env: savedPolicyEnvironment,
+        expectedStatus: 2,
+      },
+    ),
+  );
+  assert.equal(failedPolicy.ok, false);
+  assert.equal(failedPolicy.error.code, "POLICY_FAILED");
+  const invalidPolicy = JSON.parse(
+    run(
+      process.execPath,
+      [launcher, "policy", policyTarget, "--write", "--json", "--full-output"],
+      {
+        cwd: consumer,
+        capture: true,
+        env: savedPolicyEnvironment,
+        expectedStatus: 2,
+      },
+    ),
+  );
+  assert.equal(invalidPolicy.ok, false);
+  assert.match(invalidPolicy.error.message, /--write requires --apply/u);
   assert.deepEqual(await readdir(policyTarget), []);
+  // Node rejects Python's flags before reading stdin. Report that failure
+  // without an uncaught stream error in the installed Node.js entrypoint.
+  run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      [
+        'import assert from "node:assert/strict";',
+        `const { loadSecurityPolicyDraft, securityPolicyDiff } = await import(${JSON.stringify(packageManifest.name)});`,
+        "const draft = await loadSecurityPolicyDraft(process.argv[1], process.argv[2]);",
+        'draft.content = "# Policy\\n" + "x".repeat(900_000);',
+        "await assert.rejects(securityPolicyDiff(draft, process.execPath));",
+      ].join("\n"),
+      policyTarget,
+      policyArtifacts,
+    ],
+    { cwd: consumer },
+  );
+  const appliedPolicy = JSON.parse(
+    run(
+      process.execPath,
+      [
+        launcher,
+        "policy",
+        policyTarget,
+        "--apply",
+        policyArtifacts,
+        "--write",
+        "--json",
+      ],
+      {
+        cwd: consumer,
+        capture: true,
+        env: savedPolicyEnvironment,
+      },
+    ),
+  );
+  assert.equal(appliedPolicy.status, "written");
+  assert.equal(
+    await readFile(policyPreflight.targetPath, "utf8"),
+    policyMarkdown,
+  );
+  run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      [
+        'import assert from "node:assert/strict";',
+        'import { createHash } from "node:crypto";',
+        'import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";',
+        'import { dirname, join } from "node:path";',
+        `const { CodexSecurity, loadSecurityPolicyDraft, applySecurityPolicy } = await import(${JSON.stringify(packageManifest.name)});`,
+        "const repository = await realpath(process.argv[1]);",
+        "const artifacts = await realpath(process.argv[2]);",
+        'const target = join(repository, "SECURITY.md");',
+        'const previous = await readFile(target, "utf8");',
+        'const next = previous + "\\nOwner-reviewed update.\\n";',
+        'const manifestPath = join(artifacts, "policy-draft.json");',
+        'const manifest = JSON.parse(await readFile(manifestPath, "utf8"));',
+        'manifest.previousPolicySha256 = createHash("sha256").update(previous).digest("hex");',
+        'await writeFile(join(artifacts, "previous-SECURITY.md"), previous);',
+        'await writeFile(join(artifacts, "SECURITY.md"), next);',
+        "await writeFile(manifestPath, JSON.stringify(manifest));",
+        "const applied = await applySecurityPolicy(await loadSecurityPolicyDraft(repository, artifacts));",
+        "assert.equal(applied.targetPath, target);",
+        "assert.equal(dirname(applied.recoveryPath), artifacts);",
+        'assert.equal(await readFile(applied.recoveryPath, "utf8"), previous);',
+        'assert.equal(await readFile(target, "utf8"), next);',
+        'await mkdir(join(repository, "component"));',
+        "const security = new CodexSecurity();",
+        "try {",
+        "  await writeFile(target, Buffer.from([0xff]));",
+        '  await assert.rejects(security.preflightPolicy(repository, { path: "component" }), /valid UTF-8/);',
+        "} finally {",
+        "  await security.close();",
+        "  await writeFile(target, next);",
+        "}",
+      ].join("\n"),
+      policyTarget,
+      policyArtifacts,
+    ],
+    {
+      cwd: consumer,
+      env: {
+        ...process.env,
+        CODEX_CLI_PATH: join(consumer, "codex-must-not-run"),
+      },
+    },
+  );
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(

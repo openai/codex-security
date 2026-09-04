@@ -268,10 +268,10 @@ Cyber approval. Apply or check your access at
 
 ## Generate a security policy
 
-`policy` drafts `SECURITY.md` guidance for future scans. It does not run a
-vulnerability scan, change application settings, or install the draft in the
-checkout. It uses the scan runtime and authentication, requesting read-only
-access to the selected repository or component and required tools. Network access,
+`policy` drafts `SECURITY.md` guidance for future scans and can install it after
+review. It does not run a vulnerability scan or change application settings.
+Generation uses the scan runtime and authentication, requesting read-only access
+to the selected repository or component and required tools. Network access,
 web search, apps, and MCP servers are disabled. Drafts stay outside the checkout.
 Inherited and linked policy guidance is resolved by the host. The model cannot
 read sibling components or external Git metadata.
@@ -302,39 +302,89 @@ absolute path. Use `git worktree repair` for moved linked worktrees.
 Generation uses three Codex stages: describe the system, build a threat model,
 then draft the policy. The first two documents support review; they are not
 additional approval steps or policies to install.
-In a terminal, it asks about facts the source cannot establish and shows the
-exact diff. If both ChatGPT and API-key credentials are available, it asks which
-to use; `--auth chatgpt` or `--auth api-key` selects one explicitly.
+In a terminal, it asks about facts the source cannot establish, shows the exact
+diff, and asks whether to install the policy. The write confirmation defaults to
+No. If both ChatGPT and API-key credentials are available, it asks which to use; `--auth chatgpt` or `--auth api-key` selects one explicitly.
 
-| Invocation                   | Calls Codex? | Result                                                                  |
-| ---------------------------- | ------------ | ----------------------------------------------------------------------- |
-| `policy .`                   | Yes          | Ask owner questions, save documents, and preview the draft.             |
-| `policy . --headless --json` | Yes          | Save documents without prompts and return their paths and review notes. |
-| `policy . --format md`       | Yes          | Generate a draft and write its Markdown to stdout.                      |
-| `policy . --dry-run --json`  | No           | Check local inputs and show the resolved target and settings.           |
+| Invocation                              | Calls Codex? | Result                                                                           |
+| --------------------------------------- | ------------ | -------------------------------------------------------------------------------- |
+| `policy .`                              | Yes          | Ask owner questions, save documents, preview the draft, and offer to install it. |
+| `policy . --headless --json`            | Yes          | Save documents without prompts and return their paths and review notes.          |
+| `policy . --format md`                  | Yes          | Generate a draft and write its Markdown to stdout without installing it.         |
+| `policy . --dry-run --json`             | No           | Check local inputs and show the resolved target and settings.                    |
+| `policy . --apply DRAFT`                | No           | Preview a saved draft and offer to install it.                                   |
+| `policy . --apply DRAFT --headless`     | No           | Preview a saved draft without writing or prompting.                              |
+| `policy . --apply DRAFT --write --json` | No           | Install the reviewed draft without another confirmation.                         |
 
-None of these commands installs `SECURITY.md` in the repository. Output formats
-change presentation; they do not turn generation into a saved-draft read.
+`DRAFT` is the saved artifact directory. Output formats change presentation;
+`policy . --json` still generates a new draft. Use `--apply` to load one instead.
 
-### Review the draft
+### Review and apply a saved draft
 
-Review the saved `SECURITY.md` before copying it to the reported target. Check
-links from `.github/SECURITY.md` or `docs/SECURITY.md`: copying can change their
-guidance too. Preserve reporting instructions and obtain owner approval for
+Review the saved `SECURITY.md` before applying it. Preserve reporting
+instructions and obtain owner approval for
 exclusions, accepted risks, and severity decisions. Later scans read this policy.
 
 Preview rejects changes to the selected or inherited policies. Other source
 files are not frozen; regenerate if relevant source or neighboring policies change.
 
-Use `--headless` or an explicit output format to skip questions. Unanswered
-questions remain in the review notes. Drafts default to the Codex Security state
-directory; `--output-dir` selects an empty directory outside every enclosing
-Git checkout and its Git metadata.
+Use `--headless` or an explicit output format to skip questions and write
+prompts. Unanswered questions remain in the review notes. Drafts default to the
+Codex Security state directory; `--output-dir` selects an empty directory
+outside every enclosing Git checkout and its Git metadata.
 
 ```bash
 npx @openai/codex-security policy . --path services/api \
   --headless --output-dir /path/outside/repository/api-policy --json
+
+# Review or edit the saved SECURITY.md.
+npx @openai/codex-security policy . --path services/api \
+  --apply /path/outside/repository/api-policy --write
 ```
+
+`--apply` loads the saved draft without starting Codex. Omit `--write` to review
+and confirm interactively. `--write` requires `--apply`; it cannot write an
+unseen model response. The repository and component must match the draft.
+Before writing, the command checks that the original policy and inherited
+guidance have not changed. It also rejects links that would change another
+component's guidance or a separate reporting policy in `.github` or `docs`.
+Fix those links before applying. It writes the reviewed bytes, verifies that
+the policy resolver can read them, and does not stage, commit, or publish them.
+If a write succeeded but verification failed, fix the reported problem and
+retry the same saved draft with `--write`. An exact-content retry verifies the
+installed policy without replacing it. Keep any previously reported recovery
+file until concurrent edits have been reconciled.
+
+Updates keep the previous file so a late save through an open editor handle is
+not lost. The command moves it into the private artifact directory when possible;
+otherwise it stays beside the target as `.SECURITY.md.*.previous`. The CLI prints
+the path and returns `recoveryPath` in JSON. Keep that file until other writers
+have closed it and any edits are reconciled. A `recovery_required` result means
+the replacement needs manual reconciliation. A `written_unverified` result means
+the new policy was written but verification failed. Inspect the reported paths
+before retrying. Once a write commits, SDK cancellation does not skip the
+remaining checks. A terminal interrupt or process failure can still leave a
+`written_unverified` result. A later Ctrl-C or SIGTERM forces the CLI to stop.
+
+Replacing an existing policy briefly removes it from its final path while the
+previous file is checked. Another process can observe that gap, and interruption
+can leave only the recovery file. Avoid concurrent scans during application;
+inspect and restore the retained file if the final path is missing.
+
+New policies are published atomically, without overwriting a concurrent save. On
+Linux, the filename-based SELinux label is prepared before publication; if the
+current account cannot set that label, the target is left absent.
+Updates check both SELinux and Smack labels and stop if they cannot preserve them.
+
+On Windows, updates preserve the existing policy's complete security descriptor,
+including audit rules and integrity labels. If the current account cannot read or
+copy that descriptor, the existing policy is left unchanged.
+Automatic replacement of EFS-encrypted policies is not supported; use a tool that
+preserves the existing encryption settings to apply the reviewed draft.
+
+Save edited drafts as UTF-8. If generation used a custom `--plugin-path`, select
+it again when applying a saved draft. Saved metadata cannot choose executable
+plugin code. Both plugin directories and ZIP files are supported.
 
 The artifact directory contains:
 
@@ -343,8 +393,10 @@ The artifact directory contains:
 | `SECURITY.md`          | Editable policy draft.                                    |
 | `THREAT_MODEL.md`      | Detailed threat model with source references.             |
 | `project-spec.md`      | System description and security boundaries.               |
-| `previous-SECURITY.md` | Original policy used for the diff.                        |
+| `previous-SECURITY.md` | Original policy used for the diff and overwrite checks.   |
 | `policy-draft.json`    | Target, policy hashes, revision, model, and review notes. |
+
+An update may also retain `recovery-SECURITY-*.md` files.
 
 Keep supporting documents private until reviewed for disclosure. A generated
 threat scenario is neither owner approval nor a confirmed vulnerability.
@@ -352,14 +404,19 @@ threat scenario is neither owner approval nor a confirmed vulnerability.
 `--format md` writes the draft to stdout. `--json` returns paths, review notes,
 status, and estimated cost. Global filters and token options work with these
 formats. Progress goes to stderr. `--full-output` reports failures with
-`ok: false`. `--max-cost` applies to the whole generation. If a stage cannot
+`ok: false`. Plain `--json` retains recovery status and paths when a write
+needs attention. `--max-cost` applies to the whole generation. If a stage cannot
 inspect required source evidence, generation stops and preserves completed
 documents. Fix the reported problem and use a new output directory to retry.
 
 ### Generate a policy from TypeScript
 
 ```ts
-import { CodexSecurity } from "@openai/codex-security";
+import {
+  CodexSecurity,
+  applySecurityPolicy,
+  loadSecurityPolicyDraft,
+} from "@openai/codex-security";
 
 const security = new CodexSecurity();
 try {
@@ -370,7 +427,16 @@ try {
   });
 
   console.log(await security.previewPolicy(draft));
-  // Open draft.draftPath in an editor to review the saved policy.
+  console.log(draft.draftPath);
+  // Review or edit that saved file, then reload it before previewing or applying.
+  const reviewed = await loadSecurityPolicyDraft(
+    draft.repository,
+    draft.outputDir,
+    { path: draft.scope },
+  );
+  console.log(await security.previewPolicy(reviewed));
+  // Obtain approval for these exact bytes before calling:
+  // await applySecurityPolicy(reviewed, { pythonPath: security.config.pythonPath });
 } finally {
   await security.close();
 }
@@ -381,10 +447,19 @@ try {
 setting, and makes terminal control characters visible. Editing the saved file
 does not change that object. The standalone `securityPolicyDiff()` returns a raw diff
 for files or other non-terminal uses; pass an interpreter explicitly if needed.
-`generatePolicy()` accepts `auth`, `path`, `knowledgeBasePaths`, `outputDir`,
-`maxCostUsd`, `signal`, and progress and cost callbacks. An optional
+`generatePolicy()` never edits the repository. It accepts `auth`, `path`,
+`knowledgeBasePaths`, `outputDir`, `maxCostUsd`, `signal`, and progress and cost
+callbacks. An optional
 `answerQuestions` callback receives each group of up to three owner questions
 and a cancellation signal. Without it, the questions remain unresolved.
+
+Use `loadSecurityPolicyDraft(repository, artifactDirectory, { path })` to load
+an edited draft. `applySecurityPolicy()` returns `{ status, targetPath, recoveryPath }`;
+`status` is `written` or `unchanged`.
+`recoveryPath` is `null` when no existing file was replaced. Pass `{ pluginPath }`
+when applying a saved custom-plugin draft. `SecurityPolicyVerificationError` and
+`SecurityPolicyRecoveryError` identify files that need inspection or
+reconciliation.
 
 ## CLI
 

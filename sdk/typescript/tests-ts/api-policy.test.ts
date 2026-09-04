@@ -18,8 +18,10 @@ import type {
 import Ajv, { type AnySchema } from "ajv";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  applySecurityPolicy,
   CodexSecurity,
   InvalidTargetError,
+  loadSecurityPolicyDraft,
   OutputDirectoryNotEmptyError,
   securityPolicyDiff,
   writeCodexConfig,
@@ -761,7 +763,7 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
-  test("keeps literal component names intact through generation and preview", async () => {
+  test("keeps literal component names intact through generation and apply", async () => {
     for (const scope of ["-component", "~component", "~", "~/child"]) {
       let prepared = false;
       const f = await setup({
@@ -783,10 +785,14 @@ describe("CodexSecurity policy API", () => {
       const generated = await f.security.generatePolicy(f.repository, options);
       expect(generated.scope).toBe(scope);
       expect(f.prompts[0]).toContain("Inherited guidance.");
-      expect(await securityPolicyDiff(generated, PYTHON)).toContain(
+      const saved = await loadSecurityPolicyDraft(f.repository, f.outputDir, {
+        path: options.path,
+      });
+      expect(await securityPolicyDiff(saved, PYTHON)).toContain(
         `b/${scope}/SECURITY.md`,
       );
-      expect(await readdir(component)).toEqual([]);
+      await applySecurityPolicy(saved, { pythonPath: PYTHON });
+      expect(await readFile(saved.targetPath, "utf8")).toBe(POLICY);
       await f.security.close();
     }
   });
