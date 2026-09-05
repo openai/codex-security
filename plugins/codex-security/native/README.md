@@ -55,7 +55,7 @@ node --expose-gc plugins/codex-security/native/proof-windows.mjs python plugins/
 
 ## Package inputs
 
-The `native-artifacts` workflow calls all three platform workflows and combines their eight verified payloads into `native-universal-<commit>`. Package, release, container, and test workflows prepare this artifact before building the plugin. The standalone MCP builder and npm package include the same complete `mcp/native` tree; neither compiles nor downloads code at runtime.
+The `native-artifacts` workflow calls all three platform workflows and combines their eight verified payloads into `native-universal-<commit>`. PR validation jobs share one artifact assembled by `node-ci`; release and standalone validation runs assemble their own. The standalone MCP builder and npm package include the same complete `mcp/native` tree; neither compiles nor downloads code at runtime.
 
 The GNU x64 job also runs `notices.mjs` against the locked Cargo metadata. It collects crate licenses and the pinned Rust standard-library notices for both package surfaces. The NAPI crates omit license files from their registry archives, so `licenses/napi.txt` preserves their [pinned upstream license](https://github.com/napi-rs/napi-rs/blob/956e4525fea6a676ea3680b711382f167b899af9/LICENSE). Review that override when upgrading those dependencies.
 
