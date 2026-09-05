@@ -14,21 +14,11 @@ for (const name of ["app.mts", "validate.mts"]) {
 
 const build = spawnSync(
   process.execPath,
-  [
-    fileURLToPath(
-      new URL(
-        "../../sdk/typescript/node_modules/typescript/bin/tsc",
-        import.meta.url,
-      ),
-    ),
-    "--project",
-    fileURLToPath(
-      new URL("../../sdk/typescript/tsconfig.examples.json", import.meta.url),
-    ),
-    "--outDir",
-    target,
-  ],
-  { stdio: "inherit" },
+  ["--run", "build:examples", "--", "--outDir", target],
+  {
+    cwd: fileURLToPath(new URL("../../sdk/typescript", import.meta.url)),
+    stdio: "inherit",
+  },
 );
 if (build.error) throw build.error;
 if (build.status !== 0) process.exit(build.status ?? 1);
