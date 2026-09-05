@@ -118,6 +118,7 @@ import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   matchCompletedScan,
   matchScanFindingsInternal,
+  type ReadOnlyCodexOptions,
 } from "./scan-comparison.js";
 import {
   scanProgressUpdatesFromEvent,
@@ -327,7 +328,7 @@ export interface PatchOptions
   /** Override the constructor's configured model for this patch operation. */
   model?: string;
   /** Override the constructor's configured reasoning effort for this patch operation. */
-  reasoningEffort?: ModelReasoningEffort;
+  reasoningEffort?: NonNullable<ReadOnlyCodexOptions["reasoningEffort"]>;
 }
 
 interface PatchResultMetadata {
