@@ -83,7 +83,7 @@ export async function prepareKnowledgeBase(
       const extension = extname(document).toLowerCase();
       const text =
         extension === ".pdf"
-          ? await extractPdf(document, bytes)
+          ? await extractPdf(document, bytes, signal)
           : extension === ".docx"
             ? extractDocx(document, bytes)
             : decodeText(document, bytes);
@@ -150,7 +150,11 @@ function decodeText(path: string, bytes: Uint8Array): string {
   }
 }
 
-async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
+async function extractPdf(
+  path: string,
+  bytes: Uint8Array,
+  signal?: AbortSignal,
+): Promise<string> {
   try {
     const { getDocument, VerbosityLevel } = await import(
       "pdfjs-dist/legacy/build/pdf.mjs"
@@ -162,9 +166,14 @@ async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
     });
     try {
       const document = await loadingTask.promise;
+      signal?.throwIfAborted();
       const pages: string[] = [];
       for (let number = 1; number <= document.numPages; number++) {
-        const content = await (await document.getPage(number)).getTextContent();
+        signal?.throwIfAborted();
+        const page = await document.getPage(number);
+        signal?.throwIfAborted();
+        const content = await page.getTextContent();
+        signal?.throwIfAborted();
         pages.push(
           content.items
             .map((item) => ("str" in item ? item.str : ""))
@@ -176,6 +185,7 @@ async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
       await loadingTask.destroy();
     }
   } catch (error) {
+    if (signal?.aborted) signal.throwIfAborted();
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {
       cause: error,
     });
