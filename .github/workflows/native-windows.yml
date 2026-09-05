@@ -51,12 +51,14 @@ jobs:
         run: |
           cargo fmt --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo clippy --locked --target ${{ matrix.target }} -- -D warnings
+          cargo clippy --locked --target ${{ matrix.target }} --lib --example windows-wide-launcher -- -D warnings
       - name: Build and verify with Node.js 22
         run: |
           node build.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node check.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test windows-files.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $nativeNode = (Get-Command node).Source
           $env:PATH = ""
@@ -73,6 +75,8 @@ jobs:
       - name: Verify the same artifact with Node.js 20
         run: |
           node check.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test windows-files.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $nativeNode = (Get-Command node).Source
           $env:PATH = ""

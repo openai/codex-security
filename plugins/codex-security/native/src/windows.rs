@@ -1,10 +1,15 @@
 use napi::bindgen_prelude::{BigInt, Buffer};
 use napi_derive::napi;
 use std::{
-    fs::{File, TryLockError},
+    ffi::OsString,
+    fs::{self, File, TryLockError},
     io::{self, Read, Seek, SeekFrom, Write},
     mem::{offset_of, size_of, MaybeUninit},
-    os::windows::io::{AsRawHandle, FromRawHandle},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::FileTypeExt,
+        io::{AsRawHandle, FromRawHandle},
+    },
     ptr::{copy_nonoverlapping, null, null_mut},
 };
 use windows_sys::Win32::{
@@ -61,6 +66,106 @@ fn wide_path(bytes: Buffer) -> napi::Result<Vec<u16>> {
     }
     path.push(0);
     Ok(path)
+}
+
+fn wide_bytes(units: impl IntoIterator<Item = u16>) -> Buffer {
+    units
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn os_string(bytes: Buffer) -> napi::Result<OsString> {
+    let path = wide_path(bytes)?;
+    Ok(OsString::from_wide(&path[..path.len() - 1]))
+}
+
+#[napi(object)]
+pub struct BufferResult {
+    pub error: u32,
+    pub value: Buffer,
+}
+
+#[napi(object)]
+pub struct DirectoryEntry {
+    pub name: Buffer,
+    pub is_directory: bool,
+    pub is_symbolic_link: bool,
+}
+
+#[napi(object)]
+pub struct DirectoryEntriesResult {
+    pub error: u32,
+    pub value: Vec<DirectoryEntry>,
+}
+
+#[napi]
+pub fn windows_arguments() -> Vec<Buffer> {
+    std::env::args_os()
+        .map(|argument| wide_bytes(argument.encode_wide()))
+        .collect()
+}
+
+#[napi]
+pub fn windows_environment(name: Buffer) -> napi::Result<Option<Buffer>> {
+    Ok(std::env::var_os(os_string(name)?).map(|value| wide_bytes(value.encode_wide())))
+}
+
+#[napi]
+pub fn windows_absolute_path(path: Buffer) -> napi::Result<BufferResult> {
+    let path = os_string(path)?;
+    if path.is_empty() {
+        // Rust rejects empty paths before Win32; retain the native error contract.
+        let mut value = [0_u16; 256];
+        let error = unsafe {
+            GetFullPathNameW([0_u16].as_ptr(), 256, value.as_mut_ptr(), null_mut());
+            GetLastError()
+        };
+        return Ok(BufferResult {
+            error,
+            value: Vec::new().into(),
+        });
+    }
+    match std::path::absolute(path) {
+        Ok(value) => Ok(BufferResult {
+            error: 0,
+            value: wide_bytes(value.as_os_str().encode_wide()),
+        }),
+        Err(error) => Ok(BufferResult {
+            error: error
+                .raw_os_error()
+                .ok_or_else(|| invalid(&error.to_string()))? as u32,
+            value: Vec::new().into(),
+        }),
+    }
+}
+
+#[napi]
+pub fn windows_directory_entries(path: Buffer) -> napi::Result<DirectoryEntriesResult> {
+    let path = os_string(path)?;
+    let entries = || -> io::Result<Vec<DirectoryEntry>> {
+        fs::read_dir(path)?
+            .map(|entry| {
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                Ok(DirectoryEntry {
+                    name: wide_bytes(entry.file_name().encode_wide()),
+                    is_directory: kind.is_dir() || kind.is_symlink_dir(),
+                    is_symbolic_link: kind.is_symlink(),
+                })
+            })
+            .collect()
+    };
+    match entries() {
+        Ok(value) => Ok(DirectoryEntriesResult { error: 0, value }),
+        Err(error) => Ok(DirectoryEntriesResult {
+            error: error
+                .raw_os_error()
+                .ok_or_else(|| invalid(&error.to_string()))? as u32,
+            value: Vec::new(),
+        }),
+    }
 }
 
 fn io_range(buffer: &Buffer, offset: f64, length: f64) -> napi::Result<(usize, u32)> {
