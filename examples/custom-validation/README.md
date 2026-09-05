@@ -2,8 +2,9 @@
 
 This deliberately vulnerable invoice API contains only synthetic data. Do not
 deploy it. The validation script starts a real loopback HTTP server, tests
-cross-account access, saves the evidence, and stops the server. It needs Python
-3.10 or later and no extra packages or Docker.
+cross-account access, saves the evidence, and stops the server. It uses the
+SDK's supported Node.js version (including 22.13) and TypeScript compiler, with no
+extra packages or Docker.
 
 From the repository root, build the CLI and run the demo:
 
@@ -14,8 +15,16 @@ node examples/custom-validation/run.mjs
 ```
 
 The runner uses your existing Codex Security sign-in or API key. It copies the
-fixture to a temporary directory and prints the scan output path. Extra CLI
-options can be appended, for example `--model gpt-5.6-terra --effort high`.
+TypeScript fixture to a temporary directory, compiles it to JavaScript, and
+prints the scan output path. Extra CLI options can be appended, for example
+`--model gpt-5.6-terra --effort high`.
+
+To run just the HTTP proof without a scan:
+
+```bash
+pnpm --dir sdk/typescript run build:examples
+node examples/custom-validation/validate.mjs --output reports/http-proof.json
+```
 
 Look for these files in the printed scan directory:
 
@@ -31,4 +40,4 @@ cannot complete; it does not fall back to the default validation workflow.
 
 Adapt [validation.md](validation.md) for your own setup, tests, and cleanup.
 For a Docker-based project, the same prompt can run your existing compose or
-test script instead of `validate.py`.
+test script instead of `validate.mjs`.
