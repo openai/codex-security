@@ -831,6 +831,7 @@ try {
     };
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await recordCodexSecurityScanDraft(spoofedSurfaceContext, spoofedDraft);
+      assert.equal(spoofedDraft.coverage.surfaces[0].id, surfaceId);
       const spoofedSurfaceResult = await readJson(spoofedSurfaceRoot, "coverage.json");
       assert.equal(spoofedSurfaceResult.completeness, "partial");
       assert.deepEqual(
@@ -838,8 +839,73 @@ try {
         [deferred],
         "reusing a historical ID cannot resolve its deferral, even after checkpointing",
       );
+      assert.equal(
+        spoofedSurfaceResult.surfaces.find(surface => surface.id === surfaceId).riskArea,
+        "authorization",
+        "the saved ID remains bound to the original surface",
+      );
     }
+    await recordCodexSecurityScanDraft(spoofedSurfaceContext, {
+      ...input,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [{
+          label: "Source review",
+          riskArea: "authorization",
+          disposition: "no_issue_found",
+        }],
+      },
+    });
+    const correctedSurfaceResult = await readJson(spoofedSurfaceRoot, "coverage.json");
+    assert.equal(correctedSurfaceResult.completeness, "complete");
+    assert.deepEqual(correctedSurfaceResult.deferred, []);
   }
+
+  const reservedSurfaceRoot = path.join(root, "reserved-checkpoint-surface");
+  await mkdir(reservedSurfaceRoot);
+  const reservedSurfaceContext = { ...context, root: reservedSurfaceRoot };
+  await recordCodexSecurityScanDraft(reservedSurfaceContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [{ id: "surface_a", label: "Reserved", disposition: "no_issue_found" }],
+    },
+  });
+  await recordCodexSecurityScanDraft(reservedSurfaceContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [{ label: "A", disposition: "needs_follow_up" }],
+      deferred: [{
+        id: "checkpoint-a",
+        reason: "Review of A was pending.",
+        surfaceIds: ["surface_a-2"],
+      }],
+    },
+  });
+  assert.equal(
+    (await readJson(reservedSurfaceRoot, "coverage.json")).surfaces.find(surface => surface.label === "A").id,
+    "surface_a-2",
+    "historical reservations affect the canonical ID of an ID-less surface",
+  );
+  await recordCodexSecurityScanDraft(reservedSurfaceContext, {
+    ...input,
+    findings: [],
+    coverage: {
+      ...coverage,
+      surfaces: [{ label: "A", disposition: "no_issue_found" }],
+    },
+  });
+  const reservedSurfaceResult = await readJson(reservedSurfaceRoot, "coverage.json");
+  assert.equal(reservedSurfaceResult.completeness, "complete");
+  assert.deepEqual(reservedSurfaceResult.deferred, []);
 
   const undefinedCandidateRoot = path.join(root, "undefined-candidate-worker");
   await mkdir(undefinedCandidateRoot);
