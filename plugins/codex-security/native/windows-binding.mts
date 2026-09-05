@@ -6,7 +6,7 @@ export interface WindowsResult<T = number> {
   value: T;
 }
 
-/** Owns a synchronous Win32 handle. close() is idempotent; GC also closes it. */
+/** Owns a synchronous Windows file. close() is idempotent; GC also closes it. */
 export interface WindowsHandle {
   close(): number;
   attributes(): { error: number; attributes: number; reparseTag: number };
@@ -21,13 +21,9 @@ export interface WindowsHandle {
   flush(): number;
   rename(destination: Buffer, replace: boolean): number;
   setDisposition(deleteFile: boolean): number;
-  lock(
-    offset: bigint,
-    length: bigint,
-    exclusive: boolean,
-    nonblocking: boolean,
-  ): number;
-  unlock(offset: bigint, length: bigint): number;
+  /** Acquires an exclusive whole-file lock; contention returns Windows error 33. */
+  lock(nonblocking: boolean): number;
+  unlock(): number;
 }
 
 /** Paths are UTF-16LE code units without a terminator, including lone surrogates. */

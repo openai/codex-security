@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { fork, type ChildProcess } from "node:child_process";
+import { fork, spawn, type ChildProcess } from "node:child_process";
 import {
   existsSync,
   linkSync,
@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, win32 } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { setImmediate } from "node:timers/promises";
 import {
@@ -123,6 +124,10 @@ function handleProof(root: string) {
     assert.deepEqual(buffer.subarray(0, 3), Buffer.from("~~~"));
     assert.deepEqual(buffer.subarray(-3), Buffer.from("~~~"));
     assert.equal(checked(file.read(buffer, 0, 1)).value, 0);
+    assert.equal(
+      checked(file.seek(0n, flags.FILE_CURRENT)).value,
+      String(payload.length),
+    );
     const far = (1n << 53n) + 5n;
     assert.equal(
       checked(file.seek(far, flags.FILE_BEGIN)).value,
@@ -134,6 +139,22 @@ function handleProof(root: string) {
     );
     success(file.setEndOfFile());
     assert.equal(checked(file.size()).value, String(payload.length - 2));
+    assert.equal(
+      checked(file.seek(0n, flags.FILE_CURRENT)).value,
+      String(payload.length - 2),
+    );
+    assert.equal(checked(file.read(buffer, 0, 1)).value, 0);
+    assert.equal(
+      checked(file.seek(1n, flags.FILE_CURRENT)).value,
+      String(payload.length - 1),
+    );
+    success(file.setEndOfFile());
+    assert.equal(checked(file.size()).value, String(payload.length - 1));
+    assert.equal(
+      checked(file.seek(0n, flags.FILE_CURRENT)).value,
+      String(payload.length - 1),
+    );
+    assert.equal(file.seek(0n, 99).error, 87);
     samePath(checked(file.finalPath(0)).path, path);
     samePath(checked(file.finalPath(flags.FILE_NAME_OPENED)).path, path);
 
@@ -195,11 +216,22 @@ function handleProof(root: string) {
       ),
     );
     assert.throws(() => file.seek(1n << 63n, flags.FILE_BEGIN));
-    assert.throws(() => file.lock(-1n, 1n, true, true));
-    assert.throws(() => file.lock(0n, 1n << 64n, true, true));
+    const readOnly = keep(open(path, flags.GENERIC_READ));
+    assert.equal(readOnly.write(buffer, 0, 1).error, 5);
+    assert.equal(readOnly.flush(), 5);
+    assert.equal(readOnly.setEndOfFile(), 5);
+    close(readOnly);
     close(file);
     success(file.close());
     assert.equal(file.size().error, 6);
+    assert.equal(file.read(buffer, 0, 1).error, 6);
+    assert.equal(file.write(buffer, 0, 1).error, 6);
+    assert.equal(file.seek(0n, flags.FILE_CURRENT).error, 6);
+    assert.equal(file.setEndOfFile(), 6);
+    assert.equal(file.flush(), 6);
+    assert.equal(file.lock(true), 6);
+    assert.equal(file.lock(false), 6);
+    assert.equal(file.unlock(), 6);
 
     const ancestor = join(root, "ancestor");
     const scan = join(ancestor, "scan");
@@ -392,15 +424,15 @@ async function worker(path: string): Promise<void> {
   });
   process.on("message", async (command: string) => {
     if (command === "probe") {
-      const error = handle.lock(0n, 1n, true, true);
-      if (error === 0) success(handle.unlock(0n, 1n));
+      const error = handle.lock(true);
+      if (error === 0) success(handle.unlock());
       await send({ type: "probe", error });
     } else if (command === "lock") {
       await send({ type: "attempting" });
-      success(handle.lock(0n, 1n, true, false));
+      success(handle.lock(false));
       await send({ type: "acquired" });
     } else if (command === "unlock") {
-      success(handle.unlock(0n, 1n));
+      success(handle.unlock());
       await send({ type: "released" });
     } else if (command === "close") {
       success(handle.close());
@@ -413,6 +445,49 @@ async function worker(path: string): Promise<void> {
   await send({ type: "ready" });
 }
 
+// Migration oracle only: compare the existing Python byte-zero lock functions.
+const pythonOracle = String.raw`
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+from workbench_db import acquire_completion_file_lock, release_completion_file_lock, is_file_lock_contention, windows_file_lock
+fd = os.open(sys.argv[2], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o600)
+def send(kind, **values):
+    print(json.dumps({"type": kind, **values}), flush=True)
+try:
+    send("ready")
+    for line in sys.stdin:
+        command = json.loads(line)
+        if command == "probe":
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                windows_file_lock.locking(fd, windows_file_lock.LK_NBLCK, 1)
+            except OSError as error:
+                if not is_file_lock_contention(error):
+                    raise
+                send("probe", error=error.errno)
+            else:
+                release_completion_file_lock(fd)
+                send("probe", error=0)
+        elif command == "lock":
+            send("attempting")
+            acquire_completion_file_lock(fd)
+            send("acquired")
+        elif command == "unlock":
+            release_completion_file_lock(fd)
+            send("released")
+        elif command == "close":
+            os.close(fd)
+            fd = None
+            send("closed")
+        elif command == "exit":
+            break
+        else:
+            raise ValueError(command)
+finally:
+    if fd is not None:
+        os.close(fd)
+`;
+
 const peers = new Set<Peer>();
 class Peer {
   readonly child: ChildProcess;
@@ -420,29 +495,42 @@ class Peer {
   private messages: Message[] = [];
   private pending?: (message: Message) => void;
   private stderr = "";
-  constructor(path: string) {
-    this.child = fork(self, ["worker", path], {
-      execPath: process.execPath,
-      execArgv: [],
-      stdio: ["ignore", "pipe", "pipe", "ipc"],
-    });
+  private readonly python: boolean;
+  constructor(path: string, python?: string, scripts?: string) {
+    this.python = python !== undefined;
+    this.child =
+      python === undefined
+        ? fork(self, ["worker", path], {
+            execPath: process.execPath,
+            execArgv: [],
+            stdio: ["ignore", "pipe", "pipe", "ipc"],
+          })
+        : spawn(python, ["-u", "-c", pythonOracle, scripts!, path], {
+            stdio: ["pipe", "pipe", "pipe"],
+          });
     peers.add(this);
     this.child.stderr!.on("data", (chunk: Buffer) => {
       this.stderr += chunk.toString();
     });
-    this.child.on("message", (message: Message) => {
+    const receive = (message: Message) => {
       if (this.pending) {
         const receive = this.pending;
         this.pending = undefined;
         receive(message);
       } else this.messages.push(message);
-    });
+    };
+    if (this.python) {
+      createInterface({ input: this.child.stdout! }).on("line", (line) => {
+        receive(JSON.parse(line) as Message);
+      });
+    } else this.child.on("message", receive);
     this.exited = new Promise((resolve) =>
       this.child.once("exit", () => resolve()),
     );
   }
   send(command: string): void {
-    this.child.send(command);
+    if (this.python) this.child.stdin!.write(`${JSON.stringify(command)}\n`);
+    else this.child.send(command);
   }
   async next(type: string): Promise<Message> {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -497,30 +585,26 @@ class Peer {
   }
 }
 
-async function lockProof(root: string) {
-  const path = join(root, "byte-lock");
+async function lockProof(root: string, python?: string, scripts?: string) {
+  const path = join(root, "file-lock");
   const parent = open(path, readWrite, shareAll, flags.OPEN_ALWAYS);
   const other = open(path, readWrite, shareAll);
   try {
-    const high = (1n << 32n) + 5n;
-    success(parent.lock(high, 2n, true, true));
-    assert.equal(other.lock(high, 1n, true, true), 33);
-    success(other.lock(5n, 1n, true, true));
-    success(other.unlock(5n, 1n));
-    success(parent.unlock(high, 2n));
-    success(parent.lock(0n, 1n, true, true));
-    const first = new Peer(path);
+    success(parent.lock(true));
+    const first = new Peer(path, python, scripts);
     await first.next("ready");
     first.send("probe");
-    assert.equal((await first.next("probe")).error, 33);
+    const contention = (await first.next("probe")).error!;
+    if (python === undefined) assert.equal(contention, 33);
+    else assert([13, 11, 36].includes(contention));
     first.send("lock");
     await first.next("attempting");
-    success(parent.unlock(0n, 1n));
+    success(parent.unlock());
     await first.next("acquired");
-    assert.equal(parent.lock(0n, 1n, true, true), 33);
+    assert.equal(parent.lock(true), 33);
     first.send("unlock");
     await first.next("released");
-    success(parent.lock(0n, 1n, true, true));
+    success(parent.lock(true));
     first.send("lock");
     await first.next("attempting");
     success(parent.close());
@@ -531,17 +615,24 @@ async function lockProof(root: string) {
     await second.next("attempting");
     await first.stop(true);
     await second.next("acquired");
-    assert.equal(other.lock(0n, 1n, true, true), 33);
-    second.send("close");
-    await second.next("closed");
-    success(other.lock(0n, 1n, true, true));
-    success(other.unlock(0n, 1n));
-    await second.stop();
+    assert.equal(other.lock(true), 33);
+    const third = new Peer(path, python, scripts);
+    await third.next("ready");
+    third.send("lock");
+    await third.next("attempting");
+    await second.stop(true);
+    await third.next("acquired");
+    third.send("close");
+    await third.next("closed");
+    success(other.lock(true));
+    success(other.unlock());
+    await third.stop();
     return {
-      byteZeroContention: true,
-      high64BitRanges: true,
+      peerRuntime: python === undefined ? "node" : "python",
+      peerContentionError: contention,
+      wholeFileExclusiveContention: true,
       blockingHandoff: true,
-      unlockCloseAndProcessDeathRelease: true,
+      unlockCloseAndBidirectionalProcessDeathRelease: true,
     };
   } finally {
     parent.close();
@@ -553,6 +644,12 @@ async function lockProof(root: string) {
 if (process.argv[2] === "worker") {
   await worker(process.argv[3]!);
 } else {
+  const [python, scripts] = process.argv.slice(2);
+  assert.equal(
+    Boolean(python),
+    Boolean(scripts),
+    "Pass both the Python executable and scripts directory.",
+  );
   const root = realpathSync.native(
     mkdtempSync(join(tmpdir(), "codex-security-windows-")),
   );
@@ -567,6 +664,10 @@ if (process.argv[2] === "worker") {
           handles: handleProof(root),
           garbageCollectionClosesHandle: await ownershipProof(root),
           locks: await lockProof(root),
+          pythonCompatibility:
+            python && scripts
+              ? await lockProof(root, python, scripts)
+              : undefined,
           fixture: basename(root),
         },
         null,
