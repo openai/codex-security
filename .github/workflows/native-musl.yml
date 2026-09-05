@@ -1,0 +1,112 @@
+name: native-musl
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  primitives:
+    name: primitives / linux-${{ matrix.arch }}-musl
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+            rust-image: rust@sha256:83b16fd204613a557527e81ef4f87fd513229187c49635e3c7f96b08dfa43c33
+            node22-image: node@sha256:133cdce957f50f47236d6d926592fb1db7a120ac3c33191e611b60dfab63e324
+            node20-image: node@sha256:2ffec31a58e85fbcd575c544a3584f6f4d128779e6b856153a04366b8dd01bb0
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            rust-image: rust@sha256:ec97f172f73f5ec381a238dad6ddd99e0e9c14fd3709a05beb41ccdf50eb666a
+            node22-image: node@sha256:9090fa64b73b14ab658d907e7916afcb1633e4bdd5134f9b1be4a21a6c56f0b8
+            node20-image: node@sha256:9a3cb11e78b5082ce7d22bb5113ed5bb7ac4c20195c05f3981e765e21e31c29c
+    defaults:
+      run:
+        shell: bash
+        working-directory: plugins/codex-security/native
+    env:
+      RUST_IMAGE: ${{ matrix.rust-image }}
+      NODE22_IMAGE: ${{ matrix.node22-image }}
+      NODE20_IMAGE: ${{ matrix.node20-image }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: package.json
+          cache: true
+          cache_dependency_path: sdk/typescript/pnpm-lock.yaml
+      - name: Set up Node.js for TypeScript tools
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+      - name: Compile TypeScript tools
+        working-directory: .
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          pnpm --dir sdk/typescript run build:ci
+      - name: Fetch locked Rust dependencies
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+          cargo fetch --locked
+      - name: Assemble pinned musl compiler image
+        run: |
+          docker build --network none \
+            --build-arg RUST_IMAGE="$RUST_IMAGE" \
+            --build-arg NODE_IMAGE="$NODE22_IMAGE" \
+            --tag codex-security-native-musl - <<'DOCKERFILE'
+          ARG RUST_IMAGE
+          ARG NODE_IMAGE
+          FROM ${NODE_IMAGE} AS node-runtime
+          FROM ${RUST_IMAGE}
+          COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+          DOCKERFILE
+      - name: Build and check musl artifact
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-musl-cargo"
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/source" \
+            --volume "$RUNNER_TEMP/native-musl-cargo:/cargo" \
+            --volume "${CARGO_HOME:-$HOME/.cargo}/registry:/cargo/registry:ro" \
+            --env CARGO_HOME=/cargo \
+            --env CARGO_NET_OFFLINE=true \
+            --env RUSTUP_TOOLCHAIN=1.97.1 \
+            --workdir /source codex-security-native-musl /bin/sh -euc '
+              test -z "$(command -v python || true)"
+              test -z "$(command -v python3 || true)"
+              node build.mjs
+              node check.mjs
+            '
+      - name: Verify the same artifact with Node.js 22 and 20
+        run: |
+          for native_image in "$NODE22_IMAGE" "$NODE20_IMAGE"; do
+            docker run --rm --network none --user "$(id -u):$(id -g)" \
+              --volume "$PWD:/source:ro" \
+              --workdir /source "$native_image" /bin/sh -euc '
+                test -z "$(command -v python || true)"
+                test -z "$(command -v python3 || true)"
+                PATH= /usr/local/bin/node proof.mjs
+              '
+          done
+      - name: Upload verified native artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-linux-${{ matrix.arch }}-musl-${{ github.sha }}
+          path: plugins/codex-security/native/dist/linux-${{ matrix.arch }}-musl/unix.node
+          if-no-files-found: error
+          retention-days: 7

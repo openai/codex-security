@@ -23,15 +23,17 @@ The proof runs without Python. It checks directory replacement, byte paths, unre
 node plugins/codex-security/native/proof.mjs python3 plugins/codex-security/scripts
 ```
 
-Build outputs stay under ignored `target` and `dist` directories. Source, Cargo registry, and compiler paths are remapped before compilation; actual payload bytes are checked for private paths. Before an artifact is uploaded, run:
+Build outputs stay under ignored `target` and `dist` directories. Linux output directories include the C runtime: `linux-x64-gnu`, `linux-arm64-gnu`, `linux-x64-musl`, and `linux-arm64-musl`. The dependency-free `platform.mts` helper distinguishes glibc from musl using the Node diagnostic report header, without a subprocess. macOS and Windows retain their platform and architecture directories. Source, Cargo registry, and compiler paths are remapped before compilation; actual payload bytes are checked for private paths. Before an artifact is uploaded, run:
 
 ```sh
 node plugins/codex-security/native/check.mjs
 ```
 
-Linux artifacts must import no glibc version newer than 2.28. macOS artifacts must declare a deployment target of 11.0 or earlier. A build from a newer Linux workstation can pass the behavioral proof and still fail this distribution check.
+GNU Linux artifacts must import no glibc version newer than 2.28. Musl artifacts must be ELF images for the current architecture, depend on that architecture's musl library, and have no version requirements from glibc. GCC's own `GLIBC_2.0` compatibility exports are attributed to `libgcc_s.so.1`, not the C library. Musl has no glibc-style symbol version floor, so its runtime compatibility also requires the load proofs below. macOS artifacts must declare a deployment target of 11.0 or earlier. A build from a newer GNU Linux workstation can pass the behavioral proof and still fail this distribution check.
 
 The `native-unix` workflow builds Linux artifacts in digest-pinned manylinux 2.28 images. It mounts the pinned Rust toolchain and fetched Cargo registry, builds offline, and blocks Python commands during compilation. macOS builds set `MACOSX_DEPLOYMENT_TARGET=11.0`. CI verifies separate x64 and arm64 artifacts on both platforms using Node 20.0.0 and 22.13.0. These artifacts are inputs to the later universal-package gate.
+
+The `native-musl` workflow uses native x64 and arm64 Ubuntu workers with digest-pinned Rust 1.97.1 Alpine compiler images. Musl builds disable static CRT linkage so Node can load the shared library. After the ELF and private-path checks, each unchanged artifact runs the full proof in pinned Node 20.0.0 Alpine 3.17 and Node 22.13.0 Alpine 3.21 images, with musl 1.2.3 and 1.2.5 respectively. Compilation uses the locked registry offline; runtime containers mount only the source and artifact read-only. Python is absent, and proof processes receive an empty `PATH`.
 
 Windows uses `windows-binding.mts` and the same Rust crate. `WindowsHandle` owns a non-inheritable handle through Rust's `File`; explicit `close()` and garbage collection release it. Handles never cross into Node's CRT descriptor table. Paths and returned names are UTF-16LE buffers without a NUL terminator, preserving lone surrogates. Volume identities and file positions are decimal strings; file IDs retain all 128 bits in a buffer.
 

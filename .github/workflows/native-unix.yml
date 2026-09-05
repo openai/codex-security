@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   primitives:
-    name: primitives / ${{ matrix.platform }}-${{ matrix.arch }}
+    name: primitives / ${{ matrix.artifact }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -25,17 +25,21 @@ jobs:
           - runner: ubuntu-24.04
             platform: linux
             arch: x64
+            artifact: linux-x64-gnu
             image: quay.io/pypa/manylinux_2_28_x86_64@sha256:0536c364004fa2a3c5041120b6fe35d84fc5bfe31f04c6a6304f13eac4a67b63
           - runner: ubuntu-24.04-arm
             platform: linux
             arch: arm64
+            artifact: linux-arm64-gnu
             image: quay.io/pypa/manylinux_2_28_aarch64@sha256:1676a4f178dc6cf8a1d1e3b7e1d71fca891a466ebde72a33880ccda8af3383d8
           - runner: macos-15-intel
             platform: darwin
             arch: x64
+            artifact: darwin-x64
           - runner: macos-15
             platform: darwin
             arch: arm64
+            artifact: darwin-arm64
     defaults:
       run:
         shell: bash
@@ -121,7 +125,7 @@ jobs:
       - name: Upload verified native artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: native-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
-          path: plugins/codex-security/native/dist/${{ matrix.platform }}-${{ matrix.arch }}/unix.node
+          name: native-${{ matrix.artifact }}-${{ github.sha }}
+          path: plugins/codex-security/native/dist/${{ matrix.artifact }}/unix.node
           if-no-files-found: error
           retention-days: 7
