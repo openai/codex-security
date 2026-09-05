@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { prepareScanPublication } from "../src/publication.js";
 import type {
@@ -24,12 +24,17 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const temporaryDirectories: string[] = [];
-const DESTINATION = {
-  destination: "linear",
-  teamId: "team_example",
-  projectId: "project_example",
-  uploadedAt: "2026-06-01T10:30:00Z",
-} as const;
+function publicationOptions(scanDirectory: string) {
+  return {
+    destination: "linear",
+    teamId: "team_example",
+    projectId: "project_example",
+    uploadedAt: "2026-06-01T10:30:00Z",
+    environment: {
+      CODEX_SECURITY_STATE_DIR: join(dirname(scanDirectory), "state"),
+    },
+  } as const;
+}
 
 afterEach(async () => {
   await Promise.all(
@@ -76,7 +81,7 @@ describe("scan publication preparation", () => {
 
     await expect(
       prepareScanPublication(scanDirectory, {
-        ...DESTINATION,
+        ...publicationOptions(scanDirectory),
         signal: controller.signal,
       }),
     ).rejects.toBe(reason);
@@ -86,7 +91,7 @@ describe("scan publication preparation", () => {
     const scanDirectory = await copyExample();
     await expect(
       prepareScanPublication(scanDirectory, {
-        ...DESTINATION,
+        ...publicationOptions(scanDirectory),
         expectedScanId: "another-scan",
       }),
     ).rejects.toThrow(
@@ -95,7 +100,7 @@ describe("scan publication preparation", () => {
     expect(
       (
         await prepareScanPublication(scanDirectory, {
-          ...DESTINATION,
+          ...publicationOptions(scanDirectory),
           expectedScanId: "scan_example_001",
         })
       ).scanId,
@@ -106,7 +111,7 @@ describe("scan publication preparation", () => {
     const scanDirectory = await copyExample();
     const publication = await prepareScanPublication(
       scanDirectory,
-      DESTINATION,
+      publicationOptions(scanDirectory),
     );
 
     expect(publication).toMatchObject({
@@ -183,7 +188,10 @@ describe("scan publication preparation", () => {
     await reseal(scanDirectory);
 
     const { description } = (
-      await prepareScanPublication(scanDirectory, DESTINATION)
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
     ).issues[0]!;
 
     const metadata = description.indexOf("**Scan ID:**");
@@ -221,7 +229,7 @@ describe("scan publication preparation", () => {
 
     const publication = await prepareScanPublication(
       join(alias, "scan"),
-      DESTINATION,
+      publicationOptions(scanDirectory),
     );
 
     expect(publication.scanDirectory).toBe(await realpath(scanDirectory));
@@ -246,7 +254,10 @@ describe("scan publication preparation", () => {
       await reseal(scanDirectory);
 
       const { description } = (
-        await prepareScanPublication(scanDirectory, DESTINATION)
+        await prepareScanPublication(
+          scanDirectory,
+          publicationOptions(scanDirectory),
+        )
       ).issues[0]!;
 
       expect(description).toContain(`**Coverage mode:** ${mode}`);
@@ -261,6 +272,7 @@ describe("scan publication preparation", () => {
       destination: "linear",
       teamId: "team_example",
       uploadedAt: "2026-06-01T10:30:00Z",
+      environment: publicationOptions(scanDirectory).environment,
     });
 
     expect(publication.destination).toEqual({
@@ -325,7 +337,10 @@ describe("scan publication preparation", () => {
     await reseal(scanDirectory);
 
     const { description } = (
-      await prepareScanPublication(scanDirectory, DESTINATION)
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
     ).issues[0]!;
 
     expect(description).toContain("**Root control:** `src/archive.py:12`");
@@ -362,7 +377,10 @@ describe("scan publication preparation", () => {
     await writeJson(manifestPath, manifest);
 
     const { description } = (
-      await prepareScanPublication(scanDirectory, DESTINATION)
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
     ).issues[0]!;
 
     expect(description).toContain(
@@ -385,7 +403,10 @@ describe("scan publication preparation", () => {
     await writeJson(manifestPath, manifest);
 
     const { description } = (
-      await prepareScanPublication(scanDirectory, DESTINATION)
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
     ).issues[0]!;
 
     expect(description).toContain("**Remote:** ssh://github.com/example/repo");
@@ -430,7 +451,10 @@ describe("scan publication preparation", () => {
     await reseal(scanDirectory);
 
     const { description } = (
-      await prepareScanPublication(scanDirectory, DESTINATION)
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
     ).issues[0]!;
 
     expect(description).toContain(
@@ -459,8 +483,12 @@ describe("scan publication preparation", () => {
       await writeJson(findingsPath, findings);
       await reseal(scanDirectory);
 
-      const issue = (await prepareScanPublication(scanDirectory, DESTINATION))
-        .issues[0]!;
+      const issue = (
+        await prepareScanPublication(
+          scanDirectory,
+          publicationOptions(scanDirectory),
+        )
+      ).issues[0]!;
       expect(issue.title).toStartWith(
         `[Codex Security][${severity.toUpperCase()}] `,
       );
@@ -478,7 +506,12 @@ describe("scan publication preparation", () => {
     await reseal(scanDirectory);
 
     expect(
-      (await prepareScanPublication(scanDirectory, DESTINATION)).issues,
+      (
+        await prepareScanPublication(
+          scanDirectory,
+          publicationOptions(scanDirectory),
+        )
+      ).issues,
     ).toEqual([]);
   });
 
@@ -490,7 +523,7 @@ describe("scan publication preparation", () => {
     await writeJson(findingsPath, findings);
 
     await expect(
-      prepareScanPublication(scanDirectory, DESTINATION),
+      prepareScanPublication(scanDirectory, publicationOptions(scanDirectory)),
     ).rejects.toThrow();
   });
 });

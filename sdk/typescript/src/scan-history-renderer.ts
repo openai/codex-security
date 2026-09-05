@@ -445,6 +445,13 @@ export function renderScanHistory(
       "",
       `  ${paint("●", 36)} ${clean(result["scanCount"])} scans    ${paint("↔", 36)} ${clean(result["matchedPairs"])} comparisons    ${paint("◆", 32)} ${clean(result["findingMatches"])} root-cause matches`,
     );
+    if (result["relatedPairs"] || result["uncertainPairs"]) {
+      const related = result["relatedPairs"] ?? 0;
+      const uncertain = result["uncertainPairs"] ?? 0;
+      lines.push(
+        `  ${clean(related)} related pair${related === 1 ? "" : "s"} recorded    ${clean(uncertain)} uncertain pair${uncertain === 1 ? "" : "s"}`,
+      );
+    }
     if (result["unavailableScans"]) {
       lines.push(
         `  ${paint(`${clean(result["unavailableScans"])} scans unavailable`, 33)}`,

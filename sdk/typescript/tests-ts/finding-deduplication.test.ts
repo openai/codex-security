@@ -596,8 +596,8 @@ test("keeps recommendation-only screening independent from complete pair reviews
     calls.map(({ stage, model, effort }) => [stage, model, effort]),
   ).toEqual([
     ["screening", "gpt-5.6-luna", "xhigh"],
-    ["pair-review", "gpt-5.6-sol", "xhigh"],
-    ["pair-review", "gpt-5.6-sol", "xhigh"],
+    ["pair-review", "gpt-5.6-sol", "high"],
+    ["pair-review", "gpt-5.6-sol", "high"],
   ]);
   expect(calls[0]!.prompt).toContain(JSON.stringify({ findings }));
   expect(calls[1]!.prompt).toContain(
