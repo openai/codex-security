@@ -1,9 +1,13 @@
 ---
 name: verify-fix
-description: Use when the user asks whether an existing security fix, patch, finding, or completed issue actually remediates the original vulnerability without modifying the repository. Do not use to validate candidate findings, implement patches, or run full repository scans.
+description: Use only when the user explicitly requests verification that a security fix remediates a reported vulnerability. Do not invoke automatically while implementing fixes, reviewing ordinary code changes, or running tests. Do not use for non-security fixes, candidate finding validation, or full repository scans.
 ---
 
 # Verify Fix
+
+## When to Use
+
+Invoke this skill only for an explicit request to verify a security fix, including a direct `$verify-fix` invocation. A request to implement a fix or run its tests does not by itself request this skill. For other tasks, follow the user's requested workflow and response format without applying this skill's JSON result contract.
 
 ## Objective
 
