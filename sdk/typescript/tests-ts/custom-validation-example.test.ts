@@ -12,14 +12,8 @@ test("compiled validation example saves HTTP proof and exits after server cleanu
   try {
     const build = await runCommand(
       "node",
-      [
-        join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
-        "--project",
-        join(packageRoot, "tsconfig.examples.json"),
-        "--outDir",
-        source,
-      ],
-      { timeout: 30_000 },
+      ["--run", "build:examples", "--", "--outDir", source],
+      { cwd: packageRoot, timeout: 30_000 },
     );
     expect(build.status, build.stdout + build.stderr).toBe(0);
     const proofPath = join(output, "artifacts", "http-proof.json");
