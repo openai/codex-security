@@ -618,7 +618,7 @@ The extraction root is not enforced.
                         expected_coverage_mode=expected_mode,
                     )
 
-    def test_finalize_rejects_unknown_deep_inventory_strategy_alias(self) -> None:
+    def test_finalize_rejects_unknown_inventory_without_selected_deep_mode(self) -> None:
         self.coverage["mode"] = "deep_repository"
         self.coverage["inventoryStrategy"] = "deep_repository_repeated_discovery_v2"
         self.write_scan()
@@ -627,10 +627,7 @@ The extraction root is not enforced.
             FINALIZER.ContractError,
             "coverage.schema.inventoryStrategy: unsupported value",
         ):
-            FINALIZER.finalize_scan(
-                self.scan_dir,
-                expected_coverage_mode="deep_repository",
-            )
+            FINALIZER.finalize_scan(self.scan_dir)
 
     def test_finalize_rejects_sealed_deep_inventory_strategy_alias(self) -> None:
         self.coverage["mode"] = "deep_repository"

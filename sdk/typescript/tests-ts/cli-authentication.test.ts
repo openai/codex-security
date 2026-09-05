@@ -785,12 +785,10 @@ describe("CLI authentication", () => {
           'cli_auth_credentials_store = "file"\n',
         );
         const environment = {
-          ...process.env,
+          PATH: process.env["PATH"],
           HOME: userHome,
           USERPROFILE: userHome,
           CODEX_HOME: configuredHome,
-          OPENAI_API_KEY: undefined,
-          CODEX_API_KEY: undefined,
         };
         const run = (args: string[], input?: string): number | null =>
           spawnSync(
@@ -816,8 +814,9 @@ describe("CLI authentication", () => {
           {
             cwd: repository,
             env: {
-              ...process.env,
-              CODEX_HOME: undefined,
+              PATH: process.env["PATH"],
+              HOME: root,
+              USERPROFILE: root,
               Codex_Home: "   ",
             },
             encoding: "utf8",

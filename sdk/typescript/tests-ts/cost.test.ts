@@ -19,6 +19,17 @@ import type { ScanActivity } from "../src/scan-activity.js";
 import { readScanLogs } from "../src/scan-logs.js";
 import { sessionParentThreadId } from "../src/scan-sessions.js";
 import type { ScanProgress } from "../src/worker-progress.js";
+import { PLUGIN_ROOT as BUNDLED_PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  childUuid7Thread,
+  higherUuid7Turn,
+  lowerUuid7Turn,
+  ownedPythonUsage,
+  ownedSdkUsage,
+  ownershipRollout,
+  readPythonRolloutUsage,
+  scanThreadId,
+} from "./support/usage-rollout.js";
 
 const temporaryDirectories: string[] = [];
 const parentFields = ["source", "parent_thread_id", "forked_from_id"] as const;
@@ -1106,6 +1117,65 @@ describe("live scan cost tracking", () => {
       );
     },
   );
+
+  test.each([
+    [
+      "keeps a same-millisecond lower UUIDv7 turn in inherited history",
+      [lowerUuid7Turn],
+    ],
+    ["accepts a same-millisecond higher UUIDv7 turn as child-owned", []],
+  ] as const)("%s", async (_name, replayedTurnIds) => {
+    const home = await codexHome();
+    const rolloutPath = await writeSession(
+      home,
+      childUuid7Thread,
+      { input_tokens: 1_100, output_tokens: 110 },
+      scanThreadId,
+    );
+    const rollout = ownershipRollout(replayedTurnIds);
+    await writeFile(
+      rolloutPath,
+      rollout.map((event) => JSON.stringify(event)).join("\n") + "\n",
+    );
+
+    const maxCostUsd = 0.001;
+    const observedCosts: number[] = [];
+    const forwardedEvents: ScanSessionEvent[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd,
+      onCost: ({ estimatedUsd }) => observedCosts.push(estimatedUsd),
+      onSessionEvent: (event) => forwardedEvents.push(event),
+    });
+    tracker.start(scanThreadId);
+    const tracked = await tracker.stop();
+    const python = readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, rolloutPath);
+
+    expect({
+      trackedUsage: tracked.usage,
+      estimatedUsd: tracked.cost?.estimatedUsd,
+      python,
+    }).toEqual({
+      trackedUsage: ownedSdkUsage,
+      estimatedUsd: 0.0008,
+      python: {
+        usage: ownedPythonUsage,
+        warnings: [],
+      },
+    });
+    expect(observedCosts.length).toBeGreaterThan(0);
+    expect(observedCosts.every((cost) => cost < maxCostUsd)).toBe(true);
+    const forwardedTurnIds = forwardedEvents.flatMap(({ event }) => {
+      const payload = event["payload"];
+      return typeof payload === "object" &&
+        payload !== null &&
+        (payload as Record<string, unknown>)["type"] === "task_started"
+        ? [(payload as Record<string, unknown>)["turn_id"]]
+        : [];
+    });
+    expect(forwardedTurnIds).toEqual([higherUuid7Turn]);
+  });
 
   test("forwards actions from this scan's delegated workers only", async () => {
     const home = await codexHome();

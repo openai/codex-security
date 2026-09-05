@@ -115,7 +115,6 @@ import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   matchCompletedScan,
   matchScanFindingsInternal,
-  type matchScanFindings,
 } from "./scan-comparison.js";
 import {
   scanProgressUpdatesFromEvent,
@@ -415,7 +414,7 @@ interface ClientDependencies {
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
-  matchFindings?: typeof matchScanFindings;
+  matchFindings?: typeof matchScanFindingsInternal;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -1705,13 +1704,15 @@ export class CodexSecurity {
             falsePositives: falsePositiveExamples as Record<string, unknown>[],
             findings: result.findings.findings,
             workbench: runWorkbench,
-            matchFindings:
-              this.#dependencies.matchFindings ??
-              ((input, comparisonOptions) =>
-                matchScanFindingsInternal(input, comparisonOptions, {
+            matchFindings: (input, comparisonOptions) =>
+              (this.#dependencies.matchFindings ?? matchScanFindingsInternal)(
+                input,
+                comparisonOptions,
+                {
                   surface: this.#surface,
-                  allowBatching: false,
-                })),
+                  singleTurn: options.maxCostUsd !== undefined,
+                },
+              ),
             environment,
             model,
             signal,

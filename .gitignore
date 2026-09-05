@@ -14,6 +14,7 @@ __pycache__/
 /codex-security.json
 /findings.json
 /*.sarif
+.pnpm-store/
 
 # Never publish internal-only plugin data.
 .internal/
