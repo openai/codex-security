@@ -871,29 +871,44 @@ function resolvedCoverageSurfaces(
   // Reconnect a terminal surface to history only when its label and risk area
   // identify one historical ID; duplicate surfaces must stay distinct.
   const previousKeysById = new Map<string, Set<string>>();
+  const previousIdsByKey = new Map<string, Set<string>>();
   for (const surface of (previous?.coverage.surfaces ?? []) as JsonObject[]) {
     const key = coverageSurfaceSemanticKey(surface);
     if (key === undefined || typeof surface.id !== "string") continue;
     const keys = previousKeysById.get(surface.id) ?? new Set<string>();
     keys.add(key);
     previousKeysById.set(surface.id, keys);
+    const ids = previousIdsByKey.get(key) ?? new Set<string>();
+    ids.add(surface.id);
+    previousIdsByKey.set(key, ids);
   }
   const historicalIds = new Map<string, Set<string>>();
   const historicalKeysById = new Map<string, Set<string>>();
   for (const source of sources) {
+    const sourceCounts = new Map<string, number>();
+    for (const surface of source.coverage.surfaces as JsonObject[]) {
+      const key = coverageSurfaceSemanticKey(surface);
+      if (key !== undefined) sourceCounts.set(key, (sourceCounts.get(key) ?? 0) + 1);
+    }
     for (const surface of source.coverage.surfaces as JsonObject[]) {
       const key = coverageSurfaceSemanticKey(surface);
       if (key === undefined || typeof surface.id !== "string") continue;
+      let id = surface.id;
+      const savedIds = previousIdsByKey.get(key);
+      if (savedIds?.size === 1 && sourceCounts.get(key) === 1 && !previousKeysById.has(id)) {
+        id = [...savedIds][0]!;
+        surface.id = id;
+      }
       // Canonical IDs include reservations from earlier drafts. A raw checkpoint
       // cannot reassign them or recreate that context by projecting in isolation.
-      const previousKeys = previousKeysById.get(surface.id);
+      const previousKeys = previousKeysById.get(id);
       if (previousKeys !== undefined && (previousKeys.size !== 1 || !previousKeys.has(key))) continue;
       const ids = historicalIds.get(key) ?? new Set<string>();
-      ids.add(surface.id);
+      ids.add(id);
       historicalIds.set(key, ids);
-      const keys = historicalKeysById.get(surface.id) ?? new Set<string>();
+      const keys = historicalKeysById.get(id) ?? new Set<string>();
       keys.add(key);
-      historicalKeysById.set(surface.id, keys);
+      historicalKeysById.set(id, keys);
     }
   }
   if (sources.length > 0) {
@@ -997,6 +1012,7 @@ function resolvedCoverageSurfaces(
     if (previousIds?.size !== 1) continue;
     const previousId = [...previousIds][0]!;
     if (historicalKeysById.get(previousId)?.size !== 1) continue;
+    if (typeof surfaces[0]!.id === "string") surfaces[0]!.id = previousId;
     ids.add(previousId);
     semanticKeys.add(key);
   }

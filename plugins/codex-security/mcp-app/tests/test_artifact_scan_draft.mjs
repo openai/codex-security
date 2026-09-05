@@ -674,6 +674,24 @@ try {
   assert.equal(resolvedSurfaceResult.completeness, "complete");
   assert.deepEqual(resolvedSurfaceResult.deferred, []);
   assert.deepEqual(resolvedSurfaceResult.openQuestions, []);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await recordCodexSecurityScanDraft(resolvedSurfaceContext, {
+      ...input,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [{
+          id: "surface_new-source-review",
+          label: "Source review",
+          disposition: "no_issue_found",
+        }],
+      },
+    });
+    const repeated = await readJson(resolvedSurfaceRoot, "coverage.json");
+    assert.equal(repeated.completeness, "complete");
+    assert.deepEqual(repeated.deferred, []);
+    assert.equal(repeated.surfaces[0].id, surfaceId);
+  }
   const resolvedSurfaceHistory = await Promise.all(
     (await readdir(path.join(resolvedSurfaceRoot, "checkpoints"))).map(async name => (
       JSON.parse(await readFile(path.join(resolvedSurfaceRoot, "checkpoints", name), "utf8"))
