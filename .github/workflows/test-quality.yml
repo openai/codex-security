@@ -1,9 +1,12 @@
 name: test-quality
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/test-quality.yml
+  workflow_call:
+    inputs:
+      native-artifacts-ready:
+        description: Use the native artifacts already built by the caller in this run.
+        type: boolean
+        default: false
   workflow_dispatch:
   schedule:
     - cron: "23 9 * * 1"
@@ -12,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: test-quality-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -20,7 +23,13 @@ env:
   CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
 
 jobs:
+  native:
+    if: ${{ !inputs.native-artifacts-ready }}
+    uses: ./.github/workflows/native-artifacts.yml
+
   runner:
+    needs: native
+    if: ${{ !cancelled() && (inputs.native-artifacts-ready || needs.native.result == 'success') }}
     name: ${{ matrix.os }} / ${{ matrix.mode }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -63,6 +72,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "22.13.0"

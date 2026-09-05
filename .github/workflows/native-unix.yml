@@ -1,17 +1,10 @@
 name: native-unix
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    types: [opened, reopened, synchronize]
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   primitives:
@@ -73,6 +66,9 @@ jobs:
           cargo fmt --check
           cargo clippy --locked -- -D warnings
           cargo fetch --locked
+      - name: Prepare shared native notices
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: node notices.mjs
       - name: Build and verify Linux on glibc 2.28 with Node.js 22
         if: matrix.platform == 'linux'
         run: |
@@ -125,7 +121,12 @@ jobs:
       - name: Upload verified native artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: native-${{ matrix.artifact }}-${{ github.sha }}
-          path: plugins/codex-security/native/dist/${{ matrix.artifact }}/unix.node
+          name: native-platform-${{ matrix.artifact }}-${{ github.sha }}
+          path: |
+            plugins/codex-security/native/dist/*/*.node
+            plugins/codex-security/native/dist/THIRD_PARTY_NOTICES.txt
+            plugins/codex-security/native/dist/COPYRIGHT-library.html
+            plugins/codex-security/native/dist/licenses/*.txt
           if-no-files-found: error
+          overwrite: true
           retention-days: 7

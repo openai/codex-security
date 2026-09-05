@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
@@ -20,6 +20,13 @@ export async function buildMcpApp({ output }) {
   await mkdir(mcpDir, { recursive: true });
 
   await writeRuntime("server", "main.ts");
+  const contract = JSON.parse(await readFile(join(root, "../plugin-files.json"), "utf8"));
+  for (const file of contract.shippedExact.filter((path) => path.startsWith("mcp/native/"))) {
+    const path = file.slice("mcp/native/".length);
+    const destination = join(mcpDir, "native", path);
+    await mkdir(dirname(destination), { recursive: true });
+    await copyFile(join(root, "../native/prebuilt", path), destination);
+  }
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");

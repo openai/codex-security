@@ -20,6 +20,9 @@ jobs:
     timeout-minutes: 10
     outputs:
       ci-mode: ${{ steps.scope.outputs.ci-mode }}
+      container-ci: ${{ steps.scope.outputs.container-ci }}
+      container-validate: ${{ steps.scope.outputs.container-validate }}
+      test-quality: ${{ steps.scope.outputs.test-quality }}
 
     steps:
       - name: Checkout pull request for change classification
@@ -39,6 +42,14 @@ jobs:
           set -euo pipefail
           ci_mode=full
           check_markdown=false
+          container_ci=false
+          container_validate=false
+          test_quality=false
+          if [[ "$EVENT_NAME" == "pull_request" && "$BASE_CHANGED" == "true" ]]; then
+            container_ci=true
+            container_validate=true
+            test_quality=true
+          fi
           if [[ "$EVENT_NAME" == "pull_request" &&
                 "$BASE_CHANGED" != "true" ]]; then
             changed_files="$(mktemp)"
@@ -57,6 +68,30 @@ jobs:
                     "$path" == sdk/typescript/_bundled_plugin/* ]]; then
                 plugin_changed=true
               fi
+              case "$path" in
+                .dockerignore | .github/workflows/native-*.yml | \
+                  .github/actions/download-native/* | Dockerfile | \
+                  Dockerfile.dockerignore | compose.yaml | compose.apparmor.yaml | \
+                  compose.findings.yaml | compose.runner.yaml | docker/* | \
+                  plugins/codex-security/* | sdk/typescript/*)
+                  container_ci=true
+                  container_validate=true
+                  ;;
+                .github/workflows/container-ci.yml)
+                  container_ci=true
+                  ;;
+                .github/workflows/container-release.yml | .github/workflows/container-validate.yml)
+                  container_validate=true
+                  ;;
+                .github/workflows/node-ci.yml)
+                  container_ci=true
+                  container_validate=true
+                  test_quality=true
+                  ;;
+                .github/workflows/test-quality.yml)
+                  test_quality=true
+                  ;;
+              esac
             done < "$changed_files"
             if [[ "$changed" == "true" && "$markdown_only" == "true" ]]; then
               check_markdown=true
@@ -67,6 +102,9 @@ jobs:
           fi
           printf 'ci-mode=%s\n' "$ci_mode" >> "$GITHUB_OUTPUT"
           printf 'check-markdown=%s\n' "$check_markdown" >> "$GITHUB_OUTPUT"
+          printf 'container-ci=%s\n' "$container_ci" >> "$GITHUB_OUTPUT"
+          printf 'container-validate=%s\n' "$container_validate" >> "$GITHUB_OUTPUT"
+          printf 'test-quality=%s\n' "$test_quality" >> "$GITHUB_OUTPUT"
 
       - name: Require a Conventional Commit pull request title
         if: github.event_name == 'pull_request'
@@ -156,9 +194,33 @@ jobs:
       - name: Check formatting
         run: pnpm --dir sdk/typescript run format
 
+  native:
+    needs: validate-title
+    if: needs.validate-title.outputs.ci-mode == 'full' || needs.validate-title.outputs.container-ci == 'true' || needs.validate-title.outputs.container-validate == 'true' || needs.validate-title.outputs.test-quality == 'true'
+    uses: ./.github/workflows/native-artifacts.yml
+
+  container-ci:
+    needs: [validate-title, native]
+    if: needs.validate-title.outputs.container-ci == 'true'
+    uses: ./.github/workflows/container-ci.yml
+    with:
+      native-artifacts-ready: true
+
+  container-validate:
+    needs: [validate-title, native]
+    if: needs.validate-title.outputs.container-validate == 'true'
+    uses: ./.github/workflows/container-validate.yml
+
+  test-quality:
+    needs: [validate-title, native]
+    if: needs.validate-title.outputs.test-quality == 'true'
+    uses: ./.github/workflows/test-quality.yml
+    with:
+      native-artifacts-ready: true
+
   package:
     name: build and check package
-    needs: validate-title
+    needs: [validate-title, native]
     if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -169,6 +231,8 @@ jobs:
           persist-credentials: false
       - name: Check plugin source boundary
         run: node sdk/typescript/scripts/check-plugin-source.mjs
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -219,6 +283,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -457,6 +523,8 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:

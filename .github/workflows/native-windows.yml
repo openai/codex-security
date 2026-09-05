@@ -1,17 +1,10 @@
 name: native-windows
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    types: [opened, reopened, synchronize]
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   primitives:
@@ -87,7 +80,8 @@ jobs:
       - name: Upload verified native artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: native-win32-${{ matrix.arch }}-${{ github.sha }}
-          path: plugins/codex-security/native/dist/win32-${{ matrix.arch }}/windows.node
+          name: native-platform-win32-${{ matrix.arch }}-${{ github.sha }}
+          path: plugins/codex-security/native/dist/*/*.node
           if-no-files-found: error
+          overwrite: true
           retention-days: 7
