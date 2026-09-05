@@ -988,7 +988,8 @@ export class CodexSecurity {
         policyCodexConfig(session.sessionConfig),
         inputs.gitMetadataPaths.map(
           (path) =>
-            `permissions.${POLICY_PERMISSION_PROFILE}.filesystem.${JSON.stringify(path)}="deny"`,
+            // A scoped "." keeps native permission keys literal, including glob characters.
+            `permissions.${POLICY_PERMISSION_PROFILE}.filesystem.${JSON.stringify(path)}."."="deny"`,
         ),
       );
       const reportCost = (current: Readonly<ScanCost>): void => {

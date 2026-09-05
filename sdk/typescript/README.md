@@ -278,7 +278,7 @@ Inherited and reporting-policy links may also resolve to ancestor `SECURITY.md`
 files or the checkout's `.github/SECURITY.md` and `docs/SECURITY.md`.
 The model cannot read sibling components or Git metadata. Policy turns deny
 access to the resolved Git metadata and markers, including those inside the
-selected source tree.
+selected source tree and nested bare repositories.
 Policy shell tools inherit only Codex's core environment; custom shell environment
 settings, login shells, and shell snapshots are disabled for these turns.
 Knowledge-base text stays with the private review artifacts during generation
