@@ -12,7 +12,7 @@ import {
 import { dirname, join, relative } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
-  inspectSecurityPolicyPaths,
+  inspectSecurityPolicySources,
   readSecurityPolicy,
   resolveSecurityPolicyGuidance,
   resolveSecurityPolicyTarget,
@@ -301,9 +301,11 @@ describe("security policy generation", () => {
         "Not policy guidance\n",
       );
       expect(
-        await inspectSecurityPolicyPaths(
-          await resolveSecurityPolicyTarget(f.repository),
-        ),
+        (
+          await inspectSecurityPolicySources(
+            await resolveSecurityPolicyTarget(f.repository),
+          )
+        ).policyPaths,
       ).toEqual(
         nested ? ["SECURITY.md", "a-checkout/SECURITY.md"] : ["SECURITY.md"],
       );

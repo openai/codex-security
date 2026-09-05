@@ -16,6 +16,7 @@ import type {
 } from "@openai/codex-sdk";
 import Ajv, { type AnySchema } from "ajv";
 import { afterEach, describe, expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import {
   CodexSecurity,
   InvalidTargetError,
@@ -736,6 +737,39 @@ describe("CodexSecurity policy API", () => {
     expect(f.prompts[0]).not.toContain("Unlisted synthetic policy");
     await f.security.close();
   });
+
+  test.each([".", "component"])(
+    "denies Git metadata in the policy permission profile for %s",
+    async (scope) => {
+      const f = await setup();
+      policyGit(f.repository, "init", "--quiet");
+      const component = join(f.repository, "component");
+      const metadata = join(f.repository, "git-data");
+      await mkdir(component);
+      policyGit(component, "init", "--quiet", "--separate-git-dir", metadata);
+      policyGit(component, "config", "core.worktree", component);
+      await f.security.generatePolicy(f.repository, {
+        path: scope,
+        outputDir: f.outputDir,
+      });
+      const overrides = f
+        .configuration()!
+        .configOverrides!.map((override) => parseToml(override));
+      for (const path of [
+        join(f.repository, ".git"),
+        join(component, ".git"),
+        metadata,
+      ]) {
+        expect(overrides).toContainEqual({
+          permissions: {
+            codex_security_policy: { filesystem: { [path]: "deny" } },
+          },
+        });
+      }
+      expect(f.threads).toHaveLength(3);
+      await f.security.close();
+    },
+  );
 
   test("includes inherited and descendant guidance once per policy path", async () => {
     const f = await setup();

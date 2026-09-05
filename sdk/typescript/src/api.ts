@@ -114,7 +114,7 @@ import {
 import type { SeverityLevel } from "./models.js";
 import {
   formatSecurityPolicyText,
-  inspectSecurityPolicyPaths,
+  inspectSecurityPolicySources,
   readSecurityPolicySnapshot,
   requireUnchangedSecurityPolicy,
   resolveSecurityPolicyGuidance,
@@ -986,6 +986,10 @@ export class CodexSecurity {
         },
         options.auth,
         policyCodexConfig(session.sessionConfig),
+        inputs.gitMetadataPaths.map(
+          (path) =>
+            `permissions.${POLICY_PERMISSION_PROFILE}.filesystem.${JSON.stringify(path)}="deny"`,
+        ),
       );
       const reportCost = (current: Readonly<ScanCost>): void => {
         const total = addScanCosts(accumulatedCost, current);
@@ -2492,6 +2496,7 @@ export class CodexSecurity {
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
     config?: JsonObject,
+    configOverrides: string[] = [],
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
     const {
       runtime,
@@ -2557,8 +2562,15 @@ export class CodexSecurity {
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      ...(commandAuth
-        ? { configOverrides: modelProviderConfigOverride(sessionConfig) }
+      ...(commandAuth || configOverrides.length > 0
+        ? {
+            configOverrides: [
+              ...(commandAuth
+                ? modelProviderConfigOverride(sessionConfig)
+                : []),
+              ...configOverrides,
+            ],
+          }
         : {}),
       env: sdkEnvironment,
       config: {
@@ -2873,7 +2885,9 @@ export class CodexSecurity {
     target: SecurityPolicyTarget,
     options: SecurityPolicyOptions,
     signal?: AbortSignal,
-  ): Promise<LocalScanInputs & { policyPaths: string[] }> {
+  ): Promise<
+    LocalScanInputs & { policyPaths: string[]; gitMetadataPaths: string[] }
+  > {
     policyCodexConfig(await mergedCodexConfig(this.config));
     const protectedRoots = await securityPolicyProtectedRoots(target, signal);
     const inputs = await this.#validateLocalInputs(
@@ -2888,9 +2902,13 @@ export class CodexSecurity {
       signal,
       protectedRoots,
     );
+    const sources = await inspectSecurityPolicySources(target, signal);
     return {
       ...inputs,
-      policyPaths: await inspectSecurityPolicyPaths(target, signal),
+      policyPaths: sources.policyPaths,
+      gitMetadataPaths: [
+        ...new Set([...protectedRoots.slice(1), ...sources.gitMetadataPaths]),
+      ],
     };
   }
 

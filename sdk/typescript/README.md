@@ -276,7 +276,9 @@ The host resolves inherited guidance once and includes each checked descendant
 policy separately. Descendant policy links must stay within the selected component.
 Inherited and reporting-policy links may also resolve to ancestor `SECURITY.md`
 files or the checkout's `.github/SECURITY.md` and `docs/SECURITY.md`.
-The model cannot read sibling components or external Git metadata.
+The model cannot read sibling components or Git metadata. Policy turns deny
+access to the resolved Git metadata and markers, including those inside the
+selected source tree.
 Policy shell tools inherit only Codex's core environment; custom shell environment
 settings, login shells, and shell snapshots are disabled for these turns.
 Knowledge-base text stays with the private review artifacts during generation
