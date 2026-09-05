@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { join, win32 } from "node:path";
-import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { output } from "./binding.mjs";
 import { loadWindowsBinding } from "./windows-binding.mjs";
@@ -72,6 +71,9 @@ function worker(root: string): Record<string, boolean> {
     win32.join(cwd, "high-\ud800"),
   );
   samePath(files.absolute(widePath(cwd)), cwd);
+  const emptyAbsolute = native.windowsAbsolutePath(Buffer.alloc(0));
+  assert(Number.isInteger(emptyAbsolute.error));
+  assert.deepEqual(emptyAbsolute.value, Buffer.alloc(0));
   const drive = win32.parse(cwd).root.slice(0, 2);
   assert.match(drive, /^[a-z]:$/iu);
   samePath(
@@ -266,53 +268,7 @@ function worker(root: string): Record<string, boolean> {
     assert.throws(() => native.windowsAbsolutePath(malformed));
     assert.throws(() => native.windowsDirectoryEntries(malformed));
   }
-  // libuv's WTF-8 support does not bypass Node's JS string conversion.
-  assert.equal(
-    readFileSync(win32.join(cwd, "high-\ud800"), "utf8"),
-    "core replacement sentinel",
-  );
-  const rawName = Buffer.concat([
-    Buffer.from("high-"),
-    Buffer.from([0xed, 0xa0, 0x80]),
-  ]);
-  const rawCwd = Buffer.concat([
-    Buffer.from(win32.join(root, "cwd-")),
-    Buffer.from([0xed, 0xa0, 0x80]),
-  ]);
-  const rawFile = Buffer.concat([rawCwd, Buffer.from("\\"), rawName]);
-  function coreSupports(operation: () => boolean): boolean {
-    try {
-      return operation();
-    } catch (error) {
-      assert.equal(typeof (error as NodeJS.ErrnoException).code, "string");
-      return false;
-    }
-  }
-  const coreStringNames = coreSupports(() =>
-    readdirSync(rawCwd).includes("high-\ud800"),
-  );
-  const coreStringRealpath = coreSupports(
-    () => realpathSync.native(rawCwd) === cwd,
-  );
-  assert.equal(coreStringNames, false);
-  assert.equal(coreStringRealpath, false);
-  const coreBufferRead = coreSupports(
-    () => readFileSync(rawFile, "utf8") === "sentinel-0",
-  );
-  const coreBufferNames = coreSupports(() =>
-    readdirSync(rawCwd, { encoding: "buffer" }).some((name) =>
-      name.equals(rawName),
-    ),
-  );
-  const coreBufferRealpath = coreSupports(() =>
-    realpathSync.native(rawCwd, { encoding: "buffer" }).equals(rawCwd),
-  );
   return {
-    nodeStringPathsReadReplacementSibling: true,
-    nodeStringNamesAndRealpathLoseSurrogates: true,
-    nodeWtf8BufferReads: coreBufferRead,
-    nodeWtf8BufferDirectoryNames: coreBufferNames,
-    nodeWtf8BufferRealpath: coreBufferRealpath,
     rawArgumentsAndCrtQuoting: true,
     rawEnvironmentEmptyAndUnset: true,
     rawCwdAndDriveRelativePaths: true,

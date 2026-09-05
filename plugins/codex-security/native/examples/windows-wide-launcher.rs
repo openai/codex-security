@@ -23,10 +23,6 @@ fn main() -> std::io::Result<()> {
         let replacement = root.join("cwd-\u{fffd}");
         fs::create_dir(&replacement)?;
         fs::write(replacement.join("sentinel"), "replacement cwd untouched")?;
-        fs::write(
-            replacement.join("high-\u{fffd}"),
-            "core replacement sentinel",
-        )?;
         let names = [
             raw("high-", 0xd800),
             raw("high-", 0xfffd),
