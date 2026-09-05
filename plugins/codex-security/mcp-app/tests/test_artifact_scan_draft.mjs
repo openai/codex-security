@@ -639,6 +639,443 @@ try {
   assert.deepEqual(resolvedRejection.coverage.deferred, []);
   assert.deepEqual(resolvedRejection.coverage.surfaces[0].candidate, candidate);
 
+  const resolvedSurfaceRoot = path.join(root, "resolved-checkpoint-surface");
+  await mkdir(resolvedSurfaceRoot);
+  const resolvedSurfaceContext = { ...context, root: resolvedSurfaceRoot };
+  const surfaceId = "surface_source-review";
+  await recordCodexSecurityScanDraft(resolvedSurfaceContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [{ label: "Source review", disposition: "needs_follow_up" }],
+      deferred: [{
+        id: "checkpoint-source-review",
+        reason: "Source review was pending.",
+        surfaceIds: [surfaceId],
+      }],
+      openQuestions: ["Has source review completed?"],
+    },
+  });
+  await recordCodexSecurityScanDraft(resolvedSurfaceContext, {
+    ...input,
+    findings: [],
+    coverage: {
+      ...coverage,
+      surfaces: [{ label: "Source review", disposition: "no_issue_found" }],
+      openQuestions: [],
+    },
+  });
+  const resolvedSurfaceResult = JSON.parse(
+    await readFile(path.join(resolvedSurfaceRoot, "coverage.json"), "utf8"),
+  );
+  assert.equal(resolvedSurfaceResult.completeness, "complete");
+  assert.deepEqual(resolvedSurfaceResult.deferred, []);
+  assert.deepEqual(resolvedSurfaceResult.openQuestions, []);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await recordCodexSecurityScanDraft(resolvedSurfaceContext, {
+      ...input,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [{
+          id: "surface_new-source-review",
+          label: "Source review",
+          disposition: "no_issue_found",
+        }],
+      },
+    });
+    const repeated = await readJson(resolvedSurfaceRoot, "coverage.json");
+    assert.equal(repeated.completeness, "complete");
+    assert.deepEqual(repeated.deferred, []);
+    assert.equal(repeated.surfaces[0].id, surfaceId);
+  }
+  const resolvedSurfaceHistory = await Promise.all(
+    (await readdir(path.join(resolvedSurfaceRoot, "checkpoints"))).map(async name => (
+      JSON.parse(await readFile(path.join(resolvedSurfaceRoot, "checkpoints", name), "utf8"))
+    )),
+  );
+  assert.equal(resolvedSurfaceHistory.some(checkpoint => (
+    checkpoint.complete === false
+    && checkpoint.coverage.deferred.some(item => item.id === "checkpoint-source-review")
+  )), true);
+
+  const unresolvedSurfaceRoot = path.join(root, "unresolved-checkpoint-surface");
+  await mkdir(unresolvedSurfaceRoot);
+  const unresolvedSurfaceContext = { ...context, root: unresolvedSurfaceRoot };
+  await recordCodexSecurityScanDraft(unresolvedSurfaceContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [
+        { label: "Source review", disposition: "needs_follow_up" },
+        { label: "Source review", disposition: "needs_follow_up" },
+      ],
+      deferred: [{
+        id: "checkpoint-multiple-surfaces",
+        reason: "Two source review units were pending.",
+        surfaceIds: [surfaceId, `${surfaceId}-2`],
+      }],
+    },
+  });
+  await recordCodexSecurityScanDraft(unresolvedSurfaceContext, {
+    ...input,
+    findings: [],
+    coverage: {
+      ...coverage,
+      surfaces: [{ label: "Source review", disposition: "no_issue_found" }],
+    },
+  });
+  const unresolvedSurfaceResult = JSON.parse(
+    await readFile(path.join(unresolvedSurfaceRoot, "coverage.json"), "utf8"),
+  );
+  assert.equal(unresolvedSurfaceResult.completeness, "partial");
+  assert.deepEqual(
+    unresolvedSurfaceResult.deferred.map(item => item.id),
+    ["checkpoint-multiple-surfaces"],
+  );
+
+  const resolvedDuplicateRoot = path.join(root, "resolved-duplicate-surfaces");
+  await mkdir(resolvedDuplicateRoot);
+  const resolvedDuplicateContext = { ...context, root: resolvedDuplicateRoot };
+  await recordCodexSecurityScanDraft(resolvedDuplicateContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [
+        { label: "Source review", disposition: "needs_follow_up" },
+        { label: "Source review", disposition: "needs_follow_up" },
+      ],
+      deferred: [{
+        id: "checkpoint-resolved-duplicates",
+        reason: "Two source review units were pending.",
+        surfaceIds: [surfaceId, `${surfaceId}-2`],
+      }],
+    },
+  });
+  const rawDuplicateHistory = await Promise.all(
+    (await readdir(path.join(resolvedDuplicateRoot, "checkpoints"))).map(async name => (
+      JSON.parse(await readFile(path.join(resolvedDuplicateRoot, "checkpoints", name), "utf8"))
+    )),
+  );
+  const rawDuplicateCheckpoint = rawDuplicateHistory.find(checkpoint => (
+    checkpoint.complete === false
+    && checkpoint.coverage.deferred.some(item => item.id === "checkpoint-resolved-duplicates")
+  ));
+  assert.ok(rawDuplicateCheckpoint);
+  assert.equal(rawDuplicateCheckpoint.coverage.surfaces.length, 2);
+  assert.equal(
+    rawDuplicateCheckpoint.coverage.surfaces.every(surface => !("id" in surface)),
+    true,
+  );
+  await recordCodexSecurityScanDraft(resolvedDuplicateContext, {
+    ...input,
+    findings: [],
+    coverage: {
+      ...coverage,
+      surfaces: [
+        {
+          id: surfaceId,
+          label: "Source review",
+          disposition: "no_issue_found",
+        },
+        {
+          id: `${surfaceId}-2`,
+          label: "Source review",
+          disposition: "no_issue_found",
+        },
+      ],
+    },
+  });
+  const resolvedDuplicateResult = JSON.parse(
+    await readFile(path.join(resolvedDuplicateRoot, "coverage.json"), "utf8"),
+  );
+  assert.equal(resolvedDuplicateResult.completeness, "complete");
+  assert.deepEqual(resolvedDuplicateResult.deferred, []);
+  assert.deepEqual(
+    resolvedDuplicateResult.surfaces.map(surface => [surface.id, surface.disposition]),
+    [
+      [surfaceId, "no_issue_found"],
+      [`${surfaceId}-2`, "no_issue_found"],
+    ],
+  );
+
+  for (const [name, currentSurface] of [
+    ["different-label", { label: "Unrelated review", riskArea: "authorization" }],
+    ["different-risk-area", { label: "Source review", riskArea: "input-validation" }],
+  ]) {
+    const spoofedSurfaceRoot = path.join(root, `spoofed-surface-${name}`);
+    await mkdir(spoofedSurfaceRoot);
+    const spoofedSurfaceContext = { ...context, root: spoofedSurfaceRoot };
+    const deferred = {
+      id: "checkpoint-source-review",
+      reason: "Source review was pending.",
+      surfaceIds: [surfaceId],
+    };
+    await recordCodexSecurityScanDraft(spoofedSurfaceContext, {
+      ...input,
+      complete: false,
+      findings: [],
+      coverage: {
+        ...coverage,
+        completeness: "partial",
+        surfaces: [{
+          label: "Source review",
+          riskArea: "authorization",
+          disposition: "needs_follow_up",
+        }],
+        deferred: [deferred],
+      },
+    });
+    const spoofedDraft = {
+      ...input,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [{
+          ...currentSurface,
+          id: surfaceId,
+          disposition: "no_issue_found",
+        }],
+      },
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await recordCodexSecurityScanDraft(spoofedSurfaceContext, spoofedDraft);
+      assert.equal(spoofedDraft.coverage.surfaces[0].id, surfaceId);
+      const spoofedSurfaceResult = await readJson(spoofedSurfaceRoot, "coverage.json");
+      assert.equal(spoofedSurfaceResult.completeness, "partial");
+      assert.deepEqual(
+        spoofedSurfaceResult.deferred,
+        [deferred],
+        "reusing a historical ID cannot resolve its deferral, even after checkpointing",
+      );
+      assert.equal(
+        spoofedSurfaceResult.surfaces.find(surface => surface.id === surfaceId).riskArea,
+        "authorization",
+        "the saved ID remains bound to the original surface",
+      );
+    }
+    await recordCodexSecurityScanDraft(spoofedSurfaceContext, {
+      ...input,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [{
+          label: "Source review",
+          riskArea: "authorization",
+          disposition: "no_issue_found",
+        }],
+      },
+    });
+    const correctedSurfaceResult = await readJson(spoofedSurfaceRoot, "coverage.json");
+    assert.equal(correctedSurfaceResult.completeness, "complete");
+    assert.deepEqual(correctedSurfaceResult.deferred, []);
+  }
+
+  const reservedSurfaceRoot = path.join(root, "reserved-checkpoint-surface");
+  await mkdir(reservedSurfaceRoot);
+  const reservedSurfaceContext = { ...context, root: reservedSurfaceRoot };
+  await recordCodexSecurityScanDraft(reservedSurfaceContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [{ id: "surface_a", label: "Reserved", disposition: "no_issue_found" }],
+    },
+  });
+  await recordCodexSecurityScanDraft(reservedSurfaceContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [{ label: "A", disposition: "needs_follow_up" }],
+      deferred: [{
+        id: "checkpoint-a",
+        reason: "Review of A was pending.",
+        surfaceIds: ["surface_a-2"],
+      }],
+    },
+  });
+  assert.equal(
+    (await readJson(reservedSurfaceRoot, "coverage.json")).surfaces.find(surface => surface.label === "A").id,
+    "surface_a-2",
+    "historical reservations affect the canonical ID of an ID-less surface",
+  );
+  await recordCodexSecurityScanDraft(reservedSurfaceContext, {
+    ...input,
+    findings: [],
+    coverage: {
+      ...coverage,
+      surfaces: [{ label: "A", disposition: "no_issue_found" }],
+    },
+  });
+  const reservedSurfaceResult = await readJson(reservedSurfaceRoot, "coverage.json");
+  assert.equal(reservedSurfaceResult.completeness, "complete");
+  assert.deepEqual(reservedSurfaceResult.deferred, []);
+
+  const unlinkedSurfaceRoot = path.join(root, "unlinked-checkpoint-surface");
+  await mkdir(unlinkedSurfaceRoot);
+  const unlinkedSurfaceContext = { ...context, root: unlinkedSurfaceRoot };
+  await recordCodexSecurityScanDraft(unlinkedSurfaceContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [
+        { label: "Linked review", disposition: "needs_follow_up" },
+        { label: "Unlinked review", disposition: "needs_follow_up" },
+      ],
+      deferred: [{
+        id: "checkpoint-linked-review",
+        reason: "Linked review was pending.",
+        surfaceIds: ["surface_linked-review"],
+      }],
+    },
+  });
+  await recordCodexSecurityScanDraft(unlinkedSurfaceContext, {
+    ...input,
+    findings: [],
+    coverage: {
+      ...coverage,
+      surfaces: [{ label: "Linked review", disposition: "no_issue_found" }],
+    },
+  });
+  const unlinkedSurfaceResult = await readJson(unlinkedSurfaceRoot, "coverage.json");
+  assert.equal(unlinkedSurfaceResult.completeness, "partial");
+  assert.deepEqual(unlinkedSurfaceResult.deferred, []);
+  assert.deepEqual(
+    unlinkedSurfaceResult.surfaces.filter(surface => surface.disposition === "needs_follow_up").map(surface => surface.label),
+    ["Unlinked review"],
+  );
+
+  for (const [reserved, reuseId] of [[false, false], [true, false], [false, true], [true, true]]) {
+    const recoveredSurfaceRoot = path.join(root, `recovered-checkpoint-surface-${reserved}-${reuseId}`);
+    await mkdir(recoveredSurfaceRoot);
+    const recoveredSurfaceContext = { ...context, root: recoveredSurfaceRoot };
+    if (reserved) {
+      await recordCodexSecurityScanDraft(recoveredSurfaceContext, {
+        ...input,
+        complete: false,
+        findings: [],
+        coverage: {
+          ...coverage,
+          completeness: "partial",
+          surfaces: [{ id: "surface_a", label: "Reserved", disposition: "no_issue_found" }],
+        },
+      });
+    }
+    const recoveredId = reserved ? "surface_a-2" : "surface_a";
+    await saveScanDraftCheckpoint(recoveredSurfaceContext, {
+      ...input,
+      complete: false,
+      findings: [],
+      coverage: {
+        ...coverage,
+        completeness: "partial",
+        surfaces: [{ label: "A", disposition: "needs_follow_up" }],
+        deferred: [{
+          id: "checkpoint-recovered-a",
+          reason: "Review was checkpointed before the canonical write.",
+          surfaceIds: [recoveredId],
+        }],
+      },
+    });
+    if (reuseId) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await recordCodexSecurityScanDraft(recoveredSurfaceContext, {
+          ...input,
+          findings: [],
+          coverage: {
+            ...coverage,
+            surfaces: [{
+              id: recoveredId,
+              label: "A",
+              riskArea: "unrelated-review",
+              disposition: "no_issue_found",
+            }],
+          },
+        });
+        const pending = await readJson(recoveredSurfaceRoot, "coverage.json");
+        assert.equal(pending.completeness, "partial");
+        assert.equal(pending.deferred.length, 1);
+        assert.equal(pending.surfaces.find(surface => surface.id === recoveredId).disposition, "needs_follow_up");
+      }
+    }
+    await recordCodexSecurityScanDraft(recoveredSurfaceContext, {
+      ...input,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [{ label: "A", disposition: "no_issue_found" }],
+      },
+    });
+    const recoveredSurfaceResult = await readJson(recoveredSurfaceRoot, "coverage.json");
+    assert.equal(recoveredSurfaceResult.completeness, "complete");
+    assert.deepEqual(recoveredSurfaceResult.deferred, []);
+    assert.equal(recoveredSurfaceResult.surfaces.find(surface => surface.label === "A").id, recoveredId);
+  }
+
+  for (const canonical of [false, true]) {
+    const mixedSurfaceRoot = path.join(root, `partially-identified-checkpoint-${canonical}`);
+    await mkdir(mixedSurfaceRoot);
+    const mixedSurfaceContext = { ...context, root: mixedSurfaceRoot };
+    const identified = { id: "surface_a", label: "A", disposition: "needs_follow_up" };
+    if (canonical) {
+      await recordCodexSecurityScanDraft(mixedSurfaceContext, {
+        ...input,
+        complete: false,
+        findings: [],
+        coverage: { ...coverage, completeness: "partial", surfaces: [identified] },
+      });
+    }
+    await saveScanDraftCheckpoint(mixedSurfaceContext, {
+      ...input,
+      complete: false,
+      findings: [],
+      coverage: {
+        ...coverage,
+        completeness: "partial",
+        surfaces: [identified, { label: "A", disposition: "needs_follow_up" }],
+        deferred: [{
+          id: "checkpoint-partially-identified",
+          reason: "Both surfaces require review.",
+          surfaceIds: ["surface_a", "surface_a-2"],
+        }],
+      },
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await recordCodexSecurityScanDraft(mixedSurfaceContext, {
+        ...input,
+        findings: [],
+        coverage: {
+          ...coverage,
+          surfaces: [
+            { id: "surface_a", label: "A", disposition: "no_issue_found" },
+            { id: "surface_a-2", label: "A", disposition: "no_issue_found" },
+          ],
+        },
+      });
+      const mixedSurfaceResult = await readJson(mixedSurfaceRoot, "coverage.json");
+      assert.equal(mixedSurfaceResult.completeness, "complete");
+      assert.deepEqual(mixedSurfaceResult.deferred, []);
+      assert.equal(mixedSurfaceResult.surfaces.length, 2);
+    }
+  }
+
   const undefinedCandidateRoot = path.join(root, "undefined-candidate-worker");
   await mkdir(undefinedCandidateRoot);
   const undefinedCandidateContext = { ...workerContext, root: undefinedCandidateRoot };
