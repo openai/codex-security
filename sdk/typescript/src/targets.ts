@@ -235,16 +235,28 @@ export async function isGitMetadataDirectory(
   signal?: AbortSignal,
 ): Promise<boolean> {
   try {
-    return (
-      (await gitOutput(
-        repository,
-        ["rev-parse", "--is-inside-git-dir"],
-        signal,
-      )) === "true"
+    // This resolver validates Git directories without loading their configuration.
+    const directory = await gitOutput(
+      repository,
+      ["rev-parse", "--resolve-git-dir", repository],
+      signal,
+      { LC_ALL: "C" },
     );
-  } catch {
+    return (
+      relative(await realpath(directory), await realpath(repository)) === ""
+    );
+  } catch (error) {
     throwIfAborted(signal);
-    return false;
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === 128 &&
+      "stderr" in error &&
+      typeof error.stderr === "string" &&
+      error.stderr.trimEnd() === `fatal: not a gitdir '${repository}'`
+    )
+      return false;
+    throw error;
   }
 }
 
@@ -572,6 +584,7 @@ async function gitOutput(
   repository: string,
   args: readonly string[],
   signal?: AbortSignal,
+  environment: NodeJS.ProcessEnv = {},
 ): Promise<string> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
@@ -588,7 +601,7 @@ async function gitOutput(
     {
       encoding: "utf8",
       signal,
-      env: command.environment,
+      env: { ...command.environment, ...environment },
       maxBuffer: Infinity,
     },
   );

@@ -312,18 +312,25 @@ describe("security policy generation", () => {
     }
   });
 
-  test("excludes detached Git metadata without a worktree marker", async () => {
-    const f = await fixture();
-    const metadata = join(f.repository, "saved-metadata");
-    policyGit(f.repository, "init", "--quiet", "--bare", metadata);
-    policyGit(metadata, "config", "core.bare", "false");
-    await writeFile(join(metadata, "SECURITY.md"), "Git metadata fixture");
-    const inventory = await inspectSecurityPolicySources(
-      await resolveSecurityPolicyTarget(f.repository),
-    );
-    expect(inventory.policyPaths).toEqual([]);
-    expect(inventory.gitMetadataPaths).toContain(metadata);
-  });
+  test.each(["detached", "explicit worktree", "malformed config"])(
+    "excludes %s Git metadata without a worktree marker",
+    async (kind) => {
+      const f = await fixture();
+      const metadata = join(f.repository, "saved-metadata");
+      policyGit(f.repository, "init", "--quiet", "--bare", metadata);
+      policyGit(metadata, "config", "core.bare", "false");
+      if (kind === "explicit worktree")
+        policyGit(metadata, "config", "core.worktree", f.repository);
+      if (kind === "malformed config")
+        await writeFile(join(metadata, "config"), "[malformed config\n");
+      await writeFile(join(metadata, "SECURITY.md"), "Git metadata fixture");
+      const inventory = await inspectSecurityPolicySources(
+        await resolveSecurityPolicyTarget(f.repository),
+      );
+      expect(inventory.policyPaths).toEqual([]);
+      expect(inventory.gitMetadataPaths).toContain(metadata);
+    },
+  );
 
   test("keeps source with Git-like names in the policy inventory", async () => {
     const f = await fixture();
@@ -419,6 +426,13 @@ describe("security policy generation", () => {
     const checkout = await fixture();
     const standalone = await fixture();
     execFileSync("git", ["init", "--quiet", checkout.repository]);
+    policyGit(
+      standalone.repository,
+      "init",
+      "--quiet",
+      "--bare",
+      join(standalone.repository, "cache.git"),
+    );
     const component = join(checkout.repository, "component");
     await mkdir(component);
     await writeFile(join(checkout.repository, "SECURITY.md"), POLICY);
@@ -431,9 +445,11 @@ describe("security policy generation", () => {
       await expect(resolveSecurityPolicyTarget(component)).rejects.toThrow(
         "Could not determine the Git worktree root",
       );
-      expect(
-        (await resolveSecurityPolicyTarget(standalone.repository)).repository,
-      ).toBe(standalone.repository);
+      const target = await resolveSecurityPolicyTarget(standalone.repository);
+      expect(target.repository).toBe(standalone.repository);
+      await expect(inspectSecurityPolicySources(target)).rejects.toThrow(
+        "Git is not available on a trusted PATH",
+      );
     } finally {
       delete process.env["PATH"];
       for (const [key, value] of pathEntries) process.env[key] = value;
