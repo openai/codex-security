@@ -5656,7 +5656,17 @@ describe("CodexSecurity orchestration", () => {
     );
     const pythonCommand = `${process.platform === "win32" ? "& " : ""}${shellEnvironmentReference("PYTHON")}`;
     expect(prompt).toContain(
-      `Use ${pythonCommand} as <python_command> for every plugin helper`,
+      `Use ${pythonCommand} as <python_command> for plugin Python helper scripts (.py files)`,
+    );
+    const policyReference = await readFile(
+      join(PLUGIN_ROOT, "references", "security-guidance.md"),
+      "utf8",
+    );
+    const policyCommand = policyReference
+      .split("\n")
+      .find((line) => line.includes("--helper resolve-security-md"));
+    expect(policyCommand).toMatch(
+      /^<plugin_dir>\/scripts\/launch_codex_security_mcp --helper resolve-security-md /,
     );
     const helper = shellEnvironmentReference(
       "CODEX_SECURITY_PLUGIN_ROOT",

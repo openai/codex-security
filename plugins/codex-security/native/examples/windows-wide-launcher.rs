@@ -93,12 +93,120 @@ fn main() -> std::io::Result<()> {
         Ok(())
     }
 
+    fn policy_proof(node: OsString, script: OsString, root: &Path) -> io::Result<()> {
+        let cwds = [raw("cwd-", 0xd800), raw("cwd-", 0xfffd)];
+        let repos = [raw("İrepo-", 0xdc80), raw("İrepo-", 0xfffd)];
+        let scopes = [raw("scope-", 0xdfff), raw("scope-", 0xfffd)];
+        let replacement_output = raw("out-", 0xfffd);
+        let mut sentinels = Vec::new();
+        for (ci, cwd) in cwds.iter().enumerate() {
+            for (ri, repo) in repos.iter().enumerate() {
+                let directory = root.join(cwd).join(repo);
+                fs::create_dir_all(&directory)?;
+                fs::write(
+                    directory.join("SECURITY.md"),
+                    if ci == 0 && ri == 0 {
+                        "root raw\n"
+                    } else {
+                        "replacement policy\n"
+                    },
+                )?;
+                let sentinel = directory.join(&replacement_output);
+                fs::write(&sentinel, "output sentinel")?;
+                sentinels.push(sentinel);
+                for (si, scope) in scopes.iter().enumerate() {
+                    fs::create_dir(directory.join(scope))?;
+                    fs::write(
+                        directory.join(scope).join("SECURITY.md"),
+                        if ci == 0 && ri == 0 && si == 0 {
+                            "scope raw\n"
+                        } else {
+                            "replacement policy\n"
+                        },
+                    )?;
+                }
+            }
+        }
+        let repo = root.join(&cwds[0]).join(&repos[0]);
+        let output_name = raw("out-", 0xdfff);
+        let output = repo.join(&output_name);
+        let invoke = |args: &[PathBuf]| {
+            Command::new(&node)
+                .arg(&script)
+                .args(["--helper", "resolve-security-md"])
+                .args(args)
+                .current_dir(&repo)
+                .env("USERPROFILE", &repo)
+                .output()
+        };
+        for (repo_arg, scope_arg, output_arg) in [
+            (repo.clone(), PathBuf::from(&scopes[0]), output.clone()),
+            (
+                PathBuf::from("~"),
+                PathBuf::from("~").join(&scopes[0]),
+                PathBuf::from(&output_name),
+            ),
+            (
+                PathBuf::from("."),
+                PathBuf::from(&scopes[0]),
+                PathBuf::from(&output_name),
+            ),
+        ] {
+            let child = invoke(&[
+                "--repo".into(),
+                repo_arg,
+                "--scope".into(),
+                scope_arg,
+                "--out".into(),
+                output_arg,
+            ])?;
+            if !child.status.success() || !child.stdout.is_empty() || !child.stderr.is_empty() {
+                return Err(io::Error::other(format!(
+                    "Windows policy helper execution failed ({}): {}",
+                    child.status,
+                    String::from_utf8_lossy(&child.stderr),
+                )));
+            }
+            let expected = concat!(
+                "## SECURITY.md source: \"SECURITY.md\"\r\n\r\nroot raw\r\n\r\n",
+                "## SECURITY.md source: \"scope-\\udfff/SECURITY.md\"\r\n\r\nscope raw\r\n",
+            );
+            if fs::read(&output)? != expected.as_bytes() {
+                return Err(io::Error::other(
+                    "Windows policy helper selected the wrong path",
+                ));
+            }
+            fs::remove_file(&output)?;
+        }
+        let listing = invoke(&["--repo".into(), "~".into(), "--list".into()])?;
+        let expected =
+            b"[\"SECURITY.md\", \"scope-\\udfff/SECURITY.md\", \"scope-\\ufffd/SECURITY.md\"]\n";
+        if !listing.status.success() || !listing.stderr.is_empty() || listing.stdout != expected {
+            return Err(io::Error::other(
+                "Windows policy helper lost directory names",
+            ));
+        }
+        for sentinel in sentinels {
+            if fs::read(sentinel)? != b"output sentinel" {
+                return Err(io::Error::other(
+                    "Windows policy helper changed a replacement output",
+                ));
+            }
+        }
+        println!("{{\"policyHelperRawPaths\":true}}");
+        Ok(())
+    }
+
     let mut args = env::args_os().skip(1);
     let node = args.next().expect("Node executable path");
     let script = args.next().expect("Windows wide proof script");
     let root = PathBuf::from(args.next().expect("Proof fixture directory")).join("wide-process");
     fs::create_dir(&root)?;
-    let result = run(node, script, &root);
+    let result = if args.next().is_some_and(|argument| argument == "policy") {
+        policy_proof(node, script, &root)
+    } else {
+        run(node, script, &root)
+    };
     let cleanup = fs::remove_dir_all(&root);
     result?;
     cleanup
