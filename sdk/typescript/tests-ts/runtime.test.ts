@@ -333,6 +333,11 @@ describe("plugin runtime preparation", () => {
         runtime,
       )?.[0];
     expect(source).toBeDefined();
+    const surfaceSource =
+      /function buildCoverageSurfaces\(surfaces\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(surfaceSource).toBeDefined();
 
     type Surface = {
       id?: string;
@@ -345,7 +350,7 @@ describe("plugin runtime preparation", () => {
       "semanticIdentifier",
       "coverageMode",
       "inventoryStrategy",
-      `${source}\nreturn buildCoverage;`,
+      `${surfaceSource}\n${source}\nreturn buildCoverage;`,
     )(
       (label: string) => label.toLowerCase(),
       () => "deep_repository",
