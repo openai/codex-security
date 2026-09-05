@@ -24,8 +24,6 @@ export function windowsFileSystem(native: WindowsBinding) {
   }
 
   function absolute(path: Buffer): Buffer {
-    // GetFullPathNameW normalizes even explicit verbatim paths.
-    if (pathText(path).startsWith("\\\\?\\")) return path;
     const result = native.windowsAbsolutePath(path);
     check(result.error, path);
     return result.value;
@@ -82,10 +80,7 @@ export function windowsFileSystem(native: WindowsBinding) {
         win32.parse(text).root;
       normalizedText =
         root +
-        win32
-          .normalize(`\\${text.slice(root.length)}`)
-          .slice(1)
-          .replace(/\\+$/u, "");
+        win32.join("\\", text.slice(root.length)).slice(1).replace(/\\+$/u, "");
     } else {
       const text = pathText(absolute(path));
       const root = win32.parse(text).root;

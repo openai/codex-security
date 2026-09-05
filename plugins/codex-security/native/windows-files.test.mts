@@ -7,6 +7,8 @@ import { pathText, widePath, windowsFileSystem } from "./windows-files.mjs";
 const opened = new Error("Captured native open");
 
 for (const [input, expected] of [
+  ["\\\\?\\C:\\\\..\\file", "\\\\?\\C:\\file"],
+  ["\\\\?\\UNC\\server\\share\\\\..\\file", "\\\\?\\UNC\\server\\share\\file"],
   [
     "\\\\?\\UNC\\server\\share\\..\\other\\file",
     "\\\\?\\UNC\\server\\share\\other\\file",
@@ -19,6 +21,9 @@ for (const [input, expected] of [
 ] as const) {
   test(`verbatim realpath preserves its root: ${JSON.stringify(input)}`, () => {
     const native = {
+      windowsAbsolutePath(path: Buffer) {
+        return { error: 0, value: path };
+      },
       openWindowsFile(path: Buffer) {
         assert.equal(pathText(path), expected);
         throw opened;

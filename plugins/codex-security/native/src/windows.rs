@@ -114,26 +114,30 @@ pub fn windows_environment(name: Buffer) -> napi::Result<Option<Buffer>> {
 
 #[napi]
 pub fn windows_absolute_path(path: Buffer) -> napi::Result<BufferResult> {
-    let path = wide_path(path)?;
-    let mut absolute = vec![0_u16; 256];
-    loop {
-        let capacity = u32::try_from(absolute.len())
-            .map_err(|_| invalid("Absolute path exceeds the Win32 buffer size"))?;
-        let length =
-            unsafe { GetFullPathNameW(path.as_ptr(), capacity, absolute.as_mut_ptr(), null_mut()) };
-        if length == 0 {
-            return Ok(BufferResult {
-                error: unsafe { GetLastError() },
-                value: Vec::new().into(),
-            });
-        }
-        if length < capacity {
-            return Ok(BufferResult {
-                error: 0,
-                value: wide_bytes(absolute[..length as usize].iter().copied()),
-            });
-        }
-        absolute.resize(length as usize + 1, 0);
+    let path = os_string(path)?;
+    if path.is_empty() {
+        // Rust rejects empty paths before Win32; retain the native error contract.
+        let mut value = [0_u16; 256];
+        let error = unsafe {
+            GetFullPathNameW([0_u16].as_ptr(), 256, value.as_mut_ptr(), null_mut());
+            GetLastError()
+        };
+        return Ok(BufferResult {
+            error,
+            value: Vec::new().into(),
+        });
+    }
+    match std::path::absolute(path) {
+        Ok(value) => Ok(BufferResult {
+            error: 0,
+            value: wide_bytes(value.as_os_str().encode_wide()),
+        }),
+        Err(error) => Ok(BufferResult {
+            error: error
+                .raw_os_error()
+                .ok_or_else(|| invalid(&error.to_string()))? as u32,
+            value: Vec::new().into(),
+        }),
     }
 }
 
