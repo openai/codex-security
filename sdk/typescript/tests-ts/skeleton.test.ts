@@ -279,12 +279,15 @@ describe("TypeScript package skeleton", () => {
     });
     const quality = await workflow("test-quality.yml");
     expect(Object.keys(quality.on).sort()).toEqual([
-      "pull_request",
       "schedule",
+      "workflow_call",
       "workflow_dispatch",
     ]);
-    expect(quality.on["pull_request"]).toEqual({
-      paths: [".github/workflows/test-quality.yml"],
+    expect(ci.jobs["test-quality"]).toMatchObject({
+      needs: ["validate-title", "native"],
+      if: "needs.validate-title.outputs.test-quality == 'true'",
+      uses: "./.github/workflows/test-quality.yml",
+      with: { "native-artifacts-ready": true },
     });
     expect(quality.env?.["CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST"]).toBe(
       "false",
