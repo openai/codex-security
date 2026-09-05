@@ -2474,18 +2474,19 @@ export class CodexSecurity {
         sdkEnvironment,
       );
     }
+    const rawConfigOverrides = [
+      ...(commandAuth ? modelProviderConfigOverride(sessionConfig) : []),
+      ...(configOverrides ?? []),
+    ];
     const codex = this.#dependencies.createCodex({
       ...(codexPathOverride === undefined
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      ...(commandAuth
-        ? { configOverrides: modelProviderConfigOverride(sessionConfig) }
-        : {}),
       env: sdkEnvironment,
-      ...(configOverrides === undefined
+      ...(rawConfigOverrides.length === 0
         ? {}
-        : { configOverrides: [...configOverrides] }),
+        : { configOverrides: rawConfigOverrides }),
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
         responses_api_metadata: {

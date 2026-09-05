@@ -7,6 +7,7 @@ import type {
   TurnOptions,
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import {
   ScanInterruptedError,
   type PatchOptions,
@@ -16,6 +17,7 @@ import {
   type ScanSessionEvent,
 } from "../src/index.js";
 import { estimateScanCost } from "../src/cost.js";
+import type { JsonObject } from "../src/config.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import {
@@ -78,6 +80,7 @@ describe("CodexSecurity headless patching", () => {
   async function patchClient(
     events: (signal: AbortSignal) => AsyncGenerator<ThreadEvent> = () =>
       patchEvents(),
+    codexOverrides: JsonObject = {},
   ) {
     const root = await temporaryDirectory();
     const projectRoot = join(root, "repository with spaces");
@@ -108,6 +111,7 @@ describe("CodexSecurity headless patching", () => {
           approval_policy: "on-request",
           project_root_markers: ["package.json"],
           projects: { [markerRoot]: { trust_level: "trusted" } },
+          ...codexOverrides,
         },
       },
       {
@@ -320,6 +324,46 @@ describe("CodexSecurity headless patching", () => {
     ]);
     expect(captured.thread?.workingDirectory).toBe(options.repositoryPath);
   });
+
+  test.each(["direct", "profile"] as const)(
+    "preserves command authentication alongside patch trust overrides (%s)",
+    async (selection) => {
+      const provider = {
+        name: "Synthetic",
+        base_url: "https://provider.example/v1",
+        wire_api: "responses",
+        auth: {
+          command: "./synthetic-auth",
+          args: ["token"],
+          cwd: await temporaryDirectory(),
+          refresh_interval_ms: 1000,
+        },
+      };
+      const { client, options, captured } = await patchClient(undefined, {
+        ...(selection === "profile"
+          ? {
+              profile: "review",
+              profiles: { review: { model_provider: "synthetic.provider" } },
+            }
+          : { model_provider: "synthetic.provider" }),
+        model_providers: { "synthetic.provider": provider },
+      });
+      await using security = client;
+      expect(await security.patch(options)).toMatchObject(verified);
+      expect(captured.codex?.configOverrides).toHaveLength(3);
+      expect(parseToml(captured.codex!.configOverrides![0]!)).toEqual({
+        model_providers: { "synthetic.provider": provider },
+      });
+      expect(captured.codex?.configOverrides?.slice(1)).toEqual([
+        "project_root_markers=[]",
+        `projects.${JSON.stringify(options.repositoryPath)}.trust_level="untrusted"`,
+      ]);
+      expect(captured.codex?.config).not.toHaveProperty("model_providers");
+      expect(captured.codex?.apiKey).toBeUndefined();
+      expect(captured.codex?.env).not.toHaveProperty("OPENAI_API_KEY");
+      expect(captured.thread?.workingDirectory).toBe(options.repositoryPath);
+    },
+  );
 
   test.each([
     {
