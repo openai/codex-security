@@ -790,6 +790,57 @@ try {
     ],
   );
 
+  for (const [name, currentSurface] of [
+    ["different-label", { label: "Unrelated review", riskArea: "authorization" }],
+    ["different-risk-area", { label: "Source review", riskArea: "input-validation" }],
+  ]) {
+    const spoofedSurfaceRoot = path.join(root, `spoofed-surface-${name}`);
+    await mkdir(spoofedSurfaceRoot);
+    const spoofedSurfaceContext = { ...context, root: spoofedSurfaceRoot };
+    const deferred = {
+      id: "checkpoint-source-review",
+      reason: "Source review was pending.",
+      surfaceIds: [surfaceId],
+    };
+    await recordCodexSecurityScanDraft(spoofedSurfaceContext, {
+      ...input,
+      complete: false,
+      findings: [],
+      coverage: {
+        ...coverage,
+        completeness: "partial",
+        surfaces: [{
+          label: "Source review",
+          riskArea: "authorization",
+          disposition: "needs_follow_up",
+        }],
+        deferred: [deferred],
+      },
+    });
+    const spoofedDraft = {
+      ...input,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [{
+          ...currentSurface,
+          id: surfaceId,
+          disposition: "no_issue_found",
+        }],
+      },
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await recordCodexSecurityScanDraft(spoofedSurfaceContext, spoofedDraft);
+      const spoofedSurfaceResult = await readJson(spoofedSurfaceRoot, "coverage.json");
+      assert.equal(spoofedSurfaceResult.completeness, "partial");
+      assert.deepEqual(
+        spoofedSurfaceResult.deferred,
+        [deferred],
+        "reusing a historical ID cannot resolve its deferral, even after checkpointing",
+      );
+    }
+  }
+
   const undefinedCandidateRoot = path.join(root, "undefined-candidate-worker");
   await mkdir(undefinedCandidateRoot);
   const undefinedCandidateContext = { ...workerContext, root: undefinedCandidateRoot };
