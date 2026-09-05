@@ -295,7 +295,9 @@ function preferredAuthUrl(value: string): string | null {
   )) {
     const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
     try {
-      const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+      const parsed = new URL(url);
+      if (parsed.protocol !== "https:") continue;
+      const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
       if (
         hostname !== "localhost" &&
         !hostname.endsWith(".localhost") &&
