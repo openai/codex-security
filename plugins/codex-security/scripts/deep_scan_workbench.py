@@ -21,6 +21,7 @@ from deep_scan_config import resolve_deep_scan_config
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import _read_scan_local_json
 from workbench.handoff import require_current_continuation
+from workbench_source_scopes import capture_source_scopes
 from workbench_target import (
     directory_content_digest,
     directory_snapshot_regular_file_count,
@@ -828,6 +829,11 @@ def begin_deep_scan_for_target(
                 terminal["id"],
                 start_disposition="joined",
             )
+        source_scopes = capture_source_scopes(
+            target,
+            (revision, target_snapshot_digest, target_device, target_inode),
+            [scope],
+        )
         config = effective_deep_scan_config(args)
         workflow_version = optional_text(args.workflow_version, maximum=256)
         if workflow_version is None:
@@ -875,10 +881,10 @@ def begin_deep_scan_for_target(
             """
             INSERT INTO scans (
                 id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
-                target_device, target_inode, scope, mode, user_context,
+                target_device, target_inode, source_scopes_json, scope, mode, user_context,
                 deep_scan_owner_thread_id, scan_dir, model, reasoning_effort, status, phase,
                 handoff_status, started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'deep', ?, ?, ?, ?, ?,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'deep', ?, ?, ?, ?, ?,
                 'running', 'preflight', 'delivered', ?, ?, ?)
             """,
             (
@@ -890,6 +896,7 @@ def begin_deep_scan_for_target(
                 target_snapshot_digest,
                 target_device,
                 target_inode,
+                json.dumps(source_scopes),
                 scope,
                 user_context,
                 thread_id,

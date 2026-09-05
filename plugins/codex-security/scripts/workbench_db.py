@@ -110,7 +110,14 @@ from workbench_schema import (
 from workbench_schema import (
     sql_statements as sql_statements,
 )
-from workbench_source_excerpt import finding_source_excerpt, safe_source_path
+from workbench_source_excerpt import finding_source_excerpt
+from workbench_source_scopes import (
+    capture_source_scopes,
+    expected_target_kinds,
+    public_scan_recipe,
+    requested_scan_paths,
+    safe_source_path,
+)
 from workbench_target import (
     clean_worktree_content_digest,
     copy_directory_excluding,
@@ -138,6 +145,7 @@ from workbench_validation import (
     optional_text,
     parse_scan_cost,
     path_within_scope,
+    reject_non_finite_json,
     require_close_note,
     require_occurrence,
     require_uuid,
@@ -430,27 +438,6 @@ def require_scannable_target(target: Path) -> None:
         raise SystemExit(
             "Codex Security requires a checked-out worktree, not a bare Git repository."
         )
-
-
-def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
-    if scan["mode"] == "diff":
-        return ["git_diff"]
-    if scan["target_revision"] == "unversioned":
-        return ["directory_snapshot"]
-    if scan["target_snapshot_digest"] is None:
-        return ["git_worktree", "git_revision"]
-    if scan["target_snapshot_digest"] == clean_worktree_content_digest():
-        return ["git_revision"]
-    return ["git_worktree"]
-
-
-def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
-    if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
-        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
-        target = recipe["target"]
-        if target["kind"] == "paths":
-            return target["paths"]
-    return [scan["scope"]]
 
 
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
@@ -858,6 +845,12 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             diff_target,
             metadata=target_metadata,
         )
+        source_scopes = capture_source_scopes(
+            target,
+            target_identity,
+            [scope],
+            diff_target_kind=diff_target["kind"] if diff_target is not None else None,
+        )
         target_root = scan_target_root(args.scan_root, target)
         target_root.mkdir(parents=True, exist_ok=True)
         if manages_transaction:
@@ -906,6 +899,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            source_scopes=source_scopes,
             target_root=target_root,
             target_summary=target_summary,
             scope_file_count=scope_file_count,
@@ -962,6 +956,12 @@ def _start_prompt_driven_scan(
     )
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
+    source_scopes = capture_source_scopes(
+        target,
+        target_identity,
+        [scope],
+        diff_target_kind=diff_target["kind"] if diff_target is not None else None,
+    )
     target_root = scan_target_root(args.scan_root, target)
 
     connection.execute("BEGIN IMMEDIATE")
@@ -1064,6 +1064,7 @@ def _start_prompt_driven_scan(
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            source_scopes=source_scopes,
             target_root=target_root,
             target_summary=target_summary,
             scope_file_count=scope_file_count,
@@ -1676,6 +1677,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     recipe = parse_scan_recipe(recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
+    recipe.pop("_codexSecurityFileScopes", None)
     scope = paths[0] if len(paths) == 1 else "."
     diff_target = None
     if requested_target["kind"] in {"refs", "working_tree"}:
@@ -1693,6 +1695,12 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             diff_target["contentDigest"] = worktree_content_digest(repository)
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
+    source_scopes = capture_source_scopes(
+        repository,
+        target_identity,
+        paths or ["."],
+        diff_target_kind=diff_target["kind"] if diff_target is not None else None,
+    )
     scope_file_count = (
         directory_snapshot_regular_file_count(repository)
         if not paths
@@ -1750,6 +1758,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            source_scopes=source_scopes,
             target_root=scan_dir.parent,
             target_summary=None,
             scope_file_count=scope_file_count,
@@ -1875,7 +1884,7 @@ def get_scan_recipe(connection: sqlite3.Connection, args: argparse.Namespace) ->
         raise SystemExit("This scan does not have a saved launch recipe.")
     return {
         "parentScanId": scan["parent_scan_id"],
-        "recipe": json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json),
+        "recipe": public_scan_recipe(scan),
         "scanId": scan["id"],
     }
 
@@ -2721,7 +2730,7 @@ def scan_context(
     }
     if scan["recipe_json"] is not None:
         context["parentScanId"] = scan["parent_scan_id"]
-        context["recipe"] = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        context["recipe"] = public_scan_recipe(scan)
     return context
 
 
@@ -3022,6 +3031,7 @@ def finding_result(
     severity = details.get("severity")
     severity = severity if isinstance(severity, dict) else {}
     locations = []
+    excerpt_locations = []
     try:
         target = require_scan_target_identity(scan)
     except SystemExit:
@@ -3036,6 +3046,14 @@ def finding_result(
         """,
         (occurrence["id"], FINDING_LOCATIONS_LIMIT),
     ):
+        excerpt_locations.append(
+            {
+                "endLine": row["end_line"],
+                "path": row["relative_path"],
+                "role": row["role"],
+                "startLine": row["start_line"],
+            }
+        )
         absolute_path = safe_source_path(target, row["relative_path"]) if target else None
         location = {
             "endLine": row["end_line"],
@@ -3082,7 +3100,9 @@ def finding_result(
     if related:
         result["related"] = related
     result.pop("artifactPaths", None)
-    source_excerpt = finding_source_excerpt(scan, target, locations)
+    source_excerpt = finding_source_excerpt(
+        scan, target, excerpt_locations, requested_scan_paths(scan)
+    )
     if source_excerpt:
         result["sourceExcerpt"] = source_excerpt
     artifact_paths = finding_artifact_paths(Path(scan["scan_dir"]), details)
@@ -3374,10 +3394,6 @@ def read_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise SystemExit(f"{path.name}: expected a JSON object.")
     return payload
-
-
-def reject_non_finite_json(value: str) -> None:
-    raise ValueError(f"non-finite JSON number {value!r} is not supported")
 
 
 _WORKBENCH_PUBLICATION_CONTEXT = publication.WorkbenchPublicationContext(
