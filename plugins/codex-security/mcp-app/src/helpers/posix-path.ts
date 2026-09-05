@@ -40,8 +40,7 @@ export class SymlinkLoopError extends Error {}
 
 export function resolvePosixPath(value: Buffer): Buffer {
   // GNU Linux native realpath rejects file/.. and links targeting it with
-  // ENOTDIR. Retain the shipped pathlib contract for those inputs;
-  // native/proof.mts exercises the direct Node behavior on every Unix runtime.
+  // ENOTDIR. Retain the shipped pathlib contract for those inputs.
   const seen = new Map<string, string | null>();
   // Latin-1 is a lossless internal representation of pathname bytes.
   function follow(directory: string, path: string): string {
