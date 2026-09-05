@@ -312,6 +312,32 @@ describe("security policy generation", () => {
     }
   });
 
+  test("excludes detached Git metadata without a worktree marker", async () => {
+    const f = await fixture();
+    const metadata = join(f.repository, "saved-metadata");
+    policyGit(f.repository, "init", "--quiet", "--bare", metadata);
+    policyGit(metadata, "config", "core.bare", "false");
+    await writeFile(join(metadata, "SECURITY.md"), "Git metadata fixture");
+    const inventory = await inspectSecurityPolicySources(
+      await resolveSecurityPolicyTarget(f.repository),
+    );
+    expect(inventory.policyPaths).toEqual([]);
+    expect(inventory.gitMetadataPaths).toContain(metadata);
+  });
+
+  test("keeps source with Git-like names in the policy inventory", async () => {
+    const f = await fixture();
+    await writeFile(join(f.repository, "HEAD"), "Ordinary source\n");
+    await mkdir(join(f.repository, "objects"));
+    await mkdir(join(f.repository, "refs"));
+    await writeFile(join(f.repository, "objects", "SECURITY.md"), POLICY);
+    const inventory = await inspectSecurityPolicySources(
+      await resolveSecurityPolicyTarget(f.repository),
+    );
+    expect(inventory.policyPaths).toEqual(["objects/SECURITY.md"]);
+    expect(inventory.gitMetadataPaths).toEqual([]);
+  });
+
   test("keeps linked worktrees and submodules as their own policy roots", async () => {
     const f = await fixture();
     policyGit(f.repository, "init", "--quiet");

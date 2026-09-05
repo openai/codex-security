@@ -230,6 +230,24 @@ export async function enclosingGitWorktreeRoots(
   }
 }
 
+export async function isGitMetadataDirectory(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  try {
+    return (
+      (await gitOutput(
+        repository,
+        ["rev-parse", "--is-inside-git-dir"],
+        signal,
+      )) === "true"
+    );
+  } catch {
+    throwIfAborted(signal);
+    return false;
+  }
+}
+
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,

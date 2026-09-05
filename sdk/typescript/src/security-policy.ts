@@ -22,6 +22,7 @@ import {
   enclosingGitWorktreeRoot,
   enclosingGitWorktreeRoots,
   gitMetadataDirectories,
+  isGitMetadataDirectory,
   normalizeRepository,
   normalizeTarget,
   relativePathIsOutside,
@@ -465,7 +466,7 @@ async function securityPolicyPaths(
     const directory = directories.pop()!;
     if (isGitData(directory)) continue;
     const entries = await readdir(directory, { withFileTypes: true });
-    // Bare repositories have Git's HEAD/objects/refs layout without a .git marker.
+    // Only ask Git about directories with its bare-repository layout.
     if (
       entries.some((entry) => entry.name === "HEAD" && !entry.isDirectory()) &&
       ["objects", "refs"].every((name) =>
@@ -474,7 +475,8 @@ async function securityPolicyPaths(
             entry.name === name &&
             (entry.isDirectory() || entry.isSymbolicLink()),
         ),
-      )
+      ) &&
+      (await isGitMetadataDirectory(directory, signal))
     ) {
       gitDirectories.add(directory);
       continue;

@@ -749,6 +749,13 @@ describe("CodexSecurity policy API", () => {
       await mkdir(component);
       policyGit(component, "init", "--quiet", "--separate-git-dir", metadata);
       policyGit(component, "config", "core.worktree", component);
+      await writeFile(join(component, "HEAD"), "Ordinary source\n");
+      await mkdir(join(component, "objects"));
+      await mkdir(join(component, "refs"));
+      await writeFile(
+        join(component, "SECURITY.md"),
+        "Component policy fixture",
+      );
       policyGit(component, "init", "--quiet", "--bare", bare);
       await writeFile(join(bare, "SECURITY.md"), "Bare Git policy fixture");
       await f.security.generatePolicy(f.repository, {
@@ -772,6 +779,7 @@ describe("CodexSecurity policy API", () => {
       }
       expect(f.threads).toHaveLength(3);
       expect(f.prompts.join("\n")).not.toContain("Bare Git policy fixture");
+      expect(f.prompts.join("\n")).toContain("Component policy fixture");
       await f.security.close();
     },
   );
