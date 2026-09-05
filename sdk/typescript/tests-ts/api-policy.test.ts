@@ -762,6 +762,55 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
+  test.each(["SECURITY.md", ".github/SECURITY.md", "docs/SECURITY.md"])(
+    "checks %s links against the component's policy guidance before runtime setup",
+    async (policyPath) => {
+      let prepared = false;
+      const f = await setup({
+        onPrepare: () => {
+          prepared = true;
+        },
+      });
+      await mkdir(join(f.repository, "component"));
+      const source = join(f.repository, "notes.md");
+      await writeFile(source, "# Unrelated project notes\n");
+      const policy = join(f.repository, policyPath);
+      await mkdir(dirname(policy), { recursive: true });
+      await symlink(source, policy, "file");
+      const options = { path: "component", outputDir: f.outputDir };
+      await expect(
+        f.security.preflightPolicy(f.repository, options),
+      ).rejects.toThrow("outside the selected component");
+      await expect(
+        f.security.generatePolicy(f.repository, options),
+      ).rejects.toThrow("outside the selected component");
+      expect(prepared).toBe(false);
+      expect(f.threads).toHaveLength(0);
+      expect(await readdir(f.outputDir)).toEqual([]);
+      await f.security.close();
+    },
+  );
+
+  test("accepts shared inherited and reporting policy guidance for a component", async () => {
+    const f = await setup();
+    policyGit(f.repository, "init", "--quiet");
+    await mkdir(join(f.repository, "component"));
+    await mkdir(join(f.repository, ".github"));
+    await mkdir(join(f.repository, "docs"));
+    const reporting = join(f.repository, ".github", "SECURITY.md");
+    await writeFile(reporting, "# Shared reporting policy\n");
+    await symlink(reporting, join(f.repository, "SECURITY.md"), "file");
+    await symlink(reporting, join(f.repository, "docs", "SECURITY.md"), "file");
+    await f.security.generatePolicy(f.repository, {
+      path: "component",
+      outputDir: f.outputDir,
+    });
+    expect(f.prompts).toHaveLength(3);
+    for (const prompt of f.prompts)
+      expect(prompt).toContain("Shared reporting policy");
+    await f.security.close();
+  });
+
   test("keeps literal component names intact through generation and preview", async () => {
     for (const scope of ["-component", "~component", "~", "~/child"]) {
       let prepared = false;
@@ -1124,7 +1173,14 @@ describe("CodexSecurity policy API", () => {
       config: {
         codexOverrides: {
           profile: "team.prod",
-          features: { apps: true, goals: false },
+          features: { apps: true, goals: false, shell_snapshot: true },
+          allow_login_shell: true,
+          shell_environment_policy: {
+            inherit: "all",
+            ignore_default_excludes: true,
+            set: { SYNTHETIC_SETTING: "root-setting" },
+            include_only: ["SYNTHETIC_*"],
+          },
           mcp_servers: { synthetic: { command: "synthetic-tool" } },
           sandbox_workspace_write: {
             network_access: true,
@@ -1138,6 +1194,10 @@ describe("CodexSecurity policy API", () => {
               features: { apps: true, goals: true },
               mcp_servers: { synthetic: { command: "synthetic-profile-tool" } },
               web_search: "live",
+              shell_environment_policy: {
+                set: { SYNTHETIC_PROFILE_SETTING: "profile-setting" },
+                experimental_use_profile: true,
+              },
               sandbox_workspace_write: { network_access: true },
             },
           },
@@ -1150,10 +1210,20 @@ describe("CodexSecurity policy API", () => {
       model: "gpt-5.6-terra",
       model_reasoning_effort: "high",
       default_permissions: "codex_security_policy",
-      features: { plugins: false, apps: false, goals: true },
+      features: {
+        plugins: false,
+        apps: false,
+        goals: true,
+        shell_snapshot: false,
+      },
+      allow_login_shell: false,
       mcp_servers: {},
       web_search: "disabled",
       sandbox_workspace_write: { network_access: false },
+    });
+    expect(f.configuration()?.config?.["shell_environment_policy"]).toEqual({
+      inherit: "core",
+      ignore_default_excludes: false,
     });
     expect(f.configuration()?.config).not.toHaveProperty("profile");
     expect(f.configuration()?.config).not.toHaveProperty("profiles");

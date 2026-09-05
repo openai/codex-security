@@ -4432,7 +4432,17 @@ function policyCodexConfig(config: JsonObject): JsonObject {
     // The artifact directory may be inside an unrelated checkout.
     project_doc_max_bytes: 0,
     project_root_markers: [],
-    features: { ...features, plugins: false, apps: false },
+    allow_login_shell: false,
+    shell_environment_policy: {
+      inherit: "core",
+      ignore_default_excludes: false,
+    },
+    features: {
+      ...features,
+      plugins: false,
+      apps: false,
+      shell_snapshot: false,
+    },
     mcp_servers: {},
     web_search: "disabled",
     sandbox_workspace_write: { network_access: false },

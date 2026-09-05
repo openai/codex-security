@@ -274,7 +274,11 @@ access to the selected repository or component and required tools. Network acces
 web search, apps, and MCP servers are disabled. Drafts stay outside the checkout.
 The host resolves inherited guidance once and includes each checked descendant
 policy separately. Descendant policy links must stay within the selected component.
+Inherited and reporting-policy links may also resolve to ancestor `SECURITY.md`
+files or the checkout's `.github/SECURITY.md` and `docs/SECURITY.md`.
 The model cannot read sibling components or external Git metadata.
+Policy shell tools inherit only Codex's core environment; custom shell environment
+settings, login shells, and shell snapshots are disabled for these turns.
 Knowledge-base text stays with the private review artifacts during generation
 and is removed afterward.
 

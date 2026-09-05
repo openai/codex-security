@@ -318,13 +318,13 @@ export async function readSecurityPolicySnapshot(
       });
     }
     if (metadata?.isFile()) {
-      // Inherited policies may link to another file inside the repository.
       const normalized = await normalizeTarget(
         target.repository,
         [path],
         signal,
       );
       const canonical = join(target.repository, normalized.paths[0]!);
+      requirePolicyEvidenceScope(path, canonical, target);
       const content = await readPolicyFile(canonical);
       inherited.push([policyPath, digest(content)]);
     }
@@ -536,17 +536,36 @@ async function readPolicyEvidence(
     );
   const destination = await policyLinkDestination(target.repository, alias);
   if (alias.status !== "resolved" || destination === null) return null;
-  const component = dirname(target.targetPath);
-  if (
-    !relativePathIsOutside(relative(component, path)) &&
-    relativePathIsOutside(relative(component, destination))
-  )
-    throw new InvalidTargetError(
-      `Security-policy link is outside the selected component: ${path}`,
-    );
+  requirePolicyEvidenceScope(path, destination, target);
   return (await stat(destination)).isFile()
     ? await readPolicyFile(destination)
     : null;
+}
+
+function requirePolicyEvidenceScope(
+  path: string,
+  destination: string,
+  target: SecurityPolicyTarget,
+): void {
+  const component = dirname(target.targetPath);
+  if (!relativePathIsOutside(relative(component, destination))) return;
+  // Ancestor and reporting policies are explicit guidance for a component.
+  // Their links may share those policy files, but not unrelated source files.
+  if (relativePathIsOutside(relative(component, path))) {
+    const policies = [
+      join(target.repository, ".github", "SECURITY.md"),
+      join(target.repository, "docs", "SECURITY.md"),
+    ];
+    let directory = target.repository;
+    for (const part of target.scope.split("/")) {
+      policies.push(join(directory, "SECURITY.md"));
+      directory = join(directory, part);
+    }
+    if (policies.some((policy) => relative(policy, destination) === "")) return;
+  }
+  throw new InvalidTargetError(
+    `Security-policy link is outside the selected component and its policy guidance: ${path}`,
+  );
 }
 
 async function requirePolicyOutsideGitMetadata(

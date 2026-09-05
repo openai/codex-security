@@ -9,7 +9,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   inspectSecurityPolicyPaths,
@@ -858,7 +858,8 @@ describe("security policy preview", () => {
 
   test("tracks safe inherited policy links and rejects outside links", async () => {
     const f = await fixture();
-    const linkedPolicy = join(f.repository, "owner-policy.md");
+    const linkedPolicy = join(f.repository, ".github", "SECURITY.md");
+    await mkdir(dirname(linkedPolicy));
     await mkdir(join(f.repository, "component"));
     await writeFile(linkedPolicy, "# Owner policy\n");
     await symlink(linkedPolicy, join(f.repository, "SECURITY.md"), "file");
@@ -908,8 +909,9 @@ describe("security policy preview", () => {
       const component = join(f.repository, "component");
       const target = join(component, "SECURITY.md");
       const inherited = join(f.repository, "SECURITY.md");
-      const ownerPolicy = join(f.repository, "owner-policy.md");
+      const ownerPolicy = join(f.repository, ".github", "SECURITY.md");
       const intermediate = join(f.repository, "policy-link.md");
+      await mkdir(dirname(ownerPolicy));
       await mkdir(component);
       await writeFile(target, "# Original policy\n");
       await writeFile(ownerPolicy, "# Owner policy\n");
