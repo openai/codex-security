@@ -15,7 +15,10 @@ export function checkPrivatePaths(
     "/tmp/codex-security-python-",
     ...buildPaths,
   ]) {
-    if (bytes.includes(Buffer.from(marker))) {
+    if (
+      bytes.includes(Buffer.from(marker)) ||
+      bytes.includes(Buffer.from(marker, "utf16le"))
+    ) {
       throw new Error("Native payload contains a private build path.");
     }
   }
@@ -73,8 +76,23 @@ if (
       );
     }
     floor = "macOS 11.0";
+  } else if (process.platform === "win32") {
+    const header = bytes.readUInt32LE(0x3c);
+    const machine = process.arch === "arm64" ? 0xaa64 : 0x8664;
+    if (
+      bytes.toString("ascii", 0, 2) !== "MZ" ||
+      bytes.toString("ascii", header, header + 4) !== "PE\0\0" ||
+      bytes.readUInt16LE(header + 4) !== machine
+    ) {
+      throw new Error(
+        "Native payload is not a PE image for this architecture.",
+      );
+    }
+    floor = "Windows MSVC; Node 20 and 22 load proofs required";
   } else {
-    throw new Error("This foundation verifies Linux and macOS artifacts only.");
+    throw new Error(
+      "This foundation verifies Linux, macOS, and Windows artifacts only.",
+    );
   }
   console.log(
     JSON.stringify({
