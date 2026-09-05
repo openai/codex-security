@@ -17,36 +17,29 @@ on:
       - docker/**
       - plugins/codex-security/**
       - sdk/typescript/**
-  pull_request:
-    paths:
-      - .dockerignore
-      - .github/workflows/native-*.yml
-      - .github/actions/download-native/**
-      - .github/workflows/container-ci.yml
-      - Dockerfile
-      - Dockerfile.dockerignore
-      - compose.yaml
-      - compose.apparmor.yaml
-      - compose.findings.yaml
-      - compose.runner.yaml
-      - docker/**
-      - plugins/codex-security/**
-      - sdk/typescript/**
+  workflow_call:
+    inputs:
+      native-artifacts-ready:
+        description: Use the native artifacts already built by the caller in this run.
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: container-ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   native:
+    if: ${{ !inputs.native-artifacts-ready }}
     uses: ./.github/workflows/native-artifacts.yml
 
   container:
     needs: native
+    if: ${{ !cancelled() && (inputs.native-artifacts-ready || needs.native.result == 'success') }}
     name: linux-amd64
     runs-on: ubuntu-latest
     timeout-minutes: 30

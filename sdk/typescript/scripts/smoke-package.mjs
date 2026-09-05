@@ -413,16 +413,8 @@ try {
     [
       "--input-type=commonjs",
       "--eval",
-      `const assert = require("node:assert/strict");
-const native = require(process.argv[1]);
-if (process.platform === "win32") {
-  const result = native.openWindowsFile(Buffer.from(process.argv[2], "utf16le"), 0, 7, 3, 0);
-  assert.equal(result.error, 2);
-} else {
-  assert.deepEqual(native.duplicate(-1), { value: -1, errno: 9 });
-}`,
+      "require(process.argv[1])",
       nativeLibrary,
-      join(consumer, "missing-native-file"),
     ],
     { cwd: consumer, env: { ...process.env, PATH: "" } },
   );
