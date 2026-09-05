@@ -81,13 +81,8 @@ export function scanProgressUpdatesFromEvent(
         : null;
   if (typeof output !== "string") return [];
   const updates: ScanProgress[] = [];
-  let codeFence = false;
-  for (const line of output.split(/\r?\n/u)) {
-    if (/^\s*```/u.test(line)) {
-      codeFence = !codeFence;
-      continue;
-    }
-    if (codeFence || !line.startsWith(SCAN_PROGRESS_PREFIX)) continue;
+  for (const line of linesOutsideCodeFences(output)) {
+    if (!line.startsWith(SCAN_PROGRESS_PREFIX)) continue;
     const progress = scanProgressFromMarker(line);
     if (progress !== null) updates.push(progress);
   }
@@ -178,9 +173,9 @@ function dispatchStatus(
   item: Readonly<Record<string, unknown>>,
 ): ScanWorkerStatus | null {
   if (typeof item["text"] !== "string") return null;
-  const markers = item["text"]
-    .split(/\r?\n/u)
-    .filter((line) => line.startsWith(WORKER_STATUS_PREFIX));
+  const markers = linesOutsideCodeFences(item["text"]).filter((line) =>
+    line.startsWith(WORKER_STATUS_PREFIX),
+  );
   const marker = markers[0];
   if (markers.length !== 1 || marker === undefined) return null;
   let payload: unknown;
@@ -205,6 +200,34 @@ function dispatchStatus(
     planned: payload["planned"],
     started: payload["started"],
   };
+}
+
+function linesOutsideCodeFences(value: string): string[] {
+  const lines: string[] = [];
+  let fence: { marker: "`" | "~"; length: number } | null = null;
+  for (const line of value.split(/\r?\n/u)) {
+    if (fence !== null) {
+      const closing = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$/u.exec(line)?.[1];
+      if (
+        closing !== undefined &&
+        closing[0] === fence.marker &&
+        closing.length >= fence.length
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    const opening = /^[ \t]{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (opening !== undefined) {
+      fence = {
+        marker: opening[0] as "`" | "~",
+        length: opening.length,
+      };
+      continue;
+    }
+    lines.push(line);
+  }
+  return lines;
 }
 
 function isProgressCount(value: unknown): value is number {
