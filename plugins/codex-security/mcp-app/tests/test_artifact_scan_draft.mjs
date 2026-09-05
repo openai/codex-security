@@ -907,6 +907,110 @@ try {
   assert.equal(reservedSurfaceResult.completeness, "complete");
   assert.deepEqual(reservedSurfaceResult.deferred, []);
 
+  const unlinkedSurfaceRoot = path.join(root, "unlinked-checkpoint-surface");
+  await mkdir(unlinkedSurfaceRoot);
+  const unlinkedSurfaceContext = { ...context, root: unlinkedSurfaceRoot };
+  await recordCodexSecurityScanDraft(unlinkedSurfaceContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [
+        { label: "Linked review", disposition: "needs_follow_up" },
+        { label: "Unlinked review", disposition: "needs_follow_up" },
+      ],
+      deferred: [{
+        id: "checkpoint-linked-review",
+        reason: "Linked review was pending.",
+        surfaceIds: ["surface_linked-review"],
+      }],
+    },
+  });
+  await recordCodexSecurityScanDraft(unlinkedSurfaceContext, {
+    ...input,
+    findings: [],
+    coverage: {
+      ...coverage,
+      surfaces: [{ label: "Linked review", disposition: "no_issue_found" }],
+    },
+  });
+  const unlinkedSurfaceResult = await readJson(unlinkedSurfaceRoot, "coverage.json");
+  assert.equal(unlinkedSurfaceResult.completeness, "partial");
+  assert.deepEqual(unlinkedSurfaceResult.deferred, []);
+  assert.deepEqual(
+    unlinkedSurfaceResult.surfaces.filter(surface => surface.disposition === "needs_follow_up").map(surface => surface.label),
+    ["Unlinked review"],
+  );
+
+  for (const [reserved, reuseId] of [[false, false], [true, false], [false, true], [true, true]]) {
+    const recoveredSurfaceRoot = path.join(root, `recovered-checkpoint-surface-${reserved}-${reuseId}`);
+    await mkdir(recoveredSurfaceRoot);
+    const recoveredSurfaceContext = { ...context, root: recoveredSurfaceRoot };
+    if (reserved) {
+      await recordCodexSecurityScanDraft(recoveredSurfaceContext, {
+        ...input,
+        complete: false,
+        findings: [],
+        coverage: {
+          ...coverage,
+          completeness: "partial",
+          surfaces: [{ id: "surface_a", label: "Reserved", disposition: "no_issue_found" }],
+        },
+      });
+    }
+    const recoveredId = reserved ? "surface_a-2" : "surface_a";
+    await saveScanDraftCheckpoint(recoveredSurfaceContext, {
+      ...input,
+      complete: false,
+      findings: [],
+      coverage: {
+        ...coverage,
+        completeness: "partial",
+        surfaces: [{ label: "A", disposition: "needs_follow_up" }],
+        deferred: [{
+          id: "checkpoint-recovered-a",
+          reason: "Review was checkpointed before the canonical write.",
+          surfaceIds: [recoveredId],
+        }],
+      },
+    });
+    if (reuseId) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await recordCodexSecurityScanDraft(recoveredSurfaceContext, {
+          ...input,
+          findings: [],
+          coverage: {
+            ...coverage,
+            surfaces: [{
+              id: recoveredId,
+              label: "A",
+              riskArea: "unrelated-review",
+              disposition: "no_issue_found",
+            }],
+          },
+        });
+        const pending = await readJson(recoveredSurfaceRoot, "coverage.json");
+        assert.equal(pending.completeness, "partial");
+        assert.equal(pending.deferred.length, 1);
+        assert.equal(pending.surfaces.find(surface => surface.id === recoveredId).disposition, "needs_follow_up");
+      }
+    }
+    await recordCodexSecurityScanDraft(recoveredSurfaceContext, {
+      ...input,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [{ label: "A", disposition: "no_issue_found" }],
+      },
+    });
+    const recoveredSurfaceResult = await readJson(recoveredSurfaceRoot, "coverage.json");
+    assert.equal(recoveredSurfaceResult.completeness, "complete");
+    assert.deepEqual(recoveredSurfaceResult.deferred, []);
+    assert.equal(recoveredSurfaceResult.surfaces.find(surface => surface.label === "A").id, recoveredId);
+  }
+
   const undefinedCandidateRoot = path.join(root, "undefined-candidate-worker");
   await mkdir(undefinedCandidateRoot);
   const undefinedCandidateContext = { ...workerContext, root: undefinedCandidateRoot };
