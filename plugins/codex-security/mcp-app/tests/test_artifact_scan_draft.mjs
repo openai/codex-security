@@ -1011,6 +1011,53 @@ try {
     assert.equal(recoveredSurfaceResult.surfaces.find(surface => surface.label === "A").id, recoveredId);
   }
 
+  for (const canonical of [false, true]) {
+    const mixedSurfaceRoot = path.join(root, `partially-identified-checkpoint-${canonical}`);
+    await mkdir(mixedSurfaceRoot);
+    const mixedSurfaceContext = { ...context, root: mixedSurfaceRoot };
+    const identified = { id: "surface_a", label: "A", disposition: "needs_follow_up" };
+    if (canonical) {
+      await recordCodexSecurityScanDraft(mixedSurfaceContext, {
+        ...input,
+        complete: false,
+        findings: [],
+        coverage: { ...coverage, completeness: "partial", surfaces: [identified] },
+      });
+    }
+    await saveScanDraftCheckpoint(mixedSurfaceContext, {
+      ...input,
+      complete: false,
+      findings: [],
+      coverage: {
+        ...coverage,
+        completeness: "partial",
+        surfaces: [identified, { label: "A", disposition: "needs_follow_up" }],
+        deferred: [{
+          id: "checkpoint-partially-identified",
+          reason: "Both surfaces require review.",
+          surfaceIds: ["surface_a", "surface_a-2"],
+        }],
+      },
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await recordCodexSecurityScanDraft(mixedSurfaceContext, {
+        ...input,
+        findings: [],
+        coverage: {
+          ...coverage,
+          surfaces: [
+            { id: "surface_a", label: "A", disposition: "no_issue_found" },
+            { id: "surface_a-2", label: "A", disposition: "no_issue_found" },
+          ],
+        },
+      });
+      const mixedSurfaceResult = await readJson(mixedSurfaceRoot, "coverage.json");
+      assert.equal(mixedSurfaceResult.completeness, "complete");
+      assert.deepEqual(mixedSurfaceResult.deferred, []);
+      assert.equal(mixedSurfaceResult.surfaces.length, 2);
+    }
+  }
+
   const undefinedCandidateRoot = path.join(root, "undefined-candidate-worker");
   await mkdir(undefinedCandidateRoot);
   const undefinedCandidateContext = { ...workerContext, root: undefinedCandidateRoot };

@@ -897,18 +897,48 @@ function resolvedCoverageSurfaces(
     }
   }
   if (sources.length > 0) {
-    // Recover IDs only for surfaces absent from saved canonical coverage. Use
-    // the complete ordered context so earlier explicit IDs remain reserved.
-    const knownKeys = new Set(historicalIds.keys());
+    // Recover missing members of each historical group, using the complete
+    // ordered context so earlier explicit IDs remain reserved.
+    const groupSizes = new Map<string, number>();
+    for (const source of sources) {
+      const counts = new Map<string, number>();
+      for (const surface of source.coverage.surfaces as JsonObject[]) {
+        const key = coverageSurfaceSemanticKey(surface);
+        if (key === undefined) continue;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      for (const [key, count] of counts) {
+        groupSizes.set(key, Math.max(groupSizes.get(key) ?? 0, count));
+      }
+    }
     const combined = preserveScanCoverage(
       sources[0]!.coverage,
       sources.slice(1).map(source => source.coverage),
       false,
     );
+    // Coverage union coalesces matching ID-less rows. Restore their historical
+    // multiplicity before projection so a partially identified group keeps its IDs.
+    const combinedSurfaces = combined.surfaces as JsonObject[];
+    const combinedCounts = new Map<string, number>();
+    for (const surface of combinedSurfaces) {
+      const key = coverageSurfaceSemanticKey(surface);
+      if (key !== undefined) combinedCounts.set(key, (combinedCounts.get(key) ?? 0) + 1);
+    }
+    for (const source of sources) {
+      for (const surface of source.coverage.surfaces as JsonObject[]) {
+        const key = coverageSurfaceSemanticKey(surface);
+        if (typeof surface.id === "string" || key === undefined) continue;
+        const count = combinedCounts.get(key) ?? 0;
+        if (count >= groupSizes.get(key)!) continue;
+        combinedSurfaces.push(surface);
+        combinedCounts.set(key, count + 1);
+      }
+    }
     for (const surface of buildCoverageSurfaces(combined.surfaces as JsonObject[])) {
       const key = coverageSurfaceSemanticKey(surface);
-      if (key === undefined || knownKeys.has(key) || typeof surface.id !== "string") continue;
+      if (key === undefined || typeof surface.id !== "string") continue;
       const recovered = historicalIds.get(key) ?? new Set<string>();
+      if (recovered.has(surface.id) || recovered.size >= groupSizes.get(key)!) continue;
       recovered.add(surface.id);
       historicalIds.set(key, recovered);
       const keys = historicalKeysById.get(surface.id) ?? new Set<string>();
