@@ -11,17 +11,21 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
-import { scanModelConfiguration, scanModelProvider } from "../src/config.js";
+import {
+  resolveCodexProfile,
+  scanModelConfiguration,
+  scanModelProvider,
+} from "../src/config.js";
 import {
   ConfigurationError,
   DEFAULT_CODEX_CONFIG,
-  type JsonObject,
   mergedCodexConfig,
   writeCodexConfig,
 } from "../src/index.js";
 import {
   prepareCodexSecurityCredentialHome,
   requireSecureCredentialHome,
+  resolveCodexCommand,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -500,6 +504,128 @@ describe("Codex configuration", () => {
     },
   );
 
+  test.skipIf(macOsSandboxUnavailable())(
+    "reads scoped policy source without exposing sibling files or changing host files",
+    async () => {
+      const { root, codexHome, workspace, stateDirectory, environment } =
+        await scanSandboxFixture();
+      const source = join(root, "repository", "component");
+      await mkdir(source, { recursive: true });
+      const sourceFile = join(source, "fixture.txt");
+      await writeFile(sourceFile, "source");
+      const config = scanRuntimeCodexConfig(
+        await mergedCodexConfig({}),
+        codexHome,
+      );
+      const permissions = config["permissions"] as Record<
+        string,
+        { filesystem: Record<string, string> }
+      >;
+      permissions["codex_security_policy"]!.filesystem[source] = "read";
+      // The debug sandbox re-execs Codex, which may live outside OS read roots.
+      permissions["codex_security_policy"]!.filesystem[
+        resolveCodexCommand({}).command
+      ] = "read";
+      await writeCodexConfig(join(codexHome, "config.toml"), config);
+      const sandbox = (operation: "read" | "write", path: string) =>
+        runPinnedCodex(
+          codexHome,
+          [
+            "sandbox",
+            "--config",
+            "permissions.codex_security_policy.network.enabled=true",
+            "--permission-profile",
+            "codex_security_policy",
+            "--cd",
+            workspace,
+            ...(process.platform === "win32"
+              ? [
+                  join(
+                    process.env["SystemRoot"] ?? "C:\\Windows",
+                    "System32",
+                    "WindowsPowerShell",
+                    "v1.0",
+                    "powershell.exe",
+                  ),
+                  "-NoLogo",
+                  "-NoProfile",
+                  "-NonInteractive",
+                  "-Command",
+                  operation === "read"
+                    ? "$ErrorActionPreference = 'Stop'; [Console]::Write((Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw))"
+                    : "$ErrorActionPreference = 'Stop'; [System.IO.File]::WriteAllText($env:POLICY_PROBE_PATH, 'probe')",
+                ]
+              : [
+                  "/bin/sh",
+                  "-c",
+                  operation === "read"
+                    ? 'cat "$POLICY_PROBE_PATH"'
+                    : 'printf probe > "$POLICY_PROBE_PATH"',
+                ]),
+          ],
+          { ...environment, POLICY_PROBE_PATH: path },
+        );
+      const evidence = join(workspace, "previous-SECURITY.md");
+      await writeFile(evidence, "original");
+      const read = sandbox("read", evidence);
+      if (read.exitCode !== 0) {
+        const details = new TextDecoder().decode(read.stderr);
+        if (
+          (process.platform === "linux" &&
+            /bwrap: (?:setting up uid map: Permission denied|loopback: Failed RTM_NEWADDR: Operation not permitted)/u.test(
+              details,
+            )) ||
+          (process.platform === "win32" &&
+            details.includes(
+              "Restricted read-only access requires the elevated Windows sandbox backend",
+            ))
+        ) {
+          expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
+            0,
+          );
+          return;
+        }
+        throw new Error(
+          `The pinned Codex CLI rejected an allowed policy read: ${details}`,
+        );
+      }
+      expect(new TextDecoder().decode(read.stdout)).toBe("original");
+      const inspected = sandbox("read", sourceFile);
+      expect(
+        inspected.exitCode,
+        new TextDecoder().decode(inspected.stderr),
+      ).toBe(0);
+      expect(new TextDecoder().decode(inspected.stdout)).toBe("source");
+      for (const path of [
+        join(root, "repository", "sibling.txt"),
+        join(stateDirectory, "private.txt"),
+        join(codexHome, "private.txt"),
+      ]) {
+        await writeFile(path, "SYNTHETIC_PRIVATE");
+        const denied = sandbox("read", path);
+        expect(denied.exitCode).not.toBe(0);
+        expect(new TextDecoder().decode(denied.stdout)).not.toContain(
+          "SYNTHETIC_PRIVATE",
+        );
+      }
+      for (const path of [
+        sourceFile,
+        join(workspace, "inside.txt"),
+        join(root, "outside.txt"),
+        join(stateDirectory, "policy.txt"),
+        join(codexHome, "policy.txt"),
+        evidence,
+      ]) {
+        sandbox("write", path);
+        if (path === sourceFile)
+          expect(await readFile(path, "utf8")).toBe("source");
+        else if (path === evidence)
+          expect(await readFile(path, "utf8")).toBe("original");
+        else await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    },
+  );
+
   test("writes Windows sandbox settings accepted by the pinned Codex CLI", async () => {
     const root = await temporaryDirectory();
     const path = join(root, "config.toml");
@@ -527,31 +653,14 @@ describe("Codex configuration", () => {
         },
       },
     });
-    const nativeConfig = structuredClone(config);
-    delete nativeConfig["profile"];
-    delete nativeConfig["profiles"];
-    const profileConfig = (config["profiles"] as JsonObject)[
-      "elevated"
-    ] as JsonObject;
-    const profilePath = join(root, "elevated.config.toml");
-    await writeCodexConfig(path, nativeConfig);
-    await writeCodexConfig(profilePath, profileConfig);
+    await writeCodexConfig(path, resolveCodexProfile(config));
 
     expect(parse(await readFile(path, "utf8"))).toMatchObject({
-      windows: { sandbox: "unelevated" },
-    });
-    expect(parse(await readFile(profilePath, "utf8"))).toMatchObject({
       features: { elevated_windows_sandbox: true },
       windows: { sandbox: "elevated" },
     });
 
-    const result = runPinnedCodex(root, [
-      "--profile",
-      "elevated",
-      "mcp",
-      "list",
-      "--json",
-    ]);
+    const result = runPinnedCodex(root, ["mcp", "list", "--json"]);
     if (result.exitCode !== 0) {
       throw new Error(
         `The pinned Codex CLI rejected the selected Windows sandbox profile: ${new TextDecoder().decode(result.stderr)}`,

@@ -2837,6 +2837,18 @@ describe("CLI", () => {
         "--filter-output is not supported",
       ],
       [
+        ["--filter-output", "policy", "scan", ".", "--dry-run"],
+        "--filter-output is not supported",
+      ],
+      [
+        ["--filter-output=policy", "scan", ".", "--dry-run"],
+        "--filter-output is not supported",
+      ],
+      [
+        ["--format", "md", "--filter-output", "policy", "scan", "."],
+        "--filter-output is not supported",
+      ],
+      [
         ["scan", ".", "--codex", "not-an-override"],
         "--codex expects KEY=VALUE",
       ],
