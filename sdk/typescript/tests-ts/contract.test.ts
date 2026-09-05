@@ -988,6 +988,30 @@ describe("canonical scan contract", () => {
         },
         "scan.target.remote",
       ],
+      [
+        "tab in remote",
+        (manifest) => {
+          manifest["scan"]["target"]["remote"] =
+            "https://example.com\thttps://evil.example.net";
+        },
+        "scan.target.remote",
+      ],
+      [
+        "line feed in remote",
+        (manifest) => {
+          manifest["scan"]["target"]["remote"] =
+            "https://example.com\nhttps://evil.example.net";
+        },
+        "scan.target.remote",
+      ],
+      [
+        "carriage return in remote",
+        (manifest) => {
+          manifest["scan"]["target"]["remote"] =
+            "https://example.com\rhttps://evil.example.net";
+        },
+        "scan.target.remote",
+      ],
     ];
 
     for (const [_name, mutate, expected] of cases) {

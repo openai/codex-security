@@ -63,6 +63,7 @@ import {
   isWindowsUnsafePathComponent,
   windowsUnsafePathComponent,
 } from "./windows-path.js";
+import { MODEL_UNSAFE_STRING } from "./string-safety.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -73,7 +74,6 @@ const MAX_ZIP_ENTRIES = 4_096;
 const MAX_ZIP_CENTRAL_DIRECTORY = 16 * 1024 * 1024;
 const MAX_ZIP_ENTRY_SIZE = 128 * 1024 * 1024;
 const MAX_ZIP_EXPANDED_SIZE = 512 * 1024 * 1024;
-const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOCK_DATABASE = ".codex-security-scan.sqlite3";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
@@ -1828,7 +1828,7 @@ export async function planOutputArchive(
 }
 
 export function requireModelSafeOutputDir(path: string): void {
-  if (MODEL_UNSAFE_PATH.test(path)) {
+  if (MODEL_UNSAFE_STRING.test(path)) {
     throw new OutputDirectoryError(
       "Scan output directory must not contain control or line-separator characters.",
     );
