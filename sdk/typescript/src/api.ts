@@ -1837,17 +1837,26 @@ export class CodexSecurity {
             reason: safeErrorMessage(failure),
           }).catch(() => undefined);
         }
+        const canceled =
+          signal.aborted &&
+          (options.signal?.aborted === true ||
+            this.#abortController.signal.aborted) &&
+          isCancellationDerivedFailure(failure, signal);
         try {
           await workbench({ ...activeScan.options, signal: undefined }, [
-            "fail-scan",
+            canceled ? "cancel-scan" : "fail-scan",
             "--scan-id",
             activeScan.id,
-            // Scan history can be shared; never persist credential-bearing failures.
-            "--message",
-            safeErrorMessage(failure).slice(0, 2400),
-            ...(snapshot?.cost
-              ? ["--cost-json", JSON.stringify(snapshot.cost)]
-              : []),
+            ...(canceled
+              ? []
+              : [
+                  // Scan history can be shared; never persist credential-bearing failures.
+                  "--message",
+                  safeErrorMessage(failure).slice(0, 2400),
+                  ...(snapshot?.cost
+                    ? ["--cost-json", JSON.stringify(snapshot.cost)]
+                    : []),
+                ]),
           ]);
         } catch {}
       }
@@ -2700,12 +2709,18 @@ export class CodexSecurity {
       return result;
     } catch (error) {
       if (activeScan !== undefined) {
+        const canceled =
+          signal.aborted &&
+          (options.signal?.aborted === true ||
+            this.#abortController.signal.aborted) &&
+          isCancellationDerivedFailure(error, signal);
         await workbench({ ...activeScan.options, signal: undefined }, [
-          "fail-scan",
+          canceled ? "cancel-scan" : "fail-scan",
           "--scan-id",
           activeScan.id,
-          "--message",
-          safeErrorMessage(error).slice(0, 2400),
+          ...(canceled
+            ? []
+            : ["--message", safeErrorMessage(error).slice(0, 2400)]),
         ]).catch(() => undefined);
       }
       if (this.#closed) this.#requireOpen();
@@ -4137,6 +4152,31 @@ function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
     ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";
   throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
+}
+
+function isCancellationDerivedFailure(
+  failure: unknown,
+  signal: AbortSignal,
+): boolean {
+  let current = failure;
+  const seen = new Set<ScanInterruptedError>();
+  while (current instanceof ScanInterruptedError) {
+    if (current instanceof ScanCostLimitExceededError) return false;
+    if (current.cause === undefined) return true;
+    if (seen.has(current)) return false;
+    seen.add(current);
+    current = current.cause;
+  }
+  if (
+    current instanceof CodexSecurityError &&
+    current.message === "CodexSecurity is closed."
+  ) {
+    return true;
+  }
+  return (
+    current === signal.reason ||
+    (isRecord(current) && current["name"] === "AbortError")
+  );
 }
 
 function bundledCodexSdkEnvironment(
