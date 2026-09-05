@@ -405,6 +405,9 @@ try {
           throw new Error("The installed package does not export " + name + ".");
         }
       }
+      if (typeof sdk.CodexSecurity.prototype.patch !== "function") {
+        throw new Error("The installed CodexSecurity client does not expose patch().");
+      }
       const result = await sdk.matchScanFindings({ before: [], after: [] });
       if (result.matches.length !== 0 || result.uncertain.length !== 0) {
         throw new Error("Empty finding comparison did not return an empty result.");
