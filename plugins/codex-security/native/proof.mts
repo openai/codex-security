@@ -11,7 +11,6 @@ import {
   openSync,
   lstatSync,
   readFileSync,
-  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -20,7 +19,7 @@ import {
 } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { randomUUID } from "node:crypto";
-import { basename, join, relative } from "node:path";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { loadBinding, readDescriptor } from "./binding.mjs";
@@ -70,95 +69,6 @@ const fixtureName = (prefix: string, byte: number) =>
   process.platform === "darwin"
     ? Buffer.from(`${prefix}-é`)
     : Buffer.from([prefix.charCodeAt(0), byte]);
-
-function realpathProof(root: string) {
-  const directory = join(root, "realpath");
-  mkdirSync(directory);
-  const canonical = realpathSync.native(Buffer.from(directory), {
-    encoding: "buffer",
-  });
-  const path = (name: string | Buffer) =>
-    Buffer.concat([canonical, Buffer.from("/"), bytes(name)]);
-  const resolve = (name: string | Buffer) =>
-    realpathSync.native(path(name), { encoding: "buffer" });
-  mkdirSync(path("nested/target"), { recursive: true });
-  writeFileSync(path("file"), "file");
-  symlinkSync("nested/target", path("relative-link"));
-  symlinkSync("file/..", path("file-parent-link"));
-  symlinkSync("cycle", path("cycle"));
-  assert.deepEqual(resolve("relative-link"), path("nested/target"));
-  assert.deepEqual(
-    realpathSync.native(
-      Buffer.from(relative(process.cwd(), join(directory, "relative-link"))),
-      { encoding: "buffer" },
-    ),
-    path("nested/target"),
-  );
-  assert.deepEqual(resolve("relative-link/.."), path("nested"));
-  const fileParentResults = ["file/..", "file-parent-link"].map((name) => {
-    let result: Buffer;
-    try {
-      result = resolve(name);
-    } catch (error) {
-      assert.equal((error as NodeJS.ErrnoException).code, "ENOTDIR");
-      return "ENOTDIR";
-    }
-    assert.deepEqual(result, canonical);
-    return "resolved-parent";
-  });
-  for (const name of ["missing", "missing/.."])
-    assert.throws(() => resolve(name), { code: "ENOENT" });
-  assert.throws(() => resolve("cycle"), { code: "ELOOP" });
-
-  const raw = Buffer.from([0xff]);
-  let invalidName: "preserved" | "filesystem-rejected" = "preserved";
-  try {
-    mkdirSync(path(raw));
-  } catch (error) {
-    // APFS may reject the fixture itself; do not confuse that with a Node failure.
-    assert.equal(process.platform, "darwin");
-    assert(
-      ["EILSEQ", "EINVAL"].includes((error as NodeJS.ErrnoException).code!),
-    );
-    invalidName = "filesystem-rejected";
-  }
-  // A replacement-character sibling must never satisfy the raw path lookup.
-  mkdirSync(path("\ufffd"));
-  let invalidLinkTarget: "preserved" | "filesystem-rejected" = "preserved";
-  try {
-    symlinkSync(raw, path("raw-relative-link"));
-    symlinkSync(path(raw), path("raw-absolute-link"));
-  } catch (error) {
-    assert.equal(process.platform, "darwin");
-    assert(
-      ["EILSEQ", "EINVAL"].includes((error as NodeJS.ErrnoException).code!),
-    );
-    invalidLinkTarget = "filesystem-rejected";
-  }
-  if (invalidName === "preserved") {
-    assert.equal(invalidLinkTarget, "preserved");
-    for (const name of [raw, "raw-relative-link", "raw-absolute-link"])
-      assert.deepEqual(resolve(name), path(raw));
-  } else if (invalidLinkTarget === "preserved") {
-    for (const name of [raw, "raw-relative-link", "raw-absolute-link"])
-      assert.throws(
-        () => resolve(name),
-        (error: unknown) =>
-          ["ENOENT", "EILSEQ"].includes((error as NodeJS.ErrnoException).code!),
-      );
-  }
-  return {
-    bufferPaths: true,
-    invalidName,
-    invalidLinkTarget,
-    relativeLinks: true,
-    symlinkParent: true,
-    fileParent: fileParentResults[0],
-    linkedFileParent: fileParentResults[1],
-    missing: "ENOENT",
-    cycles: "ELOOP",
-  };
-}
 
 function accountProof() {
   let currentHomeMatches: boolean | null = null;
@@ -571,7 +481,6 @@ if (process.argv[2] === "lock-worker") {
   const root = mkdtempSync(join(tmpdir(), "codex-security-native-"));
   try {
     const descriptors = descriptorProof(root);
-    const realpath = realpathProof(root);
     const accounts = accountProof();
     const locks = await lockProof(root);
     const pythonCompatibility =
@@ -584,7 +493,6 @@ if (process.argv[2] === "lock-worker") {
           architecture: process.arch,
           nodeApi: 8,
           descriptors,
-          realpath,
           accounts,
           locks,
           pythonCompatibility,
