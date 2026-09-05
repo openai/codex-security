@@ -3167,7 +3167,8 @@ export async function main(
       },
     })
     .command("install-hook", {
-      description: "Install a Git pre-commit security scan.",
+      description:
+        "Install a Git pre-commit security scan from an installation outside the repository.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3190,14 +3191,38 @@ export async function main(
         .optional(),
       async run({ args, options }) {
         try {
+          const repository = resolveCliPath(
+            dependencies.currentDirectory(),
+            args.repository ?? ".",
+          );
+          const worktree = await realpath(
+            execFileSync(
+              "git",
+              ["-C", repository, "rev-parse", "--show-toplevel"],
+              {
+                encoding: "utf8",
+              },
+            ).trim(),
+          );
+          const runtime = realpathSync(process.execPath);
+          const cli = realpathSync(fileURLToPath(import.meta.url));
+          const installation = realpathSync(
+            fileURLToPath(new URL("..", import.meta.url)),
+          );
+          if (
+            [runtime, cli, installation].some(
+              (path) => !isOutsidePath(relative(worktree, path)),
+            )
+          ) {
+            throw new Error(
+              "Install the pre-commit hook using a Codex Security installation and Node runtime outside this repository, such as a global npm installation.",
+            );
+          }
           const hook = execFileSync(
             "git",
             [
               "-C",
-              resolveCliPath(
-                dependencies.currentDirectory(),
-                args.repository ?? ".",
-              ),
+              repository,
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
@@ -3205,26 +3230,38 @@ export async function main(
             ],
             { encoding: "utf8" },
           ).trim();
-          const command = [
-            realpathSync(process.execPath),
-            realpathSync(fileURLToPath(import.meta.url)),
-          ]
+          const command = [runtime, cli]
             .map((path) => `'${path.replaceAll("'", `'"'"'`)}'`)
             .join(" ");
-          const contents = `#!/bin/sh\nset -eu\nexec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
+          const contents = `#!/bin/sh\n# Managed by Codex Security.\nset -eu\nexec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
           const legacyContents = `#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
           const existing = await readFile(hook, "utf8").catch(() => null);
+          const quotedPath = "'(?:[^']|'\"'\"')*'";
+          const pinnedHook = existing?.match(
+            new RegExp(
+              `^#!/bin/sh\\n(?:# Managed by Codex Security\\.\\n)?set -eu\\nexec (${quotedPath}) (${quotedPath}) scan \\. --working-tree --fail-on-severity ${options.failOnSeverity}\\n$`,
+              "u",
+            ),
+          );
+          const generatedPinnedHook =
+            pinnedHook != null &&
+            pinnedHook
+              .slice(1)
+              .every((path) =>
+                isAbsolute(path.slice(1, -1).replaceAll(`'"'"'`, "'")),
+              );
           if (
             existing !== null &&
             existing !== contents &&
-            existing !== legacyContents
+            existing !== legacyContents &&
+            !generatedPinnedHook
           ) {
             throw new Error(`A pre-commit hook already exists at ${hook}.`);
           }
           if (existing === null) {
             await mkdir(dirname(hook), { recursive: true });
             await writeFile(hook, contents, { flag: "wx", mode: 0o755 });
-          } else if (existing === legacyContents) {
+          } else if (existing !== contents) {
             await writeFile(hook, contents, { flag: "w" });
           }
           return {
