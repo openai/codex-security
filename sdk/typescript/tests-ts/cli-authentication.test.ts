@@ -927,7 +927,10 @@ describe("CLI authentication", () => {
             deps,
           ),
         ).toBe(2);
-        expect(stdout.text()).toBe("");
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          status: "failed",
+          code: "SCAN_FAILED",
+        });
         expect(stderr.text()).toContain("workspace-managed policies");
         expect(stderr.text()).toContain(
           "API key is selected for model authentication",
@@ -962,7 +965,11 @@ describe("CLI authentication", () => {
       expect(
         await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        status: "failed",
+        code: "SCAN_FAILED",
+        message: message.includes("access token") ? "[redacted]" : message,
+      });
       expect(stderr.text()).toContain(`${message}\n`);
       expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
       expect(stderr.text()).not.toContain("npx @openai/codex-security logout");

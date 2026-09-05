@@ -1032,6 +1032,17 @@ interface ScanOutcome {
   error?: string;
 }
 
+const scanOutputSchema = z
+  .union([
+    z.record(z.string(), z.unknown()),
+    z.object({
+      status: z.literal("failed"),
+      code: z.literal("SCAN_FAILED"),
+      message: z.string(),
+    }),
+  ])
+  .optional();
+
 interface ExportArguments {
   scanDir: string;
   format: keyof typeof EXPORT_DEFAULT_OUTPUTS;
@@ -3096,7 +3107,7 @@ export async function main(
           },
         },
       ],
-      output: z.record(z.string(), z.unknown()).optional(),
+      output: scanOutputSchema,
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
           errorOutput.write(
@@ -3150,6 +3161,13 @@ export async function main(
         );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
+          if (format === "json" || format === "jsonl") {
+            return {
+              status: "failed",
+              code: "SCAN_FAILED",
+              message: safeErrorMessage(outcome.error),
+            };
+          }
           return incurError({
             code: "SCAN_FAILED",
             message: outcome.error,
