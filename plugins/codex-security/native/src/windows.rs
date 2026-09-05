@@ -1,14 +1,18 @@
 use napi::bindgen_prelude::{BigInt, Buffer};
 use napi_derive::napi;
 use std::{
+    fs::{File, TryLockError},
+    io::{self, Read, Seek, SeekFrom, Write},
     mem::{offset_of, size_of, MaybeUninit},
-    os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle},
+    os::windows::io::{AsRawHandle, FromRawHandle},
     ptr::{copy_nonoverlapping, null, null_mut},
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GetLastError, SetLastError, HANDLE, INVALID_HANDLE_VALUE},
+    Foundation::{
+        GetLastError, SetLastError, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER,
+        ERROR_LOCK_VIOLATION, HANDLE, INVALID_HANDLE_VALUE,
+    },
     Storage::FileSystem::*,
-    System::IO::OVERLAPPED,
 };
 
 fn invalid(message: &str) -> napi::Error {
@@ -20,6 +24,27 @@ fn status(success: i32) -> u32 {
         unsafe { GetLastError() }
     } else {
         0
+    }
+}
+
+fn io_error(error: io::Error) -> u32 {
+    error.raw_os_error().unwrap() as u32
+}
+
+fn io_status(result: io::Result<()>) -> u32 {
+    result.map_or_else(io_error, |()| 0)
+}
+
+fn io_count(result: io::Result<usize>) -> WindowsResult {
+    match result {
+        Ok(value) => WindowsResult {
+            error: 0,
+            value: value as u32,
+        },
+        Err(error) => WindowsResult {
+            error: io_error(error),
+            value: 0,
+        },
     }
 }
 
@@ -53,29 +78,20 @@ fn io_range(buffer: &Buffer, offset: f64, length: f64) -> napi::Result<(usize, u
     Ok((offset as usize, length as u32))
 }
 
-fn unsigned(value: BigInt) -> napi::Result<u64> {
-    let (_, value, lossless) = value.get_u64();
-    if !lossless {
-        return Err(invalid("Byte range must fit an unsigned 64-bit integer"));
-    }
-    Ok(value)
-}
-
-fn overlapped(offset: u64) -> OVERLAPPED {
-    let mut value = OVERLAPPED::default();
-    value.Anonymous.Anonymous.Offset = offset as u32;
-    value.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-    value
-}
-
 #[napi]
 pub struct WindowsHandle {
-    handle: Option<OwnedHandle>,
+    file: Option<File>,
 }
 
 impl WindowsHandle {
+    fn file(&self) -> io::Result<&File> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| io::Error::from_raw_os_error(ERROR_INVALID_HANDLE as i32))
+    }
+
     fn raw(&self) -> HANDLE {
-        self.handle
+        self.file
             .as_ref()
             .map_or(INVALID_HANDLE_VALUE, AsRawHandle::as_raw_handle)
     }
@@ -152,7 +168,7 @@ pub fn open_windows_file(
     Ok(OpenResult {
         error: 0,
         handle: Some(WindowsHandle {
-            handle: Some(unsafe { OwnedHandle::from_raw_handle(handle) }),
+            file: Some(unsafe { File::from_raw_handle(handle) }),
         }),
     })
 }
@@ -167,9 +183,8 @@ pub fn create_windows_directory(path: Buffer) -> napi::Result<u32> {
 impl WindowsHandle {
     #[napi]
     pub fn close(&mut self) -> u32 {
-        self.handle.take().map_or(0, |handle| {
-            status(unsafe { CloseHandle(handle.into_raw_handle()) })
-        })
+        drop(self.file.take());
+        0
     }
 
     #[napi]
@@ -259,33 +274,17 @@ impl WindowsHandle {
         length: f64,
     ) -> napi::Result<WindowsResult> {
         let (offset, length) = io_range(&buffer, offset, length)?;
-        let mut value = 0;
-        let error = status(unsafe {
-            ReadFile(
-                self.raw(),
-                buffer.as_mut_ptr().add(offset),
-                length,
-                &mut value,
-                null_mut(),
-            )
-        });
-        Ok(WindowsResult { error, value })
+        Ok(io_count(self.file().and_then(|mut file| {
+            file.read(&mut buffer[offset..offset + length as usize])
+        })))
     }
 
     #[napi]
     pub fn write(&self, buffer: Buffer, offset: f64, length: f64) -> napi::Result<WindowsResult> {
         let (offset, length) = io_range(&buffer, offset, length)?;
-        let mut value = 0;
-        let error = status(unsafe {
-            WriteFile(
-                self.raw(),
-                buffer.as_ptr().add(offset),
-                length,
-                &mut value,
-                null_mut(),
-            )
-        });
-        Ok(WindowsResult { error, value })
+        Ok(io_count(self.file().and_then(|mut file| {
+            file.write(&buffer[offset..offset + length as usize])
+        })))
     }
 
     #[napi]
@@ -294,11 +293,24 @@ impl WindowsHandle {
         if !lossless {
             return Err(invalid("Seek offset must fit a signed 64-bit integer"));
         }
-        let mut value = 0;
-        let error = status(unsafe { SetFilePointerEx(self.raw(), distance, &mut value, origin) });
-        Ok(PositionResult {
-            error,
-            value: value.to_string(),
+        let result = self.file().and_then(|mut file| {
+            let position = match origin {
+                FILE_BEGIN => SeekFrom::Start(distance as u64),
+                FILE_CURRENT => SeekFrom::Current(distance),
+                FILE_END => SeekFrom::End(distance),
+                _ => return Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32)),
+            };
+            file.seek(position)
+        });
+        Ok(match result {
+            Ok(value) => PositionResult {
+                error: 0,
+                value: (value as i64).to_string(),
+            },
+            Err(error) => PositionResult {
+                error: io_error(error),
+                value: "0".to_owned(),
+            },
         })
     }
 
@@ -314,12 +326,15 @@ impl WindowsHandle {
 
     #[napi]
     pub fn set_end_of_file(&self) -> u32 {
-        status(unsafe { SetEndOfFile(self.raw()) })
+        io_status(self.file().and_then(|mut file| {
+            let position = file.stream_position()?;
+            file.set_len(position)
+        }))
     }
 
     #[napi]
     pub fn flush(&self) -> u32 {
-        status(unsafe { FlushFileBuffers(self.raw()) })
+        io_status(self.file().and_then(File::sync_all))
     }
 
     #[napi]
@@ -369,48 +384,23 @@ impl WindowsHandle {
     }
 
     #[napi]
-    pub fn lock(
-        &self,
-        offset: BigInt,
-        length: BigInt,
-        exclusive: bool,
-        nonblocking: bool,
-    ) -> napi::Result<u32> {
-        let mut position = overlapped(unsigned(offset)?);
-        let length = unsigned(length)?;
-        let flags = (if exclusive {
-            LOCKFILE_EXCLUSIVE_LOCK
-        } else {
-            0
-        }) | (if nonblocking {
-            LOCKFILE_FAIL_IMMEDIATELY
-        } else {
-            0
-        });
-        Ok(status(unsafe {
-            LockFileEx(
-                self.raw(),
-                flags,
-                0,
-                length as u32,
-                (length >> 32) as u32,
-                &mut position,
-            )
+    pub fn lock(&self, nonblocking: bool) -> u32 {
+        io_status(self.file().and_then(|file| {
+            if nonblocking {
+                file.try_lock().map_err(|error| match error {
+                    TryLockError::WouldBlock => {
+                        io::Error::from_raw_os_error(ERROR_LOCK_VIOLATION as i32)
+                    }
+                    TryLockError::Error(error) => error,
+                })
+            } else {
+                file.lock()
+            }
         }))
     }
 
     #[napi]
-    pub fn unlock(&self, offset: BigInt, length: BigInt) -> napi::Result<u32> {
-        let mut position = overlapped(unsigned(offset)?);
-        let length = unsigned(length)?;
-        Ok(status(unsafe {
-            UnlockFileEx(
-                self.raw(),
-                0,
-                length as u32,
-                (length >> 32) as u32,
-                &mut position,
-            )
-        }))
+    pub fn unlock(&self) -> u32 {
+        io_status(self.file().and_then(File::unlock))
     }
 }
