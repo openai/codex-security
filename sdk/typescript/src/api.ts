@@ -800,12 +800,16 @@ export class CodexSecurity {
       options.path,
       options.signal,
     );
-    await readSecurityPolicySnapshot(target, options.signal);
     const inputs = await this.#validatePolicyInputs(
       target,
       options,
       options.signal,
     ).catch(rethrowPolicyOutputError);
+    await readSecurityPolicySnapshot(
+      target,
+      options.signal,
+      inputs.gitMetadataPaths,
+    );
     const preflight = await this.#preflightInputs(inputs, options);
     return {
       ...target,
@@ -886,8 +890,12 @@ export class CodexSecurity {
         options.path,
         signal,
       );
-      const snapshot = await readSecurityPolicySnapshot(target, signal);
       const inputs = await this.#validatePolicyInputs(target, options, signal);
+      const snapshot = await readSecurityPolicySnapshot(
+        target,
+        signal,
+        inputs.gitMetadataPaths,
+      );
       const temporaryRoot = await realpath(tmpdir());
       requireOutputOutsideRepositories(
         inputs.protectedRoots,
@@ -965,8 +973,14 @@ export class CodexSecurity {
         session.scanEnvironment,
         signal,
         inputs.policyPaths,
+        inputs.gitMetadataPaths,
       );
-      await requireUnchangedSecurityPolicy(target, snapshot, signal);
+      await requireUnchangedSecurityPolicy(
+        target,
+        snapshot,
+        signal,
+        inputs.gitMetadataPaths,
+      );
       await requireSecurityPolicyRepositoryBinding(target, signal);
       const policyReadRoots = [
         dirname(target.targetPath),
@@ -1111,6 +1125,7 @@ export class CodexSecurity {
         target,
         snapshot,
         policyPaths: inputs.policyPaths,
+        gitMetadataPaths: inputs.gitMetadataPaths,
         outputDir,
         guidance,
         pluginRoot: runtime.plugin.pluginRoot,
@@ -2890,7 +2905,13 @@ export class CodexSecurity {
     LocalScanInputs & { policyPaths: string[]; gitMetadataPaths: string[] }
   > {
     policyCodexConfig(await mergedCodexConfig(this.config));
-    const protectedRoots = await securityPolicyProtectedRoots(target, signal);
+    const sources = await inspectSecurityPolicySources(target, signal);
+    const protectedRoots = [
+      ...new Set([
+        ...(await securityPolicyProtectedRoots(target, signal)),
+        ...sources.gitMetadataPaths,
+      ]),
+    ];
     const inputs = await this.#validateLocalInputs(
       target.repository,
       {
@@ -2903,7 +2924,6 @@ export class CodexSecurity {
       signal,
       protectedRoots,
     );
-    const sources = await inspectSecurityPolicySources(target, signal);
     return {
       ...inputs,
       policyPaths: sources.policyPaths,

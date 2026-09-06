@@ -4,6 +4,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -783,6 +784,99 @@ describe("CodexSecurity policy API", () => {
       await f.security.close();
     },
   );
+
+  test.each([
+    "component/docs/SECURITY.md",
+    ".github/SECURITY.md",
+    "SECURITY.md",
+  ])(
+    "rejects %s links into separately configured Git metadata",
+    async (name) => {
+      let prepared = false;
+      const f = await setup({
+        onPrepare: () => {
+          prepared = true;
+        },
+      });
+      const component = join(f.repository, "component");
+      const metadata = join(component, "saved-metadata");
+      await mkdir(component);
+      policyGit(component, "init", "--quiet", "--bare", metadata);
+      policyGit(metadata, "config", "core.bare", "false");
+      policyGit(metadata, "config", "core.worktree", component);
+      const policy = join(f.repository, name);
+      await mkdir(dirname(policy), { recursive: true });
+      await symlink(join(metadata, "config"), policy, "file");
+      await expect(
+        f.security.preflightPolicy(f.repository, { path: "component" }),
+      ).rejects.toThrow("Git metadata");
+      expect(prepared).toBe(false);
+      expect(f.threads).toHaveLength(0);
+      await f.security.close();
+    },
+  );
+
+  test.each([
+    "component/docs/SECURITY.md",
+    ".github/SECURITY.md",
+    "SECURITY.md",
+  ])("rejects %s links into common Git metadata without HEAD", async (name) => {
+    const f = await setup();
+    const component = join(f.repository, "component");
+    const common = join(component, "shared-data");
+    const administrative = join(component, "archived-admin");
+    await mkdir(component);
+    policyGit(component, "init", "--quiet", "--bare", common);
+    await mkdir(administrative);
+    await writeFile(
+      join(administrative, "HEAD"),
+      await readFile(join(common, "HEAD")),
+    );
+    await writeFile(join(administrative, "commondir"), `${common}\n`);
+    await rm(join(common, "HEAD"));
+    const policy = join(f.repository, name);
+    await mkdir(dirname(policy), { recursive: true });
+    await symlink(join(common, "config"), policy, "file");
+    await expect(
+      f.security.preflightPolicy(f.repository, { path: "component" }),
+    ).rejects.toThrow("Git metadata");
+    expect(f.threads).toHaveLength(0);
+    await f.security.close();
+  });
+
+  test("rejects a selected root used as common Git metadata", async () => {
+    const f = await setup();
+    policyGit(f.repository, "init", "--quiet", "--bare");
+    const administrative = join(f.repository, "archived-admin");
+    await mkdir(administrative);
+    await writeFile(
+      join(administrative, "HEAD"),
+      await readFile(join(f.repository, "HEAD")),
+    );
+    await writeFile(join(administrative, "commondir"), `${f.repository}\n`);
+    await rm(join(f.repository, "HEAD"));
+    await expect(f.security.preflightPolicy(f.repository)).rejects.toThrow(
+      "Git metadata",
+    );
+    expect(f.threads).toHaveLength(0);
+    await f.security.close();
+  });
+
+  test("keeps root policy output out of nested external Git metadata", async () => {
+    const f = await setup();
+    const component = join(f.repository, "component");
+    const metadata = join(f.root, "external-metadata");
+    await mkdir(component);
+    policyGit(component, "init", "--quiet", "--separate-git-dir", metadata);
+    policyGit(component, "config", "core.worktree", component);
+    await expect(
+      f.security.preflightPolicy(f.repository, {
+        outputDir: join(metadata, "policy-output"),
+      }),
+    ).rejects.toThrow("outside");
+    expect(f.threads).toHaveLength(0);
+    await f.security.close();
+  });
 
   test("includes inherited and descendant guidance once per policy path", async () => {
     const f = await setup();

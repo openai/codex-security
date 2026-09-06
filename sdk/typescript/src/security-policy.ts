@@ -5,11 +5,20 @@ import {
   lstat,
   open,
   readdir,
+  readFile,
   readlink,
   realpath,
   stat,
 } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { promisify } from "node:util";
 import { z } from "incur";
 import type { ScanAuthentication, ScanOptions } from "./api.js";
@@ -212,6 +221,7 @@ export async function resolveSecurityPolicyTarget(
     metadata:
       gitRoot === null ? [] : await gitMetadataDirectories(gitRoot, signal),
   });
+  await requirePolicyOutsideGitMetadata(target.targetPath, signal);
   await readSecurityPolicy(target.targetPath);
   return target;
 }
@@ -274,7 +284,13 @@ async function readPolicyFile(
 export async function readSecurityPolicySnapshot(
   target: SecurityPolicyTarget,
   signal?: AbortSignal,
+  gitMetadataPaths: readonly string[] = [],
 ): Promise<SecurityPolicySnapshot> {
+  await requirePolicyOutsideGitMetadata(
+    target.targetPath,
+    signal,
+    gitMetadataPaths,
+  );
   const previousContent = await readSecurityPolicy(target.targetPath);
   const canonicalTarget = await realpath(target.targetPath).catch(
     (error: NodeJS.ErrnoException) => {
@@ -293,7 +309,12 @@ export async function readSecurityPolicySnapshot(
       throw error;
     });
     if (metadata?.isSymbolicLink()) {
-      const alias = await policyLinkSnapshot(path, target.repository, signal);
+      const alias = await policyLinkSnapshot(
+        path,
+        target.repository,
+        signal,
+        gitMetadataPaths,
+      );
       if (alias.status === "cycle") {
         throw new CodexSecurityError(
           `Inherited security-policy link contains a cycle: ${path}`,
@@ -326,6 +347,11 @@ export async function readSecurityPolicySnapshot(
       );
       const canonical = join(target.repository, normalized.paths[0]!);
       requirePolicyEvidenceScope(path, canonical, target);
+      await requirePolicyOutsideGitMetadata(
+        canonical,
+        signal,
+        gitMetadataPaths,
+      );
       const content = await readPolicyFile(canonical);
       inherited.push([policyPath, digest(content)]);
     }
@@ -348,6 +374,7 @@ async function policyLinkSnapshot(
   path: string,
   repository: string,
   signal?: AbortSignal,
+  gitMetadataPaths: readonly string[] = [],
 ): Promise<PolicyLinkSnapshot> {
   const links: [string, string][] = [];
   const seen = new Set<string>();
@@ -377,7 +404,11 @@ async function policyLinkSnapshot(
       },
     );
     if (metadata !== null || links.length > 0)
-      await requirePolicyOutsideGitMetadata(canonical, signal);
+      await requirePolicyOutsideGitMetadata(
+        canonical,
+        signal,
+        gitMetadataPaths,
+      );
     if (!metadata?.isSymbolicLink())
       return {
         links,
@@ -466,19 +497,24 @@ async function securityPolicyPaths(
     const directory = directories.pop()!;
     if (isGitData(directory)) continue;
     const entries = await readdir(directory, { withFileTypes: true });
-    // Only ask Git about directories with its bare-repository layout.
+    // HEAD also identifies candidates that use a linked-worktree commondir.
     if (
-      entries.some((entry) => entry.name === "HEAD" && !entry.isDirectory()) &&
-      ["objects", "refs"].every((name) =>
-        entries.some(
-          (entry) =>
-            entry.name === name &&
-            (entry.isDirectory() || entry.isSymbolicLink()),
-        ),
+      entries.some(
+        (entry) => entry.name.toLowerCase() === "head" && !entry.isDirectory(),
       ) &&
       (await isGitMetadataDirectory(directory, signal))
     ) {
       gitDirectories.add(directory);
+      const common = await readFile(join(directory, "commondir"), "utf8").catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        },
+      );
+      if (common !== null)
+        gitDirectories.add(
+          await realpath(resolve(directory, common.replace(/[\r\n]+$/u, ""))),
+        );
       continue;
     }
     if (
@@ -540,7 +576,14 @@ export async function inspectSecurityPolicySources(
     signal,
   );
   for (const path of inventory.paths) {
-    if ((await readPolicyEvidence(path, target, signal)) !== null)
+    if (
+      (await readPolicyEvidence(
+        path,
+        target,
+        signal,
+        inventory.gitMetadataPaths,
+      )) !== null
+    )
       paths.push(policyRelativePath(target.repository, path));
   }
   return {
@@ -553,8 +596,14 @@ async function readPolicyEvidence(
   path: string,
   target: SecurityPolicyTarget,
   signal?: AbortSignal,
+  gitMetadataPaths: readonly string[] = [],
 ): Promise<string | null> {
-  const alias = await policyLinkSnapshot(path, target.repository, signal);
+  const alias = await policyLinkSnapshot(
+    path,
+    target.repository,
+    signal,
+    gitMetadataPaths,
+  );
   if (alias.status === "cycle")
     throw new CodexSecurityError(
       `Security-policy link contains a cycle: ${path}`,
@@ -596,17 +645,42 @@ function requirePolicyEvidenceScope(
 async function requirePolicyOutsideGitMetadata(
   path: string,
   signal?: AbortSignal,
+  gitMetadataPaths: readonly string[] = [],
 ): Promise<void> {
+  if (
+    gitMetadataPaths.some(
+      (directory) => !relativePathIsOutside(relative(directory, path)),
+    )
+  )
+    throw new InvalidTargetError(
+      "Security-policy links must not point into Git metadata.",
+    );
   const parent = dirname(path);
+  let directory = parent;
+  for (;;) {
+    signal?.throwIfAborted();
+    const head = await lstat(join(directory, "HEAD")).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+        throw error;
+      },
+    );
+    if (
+      (head?.isFile() || head?.isSymbolicLink()) &&
+      (await isGitMetadataDirectory(directory, signal))
+    )
+      throw new InvalidTargetError(
+        "Security-policy links must not point into Git metadata.",
+      );
+    const next = dirname(directory);
+    if (next === directory) break;
+    directory = next;
+  }
+  if (basename(path).toLowerCase() !== ".git") return;
   const root = await enclosingGitWorktreeRoot(parent, signal, {
     requireIfPresent: true,
   });
-  if (
-    root === null ||
-    relative(root, parent) !== "" ||
-    basename(path).toLowerCase() !== ".git"
-  )
-    return;
+  if (root === null || relative(root, parent) !== "") return;
   const marker = await lstat(join(root, ".git"));
   const candidate = await lstat(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
@@ -636,8 +710,13 @@ export async function requireUnchangedSecurityPolicy(
   target: SecurityPolicyTarget,
   snapshot: SecurityPolicySnapshot,
   signal?: AbortSignal,
+  gitMetadataPaths: readonly string[] = [],
 ): Promise<void> {
-  const current = await readSecurityPolicySnapshot(target, signal);
+  const current = await readSecurityPolicySnapshot(
+    target,
+    signal,
+    gitMetadataPaths,
+  );
   if (current.previousContent !== snapshot.previousContent) {
     throw new CodexSecurityError(
       "SECURITY.md changed after its contents were read. Reconcile the changes and generate a new draft before writing.",
@@ -657,6 +736,7 @@ export async function resolveSecurityPolicyGuidance(
   environment?: ProcessEnvironment,
   signal?: AbortSignal,
   policyPaths: readonly string[] = [],
+  gitMetadataPaths: readonly string[] = [],
 ): Promise<string> {
   const { stdout } = await execFileAsync(
     python,
@@ -676,7 +756,12 @@ export async function resolveSecurityPolicyGuidance(
   for (const path of policyPaths) {
     const absolute = join(target.repository, path);
     if (absolute === target.targetPath) continue;
-    const content = await readPolicyEvidence(absolute, target, signal);
+    const content = await readPolicyEvidence(
+      absolute,
+      target,
+      signal,
+      gitMetadataPaths,
+    );
     if (content?.trim())
       sections.push(
         `## SECURITY.md source: ${JSON.stringify(path)}\n\n${content}`,
@@ -689,6 +774,7 @@ export async function runSecurityPolicyStages(options: {
   target: SecurityPolicyTarget;
   snapshot: SecurityPolicySnapshot;
   policyPaths: readonly string[];
+  gitMetadataPaths: readonly string[];
   outputDir: string;
   pluginRoot: string;
   pluginPath?: string;
@@ -834,7 +920,12 @@ export async function runSecurityPolicyStages(options: {
       ...threatModel.questions,
     ]),
   ];
-  await requireUnchangedSecurityPolicy(target, options.snapshot, signal);
+  await requireUnchangedSecurityPolicy(
+    target,
+    options.snapshot,
+    signal,
+    options.gitMetadataPaths,
+  );
   await requireSecurityPolicyRepositoryBinding(target, signal);
   const manifest = {
     documentType: "codex-security.policy-draft",

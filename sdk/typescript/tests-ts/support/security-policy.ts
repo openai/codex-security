@@ -104,12 +104,19 @@ export async function policyFixture(): Promise<{
         repository,
         options.path,
       );
+      const sources = await inspectSecurityPolicySources(
+        target,
+        options.signal,
+      );
       return await runSecurityPolicyStages({
         target,
-        snapshot: await readSecurityPolicySnapshot(target, options.signal),
-        policyPaths: (
-          await inspectSecurityPolicySources(target, options.signal)
-        ).policyPaths,
+        snapshot: await readSecurityPolicySnapshot(
+          target,
+          options.signal,
+          sources.gitMetadataPaths,
+        ),
+        policyPaths: sources.policyPaths,
+        gitMetadataPaths: sources.gitMetadataPaths,
         outputDir,
         pluginRoot: PLUGIN_ROOT,
         pluginPath: options.pluginPath,

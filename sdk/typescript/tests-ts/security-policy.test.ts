@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  cp,
   mkdir,
   readFile,
   readdir,
@@ -331,6 +332,48 @@ describe("security policy generation", () => {
       expect(inventory.gitMetadataPaths).toContain(metadata);
     },
   );
+
+  test("excludes copied linked-worktree metadata", async () => {
+    const f = await fixture();
+    policyGit(f.repository, "init", "--quiet");
+    policyGit(
+      f.repository,
+      "commit",
+      "--allow-empty",
+      "--quiet",
+      "-m",
+      "initial",
+    );
+    const linked = join(f.root, "linked");
+    policyGit(
+      f.repository,
+      "worktree",
+      "add",
+      "--quiet",
+      "--detach",
+      linked,
+      "HEAD",
+    );
+    const original = execFileSync(
+      "git",
+      ["-C", linked, "rev-parse", "--absolute-git-dir"],
+      { encoding: "utf8" },
+    ).trim();
+    const archived = join(f.repository, "archived-admin");
+    const common = join(f.repository, "shared-data");
+    await cp(join(f.repository, ".git"), common, { recursive: true });
+    await rm(join(common, "HEAD"));
+    await cp(original, archived, { recursive: true });
+    await writeFile(join(archived, "commondir"), `${common}\r\n`);
+    await writeFile(join(archived, "SECURITY.md"), "Git metadata fixture");
+    await writeFile(join(common, "SECURITY.md"), "Shared Git metadata fixture");
+    const inventory = await inspectSecurityPolicySources(
+      await resolveSecurityPolicyTarget(f.repository),
+    );
+    expect(inventory.policyPaths).toEqual([]);
+    expect(inventory.gitMetadataPaths).toContain(archived);
+    expect(inventory.gitMetadataPaths).toContain(common);
+  });
 
   test("keeps source with Git-like names in the policy inventory", async () => {
     const f = await fixture();
