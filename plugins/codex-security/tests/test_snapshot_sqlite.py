@@ -27,7 +27,4 @@ def test_sqlite_snapshot_rejects_source_identity_as_destination(tmp_path: Path) 
             check=False,
         )
         assert completed.returncode == 2
-        assert (
-            "source and destination must refer to different database files"
-            in completed.stderr
-        )
+        assert "source and destination must refer to different database files" in completed.stderr
