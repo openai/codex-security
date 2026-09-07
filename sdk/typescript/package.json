@@ -52,7 +52,7 @@
     "build:plugin": "node scripts/build-plugin.mjs",
     "check:plugin-source": "node scripts/check-plugin-source.mjs",
     "check:package": "node scripts/check-package.mjs",
-    "format": "prettier --check --ignore-path .gitignore --ignore-path .prettierignore \"**/*.{cjs,mjs,js,ts,tsx,json,md}\"",
+    "format": "prettier --check --ignore-path .gitignore --ignore-path .prettierignore \"**/*.{cjs,mjs,js,ts,tsx,json,md}\" \"../../plugins/codex-security/scripts/*.ts\"",
     "generate:models": "node scripts/generate-models.cjs",
     "generate:models:check": "node scripts/generate-models.cjs --check",
     "lint": "tsc --noEmit",

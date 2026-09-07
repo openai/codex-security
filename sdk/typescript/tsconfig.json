@@ -1,5 +1,6 @@
 {
   "include": [
+    "../../plugins/codex-security/scripts/normalize_candidates.ts",
     "src/**/*.ts",
     "src/**/*.tsx",
     "dashboard/**/*.ts",

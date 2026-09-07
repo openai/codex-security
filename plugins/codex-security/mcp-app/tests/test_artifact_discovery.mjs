@@ -34,7 +34,9 @@ const {
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
 
-const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
+const pluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
+  ? path.resolve(process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT)
+  : fileURLToPath(new URL("../../../../sdk/typescript/_bundled_plugin/", import.meta.url));
 const definitions = JSON.parse(await readFile(path.join(
   pluginRoot,
   "schemas",
@@ -388,7 +390,8 @@ async function createContext(root, repoRoot, name, layout) {
     root: artifactRoot,
     repoRoot,
     layout,
-    pluginRoot
+    pluginRoot,
+    pythonCommand: path.join(root, "missing-python")
   };
 }
 

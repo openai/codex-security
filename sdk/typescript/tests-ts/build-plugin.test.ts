@@ -169,6 +169,11 @@ describe("bundled plugin build", () => {
     await writeFixture(source, "schemas/scan.json", "{}\n");
     await writeFixture(
       source,
+      "scripts/normalize_candidates.ts",
+      'const message: string = "generated normalizer";\nconsole.log(message);\n',
+    );
+    await writeFixture(
+      source,
       "mcp-app/package.json",
       `${JSON.stringify({
         scripts: { build: "node scripts/build_mcp_app.mjs" },
@@ -202,6 +207,7 @@ await writeFile(join(output, "server.mjs"), "generated mcp runtime\\n");
             "mcp/server.mjs",
             "schemas/scan.json",
             "scripts/launch",
+            "scripts/normalize_candidates.mjs",
             "sdk/typescript/owned-by-sdk.txt",
           ],
         },
@@ -217,6 +223,7 @@ await writeFile(join(output, "server.mjs"), "generated mcp runtime\\n");
       "mcp/server.mjs",
       "schemas/scan.json",
       "scripts/launch",
+      "scripts/normalize_candidates.mjs",
     ]);
     expect(
       await readFile(join(destination, "schemas", "scan.json"), "utf8"),
@@ -224,6 +231,10 @@ await writeFile(join(output, "server.mjs"), "generated mcp runtime\\n");
     expect(await readFile(join(destination, "mcp", "server.mjs"), "utf8")).toBe(
       "generated mcp runtime\n",
     );
+    const normalizer = await execFileAsync("node", [
+      join(destination, "scripts", "normalize_candidates.mjs"),
+    ]);
+    expect(normalizer.stdout.trim()).toBe("generated normalizer");
     if (process.platform !== "win32") {
       expect(
         (await stat(join(destination, "scripts", "launch"))).mode & 0o111,

@@ -17,7 +17,6 @@ import {
   type SchemaDocument
 } from "./artifact-schema-loader.js";
 import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
-import { missingPythonHelperMessage, resolvePythonCommand } from "./python_command.js";
 
 const execFileAsync = promisify(execFile);
 const discoveryComponents = ["artifacts", "02_discovery"] as const;
@@ -137,7 +136,7 @@ export async function recordCodexSecurityDiscoveryCandidates(
   const inventoryComponents = [...discoveryComponents, "in_scope_files.txt"];
   const candidateComponents = [...discoveryComponents, "candidate_ledger.jsonl"];
 
-  // Verify the inventory is a context-bound regular file before passing it to Python.
+  // Verify the inventory is a context-bound regular file before normalization.
   await readArtifactText(context, inventoryComponents, "discovery review inventory");
   const inventoryPath = await artifactDestination(
     context,
@@ -161,12 +160,11 @@ export async function recordCodexSecurityDiscoveryCandidates(
       mode: 0o600
     });
 
-    const pythonCommand = context.pythonCommand ?? await resolvePythonCommand();
     try {
       await execFileAsync(
-        pythonCommand,
+        process.execPath,
         [
-          join(pluginRoot, "scripts", "normalize_candidates.py"),
+          join(pluginRoot, "scripts", "normalize_candidates.mjs"),
           "--input",
           temporaryInput,
           "--out",
@@ -184,7 +182,7 @@ export async function recordCodexSecurityDiscoveryCandidates(
         }
       );
     } catch (error) {
-      throw discoveryNormalizationError(error, pythonCommand, [
+      throw discoveryNormalizationError(error, [
         [temporaryInput, "candidate input"],
         [temporaryDirectory, "private candidate input"],
         [inventoryPath, "the assigned review inventory"],
@@ -226,14 +224,8 @@ export async function listCodexSecurityCandidates(
 
 function discoveryNormalizationError(
   error: unknown,
-  pythonCommand: string,
   privateValues: Array<readonly [string, string]>
 ): Error {
-  const pythonMessage = missingPythonHelperMessage(error, pythonCommand);
-  if (pythonMessage) {
-    return new Error(`${discoveryLabel}: ${pythonMessage}`, { cause: error });
-  }
-
   const stderr = error && typeof error === "object" && "stderr" in error
     ? error.stderr
     : undefined;
