@@ -62,8 +62,8 @@ jobs:
           pnpm --dir sdk/typescript run build:ci
       - name: Fetch locked Rust dependencies
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
-          cargo fetch --locked
+          rustup toolchain install 1.97.1 --profile minimal
+          cargo +1.97.1 fetch --locked
       - name: Assemble pinned musl compiler image
         run: |
           docker build --network none \
