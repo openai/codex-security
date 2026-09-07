@@ -10,7 +10,7 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, parse, sep } from "node:path";
+import { basename, dirname, parse, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { unixBinding, windowsBinding } from "../native";
 import { windowsFileSystem } from "../../../native/windows-files.mjs";
@@ -167,22 +167,29 @@ function parentDirectory(path: Buffer): Buffer {
     : path.subarray(0, Math.max(1, separator));
 }
 
-// Both paths are already canonical absolute Windows paths.
-export function windowsRelativePath(path: string, root: string) {
-  const parts = (value: string) => value.replace(/\\+$/u, "").split("\\");
-  const parent = parts(root);
-  const target = parts(path);
-  return parent.every(
-    (part, index) => part.toLowerCase() === target[index]?.toLowerCase(),
-  )
-    ? target.slice(parent.length).join("\\")
-    : undefined;
+function windowsRelativePath(path: Buffer, root: Buffer): Buffer | undefined {
+  const files = windowsFiles();
+  const rootIdentity = files.identity(root);
+  const parts: string[] = [];
+  let current = path;
+  while (true) {
+    const identity = files.identity(current);
+    if (
+      identity.volume === rootIdentity.volume &&
+      identity.fileId.equals(rootIdentity.fileId)
+    )
+      return encodePath(parts.reverse().join("\\"));
+    const parent = parentDirectory(current);
+    if (parent.equals(current)) return undefined;
+    parts.push(basename(decodePath(current)));
+    current = parent;
+  }
 }
 
 function inside(path: Buffer, root: Buffer, label: string): Buffer {
   if (process.platform === "win32") {
-    const result = windowsRelativePath(decodePath(path), decodePath(root));
-    if (result !== undefined) return encodePath(result);
+    const result = windowsRelativePath(path, root);
+    if (result !== undefined) return result;
   } else {
     if (path.equals(root)) return Buffer.alloc(0);
     const prefix = appendPath(root, Buffer.alloc(0));

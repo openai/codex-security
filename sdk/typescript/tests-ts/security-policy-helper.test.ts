@@ -332,6 +332,27 @@ describe("built SECURITY.md helper", () => {
     },
   );
 
+  test.skipIf(process.platform !== "win32")(
+    "uses directory identity for canonical Windows containment",
+    () => {
+      const { root } = fixture("İrepository");
+      const sibling = join(dirname(root), "i\u0307repository");
+      write(root, "child/SECURITY.md", "child policy\n");
+      write(sibling, "SECURITY.md", "sibling policy\n");
+
+      const scoped = resolve(root, sibling);
+      expect(scoped.status).toBe(2);
+      expect(scoped.stderr).toContain("scan scope is outside the scan root");
+      expect(scoped.stdout).toBe("");
+
+      symlinkSync(join(sibling, "SECURITY.md"), join(root, "SECURITY.md"));
+      const linked = resolve(root, ".");
+      expect(linked.status).toBe(2);
+      expect(linked.stderr).toContain("SECURITY.md is outside the scan root");
+      expect(linked.stdout).toBe("");
+    },
+  );
+
   test.skipIf(process.platform !== "linux")(
     "reads a raw-byte policy target without following its replacement-character sibling",
     () => {

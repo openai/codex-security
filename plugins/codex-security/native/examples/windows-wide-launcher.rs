@@ -193,7 +193,37 @@ fn main() -> std::io::Result<()> {
                 ));
             }
         }
-        println!("{{\"policyHelperRawPaths\":true}}");
+        let identity_root = root.join("İroot");
+        let sibling = root.join("i\u{307}root");
+        fs::create_dir(&identity_root)?;
+        fs::create_dir(&sibling)?;
+        let sibling_policy = sibling.join("SECURITY.md");
+        fs::write(&sibling_policy, "sibling policy\n")?;
+        for scope in [&sibling, &identity_root] {
+            if scope == &identity_root {
+                std::os::windows::fs::symlink_file(
+                    &sibling_policy,
+                    identity_root.join("SECURITY.md"),
+                )?;
+            }
+            let result = invoke(&[
+                "--repo".into(),
+                identity_root.clone(),
+                "--scope".into(),
+                scope.clone(),
+                "--out".into(),
+                "-".into(),
+            ])?;
+            if result.status.code() != Some(2)
+                || !result.stdout.is_empty()
+                || !String::from_utf8_lossy(&result.stderr).contains("outside the scan root")
+            {
+                return Err(io::Error::other(
+                    "Windows policy helper did not preserve directory identity",
+                ));
+            }
+        }
+        println!("{{\"policyHelperRawPaths\":true,\"directoryIdentity\":true}}");
         Ok(())
     }
 

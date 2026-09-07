@@ -129,6 +129,17 @@ export function windowsFileSystem(native: WindowsBinding) {
     }
   }
 
+  function identity(path: Buffer) {
+    const handle = open(path, flags.FILE_READ_ATTRIBUTES);
+    try {
+      const result = handle.identity();
+      check(result.error, path);
+      return { volume: result.volume, fileId: result.fileId };
+    } finally {
+      check(handle.close(), path);
+    }
+  }
+
   function entriesWithTypes(path: Buffer) {
     const result = native.windowsDirectoryEntries(operationPath(path));
     check(result.error, path);
@@ -189,6 +200,7 @@ export function windowsFileSystem(native: WindowsBinding) {
     absolute,
     realpath,
     stat,
+    identity,
     entriesWithTypes,
     mkdir,
     readInto,
