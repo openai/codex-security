@@ -6,9 +6,7 @@ on:
       - "container-v*"
   workflow_dispatch:
 
-concurrency:
-  group: container-release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'publish' }}
-  cancel-in-progress: false
+concurrency: container-release-publish
 
 permissions:
   contents: read
@@ -24,7 +22,7 @@ jobs:
     uses: ./.github/workflows/container-validate.yml
 
   authorize:
-    if: github.repository == 'openai/codex-security' && github.event_name != 'pull_request'
+    if: github.repository == 'openai/codex-security'
     name: authorize-container-publication
     needs: validate
     runs-on: ubuntu-24.04
