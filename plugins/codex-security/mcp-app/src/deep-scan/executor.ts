@@ -2,7 +2,7 @@ import { accessSync, constants as fsConstants, existsSync, promises as fs, readd
 import { createRequire } from "node:module";
 import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { Codex } from "@openai/codex-sdk";
-import { executablePathForSpawn } from "./executable-path.js";
+import { executablePathForSpawn } from "../executable-path.js";
 import {
   classifyCodexWorkerError,
   DeepScanNonRetryableError
@@ -369,7 +369,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
+export async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
   const environment = Object.fromEntries(
     Object.entries(process.env)
       .filter((entry): entry is [string, string] => entry[1] !== undefined)

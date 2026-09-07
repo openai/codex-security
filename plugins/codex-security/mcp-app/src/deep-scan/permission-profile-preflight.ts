@@ -1,9 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createInterface, type Interface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
-import { MCP_APP_VERSION } from "../version.js";
+import { AppServerClient, AppServerError } from "../app-server-client.js";
 import { classifyCodexWorkerError, DeepScanNonRetryableError } from "./errors.js";
-import { executablePathForSpawn } from "./executable-path.js";
 
 export const DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID =
   "codex_security_deep_scan_worker";
@@ -30,13 +27,6 @@ export interface DeepScanPermissionProfilePreflightOptions {
 
 type JsonRecord = Record<string, unknown>;
 
-type PendingRequest = {
-  readonly id: number;
-  readonly method: string;
-  readonly resolve: (message: JsonRecord) => void;
-  readonly reject: (error: Error) => void;
-};
-
 /**
  * Verify the worker profile with the same executable, effective worker cwd,
  * Codex home, and raw overrides that the real worker will use. App-server must
@@ -56,256 +46,104 @@ export async function preflightDeepScanWorkerPermissionProfile(
   validateOptions(options);
   if (options.signal.aborted) throw abortError(options.signal.reason);
 
-  const client = new AppServerPreflightClient(options);
+  const client = new AppServerClient(options);
   try {
-    await client.initialize();
+    await client.initialize({
+      name: "codex_security_deep_scan",
+      title: "Codex Security Deep Scan"
+    });
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
       includeLayers: false
     });
-    const catalog = await client.readPermissionProfileCatalog(options.cwd);
+    const catalog = await readPermissionProfileCatalog(client, options.cwd, options.codexPath);
     const catalogEntry = requiredCatalogEntry(catalog, options.profileId);
     const requirementsResponse = catalogEntry.allowed === true
       ? undefined
-      : await client.readConfigRequirementsForClassification();
+      : await readConfigRequirementsForClassification(client, options.signal);
     verifyPreflightResult(options, configResponse, catalogEntry, requirementsResponse);
+  } catch (error) {
+    if (options.signal.aborted && isAbortError(error)) throw abortError(options.signal.reason);
+    throw preflightAppServerError(options.codexPath, error);
   } finally {
     await client.close();
   }
 }
 
-class AppServerPreflightClient {
-  private readonly child: ChildProcessWithoutNullStreams;
-  private readonly childClose: Promise<void>;
-  private readonly stdoutLines: Interface;
-  private pending: PendingRequest | undefined;
-  private nextId = 1;
-  private terminalError: Error | undefined;
-  private closed = false;
-  private childClosed = false;
-  private readonly removeAbortListener: () => void;
+async function readPermissionProfileCatalog(
+  client: AppServerClient,
+  cwd: string,
+  codexPath: string
+): Promise<JsonRecord[]> {
+  const entries: JsonRecord[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
 
-  constructor(private readonly options: DeepScanPermissionProfilePreflightOptions) {
-    const args: string[] = [];
-    for (const override of options.configOverrides) {
-      args.push("--config", override);
-    }
-    args.push("app-server", "--stdio");
-
-    this.child = spawn(executablePathForSpawn(options.codexPath), args, {
-      cwd: options.cwd,
-      ...(options.env === undefined ? {} : { env: options.env }),
-      stdio: ["pipe", "pipe", "pipe"]
+  while (true) {
+    const result = await client.request("permissionProfile/list", {
+      cwd,
+      ...(cursor === undefined ? {} : { cursor })
     });
-    this.childClose = new Promise((resolve) => {
-      this.child.once("close", () => {
-        this.childClosed = true;
-        resolve();
-      });
-    });
-    // stderr can contain paths or repository contents. Drain it so the child
-    // cannot block, but never retain or surface it in Deep Scan errors.
-    this.child.stderr.resume();
-    this.stdoutLines = createInterface({
-      input: this.child.stdout,
-      crlfDelay: Infinity
-    });
-    this.stdoutLines.on("line", (line) => this.consumeStdoutLine(line));
-    this.stdoutLines.on("error", () => {
-      this.fail(codexExecutableStdioError(options.codexPath));
-    });
-    this.child.stdin.on("error", () => {
-      this.fail(codexExecutableStdioError(options.codexPath));
-    });
-    this.child.on("error", (error) => {
-      this.fail(codexExecutableStartError(options.codexPath, error));
-    });
-    this.child.on("exit", (code, signal) => {
-      if (!this.closed) {
-        this.fail(codexExecutableExitError(options.codexPath, code, signal));
-      }
-    });
-
-    const onAbort = () => {
-      this.fail(abortError(options.signal.reason));
-      this.stopChild();
-    };
-    options.signal.addEventListener("abort", onAbort, { once: true });
-    this.removeAbortListener = () => options.signal.removeEventListener("abort", onAbort);
-  }
-
-  async initialize(): Promise<void> {
-    await this.request("initialize", {
-      clientInfo: {
-        name: "codex_security_deep_scan",
-        title: "Codex Security Deep Scan",
-        version: MCP_APP_VERSION
-      },
-      capabilities: { experimentalApi: true }
-    });
-    this.notify("initialized", {});
-  }
-
-  async readPermissionProfileCatalog(cwd: string): Promise<JsonRecord[]> {
-    const entries: JsonRecord[] = [];
-    const seenCursors = new Set<string>();
-    let cursor: string | undefined;
-
-    while (true) {
-      const result = await this.request("permissionProfile/list", {
-        cwd,
-        ...(cursor === undefined ? {} : { cursor })
-      });
-      const data = result.data;
-      if (!Array.isArray(data)) throw malformedPreflightError();
-      for (const value of data) {
-        const entry = record(value);
-        // Catalog ids are opaque. Only our requested profile id is fixed and
-        // non-empty; unrelated valid ids may be empty or otherwise unusual.
-        if (!entry || typeof entry.id !== "string") {
-          throw malformedPreflightError();
-        }
-        if (!Object.prototype.hasOwnProperty.call(entry, "allowed")) {
-          throw unsupportedCodexApiError(
-            this.options.codexPath,
-            "permissionProfile/list.allowed"
-          );
-        }
-        if (typeof entry.allowed !== "boolean") throw malformedPreflightError();
-        if (entry.description !== null && entry.description !== undefined
-          && typeof entry.description !== "string") {
-          throw malformedPreflightError();
-        }
-        entries.push(entry);
-      }
-
-      const nextCursor = result.nextCursor;
-      if (nextCursor === null) return entries;
-      if (typeof nextCursor !== "string" || nextCursor.length === 0
-        || seenCursors.has(nextCursor)) {
+    const data = result.data;
+    if (!Array.isArray(data)) throw malformedPreflightError();
+    for (const value of data) {
+      const entry = record(value);
+      // Catalog ids are opaque. Only our requested profile id is fixed and
+      // non-empty; unrelated valid ids may be empty or otherwise unusual.
+      if (!entry || typeof entry.id !== "string") {
         throw malformedPreflightError();
       }
-      seenCursors.add(nextCursor);
-      cursor = nextCursor;
+      if (!Object.prototype.hasOwnProperty.call(entry, "allowed")) {
+        throw unsupportedCodexApiError(
+          codexPath,
+          "permissionProfile/list.allowed"
+        );
+      }
+      if (typeof entry.allowed !== "boolean") throw malformedPreflightError();
+      if (entry.description !== null && entry.description !== undefined
+        && typeof entry.description !== "string") {
+        throw malformedPreflightError();
+      }
+      entries.push(entry);
     }
-  }
 
-  /**
-   * Classification is best effort after the catalog already rejected the
-   * profile. An older runtime may not expose this API; that is still a safe
-   * generic managed-policy rejection, not a reason to guess at remediation.
-   */
-  async readConfigRequirementsForClassification(): Promise<JsonRecord | undefined> {
-    try {
-      return await this.request("configRequirements/read");
-    } catch (error) {
-      if (this.options.signal.aborted || isAbortError(error)) throw error;
-      return undefined;
+    const nextCursor = result.nextCursor;
+    if (nextCursor === null) return entries;
+    if (typeof nextCursor !== "string" || nextCursor.length === 0
+      || seenCursors.has(nextCursor)) {
+      throw malformedPreflightError();
     }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
   }
+}
 
-  request(method: string, params?: JsonRecord): Promise<JsonRecord> {
-    if (this.terminalError) return Promise.reject(this.terminalError);
-    const id = this.nextId++;
-    return new Promise<JsonRecord>((resolve, reject) => {
-      // This no-turn preflight awaits each request before sending the next.
-      this.pending = { id, method, resolve, reject };
-      this.write({
-        jsonrpc: "2.0",
-        id,
-        method,
-        ...(params === undefined ? {} : { params })
-      });
-    });
+/**
+ * Classification is best effort after the catalog already rejected the
+ * profile. An older runtime may not expose this API; that is still a safe
+ * generic managed-policy rejection, not a reason to guess at remediation.
+ */
+async function readConfigRequirementsForClassification(
+  client: AppServerClient,
+  signal: AbortSignal
+): Promise<JsonRecord | undefined> {
+  try {
+    return await client.request("configRequirements/read");
+  } catch (error) {
+    if (signal.aborted || isAbortError(error)) throw error;
+    return undefined;
   }
+}
 
-  notify(method: string, params: JsonRecord): void {
-    if (this.terminalError) throw this.terminalError;
-    this.write({ jsonrpc: "2.0", method, params });
-  }
-
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    this.removeAbortListener();
-    this.pending?.reject(
-      this.terminalError ?? codexExecutableStdioError(this.options.codexPath)
-    );
-    this.pending = undefined;
-    this.stopChild();
-    if (this.childClosed) return;
-    await this.childClose;
-  }
-
-  private write(message: JsonRecord): void {
-    if (!this.child.stdin.writable) {
-      this.fail(codexExecutableStdioError(this.options.codexPath));
-      return;
-    }
-    this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
-      if (error) this.fail(codexExecutableStdioError(this.options.codexPath));
-    });
-  }
-
-  private consumeStdoutLine(line: string): void {
-    if (this.terminalError || line.trim().length === 0) return;
-    let value: unknown;
-    try {
-      value = JSON.parse(line);
-    } catch {
-      this.fail(malformedPreflightError());
-      return;
-    }
-    const message = record(value);
-    if (!message) {
-      this.fail(malformedPreflightError());
-      return;
-    }
-    this.handleMessage(message);
-  }
-
-  private handleMessage(message: JsonRecord): void {
-    const id = message.id;
-    if (typeof id !== "number") {
-      // Notifications and server-initiated requests are irrelevant to this
-      // read-only preflight. We never answer them or start a turn.
-      return;
-    }
-    const pending = this.pending;
-    if (!pending || pending.id !== id) {
-      this.fail(malformedPreflightError());
-      return;
-    }
-    this.pending = undefined;
-    if (message.error !== undefined) {
-      pending.reject(jsonRpcPreflightError(
-        this.options.codexPath,
-        pending.method,
-        message.error
-      ));
-      return;
-    }
-    const result = record(message.result);
-    if (!result) {
-      pending.reject(malformedPreflightError());
-      return;
-    }
-    pending.resolve(result);
-  }
-
-  private fail(error: Error): void {
-    if (this.terminalError) return;
-    this.terminalError = error;
-    this.pending?.reject(error);
-    this.pending = undefined;
-  }
-
-  private stopChild(): void {
-    this.stdoutLines.close();
-    if (!this.child.stdin.destroyed) this.child.stdin.end();
-    if (this.child.exitCode === null && this.child.signalCode === null) {
-      this.child.kill("SIGTERM");
-    }
+function preflightAppServerError(codexPath: string, error: unknown): unknown {
+  if (!(error instanceof AppServerError)) return error;
+  const failure = error.failure;
+  switch (failure.kind) {
+    case "protocol": return malformedPreflightError();
+    case "stdio": return codexExecutableStdioError(codexPath);
+    case "start": return codexExecutableStartError(codexPath, failure.error);
+    case "exit": return codexExecutableExitError(codexPath, failure.code, failure.signal);
+    case "rpc": return jsonRpcPreflightError(codexPath, failure.method, failure.code);
   }
 }
 
@@ -464,9 +302,8 @@ function unsupportedCodexApiError(
 function jsonRpcPreflightError(
   codexPath: string,
   method: string,
-  value: unknown
+  code: number | undefined
 ): DeepScanNonRetryableError {
-  const code = jsonRpcErrorCode(value);
   if (code === -32601) return unsupportedCodexApiError(codexPath, method);
   const codeDetail = code === undefined ? "" : " (JSON-RPC code " + code + ")";
   return new DeepScanNonRetryableError(
@@ -541,13 +378,6 @@ function codexExecutableFailureMessage(
 
 function quotedExecutable(codexPath: string): string {
   return JSON.stringify(codexPath);
-}
-
-function jsonRpcErrorCode(value: unknown): number | undefined {
-  const error = record(value);
-  return typeof error?.code === "number" && Number.isFinite(error.code)
-    ? error.code
-    : undefined;
 }
 
 function processErrorCode(error: Error): string | undefined {

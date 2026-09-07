@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 
 const bundle = await build({
@@ -11,6 +11,7 @@ const bundle = await build({
 });
 const {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
+  codexSandboxWorkingDirectory,
   resolveDeepWorkerParentSandbox
 } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
@@ -27,6 +28,13 @@ const pinnedReadOnly = {
 };
 
 assert.equal(CODEX_SANDBOX_STATE_META_CAPABILITY, "codex/sandbox-state-meta");
+const workingDirectory = fileURLToPath(new URL(".", import.meta.url));
+for (const sandboxCwd of [workingDirectory, pathToFileURL(workingDirectory).href]) {
+  const metadata = { [CODEX_SANDBOX_STATE_META_CAPABILITY]: { sandboxCwd } };
+  assert.equal(codexSandboxWorkingDirectory({ _meta: metadata }), workingDirectory);
+  assert.equal(codexSandboxWorkingDirectory({ requestInfo: { _meta: metadata } }), workingDirectory);
+}
+assert.equal(codexSandboxWorkingDirectory({ _meta: { [CODEX_SANDBOX_STATE_META_CAPABILITY]: {} } }), undefined);
 assert.deepEqual(resolveDeepWorkerParentSandbox(extra(pinnedReadOnly)), {
   filesystemDenies: []
 });
