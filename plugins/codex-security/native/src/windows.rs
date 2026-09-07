@@ -116,9 +116,10 @@ pub fn windows_environment(name: Buffer) -> napi::Result<Option<Buffer>> {
 pub fn windows_absolute_path(path: Buffer) -> napi::Result<BufferResult> {
     let path = os_string(path)?;
     if path.is_empty() {
-        // Rust rejects empty paths before Win32; retain the native error contract.
+        // The public Rust path API rejects empty input before reaching Win32.
         let mut value = [0_u16; 256];
         let error = unsafe {
+            SetLastError(0);
             GetFullPathNameW([0_u16].as_ptr(), 256, value.as_mut_ptr(), null_mut());
             GetLastError()
         };
@@ -282,6 +283,11 @@ pub fn open_windows_file(
 pub fn create_windows_directory(path: Buffer) -> napi::Result<u32> {
     let path = wide_path(path)?;
     Ok(status(unsafe { CreateDirectoryW(path.as_ptr(), null()) }))
+}
+
+#[napi]
+pub fn create_windows_directories(path: Buffer) -> napi::Result<u32> {
+    Ok(io_status(fs::create_dir_all(os_string(path)?)))
 }
 
 #[napi]

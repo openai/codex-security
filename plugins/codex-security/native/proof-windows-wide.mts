@@ -159,6 +159,7 @@ function worker(root: string): Record<string, boolean> {
     error: 3,
     value: [],
   });
+  assert.deepEqual(native.windowsAbsolutePath(Buffer.alloc(0)), emptyAbsolute);
   const notDirectory = native.windowsDirectoryEntries(widePath(names[0]!));
   assert.notEqual(notDirectory.error, 0);
   assert(Number.isInteger(notDirectory.error));
@@ -251,6 +252,9 @@ function worker(root: string): Record<string, boolean> {
   files.mkdir(widePath(longDirectory));
   files.mkdir(widePath(longDirectory));
   assert(files.stat(widePath(longDirectory)).isDirectory());
+  assert.throws(() => files.mkdir(Buffer.alloc(0)));
+  assert.throws(() => files.mkdir(widePath(names[0]!)));
+  assert.throws(() => files.mkdir(widePath(`${names[0]}\\child`)));
   const longFile = widePath(win32.join(longDirectory, "file-\udc80"));
   files.writeFile(longFile, Buffer.from("long raw path"));
   const longLength = files.readInto(longFile, contents);

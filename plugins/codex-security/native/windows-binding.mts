@@ -44,6 +44,7 @@ export interface WindowsBinding {
     flags: number,
   ): { error: number; handle?: WindowsHandle | null };
   createWindowsDirectory(path: Buffer): number;
+  createWindowsDirectories(path: Buffer): number;
 }
 
 export const windowsFlags = {

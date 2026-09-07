@@ -143,21 +143,7 @@ export function windowsFileSystem(native: WindowsBinding) {
   }
 
   function mkdir(path: Buffer): void {
-    const resolved = absolute(path);
-    const parent = widePath(win32.dirname(pathText(resolved)));
-    let error = native.createWindowsDirectory(operationPath(resolved));
-    if (error === 3 && !parent.equals(resolved)) {
-      mkdir(parent);
-      error = native.createWindowsDirectory(operationPath(resolved));
-    }
-    if (error !== 0) {
-      try {
-        if (stat(resolved).isDirectory()) return;
-      } catch {
-        // Report the original creation error.
-      }
-      check(error, path);
-    }
+    check(native.createWindowsDirectories(operationPath(path)), path);
   }
 
   function readInto(path: Buffer, buffer: Buffer): number {
