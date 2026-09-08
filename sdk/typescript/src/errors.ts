@@ -31,6 +31,32 @@ export class CodexSecurityError extends Error {
   }
 }
 
+export type DeduplicationReviewStage = "screening" | "pair-review";
+export type DeduplicationReviewFailureCategory =
+  | "validation"
+  | "no-submission"
+  | "model"
+  | "transport";
+
+export interface DeduplicationReviewFailureMetadata {
+  stage: DeduplicationReviewStage;
+  model: string;
+  category: DeduplicationReviewFailureCategory;
+  attempts: number;
+  reason: string;
+}
+
+export class DeduplicationReviewError extends CodexSecurityError {
+  public constructor(
+    public readonly metadata: Readonly<DeduplicationReviewFailureMetadata>,
+    displayReason: string = metadata.reason,
+  ) {
+    super(
+      `Codex did not complete a validated deduplication review. Findings are unchanged; retry the command. Reason: ${displayReason}`,
+    );
+  }
+}
+
 export class ConfigurationError extends CodexSecurityError {}
 export class AuthenticationRequiredError extends CodexSecurityError {}
 export class PluginBootstrapError extends CodexSecurityError {}

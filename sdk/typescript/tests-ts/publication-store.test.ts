@@ -96,6 +96,7 @@ async function publicationFixture(
   };
   const fixture = { environment, publication, python, stateDirectory };
   if (options.createDatabase !== false) {
+    await mkdir(stateDirectory, { mode: 0o700 });
     await runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, [
       "database-info",
     ]);
@@ -248,6 +249,7 @@ describe("read-only publication history", () => {
       destination: "linear" as const,
       teamId: "team-example",
       projectId: "project-example",
+      environment: fixture.environment,
     };
     const original = await prepareScanPublication(scanDirectory, options);
     seedPublicationScan(fixture, original);

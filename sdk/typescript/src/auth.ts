@@ -1,14 +1,65 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
-import { PluginBootstrapError } from "./errors.js";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { parse } from "smol-toml";
+import type { JsonObject } from "./config.js";
+import { CodexSecurityError, PluginBootstrapError } from "./errors.js";
 import {
   executablePathForSpawn,
+  expandHome,
   runCodexCommand,
   type CodexCommand,
   type ProcessEnvironment,
 } from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
+
+/** @internal */
+export function environmentEntry(
+  environment: ProcessEnvironment,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested];
+  if (exact !== undefined || process.platform !== "win32") return exact;
+  const upper = requested.toUpperCase();
+  return Object.entries(environment).find(
+    ([name]) => name.toUpperCase() === upper,
+  )?.[1];
+}
+
+/** @internal */
+export function configuredCodexHome(environment: ProcessEnvironment): string {
+  return resolve(
+    expandHome(
+      environmentEntry(environment, "CODEX_HOME")?.trim() ||
+        join(homedir(), ".codex"),
+      environment,
+    ),
+  );
+}
+
+/** @internal */
+export async function readCodexHomeConfig(
+  environment: ProcessEnvironment,
+  signal?: AbortSignal,
+): Promise<JsonObject> {
+  try {
+    return parse(
+      await readFile(join(configuredCodexHome(environment), "config.toml"), {
+        encoding: "utf8",
+        signal,
+      }),
+    ) as JsonObject;
+  } catch (error) {
+    signal?.throwIfAborted();
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new CodexSecurityError(
+      "Could not read the configured Codex provider.",
+    );
+  }
+}
 
 export interface LoginResult {
   success: boolean;

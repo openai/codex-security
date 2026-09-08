@@ -1,6 +1,7 @@
 import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import type { ScanBudget } from "./api.js";
 import type { ScanModelConfiguration } from "./config.js";
 import type {
   ComponentReceipt,
@@ -128,6 +129,12 @@ export class ScanDashboard {
   #files: ScanProgress | null = null;
   #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
+  #budget: {
+    request: ScanBudget;
+    input: string;
+    error: string;
+    finish: (limit?: number) => void;
+  } | null = null;
   #timer: NodeJS.Timeout | null = null;
   #scrollOffset = 0;
   #view: "activity" | "details" = "activity";
@@ -139,6 +146,39 @@ export class ScanDashboard {
   readonly #onInput = (chunk: string | Uint8Array): void => {
     const input =
       typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    if (this.#budget !== null) {
+      for (const key of input.match(/\u001B\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
+        []) {
+        const budget = this.#budget;
+        if (budget === null) break;
+        if (key === "\u0003" || key === "\u0004") {
+          budget.finish();
+          this.#options.onInterrupt?.();
+        } else if (key === "\u001B") {
+          budget.finish();
+        } else if (key === "\r" || key === "\n") {
+          const value = budget.input.trim();
+          const limit = Number(value);
+          const minimum = Math.max(
+            budget.request.maxCostUsd,
+            this.#cost?.estimatedUsd ?? budget.request.cost.estimatedUsd,
+          );
+          if (value === "") budget.finish();
+          else if (Number.isFinite(limit) && limit > minimum)
+            budget.finish(limit);
+          else
+            budget.error = `Enter a finite total above ${formatUsd(minimum)}.`;
+        } else if (key === "\u007F" || key === "\b") {
+          budget.input = budget.input.slice(0, -1);
+        } else if (key === "\u0015") {
+          budget.input = "";
+        } else if (!key.startsWith("\u001B") && key >= " ") {
+          budget.input += key;
+        }
+      }
+      this.#refresh();
+      return;
+    }
     if (this.#options.presentation === "components") {
       this.#componentInput(input);
       return;
@@ -237,6 +277,7 @@ export class ScanDashboard {
     if (this.#timer === null) return;
     this.#options.clock.clearInterval(this.#timer);
     this.#timer = null;
+    this.#budget?.finish();
     const input = this.#options.input;
     try {
       if (input?.isTTY === true) {
@@ -366,9 +407,38 @@ export class ScanDashboard {
     this.#refresh();
   }
 
-  public setCost(cost: Readonly<ScanCost>): void {
+  public setCost(
+    cost: Readonly<ScanCost>,
+    maxCostUsd = this.#options.maxCostUsd,
+  ): void {
     this.#cost = cost;
+    this.#options.maxCostUsd = maxCostUsd;
     this.#refresh();
+  }
+
+  public requestBudgetIncrease(
+    request: ScanBudget,
+  ): Promise<number | undefined> {
+    if (
+      request.signal.aborted ||
+      this.#timer === null ||
+      this.#options.input?.isTTY !== true ||
+      this.#budget !== null
+    ) {
+      return Promise.resolve(undefined);
+    }
+    return new Promise((resolve) => {
+      const abort = () => finish();
+      const finish = (limit?: number) => {
+        request.signal.removeEventListener("abort", abort);
+        this.#budget = null;
+        this.#refresh();
+        resolve(limit);
+      };
+      this.#budget = { request, input: "", error: "", finish };
+      request.signal.addEventListener("abort", abort, { once: true });
+      this.#refresh();
+    });
   }
 
   public note(description: string): void {
@@ -550,8 +620,14 @@ export class ScanDashboard {
               : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
             `  TOKENS   ${tokens}`,
             `  COST     ${cost}`,
+            ...(this.#budget === null
+              ? []
+              : [
+                  `  BUDGET   Raise total USD limit: ${this.#budget.input}_`,
+                  `           ${this.#budget.error || "Scan running. Enter blank/Esc keeps limit."}`,
+                ]),
           ]),
-      `  TIME     ${time}  ·  ${scrollStatus}`,
+      `  TIME     ${time}  ·  ${this.#budget === null ? scrollStatus : "Enter to apply · Ctrl+C to exit"}`,
     ];
 
     return this.#formatFrame(lines);
@@ -726,7 +802,8 @@ export class ScanDashboard {
     return Math.max(
       1,
       (this.#stream.rows ?? 24) -
-        FIXED_SCREEN_ROWS +
+        FIXED_SCREEN_ROWS -
+        (this.#budget === null ? 0 : 2) +
         (this.#options.presentation === "publication"
           ? 2
           : this.#options.mode === "deep"

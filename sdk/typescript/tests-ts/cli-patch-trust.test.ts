@@ -36,6 +36,7 @@ test.each([
       await mkdir(repository);
       execFileSync("git", ["init", "--quiet", repository]);
       await writeCodexConfig(join(repository, ".codex", "config.toml"), {
+        analytics: { enabled: true },
         mcp_servers: {
           synthetic: {
             command: process.execPath,
@@ -48,6 +49,7 @@ test.each([
       });
       const configPath = join(codexHome, "config.toml");
       await writeCodexConfig(configPath, {
+        analytics: { enabled: true },
         model: "synthetic-model",
         model_provider: "synthetic",
         model_providers: {
@@ -76,7 +78,13 @@ test.each([
       });
       const child = spawn(
         resolveCodexCommand({}).command,
-        ["app-server", "--disable", "plugins"],
+        [
+          "app-server",
+          "--disable",
+          "plugins",
+          "--config",
+          "analytics.enabled=false",
+        ],
         {
           cwd: repository,
           env: {
@@ -94,6 +102,8 @@ test.each([
       child.stderr.resume();
       const closed = once(child, "close");
       let servers: string[] | undefined;
+      let analyticsEnabled: boolean | undefined;
+      let inspectedThreadId: string | undefined;
       const input = new Writable({
         final(callback) {
           if (child.stdin.writableEnded) {
@@ -106,11 +116,12 @@ test.each([
           const request = JSON.parse(chunk.toString());
           // Inspect the native task without making a model request.
           if (request.method === "turn/start") {
+            inspectedThreadId = request.params.threadId;
             child.stdin.write(
               `${JSON.stringify({
-                id: 5,
-                method: "mcpServerStatus/list",
-                params: { threadId: request.params.threadId },
+                id: 6,
+                method: "config/read",
+                params: { cwd: repository },
               })}\n`,
               callback,
             );
@@ -122,6 +133,16 @@ test.each([
       async function* events(): AsyncGenerator<string> {
         for await (const line of createInterface({ input: child.stdout })) {
           const event = JSON.parse(line);
+          if (event.id === 6) {
+            analyticsEnabled = event.result?.config?.analytics?.enabled;
+            child.stdin.write(
+              `${JSON.stringify({
+                id: 5,
+                method: "mcpServerStatus/list",
+                params: { threadId: inspectedThreadId },
+              })}\n`,
+            );
+          }
           if (event.id === 5) {
             servers = event.result?.data.map(
               (server: { name: string }) => server.name,
@@ -150,6 +171,12 @@ test.each([
             : {}),
         });
         expect(await closed).toEqual([0, null]);
+        expect(analyticsEnabled).toBe(
+          mode === "conflicting-user-server" ? undefined : false,
+        );
+        expect(
+          parseToml(await readFile(configPath, "utf8"))["analytics"],
+        ).toEqual({ enabled: true });
         expect(
           parseToml(await readFile(configPath, "utf8"))["projects"],
         ).toEqual(projects);

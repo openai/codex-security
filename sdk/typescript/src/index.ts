@@ -1,4 +1,19 @@
 export { CodexSecurity, createSecurity } from "./api.js";
+export { classifySeverity } from "./classify-severity.js";
+export type {
+  ClassifySeverityOptions,
+  SeverityClassificationFinding,
+  SeverityClassification,
+  SeverityAssessment,
+} from "./classify-severity.js";
+export {
+  classifyScanSeverity,
+  classifyScanDirectorySeverity,
+} from "./classify-scan-severity.js";
+export type {
+  ClassifyScanSeverityOptions,
+  ScanSeverityClassification,
+} from "./classify-scan-severity.js";
 export { runComponentScans } from "./component-scan.js";
 export type {
   ComponentDeduplicationSummary,
@@ -17,11 +32,19 @@ export type { ScanCost, ScanSessionEvent } from "./cost.js";
 export type { DeepScanProgress } from "./deep-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
+export { matchScanFindings } from "./scan-comparison.js";
+export type {
+  ScanComparisonInput,
+  ScanComparisonOptions,
+  ScanComparisonProgress,
+  ScanComparisonResult,
+} from "./scan-comparison.js";
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,
   ScanAuthMode,
   ScanAuthentication,
+  ScanBudget,
   ScanOptions,
   ScanPreflight,
   ScanReconnectDetails,
@@ -44,6 +67,7 @@ export {
   CodexSecurityError,
   ConfigurationError,
   ContractValidationError,
+  DeduplicationReviewError,
   IncompleteScanError,
   InvalidTargetError,
   OutputDirectoryError,
@@ -54,7 +78,12 @@ export {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
-export type { ProtectedScanPathKind } from "./errors.js";
+export type {
+  DeduplicationReviewFailureCategory,
+  DeduplicationReviewFailureMetadata,
+  DeduplicationReviewStage,
+  ProtectedScanPathKind,
+} from "./errors.js";
 export {
   DEFAULT_CODEX_CONFIG,
   mergedCodexConfig,
@@ -70,8 +99,12 @@ export type {
   PublishScanToCustomOptions,
   CustomPublicationResult,
 } from "./custom-publish.js";
-export { deduplicateScan } from "./deduplication/scan.js";
+export {
+  deduplicateScan,
+  deduplicateScanDirectory,
+} from "./deduplication/scan.js";
 export type {
+  DeduplicateScanDirectoryOptions,
   DeduplicateScanOptions,
   DeduplicateScanResult,
 } from "./deduplication/scan.js";
