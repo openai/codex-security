@@ -48,7 +48,9 @@ import {
   createMarketplace,
   extractPluginZip,
   importAmbientAuth,
+  LocalPluginBootstrapError,
   pluginExecutionEnvironment,
+  pluginMetadata,
   PluginBootstrapError,
   PluginPythonUnavailableError,
   prepareOutputDir,
@@ -949,17 +951,46 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test("preserves the local origin of plugin selection and manifest failures", async () => {
+    const root = await temporaryDirectory();
+    const workspace = join(root, "workspace");
+    const source = await plugin(root);
+    await mkdir(workspace);
+    await expect(
+      resolvePluginPath(join(root, "network-plugin"), workspace),
+    ).rejects.toBeInstanceOf(LocalPluginBootstrapError);
+
+    const cause = new Error("Synthetic manifest read failure.");
+    const manifestRead = spyOn(fsPromises, "readFile").mockRejectedValue(cause);
+    try {
+      for (const operation of [
+        () => pluginMetadata(source),
+        () => resolvePluginPath(source, workspace),
+      ]) {
+        const result = operation();
+        await expect(result).rejects.toBeInstanceOf(LocalPluginBootstrapError);
+        await expect(result).rejects.toMatchObject({
+          message: `Invalid Codex plugin directory: ${source}`,
+          cause,
+        });
+      }
+    } finally {
+      manifestRead.mockRestore();
+    }
+  });
+
   test("honors cancellation while staging a configured plugin directory", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "bootstrap");
     await mkdir(workspace);
     const source = await plugin(root);
     const controller = new AbortController();
-    controller.abort(new DOMException("canceled", "AbortError"));
+    const reason = new DOMException("canceled", "AbortError");
+    controller.abort(reason);
 
     await expect(
       resolvePluginPath(source, workspace, controller.signal),
-    ).rejects.toMatchObject({ name: "AbortError" });
+    ).rejects.toBe(reason);
     expect(existsSync(join(workspace, "selected-plugin"))).toBe(false);
   });
 
@@ -986,6 +1017,53 @@ describe("plugin runtime preparation", () => {
         ),
       ),
     ).toBeDefined();
+  });
+
+  test("keeps local marketplace failures separate from installer failures", async () => {
+    const root = await temporaryDirectory();
+    const selected = await plugin(root);
+    const home = join(root, "home");
+    const marketplace = join(home, "sdk-marketplace");
+    const installationFailure = new PluginBootstrapError(
+      "Codex plugin bootstrap failed: network ECONNRESET",
+    );
+    let installerCalls = 0;
+    const options = {
+      codexCommand: { command: join(root, "codex") },
+      environment: {},
+      runCodex: async () => {
+        installerCalls += 1;
+        throw installationFailure;
+      },
+    };
+
+    await mkdir(home);
+    await writeFile(marketplace, "local fixture");
+    await expect(
+      bootstrapPlugin(home, selected, options),
+    ).rejects.toBeInstanceOf(LocalPluginBootstrapError);
+    await rm(marketplace);
+
+    const cause = new PluginBootstrapError(
+      "Plugin projection failed for a local network directory.",
+    );
+    const copy = spyOn(fsPromises, "cp").mockRejectedValue(cause);
+    try {
+      const result = bootstrapPlugin(home, selected, options);
+      await expect(result).rejects.toBeInstanceOf(LocalPluginBootstrapError);
+      await expect(result).rejects.toMatchObject({
+        message: cause.message,
+        cause,
+      });
+    } finally {
+      copy.mockRestore();
+    }
+    expect(installerCalls).toBe(0);
+
+    await expect(bootstrapPlugin(home, selected, options)).rejects.toBe(
+      installationFailure,
+    );
+    expect(installerCalls).toBe(1);
   });
 
   test("copies configured plugins with more than 4,096 entries", async () => {
@@ -1259,7 +1337,7 @@ describe("plugin runtime preparation", () => {
     ).toBe(false);
   });
 
-  test("extracts a plugin in one top-level directory", async () => {
+  test("extracts a plugin in one top-level directory and preserves manifest failures", async () => {
     const root = await temporaryDirectory();
     const archive = join(root, "plugin.zip");
     await writeFile(
@@ -1272,6 +1350,35 @@ describe("plugin runtime preparation", () => {
     );
     const extracted = await extractPluginZip(archive, join(root, "extracted"));
     expect(extracted).toBe(join(root, "extracted", "release"));
+
+    const cause = new Error("Synthetic manifest read failure.");
+    const originalReadFile = fsPromises.readFile;
+    const manifestRead = spyOn(fsPromises, "readFile").mockImplementation(((
+      ...args: Parameters<typeof originalReadFile>
+    ) => {
+      if (
+        args[1] === "utf8" &&
+        String(args[0]).endsWith(join(".codex-plugin", "plugin.json"))
+      ) {
+        return Promise.reject(cause);
+      }
+      return Reflect.apply(originalReadFile, fsPromises, args);
+    }) as typeof originalReadFile);
+    try {
+      for (const operation of [
+        () => extractPluginZip(archive, join(root, "failed-extract")),
+        () => resolvePluginPath(archive, join(root, "bootstrap")),
+      ]) {
+        const result = operation();
+        await expect(result).rejects.toBeInstanceOf(LocalPluginBootstrapError);
+        await expect(result).rejects.toMatchObject({
+          message: expect.stringContaining("Invalid Codex plugin directory:"),
+          cause,
+        });
+      }
+    } finally {
+      manifestRead.mockRestore();
+    }
   });
 
   test("decodes flag-clear ZIP filenames with the legacy CP437 encoding", async () => {
