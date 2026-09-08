@@ -5418,7 +5418,7 @@ async function publishPatchBranch(
     );
     if (!url) {
       await run("git", ["push", "--set-upstream", "origin", branch]);
-      url = await run(
+      const createOutput = await run(
         command,
         gitlab
           ? [
@@ -5449,6 +5449,7 @@ async function publishPatchBranch(
               body,
             ],
       );
+      url = gitlab ? glabMergeRequestUrl(createOutput) : createOutput;
     }
     stderr.write(
       `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url)}\n`,
@@ -5460,6 +5461,14 @@ async function publishPatchBranch(
     );
     throw error;
   }
+}
+
+function glabMergeRequestUrl(output: string): string {
+  for (const line of output.split(/\r?\n/u).reverse()) {
+    const candidate = line.trim();
+    if (/^https?:\/\/\S+$/u.test(candidate)) return candidate;
+  }
+  throw new CodexSecurityError("glab did not return a merge request URL.");
 }
 
 function patchRemoteHost(remote: string): string | undefined {
