@@ -187,7 +187,7 @@ def generate_diff_in_scope_files(
 ) -> int:
     """Reuse the existing diff selection without generating previews or duplicate worklists."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from generate_rank_input import git_changed_paths, path_is_excluded
+    from generate_rank_input import git_changed_paths, path_is_diff_excluded
     from rank_preview import (
         DEFAULT_PREVIEW_BYTES,
         TEXT_CODE_EXTENSIONS,
@@ -206,7 +206,7 @@ def generate_diff_in_scope_files(
         eligible = [
             (path, status)
             for path, status in changed
-            if not path_is_excluded(path.relative_to(repository))
+            if not path_is_diff_excluded(path.relative_to(repository))
             and path.suffix.lower() in TEXT_CODE_EXTENSIONS
         ]
         revision_paths = [
