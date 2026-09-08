@@ -9,9 +9,9 @@ import { PLUGIN_NAME } from "./runtime.js";
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
   "references/core-scan.md":
-    "4a96c8685d30a0441510a289effb41172fa685cc3441686a2eddd4041938e171",
+    "7f3b0f5445f99551e7b23c6f4a38de8f2f336a0cc7dd77be3be8559474e14f27",
   "skills/security-scan/SKILL.md":
-    "5b8f5d7debeca14c6b37e8e7ba737671362b8eb4b7f49e693c99c6bd04bc8fa0",
+    "157e67701650cfba2ab19d6adb08ac18d4fa9f15328ffa74cd581e5349382dfb",
   "skills/security-diff-scan/SKILL.md":
     "0a4c519ad713585876ea7eb0a8af4b59892c86746f4c69851db9ab347b7fad2f",
 } as const;
@@ -71,7 +71,7 @@ export async function customDiscoveryPrompt(
       ),
       "## Discovery workflow",
       `1. ${step(skill, 1)}`,
-      "2. Perform the embedded core discovery workflow below. Do not reload the ordinary core-scan.md or top-level security-scan skill.",
+      "2. Use <scan_dir>/artifacts/message-board for shared notes. Perform the embedded core discovery workflow below. Do not reload the ordinary core-scan.md or top-level security-scan skill.",
       `3. ${step(skill, 3).split("For an SDK-owned or prompt-only headless scan, ")[1]}`,
       `4. ${HANDOFF}`,
       "## Embedded core discovery workflow",
