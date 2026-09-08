@@ -394,6 +394,31 @@ try {
     "Installed npm package does not match the complete bundled-plugin contract.",
   );
 
+  const libc =
+    process.platform === "linux"
+      ? process.report.getReport().header.glibcVersionRuntime === undefined
+        ? "-musl"
+        : "-gnu"
+      : "";
+  const nativeLibrary = join(
+    installedRoot,
+    "_bundled_plugin",
+    "mcp",
+    "native",
+    `${process.platform}-${process.arch}${libc}`,
+    process.platform === "win32" ? "windows.node" : "unix.node",
+  );
+  run(
+    process.execPath,
+    [
+      "--input-type=commonjs",
+      "--eval",
+      "require(process.argv[1])",
+      nativeLibrary,
+    ],
+    { cwd: consumer, env: { ...process.env, PATH: "" } },
+  );
+
   run(
     process.execPath,
     [
