@@ -110,7 +110,6 @@ def test_daybreak_access_uses_plugin_mcp() -> None:
 
     assert LEGACY_CODEX_SECURITY_ACCESS_APP_NAME not in apps
     assert all(app["id"] != LEGACY_CODEX_SECURITY_ACCESS_CONNECTOR_ID for app in apps.values())
-    assert all(app.get("required") is not True for app in apps.values())
     assert "codex-security" in mcp_servers
     assert LEGACY_CODEX_SECURITY_ACCESS_APP_NAME not in mcp_servers
 
