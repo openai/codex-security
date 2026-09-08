@@ -45,6 +45,11 @@ make extra model calls; see [Progress and cost](#progress-and-cost).
 Keep results outside the repository and restrict access: reports can contain
 source code, vulnerability details, and reproduction steps.
 
+Saved-history excerpts use scanned Git objects without fetching missing data.
+Working-tree diff scans omit excerpts, as do historical scans whose source or
+scope cannot be established. Unambiguous older scans remain readable. An omitted
+excerpt does not remove the finding.
+
 ### Validate an existing finding
 
 ```ts

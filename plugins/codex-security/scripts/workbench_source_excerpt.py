@@ -8,9 +8,16 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-# Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_target import clean_worktree_content_digest, git_bytes
+from workbench_source_scopes import (
+    load_source_scopes,
+    normalized_path_component,
+    offline_git_bytes,
+    relative_path,
+    safe_source_path,
+    source_object_for_path,
+)
+from workbench_target import clean_worktree_content_digest
 
 CONTEXT_LINES = 3
 MAX_BYTES = 16_000
@@ -21,23 +28,69 @@ def finding_source_excerpt(
     scan: sqlite3.Row,
     target: Path | None,
     locations: list[dict[str, Any]],
+    scopes: list[str],
 ) -> str | None:
-    if target is None or not locations:
+    if target is None or not locations or scan["target_revision"] == "unversioned":
         return None
-    location = next(
-        (
-            candidate
-            for candidate in locations
-            if "root_control" in str(candidate.get("role") or "").lower()
-        ),
-        locations[0],
+    snapshot = scan["target_snapshot_digest"]
+    if snapshot is not None and snapshot != clean_worktree_content_digest():
+        return None
+    locations = [
+        location
+        for location in locations
+        if isinstance(path := location.get("path"), str)
+        and isinstance(location.get("startLine"), int)
+        and safe_source_path(target, path) is not None
+    ]
+    if not locations:
+        return None
+    try:
+        context = load_source_scopes(scan, target, scopes)
+    except (OSError, RuntimeError, SystemExit, UnicodeError, ValueError):
+        return None
+    if context is None:
+        return None
+    repository, tree, records = context
+    indexed: dict[tuple[str, ...], list[dict[str, str]]] = {}
+    for record in records:
+        for name in ("path", "canonicalPath"):
+            parts = tuple(
+                normalized_path_component(part) for part in PurePosixPath(record[name]).parts
+            )
+            indexed.setdefault(parts, []).append(record)
+    lengths = sorted({len(parts) for parts in indexed})
+
+    def source_object(path: str) -> str | None:
+        parsed = relative_path(path)
+        if parsed is None:
+            return None
+        parts = tuple(normalized_path_component(part) for part in parsed.parts)
+        try:
+            for length in lengths:
+                if length > len(parts):
+                    break
+                for record in indexed.get(parts[:length], []):
+                    object_id = source_object_for_path(repository, tree, target, path, record)
+                    if object_id is not None:
+                        return object_id
+        except (OSError, RuntimeError, SystemExit, UnicodeError, ValueError):
+            pass
+        return None
+
+    locations.sort(
+        key=lambda location: (
+            location.get("role") != "root_control",
+            "root_control" not in str(location.get("role") or "").lower(),
+        )
     )
-    path = location.get("path")
-    start_line = location.get("startLine")
-    end_line = location.get("endLine")
-    if not isinstance(path, str) or not isinstance(start_line, int):
+    for location in locations:
+        object_id = source_object(location["path"])
+        if object_id is not None:
+            break
+    else:
         return None
-    source = scanned_source_text(scan, target, path)
+    start_line, end_line = location["startLine"], location.get("endLine")
+    source = scanned_source_text(repository, object_id)
     if not source or "\0" in source:
         return None
     lines = source.splitlines()
@@ -55,36 +108,15 @@ def finding_source_excerpt(
         f"{line_number:>{width}}  {lines[line_number - 1]}"
         for line_number in range(excerpt_start, excerpt_end + 1)
     )
-    encoded = excerpt.encode("utf-8")[:MAX_BYTES]
-    return encoded.decode("utf-8", errors="ignore")
+    return excerpt.encode("utf-8")[:MAX_BYTES].decode("utf-8", errors="ignore")
 
 
-def scanned_source_text(scan: sqlite3.Row, target: Path, path: str) -> str | None:
-    if safe_source_path(target, path) is None:
-        return None
-    revision = scan["target_revision"]
-    if revision == "unversioned":
-        return None
-    snapshot_digest = scan["target_snapshot_digest"]
-    if snapshot_digest is not None and snapshot_digest != clean_worktree_content_digest():
-        return None
-    object_name = f"{revision}:{path}"
-    content = git_bytes(target, "cat-file", "blob", object_name)
-    return content.decode("utf-8", errors="replace") if content is not None else None
-
-
-def safe_source_path(target: Path, relative_path: str) -> Path | None:
-    if "\\" in relative_path:
-        return None
-    parsed = PurePosixPath(relative_path)
-    if parsed.is_absolute() or ".." in parsed.parts:
-        return None
+def scanned_source_text(repository: Path, object_id: str) -> str | None:
     try:
-        path = (target / parsed.as_posix()).resolve()
-        path.relative_to(target)
-    except (OSError, RuntimeError, ValueError):
+        content = offline_git_bytes(repository, "cat-file", "blob", object_id)
+    except (OSError, RuntimeError, SystemExit):
         return None
-    return path
+    return content.decode("utf-8", errors="replace") if content is not None else None
 
 
 def main() -> None:
