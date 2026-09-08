@@ -101,8 +101,24 @@ describe("CLI workbench", () => {
         ["list-scans", "--repository", resolve(repository, "other")],
       ],
       [
+        ["scans", "--format", "json", "other"],
+        ["list-scans", "--repository", resolve(repository, "other")],
+      ],
+      [
+        ["scans", "--json", "show"],
+        ["list-scans", "--repository", resolve(repository, "show")],
+      ],
+      [
+        ["--format", "json", "scans", "--json", "other"],
+        ["list-scans", "--repository", resolve(repository, "other")],
+      ],
+      [
         ["scans", "list", "--scan-root", "/tmp/history"],
         ["list-scans", "--scan-root", resolve("/tmp/history")],
+      ],
+      [
+        ["scans", "list", "--scan-root", ""],
+        ["list-scans", "--scan-root", repository],
       ],
     ];
     for (const [argv, expected] of cases) {
@@ -132,6 +148,35 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toMatchObject({ repository: "scans" });
+  });
+
+  test("keeps shorthand finding repositories after global output options", async () => {
+    for (const [argv, selected] of [
+      [["findings", "--format", "json", "other"], "other"],
+      [["findings", "--json", "list"], "list"],
+      [["--format", "json", "findings", "--json", "other"], "other"],
+    ] as const) {
+      const stdout = capture();
+      const calls: Array<readonly string[]> = [];
+      expect(
+        await main(
+          argv,
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args) => {
+              calls.push(args);
+              return { repositories: [] };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(calls).toEqual([["list-repositories"]]);
+      expect(JSON.parse(stdout.text())).toEqual({
+        repository: resolve("/current/repository", selected),
+        findings: [],
+      });
+    }
   });
 
   test("shows scans and returns cached comparisons with one workbench call", async () => {

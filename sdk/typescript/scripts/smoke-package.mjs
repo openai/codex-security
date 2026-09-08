@@ -626,6 +626,12 @@ try {
     /lin_api_|security@example\.test/u,
   );
 
+  const manifest = runInstalledCli("--llms-full");
+  assert.match(manifest, /^# codex-security$/mu);
+  assert.match(manifest, /^## Authentication$/mu);
+  assert.match(manifest, /\| `--working-tree` \|/u);
+  assert.doesNotMatch(manifest, /--[a-z][a-z0-9-]*[A-Z][A-Za-z0-9-]*/u);
+
   const { startFindingsServer } = await import(
     pathToFileURL(join(installedRoot, "dist/server/server.js")).href
   );
