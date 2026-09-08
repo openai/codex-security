@@ -58,7 +58,10 @@ import {
   errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  resolveTrustedExecutable,
+  type TrustedExecutable,
+} from "./trusted-executable.js";
 import {
   isWindowsUnsafePathComponent,
   windowsUnsafePathComponent,
@@ -149,6 +152,7 @@ export interface PluginPythonOptions {
   homeDirectory?: string;
   managedRuntimeRoots?: readonly string[];
   protectedRoot?: string;
+  additionalProtectedRoots?: readonly string[];
   signal?: AbortSignal;
 }
 
@@ -2563,14 +2567,25 @@ export async function pluginMetadata(
 export async function resolvePluginPython(
   options: PluginPythonOptions = {},
 ): Promise<string> {
+  return (await resolvePluginPythonCommand(options)).executable;
+}
+
+export async function resolvePluginPythonCommand(
+  options: PluginPythonOptions = {},
+): Promise<TrustedExecutable> {
   const environment = options.environment ?? process.env;
-  const protectedRoot = options.protectedRoot ?? process.cwd();
+  const protectedRoots = [
+    ...new Set([
+      options.protectedRoot ?? process.cwd(),
+      ...(options.additionalProtectedRoots ?? []),
+    ]),
+  ];
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,
       "configured plugin Python",
       environment,
-      protectedRoot,
+      protectedRoots,
       options.signal,
     );
   }
@@ -2580,7 +2595,7 @@ export async function resolvePluginPython(
       inherited,
       "PYTHON",
       environment,
-      protectedRoot,
+      protectedRoots,
       options.signal,
     );
   }
@@ -2606,7 +2621,7 @@ export async function resolvePluginPython(
       const resolved = await usablePython(
         candidate,
         environment,
-        protectedRoot,
+        protectedRoots,
         options.signal,
       );
       if (resolved !== null) return resolved;
@@ -2619,7 +2634,7 @@ export async function resolvePluginPython(
     const resolved = await usablePython(
       candidate,
       environment,
-      protectedRoot,
+      protectedRoots,
       options.signal,
     );
     if (resolved !== null) return resolved;
@@ -2652,7 +2667,7 @@ export function pythonUtf8Environment(
   return normalized;
 }
 
-function pluginHelperEnvironment(
+export function pluginHelperEnvironment(
   environment: ProcessEnvironment,
 ): ProcessEnvironment {
   return pythonUtf8Environment(
@@ -2845,13 +2860,13 @@ async function requirePython(
   candidate: string,
   source: string,
   environment: ProcessEnvironment,
-  protectedRoot: string,
+  protectedRoots: readonly string[],
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<TrustedExecutable> {
   const resolved = await usablePython(
     candidate,
     environment,
-    protectedRoot,
+    protectedRoots,
     signal,
   );
   if (resolved !== null) return resolved;
@@ -2863,17 +2878,24 @@ async function requirePython(
 
 async function usablePython(
   candidate: string,
-  environment: ProcessEnvironment = process.env,
-  protectedRoot: string = process.cwd(),
+  environment: ProcessEnvironment,
+  protectedRoots: readonly string[],
   signal?: AbortSignal,
-): Promise<string | null> {
-  const command = await resolveTrustedExecutable(
-    isPythonPathCandidate(candidate)
-      ? expandHome(candidate, environment)
-      : candidate,
-    environment,
-    protectedRoot,
-  );
+): Promise<TrustedExecutable | null> {
+  const original = isPythonPathCandidate(candidate)
+    ? expandHome(candidate, environment)
+    : candidate;
+  let command: TrustedExecutable | null = null;
+  // Preserve the invocation name while each root further filters the same PATH.
+  for (const protectedRoot of protectedRoots) {
+    throwIfSignalAborted(signal);
+    command = await resolveTrustedExecutable(
+      original,
+      command?.environment ?? environment,
+      protectedRoot,
+    );
+    if (command === null) return null;
+  }
   if (command === null) return null;
   try {
     const { stdout } = await execFile(
@@ -2891,9 +2913,7 @@ async function usablePython(
         signal,
       },
     );
-    return stdout.trim() === "codex-security-python-ok"
-      ? command.executable
-      : null;
+    return stdout.trim() === "codex-security-python-ok" ? command : null;
   } catch (error) {
     if (signal?.aborted) throw error;
     return null;

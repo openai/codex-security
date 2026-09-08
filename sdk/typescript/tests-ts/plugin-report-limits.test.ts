@@ -3,6 +3,77 @@ import { describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 describe("bundled scan report and source limits", () => {
+  test("refreshes only unsealed report projections", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const program = [
+      "import os, pathlib, stat, sys",
+      "from contextlib import ExitStack",
+      "from unittest.mock import Mock, patch",
+      "sys.path.insert(0, sys.argv[1])",
+      "import finalize_scan_contract as finalizer",
+      "scan_dir, schema_dir = pathlib.Path('saved-scan'), pathlib.Path('selected-schemas')",
+      "findings, coverage = {}, {}",
+      "metadata = os.stat_result((stat.S_IFREG, 7, 11, 1, 0, 0, 0, 0, 0, 0))",
+      "directory = os.stat_result((stat.S_IFDIR, 1, 11, 1, 0, 0, 0, 0, 0, 0))",
+      "other_directory = os.stat_result((stat.S_IFDIR, 2, 11, 1, 0, 0, 0, 0, 0, 0))",
+      "def check_report(paths, entries, outcome, *, missing=False, separate_parent=False):",
+      "    manifest = {'scan': {'artifacts': [{'path': path} for path in paths]}}",
+      "    reader = Mock(return_value=(manifest, findings, coverage, b'canonical'))",
+      "    project, writer = Mock(return_value=b'projected report\\n'), Mock()",
+      "    opened, closed = Mock(return_value=42), Mock()",
+      "    def inspect(path, *, follow_symlinks=True):",
+      "        if path == scan_dir / 'report.md':",
+      "            if missing: raise FileNotFoundError",
+      "            return metadata",
+      "        return other_directory if separate_parent and path == scan_dir / 'artifacts' else directory",
+      "    with ExitStack() as stack:",
+      "        for owner, name, replacement in [(finalizer, '_require_scan_directory', lambda path: path), (finalizer, '_read_sealed_scan', reader), (finalizer, '_generate_report_projection', project), (finalizer, 'write_scan_local_bytes', writer), (pathlib.Path, 'stat', inspect), (finalizer.os, 'listdir', lambda path: entries), (finalizer, 'open_scan_local_file_descriptor', opened), (finalizer.os, 'fstat', lambda descriptor: metadata), (finalizer.os, 'close', closed)]:",
+      "            stack.enter_context(patch.object(owner, name, replacement))",
+      "        if outcome == 'ambiguous':",
+      "            try: finalizer.write_report_projection(scan_dir, schema_dir)",
+      "            except finalizer.ContractError as exc: assert 'ambiguous sealed artifact alias' in str(exc)",
+      "            else: raise AssertionError('ambiguous alias was accepted')",
+      "        else: finalizer.write_report_projection(scan_dir, schema_dir)",
+      "    reader.assert_called_once_with(scan_dir, schema_dir, 'report projection')",
+      "    assert opened.call_count == closed.call_count",
+      "    if outcome == 'write':",
+      "        project.assert_called_once_with(manifest, findings, coverage)",
+      "        writer.assert_called_once_with(scan_dir, 'report.md', b'projected report\\n')",
+      "    else:",
+      "        project.assert_not_called(); writer.assert_not_called()",
+      "check_report(['findings.json', 'coverage.json'], [], 'write', missing=True)",
+      "check_report(['./report.md'], [], 'preserve')",
+      "check_report(['REPORT.md'], ['REPORT.md'], 'preserve')",
+      "check_report(['REPORT.md'], ['report.md'], 'preserve')",
+      "check_report(['findings.json', 'coverage.json'], ['report.md', 'findings.json', 'coverage.json'], 'write')",
+      "check_report(['REPORT.md'], ['REPORT.md', 'report.md'], 'write')",
+      "check_report(['findings.json'], ['Report.md', 'findings.json'], 'write')",
+      "check_report(['artifacts/report.md'], ['report.md'], 'write', separate_parent=True)",
+      "check_report(['artifacts/report.md'], ['report.md'], 'ambiguous')",
+      "check_report(['REPORT.md'], [], 'ambiguous')",
+      "with patch.object(finalizer, 'write_report_projection') as report_only, patch.object(finalizer, 'finalize_scan') as full_finalizer, patch.object(finalizer, 'build_findings_export') as export, patch.object(finalizer, 'build_sarif_projection') as sarif, patch.object(sys, 'argv', ['finalizer', '--scan-dir', str(scan_dir), '--schema-dir', str(schema_dir), '--report-only']):",
+      "    assert finalizer.main() == 0",
+      "    report_only.assert_called_once_with(scan_dir, schema_dir)",
+      "    full_finalizer.assert_not_called(); export.assert_not_called(); sarif.assert_not_called()",
+      "fingerprints = {'algorithm': finalizer.FINGERPRINT_ALGORITHM, 'primary': 'derived'}",
+      "finding = {'findingId': 'finding', 'occurrenceId': 'occurrence', 'fingerprints': {**fingerprints, 'future': 'preserved'}}",
+      "with patch.object(finalizer, '_derived_finding_identity_rows', return_value=[('finding', finding, 'finding', 'occurrence', fingerprints)]):",
+      "    finalizer._validate_derived_finding_identities({}, {})",
+      "    assert finding['fingerprints']['future'] == 'preserved'",
+      "print('report projection checks passed')",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts")],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(new TextDecoder().decode(result.stdout).trim()).toBe(
+      "report projection checks passed",
+    );
+  });
+
   test("accepts large reports, schemas, source files, and late source lines", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
