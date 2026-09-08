@@ -1300,6 +1300,68 @@ describe("plugin runtime preparation", () => {
     );
   });
 
+  test("extracts ZIP directories and preserves executable file permissions", async () => {
+    const root = await temporaryDirectory();
+    const archive = join(root, "plugin.zip");
+    await writeFile(
+      archive,
+      zipSync({
+        "__MACOSX/._release": strToU8("metadata"),
+        "release/.codex-plugin/plugin.json": strToU8(
+          JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+        ),
+        "release/unix-directory": [
+          new Uint8Array(),
+          { os: 3, attrs: 0o40700 << 16 },
+        ],
+        "release/dos-directory": [new Uint8Array(), { os: 0, attrs: 16 }],
+        "release/scripts/helper": [
+          strToU8("#!/bin/sh\n"),
+          { os: 3, attrs: 0o100755 << 16 },
+        ],
+      }),
+    );
+    const extracted = await extractPluginZip(archive, join(root, "extracted"));
+    expect((await stat(join(extracted, "unix-directory"))).isDirectory()).toBe(
+      true,
+    );
+    expect((await stat(join(extracted, "dos-directory"))).isDirectory()).toBe(
+      true,
+    );
+    expect(await readFile(join(extracted, "scripts/helper"), "utf8")).toBe(
+      "#!/bin/sh\n",
+    );
+    expect(existsSync(join(root, "extracted", "__MACOSX"))).toBe(false);
+    if (process.platform !== "win32") {
+      expect((await stat(join(extracted, "scripts/helper"))).mode & 0o777).toBe(
+        0o755 & ~process.umask(),
+      );
+    }
+  });
+
+  test("rejects ZIP symlinks before writing through them and cleans staging", async () => {
+    const root = await temporaryDirectory();
+    const outside = await temporaryDirectory();
+    const target = join(outside, "target.txt");
+    await writeFile(target, "unchanged");
+    const archive = join(root, "plugin.zip");
+    await writeFile(
+      archive,
+      zipSync({
+        "release/.codex-plugin/plugin.json": strToU8(
+          JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+        ),
+        "release/link": [strToU8(outside), { os: 3, attrs: 0o120777 << 16 }],
+        "release/link/target.txt": strToU8("overwritten"),
+      }),
+    );
+    await expect(
+      extractPluginZip(archive, join(root, "extracted")),
+    ).rejects.toThrow("unsafe path");
+    expect(await readFile(target, "utf8")).toBe("unchanged");
+    expect(await readdir(root)).toEqual(["plugin.zip"]);
+  });
+
   test("honors cancellation while preparing a plugin ZIP", async () => {
     const root = await temporaryDirectory();
     const archive = join(root, "plugin.zip");
