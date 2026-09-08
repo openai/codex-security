@@ -30,6 +30,7 @@ export interface FindingsStore {
   insert(
     entries: readonly EmbeddedFinding[],
     repositoryId?: string,
+    repositoryName?: string,
   ): Promise<string[]>;
   list(page: { limit: number; offset: number }): Promise<FindingsPage>;
   storeDedupeGroups(groups: readonly string[][]): Promise<FindingDedupeGroup[]>;

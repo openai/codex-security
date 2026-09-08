@@ -6,7 +6,11 @@ import type { FindingSearchScope } from "../finding-retrieval.js";
 import { bundledPluginRoot } from "../runtime.js";
 import { FindingsError } from "./errors.js";
 
-export type FindingsRequest = { findings: Finding[]; repositoryId?: string };
+export type FindingsRequest = {
+  findings: Finding[];
+  repositoryId?: string;
+  repositoryName?: string;
+};
 
 export const validateDedupeGroups = new Ajv2020().compile<{
   groups: string[][];
@@ -39,7 +43,9 @@ export async function findingsRequestValidator(): Promise<
     properties: {
       findings: schema.properties.findings,
       repositoryId: { type: "string", minLength: 1 },
+      repositoryName: { type: "string", minLength: 1 },
     },
+    dependentRequired: { repositoryName: ["repositoryId"] },
   });
 }
 

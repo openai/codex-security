@@ -85,7 +85,11 @@ export async function handleFindingsRequest(
       json(
         response,
         201,
-        await service.insert(input.findings, input.repositoryId),
+        await service.insert(
+          input.findings,
+          input.repositoryId,
+          input.repositoryName,
+        ),
       );
       return;
     }

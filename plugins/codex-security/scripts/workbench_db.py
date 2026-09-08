@@ -3637,7 +3637,11 @@ def main() -> None:
         elif args.command == "store-findings":
             payload = json.load(sys.stdin)
             result = store_findings(
-                connection, payload["entries"], now(), payload.get("repositoryId")
+                connection,
+                payload["entries"],
+                now(),
+                payload.get("repositoryId"),
+                payload.get("repositoryName"),
             )
         elif args.command == "find-potential-duplicates":
             result = find_potential_duplicates(connection, args.finding_id, args.repository_id)

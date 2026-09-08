@@ -99,11 +99,12 @@ function insert(
   base: string,
   findings: Finding[],
   repositoryId = "repository-a",
+  repositoryName?: string,
 ) {
   return fetch(`${base}/v1/bulk/findings`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ findings, repositoryId }),
+    body: JSON.stringify({ findings, repositoryId, repositoryName }),
   });
 }
 
@@ -126,6 +127,34 @@ async function dashboard(
   expect(response.headers.get("cache-control")).toBe("no-store");
   return (await response.json()) as DashboardSnapshot;
 }
+
+test("repository names survive legacy imports without changing IDs or findings", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store);
+  const id = "target_sha256_synthetic";
+  const first = finding(1);
+  expect((await insert(base, [first], id, "example/widget")).status).toBe(201);
+  expect((await insert(base, [first], id)).status).toBe(201);
+  const page = await dashboard(base, { repository: id, id: first.findingId });
+  expect(page.repositories).toEqual([{ id, label: "example/widget" }]);
+  expect(page.total).toBe(1);
+  expect(page.items[0]?.repositoryIds).toEqual([id]);
+  expect(page.detail?.finding).toEqual(first);
+  expect((await dashboard(base, { query: "WIDGET" })).total).toBe(1);
+
+  expect((await insert(base, [], id, "example/renamed")).status).toBe(201);
+  const reopened = await start(new SqliteFindingsStore(environment));
+  expect((await dashboard(reopened)).repositories).toEqual([
+    { id, label: "example/renamed" },
+  ]);
+  expect((await dashboard(reopened)).total).toBe(1);
+  const invalid = await fetch(`${base}/v1/bulk/findings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ findings: [], repositoryName: "missing-id" }),
+  });
+  expect(invalid.status).toBe(400);
+});
 
 test("dashboard serves only findings and groups, and never calls an embedding provider", async () => {
   const { store } = await fixture();
@@ -197,7 +226,7 @@ test("dashboard browses imported findings and overlapping groups without local r
     await database(
       environment,
       `from workbench_dashboard import dashboard
-allowed = {'findings', 'finding_repositories', 'finding_dedupe_groups', 'finding_dedupe_group_members'}
+allowed = {'findings', 'finding_repositories', 'finding_repository_names', 'finding_dedupe_groups', 'finding_dedupe_group_members'}
 def authorize(action, table, column, database, source):
     if action == sqlite3.SQLITE_READ and table not in allowed:
         return sqlite3.SQLITE_DENY

@@ -37,10 +37,11 @@ export class SqliteFindingsStore implements FindingsStore {
   async insert(
     entries: readonly EmbeddedFinding[],
     repositoryId?: string,
+    repositoryName?: string,
   ): Promise<string[]> {
     const result = await this.run(
       ["store-findings"],
-      JSON.stringify({ entries, repositoryId }),
+      JSON.stringify({ entries, repositoryId, repositoryName }),
     );
     if (result["error"] === "finding_conflict") {
       throw new FindingsError(

@@ -67,7 +67,11 @@ export async function publishScanToCustomInternal(
           options.findingsUrl,
           options.signal,
           dependencies.fetch,
-        ).publish(findings.findings, repositoryId);
+        ).publish(
+          findings.findings,
+          repositoryId,
+          manifest.scan.target.displayName,
+        );
     return {
       scanId: manifest.scan.id,
       repositoryId,

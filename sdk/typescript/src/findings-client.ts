@@ -43,10 +43,12 @@ export class FindingsClient {
   async publish(
     findings: readonly Finding[],
     repositoryId: string,
+    repositoryName?: string,
   ): Promise<string[]> {
     const receipt = await this.post("v1/bulk/findings", {
       findings,
       repositoryId,
+      repositoryName,
     });
     const expected = new Set(findings.map((finding) => finding.findingId));
     if (

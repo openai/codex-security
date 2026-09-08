@@ -1315,6 +1315,14 @@ do not create extra rows. An existing ID's fingerprint, rule, and identity
 anchor/instance cannot be replaced. Repeated IDs in one request are applied in order,
 with the last supplied record retained. Stored scan occurrences are unchanged.
 
+An optional `repositoryName` supplies a human-readable dashboard label for
+`repositoryId` without changing that ID or any finding identity. It requires
+`repositoryId`. Reimports without a name preserve the stored label; supplying
+a name updates it. An empty `findings` array can update the label alone without
+generating embeddings. The dashboard falls back to the ID when no name exists.
+`publish scan --to custom` sends the sealed scan's `target.displayName`
+automatically. Repository filters still use IDs; text search also matches names.
+
 For example, add `repositoryId` to a copy of an exported findings document
 saved as `findings-import.json` (leave the sealed scan artifacts unchanged),
 then import it with the API key configured before starting Compose:

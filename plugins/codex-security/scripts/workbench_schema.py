@@ -867,6 +867,16 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        42,
+        "imported repository display names",
+        """
+        CREATE TABLE finding_repository_names (
+            repository_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        """,
+    ),
 )
 
 

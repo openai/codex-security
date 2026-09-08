@@ -20,10 +20,20 @@ def store_findings(
     entries: list[dict[str, Any]],
     timestamp: str,
     repository_id: str | None = None,
+    repository_name: str | None = None,
 ) -> dict[str, Any]:
     try:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
+            if repository_id is not None and repository_name is not None:
+                connection.execute(
+                    """
+                    INSERT INTO finding_repository_names (repository_id, name)
+                    VALUES (?, ?)
+                    ON CONFLICT(repository_id) DO UPDATE SET name = excluded.name
+                    """,
+                    (repository_id, repository_name),
+                )
             for entry in entries:
                 finding = entry["finding"]
                 embedding = entry["embedding"]

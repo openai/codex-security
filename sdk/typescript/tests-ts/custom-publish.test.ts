@@ -51,6 +51,7 @@ test("publishes complete sealed findings with their repository ID to a custom ba
           body: JSON.stringify({
             findings: document.findings,
             repositoryId: "target_sha256_example",
+            repositoryName: "example/repo",
           }),
           signal: controller.signal,
         });

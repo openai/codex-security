@@ -85,9 +85,11 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
         clauses.append(
             "("
             + " OR ".join(f"instr(casefold(COALESCE({c}, '')), casefold(?)) > 0" for c in columns)
-            + ")"
+            + " OR EXISTS (SELECT 1 FROM json_each(repositoryIds) AS repository "
+            + "JOIN finding_repository_names AS names ON names.repository_id = repository.value "
+            + "WHERE instr(casefold(names.name), casefold(?)) > 0))"
         )
-        values.extend([query["query"]] * len(columns))
+        values.extend([query["query"]] * (len(columns) + 1))
     if query.get("repository"):
         clauses.append("EXISTS (SELECT 1 FROM json_each(repositoryIds) WHERE value = ?)")
         values.append(query["repository"])
@@ -96,8 +98,12 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
     connection.execute("BEGIN")
     with connection:
         repositories = connection.execute("""
-            SELECT DISTINCT repository_id AS id, repository_id AS label
-            FROM finding_repositories ORDER BY repository_id
+            SELECT DISTINCT repositories.repository_id AS id,
+                COALESCE(names.name, repositories.repository_id) AS label
+            FROM finding_repositories AS repositories
+            LEFT JOIN finding_repository_names AS names
+                ON names.repository_id = repositories.repository_id
+            ORDER BY label, id
         """).fetchall()
         total = connection.execute(f"SELECT COUNT(*) FROM ({records}) {where}", values).fetchone()[
             0

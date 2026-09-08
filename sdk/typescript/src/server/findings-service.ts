@@ -13,6 +13,7 @@ export class FindingsService {
   async insert(
     findings: readonly Finding[],
     repositoryId?: string,
+    repositoryName?: string,
   ): Promise<string[]> {
     const embeddings = await this.embeddings.embed(findings);
     return await this.store.insert(
@@ -21,6 +22,7 @@ export class FindingsService {
         embedding: embeddings[index]!,
       })),
       repositoryId,
+      repositoryName,
     );
   }
 

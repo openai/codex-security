@@ -76,9 +76,11 @@ function RecordLinks({
 function Inspector({
   detail,
   navigate,
+  repositories,
 }: {
   detail: DashboardDetail;
   navigate: Navigate;
+  repositories: DashboardSnapshot["repositories"];
 }) {
   const finding = detail.finding;
   return (
@@ -108,7 +110,12 @@ function Inspector({
                 <code>{finding.findingId}</code>
               </Field>
               <Field name="Repository associations">
-                {detail.item.repositoryIds.join(", ") || "Not recorded"}
+                {detail.item.repositoryIds
+                  .map(
+                    (id) =>
+                      repositories.find((repo) => repo.id === id)?.label ?? id,
+                  )
+                  .join(", ") || "Not recorded"}
               </Field>
             </dl>
           </section>
@@ -184,12 +191,14 @@ function Results({
   selected,
   navigate,
   now,
+  repositories,
 }: {
   view: DashboardView;
   items: DashboardItem[];
   selected: string;
   navigate: Navigate;
   now: number;
+  repositories: DashboardSnapshot["repositories"];
 }) {
   return (
     <div className="table-scroll">
@@ -222,7 +231,12 @@ function Results({
                 )}
               </th>
               <td className="repository-cell">
-                {item.repositoryIds.join(", ") || "—"}
+                {item.repositoryIds
+                  .map(
+                    (id) =>
+                      repositories.find((repo) => repo.id === id)?.label ?? id,
+                  )
+                  .join(", ") || "—"}
               </td>
               {view === "findings" && (
                 <td>
@@ -486,6 +500,7 @@ export function App() {
                   selected={selected}
                   navigate={navigate}
                   now={now}
+                  repositories={data.repositories}
                 />
               ) : (
                 <div className="empty-state">
@@ -551,7 +566,11 @@ export function App() {
                   </Button>
                 </div>
                 {data?.detail ? (
-                  <Inspector detail={data.detail} navigate={navigate} />
+                  <Inspector
+                    detail={data.detail}
+                    navigate={navigate}
+                    repositories={data.repositories}
+                  />
                 ) : (
                   <p className="text-secondary">
                     {data
