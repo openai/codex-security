@@ -402,8 +402,52 @@ fn main() -> std::io::Result<()> {
         {
             return Err(io::Error::other("Assessment validation changed its input"));
         }
+        let worklist_dir = raw("worklist-", 0xdc80);
+        let worklist_output = repo.join(&worklist_dir).join(&output_name);
+        let worklist_sentinel = repo
+            .join(raw("worklist-", 0xfffd))
+            .join(&replacement_output);
+        fs::create_dir_all(worklist_sentinel.parent().unwrap())?;
+        fs::write(&worklist_sentinel, "worklist output sentinel")?;
+        for (command, input_flag, row) in [
+            (
+                "copy-deep-review-input",
+                "--rank-input",
+                "{\"path\":\"source.py\",\"area\":\"src\",\"preview\":\"source line\"}\n",
+            ),
+            (
+                "select-deep-review-input",
+                "--rank-output",
+                "{\"path\":\"source.py\",\"area\":\"src\",\"score\":5,\"include\":true,\"reason\":\"source line\"}\n",
+            ),
+        ] {
+            fs::write(repo.join(&input_name), row)?;
+            for prefix in [repo.clone(), PathBuf::from("~"), PathBuf::from(".")] {
+                let child = invoke(command, &[
+                    input_flag.into(), prefix.join(&input_name),
+                    "--out".into(), prefix.join(&worklist_dir).join(&output_name),
+                ])?;
+                if !child.status.success()
+                    || !child.stderr.is_empty()
+                    || fs::read(&worklist_output)? != b"{\"path\":\"source.py\",\"area\":\"src\"}\r\n"
+                {
+                    return Err(io::Error::other(format!(
+                        "Wide deep-review helper failed: {}",
+                        String::from_utf8_lossy(&child.stderr)
+                    )));
+                }
+                fs::remove_file(&worklist_output)?;
+            }
+        }
+        if fs::read(&worklist_sentinel)? != b"worklist output sentinel"
+            || fs::read(repo.join(raw("input-", 0xfffd)))? != b"invalid replacement input"
+        {
+            return Err(io::Error::other(
+                "Deep-review helper changed a replacement path",
+            ));
+        }
         println!(
-            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
+            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
         );
         Ok(())
     }
