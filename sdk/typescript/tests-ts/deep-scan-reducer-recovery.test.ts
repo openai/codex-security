@@ -77,7 +77,7 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
         ].join("\n"),
         timeout: 30_000,
       });
-      expect(result.status, result.stderr).toBe(0);
+      expect(result.status, result.stderr || result.error?.message).toBe(0);
       const response = result.stdout
         .trim()
         .split("\n")
