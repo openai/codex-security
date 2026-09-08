@@ -157,15 +157,16 @@ fn main() -> std::io::Result<()> {
         let repo = root.join(&cwds[0]).join(&repos[0]);
         let output_name = raw("out-", 0xdfff);
         let output = repo.join(&output_name);
-        let invoke = |args: &[PathBuf]| {
+        let invoke = |command: &str, args: &[PathBuf]| {
             Command::new(&node)
                 .arg(&script)
-                .args(["--helper", "resolve-security-md"])
+                .args(["--helper", command])
                 .args(args)
                 .current_dir(&repo)
                 .env("USERPROFILE", &repo)
                 .output()
         };
+        let policy = |args: &[PathBuf]| invoke("resolve-security-md", args);
         for (repo_arg, scope_arg, output_arg) in [
             (repo.clone(), PathBuf::from(&scopes[0]), output.clone()),
             (
@@ -179,7 +180,7 @@ fn main() -> std::io::Result<()> {
                 PathBuf::from(&output_name),
             ),
         ] {
-            let child = invoke(&[
+            let child = policy(&[
                 "--repo".into(),
                 repo_arg,
                 "--scope".into(),
@@ -206,7 +207,7 @@ fn main() -> std::io::Result<()> {
             fs::remove_file(&output)?;
         }
         for scope in [PathBuf::from("."), PathBuf::from(&scopes[0]).join("..")] {
-            let child = invoke(&["--repo".into(), repo.clone(), "--scope".into(), scope])?;
+            let child = policy(&["--repo".into(), repo.clone(), "--scope".into(), scope])?;
             let expected = b"## SECURITY.md source: \"SECURITY.md\"\n\nroot raw\n";
             if !child.status.success() || !child.stderr.is_empty() || child.stdout != expected {
                 return Err(io::Error::other(
@@ -214,7 +215,7 @@ fn main() -> std::io::Result<()> {
                 ));
             }
         }
-        let listing = invoke(&["--repo".into(), "~".into(), "--list".into()])?;
+        let listing = policy(&["--repo".into(), "~".into(), "--list".into()])?;
         let expected =
             b"[\"SECURITY.md\", \"scope-\\udfff/SECURITY.md\", \"scope-\\ufffd/SECURITY.md\"]\n";
         if !listing.status.success() || !listing.stderr.is_empty() || listing.stdout != expected {
@@ -236,7 +237,7 @@ fn main() -> std::io::Result<()> {
         let sibling_policy = sibling.join("SECURITY.md");
         fs::write(&sibling_policy, "sibling policy\n")?;
         let verify_outside_root = |scope: &Path| -> io::Result<()> {
-            let result = invoke(&[
+            let result = policy(&[
                 "--repo".into(),
                 identity_root.clone(),
                 "--scope".into(),
@@ -292,20 +293,20 @@ fn main() -> std::io::Result<()> {
             "\n",
         );
         let candidate = |repo_arg: &Path, input: &Path, scope: &Path, output: &Path| {
-            Command::new(&node)
-                .arg(&script)
-                .args(["--helper", "normalize-candidates", "--repo-root"])
-                .arg(repo_arg)
-                .arg("--input")
-                .arg(input)
-                .arg("--in-scope-files")
-                .arg(scope)
-                .arg("--out")
-                .arg(output)
-                .arg("--allow-missing-in-scope")
-                .current_dir(&repo)
-                .env("USERPROFILE", &repo)
-                .output()
+            invoke(
+                "normalize-candidates",
+                &[
+                    "--repo-root".into(),
+                    repo_arg.into(),
+                    "--input".into(),
+                    input.into(),
+                    "--in-scope-files".into(),
+                    scope.into(),
+                    "--out".into(),
+                    output.into(),
+                    "--allow-missing-in-scope".into(),
+                ],
+            )
         };
         fs::write(&output, "previous output")?;
         for (index, prefix) in [repo.clone(), PathBuf::from("~"), PathBuf::from(".")]
@@ -362,8 +363,47 @@ fn main() -> std::io::Result<()> {
                 ));
             }
         }
+        let assessment_name = raw("assessment-", 0xd800);
+        let assessment_path = repo.join(&assessment_name);
+        let replacement_assessment = repo.join(raw("assessment-", 0xfffd));
+        let assessment = r#"{
+            "schemaVersion":1,
+            "patch":{"repository":"example/project","sourceType":"patch_file","base":"base","head":"head","changedFiles":["src/example.ts"],"sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+            "recommendation":"no_op","workflowLabel":"no_op",
+            "impact":{"rating":"low","rationale":"No active path changes."},
+            "regressionLikelihood":{"rating":"low","rationale":"No live effect."},
+            "regressionProtection":{"rating":"strong","rationale":"Fixture validated.","exactHeadChecksPassed":true},
+            "recoverability":{"rating":"easy","rationale":"Local change."},
+            "confidence":{"rating":"high","rationale":"Known fixture."},
+            "applicability":{"status":"no_live_effect","rationale":"Synthetic input."},
+            "statusQuoRisk":{"rating":"low","rationale":"No live effect."},
+            "autoMergeExclusions":[],"affectedRuntimeRoots":[],"materialBoundaries":[],
+            "validation":[{"name":"fixture","status":"passed","protects":"Validator input."}],
+            "unknowns":[],"evidencePlan":[]
+        }"#;
+        fs::write(&assessment_path, assessment)?;
+        fs::write(&replacement_assessment, "replacement assessment sentinel")?;
+        for input in [assessment_path.clone(), PathBuf::from(&assessment_name)] {
+            let child = Command::new(&node)
+                .arg(&script)
+                .args(["--helper", "validate-patch-risk-assessment"])
+                .arg(input)
+                .current_dir(&repo)
+                .output()?;
+            if !child.status.success() || !child.stdout.is_empty() || !child.stderr.is_empty() {
+                return Err(io::Error::other(format!(
+                    "Wide assessment helper failed: {}",
+                    String::from_utf8_lossy(&child.stderr)
+                )));
+            }
+        }
+        if fs::read(&assessment_path)? != assessment.as_bytes()
+            || fs::read(&replacement_assessment)? != b"replacement assessment sentinel"
+        {
+            return Err(io::Error::other("Assessment validation changed its input"));
+        }
         println!(
-            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
+            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
         );
         Ok(())
     }
