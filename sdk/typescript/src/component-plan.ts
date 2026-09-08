@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
 import { z } from "incur";
+import type { ScanAuthMode } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import {
   runReadOnlyCodex,
@@ -40,6 +41,8 @@ export interface ComponentPlan {
 }
 
 export interface ComponentPlanningOptions {
+  /** @internal Authentication already selected by the calling scan. */
+  auth?: ScanAuthMode;
   config?: CodexSecurityConfig;
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;

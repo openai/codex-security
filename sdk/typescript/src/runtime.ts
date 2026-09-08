@@ -1529,23 +1529,24 @@ export async function preparePersistentOutputRoot(
   return root;
 }
 
+const workbenchComparisonSupport = new Map<
+  string,
+  { stdin: boolean; related: boolean }
+>();
+
 export async function runWorkbench(
   options: WorkbenchCommandOptions,
   args: readonly string[],
   input?: string,
 ): Promise<JsonObject> {
-  let stdout: string;
-  try {
+  const script = join(options.pluginRoot, "scripts", "workbench_db.py");
+  const run = async (
+    arguments_: readonly string[],
+    input?: string,
+  ): Promise<string> => {
     const result = await runCodexCommand(
       { command: options.python },
-      [
-        "-I",
-        "-X",
-        "utf8",
-        "-B",
-        join(options.pluginRoot, "scripts", "workbench_db.py"),
-        ...args,
-      ],
+      ["-I", "-X", "utf8", "-B", script, ...arguments_],
       pluginHelperEnvironment(options.environment),
       input,
       options.signal,
@@ -1557,7 +1558,41 @@ export async function runWorkbench(
           `Workbench exited with status ${result.exitCode}.`,
       );
     }
-    stdout = result.stdout;
+    return result.stdout;
+  };
+  let stdout: string;
+  try {
+    const arguments_ = [...args];
+    const matchesStdinIndex = arguments_.indexOf("--matches-json-stdin");
+    if (
+      arguments_[0] === "save-scan-comparison" &&
+      matchesStdinIndex !== -1 &&
+      input !== undefined
+    ) {
+      const key = JSON.stringify([options.python, script]);
+      let support = workbenchComparisonSupport.get(key);
+      if (support === undefined) {
+        const help = await run(["save-scan-comparison", "--help"]);
+        options.signal?.throwIfAborted();
+        support = {
+          stdin: help.includes("--matches-json-stdin"),
+          related: help
+            .replace(/\s+/gu, " ")
+            .includes("Comparison payload supports related findings."),
+        };
+        workbenchComparisonSupport.set(key, support);
+      }
+      const comparison: unknown = JSON.parse(input);
+      if (isRecord(comparison) && "related" in comparison && !support.related) {
+        delete comparison["related"];
+        input = JSON.stringify(comparison);
+      }
+      if (!support.stdin) {
+        arguments_.splice(matchesStdinIndex, 1, "--matches-json", input);
+        input = undefined;
+      }
+    }
+    stdout = await run(arguments_, input);
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);

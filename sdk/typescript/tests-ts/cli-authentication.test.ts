@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   realpath,
@@ -743,10 +744,11 @@ describe("CLI authentication", () => {
     const tildeHome = join(root, ".codex-security-home");
     const mountedHome = join(root, "mounted-codex-home");
     const defaultHome = join(root, ".codex");
-    await mkdir(relativeHome, { recursive: true });
-    await mkdir(tildeHome, { recursive: true });
-    await mkdir(mountedHome, { recursive: true });
-    await mkdir(defaultHome, { recursive: true });
+    await mkdir(repository, { mode: 0o700 });
+    await mkdir(relativeHome, { mode: 0o700 });
+    await mkdir(tildeHome, { mode: 0o700 });
+    await mkdir(mountedHome, { mode: 0o700 });
+    await mkdir(defaultHome, { mode: 0o700 });
     try {
       for (const [configuredHome, expectedHome, userHome] of [
         [".codex-security-home", relativeHome, root],
@@ -759,25 +761,34 @@ describe("CLI authentication", () => {
               ["   ", defaultHome, root],
             ] as const)),
       ] as const) {
-        const credentialHome = join(
-          expectedHome,
-          "state",
-          "plugins",
-          "codex-security",
-          "codex-home",
-        );
+        const credentialAncestors = [
+          join(expectedHome, "state"),
+          join(expectedHome, "state", "plugins"),
+          join(expectedHome, "state", "plugins", "codex-security"),
+          join(
+            expectedHome,
+            "state",
+            "plugins",
+            "codex-security",
+            "codex-home",
+          ),
+        ];
+        const credentialHome = credentialAncestors.at(-1)!;
         await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+        if (process.platform !== "win32") {
+          for (const path of [expectedHome, ...credentialAncestors]) {
+            await chmod(path, 0o700);
+          }
+        }
         await writeFile(
           join(credentialHome, "config.toml"),
           'cli_auth_credentials_store = "file"\n',
         );
         const environment = {
-          ...process.env,
+          PATH: process.env["PATH"],
           HOME: userHome,
           USERPROFILE: userHome,
           CODEX_HOME: configuredHome,
-          OPENAI_API_KEY: undefined,
-          CODEX_API_KEY: undefined,
         };
         const run = (args: string[], input?: string): number | null =>
           spawnSync(
@@ -803,8 +814,9 @@ describe("CLI authentication", () => {
           {
             cwd: repository,
             env: {
-              ...process.env,
-              CODEX_HOME: undefined,
+              PATH: process.env["PATH"],
+              HOME: root,
+              USERPROFILE: root,
               Codex_Home: "   ",
             },
             encoding: "utf8",

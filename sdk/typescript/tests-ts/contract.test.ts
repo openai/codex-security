@@ -510,7 +510,7 @@ describe("canonical scan contract", () => {
       temporaryDirectories.push(root);
       const parent = join(root, "actual-parent");
       const linkedParent = join(root, "linked-parent");
-      await mkdir(parent);
+      await mkdir(parent, { mode: 0o700 });
       const scanDir = join(parent, "scan");
       await cp(EXAMPLE, scanDir, { recursive: true });
       if (process.platform !== "win32") await chmod(scanDir, 0o700);

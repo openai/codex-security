@@ -2,13 +2,15 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, win32 } from "node:path";
+import { join, relative, win32 } from "node:path";
+import { parse, stringify } from "smol-toml";
 import {
   Codex,
   type CodexOptions,
@@ -18,6 +20,7 @@ import {
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
 import {
+  comparisonForScan,
   comparisonEnvironment,
   matchCompletedScan,
   matchScanFindings,
@@ -84,12 +87,289 @@ describe("semantic scan comparison", () => {
   test("uses comparison attribution for CLI comparison turns", async () => {
     const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
     await matchScanFindingsInternal(
-      { before: [], after: [] },
+      { before: [finding("before")], after: [finding("after")] },
       { codex },
       { surface: "cli" },
     );
     expect(calls.threadOptions?.threadSource).toBe("security_scan_comparison");
   });
+
+  test.each([
+    [
+      "OPENAI_API_KEY",
+      { OPENAI_API_KEY: "synthetic-openai-key" },
+      "synthetic-openai-key",
+    ],
+    [
+      "CODEX_API_KEY",
+      { CODEX_API_KEY: "synthetic-codex-key" },
+      "synthetic-codex-key",
+    ],
+    [
+      "OPENAI_API_KEY precedence",
+      {
+        OPENAI_API_KEY: "synthetic-openai-key",
+        CODEX_API_KEY: "synthetic-codex-key",
+      },
+      "synthetic-openai-key",
+    ],
+    [
+      "blank OPENAI_API_KEY fallback",
+      { OPENAI_API_KEY: " \t ", CODEX_API_KEY: "synthetic-codex-key" },
+      "synthetic-codex-key",
+    ],
+    ["no environment key", {}, undefined],
+  ] as const)(
+    "supplies %s authentication to Codex matching",
+    async (_name, keys, expected) => {
+      const home = await mkdtemp(
+        join(tmpdir(), "codex-security-matcher-auth-"),
+      );
+      temporaryDirectories.push(home);
+      let captured: CodexOptions | undefined;
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, options) {
+        captured = (this as unknown as { options: CodexOptions }).options;
+        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+              CODEX_SECURITY_STATE_DIR: join(home, "state"),
+              ...keys,
+            },
+            workingDirectory: home,
+          },
+        );
+        expect(startThread).toHaveBeenCalledTimes(1);
+        expect(captured?.apiKey).toBe(expected);
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test.each(["home", "profile", "overrides", "override-away"])(
+    "preserves native command auth selection from %s",
+    async (selection) => {
+      const home = await mkdtemp(
+        join(tmpdir(), "codex-security-command-comparison-"),
+      );
+      temporaryDirectories.push(home);
+      const commandAuth = selection !== "override-away";
+      const provider = {
+        name: "Synthetic",
+        wire_api: "responses",
+        base_url: "https://provider.example/v1",
+        auth: {
+          command: "./synthetic-auth",
+          args: ["original"],
+          refresh_interval_ms: 1234,
+        },
+      };
+      const config = {
+        model_provider:
+          selection === "overrides" || selection === "profile"
+            ? "openai"
+            : "synthetic.provider",
+        model_providers: { "synthetic.provider": provider },
+      };
+      const contents = stringify(config);
+      await writeFile(join(home, "config.toml"), contents);
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: relative(process.cwd(), home),
+        OPENAI_API_KEY: "synthetic-ambient-key",
+        CODEX_API_KEY: "synthetic-other-key",
+      };
+      let captured: CodexOptions | undefined;
+      let threadOptions: ThreadOptions | undefined;
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, options) {
+        captured = (this as unknown as { options: CodexOptions }).options;
+        threadOptions = options;
+        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment,
+            workingDirectory: home,
+            ...(selection === "overrides"
+              ? {
+                  config: {
+                    codexOverrides: {
+                      model_provider: "synthetic.provider",
+                      model_providers: {
+                        "synthetic.provider": {
+                          auth: { args: ["override"], cwd: "~/helpers" },
+                        },
+                      },
+                    },
+                  },
+                }
+              : selection === "override-away"
+                ? { config: { codexOverrides: { model_provider: "openai" } } }
+                : selection === "profile"
+                  ? {
+                      config: {
+                        codexOverrides: {
+                          profile: "review",
+                          profiles: {
+                            review: { model_provider: "synthetic.provider" },
+                          },
+                        },
+                      },
+                    }
+                  : {}),
+          },
+        );
+        expect(captured?.env?.["CODEX_HOME"]).toBe(home);
+        if (selection === "profile")
+          expect(captured?.config?.["profile"]).toBe("review");
+        if (commandAuth) {
+          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+          expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+          expect(captured?.apiKey).toBeUndefined();
+          expect(parse(captured!.configOverrides![0]!)).toEqual({
+            model_providers: {
+              "synthetic.provider": {
+                ...provider,
+                auth: {
+                  ...provider.auth,
+                  cwd: selection === "overrides" ? "~/helpers" : home,
+                  args: selection === "overrides" ? ["override"] : ["original"],
+                },
+              },
+            },
+          });
+        } else {
+          expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
+            "synthetic-ambient-key",
+          );
+          expect(captured?.configOverrides).toBeUndefined();
+        }
+        expect(threadOptions).toMatchObject({
+          workingDirectory: home,
+          sandboxMode: "read-only",
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+        });
+        expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+          contents,
+        );
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test("does not substitute managed login for an explicitly configured command provider", async () => {
+    const home = await mkdtemp(join(tmpdir(), "codex-security-command-login-"));
+    temporaryDirectories.push(home);
+    const state = join(home, "state");
+    await mkdir(join(state, "codex-home"), { recursive: true });
+    // Invalid auth remains native Codex's responsibility, without login fallback.
+    await writeFile(
+      join(home, "config.toml"),
+      'model_provider="openai"\nprofile="review"\n[profiles.review]\nmodel_provider="synthetic"\n[model_providers.synthetic.auth]\ncommand=""\n',
+    );
+    const environment = { CODEX_HOME: home, CODEX_SECURITY_STATE_DIR: state };
+    expect(
+      await comparisonEnvironment(environment, async () => {
+        throw new Error("Must not probe managed login");
+      }),
+    ).toEqual(environment);
+  });
+
+  test.each(["chatgpt", "api-key"] as const)(
+    "rejects ambient command auth that conflicts with explicit %s authentication",
+    async (auth) => {
+      const home = await mkdtemp(
+        join(tmpdir(), "codex-security-auth-conflict-"),
+      );
+      temporaryDirectories.push(home);
+      const provider = {
+        name: "Synthetic",
+        base_url: "https://provider.example/v1",
+        wire_api: "responses",
+        auth: { command: "./synthetic-auth" },
+      };
+      const config = {
+        model_provider: "synthetic",
+        model_providers: { synthetic: provider },
+      };
+      await writeFile(join(home, "config.toml"), stringify(config));
+      const options = {
+        auth,
+        config: {},
+        environment: {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          OPENAI_API_KEY: "synthetic-selected-key",
+        },
+        workingDirectory: home,
+      };
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(
+        (options) =>
+          codex.startThread(options!) as ReturnType<Codex["startThread"]>,
+      );
+      try {
+        await expect(
+          matchScanFindings(
+            { before: [finding("before")], after: [finding("after")] },
+            options,
+          ),
+        ).rejects.toThrow("conflicts with command authentication");
+        expect(startThread).not.toHaveBeenCalled();
+
+        // A complete command provider selected by the caller keeps scan precedence.
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          { ...options, config: { codexOverrides: config } },
+        );
+        expect(startThread).toHaveBeenCalledTimes(1);
+        startThread.mockClear();
+
+        // An ambient profile must not replace that explicitly selected provider.
+        await writeFile(
+          join(home, "config.toml"),
+          stringify({
+            profile: "ambient",
+            profiles: { ambient: { model_provider: "other" } },
+            model_providers: { other: provider },
+          }),
+        );
+        await expect(
+          matchScanFindings(
+            { before: [finding("before")], after: [finding("after")] },
+            { ...options, config: { codexOverrides: config } },
+          ),
+        ).rejects.toThrow("conflicts with command authentication");
+        expect(startThread).not.toHaveBeenCalled();
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
 
   test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
     const home = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
@@ -129,7 +409,7 @@ describe("semantic scan comparison", () => {
     });
     try {
       await matchScanFindings(
-        { before: [], after: [] },
+        { before: [finding("before")], after: [finding("after")] },
         {
           environment,
           workingDirectory: home,
@@ -218,7 +498,7 @@ describe("semantic scan comparison", () => {
     const provider = {
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       CODEX_SECURITY_SCAN_ID: "scan",
-      CODEX_HOME: "/provider-home",
+      CODEX_HOME: join(root, "provider-home"),
       CODEX_CLI_PATH: "/compatible-codex",
       CODEX_SAFETY_IDENTIFIER: "synthetic-user",
       FIREWORKS_API_KEY: "provider-key",
@@ -453,8 +733,23 @@ describe("semantic scan comparison", () => {
     });
     expect(calls.turnOptions).toMatchObject({ signal: controller.signal });
     expect(calls.turnOptions?.outputSchema).toMatchObject({
-      required: ["matches", "uncertain"],
+      required: ["matches", "uncertain", "related", "request"],
     });
+    const strictObjects = (schema: unknown): void => {
+      if (schema === null || typeof schema !== "object") return;
+      const object = schema as Record<string, unknown>;
+      if (object["type"] === "object") {
+        expect(object["required"]).toEqual(
+          Object.keys(object["properties"] as object),
+        );
+        expect(object["additionalProperties"]).toBe(false);
+      }
+      for (const value of Object.values(object)) strictObjects(value);
+    };
+    strictObjects(calls.turnOptions?.outputSchema);
+    expect(JSON.stringify(calls.turnOptions?.outputSchema)).toContain(
+      '"type":"null"',
+    );
     expect(calls.prompt).toContain(
       "same underlying root cause and remediation",
     );
@@ -468,6 +763,10 @@ describe("semantic scan comparison", () => {
 
   test("uses the requested scan model and effort for component matching", async () => {
     const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+    const input = {
+      before: [finding("before")],
+      after: [finding("after")],
+    };
     const config = {
       codexOverrides: {
         model: "configured-model",
@@ -475,98 +774,176 @@ describe("semantic scan comparison", () => {
         model_provider: "synthetic-provider",
       },
     };
-    await matchScanFindings({ before: [], after: [] }, { config, codex });
+    await matchScanFindings(input, { config, codex });
     expect(calls.threadOptions).toMatchObject({
       model: "configured-model",
       modelReasoningEffort: "high",
       sandboxMode: "read-only",
       networkAccessEnabled: false,
     });
-    await matchScanFindings(
-      { before: [], after: [] },
-      { config, codex, model: "explicit-model", reasoningEffort: "low" },
-    );
+    await matchScanFindings(input, {
+      config,
+      codex,
+      model: "explicit-model",
+      reasoningEffort: "max",
+    });
     expect(calls.threadOptions).toMatchObject({
       model: "explicit-model",
-      modelReasoningEffort: "low",
+      modelReasoningEffort: "max",
     });
   });
 
-  test("matches open and dismissed findings from the same target", async () => {
+  test("rejects a confirmed match with conflicting same-scan uncertainty", async () => {
     const open = { findingId: "open", occurrenceId: "old-open" };
     const dismissed = { findingId: "dismissed", occurrenceId: "old-dismissed" };
     const after = { findingId: "renamed", occurrenceId: "new-renamed" };
     const commands: Array<{ args: readonly string[]; input?: string }> = [];
     let input: ScanComparisonInput | undefined;
+    await expect(
+      matchCompletedScan({
+        scanId: "current",
+        repository: "/repository",
+        previousFindings: [open],
+        falsePositives: [{ findingId: "dismissed", sourceScanId: "prior" }],
+        findings: [after],
+        environment: {
+          CODEX_HOME: "/provider-home",
+          CODEX_SECURITY_SCAN_ID: "current",
+          FIREWORKS_API_KEY: "synthetic-provider-key",
+        },
+        async workbench(args, commandInput) {
+          commands.push({ args, input: commandInput });
+          return args[0] === "list-unmatched-scan-pairs"
+            ? {
+                batches: [
+                  {
+                    afterScanId: "current",
+                    afterFindings: [after],
+                    knownFindingGroups: [["dismissed", "historical-alias"]],
+                    beforeScans: [
+                      {
+                        scanId: "another-target",
+                        findings: [{ ...dismissed, occurrenceId: "foreign" }],
+                      },
+                      { scanId: "prior", findings: [open, dismissed] },
+                    ],
+                  },
+                ],
+              }
+            : {};
+        },
+        async matchFindings(value, options) {
+          input = value;
+          expect(options).toMatchObject({
+            environment: {
+              CODEX_HOME: "/provider-home",
+              CODEX_SECURITY_SCAN_ID: "current",
+            },
+          });
+          const response = {
+            matches: [
+              {
+                beforeOccurrenceIds: ["old-dismissed"],
+                afterOccurrenceIds: ["new-renamed"],
+                confidence: "high",
+                reason: "Same dismissed root cause.",
+              },
+            ],
+            uncertain: [
+              {
+                beforeOccurrenceId: "old-open",
+                afterOccurrenceId: "new-renamed",
+                reason: "Possible match.",
+              },
+            ],
+          };
+          return await matchScanFindings(value, {
+            ...options,
+            codex: fakeCodex(response).codex,
+          });
+        },
+      }),
+    ).rejects.toThrow("conflicting confirmed and uncertain findings");
+    expect(input).toEqual({
+      before: [open, dismissed],
+      after: [after],
+      knownFindingGroups: [["dismissed", "historical-alias"]],
+    });
+    expect(commands.map(({ args: [command] }) => command)).toEqual([
+      "list-unmatched-scan-pairs",
+    ]);
+  });
+
+  test("compares complete selected scans before caching automatic matches", async () => {
+    const firstShared = { findingId: "shared", occurrenceId: "first-shared" };
+    const firstOther = { findingId: "other", occurrenceId: "first-other" };
+    const latestShared = { findingId: "shared", occurrenceId: "latest-shared" };
+    const unselected = { findingId: "unselected", occurrenceId: "unselected" };
+    const after = { findingId: "renamed", occurrenceId: "current-renamed" };
+    const saved = new Map<string, ScanComparisonResult>();
+    let observed: ScanComparisonInput | undefined;
+    const model = fakeCodex({
+      matches: [],
+      uncertain: [
+        {
+          beforeOccurrenceId: latestShared.occurrenceId,
+          afterOccurrenceId: after.occurrenceId,
+          reason: "The synthetic control may have moved.",
+        },
+      ],
+    });
+
     await matchCompletedScan({
       scanId: "current",
       repository: "/repository",
-      previousFindings: [open],
-      falsePositives: [{ findingId: "dismissed", sourceScanId: "prior" }],
+      previousFindings: [firstOther, latestShared],
+      falsePositives: [],
       findings: [after],
-      environment: {
-        CODEX_HOME: "/provider-home",
-        CODEX_SECURITY_SCAN_ID: "current",
-        FIREWORKS_API_KEY: "synthetic-provider-key",
-      },
       async workbench(args, commandInput) {
-        commands.push({ args, input: commandInput });
-        return args[0] === "list-unmatched-scan-pairs"
-          ? {
-              batches: [
-                {
-                  afterScanId: "current",
-                  afterFindings: [after],
-                  beforeScans: [
-                    {
-                      scanId: "another-target",
-                      findings: [{ ...dismissed, occurrenceId: "foreign" }],
-                    },
-                    { scanId: "prior", findings: [open, dismissed] },
-                  ],
-                },
-              ],
-            }
-          : {};
+        if (args[0] === "list-unmatched-scan-pairs") {
+          return {
+            batches: [
+              {
+                afterScanId: "current",
+                afterFindings: [after],
+                beforeScans: [
+                  { scanId: "unselected", findings: [unselected] },
+                  { scanId: "first", findings: [firstShared, firstOther] },
+                  { scanId: "latest", findings: [latestShared] },
+                ],
+              },
+            ],
+          };
+        }
+        saved.set(args[2]!, JSON.parse(commandInput!) as ScanComparisonResult);
+        return {};
       },
-      async matchFindings(value, options) {
-        input = value;
-        expect(options).toMatchObject({
-          environment: {
-            CODEX_HOME: "/provider-home",
-            CODEX_SECURITY_SCAN_ID: "current",
-          },
-        });
-        return {
-          matches: [
-            {
-              beforeOccurrenceIds: ["old-dismissed"],
-              afterOccurrenceIds: ["new-renamed"],
-              confidence: "high",
-              reason: "Same dismissed root cause.",
-            },
-          ],
-          uncertain: [
-            {
-              beforeOccurrenceId: "old-open",
-              afterOccurrenceId: "new-renamed",
-              reason: "Possible match.",
-            },
-          ],
-        };
+      matchFindings(input, options) {
+        observed = input;
+        return matchScanFindings(input, { ...options, codex: model.codex });
       },
     });
-    expect(input).toEqual({ before: [open, dismissed], after: [after] });
-    expect(commands.map(({ args: [command] }) => command)).toEqual([
-      "list-unmatched-scan-pairs",
-      "save-scan-comparison",
-    ]);
-    expect(commands[1]!.args.at(-1)).toBe("--matches-json-stdin");
-    const saved = JSON.parse(commands[1]!.input!) as ScanComparisonResult;
-    expect(
-      saved.matches.map(({ beforeOccurrenceIds }) => beforeOccurrenceIds),
-    ).toEqual([["old-dismissed"]]);
-    expect(saved.uncertain).toEqual([]);
+
+    expect(observed).toEqual({
+      before: [firstShared, firstOther, latestShared],
+      after: [after],
+    });
+    expect([...saved.keys()]).toEqual(["first", "latest"]);
+    for (const [scanId, occurrenceId] of [
+      ["first", firstShared.occurrenceId],
+      ["latest", latestShared.occurrenceId],
+    ] as const) {
+      expect(saved.get(scanId)).toEqual({
+        matches: [],
+        uncertain: [
+          {
+            beforeOccurrenceId: occurrenceId,
+            afterOccurrenceId: after.occurrenceId,
+            reason: "The synthetic control may have moved.",
+          },
+        ],
+      });
+    }
   });
 
   test.each([
@@ -589,7 +966,7 @@ describe("semantic scan comparison", () => {
         occurrenceId: "new",
       };
       let calls = 0;
-      let modelCalled = false;
+      const model = fakeCodex({ matches: [], uncertain: [] });
       await matchCompletedScan({
         scanId: "current",
         repository: "/repository",
@@ -612,37 +989,264 @@ describe("semantic scan comparison", () => {
               }
             : {};
         },
-        async matchFindings() {
-          modelCalled = true;
-          return { matches: [], uncertain: [] };
-        },
+        matchFindings: (input, options) =>
+          matchScanFindings(input, { ...options, codex: model.codex }),
       });
       expect(calls).toBe(expectedCalls);
-      expect(modelCalled).toBe(expectedModel);
+      expect(model.calls.prompt !== undefined).toBe(expectedModel);
+    },
+  );
+
+  test.each(["split", "combined", "confirmed alias"] as const)(
+    "retains known identities when a later finding is %s",
+    async (scenario) => {
+      const oldA = { findingId: "identity-a", occurrenceId: "old-a" };
+      const oldB = { findingId: "identity-b", occurrenceId: "old-b" };
+      const newA = { findingId: "identity-a", occurrenceId: "new-a" };
+      const newB = { findingId: "identity-b", occurrenceId: "new-b" };
+      const before = scenario === "combined" ? [oldA, oldB] : [oldA];
+      const after =
+        scenario === "split"
+          ? [newA, newB]
+          : scenario === "combined"
+            ? [newA]
+            : [newB];
+      const knownFindingGroups =
+        scenario === "confirmed alias"
+          ? [["identity-a", "identity-b"]]
+          : undefined;
+      const model = fakeCodex({
+        matches: [
+          {
+            beforeOccurrenceIds: before.map(({ occurrenceId }) => occurrenceId),
+            afterOccurrenceIds: after.map(({ occurrenceId }) => occurrenceId),
+            confidence: "high",
+            reason: "The scan split or combined the same defective control.",
+          },
+        ],
+        uncertain: [],
+      });
+      const saved: ScanComparisonResult[] = [];
+      await matchCompletedScan({
+        scanId: "current",
+        repository: "/repository",
+        previousFindings: before,
+        falsePositives: [],
+        findings: after,
+        async workbench(args, commandInput) {
+          if (args[0] === "list-unmatched-scan-pairs") {
+            return {
+              batches: [
+                {
+                  afterScanId: "current",
+                  afterFindings: after,
+                  beforeScans: [{ scanId: "prior", findings: before }],
+                  knownFindingGroups,
+                },
+              ],
+            };
+          }
+          saved.push(JSON.parse(commandInput!) as ScanComparisonResult);
+          return {};
+        },
+        async matchFindings(input, options) {
+          expect(input).toEqual({
+            before,
+            after,
+            ...(knownFindingGroups === undefined ? {} : { knownFindingGroups }),
+          });
+          return await matchScanFindings(input, {
+            ...options,
+            codex: model.codex,
+          });
+        },
+      });
+      expect(model.calls.prompt !== undefined).toBe(
+        scenario !== "confirmed alias",
+      );
+      expect(saved).toEqual([
+        {
+          matches: [
+            expect.objectContaining({
+              beforeOccurrenceIds: before.map(
+                ({ occurrenceId }) => occurrenceId,
+              ),
+              afterOccurrenceIds: after.map(({ occurrenceId }) => occurrenceId),
+            }),
+          ],
+          uncertain: [],
+        },
+      ]);
+    },
+  );
+
+  test.each(["new", "resolved", "split", "combined"] as const)(
+    "preserves deterministic matches while reconciling a %s issue",
+    async (scenario) => {
+      const oldA = { findingId: "identity-a", occurrenceId: "old-a" };
+      const oldB = { findingId: "identity-b", occurrenceId: "old-b" };
+      const newA = { findingId: "identity-a", occurrenceId: "new-a" };
+      const newB = { findingId: "identity-b", occurrenceId: "new-b" };
+      const before =
+        scenario === "resolved" || scenario === "combined"
+          ? [oldA, oldB]
+          : [oldA];
+      const after =
+        scenario === "new" || scenario === "split" ? [newA, newB] : [newA];
+      const extendsKnown = scenario === "split" || scenario === "combined";
+      const saved: ScanComparisonResult[] = [];
+      await matchCompletedScan({
+        scanId: "current",
+        repository: "/repository",
+        previousFindings: before,
+        falsePositives: [],
+        findings: after,
+        async workbench(args, commandInput) {
+          if (args[0] === "list-unmatched-scan-pairs")
+            return {
+              batches: [
+                {
+                  afterScanId: "current",
+                  afterFindings: after,
+                  beforeScans: [{ scanId: "prior", findings: before }],
+                },
+              ],
+            };
+          saved.push(JSON.parse(commandInput!) as ScanComparisonResult);
+          return {};
+        },
+        async matchFindings(input, options) {
+          const response = {
+            matches: extendsKnown
+              ? [
+                  {
+                    beforeOccurrenceIds: [
+                      scenario === "split"
+                        ? oldA.occurrenceId
+                        : oldB.occurrenceId,
+                    ],
+                    afterOccurrenceIds: [
+                      scenario === "split"
+                        ? newB.occurrenceId
+                        : newA.occurrenceId,
+                    ],
+                    confidence: "high",
+                    reason: "The same control was split or combined.",
+                  },
+                ]
+              : [],
+            uncertain: extendsKnown
+              ? []
+              : [
+                  {
+                    beforeOccurrenceId: oldA.occurrenceId,
+                    afterOccurrenceId: newA.occurrenceId,
+                    reason: "The model omitted the proven identity.",
+                  },
+                ],
+            related:
+              scenario === "resolved"
+                ? []
+                : [
+                    {
+                      beforeOccurrenceId: oldA.occurrenceId,
+                      afterOccurrenceId:
+                        scenario === "new"
+                          ? newB.occurrenceId
+                          : newA.occurrenceId,
+                      reason: "A related control.",
+                    },
+                  ],
+          };
+          return await matchScanFindings(input, {
+            ...options,
+            codex: fakeCodex(response).codex,
+          });
+        },
+      });
+      expect(saved).toHaveLength(1);
+      expect(saved[0]!.matches).toHaveLength(1);
+      expect(new Set(saved[0]!.matches[0]!.beforeOccurrenceIds)).toEqual(
+        new Set(
+          (extendsKnown ? before : [oldA]).map(
+            ({ occurrenceId }) => occurrenceId,
+          ),
+        ),
+      );
+      expect(new Set(saved[0]!.matches[0]!.afterOccurrenceIds)).toEqual(
+        new Set(
+          (extendsKnown ? after : [newA]).map(
+            ({ occurrenceId }) => occurrenceId,
+          ),
+        ),
+      );
+      expect(saved[0]!.uncertain).toEqual([]);
+      expect(saved[0]!.related).toHaveLength(scenario === "new" ? 1 : 0);
     },
   );
 
   test("rejects malformed model JSON", async () => {
     const { codex } = fakeCodex("not-json");
     await expect(
-      matchScanFindings({ before: [], after: [] }, { codex }),
+      matchScanFindings(
+        { before: [finding("before")], after: [finding("after")] },
+        { codex },
+      ),
     ).rejects.toThrow("invalid JSON");
+  });
+
+  test("does not start Codex when either scan has no findings", async () => {
+    const codex: NonNullable<ScanComparisonOptions["codex"]> = {
+      startThread() {
+        throw new Error("No model is needed.");
+      },
+    };
+    for (const input of [
+      { before: [], after: [finding("after")] },
+      { before: [finding("before")], after: [] },
+    ]) {
+      expect(await matchScanFindings(input, { codex })).toEqual({
+        matches: [],
+        uncertain: [],
+      });
+    }
+  });
+
+  test.each([
+    ["empty", { before: [finding(" ")], after: [] }],
+    [
+      "same-scan duplicate",
+      { before: [finding("duplicate"), finding("duplicate")], after: [] },
+    ],
+    [
+      "cross-scan duplicate",
+      {
+        before: [finding("duplicate")],
+        after: [finding("duplicate")],
+      },
+    ],
+  ])("rejects %s occurrence IDs before matching", async (_, input) => {
+    const codex: NonNullable<ScanComparisonOptions["codex"]> = {
+      startThread() {
+        throw new Error("No model should start for invalid input.");
+      },
+    };
+
+    await expect(matchScanFindings(input, { codex })).rejects.toThrow(
+      "must be nonempty and globally unique",
+    );
   });
 
   test("allows cross-history uncertainty without relaxing two-scan matching", async () => {
     const input: ScanComparisonInput = {
-      before: [finding("before-confirmed"), finding("before-uncertain")],
-      after: [finding("after-shared")],
-    };
-    const response = {
-      matches: [
-        {
-          beforeOccurrenceIds: ["before-confirmed"],
-          afterOccurrenceIds: ["after-shared"],
-          confidence: "high",
-          reason: "Confirmed in one historical scan.",
-        },
+      before: [
+        { occurrenceId: "before-confirmed", findingId: "shared" },
+        { occurrenceId: "before-uncertain", findingId: "other" },
       ],
+      after: [{ occurrenceId: "after-shared", findingId: "shared" }],
+    };
+    const modelResponse = {
+      matches: [],
       uncertain: [
         {
           beforeOccurrenceId: "before-uncertain",
@@ -653,14 +1257,231 @@ describe("semantic scan comparison", () => {
     } satisfies ScanComparisonResult;
 
     await expect(
-      matchScanFindings(input, { codex: fakeCodex(response).codex }),
+      matchScanFindings(input, { codex: fakeCodex(modelResponse).codex }),
     ).rejects.toThrow("invalid uncertain pair");
+    const response = await matchScanFindings(input, {
+      codex: fakeCodex(modelResponse).codex,
+      allowHistoricalUncertainty: true,
+    });
+    expect(response).toEqual({
+      matches: [
+        {
+          beforeOccurrenceIds: ["before-confirmed"],
+          afterOccurrenceIds: ["after-shared"],
+          confidence: "high",
+          reason:
+            "The findings share a stable identity or a previously confirmed link.",
+        },
+      ],
+      uncertain: modelResponse.uncertain,
+    });
+    expect(comparisonForScan(response, [input.before[0]!])).toEqual({
+      matches: response.matches,
+      uncertain: [],
+    });
+    expect(comparisonForScan(response, [input.before[1]!])).toEqual({
+      matches: [],
+      uncertain: modelResponse.uncertain,
+    });
+    expect(() => comparisonForScan(response, input.before)).toThrow(
+      "conflicting confirmed and uncertain findings",
+    );
+  });
+
+  test("honors confirmed historical groups and preserves distinct related findings", async () => {
+    const input = {
+      before: [
+        { occurrenceId: "before-known", findingId: "known-a" },
+        { occurrenceId: "before-related", findingId: "related-a" },
+      ],
+      after: [
+        { occurrenceId: "after-known", findingId: "known-b" },
+        { occurrenceId: "after-related", findingId: "related-b" },
+      ],
+      knownFindingGroups: [["known-a", "known-b"]],
+    };
+    const response = {
+      matches: [
+        {
+          beforeOccurrenceIds: ["before-known"],
+          afterOccurrenceIds: ["after-known"],
+          confidence: "high" as const,
+          reason: "Previously confirmed root cause.",
+        },
+      ],
+      uncertain: [],
+      related: [
+        {
+          beforeOccurrenceId: "before-related",
+          afterOccurrenceId: "after-related",
+          reason: "Related controls remain independently vulnerable.",
+        },
+      ],
+    };
+    const { codex, calls } = fakeCodex(response);
+
+    expect(await matchScanFindings(input, { codex })).toEqual(response);
+    expect(JSON.parse(calls.prompt!.split("\n").at(-1)!)).toMatchObject({
+      findings: {
+        before: [
+          { occurrenceId: "before-known", issueId: "known-a" },
+          { occurrenceId: "before-related", issueId: "related-a" },
+        ],
+      },
+    });
+  });
+
+  test.each([
+    ["confirmed aliases", ["a"], ["b"], [["a", "b"]]],
+    [
+      "overlapping aliases",
+      ["a"],
+      ["c"],
+      [
+        ["a", "b"],
+        ["b", "c"],
+      ],
+    ],
+    ["repeated stable identities", ["same", "same"], ["same", "same"], []],
+  ] as const)(
+    "confirms %s without starting Codex",
+    async (_scenario, before, after, knownFindingGroups) => {
+      const input = {
+        before: before.map((findingId, index) => ({
+          occurrenceId: `before-${index}`,
+          findingId,
+        })),
+        after: after.map((findingId, index) => ({
+          occurrenceId: `after-${index}`,
+          findingId,
+        })),
+        knownFindingGroups,
+      };
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      expect(await matchScanFindings(input, { codex })).toEqual({
+        matches: [
+          {
+            beforeOccurrenceIds: input.before.map(
+              ({ occurrenceId }) => occurrenceId,
+            ),
+            afterOccurrenceIds: input.after.map(
+              ({ occurrenceId }) => occurrenceId,
+            ),
+            confidence: "high",
+            reason: expect.any(String),
+          },
+        ],
+        uncertain: [],
+      });
+      expect(calls.prompt).toBeUndefined();
+    },
+  );
+
+  test("never accepts uncertainty between occurrences of the same stable finding", async () => {
+    const input = {
+      before: [{ occurrenceId: "before", findingId: "shared-identity" }],
+      after: [{ occurrenceId: "after", findingId: "shared-identity" }],
+    };
+    const response = {
+      matches: [],
+      uncertain: [
+        {
+          beforeOccurrenceId: "before",
+          afterOccurrenceId: "after",
+          reason: "Incorrectly treats the same stable identity as uncertain.",
+        },
+      ],
+    };
+
+    const requiringModel = {
+      before: [
+        ...input.before,
+        { occurrenceId: "other-before", findingId: "other-before" },
+      ],
+      after: [
+        ...input.after,
+        { occurrenceId: "other-after", findingId: "other-after" },
+      ],
+    };
+    const contradictory = fakeCodex(response);
     expect(
-      await matchScanFindings(input, {
-        codex: fakeCodex(response).codex,
-        allowHistoricalUncertainty: true,
-      }),
-    ).toEqual(response);
+      await matchScanFindings(requiringModel, { codex: contradictory.codex }),
+    ).toEqual({
+      matches: [
+        {
+          beforeOccurrenceIds: ["before"],
+          afterOccurrenceIds: ["after"],
+          confidence: "high",
+          reason:
+            "The findings share a stable identity or a previously confirmed link.",
+        },
+      ],
+      uncertain: [],
+    });
+    expect(contradictory.calls.prompt).toBeDefined();
+  });
+
+  test("never lets a model split a confirmed historical group", async () => {
+    const input = {
+      before: [
+        { occurrenceId: "before-a", findingId: "known-a" },
+        { occurrenceId: "before-b", findingId: "known-b" },
+      ],
+      after: [{ occurrenceId: "after", findingId: "new" }],
+      knownFindingGroups: [["known-a", "known-b"]],
+    };
+    const response = {
+      matches: [
+        {
+          beforeOccurrenceIds: ["before-a"],
+          afterOccurrenceIds: ["after"],
+          confidence: "high" as const,
+          reason: "Incorrectly separates a confirmed identity.",
+        },
+      ],
+      uncertain: [],
+    };
+
+    const invalid = fakeCodex(response);
+
+    await expect(
+      matchScanFindings(input, { codex: invalid.codex }),
+    ).rejects.toThrow("unknown before occurrence");
+    expect(JSON.parse(invalid.calls.prompt!.split("\n").at(-1)!)).toMatchObject(
+      {
+        findings: {
+          before: [
+            {
+              occurrenceId: "before-b",
+              occurrenceCount: 2,
+              issueId: "known-a",
+            },
+          ],
+        },
+      },
+    );
+
+    const valid = {
+      ...response,
+      matches: [
+        {
+          ...response.matches[0]!,
+          beforeOccurrenceIds: ["before-b"],
+        },
+      ],
+    };
+    expect(
+      await matchScanFindings(input, { codex: fakeCodex(valid).codex }),
+    ).toMatchObject({
+      matches: [
+        {
+          beforeOccurrenceIds: ["before-a", "before-b"],
+          afterOccurrenceIds: ["after"],
+          confidence: "high",
+        },
+      ],
+      uncertain: [],
+    });
   });
 
   const match = (beforeOccurrenceIds = ["before-1"]) => ({
@@ -679,6 +1500,25 @@ describe("semantic scan comparison", () => {
     {
       label: "missing arrays",
       result: {},
+      error: "invalid match result",
+    },
+    {
+      label: "unexpected result fields",
+      result: { matches: [], uncertain: [], unexpected: true },
+      error: "invalid match result",
+    },
+    {
+      label: "blank match reasons",
+      result: { matches: [{ ...match(), reason: " " }], uncertain: [] },
+      error: "invalid match result",
+    },
+    {
+      label: "malformed related pairs",
+      result: {
+        matches: [],
+        uncertain: [],
+        related: [{ ...uncertain(), beforeOccurrenceId: 1 }],
+      },
       error: "invalid match result",
     },
     {
@@ -715,6 +1555,42 @@ describe("semantic scan comparison", () => {
       label: "duplicate uncertain pairs",
       result: { matches: [], uncertain: [uncertain(), uncertain()] },
       error: "duplicate uncertain pair",
+    },
+    {
+      label: "invented related occurrences",
+      result: {
+        matches: [],
+        uncertain: [],
+        related: [uncertain("invented")],
+      },
+      error: "invalid related pair",
+    },
+    {
+      label: "duplicate related pairs",
+      result: {
+        matches: [],
+        uncertain: [],
+        related: [uncertain(), uncertain()],
+      },
+      error: "invalid related pair",
+    },
+    {
+      label: "related pairs that contradict confirmed matches",
+      result: {
+        matches: [match()],
+        uncertain: [],
+        related: [uncertain()],
+      },
+      error: "invalid related pair",
+    },
+    {
+      label: "related pairs that duplicate uncertainty",
+      result: {
+        matches: [],
+        uncertain: [uncertain()],
+        related: [uncertain()],
+      },
+      error: "invalid related pair",
     },
   ])("rejects $label", async ({ result, error }) => {
     const { codex } = fakeCodex(result);

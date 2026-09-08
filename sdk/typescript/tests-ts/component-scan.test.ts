@@ -463,13 +463,19 @@ test.each(["dashboard", "headless", "ci"])(
             presentation === "ci" ? { CI: "true" } : { NO_COLOR: "1" },
         }),
         createSecurity: client(async (_repository, options) => {
-          expect(typeof options.onProgress).toBe(
-            presentation === "dashboard" ? "function" : "undefined",
-          );
+          expect(typeof options.onProgress).toBe("function");
           options.onProgress?.({
             phase: "validation",
             filesCompleted: 2,
             filesTotal: 2,
+          });
+          options.onCost?.({
+            model: "gpt-5.6",
+            inputTokens: 100,
+            cachedInputTokens: 10,
+            cacheWriteInputTokens: 0,
+            outputTokens: 20,
+            estimatedUsd: 0.00123,
           });
           return completed(options);
         }),
@@ -490,6 +496,14 @@ test.each(["dashboard", "headless", "ci"])(
         stderr.text().indexOf("Component scans:"),
       );
     } else expect(stderr.text()).toContain("apps/api completed");
+    if (presentation !== "dashboard") {
+      expect(stderr.text()).toContain(
+        "apps/api validating findings | Files: 2/2",
+      );
+      expect(stderr.text()).toContain(
+        "apps/api | Tokens: 100 input, 10 cached, 20 output | Cost: $0.00123",
+      );
+    }
     expect(
       [...signals.listeners.values()].every(
         (listeners) => listeners.size === 0,
@@ -627,7 +641,45 @@ test("keeps uncertain findings separate even when their fingerprints match", asy
   });
   const saved = await json(summary.findingsPath!);
   expect(saved.findings).toHaveLength(2);
+  expect(
+    saved.findings.map(
+      ({ finding }: { finding: Finding }) => finding.findingId,
+    ),
+  ).toEqual(["same", "same"]);
   expect(saved.deduplication.uncertain).toHaveLength(1);
+});
+
+test("preserves distinct related findings in the component findings artifact", async () => {
+  const paths = await fixture();
+  const reason = "These nearby controls need independent corrections.";
+  const summary = await scan(paths, {
+    components: components.slice(0, 2),
+    matchFindings: matcher(({ before, after }) => ({
+      matches: [],
+      uncertain: [],
+      related: [
+        {
+          beforeOccurrenceId: before[0]!.occurrenceId,
+          afterOccurrenceId: after[0]!.occurrenceId,
+          reason,
+        },
+      ],
+    })),
+  });
+  const saved = await json(summary.findingsPath!);
+
+  expect(saved.findings).toHaveLength(2);
+  expect(saved.deduplication).toMatchObject({
+    confirmedGroups: 0,
+    uncertainPairs: 0,
+    related: [
+      {
+        beforeOccurrenceId: "apps/api",
+        afterOccurrenceId: "apps/web",
+        reason,
+      },
+    ],
+  });
 });
 
 test("retains earlier confirmed matches if later matching fails", async () => {
@@ -1123,6 +1175,7 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
       {
         ...dependencies({ currentDirectory: paths.root, environment }),
         planComponents: async (_repository, options) => {
+          expect(options?.auth).toBe(auth);
           expect(options?.environment).toEqual(expectedEnvironment);
           planned = true;
           return { components: components.slice(0, 2) };
@@ -1132,6 +1185,7 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
           return completed(options);
         }),
         matchFindings: async (_input, options) => {
+          expect(options?.auth).toBe(auth);
           expect(options?.environment).toEqual(expectedEnvironment);
           matched = true;
           return noMatches;

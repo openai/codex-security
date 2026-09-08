@@ -69,6 +69,8 @@ EXPECTED_TABLES = {
     "finding_repositories",
     "finding_triage",
     "finding_workflow_reviews",
+    "finding_severity_assessments",
+    "scan_severity_classifications",
     "finding_workflows",
     "findings",
     "scan_artifacts",
@@ -178,6 +180,54 @@ def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -
         "--message",
         BUDGET_WARNING,
         check=check,
+    )
+
+
+def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
+    tmp_path: Path,
+) -> None:
+    state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path)
+    original = run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]
+    for limit in (0.0055, 0.006):
+        run_workbench(
+            state_dir,
+            "set-scan-cost-limit",
+            "--scan-id",
+            scan_id,
+            "--max-cost-usd",
+            str(limit),
+        )
+    saved = run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]
+    assert saved == {**original, "maxCostUsd": 0.006}
+    assert complete_budget_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "complete"
+    stopped = run_workbench(
+        state_dir,
+        "set-scan-cost-limit",
+        "--scan-id",
+        scan_id,
+        "--max-cost-usd",
+        "1",
+        check=False,
+    )
+    assert stopped["returncode"] != 0
+
+
+@pytest.mark.parametrize("limit", ["0", "-1", "nan", "inf", "0.004", "0.005"])
+def test_cost_limit_rejects_invalid_or_nonincreasing_totals(tmp_path: Path, limit: str) -> None:
+    state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path, mode="standard")
+    result = run_workbench(
+        state_dir,
+        "set-scan-cost-limit",
+        "--scan-id",
+        scan_id,
+        "--max-cost-usd",
+        limit,
+        check=False,
+    )
+    assert result["returncode"] != 0
+    assert (
+        run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]["maxCostUsd"]
+        == 0.005
     )
 
 
@@ -992,7 +1042,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (39,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 

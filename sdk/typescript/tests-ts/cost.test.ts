@@ -19,6 +19,17 @@ import type { ScanActivity } from "../src/scan-activity.js";
 import { readScanLogs } from "../src/scan-logs.js";
 import { sessionParentThreadId } from "../src/scan-sessions.js";
 import type { ScanProgress } from "../src/worker-progress.js";
+import { PLUGIN_ROOT as BUNDLED_PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  childUuid7Thread,
+  higherUuid7Turn,
+  lowerUuid7Turn,
+  ownedPythonUsage,
+  ownedSdkUsage,
+  ownershipRollout,
+  readPythonRolloutUsage,
+  scanThreadId,
+} from "./support/usage-rollout.js";
 
 const temporaryDirectories: string[] = [];
 const parentFields = ["source", "parent_thread_id", "forked_from_id"] as const;
@@ -1107,6 +1118,65 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each([
+    [
+      "keeps a same-millisecond lower UUIDv7 turn in inherited history",
+      [lowerUuid7Turn],
+    ],
+    ["accepts a same-millisecond higher UUIDv7 turn as child-owned", []],
+  ] as const)("%s", async (_name, replayedTurnIds) => {
+    const home = await codexHome();
+    const rolloutPath = await writeSession(
+      home,
+      childUuid7Thread,
+      { input_tokens: 1_100, output_tokens: 110 },
+      scanThreadId,
+    );
+    const rollout = ownershipRollout(replayedTurnIds);
+    await writeFile(
+      rolloutPath,
+      rollout.map((event) => JSON.stringify(event)).join("\n") + "\n",
+    );
+
+    const maxCostUsd = 0.001;
+    const observedCosts: number[] = [];
+    const forwardedEvents: ScanSessionEvent[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd,
+      onCost: ({ estimatedUsd }) => observedCosts.push(estimatedUsd),
+      onSessionEvent: (event) => forwardedEvents.push(event),
+    });
+    tracker.start(scanThreadId);
+    const tracked = await tracker.stop();
+    const python = readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, rolloutPath);
+
+    expect({
+      trackedUsage: tracked.usage,
+      estimatedUsd: tracked.cost?.estimatedUsd,
+      python,
+    }).toEqual({
+      trackedUsage: ownedSdkUsage,
+      estimatedUsd: 0.0008,
+      python: {
+        usage: ownedPythonUsage,
+        warnings: [],
+      },
+    });
+    expect(observedCosts.length).toBeGreaterThan(0);
+    expect(observedCosts.every((cost) => cost < maxCostUsd)).toBe(true);
+    const forwardedTurnIds = forwardedEvents.flatMap(({ event }) => {
+      const payload = event["payload"];
+      return typeof payload === "object" &&
+        payload !== null &&
+        (payload as Record<string, unknown>)["type"] === "task_started"
+        ? [(payload as Record<string, unknown>)["turn_id"]]
+        : [];
+    });
+    expect(forwardedTurnIds).toEqual([higherUuid7Turn]);
+  });
+
   test("forwards actions from this scan's delegated workers only", async () => {
     const home = await codexHome();
     const usage = { input_tokens: 100, output_tokens: 10 };
@@ -1982,6 +2052,39 @@ describe("live scan cost tracking", () => {
     expect(updates).toEqual([0.00625]);
   });
 
+  test.each([undefined, 100, 1_000, 1_500])(
+    "reconciles the parent receipt with worker usage when logged parent tokens are %s",
+    async (parentTokens) => {
+      const home = await codexHome();
+      if (parentTokens !== undefined) {
+        await writeSession(home, "scan-thread", {
+          input_tokens: parentTokens,
+          output_tokens: 0,
+        });
+      }
+      await writeSession(
+        home,
+        "worker-thread",
+        { input_tokens: 100, output_tokens: 0 },
+        "scan-thread",
+      );
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+      });
+      tracker.start("scan-thread");
+
+      const snapshot = await tracker.stop({
+        input_tokens: 1_000,
+        output_tokens: 0,
+      });
+
+      expect(snapshot.cost?.inputTokens).toBe(
+        Math.max(parentTokens ?? 0, 1_000) + 100,
+      );
+    },
+  );
+
   test("falls back to the completed turn when session logs are unavailable", async () => {
     const tracker = new ScanCostTracker({
       codexHome: await codexHome(),
@@ -1991,7 +2094,13 @@ describe("live scan cost tracking", () => {
     tracker.start("scan-thread");
 
     expect(await tracker.stop(usage)).toEqual({
-      usage,
+      usage: {
+        ...usage,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: 1_020,
+      },
       cost: {
         model: "gpt-5.6-luna",
         inputTokens: 1_000,
@@ -2002,4 +2111,30 @@ describe("live scan cost tracking", () => {
       },
     });
   });
+
+  test.each(["receipt", "receipt-and-log", "unknown"] as const)(
+    "accounts for a separate validation turn with %s usage",
+    async (source) => {
+      const home = await codexHome();
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+      });
+      tracker.start("scan-thread");
+      const usage = { input_tokens: 500, output_tokens: 0 };
+      tracker.recordUsage(
+        source === "unknown" ? null : usage,
+        "validation-thread",
+      );
+      if (source === "receipt-and-log")
+        await writeSession(home, "validation-thread", usage);
+      const snapshot = await tracker.stop({
+        input_tokens: 1_000,
+        output_tokens: 0,
+      });
+      if (source === "unknown")
+        expect(snapshot).toEqual({ usage: null, cost: null });
+      else expect(snapshot.cost?.inputTokens).toBe(1_500);
+    },
+  );
 });

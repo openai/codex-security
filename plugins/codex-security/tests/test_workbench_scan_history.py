@@ -717,6 +717,18 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
     assert "Run 'codex-security scans match BEFORE AFTER' first" in rejected["stderr"]
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM scan_comparison_matches").fetchone() == (0,)
+        known_since = connection.execute("SELECT MIN(started_at) FROM scans").fetchone()[0]
+
+    before_finding, after_finding = (
+        run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0]
+        for scan in (before, after)
+    )
+    assert before_finding["findingId"] == after_finding["findingId"]
+    for finding, other in ((before_finding, after_finding), (after_finding, before_finding)):
+        assert [match["occurrenceId"] for match in finding["matches"]] == [other["occurrenceId"]]
+        assert finding["knownSince"] == known_since
+        assert finding["knownScanIds"] == [before["scanId"], after["scanId"]]
 
     save_scan_matches(state_dir, before, after)
     with sqlite3.connect(database) as connection:
@@ -734,7 +746,8 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
     )
 
     compared = compare_scan_pair(state_dir, before, after, "--require-matches")
-    assert compared["summary"]["new"] == compared["summary"]["resolved"] == 1
+    assert compared["summary"]["persisting"] == 1
+    assert compared["summary"]["new"] == compared["summary"]["resolved"] == 0
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT * FROM scan_comparisons").fetchall() == comparisons
         assert connection.execute("SELECT * FROM finding_occurrences").fetchall() == occurrences
@@ -1021,13 +1034,15 @@ def test_uncertain_semantic_scan_matches_stay_separate(tmp_path: Path) -> None:
     repository.mkdir()
     root = tmp_path / "results"
     before = create_cli_scan(state_dir, root, repository)
-    after = create_cli_scan(state_dir, root, repository)
+    after = create_cli_scan(
+        state_dir, root, repository, identity_anchor="independent-archive-entry-write"
+    )
     inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
         "matchingInputs"
     ]
     previous = inputs["before"][0]
     current = inputs["after"][0]
-    assert previous["findingId"] == current["findingId"]
+    assert previous["findingId"] != current["findingId"]
 
     compared = save_scan_matches(
         state_dir,

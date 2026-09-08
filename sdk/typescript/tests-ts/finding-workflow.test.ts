@@ -26,6 +26,7 @@ test.each([
   "finding",
   "source",
   "scope",
+  "stage",
   "model",
   "effort",
   "prompt",
@@ -53,6 +54,7 @@ test.each([
     },
   };
   const review: CodexReview<DuplicateDecision> = {
+    stage: "pair-review",
     model: "gpt-5.6-sol",
     effort: "ultra",
     prompt: JSON.stringify(document.findings),
@@ -86,6 +88,7 @@ test.each([
       { ...document.findings[0], title: "Changed original" },
     ]);
   if (changed === "model") next.model = "gpt-5.6-luna";
+  if (changed === "stage") next.stage = "screening";
   if (changed === "effort") next.effort = "high";
   if (changed === "prompt") next.prompt += "Changed review contract";
   if (changed === "contract")
@@ -124,6 +127,7 @@ test("does not checkpoint a review when source changes during its execution", as
     { allRepositories: true },
   );
   const review: CodexReview<DuplicateDecision> = {
+    stage: "pair-review",
     model: "gpt-5.6-sol",
     effort: "ultra",
     prompt: JSON.stringify(document.findings),

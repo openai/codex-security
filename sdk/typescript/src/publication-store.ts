@@ -27,13 +27,17 @@ export async function inspectPublicationStore(
   const recorded = result["recorded"];
   if (
     !matchesPublication(result, publication) ||
-    result["findingCount"] !== publication.issues.length ||
+    result["findingCount"] !==
+      (publication.sourceFindings ?? publication.issues).length ||
     !Array.isArray(recorded)
   ) {
     throw invalidPublicationRecords();
   }
   const expected = new Map(
-    publication.issues.map((issue) => [issue.findingId, issue.occurrenceId]),
+    (publication.sourceFindings ?? publication.issues).map((issue) => [
+      issue.findingId,
+      issue.occurrenceId,
+    ]),
   );
   const found = new Map<string, PublishedScanIssue>();
   for (const value of recorded) {
@@ -63,7 +67,8 @@ export async function preparePublicationStore(
   );
   if (
     result["scanId"] !== publication.scanId ||
-    result["findingCount"] !== publication.issues.length
+    result["findingCount"] !==
+      (publication.sourceFindings ?? publication.issues).length
   ) {
     throw new CodexSecurityError(
       "The workbench could not verify every finding selected for publication.",
@@ -146,10 +151,12 @@ async function runPublicationWorkbench(
     bundledPluginRoot(),
   ]);
   signal?.throwIfAborted();
-  const findings = publication.issues.map(({ findingId, occurrenceId }) => ({
-    findingId,
-    occurrenceId,
-  }));
+  const findings = (publication.sourceFindings ?? publication.issues).map(
+    ({ findingId, occurrenceId }) => ({
+      findingId,
+      occurrenceId,
+    }),
+  );
   let temporaryRoot = stateDirectory;
   if (command === "inspect-linear-publication") {
     temporaryRoot = await realpath(tmpdir());

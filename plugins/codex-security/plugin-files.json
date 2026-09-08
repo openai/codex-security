@@ -77,6 +77,7 @@
     "scripts/workbench_scan_start.py",
     "scripts/workbench_scan_usage.py",
     "scripts/workbench_schema.py",
+    "scripts/workbench_severity.py",
     "scripts/workbench_source_excerpt.py",
     "scripts/workbench_target.py",
     "scripts/workbench_target_state.py",

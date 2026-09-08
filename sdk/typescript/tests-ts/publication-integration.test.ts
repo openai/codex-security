@@ -325,6 +325,82 @@ function receiptPath(fixture: PublicationFixture): string {
 }
 
 describe("database-backed Linear publication integration", () => {
+  test("publishes classified selections while verifying the complete scan history and preserving earlier tickets", async () => {
+    const { classifyScanDirectorySeverity } = await import(
+      "../src/classify-scan-severity.js"
+    );
+    const completed = await fixture(2);
+    const rubricPath = join(completed.stateDirectory, "policy.md");
+    await writeFile(rubricPath, "Classify bounded impact as Medium.");
+    type LinearClient = ReturnType<
+      NonNullable<PublishScanDependencies["linearClient"]>
+    >;
+    type IssueInput = Parameters<LinearClient["createIssue"]>[0];
+    const created: IssueInput[] = [];
+    const runtime: PublishScanDependencies = {
+      environment: completed.environment,
+      linearClient: () =>
+        ({
+          createIssue: async (input: IssueInput) => {
+            created.push(input);
+            return {
+              success: true,
+              issue: Promise.resolve({
+                identifier: `EXAMPLE-${created.length}`,
+              }),
+            };
+          },
+        }) as unknown as LinearClient,
+    };
+    for (const finding of completed.findings) {
+      await classifyScanDirectorySeverity(completed.scanDirectory, {
+        environment: completed.environment,
+        rubricPath,
+        findingIds: [finding.findingId],
+        codex: {
+          startThread: () => ({
+            run: async () => ({
+              finalResponse: JSON.stringify({
+                findingId: finding.findingId,
+                decision: "assessed",
+                level: "medium",
+                rubricLabel: "MEDIUM",
+                rationale: "Only bounded impact is established.",
+                confidence: "high",
+                reviewTrigger: null,
+              }),
+            }),
+          }),
+        },
+      });
+      const result = await publishScanInternal(
+        completed.scanDirectory,
+        {
+          ...OPTIONS,
+          linearApiKey: "lin_api_SYNTHETIC_CLASSIFICATION",
+          skipExisting: true,
+        },
+        runtime,
+      );
+      expect(result.created).toHaveLength(1);
+      expect(result.created[0]!.findingId).toBe(finding.findingId);
+      expect(created.at(-1)!.priority).toBe(3);
+    }
+    const repeated = await publishScanInternal(
+      completed.scanDirectory,
+      {
+        ...OPTIONS,
+        linearApiKey: "lin_api_SYNTHETIC_CLASSIFICATION",
+        skipExisting: true,
+      },
+      runtime,
+    );
+    expect(repeated.created).toEqual([]);
+    expect(repeated.skipped).toHaveLength(1);
+    expect(created).toHaveLength(2);
+    expect(storedPublications(completed)).toHaveLength(2);
+  });
+
   test("checks and retries a partial publication without duplicating recorded successes", async () => {
     const completed = await fixture(2);
     const sealed = await artifactDigests(completed.scanDirectory);

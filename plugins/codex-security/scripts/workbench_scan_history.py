@@ -6,6 +6,8 @@ import json
 import os
 import sqlite3
 import sys
+from collections.abc import Iterable, Iterator
+from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -28,10 +30,12 @@ def _same_repository(
     *,
     after_identity: tuple[str | None, tuple[str, str] | None] | None = None,
 ) -> bool:
-    if before["target_id"] == after["target_id"]:
+    if before["target_id"] is not None and before["target_id"] == after["target_id"]:
         return True
     before_target = Path(before["target_path"])
     after_target = Path(after["target_path"])
+    if before_target.resolve() == after_target.resolve():
+        return True
     before_git_dir = git_output(
         before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
     )
@@ -253,7 +257,7 @@ def list_unmatched_scan_pairs(
         for scan in connection.execute(
             "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
         )
-        if Path(scan["target_path"]).resolve() == repository or _same_repository(scan, requested)
+        if _same_repository(scan, requested)
     ]
 
     available = []
@@ -271,6 +275,7 @@ def list_unmatched_scan_pairs(
     batches = []
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
+    known_links: list[sqlite3.Row] | None = None
     for index, after in enumerate(available):
         previous = [
             before
@@ -280,12 +285,26 @@ def list_unmatched_scan_pairs(
         skipped += index - len(previous)
         if not previous:
             continue
+        if known_links is None:
+            known_links = (
+                []
+                if args.force
+                else _saved_finding_links(connection, {scan["id"] for scan in selected})
+            )
         for scan in (*previous, after):
             if scan["id"] not in matching_findings:
                 backfill_finding_details(connection, scan)
                 matching_findings[scan["id"]] = [
                     _matching_input(row) for row in _scan_findings(connection, scan["id"]).values()
                 ]
+        known_groups = _known_finding_groups(
+            known_links,
+            {
+                scan["id"]
+                for scan in selected
+                if (scan["started_at"], scan["id"]) <= (after["started_at"], after["id"])
+            },
+        )
         batches.append(
             {
                 "afterFindings": matching_findings[after["id"]],
@@ -297,6 +316,7 @@ def list_unmatched_scan_pairs(
                     }
                     for before in previous
                 ],
+                **({"knownFindingGroups": known_groups} if known_groups else {}),
             }
         )
     return {
@@ -306,6 +326,53 @@ def list_unmatched_scan_pairs(
         "skippedPairs": skipped,
         "unavailableScans": len(selected) - len(available),
     }
+
+
+def _saved_finding_links(connection: sqlite3.Connection, scan_ids: set[str]) -> list[sqlite3.Row]:
+    return [
+        row
+        for row in _rows_for_ids(
+            connection,
+            """
+            SELECT before.scan_id AS before_scan_id, before.finding_id AS before_finding_id,
+                after.scan_id AS after_scan_id, after.finding_id AS after_finding_id
+            FROM scan_comparison_matches AS matches
+            JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
+            JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
+            WHERE matches.before_scan_id IN ({placeholders})
+            ORDER BY matches.before_scan_id, after.scan_id, before.finding_id, after.finding_id
+            """,
+            sorted(scan_ids),
+        )
+        if row["before_scan_id"] in scan_ids and row["after_scan_id"] in scan_ids
+    ]
+
+
+def _finding_aliases(links: Iterable[tuple[str, str]]) -> dict[str, str]:
+    parents: dict[str, str] = {}
+
+    def root(value: str) -> str:
+        parents.setdefault(value, value)
+        while parents[value] != value:
+            parents[value] = parents[parents[value]]
+            value = parents[value]
+        return value
+
+    for before_id, after_id in links:
+        parents[root(after_id)] = root(before_id)
+    return {finding_id: root(finding_id) for finding_id in parents}
+
+
+def _known_finding_groups(links: list[sqlite3.Row], scan_ids: set[str]) -> list[list[str]]:
+    aliases = _finding_aliases(
+        (link["before_finding_id"], link["after_finding_id"])
+        for link in links
+        if link["before_scan_id"] in scan_ids and link["after_scan_id"] in scan_ids
+    )
+    groups: dict[str, list[str]] = {}
+    for finding_id, identity in aliases.items():
+        groups.setdefault(identity, []).append(finding_id)
+    return sorted(sorted(group) for group in groups.values() if len(group) > 1)
 
 
 def compare_scans(
@@ -351,7 +418,12 @@ def compare_scans(
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
     matches = json.loads(cached["result_json"]) if cached is not None else None
-    groups = _finding_groups(before_findings, after_findings, matches)
+    saved_matches = matches["matches"] if matches is not None else []
+    occurrences = {
+        row["id"]: row for row in chain(before_findings.values(), after_findings.values())
+    }
+    aliases = _confirmed_finding_aliases(connection, occurrences)
+    groups = _finding_groups(before_findings, after_findings, saved_matches, aliases)
     uncertain = (
         {
             (side, match[f"{side}OccurrenceId"]): match["reason"]
@@ -365,23 +437,33 @@ def compare_scans(
     summary = {status: 0 for status in ("new", "persisting", "resolved", "reopened", "unknown")}
 
     for previous_rows, current_rows, match_reason in groups:
-        previous = previous_rows[0] if previous_rows else None
+        previous = (
+            min(previous_rows, key=lambda row: SEVERITY_ORDER[row["severity"]])
+            if previous_rows
+            else None
+        )
         current = (
             min(current_rows, key=lambda row: SEVERITY_ORDER[row["severity"]])
             if current_rows
             else None
         )
         selected = current if current is not None else previous
-        if selected is None:
-            continue
         item = {
             "findingId": selected["finding_id"],
             "path": selected["relative_path"],
             "severity": selected["severity"],
             "title": selected["title"],
         }
+        side = "after" if current_rows else "before"
+        uncertain_reason = next(
+            (
+                uncertain[(side, row["id"])]
+                for row in current_rows or previous_rows
+                if (side, row["id"]) in uncertain
+            ),
+            None,
+        )
         if previous is None:
-            uncertain_reason = uncertain.get(("after", current["id"])) if current else None
             if uncertain_reason is None:
                 status = "new"
             else:
@@ -399,17 +481,20 @@ def compare_scans(
             )
             if match_reason is not None:
                 item["matchReason"] = match_reason
-        elif (uncertain_reason := uncertain.get(("before", previous["id"]))) is not None:
+        elif uncertain_reason is not None:
             status = "unknown"
             item["reason"] = uncertain_reason
         elif not comparable:
             status = "unknown"
             item["reason"] = "The later scan has incomplete coverage."
-        elif not scan_covers_path(
-            after,
-            target_id=after["target_id"],
-            path=previous["relative_path"],
-            coverage=after_coverage,
+        elif not all(
+            scan_covers_path(
+                after,
+                target_id=after["target_id"],
+                path=row["relative_path"],
+                coverage=after_coverage,
+            )
+            for row in previous_rows
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
@@ -441,11 +526,41 @@ def compare_scans(
         "repository": before["target_path"],
         "summary": summary,
     }
+    if matches is not None and matches.get("related"):
+        related = _separate_finding_pairs(matches["related"], occurrences, aliases)
+        if related:
+            result["related"] = [
+                {
+                    **pair,
+                    "beforeTitle": occurrences[pair["beforeOccurrenceId"]]["title"],
+                    "afterTitle": occurrences[pair["afterOccurrenceId"]]["title"],
+                }
+                for pair in related
+            ]
     if include_matching_inputs:
+        known_scan_ids = {
+            scan["id"]
+            for scan in connection.execute(
+                "SELECT * FROM scans WHERE status = 'complete' "
+                "AND (started_at < ? OR (started_at = ? AND id <= ?))",
+                (after["started_at"], after["started_at"], after["id"]),
+            )
+            if _same_repository(scan, after)
+        }
+        excluded_pairs = {(before["id"], after["id"]), (after["id"], before["id"])}
+        known_groups = _known_finding_groups(
+            [
+                link
+                for link in _saved_finding_links(connection, known_scan_ids)
+                if (link["before_scan_id"], link["after_scan_id"]) not in excluded_pairs
+            ],
+            known_scan_ids,
+        )
         result["matchingCached"] = cached is not None
         result["matchingInputs"] = {
             "before": [_matching_input(row) for row in before_findings.values()],
             "after": [_matching_input(row) for row in after_findings.values()],
+            **({"knownFindingGroups": known_groups} if known_groups else {}),
         }
     return result
 
@@ -469,42 +584,80 @@ def save_scan_comparison(
     read_coverage(after)
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
-    matches_json = sys.stdin.read() if args.matches_json_stdin else args.matches_json
+    matches_json = (
+        sys.stdin.read() if getattr(args, "matches_json_stdin", False) else args.matches_json
+    )
     try:
         payload = json.loads(matches_json)
     except (TypeError, ValueError) as exc:
         raise SystemExit("Scan comparison matches must be a valid JSON object.") from exc
-    if not isinstance(payload, dict) or set(payload) != {"matches", "uncertain"}:
+    if (
+        not isinstance(payload, dict)
+        or not {"matches", "uncertain"}.issubset(payload)
+        or set(payload) - {"matches", "uncertain", "related"}
+    ):
         raise SystemExit("Scan comparison matches must contain matches and uncertain arrays.")
-    if not isinstance(payload["matches"], list) or not isinstance(payload["uncertain"], list):
+    if any(
+        not isinstance(payload.get(key, []), list) for key in ("matches", "uncertain", "related")
+    ):
         raise SystemExit("Scan comparison matches must contain matches and uncertain arrays.")
     allowed = {
         "before": {row["id"] for row in before_findings.values()},
         "after": {row["id"] for row in after_findings.values()},
     }
-    consumed: dict[str, set[str]] = {"before": set(), "after": set()}
-    for match in payload["matches"]:
+    consumed: dict[str, dict[str, int]] = {"before": {}, "after": {}}
+    for group, match in enumerate(payload["matches"]):
+        if (
+            not isinstance(match, dict)
+            or match.get("confidence") != "high"
+            or not isinstance(match.get("reason"), str)
+            or not match["reason"].strip()
+        ):
+            raise SystemExit("Scan comparison matches must have high confidence and a reason.")
         for side in ("before", "after"):
-            occurrences = match[f"{side}OccurrenceIds"]
+            occurrences = match.get(f"{side}OccurrenceIds")
+            if not isinstance(occurrences, list) or any(
+                not isinstance(value, str) for value in occurrences
+            ):
+                raise SystemExit("Scan comparison matches must identify distinct scan findings.")
             unique = set(occurrences)
             if (
                 not occurrences
                 or len(unique) != len(occurrences)
                 or not unique.issubset(allowed[side])
-                or not consumed[side].isdisjoint(unique)
+                or not unique.isdisjoint(consumed[side])
             ):
                 raise SystemExit("Scan comparison matches must identify distinct scan findings.")
-            consumed[side].update(unique)
+            consumed[side].update((occurrence_id, group) for occurrence_id in unique)
     uncertain_pairs = set()
     for match in payload["uncertain"]:
+        if not _valid_finding_pair(match):
+            raise SystemExit("Uncertain scan comparison matches must identify distinct findings.")
         pair = (match["beforeOccurrenceId"], match["afterOccurrenceId"])
         if (
-            pair[0] not in allowed["before"] - consumed["before"]
-            or pair[1] not in allowed["after"] - consumed["after"]
+            pair[0] not in allowed["before"]
+            or pair[0] in consumed["before"]
+            or pair[1] not in allowed["after"]
+            or pair[1] in consumed["after"]
             or pair in uncertain_pairs
         ):
             raise SystemExit("Uncertain scan comparison matches must identify distinct findings.")
         uncertain_pairs.add(pair)
+    related_pairs = set()
+    for match in payload.get("related", []):
+        if not _valid_finding_pair(match):
+            raise SystemExit("Related scan comparison findings must identify distinct findings.")
+        pair = (match["beforeOccurrenceId"], match["afterOccurrenceId"])
+        group = consumed["before"].get(pair[0])
+        if (
+            pair[0] not in allowed["before"]
+            or pair[1] not in allowed["after"]
+            or (group is not None and group == consumed["after"].get(pair[1]))
+            or pair in uncertain_pairs
+            or pair in related_pairs
+        ):
+            raise SystemExit("Related scan comparison findings must identify distinct findings.")
+        related_pairs.add(pair)
     timestamp = now()
     with connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -542,6 +695,142 @@ def save_scan_comparison(
     return compare_scans(connection, args, require_scan=require_scan, read_coverage=read_coverage)
 
 
+def _valid_finding_pair(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"beforeOccurrenceId", "afterOccurrenceId", "reason"}
+        and all(isinstance(item, str) and item.strip() for item in value.values())
+    )
+
+
+def _rows_for_ids(
+    connection: sqlite3.Connection, query: str, ids: Iterable[str]
+) -> Iterator[sqlite3.Row]:
+    values = tuple(dict.fromkeys(ids))
+    getlimit = getattr(connection, "getlimit", None)
+    # Python 3.10 lacks getlimit; 999 is SQLite's older host-parameter limit.
+    limit = getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if getlimit else 999
+    for start in range(0, len(values), limit):
+        batch = values[start : start + limit]
+        yield from connection.execute(
+            query.format(placeholders=", ".join("?" for _ in batch)), batch
+        )
+
+
+# Stable finding IDs already include the target identity. Follow their indexed
+# occurrences instead of resolving repository paths or scanning every saved link.
+_FINDING_NEIGHBORS_SQL = """
+    FROM linked
+    CROSS JOIN finding_occurrences AS source
+        ON source.finding_id = linked.finding_id
+    CROSS JOIN scan_comparison_matches AS matches
+        ON matches.before_occurrence_id = source.id OR matches.after_occurrence_id = source.id
+    CROSS JOIN finding_occurrences AS neighbor ON neighbor.id = CASE
+        WHEN matches.before_occurrence_id = source.id THEN matches.after_occurrence_id
+        ELSE matches.before_occurrence_id END
+"""
+# Traverse only the selected findings' components, including recurring stable IDs.
+_LINKED_FINDINGS_SQL = f"""
+    WITH RECURSIVE linked(finding_id) AS (
+        SELECT occurrences.finding_id
+        FROM finding_occurrences AS occurrences
+        WHERE occurrences.id IN ({{placeholders}})
+        UNION
+        SELECT neighbor.finding_id
+        {_FINDING_NEIGHBORS_SQL}
+    )
+"""
+
+
+def _confirmed_finding_aliases(
+    connection: sqlite3.Connection, occurrence_ids: Iterable[str]
+) -> dict[str, str]:
+    query = f"""
+        {_LINKED_FINDINGS_SQL}
+        SELECT DISTINCT linked.finding_id AS before_finding_id,
+            neighbor.finding_id AS after_finding_id
+        {_FINDING_NEIGHBORS_SQL}
+    """
+    return _finding_aliases(
+        (row["before_finding_id"], row["after_finding_id"])
+        for row in _rows_for_ids(connection, query, occurrence_ids)
+    )
+
+
+def _separate_finding_pairs(
+    pairs: list[dict[str, Any]],
+    occurrences: dict[str, sqlite3.Row],
+    aliases: dict[str, str],
+) -> list[dict[str, Any]]:
+    def identity(occurrence_id: str) -> str:
+        finding_id = occurrences[occurrence_id]["finding_id"]
+        return aliases.get(finding_id, finding_id)
+
+    return [
+        pair
+        for pair in pairs
+        if identity(pair["beforeOccurrenceId"]) != identity(pair["afterOccurrenceId"])
+    ]
+
+
+def finding_relations(
+    connection: sqlite3.Connection, scan_id: str, occurrence_ids: Iterable[str]
+) -> dict[str, list[dict[str, Any]]]:
+    selected = set(occurrence_ids)
+    if not selected:
+        return {}
+    pairs = []
+    for comparison in connection.execute(
+        "SELECT before_scan_id, after_scan_id, result_json FROM scan_comparisons "
+        "WHERE before_scan_id = ? OR after_scan_id = ? "
+        "ORDER BY before_scan_id, after_scan_id",
+        (scan_id, scan_id),
+    ):
+        side = "before" if comparison["before_scan_id"] == scan_id else "after"
+        other = "after" if side == "before" else "before"
+        for pair in json.loads(comparison["result_json"]).get("related", []):
+            if pair[f"{side}OccurrenceId"] in selected:
+                pairs.append(
+                    {
+                        "beforeOccurrenceId": pair[f"{side}OccurrenceId"],
+                        "afterOccurrenceId": pair[f"{other}OccurrenceId"],
+                        "afterScanId": comparison[f"{other}_scan_id"],
+                        "reason": pair["reason"],
+                    }
+                )
+    occurrences = {
+        row["id"]: row
+        for row in _rows_for_ids(
+            connection,
+            "SELECT id, finding_id, scan_id, title FROM finding_occurrences "
+            "WHERE id IN ({placeholders})",
+            (pair[key] for pair in pairs for key in ("beforeOccurrenceId", "afterOccurrenceId")),
+        )
+    }
+    pairs = [
+        pair
+        for pair in pairs
+        if pair["beforeOccurrenceId"] in occurrences
+        and occurrences[pair["beforeOccurrenceId"]]["scan_id"] == scan_id
+        and pair["afterOccurrenceId"] in occurrences
+        and occurrences[pair["afterOccurrenceId"]]["scan_id"] == pair["afterScanId"]
+    ]
+    result: dict[str, list[dict[str, Any]]] = {}
+    aliases = _confirmed_finding_aliases(connection, (pair["beforeOccurrenceId"] for pair in pairs))
+    for pair in _separate_finding_pairs(pairs, occurrences, aliases):
+        finding = occurrences[pair["afterOccurrenceId"]]
+        result.setdefault(pair["beforeOccurrenceId"], []).append(
+            {
+                "findingId": finding["finding_id"],
+                "occurrenceId": finding["id"],
+                "reason": pair["reason"],
+                "scanId": pair["afterScanId"],
+                "title": finding["title"],
+            }
+        )
+    return result
+
+
 def finding_matches(
     connection: sqlite3.Connection, occurrence_id: str, scan_id: str, started_at: str
 ) -> tuple[list[dict[str, Any]], str, list[str]]:
@@ -562,34 +851,34 @@ def finding_matches(
         """,
         (occurrence_id, occurrence_id),
     ).fetchall()
-    known_scans = [(started_at, scan_id)]
-    if rows:
-        known_scans = [
-            (row["started_at"], row["scan_id"])
-            for row in connection.execute(
-                """
-                WITH RECURSIVE linked_occurrences(occurrence_id) AS (
-                    SELECT ?
-                    UNION
-                    SELECT CASE
-                        WHEN matches.before_occurrence_id = linked.occurrence_id
-                            THEN matches.after_occurrence_id
-                        ELSE matches.before_occurrence_id
-                    END
-                    FROM scan_comparison_matches AS matches
-                    JOIN linked_occurrences AS linked
-                        ON matches.before_occurrence_id = linked.occurrence_id
-                        OR matches.after_occurrence_id = linked.occurrence_id
-                )
-                SELECT DISTINCT scans.started_at, scans.id AS scan_id
-                FROM linked_occurrences AS linked
-                JOIN finding_occurrences AS occurrences ON occurrences.id = linked.occurrence_id
-                JOIN scans ON scans.id = occurrences.scan_id
-                ORDER BY scans.started_at, scans.id
-                """,
-                (occurrence_id,),
-            )
-        ]
+    linked_rows = list(
+        _rows_for_ids(
+            connection,
+            f"""
+            {_LINKED_FINDINGS_SQL}
+            SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
+                scans.started_at, scans.id AS scan_id
+            FROM linked
+            CROSS JOIN finding_occurrences AS occurrences
+                ON occurrences.finding_id = linked.finding_id
+            CROSS JOIN scans ON scans.id = occurrences.scan_id
+            """,
+            (occurrence_id,),
+        )
+    )
+    known_scans = sorted(
+        {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows}
+    )
+    included = {occurrence_id, *(row["occurrence_id"] for row in rows)}
+    rows.extend(
+        {
+            **row,
+            "reason": "The findings share a stable identity or a previously confirmed link.",
+        }
+        for row in linked_rows
+        if row["occurrence_id"] not in included
+    )
+    rows.sort(key=lambda row: (row["scan_id"], row["occurrence_id"]))
     known_scan_ids = [known_scans[0][1]]
     if len(known_scans) > 1:
         known_scan_ids.append(known_scans[-1][1])
@@ -612,26 +901,45 @@ def finding_matches(
 def _finding_groups(
     before_findings: dict[str, sqlite3.Row],
     after_findings: dict[str, sqlite3.Row],
-    matches: dict[str, Any] | None,
+    matches: list[dict[str, Any]],
+    aliases: dict[str, str],
 ) -> list[tuple[list[sqlite3.Row], list[sqlite3.Row], str | None]]:
     rows = {
         side: {row["id"]: row for row in findings.values()}
         for side, findings in (("before", before_findings), ("after", after_findings))
     }
-    consumed: dict[str, set[str]] = {"before": set(), "after": set()}
-    result = []
-    for match in matches["matches"] if matches is not None else []:
-        previous = [rows["before"][value] for value in match["beforeOccurrenceIds"]]
-        current = [rows["after"][value] for value in match["afterOccurrenceIds"]]
-        consumed["before"].update(match["beforeOccurrenceIds"])
-        consumed["after"].update(match["afterOccurrenceIds"])
-        result.append((previous, current, match["reason"]))
-    result.extend(
-        ([row], [], None) for key, row in rows["before"].items() if key not in consumed["before"]
-    )
-    result.extend(
-        ([], [row], None) for key, row in rows["after"].items() if key not in consumed["after"]
-    )
+    groups: dict[str, tuple[list[sqlite3.Row], list[sqlite3.Row], list[str]]] = {}
+
+    def group(row: sqlite3.Row) -> tuple[list[sqlite3.Row], list[sqlite3.Row], list[str]]:
+        finding_id = row["finding_id"]
+        return groups.setdefault(aliases.get(finding_id, finding_id), ([], [], []))
+
+    for match in matches:
+        group(rows["before"][match["beforeOccurrenceIds"][0]])[2].append(match["reason"])
+    for index, side in enumerate(("before", "after")):
+        occurrence_ids = dict.fromkeys(
+            chain(
+                (value for match in matches for value in match[f"{side}OccurrenceIds"]),
+                rows[side],
+            )
+        )
+        for occurrence_id in occurrence_ids:
+            row = rows[side][occurrence_id]
+            group(row)[index].append(row)
+    result = [
+        (
+            previous,
+            current,
+            (
+                " ".join(dict.fromkeys(reasons))
+                if reasons
+                else "The findings share a stable identity or a previously confirmed link."
+            )
+            if previous and current
+            else None,
+        )
+        for previous, current, reasons in groups.values()
+    ]
     return sorted(
         result,
         key=lambda group: (

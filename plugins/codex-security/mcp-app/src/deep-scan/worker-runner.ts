@@ -6,7 +6,7 @@ import {
   validateDiscoveryArtifacts,
   validateReducerArtifacts
 } from "./artifact-validation.js";
-import type { ReducerArtifactValidation } from "./artifact-validation.js";
+import type { DeepReductionInput, ReducerArtifactValidation } from "./artifact-validation.js";
 import {
   archiveDirectory,
   discoveryArtifacts,
@@ -62,6 +62,7 @@ export interface SuccessfulDedupOutcome {
   id: string;
   consumed: AcceptedDiscovery[];
   resultPath: string;
+  result: DeepReductionInput;
   newFindings: number;
   attempt: number;
   threadId?: string;
@@ -442,6 +443,7 @@ export class DeepScanWorkerRunner {
       id: reducerId,
       consumed,
       resultPath,
+      result: reducerValidation.result,
       newFindings: reducerValidation.newFindings,
       attempt: outcome.attempt,
       threadId: outcome.threadId,
@@ -796,7 +798,7 @@ function standardScanCompletionContinuation(attempt: number): string {
 function reducerCompletionContinuation(attempt: number): string {
   return [
     `Continue the existing Deep Scan reducer after attempt ${attempt} ended without its required result.`,
-    "Use your existing Standard scan analysis and call record_codex_security_deep_reduction({ scanId, findings, coverage, threatModel?, scope? }).",
+    "Submit the aggregate with record_codex_security_deep_reduction({ scanId, findings, threatModel?, scope? }).",
     "If the tool rejects the arguments, use its error to correct them and retry the call until it succeeds.",
     "Do not end your turn, write the result directly, or call the tool again after it succeeds."
   ].join("\n");

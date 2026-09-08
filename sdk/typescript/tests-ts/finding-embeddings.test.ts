@@ -88,12 +88,17 @@ test("chunks long findings losslessly and pools vectors by token count", async (
   expect(Math.hypot(...result.vector)).toBeCloseTo(1, 10);
 });
 
-test("splits bulk requests at the provider token budget", async () => {
+test("splits bulk requests at the provider token budget and renews credentials per batch", async () => {
   const finding: Finding = { ...example, summary: " evidence".repeat(8000) };
   const requests: number[][][] = [];
+  let credentials = 0;
   const embedder = new OpenAiFindingEmbedder(
-    "synthetic-key",
+    async () => `synthetic-key-${++credentials}`,
     async (_url, init) => {
+      expect(credentials).toBe(requests.length + 1);
+      expect(init.headers).toMatchObject({
+        Authorization: `Bearer synthetic-key-${credentials}`,
+      });
       const input: number[][] = JSON.parse(String(init.body)).input;
       requests.push(input);
       expect(
@@ -110,8 +115,39 @@ test("splits bulk requests at the provider token budget", async () => {
     Array.from({ length: 40 }, () => finding),
   );
   expect(requests).toHaveLength(2);
+  expect(credentials).toBe(2);
   expect(result).toHaveLength(40);
   expect(result.every((embedding) => embedding.vector[0] === 1)).toBe(true);
+});
+
+test("does not resolve credentials for empty input or reuse a key after renewal fails", async () => {
+  for (const failure of ["throw", "empty"]) {
+    let credentials = 0;
+    let requests = 0;
+    const embedder = new OpenAiFindingEmbedder(
+      () => {
+        if (++credentials === 1) return "synthetic-key";
+        if (failure === "throw") throw new Error("synthetic-private-token");
+        return "";
+      },
+      async () => {
+        requests++;
+        return Response.json({
+          model: EMBEDDING_MODEL,
+          data: [{ index: 0, embedding: vector() }],
+        });
+      },
+    );
+    expect(await embedder.embed([])).toEqual([]);
+    expect(credentials).toBe(0);
+    await embedder.embed([example]);
+    await expect(embedder.embed([example])).rejects.toMatchObject({
+      code: "embedding_failed",
+      message: "Could not reach the embedding provider.",
+    });
+    expect(credentials).toBe(2);
+    expect(requests).toBe(1);
+  }
 });
 
 test("does not call the provider for empty input or missing credentials", async () => {
