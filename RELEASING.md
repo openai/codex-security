@@ -62,9 +62,10 @@ Review this policy before enabling automation for `1.x`.
 It defaults to a read-only preview. It does not merge, tag, publish, or change
 the existing publication gates.
 
-The updater keeps one draft proposal on `release/next-<base-version>` and
-recomputes its version from all changes since the current package version
-first reached `main`. Squash-merge release PRs, as required by this
+The updater opens one ready-for-review proposal on `release/next-<base-version>`
+once a change reaches `main` after the current package version. It recomputes
+the proposal's version from all changes since that package version first
+reached `main`. Squash-merge release PRs, as required by this
 repository's enabled merge method, so the whole proposal lands as one
 release boundary commit. A later breaking change changes the version on the
 same PR. Each update incorporates the latest `main` and appends a commit;
@@ -72,35 +73,34 @@ the updater never force-pushes. A concurrent commit causes it to reread and
 retry. It requests Codex review when the proposal files change. Updates that
 only incorporate `main` keep CI current without repeating the same proposal
 review. New suggestions for human-owned notes still appear in a comment.
-Before marking the proposal ready, check CI and request a final Codex review
+Before merging the proposal, check CI and request a final Codex review
 if the last review targets an older head.
 
 If a run reports that GitHub has not exposed the updated PR head, manually
 rerun the updater with **dry_run** disabled after the PR catches up. This
 allows any deferred review request or note suggestions to be posted. Verify
-review on the current head before marking the proposal ready.
+review on the current head before merging the proposal.
 
-When the release version merges, the next draft can open immediately, even
-while publication is still running. Until another change reaches `main`,
-that draft leaves the package version unchanged. Do not mark an empty draft
-ready or merge it. Publication of the previous version still has to complete
-and pass the verification steps below.
+When the release version merges, the updater waits for another change to
+reach `main` before opening the next proposal. An empty release cycle returns
+`action: "unchanged"` without creating a branch or PR. Publication of the
+previous version still has to complete and pass the verification steps below.
 
 The updater leaves another open `release:` PR targeting `main`, including a
 manually prepared release, untouched and does not open a duplicate. Finish
 or close that PR before enabling the new flow. Closing an automated proposal
 pauses its cycle; reopen it to resume. Retargeting it away from `main` also
-pauses updates; restore its `main` base before resuming. Marking the proposal
-ready pauses updates, preserving the reviewed version and notes. To resume,
-convert it back to a draft and rerun the updater. Do this before merging if
-`main` has advanced, then review the updated proposal. The updater rechecks
-these conditions before advancing the branch. Changes to other files on the
-release branch, or to package fields other than the version, also pause the
+pauses updates; restore its `main` base before resuming. Both ready proposals
+and existing drafts receive updates. Existing drafts can be marked ready
+without pausing the updater. Review the current head before merging if
+`main` has advanced. The updater rechecks pause conditions before advancing
+the branch. Changes to other files on the release branch, or to package
+fields other than the version, also pause the
 updater so those edits cannot be lost. These intentional pauses return
 `action: "held"` and leave the workflow successful. Preserve or merge the
 additional changes, then rerun the updater to resume.
 
-### Editing the draft notes
+### Editing the release notes
 
 The committed `.github/release-notes.md` is authoritative. The updater
 drafts highlights from merged titles and lists marked breaking changes for
@@ -148,7 +148,7 @@ the repository's `GITHUB_TOKEN` with **Contents: write** and **Pull requests: wr
 by default; no separate App credentials are required. Preview runs use a separate
 job with read-only permissions for both scopes.
 
-Review the resulting draft and select **Approve workflows to run** in its merge
+Review the resulting PR and select **Approve workflows to run** in its merge
 box to start hosted CI. GitHub requires this approval for PRs created or updated
 with `GITHUB_TOKEN`. Check the Codex review on the current head as well, and
 request it manually if the automated request has not started a review.

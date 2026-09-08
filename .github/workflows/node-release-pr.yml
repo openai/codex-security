@@ -24,7 +24,7 @@ jobs:
       github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main' &&
       ((github.event_name == 'workflow_dispatch' && inputs.dry_run) ||
       (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED != 'true'))
-    name: preview draft release PR
+    name: preview release PR
     runs-on: ubuntu-latest
     env:
       RELEASE_PR_DRY_RUN: "true"
@@ -52,7 +52,7 @@ jobs:
       github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main' &&
       ((github.event_name == 'workflow_dispatch' && !inputs.dry_run) ||
       (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED == 'true'))
-    name: maintain draft release PR
+    name: maintain release PR
     runs-on: ubuntu-latest
     permissions:
       contents: write
