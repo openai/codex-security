@@ -56,6 +56,7 @@ interface MultiscanReceipt extends MultiscanTask {
   cost?: ScanCost;
   error?: string;
   warning?: string;
+  warnings?: string[];
 }
 
 export interface MultiscanOptions {
@@ -166,6 +167,16 @@ async function runCampaign(
         receipt.outputDir === selectedArtifactOutput) &&
       (await hasArtifacts(artifactOutput))
     ) {
+      if (receipt.status !== "failed") {
+        for (const warning of receipt.warnings ?? []) {
+          notifyProgress(options, {
+            repository: task.id,
+            status: receipt.status,
+            attempt: receipt.attempt,
+            warning,
+          });
+        }
+      }
       if (receipt.status === "completed") {
         completed += 1;
         continue;
@@ -228,6 +239,7 @@ async function runCampaign(
         notifyProgress(options, { ...progress, status: "started" });
         let failure: string | undefined;
         let warning: string | undefined;
+        const runWarnings: string[] = [];
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
         let exhaustedBudget = false;
@@ -272,12 +284,14 @@ async function runCampaign(
             ...(options.maxCostUsd === undefined
               ? {}
               : { maxCostUsd: options.maxCostUsd }),
-            onWarning: (warning) =>
+            onWarning: (warning) => {
+              runWarnings.push(warning);
               notifyProgress(options, {
                 ...progress,
                 status: "started",
                 warning,
-              }),
+              });
+            },
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
@@ -317,6 +331,7 @@ async function runCampaign(
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
             ...(warning === undefined ? {} : { warning }),
+            ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
           })}\n`,
         );
         notifyProgress(options, {
