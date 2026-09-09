@@ -104,6 +104,18 @@ export function scanModelConfiguration(
   return { model, reasoningEffort };
 }
 
+/** @internal Apply a scan's accepted model choices without changing saved settings. */
+export function withScanModelConfiguration(
+  config: JsonObject,
+  selection: ScanModelConfiguration,
+): JsonObject {
+  const updated = structuredClone(config);
+  const target = selectedScanProfile(updated) ?? updated;
+  target["model"] = selection.model;
+  target["model_reasoning_effort"] = selection.reasoningEffort;
+  return updated;
+}
+
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   const selectedProfile = selectedScanProfile(config);
   return selectedProfile !== undefined &&
@@ -151,6 +163,13 @@ export function modelProviderConfigOverride(config: JsonObject): string[] {
   return config["model_providers"] === undefined
     ? []
     : [`model_providers=${inlineToml(config["model_providers"])}`];
+}
+
+/** @internal Preserve nested literal TOML keys in Codex's dotted override syntax. */
+export function codexConfigOverrides(config: JsonObject): string[] {
+  return Object.entries(config).map(
+    ([key, value]) => `${key}=${inlineToml(value)}`,
+  );
 }
 
 function inlineToml(value: JsonValue): string {

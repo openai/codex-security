@@ -259,6 +259,50 @@ describe("live scan dashboard", () => {
     expect(stderr.text().split("\u001B[?1049h")).toHaveLength(2);
   });
 
+  test("updates model labels in component views created before model selection", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 110, rows: 20 },
+      {
+        repository: "/synthetic/project",
+        presentation: "components",
+        input,
+        model: { model: "model-old", reasoningEffort: "high" },
+        clock: fakeClock(),
+      },
+    );
+    const frame = () =>
+      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!);
+    dashboard.start();
+    try {
+      dashboard.setComponents(
+        ["API", "Web"].map((name, index) => ({
+          id: `component-${index + 1}`,
+          name,
+          paths: [`src/${name.toLowerCase()}`],
+          status: "pending",
+          outputDir: `/synthetic/results/${index + 1}`,
+        })),
+      );
+      input.emit("data", "\r");
+      expect(frame()).toContain("API");
+      expect(frame()).toContain("model-old (high)");
+      dashboard.stop();
+      dashboard.setModel({ model: "model-new", reasoningEffort: "xhigh" });
+      dashboard.start();
+      expect(frame()).toContain("model-new (xhigh)");
+      expect(frame()).not.toContain("model-old");
+      input.emit("data", "\u001B");
+      input.emit("data", "\u001B[B\r");
+      expect(frame()).toContain("Web");
+      expect(frame()).toContain("model-new (xhigh)");
+      expect(frame()).not.toContain("model-old");
+    } finally {
+      dashboard.stop();
+    }
+  });
+
   test("navigates a long component list and shows sanitized failure details", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();

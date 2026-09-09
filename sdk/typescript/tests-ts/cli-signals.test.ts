@@ -1,3 +1,4 @@
+import { PassThrough } from "node:stream";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import {
@@ -89,11 +90,20 @@ describe("CLI signals", () => {
     const synchronousWrites: string[] = [];
     let now = 0;
     const deps = dependencies({ signals });
+    deps.scanInput = Object.assign(new PassThrough(), { isTTY: true });
     deps.now = () => now;
     deps.writeSynchronously = (_stream, value) => synchronousWrites.push(value);
     deps.forceExit = (signal) => forced.push(signal);
     deps.createSecurity = () => ({
-      run: async () => {
+      run: async (_repository, options) => {
+        options?.onActivity?.({
+          id: "read-1",
+          kind: "command",
+          status: "running",
+          description: "read src/index.ts",
+          paths: ["src/index.ts"],
+        });
+        expect(stderr.text()).toContain("\u001B[?25l");
         signals.emit("SIGINT");
         signals.emit("SIGINT");
         expect(forced).toEqual([]);
@@ -140,14 +150,24 @@ describe("CLI signals", () => {
     const signals = new FakeSignals();
     const forced: string[] = [];
     let now = 0;
+    let restorationAttempts = 0;
     const deps = dependencies({ signals });
+    deps.scanInput = Object.assign(new PassThrough(), { isTTY: true });
     deps.now = () => now;
     deps.writeSynchronously = () => {
+      restorationAttempts += 1;
       throw new Error("terminal unavailable");
     };
     deps.forceExit = (signal) => forced.push(signal);
     deps.createSecurity = () => ({
-      run: async () => {
+      run: async (_repository, options) => {
+        options?.onActivity?.({
+          id: "read-1",
+          kind: "command",
+          status: "running",
+          description: "read src/index.ts",
+          paths: ["src/index.ts"],
+        });
         signals.emit("SIGINT");
         now = 1_000;
         signals.emit("SIGINT");
@@ -159,5 +179,6 @@ describe("CLI signals", () => {
 
     await main(["scan", "."], capture().stream, capture(true).stream, deps);
     expect(forced).toEqual(["SIGINT"]);
+    expect(restorationAttempts).toBe(1);
   });
 });
