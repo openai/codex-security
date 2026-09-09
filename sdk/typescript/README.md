@@ -997,9 +997,9 @@ codex-security feedback --reason "The scan stopped before it finished"
 codex-security feedback SCAN_ID --reason "The scan stopped before it finished" --include-logs
 ```
 
-Without an ID, `feedback` selects the latest scan in the current repository,
-including active or failed scans. If there are no saved scans, it sends a general
-report. The report includes your description, version details, and the selected
+Without an ID, `feedback` selects the most recently started scan in the current
+repository, including active or failed scans. If there are no saved scans, it sends
+a general report. The report includes your description, version details, and the selected
 scan and session IDs. Add `--json` for structured output.
 
 Logs are off by default. `--include-logs` uploads Codex diagnostics and saved scan

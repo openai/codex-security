@@ -4619,7 +4619,7 @@ export async function main(
           .min(1)
           .optional()
           .describe(
-            "Scan ID or unique prefix (default: latest scan in the current repository).",
+            "Scan ID or unique prefix (default: most recently started scan in the current repository).",
           ),
       }),
       options: z.object({
@@ -4643,10 +4643,14 @@ export async function main(
             "list-scans",
             "--repository",
             dependencies.currentDirectory(),
-            "--limit",
-            "1",
           ]);
-          scanId = (value["scans"] as ScanLogSource[])[0]?.scanId;
+          const scans = value["scans"] as {
+            scanId: string;
+            startedAt: string;
+          }[];
+          scanId = scans.toSorted((a, b) =>
+            b.startedAt.localeCompare(a.startedAt),
+          )[0]?.scanId;
         }
         const scan =
           scanId === undefined

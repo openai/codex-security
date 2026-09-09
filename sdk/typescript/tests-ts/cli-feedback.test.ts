@@ -1,7 +1,13 @@
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
+import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 async function run(args: string[], deps = dependencies()) {
   const stdout = capture();
@@ -15,58 +21,120 @@ async function run(args: string[], deps = dependencies()) {
   return { code, stdout: stdout.text(), stderr: stderr.text() };
 }
 
-for (const requested of [undefined, "scan-pre"]) {
-  test(`feedback selects ${requested ?? "the latest scan, including failed scans"}`, async () => {
-    const calls: string[][] = [];
-    const scan = { scanId: "scan-prefix-full", progress: { status: "failed" } };
-    const deps = dependencies({
-      onWorkbench: (args): JsonObject => {
-        calls.push([...args]);
-        return args[0] === "list-scans" ? { scans: [scan] } : { scan };
-      },
-    });
-    const report = {
-      feedbackId: "feedback-1",
-      scanId: scan.scanId,
-      includedLogs: true,
+test("feedback selects the newest saved scan when an older scan is still running", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "feedback-history-")),
+  );
+  try {
+    const python = await resolvePluginPython();
+    const repository = join(root, "repository");
+    const environment = {
+      PATH: process.env["PATH"],
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
     };
-    deps.sendFeedback = async (options) => {
-      expect(options).toMatchObject({
-        reason: "Scan stopped",
-        includeLogs: true,
-        scan,
+    const workbench = (args: readonly string[]) =>
+      runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args);
+    const scans: { scanId: string; status: string; startedAt: string }[] = [];
+    for (const [index, status] of ["running", "failed", "running"].entries()) {
+      const target = index === 2 ? join(root, "other-repository") : repository;
+      const scanDir = join(root, `scan-${index}`);
+      await mkdir(target, { recursive: true });
+      await mkdir(scanDir, { mode: 0o700 });
+      const registered = await workbench([
+        "register-cli-scan",
+        "--repository",
+        target,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "standard",
+          repository: target,
+          target: { kind: "repository", paths: [] },
+        }),
+      ]);
+      scans.push({
+        scanId: registered["scanId"] as string,
+        status,
+        startedAt: `2026-01-0${index + 1}T00:00:00Z`,
       });
-      return report;
+    }
+    const seeded = spawnSync(
+      python,
+      [
+        "-c",
+        `import json, sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    for scan in json.loads(sys.argv[2]):
+        connection.execute("UPDATE scans SET started_at = ?, status = ? WHERE id = ?", (scan["startedAt"], scan["status"], scan["scanId"]))`,
+        join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+        JSON.stringify(scans),
+      ],
+      { encoding: "utf8" },
+    );
+    expect(seeded.stderr).toBe("");
+    expect(seeded.status).toBe(0);
+    const history = await workbench(["list-scans", "--repository", repository]);
+    expect(
+      (history["scans"] as JsonObject[]).map((scan) => scan["scanId"]),
+    ).toEqual([scans[0]!.scanId, scans[1]!.scanId]);
+    const deps = dependencies({
+      currentDirectory: repository,
+      environment,
+      onWorkbench: workbench,
+    });
+    deps.sendFeedback = async ({ scan }) => {
+      expect(scan?.scanId).toBe(scans[1]!.scanId);
+      return {
+        feedbackId: "feedback-1",
+        scanId: scan!.scanId,
+        includedLogs: true,
+      };
     };
     const result = await run(
-      [
-        ...(requested === undefined ? [] : [requested]),
-        "--reason",
-        "Scan stopped",
-        "--include-logs",
-        "--json",
-      ],
+      ["--reason", "Scan stopped", "--include-logs", "--json"],
       deps,
     );
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
-    expect(JSON.parse(result.stdout)).toEqual(report);
-    expect(calls).toEqual([
-      ...(requested === undefined
-        ? [
-            [
-              "list-scans",
-              "--repository",
-              "/current/repository",
-              "--limit",
-              "1",
-            ],
-          ]
-        : []),
-      ["get-scan", "--scan-id", requested ?? scan.scanId],
-    ]);
+    expect(JSON.parse(result.stdout).scanId).toBe(scans[1]!.scanId);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("feedback selects a scan prefix", async () => {
+  const calls: string[][] = [];
+  const scan = { scanId: "scan-prefix-full", progress: { status: "failed" } };
+  const deps = dependencies({
+    onWorkbench: (args): JsonObject => {
+      calls.push([...args]);
+      return { scan };
+    },
   });
-}
+  const report = {
+    feedbackId: "feedback-1",
+    scanId: scan.scanId,
+    includedLogs: true,
+  };
+  deps.sendFeedback = async (options) => {
+    expect(options).toMatchObject({
+      reason: "Scan stopped",
+      includeLogs: true,
+      scan,
+    });
+    return report;
+  };
+  const result = await run(
+    ["scan-pre", "--reason", "Scan stopped", "--include-logs", "--json"],
+    deps,
+  );
+  expect(result.code).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(JSON.parse(result.stdout)).toEqual(report);
+  expect(calls).toEqual([["get-scan", "--scan-id", "scan-pre"]]);
+});
 
 test("feedback without saved scans sends a general report with logs off", async () => {
   const deps = dependencies();
