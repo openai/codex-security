@@ -304,14 +304,43 @@ export async function isGitMetadataDirectory(
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,
-): Promise<[string, string]> {
-  const [directory, commonDirectory] = await Promise.all([
+): Promise<[string, string, ...string[]]> {
+  const [directory, commonDirectory, objects] = await Promise.all([
     gitOutput(repository, ["rev-parse", "--absolute-git-dir"], signal),
     gitOutput(repository, ["rev-parse", "--git-common-dir"], signal),
+    gitOutput(
+      repository,
+      ["-c", "core.quotePath=false", "count-objects", "--verbose"],
+      signal,
+    ),
   ]);
+  const alternates = objects
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith("alternate: "))
+    .map((line) => {
+      const path = line.slice("alternate: ".length);
+      if (!path.startsWith('"')) return path;
+      // With quotePath=false, Git only C-quotes control bytes and delimiters.
+      return JSON.parse(
+        path.replace(/\\(?:[abtnvfr\\"]|[0-7]{3})/gu, (escape) => {
+          const byte =
+            escape === "\\a"
+              ? 7
+              : escape === "\\v"
+                ? 11
+                : /^\\[0-7]{3}$/u.test(escape)
+                  ? Number.parseInt(escape.slice(1), 8)
+                  : undefined;
+          return byte === undefined
+            ? escape
+            : `\\u${byte.toString(16).padStart(4, "0")}`;
+        }),
+      ) as string;
+    });
   return await Promise.all([
     abortable(() => realpath(resolve(repository, directory)), signal),
     abortable(() => realpath(resolve(repository, commonDirectory)), signal),
+    ...alternates.map((path) => resolve(path)),
   ]);
 }
 

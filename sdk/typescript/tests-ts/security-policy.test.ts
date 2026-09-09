@@ -413,6 +413,62 @@ describe("security policy generation", () => {
     expect(inventory.gitMetadataPaths).toEqual([]);
   });
 
+  test("protects relative and recursive alternate Git object stores", async () => {
+    const f = await fixture();
+    policyGit(f.repository, "init", "--quiet");
+    const primary = join(f.repository, ".git", "objects");
+    const first = join(f.repository, "object-cache");
+    const second = join(f.root, "shared-object-cache");
+    for (const directory of [first, second]) {
+      await mkdir(join(directory, "info"), { recursive: true });
+      await mkdir(join(directory, "pack"));
+    }
+    await writeFile(
+      join(primary, "info", "alternates"),
+      `${relative(primary, first)}\n`,
+    );
+    await writeFile(join(first, "info", "alternates"), `${second}\n`);
+    await writeFile(join(first, "SECURITY.md"), "Object-store fixture\n");
+    const target = await resolveSecurityPolicyTarget(f.repository);
+    const inventory = await inspectSecurityPolicySources(target);
+    expect(inventory.gitMetadataPaths).toContain(first);
+    expect(inventory.gitMetadataPaths).toContain(second);
+    expect(inventory.policyPaths).toEqual([]);
+    expect(await securityPolicyProtectedRoots(target)).toEqual(
+      expect.arrayContaining([first, second]),
+    );
+  });
+
+  test.each([
+    "object store",
+    "object-\u00e9",
+    ...(process.platform === "win32"
+      ? []
+      : [
+          "object\nstore",
+          "object\tstore",
+          'object"store',
+          "object\\001",
+          "object\u0001",
+          "object\u0007",
+          "object\u000b",
+        ]),
+  ])("preserves alternate Git object-store path %j", async (name) => {
+    const f = await fixture();
+    policyGit(f.repository, "init", "--quiet");
+    const alternate = join(f.repository, name);
+    await mkdir(join(alternate, "info"), { recursive: true });
+    await mkdir(join(alternate, "pack"));
+    await writeFile(
+      join(f.repository, ".git", "objects", "info", "alternates"),
+      `${alternate.includes("\n") ? JSON.stringify(alternate) : alternate}\n`,
+    );
+    const target = await resolveSecurityPolicyTarget(f.repository);
+    expect(
+      (await inspectSecurityPolicySources(target)).gitMetadataPaths,
+    ).toContain(alternate);
+  });
+
   test("keeps linked worktrees and submodules as their own policy roots", async () => {
     const f = await fixture();
     policyGit(f.repository, "init", "--quiet");

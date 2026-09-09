@@ -278,11 +278,15 @@ Inherited and reporting-policy links may also resolve to ancestor `SECURITY.md`
 files or the checkout's `.github/SECURITY.md` and `docs/SECURITY.md`.
 The model cannot read sibling components or Git metadata. Policy turns deny
 access to the resolved Git metadata and markers, including those inside the
-selected source tree and nested bare repositories.
+selected source tree, nested bare repositories, and associated alternate object
+stores.
 Policy shell tools inherit only Codex's core environment; custom shell environment
 settings, login shells, and shell snapshots are disabled for these turns.
 Knowledge-base text stays with the private review artifacts during generation
 and is removed afterward.
+
+Known limitation: policy preflight and generation currently fail on Unix
+directories with non-UTF-8 names.
 
 On macOS, the pinned Codex runtime does not fully enforce write restrictions
 under `/tmp` (including `/private/tmp`). Keep the repository and artifacts outside

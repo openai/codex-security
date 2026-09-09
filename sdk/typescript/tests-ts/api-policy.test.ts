@@ -749,9 +749,16 @@ describe("CodexSecurity policy API", () => {
       const metadata = join(f.repository, "git-data[1]");
       const bare = join(component, "cache[1].git");
       const common = join(component, "shared-data");
+      const alternate = join(component, "object-cache[1]");
       await mkdir(component);
       policyGit(component, "init", "--quiet", "--separate-git-dir", metadata);
       policyGit(component, "config", "core.worktree", component);
+      await mkdir(join(alternate, "info"), { recursive: true });
+      await mkdir(join(alternate, "pack"));
+      await writeFile(
+        join(metadata, "objects", "info", "alternates"),
+        `${alternate}\n`,
+      );
       await writeFile(join(component, "HEAD"), "Ordinary source\n");
       await mkdir(join(component, "objects"));
       await mkdir(join(component, "refs"));
@@ -776,6 +783,7 @@ describe("CodexSecurity policy API", () => {
         metadata,
         bare,
         common,
+        alternate,
       ]) {
         expect(overrides).toContainEqual({
           permissions: {
