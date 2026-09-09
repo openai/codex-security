@@ -78,6 +78,38 @@ async function fixture() {
   return { environment, store: new SqliteFindingsStore(environment) };
 }
 
+test("an acknowledged import replay reuses its receipt without overwriting newer evidence", async () => {
+  const { store, environment } = await fixture();
+  let calls = 0;
+  const base = await start(store, {
+    async embed(findings) {
+      calls++;
+      return embedder.embed(findings);
+    },
+  });
+  const original = finding();
+  const request = (value: Finding, key?: string) =>
+    fetch(`${base}/v1/bulk/findings`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(key === undefined ? {} : { "Idempotency-Key": key }),
+      },
+      body: JSON.stringify({ findings: [value], repositoryId: "repository-a" }),
+    });
+  expect((await request(original, "import-example")).status).toBe(201);
+  const updated = { ...original, title: "Updated evidence" };
+  expect((await request(updated)).status).toBe(201);
+  expect((await request(original, "import-example")).status).toBe(201);
+  expect(calls).toBe(2);
+  expect(
+    (await new SqliteFindingsStore(environment).list({ limit: 10, offset: 0 }))
+      .findings[0]!.title,
+  ).toBe(updated.title);
+  expect((await request(updated, "import-example")).status).toBe(409);
+  expect(calls).toBe(2);
+});
+
 async function start(
   store: SqliteFindingsStore,
   embeddings = embedder,

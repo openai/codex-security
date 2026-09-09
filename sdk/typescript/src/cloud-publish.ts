@@ -1,11 +1,22 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import { loadContract } from "./contract.js";
-import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
+import {
+  AuthenticationRequiredError,
+  CodexSecurityError,
+  safeErrorMessage,
+} from "./errors.js";
 import type { Finding, ScanManifest } from "./models.js";
 import {
   CSV_TARGET_ID,
@@ -14,12 +25,16 @@ import {
 } from "./findings-import.js";
 import {
   bundledPluginRoot,
+  canonicalizeModelSafePath,
+  codexSecurityStateDirectory,
+  requireOutputOutsideRepository,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   expandHome,
 } from "./runtime.js";
 import { VERSION } from "./version.js";
+import { workflowDigest } from "./finding-workflow.js";
 
 const CLOUD_PUBLISH_URL =
   "https://chatgpt.com/backend-api/aardvark/cli/findings";
@@ -72,7 +87,12 @@ export async function publishScanToCloud(
       "The completed scan has no findings to publish.",
     );
   }
-  return publishCloudPayload(manifest.scan, findings.findings, dependencies);
+  return publishCloudPayload(
+    manifest.scan,
+    findings.findings,
+    dependencies,
+    scanDirectory,
+  );
 }
 
 export async function publishFindingsCsvToCloud(
@@ -158,7 +178,7 @@ export async function publishFindingsCsvToCloud(
       },
     ],
   };
-  return publishCloudPayload(scan, findings, dependencies);
+  return publishCloudPayload(scan, findings, dependencies, undefined, digest);
 }
 
 function sha256(value: string): string {
@@ -169,6 +189,8 @@ async function publishCloudPayload(
   scan: ScanManifest["scan"],
   findings: Finding[],
   dependencies: CloudPublicationDependencies,
+  scanDirectory?: string,
+  csvDigest?: string,
 ): Promise<CloudPublicationResult> {
   if (findings.length === 0) {
     throw new CodexSecurityError("There are no findings to publish.");
@@ -189,74 +211,168 @@ async function publishCloudPayload(
   const publishUrl =
     dependencies.environment?.["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
     CLOUD_PUBLISH_URL;
-  const timeout = AbortSignal.timeout(30_000);
-  const signal = dependencies.signal
-    ? AbortSignal.any([dependencies.signal, timeout])
-    : timeout;
-  let response: Response;
-  try {
-    response = await (dependencies.fetch ?? globalThis.fetch)(publishUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${credentials.access_token}`,
-        "ChatGPT-Account-ID": credentials.account_id,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        schemaVersion: "1.0",
-        scan,
-        findings,
-      }),
-      redirect: "error",
-      signal,
-    });
-  } catch {
-    dependencies.signal?.throwIfAborted();
-    // A lost response does not establish whether the server accepted the POST.
-    throw new CodexSecurityError(
-      "Cloud publication was not confirmed. The request was not retried; check whether it was accepted before submitting again.",
-    );
-  }
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
-    const detail =
-      response.status === 401
-        ? "Sign in with ChatGPT again before retrying."
-        : response.status === 403
-          ? "The signed-in account is not authorized to publish to Cloud."
-          : response.status === 404
-            ? "Cloud publication is not available for this account or deployment."
-            : "The request was not retried.";
-    throw new CodexSecurityError(
-      `Cloud publication failed (HTTP ${response.status}). ${detail}`,
-    );
-  }
-  const receipt = receiptSchema.safeParse(
-    await response.json().catch(() => {
-      dependencies.signal?.throwIfAborted();
-      return undefined;
-    }),
+  const directory = join(
+    codexSecurityStateDirectory(dependencies.environment),
+    "publications",
+    "cloud",
   );
-  // Cloud assigns opaque IDs in request order, so they cannot be compared to
-  // local finding IDs. The authenticated response must still preserve the
-  // submitted count and return one distinct observation for each finding.
-  if (
-    (response.status !== 200 && response.status !== 201) ||
-    !receipt.success ||
-    receipt.data.finding_count !== findings.length ||
-    receipt.data.finding_ids.length !== findings.length ||
-    new Set(receipt.data.finding_ids).size !== receipt.data.finding_ids.length
-  ) {
-    throw new CodexSecurityError(
-      "Cloud publication returned an invalid acceptance receipt. Check whether the request was accepted before submitting again.",
+  if (scanDirectory !== undefined) {
+    requireOutputOutsideRepository(
+      await canonicalizeModelSafePath(scanDirectory),
+      await canonicalizeModelSafePath(directory),
     );
   }
-  return {
-    scanId: scan.id,
-    findingIds: receipt.data.finding_ids,
-    findingCount: receipt.data.finding_count,
-  };
+  const key = workflowDigest({
+    payload:
+      csvDigest === undefined
+        ? { scan, findings }
+        : { csvDigest, converterVersion: VERSION },
+    url: publishUrl,
+    account: credentials.account_id,
+  });
+  const receiptPath = join(directory, `${key}.json`);
+  let saved: string | undefined;
+  try {
+    saved = await readFile(receiptPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (saved !== undefined) return JSON.parse(saved) as CloudPublicationResult;
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  for (const name of await readdir(directory)) {
+    if (!name.startsWith(`${key}-`) || !name.endsWith(".attempt.json"))
+      continue;
+    let contents: string;
+    try {
+      contents = await readFile(join(directory, name), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // Successful concurrent cleanup follows its durable acceptance receipt.
+      return JSON.parse(
+        await readFile(receiptPath, "utf8"),
+      ) as CloudPublicationResult;
+    }
+    const previous = JSON.parse(contents) as {
+      status: string;
+      result?: CloudPublicationResult;
+    };
+    if (previous.status === "accepted" && previous.result) {
+      await writeCloudRecord(receiptPath, previous.result);
+      return previous.result;
+    }
+  }
+  const attemptPath = join(directory, `${key}-${randomUUID()}.attempt.json`);
+  await writeCloudRecord(attemptPath, { scanId: scan.id, status: "pending" });
+  let accepted = false;
+  try {
+    dependencies.signal?.throwIfAborted();
+    const timeout = AbortSignal.timeout(30_000);
+    const signal = dependencies.signal
+      ? AbortSignal.any([dependencies.signal, timeout])
+      : timeout;
+    let response: Response;
+    try {
+      response = await (dependencies.fetch ?? globalThis.fetch)(publishUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${credentials.access_token}`,
+          "ChatGPT-Account-ID": credentials.account_id,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          schemaVersion: "1.0",
+          scan,
+          findings,
+        }),
+        redirect: "error",
+        signal,
+      });
+    } catch {
+      dependencies.signal?.throwIfAborted();
+      // A lost response does not establish whether the server accepted the POST.
+      throw new CodexSecurityError(
+        "Cloud publication was not confirmed. The request was not retried; check whether it was accepted before submitting again.",
+      );
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      const detail =
+        response.status === 401
+          ? "Sign in with ChatGPT again before retrying."
+          : response.status === 403
+            ? "The signed-in account is not authorized to publish to Cloud."
+            : response.status === 404
+              ? "Cloud publication is not available for this account or deployment."
+              : "The request was not retried.";
+      throw new CodexSecurityError(
+        `Cloud publication failed (HTTP ${response.status}). ${detail}`,
+      );
+    }
+    const receipt = receiptSchema.safeParse(
+      await response.json().catch(() => {
+        dependencies.signal?.throwIfAborted();
+        return undefined;
+      }),
+    );
+    // Cloud assigns opaque IDs in request order, so they cannot be compared to
+    // local finding IDs. The authenticated response must still preserve the
+    // submitted count and return one distinct observation for each finding.
+    if (
+      (response.status !== 200 && response.status !== 201) ||
+      !receipt.success ||
+      receipt.data.finding_count !== findings.length ||
+      receipt.data.finding_ids.length !== findings.length ||
+      new Set(receipt.data.finding_ids).size !== receipt.data.finding_ids.length
+    ) {
+      throw new CodexSecurityError(
+        "Cloud publication returned an invalid acceptance receipt. Check whether the request was accepted before submitting again.",
+      );
+    }
+    const result = {
+      scanId: scan.id,
+      findingIds: receipt.data.finding_ids,
+      findingCount: receipt.data.finding_count,
+    };
+    accepted = true;
+    // Try both copies so a diagnostic write cannot prevent saving the receipt.
+    const evidenceSaved = await writeCloudRecord(attemptPath, {
+      status: "accepted",
+      result,
+    }).then(
+      () => true,
+      () => false,
+    );
+    try {
+      await writeCloudRecord(receiptPath, result);
+    } catch (error) {
+      throw new CodexSecurityError(
+        `Cloud accepted the findings, but the local receipt could not be saved: ${safeErrorMessage(error)}. Acceptance evidence: ${evidenceSaved ? attemptPath : JSON.stringify(result)}. Recover it before submitting again.`,
+      );
+    }
+    await rm(attemptPath, { force: true }).catch(() => undefined);
+    return result;
+  } catch (error) {
+    // Diagnostics must not hide cancellation or an acknowledged acceptance.
+    if (!accepted) {
+      await writeCloudRecord(attemptPath, {
+        scanId: scan.id,
+        status: "unconfirmed",
+        error: safeErrorMessage(error),
+      }).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+async function writeCloudRecord(path: string, value: unknown): Promise<void> {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify(value), { mode: 0o600 });
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
 }
 
 async function readCloudCredentials(environment: NodeJS.ProcessEnv) {

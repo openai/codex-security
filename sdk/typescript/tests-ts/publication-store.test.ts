@@ -495,6 +495,18 @@ describe("read-only publication history", () => {
     await expect(
       inspectPublicationStore(fixture.publication, fixture.environment),
     ).resolves.toEqual([first, second]);
+    expect(
+      await inspectPublicationStore(
+        fixture.publication,
+        fixture.environment,
+        undefined,
+        true,
+      ),
+    ).toEqual([
+      first,
+      second,
+      publishedIssue(fixture.publication, 0, "EXAMPLE-201"),
+    ]);
     await expect(
       inspectPublicationStore(teamOnly, fixture.environment),
     ).resolves.toEqual([withoutProject]);
@@ -868,6 +880,101 @@ connection.close()
       ),
     ).rejects.toThrow(/does not belong to the completed scan/u);
   });
+
+  test("retains the originating attempt without changing ordinary history output", async () => {
+    const fixture = await publicationFixture();
+    const first = publishedIssue(fixture.publication, 0, "EXAMPLE-101");
+    const second = publishedIssue(fixture.publication, 1, "EXAMPLE-102");
+    await recordPublishedIssues(
+      fixture.publication,
+      [first],
+      fixture.environment,
+      "attempt-a",
+    );
+    await recordPublishedIssues(
+      fixture.publication,
+      [first],
+      fixture.environment,
+      "attempt-b",
+    );
+    await recordPublishedIssues(
+      fixture.publication,
+      [second],
+      fixture.environment,
+    );
+    expect(
+      await inspectPublicationStore(fixture.publication, fixture.environment),
+    ).toEqual([first, second]);
+    expect(
+      await inspectPublicationStore(
+        fixture.publication,
+        fixture.environment,
+        undefined,
+        true,
+      ),
+    ).toEqual([{ ...first, attemptId: "attempt-a" }, second]);
+  });
+
+  test.each(["project-example", undefined])(
+    "binds legacy publication receipts atomically and preserves their first attempt (project %s)",
+    async (projectId) => {
+      const fixture = await publicationFixture({ count: 3 });
+      const publication: PreparedScanPublication = {
+        ...fixture.publication,
+        destination: { type: "linear", teamId: "team-example", projectId },
+      };
+      const first = publishedIssue(publication, 0, "EXAMPLE-501");
+      const second = publishedIssue(publication, 1, "EXAMPLE-502");
+      const third = publishedIssue(publication, 2, "EXAMPLE-503");
+      await recordPublishedIssues(
+        publication,
+        [first, third],
+        fixture.environment,
+      );
+
+      await expect(
+        recordPublishedIssues(
+          publication,
+          [first, { ...second, issueIdentifier: third.issueIdentifier }],
+          fixture.environment,
+          "attempt-failed",
+        ),
+      ).rejects.toThrow(/already associated with a different finding/u);
+      expect(
+        await inspectPublicationStore(
+          publication,
+          fixture.environment,
+          undefined,
+          true,
+        ),
+      ).toEqual([first, third]);
+
+      await recordPublishedIssues(
+        publication,
+        [first, second],
+        fixture.environment,
+        "attempt-a",
+      );
+      await recordPublishedIssues(
+        publication,
+        [first, second],
+        fixture.environment,
+        "attempt-b",
+      );
+      expect(
+        await inspectPublicationStore(
+          publication,
+          fixture.environment,
+          undefined,
+          true,
+        ),
+      ).toEqual([
+        { ...first, attemptId: "attempt-a" },
+        third,
+        { ...second, attemptId: "attempt-a" },
+      ]);
+    },
+  );
 
   test("returns only database-backed current results in original finding order", async () => {
     const fixture = await publicationFixture();

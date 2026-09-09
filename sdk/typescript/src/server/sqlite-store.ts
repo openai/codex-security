@@ -27,6 +27,25 @@ export class SqliteFindingsStore implements FindingsStore {
     await this.run(["database-info"]);
   }
 
+  async getEmbeddingChunks(
+    keys: readonly string[],
+  ): Promise<(number[] | null)[]> {
+    const result = await this.run(
+      ["embedding-chunks"],
+      JSON.stringify({ action: "get", keys }),
+    );
+    return result["vectors"] as (number[] | null)[];
+  }
+
+  async saveEmbeddingChunks(
+    entries: readonly { key: string; vector: number[] }[],
+  ): Promise<void> {
+    await this.run(
+      ["embedding-chunks"],
+      JSON.stringify({ action: "put", entries }),
+    );
+  }
+
   async dashboard(query: DashboardQuery): Promise<DashboardSnapshot> {
     return (await this.run(
       ["dashboard"],
@@ -37,10 +56,11 @@ export class SqliteFindingsStore implements FindingsStore {
   async insert(
     entries: readonly EmbeddedFinding[],
     repositoryId?: string,
+    receipt?: { key: string; digest: string },
   ): Promise<string[]> {
     const result = await this.run(
       ["store-findings"],
-      JSON.stringify({ entries, repositoryId }),
+      JSON.stringify({ entries, repositoryId, receipt }),
     );
     if (result["error"] === "finding_conflict") {
       throw new FindingsError(
@@ -49,6 +69,23 @@ export class SqliteFindingsStore implements FindingsStore {
       );
     }
     return result["findingIds"] as string[];
+  }
+
+  async importReceipt(
+    key: string,
+    digest: string,
+  ): Promise<string[] | undefined> {
+    const result = await this.run(
+      ["finding-import-receipt"],
+      JSON.stringify({ key, digest }),
+    );
+    if (result["error"] === "finding_conflict") {
+      throw new FindingsError(
+        "finding_conflict",
+        "The publication key belongs to different finding inputs.",
+      );
+    }
+    return result["findingIds"] as string[] | undefined;
   }
 
   async list(page: { limit: number; offset: number }): Promise<FindingsPage> {

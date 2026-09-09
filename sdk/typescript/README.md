@@ -1009,11 +1009,13 @@ doesn't stop the rest, but the command exits with `2` if any failed. Cancellatio
 stops new requests and returns results so far with `130` (Ctrl-C) or `143`
 (SIGTERM), unless all publications were already confirmed.
 
-Save the output: Cloud receipts aren't stored in scan history. They contain
-Cloud finding IDs in request order, not local IDs. Uploads aren't retried
-automatically. Cloud may have accepted an upload even if its receipt is missing
-or invalid. Check Cloud before retrying; never resend a scan with a confirmed
-receipt.
+Cloud saves confirmed receipts under `$CODEX_SECURITY_STATE_DIR/publications/cloud`,
+separately from scan artifacts. Repeating the same payload for the same account
+and endpoint returns its saved receipt without another upload. Receipts contain
+Cloud finding IDs in request order, not local IDs. Each attempt also saves its
+status. Uploads aren't retried automatically: a missing or invalid response can
+still mean Cloud accepted the upload. Check Cloud before manually retrying an
+unconfirmed attempt. Concurrent uploads are not deduplicated by this local receipt.
 
 ### Publish completed scans to Linear
 
@@ -1072,10 +1074,36 @@ successes for the same occurrence, team, and project, without checking remote
 issues. Results distinguish `created` and `skipped` issues. Add `--dry-run`
 to preview the remaining findings.
 
-After an interrupted or indeterminate publication, check the retained handoff,
-evidence, and Linear destination before retrying. Issues may exist without a
-local record. The CLI can't recover those issues, and `--skip-existing` can't
-prevent duplicates from them or concurrent publications.
+With `--skip-existing`, the CLI first recovers confirmed issue IDs from retained
+handoffs and connector evidence, then skips those issues. API outcomes are saved
+as each issue finishes; verified mappings enter SQLite after the attempt's issue
+identities are reconciled. The API path records each batch before submitting it,
+so retry can continue batches that never started. A host-owned recovery receipt
+outside the connected publisher's working directory retains the original prepared
+request and verified results. Recovery uses that snapshot even if the current
+classification or finding selection has changed, or optional connector logs
+could not be retained. Current classification and filters apply to new submissions.
+The receipt also records pre-existing issue IDs, and SDK-recorded mappings retain
+their originating attempt. A separate publication cannot resolve this attempt's
+unknown outcome. New mappings recorded manually in SQLite can resolve the attempt
+after operator reconciliation; each manual confirmation is assigned to one attempt
+when recovery consumes it. The completed host receipt remains after handoff cleanup,
+so a concurrent retry can verify completion. Partial cleanup also retains definite
+API rejections that can be retried safely.
+Native event evidence also stays outside the publisher's writable directory;
+model-written logs and legacy transport labels cannot authorize replay. Recovery
+honors existing SQLite mappings and re-reads unresolved handoffs after operator
+correction. It keeps handoffs and marks them reconciled after saving confirmed mappings.
+Older handoffs without a host receipt require each finding to be in the current
+selection or already recorded in SQLite; otherwise, reconcile them before retrying.
+Their acknowledgements must corroborate recorded issue IDs to resolve an unknown
+attempt; an older SQLite mapping alone does not confirm another publication.
+Empty legacy plans require reconciliation. Recording one issue does not resolve
+additional mutations acknowledged by native connector events.
+Incomplete setup directories with no mutation evidence do not block retry.
+If retained evidence leaves an issue's outcome unknown, the retry stops and
+prints the handoff path; check that evidence and Linear before proceeding.
+Local receipts cannot prevent duplicates from concurrent publications.
 
 ```ts
 import { publishScan } from "@openai/codex-security";
@@ -1624,11 +1652,19 @@ only available to explicit all-repository retrieval until imported with an ID.
 
 Bulk insertion generates embeddings and then writes the findings and vectors
 in one SQLite transaction. If embedding generation fails or a finding identity
-conflicts with another stored identity, no part of the batch is written.
+conflicts with another stored identity, no findings from the batch become visible.
+Validated embedding chunks are checkpointed separately after each provider
+response, so retrying after a failure reuses completed work.
 Reusing a `findingId` updates that finding and replaces its embedding; retries
 do not create extra rows. An existing ID's fingerprint, rule, and identity
 anchor/instance cannot be replaced. Repeated IDs in one request are applied in order,
 with the last supplied record retained. Stored scan occurrences are unchanged.
+
+An optional `Idempotency-Key` header records the successful import receipt in the
+same transaction as its findings. Replaying the same key and payload returns the
+original IDs without regenerating embeddings or overwriting later edits. Reusing
+a key for a different payload returns HTTP 409. Clients that omit the header keep
+the existing update behavior.
 
 For example, add `repositoryId` to a copy of an exported findings document
 saved as `findings-import.json` (leave the sealed scan artifacts unchanged),
@@ -1689,9 +1725,21 @@ The service creates embeddings and commits the batch before acknowledging it.
 The existing saved-scan selector, external `--scan-dir`, and interactive picker
 work with custom publication. Custom publication accepts one scan, not CSV
 input or Linear options. Add `--dry-run` to validate and preview the payload
-without making an HTTP request. Existing Linear and Cloud destinations are
-unchanged. Upload failures and incomplete receipts fail the command; uploads
-are not automatically retried because a lost response may have been committed.
+without making an HTTP request. Publication state is saved automatically;
+repeating a locally recorded publication returns its receipt without an HTTP request,
+including after moving unchanged artifacts to another directory. Explicit
+workflow IDs remain bound to their original artifact directory.
+The client sends a stable `Idempotency-Key` for the exact scan and destination.
+The bundled service honors that key, including after a lost response. Other
+services must implement the same receipt behavior to support safe replay.
+Upload failures and incomplete receipts fail the command; uploads are not
+automatically retried.
+If the server accepts an upload but its local checkpoint cannot be confirmed,
+the command returns the acceptance receipt with a `warnings` entry. Keep that
+receipt: a later retry may resubmit the accepted findings if the checkpoint was
+not stored. If cancellation arrives after acceptance, the CLI preserves this
+receipt and any checkpoint warning while exiting with code 130 for Ctrl-C or
+143 for SIGTERM.
 
 ```typescript
 import { publishScanToCustom } from "@openai/codex-security";
@@ -1850,6 +1898,18 @@ publication with an empty receipt. Dry-run never advances a workflow stage.
 A completed `dedupe --workflow-id` returns its saved result without repeating
 reviews or group writes. A publication whose acknowledgement was lost is retried
 using the service's existing idempotent upsert.
+
+If the server accepts that upload but its local checkpoint cannot be confirmed,
+the dedupe result includes a `publication` acceptance receipt with `warnings`.
+The CLI also prints those warnings to stderr, for both human and JSON output.
+Keep the receipt: retrying may resend the accepted findings. This metadata is
+returned for the current call and is not stored in the dedupe result cache;
+after publication recovers, retries return the normal dedupe result. If dedupe
+then fails, the SDK error retains that receipt in `CodexSecurityError.publication`
+with the original failure as its cause when wrapping is needed. Cancellation
+retains its original abort reason. The CLI keeps the failing or canceled exit
+code and returns `{ scanId, deduplicationStatus: "failed", publication }` only
+for failures with this receipt; ordinary failures keep their existing output.
 
 Each validated screening and pair review is checkpointed locally,
 including DISTINCT decisions. Screening checkpoints retain pair recommendations
@@ -2030,6 +2090,12 @@ bundled `cl100k_base` encoding. Long inputs are split without truncation;
 their vectors are combined by token weight and normalized. Requests respect
 the provider's 8,192-token input, 300,000-token request, and 2,048-input limits.
 See the [embedding API contract](https://developers.openai.com/api/reference/resources/embeddings/methods/create).
+
+The bundled service saves validated chunks in SQLite before requesting another
+batch. Cache keys include the exact token input, endpoint, model, and dimensions;
+a changed input or configuration gets a new embedding. Partial chunks are not
+exposed as imported findings. Restart with the same state volume and retry the
+import to reuse completed chunks.
 
 Storage initializes before the server listens. The SQLite adapter reuses the
 bundled workbench's schema and migrations at

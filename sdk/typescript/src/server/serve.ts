@@ -8,12 +8,14 @@ export async function serveFindings(
 ): Promise<void> {
   const host = environment["HOST"] ?? "127.0.0.1";
   const port = Number(environment["PORT"] ?? 3000);
+  const store = new SqliteFindingsStore(environment);
   const server = await startFindingsServer({
-    store: new SqliteFindingsStore(environment),
+    store,
     embeddings: new OpenAiFindingEmbedder(
       environment["OPENAI_API_KEY"] ?? environment["CODEX_API_KEY"],
       fetch,
       environment["CODEX_SECURITY_EMBEDDINGS_URL"] || undefined,
+      store,
     ),
     host,
     port,

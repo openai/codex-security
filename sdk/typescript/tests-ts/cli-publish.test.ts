@@ -4,6 +4,13 @@ import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import {
+  publishScanToCustomInternal,
+  type CustomPublicationResult,
+} from "../src/custom-publish.js";
+import { FindingWorkflow } from "../src/finding-workflow.js";
+import { runWorkbench } from "../src/runtime.js";
+import { workflowFixture } from "./support/workflow-fixture.js";
 import type { CheckScanPublicationResult } from "../src/publish.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 
@@ -122,9 +129,16 @@ describe("publish scan to custom", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(receipt);
   });
-  test.each([false, true])(
-    "publishes a selected saved scan with dry-run=%j",
-    async (dryRun) => {
+  test.each([
+    { dryRun: false },
+    { dryRun: true },
+    {
+      dryRun: false,
+      warnings: ["Accepted upload; local receipt was not confirmed."],
+    },
+  ])(
+    "publishes a selected saved scan with %j",
+    async ({ dryRun, warnings }) => {
       const [scanDir] = await publicationScanDirectories(1);
       const stdout = capture();
       const stderr = capture();
@@ -142,6 +156,7 @@ describe("publish scan to custom", () => {
         repositoryId: "repository-example",
         findingIds: ["finding-1"],
         findingCount: 1,
+        ...(warnings === undefined ? {} : { warnings: [...warnings] }),
       };
       let calls = 0;
       deps.publishScanToCustom = async (directory, options) => {
@@ -179,6 +194,150 @@ describe("publish scan to custom", () => {
       expect(stderr.text()).toBe("");
     },
   );
+
+  test.each([
+    { signal: "SIGINT", code: 130, json: true },
+    { signal: "SIGTERM", code: 143, json: false },
+  ] as const)(
+    "retains accepted custom receipts when their checkpoint is canceled (%j)",
+    async ({ signal, code, json }) => {
+      await using fixture = await workflowFixture();
+      const signals = new FakeSignals();
+      const deps = dependencies({ signals, environment: fixture.environment });
+      const ids = fixture.document.findings.map((finding) => finding.findingId);
+      const keys: (string | null)[] = [];
+      let publicationId = "";
+      let failCheckpoint = true;
+      let accepted: CustomPublicationResult | undefined;
+      deps.publishScanToCustom = async (directory, options) => {
+        accepted = await publishScanToCustomInternal(directory, options, {
+          environment: fixture.environment,
+          fetch: async (_url, init) => {
+            keys.push(new Headers(init.headers).get("Idempotency-Key"));
+            return Response.json(ids, { status: 201 });
+          },
+          runWorkbench: async (workbenchOptions, args, input) => {
+            if (args[0] === "finding-workflow") {
+              const request = JSON.parse(input!);
+              if (
+                failCheckpoint &&
+                request.action === "complete" &&
+                request.stage === "publish"
+              ) {
+                failCheckpoint = false;
+                publicationId = request.id;
+                signals.emit(signal);
+                throw new Error("Publication checkpoint unavailable");
+              }
+            }
+            return runWorkbench(workbenchOptions, args, input);
+          },
+        });
+        return accepted;
+      };
+      const args = [
+        "publish",
+        "scan",
+        "--scan-dir",
+        fixture.scanDir,
+        "--to",
+        "custom",
+        "--findings-url",
+        "http://synthetic.test",
+      ];
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          [...args, ...(json ? ["--json"] : [])],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(code);
+      expect(accepted).toMatchObject({
+        scanId: fixture.document.scanId,
+        findingIds: ids,
+        findingCount: ids.length,
+        warnings: [
+          expect.stringContaining("Publication checkpoint unavailable"),
+        ],
+      });
+      expect(stdout.text()).not.toBe("");
+      if (json) expect(JSON.parse(stdout.text())).toEqual(accepted);
+      else {
+        expect(stdout.text()).toContain(fixture.document.scanId);
+        expect(stdout.text()).toContain(ids[0]!);
+        expect(stdout.text()).toContain("Publication checkpoint unavailable");
+      }
+      expect(stderr.text()).toContain(
+        signal === "SIGINT" ? "Publication canceled" : "Publication terminated",
+      );
+      expect(stderr.text()).toContain("Publication checkpoint unavailable");
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      const workflow = new FindingWorkflow(publicationId, fixture.environment);
+      expect((await workflow.get())!.stages.publish.status).toBe("running");
+      const retryOutput = capture();
+      const retryErrors = capture();
+      expect(
+        await main(
+          [...args, "--json"],
+          retryOutput.stream,
+          retryErrors.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(retryOutput.text())).toEqual({
+        scanId: fixture.document.scanId,
+        repositoryId: accepted!.repositoryId,
+        findingIds: ids,
+        findingCount: ids.length,
+      });
+      expect(retryErrors.text()).toBe("");
+      expect((await workflow.get())!.stages.publish.status).toBe("completed");
+      expect(keys).toHaveLength(2);
+      expect(new Set(keys).size).toBe(1);
+    },
+  );
+
+  test("keeps canceled custom previews out of receipt output", async () => {
+    const signals = new FakeSignals();
+    const deps = dependencies({ signals });
+    deps.publishScanToCustom = async () => {
+      signals.emit("SIGINT");
+      return {
+        scanId: "scan-example",
+        repositoryId: "repository-example",
+        findingIds: ["finding-example"],
+        findingCount: 1,
+        dryRun: true,
+      };
+    };
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--scan-dir",
+          "external-scan",
+          "--to",
+          "custom",
+          "--findings-url",
+          "http://synthetic.test",
+          "--dry-run",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(130);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Publication canceled");
+  });
 
   test.each([
     [["--to", "custom"], "requires --findings-url"],
