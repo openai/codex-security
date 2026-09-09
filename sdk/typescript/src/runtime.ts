@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   constants,
+  createWriteStream,
   existsSync,
   readdirSync,
   type BigIntStats,
@@ -43,9 +44,10 @@ import {
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { pipeline } from "node:stream/promises";
 import { crc32 } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
-import extractZip from "extract-zip";
+import { openPromise as openZip } from "yauzl";
 import { parse } from "smol-toml";
 import {
   CodexSecurityError,
@@ -2172,17 +2174,16 @@ export async function extractPluginZip(
     let expandedSize = 0;
     const paths = new Set<string>();
     const checksums: Array<{ path: string; checksum: number }> = [];
-    await extractZip(archivePath, {
-      dir: staging,
-      defaultDirMode: 0o700,
-      defaultFileMode: 0o600,
-      onEntry(entry, archive) {
+    const zip = await openZip(archivePath, { strictFileNames: true });
+    try {
+      for await (const entry of zip.eachEntry()) {
         throwIfSignalAborted(signal);
-        if (archive.entryCount > MAX_ZIP_ENTRIES) {
+        if (zip.entryCount > MAX_ZIP_ENTRIES) {
           throw new PluginBootstrapError(
-            `Plugin ZIP contains too many entries: ${archive.entryCount}.`,
+            `Plugin ZIP contains too many entries: ${zip.entryCount}.`,
           );
         }
+        if (entry.fileName.startsWith("__MACOSX/")) continue;
         const path = safeArchivePath(entry.fileName);
         const collisionKey = path.toLowerCase();
         if (paths.has(collisionKey)) {
@@ -2213,11 +2214,25 @@ export async function extractPluginZip(
           mode === 0o040000 ||
           (entry.versionMadeBy >>> 8 === 0 &&
             entry.externalFileAttributes === 16);
-        if (!directory) {
-          checksums.push({ path, checksum: entry.crc32 >>> 0 });
-        }
-      },
-    });
+        const output = join(staging, ...path.split("/"));
+        const entryMode = (entry.externalFileAttributes >>> 16) & 0xffff;
+        const permissions = (entryMode || (directory ? 0o700 : 0o600)) & 0o777;
+        await mkdir(directory ? output : dirname(output), {
+          recursive: true,
+          ...(directory ? { mode: permissions } : {}),
+        });
+        if (directory) continue;
+        const stream = await zip.openReadStreamPromise(entry);
+        await pipeline(
+          stream,
+          createWriteStream(output, { mode: permissions, flags: "wx" }),
+          { signal },
+        );
+        checksums.push({ path, checksum: entry.crc32 >>> 0 });
+      }
+    } finally {
+      zip.close();
+    }
     for (const { path, checksum } of checksums) {
       throwIfSignalAborted(signal);
       const bytes = await readFile(join(staging, ...path.split("/")));
