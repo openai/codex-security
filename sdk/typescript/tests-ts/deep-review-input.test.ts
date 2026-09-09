@@ -352,6 +352,15 @@ describe("deep-review worklists", () => {
       ]),
       "encoded data",
     ],
+    [
+      false,
+      Buffer.concat([
+        Buffer.from('{"path":"a.py","area":"src","preview":"'),
+        Buffer.from([0xed, 0xa0, 0x80]),
+        Buffer.from('"}'),
+      ]),
+      "encoded data",
+    ],
   ];
   test.each(invalid)(
     "rejects invalid worklist data (selection=%j, data=%j)",
