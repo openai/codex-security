@@ -200,6 +200,38 @@ describe("saved scan logs", () => {
     expect(JSON.stringify(result)).not.toContain("PRIVATE PRE-SCAN");
   });
 
+  test("excludes logs after completed time", async () => {
+    const home = await temporaryHome();
+    await writeSession(
+      home,
+      "parent",
+      [
+        commandEvent(
+          "DURING scan event",
+          "call-during",
+          "2026-08-21T12:01:00.000Z",
+        ),
+        commandEvent(
+          "AFTER hours event",
+          "call-after",
+          "2026-08-21T12:03:00.000Z",
+        ),
+      ],
+      undefined,
+      "2026-08-21T12:00:00.000Z",
+    );
+
+    const result = await readScanLogs({
+      scanId: "scan-1",
+      threadId: "parent",
+      codexHome: home,
+      completedAt: "2026-08-21T12:02:00.000Z",
+    });
+
+    expect(JSON.stringify(result)).toContain("DURING scan event");
+    expect(JSON.stringify(result)).not.toContain("AFTER hours event");
+  });
+
   test("includes independent Deep workers without crossing scan boundaries", async () => {
     const home = await temporaryHome();
     const scanDirectory = join(home, "scans", "current");

@@ -70,6 +70,10 @@ export async function readScanLogs(options: ScanLogOptions) {
       }
     }
   }
+  const completedBoundary =
+    options.completedAt === undefined || options.completedAt === null
+      ? Number.NaN
+      : Date.parse(options.completedAt);
   const events: Record<string, unknown>[] = [];
   for (const session of sessions) {
     let replaying = false;
@@ -90,6 +94,15 @@ export async function readScanLogs(options: ScanLogOptions) {
           continue;
         }
         replaying = false;
+      }
+      if (
+        Number.isFinite(completedBoundary) &&
+        typeof event["timestamp"] === "string"
+      ) {
+        const eventTime = Date.parse(event["timestamp"]);
+        if (Number.isFinite(eventTime) && eventTime > completedBoundary) {
+          continue;
+        }
       }
       events.push({ threadId: session.threadId, event });
     }
