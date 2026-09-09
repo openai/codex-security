@@ -9,7 +9,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { listRepositoryFindings } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import { loadContract } from "./contract.js";
 import {
@@ -21,7 +20,7 @@ import {
   bindImportedFindings,
   parseImportedFindings,
 } from "./findings-import.js";
-import { ScanResult, type RepositoryFinding } from "./result.js";
+import { ScanResult } from "./result.js";
 import {
   cleanupSdkDirectory,
   codexSecurityStateDirectory,
@@ -274,7 +273,7 @@ export async function importScan(
     }
     await workbench(workbenchOptions, ["complete-scan", "--scan-id", scanId]);
     activeScan = undefined;
-    const result = new ScanResult({
+    return new ScanResult({
       ...contract,
       scanDir,
       threadId: "",
@@ -284,11 +283,6 @@ export async function importScan(
         finalResponse: IMPORT_DESCRIPTION,
       },
     });
-    result.repositoryFindings = (await listRepositoryFindings(
-      (args) => workbench(workbenchOptions, args),
-      targetId,
-    )) as RepositoryFinding[] | undefined;
-    return result;
   } catch (error) {
     if (activeScan !== undefined) {
       await workbench({ ...activeScan.options, signal: undefined }, [
