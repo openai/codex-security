@@ -748,9 +748,13 @@ test.each([false, true])(
   },
 );
 
-test.each([true, false])(
-  "a hard-killed continuation requires bound native spend to enforce its saved cap: persistedThread=%j",
-  async (persistedThread) => {
+test.each([
+  { persistedThread: true, nativeLogs: true },
+  { persistedThread: false, nativeLogs: true },
+  { persistedThread: false, nativeLogs: false },
+])(
+  "a hard-killed continuation requires bound native spend to enforce its saved cap: %j",
+  async ({ persistedThread, nativeLogs }) => {
     const f = await savedScan({ maxCostUsd: 20 });
     const child = join(f.root, "interrupted-child");
     await mkdir(child, { mode: 0o700 });
@@ -809,6 +813,7 @@ test.each([true, false])(
         },
       }) + "\n",
     );
+    if (!nativeLogs) await rm(sessionPath);
     let latestId = "";
     let modelCalls = 0;
     const outcome = await resume({ ...f, scanId: childId }, (options) => ({
@@ -825,7 +830,7 @@ test.each([true, false])(
         };
       },
     }));
-    if (!persistedThread) {
+    if (!nativeLogs) {
       expect(outcome.code, outcome.stderr).toBe(2);
       expect(modelCalls).toBe(0);
       expect(outcome.stderr).toContain("cost is unavailable");

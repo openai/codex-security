@@ -1370,11 +1370,7 @@ export class CodexSecurity {
         const needsHistoricalCost =
           savedScanCost(resumeContext["cost"]) === null;
         let savedSession: Awaited<ReturnType<typeof findScanSession>> = null;
-        if (
-          mode === "standard" &&
-          typeof savedThreadId !== "string" &&
-          typeof resumeContext["sourceThreadId"] !== "string"
-        ) {
+        if (mode === "standard" && typeof savedThreadId !== "string") {
           try {
             savedSession = await findScanSessionForDirectory(
               runtime.codexHome,
