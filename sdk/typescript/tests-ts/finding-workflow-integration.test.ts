@@ -54,6 +54,44 @@ async function fixture() {
   return { ...value, history, workbenchOptions };
 }
 
+async function fixtureWithFindings(count: number) {
+  const value = await fixture();
+  const { scanDir, document } = value;
+  const manifestPath = join(scanDir, "scan-manifest.json");
+  const manifest = JSON.parse(
+    await readFile(manifestPath, "utf8"),
+  ) as ScanManifest;
+  const digest = (text: string) =>
+    createHash("sha256").update(text).digest("hex");
+  document.findings = Array.from({ length: count }, (_value, index) => {
+    const finding = structuredClone(document.findings[0]!);
+    finding.identity.instance = `concurrent-${index}`;
+    const fingerprint = `codex-security/v1:sha256:${digest(
+      [
+        "codex-security/v1",
+        manifest.scan.target.targetId,
+        finding.ruleId,
+        finding.identity.anchor,
+        finding.identity.instance,
+      ].join("\0"),
+    )}`;
+    return {
+      ...finding,
+      findingId: `csf_${digest(fingerprint).slice(0, 24)}`,
+      occurrenceId: `occ_${digest([document.scanId, fingerprint].join("\0")).slice(0, 24)}`,
+      fingerprints: { ...finding.fingerprints, primary: fingerprint },
+      title: `Synthetic concurrent finding ${index}`,
+    };
+  });
+  const content = JSON.stringify(document);
+  await writeFile(join(scanDir, "findings.json"), content);
+  manifest.scan.artifacts!.find(
+    (artifact) => artifact.path === "findings.json",
+  )!.sha256 = digest(content);
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  return value;
+}
+
 async function restoreLegacyWorkflow(
   environment: NodeJS.ProcessEnv,
   state: object,
@@ -491,40 +529,7 @@ test.each(["screen", "pair"])(
 test.each(["screening", "pair-review"] as const)(
   "drains concurrent %s checkpoints after failure and resumes with different concurrency",
   async (failedStage) => {
-    const { scanDir, environment, document, history } = await fixture();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = JSON.parse(
-      await readFile(manifestPath, "utf8"),
-    ) as ScanManifest;
-    const digest = (value: string) =>
-      createHash("sha256").update(value).digest("hex");
-    document.findings = Array.from({ length: 4 }, (_value, index) => {
-      const finding = structuredClone(document.findings[0]!);
-      finding.identity.instance = `concurrent-${index}`;
-      const fingerprint = `codex-security/v1:sha256:${digest(
-        [
-          "codex-security/v1",
-          manifest.scan.target.targetId,
-          finding.ruleId,
-          finding.identity.anchor,
-          finding.identity.instance,
-        ].join("\0"),
-      )}`;
-      return {
-        ...finding,
-        findingId: `csf_${digest(fingerprint).slice(0, 24)}`,
-        occurrenceId: `occ_${digest([document.scanId, fingerprint].join("\0")).slice(0, 24)}`,
-        fingerprints: { ...finding.fingerprints, primary: fingerprint },
-        title: `Synthetic concurrent finding ${index}`,
-      };
-    });
-    const content = JSON.stringify(document);
-    await writeFile(join(scanDir, "findings.json"), content);
-    manifest.scan.artifacts!.find(
-      (artifact) => artifact.path === "findings.json",
-    )!.sha256 = createHash("sha256").update(content).digest("hex");
-    await writeFile(manifestPath, JSON.stringify(manifest));
-
+    const { environment, document, history } = await fixtureWithFindings(4);
     const options = {
       workflowId: `concurrent-${failedStage}`,
       findingsUrl: "http://synthetic.test",
@@ -659,6 +664,118 @@ test.each(["screening", "pair-review"] as const)(
     ).toEqual({ status: "completed", result });
   },
 );
+
+test("resumes a saved Sol review after overlapping Luna work fails", async () => {
+  const { environment, document, history } = await fixtureWithFindings(3);
+  const options = {
+    workflowId: "overlapping-reviews",
+    findingsUrl: "http://synthetic.test",
+    concurrency: 2,
+  };
+  const failedAnchor = document.findings[2]!.findingId;
+  const lunaStarted = Promise.withResolvers<void>();
+  const solSaved = Promise.withResolvers<void>();
+  const failure = new Error("Synthetic later screening failure");
+  const calls = new Map<string, number>();
+  const events: string[] = [];
+  let interrupt = true;
+  let failedReviewKey: string | undefined;
+  let groupWrites = 0;
+  const dependencies = {
+    environment,
+    reviewRunner: {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        const originals = JSON.parse(
+          review.prompt.slice(review.prompt.lastIndexOf("\n\n") + 2),
+        ).findings as Finding[];
+        const key = `${review.stage}:${originals.map((finding) => finding.findingId).join(",")}`;
+        calls.set(key, (calls.get(key) ?? 0) + 1);
+        if (
+          interrupt &&
+          review.stage === "screening" &&
+          originals[0]!.findingId === failedAnchor
+        ) {
+          failedReviewKey = key;
+          events.push("luna-pending");
+          lunaStarted.resolve();
+          await solSaved.promise;
+          events.push("luna-failed");
+          throw failure;
+        }
+        if (interrupt && review.stage === "pair-review")
+          await lunaStarted.promise;
+        return review.validate(
+          review.stage === "screening"
+            ? {
+                decisions: Object.fromEntries(
+                  originals
+                    .slice(1)
+                    .map((_finding, index) => [
+                      screeningPairSlot(index),
+                      { ...sameRecommendation },
+                    ]),
+                ),
+              }
+            : merged(originals),
+        );
+      },
+    },
+    runWorkbench: async (args: readonly string[], input?: string) => {
+      const response = await history(args, input);
+      const payload = input ? JSON.parse(input) : {};
+      if (
+        interrupt &&
+        payload.action === "save-review" &&
+        payload.binding.stage === "pair-review"
+      ) {
+        events.push("sol-saved");
+        solSaved.resolve();
+      }
+      return response;
+    },
+    fetch: async (url: URL) => {
+      if (url.pathname.endsWith("/bulk/findings"))
+        return Response.json(
+          document.findings.map((finding) => finding.findingId),
+        );
+      if (url.pathname.endsWith("/dedupe-groups")) {
+        groupWrites++;
+        return Response.json([]);
+      }
+      const id = decodeURIComponent(url.pathname.split("/").at(-2)!);
+      return Response.json({
+        finding: document.findings.find((finding) => finding.findingId === id),
+        potentialDuplicates: document.findings.filter(
+          (finding) => finding.findingId !== id,
+        ),
+      });
+    },
+  };
+  await expect(
+    deduplicateScanInternal(document.scanId, options, dependencies),
+  ).rejects.toThrow(failure.message);
+  expect(events).toEqual(["luna-pending", "sol-saved", "luna-failed"]);
+  expect(groupWrites).toBe(0);
+  expect(calls.size).toBe(4);
+
+  interrupt = false;
+  const result = await deduplicateScanInternal(
+    document.scanId,
+    { ...options, concurrency: 1 },
+    dependencies,
+  );
+  expect(result.duplicateGroups).toEqual([
+    document.findings.map((finding) => finding.findingId).sort(),
+  ]);
+  expect(groupWrites).toBe(1);
+  expect(calls.size).toBe(6);
+  for (const [key, count] of calls)
+    expect(count).toBe(key === failedReviewKey ? 2 : 1);
+  expect(
+    (await new FindingWorkflow(options.workflowId, environment).get())?.stages
+      .dedupe,
+  ).toEqual({ status: "completed", result });
+});
 
 test("replays an unacknowledged group write after migrating its workflow database", async () => {
   const { environment, document, history } = await fixture();

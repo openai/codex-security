@@ -1550,15 +1550,20 @@ codex-security dedupe --scan SCAN_ID --findings-url http://127.0.0.1:3000 --json
 
 Deduplication runs up to 8 jobs concurrently by default. Set `--concurrency N`
 to choose a positive integer, or `--concurrency 1` for serial execution. The SDK
-equivalent is `concurrency: N`. Each available worker takes the next queued job
-as soon as its current job finishes; it does not wait for a batch to finish.
-First, workers retrieve and screen finding neighborhoods with Luna. After all
-screenings finish, workers review the nominated pairs with Sol. Results are
-combined in input order so completion timing does not change the groups.
+equivalent is `concurrency: N`. Candidate neighborhoods are fetched first, with
+the same concurrency limit. Luna screenings and ready Sol pair reviews then use
+two queues sharing one worker pool, with at most 8 jobs running in total by
+default. Each available worker takes a ready job as soon as its current job
+finishes; it does not wait for a batch to finish.
+
+A Sol pair review becomes ready once every Luna screening covering that pair
+has finished and none voted `DISTINCT`. It can run while unrelated Luna
+screenings continue. Results are combined in input order so completion timing
+does not change the groups.
 
 If a job fails after its retries, queued jobs stop and already running jobs
 finish before the command reports the failure. No groups are posted from an
-incomplete review phase. To retain completed reviews across runs, use a
+incomplete review. To retain completed reviews across runs, use a
 `--workflow-id` as described below.
 
 The default scope is the saved scan's repository, identified by
@@ -1577,7 +1582,7 @@ import { deduplicateScan } from "@openai/codex-security";
 
 const result = await deduplicateScan("scan_example_001", {
   findingsUrl: "http://127.0.0.1:3000",
-  // concurrency: 8, // Maximum concurrent jobs per review phase; use 1 for serial.
+  // concurrency: 8, // Shared worker limit for Luna and Sol; use 1 for serial.
   // allRepositories: true, // Omit to search only this scan's repository.
   // signal: controller.signal,
 });
@@ -1721,7 +1726,7 @@ exponential backoff with jitter; HTTP retries honor `Retry-After`. Waiting to re
 occupies the job's concurrency slot.
 
 Cancellation, authentication or configuration errors, permanent HTTP errors, and
-required-source-access blockers are not retried. Exhausted retries fail the phase;
+required-source-access blockers are not retried. Exhausted retries fail deduplication;
 invalid or unfinished reviews are not cached. Completed checkpoints remain
 available when the workflow resumes.
 
@@ -1747,12 +1752,15 @@ use another workflow ID for a fresh review rather than changing that saved resul
 1. For each distinct finding ID in the scan, request
    `/v1/finding/{id}/potential-duplicates` with the selected repository or
    explicit all-repository scope. Use the complete stored anchor and
-   candidates returned by that request.
+   candidates returned by that request. Fetch all neighborhoods before starting
+   reviews so every pair's screening dependencies are known.
 2. Screen each nonempty neighborhood with `gpt-5.6-luna` at `xhigh` reasoning
    effort. The review covers every anchor-neighbor pair; nominations between
    neighbors are rejected.
 3. Independently review each nominated pair once with `gpt-5.6-sol` at `high`
-   reasoning effort. Only accepted pairs contribute to duplicate groups.
+   reasoning effort after all Luna screenings covering that pair finish without
+   a `DISTINCT` decision. Luna and ready Sol jobs share the configured worker
+   pool and can run together. Only accepted pairs contribute to duplicate groups.
 4. Group accepted duplicate pairs transitively unless a Luna or Sol `DISTINCT`
    decision contradicts the resulting component. Contradicted components are
    split deterministically, preferring legal subgroups that preserve more

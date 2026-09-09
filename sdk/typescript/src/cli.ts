@@ -3565,7 +3565,7 @@ export async function main(
           .positive()
           .default(DEFAULT_DEDUPE_CONCURRENCY)
           .describe(
-            "Maximum concurrent dedupe jobs per phase; use 1 for serial execution.",
+            "Maximum concurrent dedupe jobs across Luna and Sol; use 1 for serial execution.",
           ),
         workflowId: optionValue("--workflow-id")
           .optional()

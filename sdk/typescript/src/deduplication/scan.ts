@@ -40,7 +40,7 @@ export interface DeduplicateScanOptions {
   findingsUrl: string;
   /** Search all repositories instead of the scan's targetId. Defaults to false. */
   allRepositories?: boolean;
-  /** Maximum concurrent jobs in each deduplication phase. Defaults to 8. */
+  /** Shared concurrency limit for deduplication jobs. Defaults to 8. */
   concurrency?: number;
   signal?: AbortSignal;
 }
