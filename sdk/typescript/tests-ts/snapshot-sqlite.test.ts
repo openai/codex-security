@@ -18,6 +18,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { readSqliteRows } from "./support/read-sqlite";
+import { runCommand } from "./support/shell";
 
 const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
@@ -45,9 +46,8 @@ function rows(path: string) {
   );
 }
 function run(root: string, args: string[], env = process.env) {
-  return spawnSync(node, [helper, "snapshot-sqlite", ...args], {
+  return runCommand(node, [helper, "snapshot-sqlite", ...args], {
     cwd: root,
-    encoding: "utf8",
     env: { ...env, PATH: "" },
     timeout: 10_000,
   });
@@ -58,7 +58,7 @@ afterEach(() => {
 });
 
 describe("SQLite snapshots", () => {
-  test("copies committed WAL rows into a populated standalone database without renumbering rowids", () => {
+  test("copies committed WAL rows into a populated standalone database without renumbering rowids", async () => {
     const f = fixture();
     const source = new Database(f.source);
     source.exec(
@@ -73,7 +73,7 @@ describe("SQLite snapshots", () => {
     if (process.platform !== "win32") chmodSync(f.destination, 0o644);
     try {
       expect(statSync(`${f.source}-wal`).size).toBeGreaterThan(0);
-      const result = run(f.root, [f.source, f.destination]);
+      const result = await run(f.root, [f.source, f.destination]);
       expect({
         status: result.status,
         out: result.stdout,
@@ -103,7 +103,7 @@ describe("SQLite snapshots", () => {
     }
   });
 
-  test("expands homes, quotes URI characters, and creates nested destination parents", () => {
+  test("expands homes, quotes URI characters, and creates nested destination parents", async () => {
     const f = fixture();
     const source = join(
       f.root,
@@ -115,11 +115,15 @@ describe("SQLite snapshots", () => {
     const db = create(source);
     db.close();
     const name = source.slice(f.root.length + 1);
-    const result = run(f.root, [`~/${name}`, "~/new/nested/snapshot.sqlite3"], {
-      ...process.env,
-      HOME: f.root,
-      USERPROFILE: f.root,
-    });
+    const result = await run(
+      f.root,
+      [`~/${name}`, "~/new/nested/snapshot.sqlite3"],
+      {
+        ...process.env,
+        HOME: f.root,
+        USERPROFILE: f.root,
+      },
+    );
     expect(result.status).toBe(0);
     expect(result.stderr).toBe("");
     expect(rows(join(f.root, "new/nested/snapshot.sqlite3"))).toEqual(
@@ -127,7 +131,7 @@ describe("SQLite snapshots", () => {
     );
   });
 
-  test("resolves source directory links and writes through destination directory links", () => {
+  test("resolves source directory links and writes through destination directory links", async () => {
     const f = fixture();
     const source = create(f.source);
     source.close();
@@ -143,7 +147,7 @@ describe("SQLite snapshots", () => {
       join(f.root, "destination-link"),
       process.platform === "win32" ? "junction" : "dir",
     );
-    const result = run(f.root, [
+    const result = await run(f.root, [
       join(f.root, "source-link", "source.sqlite3"),
       join(f.root, "destination-link", "snapshot.sqlite3"),
     ]);
@@ -154,14 +158,14 @@ describe("SQLite snapshots", () => {
 
   test.skipIf(process.platform === "win32")(
     "keeps destination symlink/parent components and follows file aliases",
-    () => {
+    async () => {
       const f = fixture();
       const db = create(f.source);
       db.close();
       const nested = join(f.root, "actual", "child");
       mkdirSync(nested, { recursive: true });
       symlinkSync(nested, join(f.root, "link"), "dir");
-      const result = run(f.root, [
+      const result = await run(f.root, [
         f.source,
         `${f.root}/link/../snapshot.sqlite3`,
       ]);
@@ -172,7 +176,7 @@ describe("SQLite snapshots", () => {
       expect(existsSync(f.destination)).toBe(false);
       symlinkSync(join(f.root, "actual", "snapshot.sqlite3"), f.destination);
       chmodSync(join(f.root, "actual", "snapshot.sqlite3"), 0o644);
-      expect(run(f.root, [f.source, f.destination]).status).toBe(0);
+      expect((await run(f.root, [f.source, f.destination])).status).toBe(0);
       expect(statSync(f.destination).mode & 0o777).toBe(0o600);
     },
   );
@@ -236,9 +240,9 @@ describe("SQLite snapshots", () => {
     },
   );
 
-  test("fails before creating destination parents when the source is missing", () => {
+  test("fails before creating destination parents when the source is missing", async () => {
     const f = fixture();
-    const result = run(f.root, [
+    const result = await run(f.root, [
       f.source,
       join(f.root, "missing", "snapshot.sqlite3"),
     ]);
@@ -248,14 +252,14 @@ describe("SQLite snapshots", () => {
     expect(existsSync(join(f.root, "missing"))).toBe(false);
   });
 
-  test("leaves an existing destination and its permissions unchanged when backup fails", () => {
+  test("leaves an existing destination and its permissions unchanged when backup fails", async () => {
     const f = fixture();
     writeFileSync(f.source, "not a database");
     const db = create(f.destination);
     db.close();
     if (process.platform !== "win32") chmodSync(f.destination, 0o644);
     const before = readFileSync(f.destination);
-    const result = run(f.root, [f.source, f.destination]);
+    const result = await run(f.root, [f.source, f.destination]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("file is not a database");
     expect(readFileSync(f.destination)).toEqual(before);
@@ -263,13 +267,13 @@ describe("SQLite snapshots", () => {
       expect(statSync(f.destination).mode & 0o777).toBe(0o644);
   });
 
-  test("reports destination creation errors without changing source data", () => {
+  test("reports destination creation errors without changing source data", async () => {
     const f = fixture();
     const db = create(f.source);
     db.close();
     writeFileSync(f.destination, "parent is a file");
     const before = readFileSync(f.source);
-    const result = run(f.root, [
+    const result = await run(f.root, [
       f.source,
       join(f.destination, "child.sqlite3"),
     ]);
@@ -278,18 +282,20 @@ describe("SQLite snapshots", () => {
     expect(readFileSync(f.destination, "utf8")).toBe("parent is a file");
   });
 
-  test("keeps positional help, option terminators, and argument error status", () => {
+  test("keeps positional help, option terminators, and argument error status", async () => {
     const f = fixture();
     const db = create(join(f.root, "-source"));
     db.close();
-    expect(run(f.root, ["--", "-source", "-destination"]).status).toBe(0);
+    expect((await run(f.root, ["--", "-source", "-destination"])).status).toBe(
+      0,
+    );
     expect(rows(join(f.root, "-destination"))).toEqual(
       rows(join(f.root, "-source")),
     );
     for (const args of [[], ["source"], ["a", "b", "c"], ["--help=1"]])
-      expect(run(f.root, args).status).toBe(2);
+      expect((await run(f.root, args)).status).toBe(2);
     for (const args of [["--unknown", "--h"], ["-hignored=value"]]) {
-      const help = run(f.root, args);
+      const help = await run(f.root, args);
       expect(help.status).toBe(0);
       expect(help.stdout).toContain("source destination");
     }
