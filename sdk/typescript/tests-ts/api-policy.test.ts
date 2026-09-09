@@ -814,6 +814,10 @@ describe("CodexSecurity policy API", () => {
           },
         });
       }
+      await writeCodexConfig(
+        join(f.runtime.codexHome, "config.toml"),
+        f.configuration()!.config!,
+      );
       const environment: NodeJS.ProcessEnv = {
         ...process.env,
         CODEX_HOME: f.runtime.codexHome,
