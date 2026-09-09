@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
+import { isDeepStrictEqual } from "node:util";
 import {
   basename,
   delimiter,
@@ -1249,8 +1250,16 @@ export class CodexSecurity {
           previousCost.cachedInputTokens + cost.cachedInputTokens,
         cacheWriteInputTokens:
           previousCost.cacheWriteInputTokens + cost.cacheWriteInputTokens,
+        ...(previousCost.cacheWriteInputTokensReported === false ||
+        cost.cacheWriteInputTokensReported === false
+          ? { cacheWriteInputTokensReported: false }
+          : {}),
         outputTokens: previousCost.outputTokens + cost.outputTokens,
         estimatedUsd: previousCost.estimatedUsd + cost.estimatedUsd,
+        ...(cost.pricing !== undefined &&
+        isDeepStrictEqual(previousCost.pricing, cost.pricing)
+          ? { pricing: cost.pricing }
+          : {}),
       };
     };
     let budgetRecovery: {

@@ -19,7 +19,11 @@ import {
   ScanInterruptedError,
 } from "../src/errors.js";
 import { DEFAULT_CODEX_CONFIG } from "../src/config.js";
-import { ScanCostTracker } from "../src/cost.js";
+import {
+  estimateScanCost,
+  ScanCostTracker,
+  type ScanCost,
+} from "../src/cost.js";
 import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -46,6 +50,7 @@ async function savedScan(
     mode?: "standard" | "deep";
     running?: boolean;
     cost?: boolean;
+    savedCost?: ScanCost;
     maxCostUsd?: number;
     custom?: boolean;
     postScanPrompt?: string;
@@ -183,7 +188,7 @@ async function savedScan(
       "Synthetic interrupted scan",
       ...(options.cost === false
         ? []
-        : ["--cost-json", JSON.stringify(previousCost)]),
+        : ["--cost-json", JSON.stringify(options.savedCost ?? previousCost)]),
     ]);
   return {
     root,
@@ -357,6 +362,86 @@ test("Standard continuation preserves the sealed parent and resumes only unfinis
     f.command(["get-cli-scan-resume", "--scan-id", childId]),
   ).rejects.toThrow("already completed");
 });
+
+test.each([
+  "reported",
+  "parent-unreported",
+  "current-unreported",
+  "different-pricing",
+  "missing-pricing",
+] as const)(
+  "continuation preserves truthful cost metadata (%s)",
+  async (scenario) => {
+    const parentCost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1000,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      cache_write_input_tokens_reported: scenario !== "parent-unreported",
+      output_tokens: 50,
+    })!;
+    if (scenario === "different-pricing") {
+      parentCost.pricing!.usdPerMillionTokens.input *= 2;
+      parentCost.estimatedUsd += 0.004;
+    } else if (scenario === "missing-pricing") {
+      delete parentCost.pricing;
+    }
+    const f = await savedScan({ savedCost: parentCost });
+    let childId = "";
+    const currentUsage = {
+      input_tokens: 10,
+      cached_input_tokens: 2,
+      cache_write_input_tokens: 0,
+      cache_write_input_tokens_reported: scenario !== "current-unreported",
+      output_tokens: 3,
+      reasoning_output_tokens: 1,
+    };
+    const outcome = await resume(f, (options) => ({
+      startThread(threadOptions) {
+        childId = options.env!["CODEX_SECURITY_SCAN_ID"]!;
+        const threadId = randomUUID();
+        return {
+          id: threadId,
+          async runStreamed() {
+            await finishChild(f, threadOptions.workingDirectory!, childId);
+            return {
+              events: (async function* () {
+                for await (const event of completedEvents(threadId))
+                  yield event.type === "turn.completed"
+                    ? { ...event, usage: currentUsage }
+                    : event;
+              })(),
+            };
+          },
+        };
+      },
+      resumeThread() {
+        throw new Error("A sealed parent cannot be reopened");
+      },
+    }));
+    expect(outcome.code, outcome.stderr).toBe(0);
+    const result = JSON.parse(outcome.stdout);
+    const currentCost = estimateScanCost(result.cost.model, currentUsage)!;
+    expect(result.cost.estimatedUsd).toBe(
+      parentCost.estimatedUsd + currentCost.estimatedUsd,
+    );
+    expect(result.cost.cacheWriteInputTokensReported).toBe(
+      scenario === "parent-unreported" || scenario === "current-unreported"
+        ? false
+        : undefined,
+    );
+    expect(result.cost.pricing).toEqual(
+      scenario === "different-pricing" || scenario === "missing-pricing"
+        ? undefined
+        : currentCost.pricing,
+    );
+    expect(
+      (await f.command(["get-scan", "--scan-id", childId]))["scan"],
+    ).toMatchObject({
+      progress: { status: "complete" },
+      cost: result.cost,
+    });
+  },
+);
 
 test.each(["scan-continuation.json", "false_positive_feedback.json"])(
   "continuation preserves inherited %s receipts while writing current context",
