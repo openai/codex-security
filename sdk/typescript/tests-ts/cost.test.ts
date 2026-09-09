@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, parse, sep } from "node:path";
+import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   estimateScanCost,
@@ -378,6 +379,67 @@ describe("scan cost", () => {
 });
 
 describe("live scan cost tracking", () => {
+  test.each([
+    [undefined, undefined],
+    [0, 0],
+    [12, undefined],
+    [undefined, 12],
+  ] as const)(
+    "preserves cache-write usage through SDK normalization: log %p, receipt %p",
+    async (writes, receiptWrites) => {
+      const home = await codexHome();
+      const usage = {
+        input_tokens: 120,
+        cached_input_tokens: 30,
+        output_tokens: 15,
+        ...(writes === undefined ? {} : { cache_write_input_tokens: writes }),
+      };
+      await writeSession(home, "scan-thread", usage);
+      const thread = new Codex({
+        codexPathOverride: process.execPath,
+      }).startThread();
+      const executable = thread as unknown as {
+        _exec: { run(): AsyncGenerator<string> };
+      };
+      executable._exec.run = async function* () {
+        yield JSON.stringify({
+          type: "thread.started",
+          thread_id: "scan-thread",
+        });
+        yield JSON.stringify({
+          type: "turn.completed",
+          usage: { ...usage, cache_write_input_tokens: receiptWrites },
+        });
+      };
+      const receipt = (await thread.run("Scan the repository.")).usage;
+      expect(receipt?.cache_write_input_tokens).toBe(receiptWrites ?? 0);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-6-astra",
+      });
+      tracker.start("scan-thread");
+      const running = await tracker.refresh();
+      const completed = await tracker.stop(receipt);
+
+      expect(formatTokenUsage(running.usage)).toContain(
+        `${writes ?? "unavailable"} cache writes`,
+      );
+      const expectedWrites = receiptWrites ?? writes;
+      expect(completed.cost).toMatchObject({
+        inputTokens: 120,
+        cachedInputTokens: 30,
+        cacheWriteInputTokens: expectedWrites ?? 0,
+        outputTokens: 15,
+      });
+      expect(completed.cost?.cacheWriteInputTokensReported).toBe(
+        expectedWrites === undefined ? false : undefined,
+      );
+      expect(formatTokenUsage(completed.usage)).toContain(
+        `${expectedWrites ?? "unavailable"} cache writes`,
+      );
+    },
+  );
+
   test("retains reported write charges when another worker omits cache writes", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {

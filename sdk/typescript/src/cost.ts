@@ -300,9 +300,13 @@ export class ScanCostTracker {
         }
         this.#reportWorkerProgress(session);
       }
+      const receipt = usages.get(threadId);
       if (
         session.usage !== null &&
-        session.usage.total_tokens > (usages.get(threadId)?.total_tokens ?? -1)
+        (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
+          // The SDK inserts zero when the final receipt omits cache writes.
+          (session.usage.total_tokens === receipt?.total_tokens &&
+            receipt.cache_write_input_tokens === 0))
       ) {
         usages.set(threadId, session.usage);
       }

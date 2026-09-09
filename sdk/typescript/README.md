@@ -586,6 +586,9 @@ The token summary shows uncached input, cache reads, cache writes, output,
 and total tokens. Total tokens include all input plus output; cache reads and
 writes are subsets of input, not extra tokens. When cache-write usage is missing,
 the summary shows uncached input and cache writes as unavailable.
+The final summary preserves missing-data information from a matching session log.
+If the Codex runtime converts an omitted count to zero before recording it, the
+CLI cannot distinguish that zero from reported usage.
 
 JSON results, scan history, and bulk-scan receipts record the model, tokens,
 estimated cost, and `cost.pricing`: the price source, verification date, processing
