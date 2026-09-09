@@ -1034,6 +1034,105 @@ describe("database-backed Linear publication integration", () => {
     expect(launches).toBe(1);
   });
 
+  test.each(["EXAMPLE-1", "EXAMPLE-2", "EXAMPLE-3"])(
+    "legacy recovery matches the acknowledged identity across all SQLite history (%s)",
+    async (acknowledgedId) => {
+      const completed = await fixture(1);
+      const sealed = await artifactDigests(completed.scanDirectory);
+      const prepared = await prepareScanPublication(completed.scanDirectory, {
+        ...OPTIONS,
+        environment: completed.environment,
+      });
+      const issue = prepared.issues[0]!;
+      const mapping = (issueIdentifier: string) => ({
+        findingId: issue.findingId,
+        occurrenceId: issue.occurrenceId,
+        issueIdentifier,
+      });
+      for (const identifier of ["EXAMPLE-1", "EXAMPLE-2", "EXAMPLE-3"])
+        await recordPublishedIssues(
+          prepared,
+          [mapping(identifier)],
+          completed.environment,
+        );
+      const stored = storedPublications(completed);
+      const name = `${sha256(prepared.scanId)}-legacy`;
+      const directory = join(
+        completed.stateDirectory,
+        "publications",
+        "linear",
+        "handoffs",
+        name,
+      );
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const request = {
+        findingId: issue.findingId,
+        occurrenceId: issue.occurrenceId,
+        arguments: linearPublicationArguments(prepared.destination, issue),
+      };
+      await writeFile(
+        join(directory, "publication.json"),
+        JSON.stringify({
+          scanId: prepared.scanId,
+          destination: prepared.destination,
+          batches: [[request]],
+        }),
+      );
+      // Older releases appended the host's verified success after a model failure.
+      await writeFile(
+        join(directory, "issues.jsonl"),
+        [
+          {
+            ...request,
+            scanId: prepared.scanId,
+            error: "The model omitted the created issue",
+          },
+          {
+            ...request,
+            scanId: prepared.scanId,
+            issueIdentifier: acknowledgedId,
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join("\n") + "\n",
+      );
+      let launches = 0;
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        runCodex: async () => {
+          launches++;
+          throw new Error("Recorded legacy publication must not be repeated");
+        },
+      };
+      for (let retry = 0; retry < 2; retry++) {
+        const result = await publishScanInternal(
+          completed.scanDirectory,
+          { ...OPTIONS, skipExisting: true },
+          runtime,
+        );
+        expect(result.counts).toEqual({
+          findings: 1,
+          created: 0,
+          failed: 0,
+          skipped: 1,
+        });
+        expect(result.skipped).toEqual([mapping("EXAMPLE-1")]);
+        const receipt = JSON.parse(
+          await readFile(
+            join(dirname(dirname(directory)), `${name}.json`),
+            "utf8",
+          ),
+        );
+        expect(receipt.recovered).toBe(true);
+        expect(receipt.outcome.created).toEqual([mapping(acknowledgedId)]);
+        expect(storedPublications(completed)).toEqual(stored);
+      }
+      expect(launches).toBe(0);
+      expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+    },
+  );
+
   test.each([false, true])(
     "unknown repeated attempts require a new acknowledgement or SQLite mapping (legacy=%j)",
     async (legacy) => {

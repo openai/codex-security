@@ -1195,7 +1195,7 @@ async function recoverPublicationHandoffs(
       },
       environment,
       signal,
-      checkpoint !== undefined,
+      true,
     );
     let previous: PreparedScanPublication;
     if (checkpoint !== undefined) {
@@ -1311,14 +1311,15 @@ async function recoverPublicationHandoffs(
       issues: issues as PreparedPublicationIssue[],
     };
     const baseline = new Set(checkpoint?.previousIssueIdentifiers ?? []);
+    const attemptMappings = persisted
+      .filter(
+        (issue) =>
+          !baseline.has(issue.issueIdentifier) &&
+          (issue.attemptId === undefined || issue.attemptId === entry.name),
+      )
+      .map(({ attemptId: _attempt, ...issue }) => issue);
     const confirmed = new Map(
-      persisted
-        .filter(
-          (issue) =>
-            !baseline.has(issue.issueIdentifier) &&
-            (issue.attemptId === undefined || issue.attemptId === entry.name),
-        )
-        .map(({ attemptId: _attempt, ...issue }) => [issue.findingId, issue]),
+      attemptMappings.map((issue) => [issue.findingId, issue]),
     );
     const restore = (checkpoint?.outcome?.created ?? []).filter(
       (issue) =>
@@ -1356,11 +1357,12 @@ async function recoverPublicationHandoffs(
     if (checkpoint === undefined) {
       // Legacy handoffs have no pre-attempt snapshot. An older SQLite mapping
       // confirms this attempt only when its own acknowledgement names that ID.
-      for (const [findingId, issue] of confirmed) {
+      confirmed.clear();
+      for (const issue of attemptMappings) {
         if (
-          !evidence.some(
+          evidence.some(
             (item) =>
-              item.ownerFindingId === findingId &&
+              item.ownerFindingId === issue.findingId &&
               item.resolution.state === "resolved" &&
               item.resolution.issueIdentifier === issue.issueIdentifier &&
               (item.source === "handoff"
@@ -1368,7 +1370,7 @@ async function recoverPublicationHandoffs(
                 : item.status === "completed" && item.argumentsValid),
           )
         )
-          confirmed.delete(findingId);
+          confirmed.set(issue.findingId, issue);
       }
     }
     // A previously published issue does not confirm a distinct later mutation.
