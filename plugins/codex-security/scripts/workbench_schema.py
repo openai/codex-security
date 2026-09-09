@@ -914,6 +914,23 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        44,
+        "resume ordinary dedupe with saved candidate inputs",
+        """
+        ALTER TABLE finding_workflows ADD COLUMN dedupe_request_digest TEXT;
+        CREATE INDEX unfinished_dedupe_requests
+            ON finding_workflows(dedupe_request_digest)
+            WHERE dedupe_status != 'completed';
+        CREATE TABLE finding_workflow_candidates (
+            workflow_id TEXT NOT NULL REFERENCES finding_workflows(id) ON DELETE CASCADE,
+            finding_id TEXT NOT NULL,
+            candidates_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (workflow_id, finding_id)
+        );
+        """,
+    ),
 )
 
 

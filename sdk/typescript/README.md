@@ -1860,7 +1860,10 @@ they do not replace stored documents.
 Add `--workflow-id` to opt into durable state shared by `scan`, `publish scan
 --to custom`, and `dedupe`. The SDK equivalents are the optional `workflowId`
 fields on `ScanOptions`, `PublishScanToCustomOptions`, and `DeduplicateScanOptions`.
-Without a workflow ID, existing command behavior and output shapes are unchanged.
+Ordinary `dedupe --scan` also saves local checkpoints automatically. Repeating the
+same scan, source, settings, destination, and scope resumes an interrupted operation;
+rerunning after success starts a fresh review using current candidates. This does
+not publish findings. Successful output shapes are unchanged.
 
 ```bash
 codex-security scan /path/to/repository --workflow-id run-001
@@ -1882,7 +1885,9 @@ publication of a completed scan. Dedupe still requires local scan history to loc
 the approved source checkout. For a workflow, dedupe first completes publication
 if its receipt is missing. `--all-repositories` retains its existing default of
 false. Changing a workflow's scan, destination, or bound scope is an error: choose
-a different workflow ID. Use one coordinating process per workflow.
+a different workflow ID. A live dedupe operation holds a process-owned SQLite
+lock: a concurrent retry stops before reviewing or writing groups. Process exit
+releases that lock; a slow or paused process retains ownership.
 
 Workflow metadata, stage statuses, errors, publication receipts, and results live
 in the local workbench SQLite database under `CODEX_SECURITY_STATE_DIR`, outside
@@ -1911,6 +1916,12 @@ retains its original abort reason. The CLI keeps the failing or canceled exit
 code and returns `{ scanId, deduplicationStatus: "failed", publication }` only
 for failures with this receipt; ordinary failures keep their existing output.
 
+Each candidate neighborhood and its order is saved before review. An interrupted
+operation reuses those inputs even if the findings service changes. A fresh
+operation retrieves current candidates. Candidate reads retry transient HTTP
+responses up to three attempts, honoring `Retry-After`. Authentication failures
+and ambiguous writes stop with recovery guidance.
+
 Each validated screening and pair review is checkpointed locally,
 including DISTINCT decisions. Screening checkpoints retain pair recommendations
 and rationales under host-assigned pair slots bound to the original records.
@@ -1931,6 +1942,9 @@ review stop that attempt before group writes; restart with the same ID to review
 the changed source. Original findings, never prior rationales or merged findings,
 are supplied to later independent reviews. Source snapshots do not follow directory
 links outside the approved checkout.
+Snapshots exclude the workflow database and its journals, dedupe locks and
+diagnostics, and the managed Codex credential home. Ordinary source files under
+the state directory remain part of the snapshot.
 
 Before posting groups, the workflow saves the exact final result and write payload.
 If posting fails or its acknowledgement is lost, rerunning dedupe replays that
@@ -1996,9 +2010,11 @@ merged findings. These review fields do not change the command's ID-only result
 or stored findings.
 
 Non-cancellation review failures throw `DeduplicationReviewError`. Its `metadata`
-contains only the review stage, model, failure category, attempt count, and a
-sanitized reason for diagnostics or an external support bundle; it does not
-contain findings, prompts, paths, thread IDs, or credentials.
+contains the review stage, model, failure category, attempt count, a
+credential-safe reason, and an optional local `diagnosticsPath`. Dedupe failures
+also expose `deduplicationRecovery`: operation and scan IDs, failed work, committed
+candidate/review counts, and whether the final group write awaits acknowledgement.
+The CLI prints these details and a retry command pinned to the saved scan.
 
 If a completed turn has no accepted submission, whether it ended with text only
 or after rejected submissions, the runner sends one corrective instruction in
@@ -2008,11 +2024,13 @@ those turns (or the initial attempt if setup fails). Accepted results are not
 replayed. Cancellation, accepted `submit_error` reports, and model or transport
 failures remain terminal.
 
-The SDK does not retain private review transcripts, subprocess stderr, or full
-provider/RPC error payloads, and ephemeral review state is removed after the
-session. The public metadata is a limited diagnostic summary, not a complete
-troubleshooting trace; it intentionally omits the original error cause. Private
-diagnostic retention is not currently implemented.
+Dedupe retains failure diagnostics beneath `CODEX_SECURITY_STATE_DIR/dedupe`: native
+stderr, thread/turn IDs, process exit code/signal, RPC code, and the concrete failure
+message when available. Existing credential filtering applies before these local
+files are written. Failed diagnostic writes never replace the original failure.
+Review transcripts, prompts, and arbitrary RPC payloads are not retained; ephemeral
+Codex runtime data is removed after the session. Review checkpoints contain the
+accepted semantic results needed for a retry, not a resumable in-flight model turn.
 
 Model calls run sequentially on the SDK/CLI host using its Codex sign-in or
 `OPENAI_API_KEY`/`CODEX_API_KEY`, with access to the configured models. Model

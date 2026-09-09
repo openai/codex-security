@@ -1,8 +1,10 @@
 import { CodexSecurityError } from "./errors.js";
+import { setTimeout } from "node:timers/promises";
 import type { Finding } from "./models.js";
-import type {
-  FindingNeighborhood,
-  FindingSearchScope,
+import {
+  isFinding,
+  type FindingNeighborhood,
+  type FindingSearchScope,
 } from "./finding-retrieval.js";
 
 export type FindingsRequest = (
@@ -15,6 +17,17 @@ export class FindingsClient {
     private readonly url: string,
     private readonly signal?: AbortSignal,
     private readonly request: FindingsRequest = fetch,
+    private readonly delay: (
+      milliseconds: number,
+      signal?: AbortSignal,
+    ) => Promise<void> = async (milliseconds, signal) => {
+      try {
+        await setTimeout(milliseconds, undefined, { signal });
+      } catch (error) {
+        signal?.throwIfAborted();
+        throw error;
+      }
+    },
   ) {}
 
   async potentialDuplicates(
@@ -27,7 +40,35 @@ export class FindingsClient {
     if (scope.allRepositories === true)
       url.searchParams.set("allRepositories", "true");
     else url.searchParams.set("repositoryId", scope.repositoryId);
-    const response = await this.request(url, { signal: this.signal });
+    let response: Response;
+    for (let attempt = 0; ; attempt++) {
+      this.signal?.throwIfAborted();
+      response = await this.request(url, { signal: this.signal });
+      if (
+        attempt === 2 ||
+        ![408, 429, 500, 502, 503, 504].includes(response.status)
+      )
+        break;
+      const header = response.headers.get("Retry-After");
+      const retryAfter =
+        header === null
+          ? NaN
+          : /^\d+(?:\.\d+)?$/u.test(header)
+            ? Number(header) * 1000
+            : Date.parse(header) - Date.now();
+      try {
+        await response.body?.cancel();
+      } catch {
+        // An errored response body must not prevent retrying its transient status.
+      }
+      this.signal?.throwIfAborted();
+      await this.delay(
+        Number.isFinite(retryAfter)
+          ? Math.max(0, retryAfter)
+          : 250 * 2 ** attempt,
+        this.signal,
+      );
+    }
     if (!response.ok) {
       throw new CodexSecurityError(
         `Potential-duplicates lookup for ${findingId} failed (HTTP ${response.status}).${
@@ -37,7 +78,18 @@ export class FindingsClient {
         }`,
       );
     }
-    return (await response.json()) as FindingNeighborhood;
+    const candidates = (await response.json()) as FindingNeighborhood;
+    if (
+      !candidates ||
+      !isFinding(candidates.finding) ||
+      !Array.isArray(candidates.potentialDuplicates) ||
+      !candidates.potentialDuplicates.every(isFinding)
+    ) {
+      throw new CodexSecurityError(
+        `Potential-duplicates lookup for ${findingId} returned an invalid finding neighborhood.`,
+      );
+    }
+    return candidates;
   }
 
   async publish(

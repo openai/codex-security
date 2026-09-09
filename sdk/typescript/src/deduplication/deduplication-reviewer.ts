@@ -1,7 +1,6 @@
 import { z } from "incur";
-import { readFileSync } from "node:fs";
-import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import type { Finding } from "../models.js";
+import { isFinding } from "../finding-retrieval.js";
 import type { CodexReviewRunner } from "./codex-review.js";
 import { pairReviewPrompt, screeningPrompt } from "./deduplication-prompts.js";
 
@@ -41,26 +40,10 @@ const screeningSchema = z
   })
   .strict();
 
-let validateMergedFinding: ValidateFunction<Finding> | undefined;
-
 function requireMergedFinding(result: DuplicateDecision): void {
   if (result.decision !== "SAME") return;
-  if (validateMergedFinding === undefined) {
-    const schema = JSON.parse(
-      readFileSync(
-        new URL(
-          "../../_bundled_plugin/schemas/findings.schema.json",
-          import.meta.url,
-        ),
-        "utf8",
-      ),
-    );
-    validateMergedFinding = new Ajv2020({ strict: false }).compile<Finding>(
-      schema.properties.findings.items,
-    );
-  }
   if (
-    !validateMergedFinding(result.mergedFinding) ||
+    !isFinding(result.mergedFinding) ||
     result.mergedFinding["findingId"] !== result.canonicalFindingId
   )
     throw new Error(

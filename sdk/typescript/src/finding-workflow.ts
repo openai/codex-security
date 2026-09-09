@@ -1,11 +1,17 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, sep } from "node:path";
 import type { JsonObject } from "./config.js";
-import { CodexSecurityError, safeErrorMessage } from "./errors.js";
+import {
+  CodexSecurityError,
+  DeduplicationReviewError,
+  safeErrorMessage,
+} from "./errors.js";
 import type { FindingSearchScope } from "./finding-retrieval.js";
+import type { FindingNeighborhood } from "./finding-retrieval.js";
 import {
   bundledPluginRoot,
   canonicalizeModelSafePath,
+  codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   resolvePluginPython,
   runWorkbench,
@@ -16,6 +22,7 @@ export type WorkflowStage = "scan" | "publish" | "dedupe";
 export interface WorkflowBinding {
   repositoryPath?: string;
   scanRequestDigest?: string;
+  dedupeRequestDigest?: string;
   scanId?: string;
   scanDir?: string;
   artifactDigest?: string;
@@ -31,6 +38,7 @@ export interface WorkflowState extends WorkflowBinding {
       result?: unknown;
       error?: string;
       pendingWrite?: { groups: string[][] };
+      failureDetails?: object;
     }
   >;
 }
@@ -68,12 +76,13 @@ export class FindingWorkflow {
       throw new CodexSecurityError("workflowId must be a nonempty string.");
   }
 
-  async protectArtifacts(scanDir: string): Promise<void> {
+  async protectArtifacts(
+    scanDir: string,
+    destination = codexSecurityStateDirectory(this.environment),
+  ): Promise<void> {
     const path = relative(
       await canonicalizeModelSafePath(scanDir),
-      await canonicalizeModelSafePath(
-        codexSecurityStateDirectory(this.environment),
-      ),
+      await canonicalizeModelSafePath(destination),
     );
     if (
       path === "" ||
@@ -87,6 +96,48 @@ export class FindingWorkflow {
 
   async get(): Promise<WorkflowState | null> {
     return (await this.command({ action: "get" })) as WorkflowState | null;
+  }
+
+  async selectDedupe(
+    requestDigest: string,
+    binding: WorkflowBinding,
+  ): Promise<WorkflowState> {
+    return (await this.command({
+      action: "select-dedupe",
+      requestDigest,
+      binding,
+    }))!;
+  }
+
+  async candidateNeighborhood(
+    findingId: string,
+  ): Promise<FindingNeighborhood | null> {
+    const saved = (await this.request({ action: "get-candidates", findingId }))[
+      "candidatesJson"
+    ] as string | null;
+    return saved === null ? null : (JSON.parse(saved) as FindingNeighborhood);
+  }
+
+  async saveCandidateNeighborhood(
+    findingId: string,
+    candidates: FindingNeighborhood,
+  ): Promise<FindingNeighborhood> {
+    const saved = (
+      await this.request({ action: "save-candidates", findingId, candidates })
+    )["candidatesJson"] as string;
+    return JSON.parse(saved) as FindingNeighborhood;
+  }
+
+  async dedupeProgress(): Promise<{
+    candidateCount: number;
+    reviewCount: number;
+    pendingWrite: boolean;
+  }> {
+    return (await this.request({ action: "dedupe-progress" }))["progress"] as {
+      candidateCount: number;
+      reviewCount: number;
+      pendingWrite: boolean;
+    };
   }
 
   async bind(binding: WorkflowBinding): Promise<WorkflowState> {
@@ -109,6 +160,18 @@ export class FindingWorkflow {
       action: "fail",
       stage,
       error: safeErrorMessage(error),
+      ...(stage === "dedupe" && error instanceof CodexSecurityError
+        ? {
+            details: {
+              ...(error instanceof DeduplicationReviewError
+                ? { review: error.metadata }
+                : {}),
+              ...(error.deduplicationRecovery
+                ? { recovery: error.deduplicationRecovery }
+                : {}),
+            },
+          }
+        : {}),
     }).catch(() => undefined);
   }
 
@@ -131,10 +194,20 @@ export class FindingWorkflow {
     return context["scan"] as JsonObject;
   }
 
-  async sourceSnapshot(repository: string): Promise<JsonObject> {
-    return (await this.request({ action: "source", repository }))[
-      "source"
-    ] as JsonObject;
+  async sourceSnapshot(
+    repository: string,
+    signal?: AbortSignal,
+  ): Promise<JsonObject> {
+    return (
+      await this.request(
+        {
+          action: "source",
+          repository,
+          credentialHome: codexSecurityCredentialHome(this.environment),
+        },
+        signal,
+      )
+    )["source"] as JsonObject;
   }
 
   async getReview(key: string): Promise<unknown> {
@@ -166,16 +239,21 @@ export class FindingWorkflow {
     return result["workflow"] as unknown as WorkflowState | null;
   }
 
-  private async request(payload: object): Promise<JsonObject> {
+  private async request(
+    payload: object,
+    signal?: AbortSignal,
+  ): Promise<JsonObject> {
     return await this.call(
       ["finding-workflow"],
       JSON.stringify({ id: this.id, ...payload }),
+      signal,
     );
   }
 
   private async call(
     args: readonly string[],
     input?: string,
+    signal?: AbortSignal,
   ): Promise<JsonObject> {
     this.options ??= (async () => ({
       pluginRoot: await bundledPluginRoot(),
@@ -189,6 +267,10 @@ export class FindingWorkflow {
       },
       failureMessage: "Could not save or resume the findings workflow",
     }))();
-    return await this.workbench(await this.options, args, input);
+    return await this.workbench(
+      { ...(await this.options), signal },
+      args,
+      input,
+    );
   }
 }

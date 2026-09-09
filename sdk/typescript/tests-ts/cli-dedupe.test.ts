@@ -396,8 +396,20 @@ test("dedupe forwards cancellation and removes signal handlers", async () => {
     deps.addSignalListener = (name, listener) => signals.add(name, listener);
     deps.removeSignalListener = (name, listener) =>
       signals.remove(name, listener);
-    deps.deduplicateScan = async (_scanId, options) => {
+    deps.deduplicateScan = async (_scanId, options, internal) => {
       signals.emit(signal);
+      await internal?.onRecovery?.({
+        scanId: "saved-scan",
+        operationId: "dedupe-canceled",
+        findingsUrl: "http://127.0.0.1:3000/",
+        allRepositories: false,
+        phase: "screening",
+        findingIds: [],
+        candidateCount: 1,
+        reviewCount: 2,
+        findingCount: 1,
+        pendingWrite: false,
+      });
       options.signal!.throwIfAborted();
       throw new Error("Cancellation must throw");
     };
@@ -408,7 +420,263 @@ test("dedupe forwards cancellation and removes signal handlers", async () => {
     );
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Deduplication canceled");
+    expect(stderr.text()).toContain(
+      "Saved 2 validated reviews and 1/1 candidate neighborhoods",
+    );
+    expect(stderr.text()).toContain("--workflow-id dedupe-canceled");
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   }
 });
+
+test.each(["--help", "--json"])(
+  "dedupe recovery commands replay the accepted workflow ID %s",
+  async (workflowId) => {
+    const deps = dependencies();
+    let calls = 0;
+    deps.deduplicateScan = async (scanId, options) => {
+      calls++;
+      expect(scanId).toBe("saved-scan");
+      expect(options.workflowId).toBe(workflowId);
+      if (calls === 1) {
+        const failure = new CodexSecurityError("Synthetic review failure");
+        failure.deduplicationRecovery = {
+          scanId,
+          operationId: workflowId,
+          findingsUrl: options.findingsUrl,
+          allRepositories: false,
+          phase: "screening",
+          findingIds: [],
+          findingCount: 1,
+          pendingWrite: false,
+        };
+        throw failure;
+      }
+      return {
+        scanId,
+        uniqueFindingIds: [],
+        duplicateGroups: [],
+        deduplicationStatus: "completed",
+      };
+    };
+    const stderr = capture();
+    expect(
+      await main(
+        [
+          "dedupe",
+          "--scan",
+          "saved-scan",
+          `--workflow-id=${workflowId}`,
+          "--findings-url",
+          "http://127.0.0.1:3000/",
+        ],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    const retry = stderr
+      .text()
+      .match(/^Resume(?: \(PowerShell\))?: (.+)$/mu)![1]!;
+    expect(
+      await main(
+        retry.split(" ").slice(1),
+        capture().stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(calls).toBe(2);
+  },
+);
+
+test.skipIf(process.platform === "win32" || Bun.which("zsh") === null)(
+  "dedupe recovery preserves a leading equals sign through zsh",
+  async () => {
+    const deps = dependencies();
+    const failure = new CodexSecurityError("Synthetic review failure");
+    failure.deduplicationRecovery = {
+      scanId: "saved-scan",
+      operationId: "=ls",
+      findingsUrl: "http://127.0.0.1:3000/",
+      allRepositories: false,
+      phase: "screening",
+      findingIds: [],
+      findingCount: 1,
+      pendingWrite: false,
+    };
+    deps.deduplicateScan = async () => {
+      throw failure;
+    };
+    const stderr = capture();
+    expect(await main(args, capture().stream, stderr.stream, deps)).toBe(2);
+    const retry = stderr.text().match(/^Resume: (.+)$/mu)![1]!;
+    const parsed = Bun.spawnSync([
+      Bun.which("zsh")!,
+      "-f",
+      "-c",
+      `set -- ${retry}\nprintf '%s\\0' "$@"`,
+    ]);
+    expect(parsed.exitCode, parsed.stderr.toString()).toBe(0);
+    const recoveredArgs = parsed.stdout.toString().split("\0").slice(1, -1);
+    deps.deduplicateScan = async (scanId, options) => {
+      expect(scanId).toBe("saved-scan");
+      expect(options.workflowId).toBe("=ls");
+      return {
+        scanId,
+        uniqueFindingIds: [],
+        duplicateGroups: [],
+        deduplicationStatus: "completed",
+      };
+    };
+    expect(
+      await main(recoveredArgs, capture().stream, capture().stream, deps),
+    ).toBe(0);
+  },
+);
+
+test("dedupe reports committed work and a pinned retry without implicitly publishing", async () => {
+  const deps = dependencies();
+  const failure = new CodexSecurityError("Synthetic lost acknowledgement");
+  failure.deduplicationRecovery = {
+    scanId: "saved-scan",
+    operationId: "dedupe-example",
+    findingsUrl: "http://127.0.0.1:3000/",
+    allRepositories: true,
+    phase: "groups",
+    findingIds: [],
+    candidateCount: 4,
+    reviewCount: 6,
+    findingCount: 4,
+    pendingWrite: true,
+    diagnosticsPath: "/synthetic/review.json",
+  };
+  deps.deduplicateScan = async () => {
+    throw failure;
+  };
+  const stdout = capture();
+  const stderr = capture();
+  expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(2);
+  expect(stdout.text()).toBe("");
+  expect(stderr.text()).toContain(
+    "Saved 6 validated reviews and 4/4 candidate neighborhoods",
+  );
+  expect(stderr.text()).toContain("acknowledgement is not confirmed");
+  expect(stderr.text()).toContain("/synthetic/review.json");
+  expect(stderr.text()).toContain(
+    "codex-security dedupe --scan saved-scan --workflow-id dedupe-example --findings-url http://127.0.0.1:3000/ --all-repositories",
+  );
+});
+
+test("dedupe quotes a leading at sign in PowerShell recovery arguments", async () => {
+  const deps = dependencies();
+  const failure = new CodexSecurityError("Synthetic review failure");
+  failure.deduplicationRecovery = {
+    scanId: "saved-scan",
+    operationId: "@review",
+    findingsUrl: "http://127.0.0.1:3000/",
+    allRepositories: false,
+    phase: "screening",
+    findingIds: [],
+    findingCount: 1,
+    pendingWrite: false,
+  };
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  deps.deduplicateScan = async () => {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    throw failure;
+  };
+  const stderr = capture();
+  try {
+    expect(await main(args, capture().stream, stderr.stream, deps)).toBe(2);
+    expect(stderr.text()).toContain(
+      "Resume (PowerShell): codex-security dedupe --scan saved-scan --workflow-id '@review' --findings-url http://127.0.0.1:3000/",
+    );
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+});
+
+const powershell = Bun.which("pwsh") ?? Bun.which("powershell");
+for (const quote of ["'", "\u2018", "\u2019", "\u201a", "\u201b"]) {
+  test.skipIf(powershell === null)(
+    `dedupe recovery preserves PowerShell quote U+${quote.codePointAt(0)!.toString(16)}`,
+    async () => {
+      const workflowId = `@review${quote}checkpoint`;
+      const deps = dependencies();
+      const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+      let calls = 0;
+      deps.deduplicateScan = async (scanId, options) => {
+        calls++;
+        expect(scanId).toBe("saved-scan");
+        expect(options.workflowId).toBe(workflowId);
+        if (calls === 1) {
+          const failure = new CodexSecurityError("Synthetic review failure");
+          failure.deduplicationRecovery = {
+            scanId,
+            operationId: workflowId,
+            findingsUrl: options.findingsUrl,
+            allRepositories: false,
+            phase: "screening",
+            findingIds: [],
+            findingCount: 1,
+            pendingWrite: false,
+          };
+          Object.defineProperty(process, "platform", { value: "win32" });
+          throw failure;
+        }
+        return {
+          scanId,
+          uniqueFindingIds: [],
+          duplicateGroups: [],
+          deduplicationStatus: "completed",
+        };
+      };
+      const stderr = capture();
+      try {
+        expect(
+          await main(
+            [
+              "dedupe",
+              "--scan",
+              "saved-scan",
+              "--workflow-id",
+              workflowId,
+              "--findings-url",
+              "http://127.0.0.1:3000/",
+            ],
+            capture().stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+      } finally {
+        Object.defineProperty(process, "platform", platform);
+      }
+      const retry = stderr.text().match(/^Resume \(PowerShell\): (.+)$/mu)![1]!;
+      const parsed = Bun.spawnSync([
+        powershell!,
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); function codex-security { ConvertTo-Json -InputObject @($args) -Compress }; ${retry}`,
+      ]);
+      expect(parsed.exitCode, parsed.stderr.toString()).toBe(0);
+      const recoveredArgs = JSON.parse(parsed.stdout.toString());
+      expect(recoveredArgs).toEqual([
+        "dedupe",
+        "--scan",
+        "saved-scan",
+        "--workflow-id",
+        workflowId,
+        "--findings-url",
+        "http://127.0.0.1:3000/",
+      ]);
+      expect(
+        await main(recoveredArgs, capture().stream, capture().stream, deps),
+      ).toBe(0);
+      expect(calls).toBe(2);
+    },
+  );
+}
