@@ -11,6 +11,7 @@ export interface JsonObject {
 }
 
 export interface CodexSecurityConfig {
+  endpoint?: string;
   pluginPath?: string;
   codexOverrides?: JsonObject;
   pythonPath?: string;

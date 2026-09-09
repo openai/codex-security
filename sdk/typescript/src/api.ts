@@ -2168,6 +2168,7 @@ export class CodexSecurity {
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+      ...(this.config.endpoint ? { baseUrl: this.config.endpoint } : {}),
       ...(commandAuth
         ? { configOverrides: modelProviderConfigOverride(sessionConfig) }
         : {}),
@@ -4024,6 +4025,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       "model_reasoning_effort",
       "model_provider",
       "service_tier",
+      "openai_base_url",
     ]) {
       const value = source[key];
       if (safeString(value)) result[key] = value;
