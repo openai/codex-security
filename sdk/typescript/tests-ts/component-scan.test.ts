@@ -17,6 +17,7 @@ import { afterEach, expect, test } from "bun:test";
 import type { ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
 import {
+  componentPlanningBatches,
   normalizeComponentPlan,
   planComponents,
   type ComponentPlan,
@@ -859,6 +860,153 @@ test("plans from a Git inventory without tools or ignored files", async () => {
   }
 });
 
+test.each(["directories", "manifests", "root files"])(
+  "batches oversized %s without dropping inventory paths",
+  (layout) => {
+    const files = Array.from({ length: 12_000 }, (_, index) => {
+      const name = `unit-${String(index).padStart(5, "0")}-${"x".repeat(100)}`;
+      return layout === "root files"
+        ? `${name}.ts`
+        : `packages/${name}/${layout === "manifests" ? "package.json" : "app.ts"}`;
+    });
+    const batches = [...componentPlanningBatches(files)];
+    expect(batches.length).toBeGreaterThan(1);
+    expect(batches.flatMap(({ files }) => files)).toEqual(files);
+    for (const { files: batch, prompt } of batches) {
+      expect(prompt.length).toBeLessThanOrEqual(1_048_576);
+      const inventory = JSON.parse(prompt.split("\n").at(-1)!);
+      expect(inventory.scopes).not.toContain(".");
+      for (const file of batch) {
+        expect(
+          inventory.scopes.some(
+            (path: string) => file === path || file.startsWith(`${path}/`),
+          ),
+        ).toBe(true);
+      }
+      if (layout === "manifests") expect(inventory.manifests).toEqual(batch);
+      if (layout === "root files") expect(inventory.rootFiles).toEqual(batch);
+    }
+  },
+);
+
+test("keeps package boundaries until a package needs splitting", () => {
+  const files = [
+    "packages/a/a.ts",
+    "packages/a/b.ts",
+    "packages/a/c.ts",
+    "packages/b/a.ts",
+    "packages/b/b.ts",
+    "packages/c/a.ts",
+    "packages/c/b.ts",
+  ];
+  const batches = [
+    ...componentPlanningBatches(files, { maxComponentFiles: 2 }),
+  ];
+  expect(batches.map(({ files }) => files)).toEqual([
+    files.slice(0, 1),
+    files.slice(1, 3),
+    files.slice(3, 5),
+    files.slice(5),
+  ]);
+  expect(batches.flatMap(({ files }) => files)).toEqual(files);
+});
+
+test("plans bounded components and fills omissions inside each batch", async () => {
+  const paths = await fixture();
+  let calls = 0;
+  const plan = await planComponents(paths.repository, {
+    maxComponentFiles: 2,
+    codex: {
+      startThread: () => ({
+        run: async (prompt) => {
+          calls++;
+          const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
+          return {
+            finalResponse: JSON.stringify({
+              components: [{ name: "Selected", paths: [scopes[0]] }],
+            }),
+          };
+        },
+      }),
+    },
+  });
+  expect(calls).toBe(2);
+  expect(plan.components).toEqual([
+    { name: "Selected", paths: ["apps"] },
+    { name: "Selected", paths: ["package.json"] },
+    { name: "Other files", paths: ["shared"] },
+  ]);
+});
+
+test("splits a flat package into reusable file scopes", async () => {
+  const paths = await fixture();
+  const names = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"];
+  const repository = join(paths.repository, "flat");
+  await mkdir(repository);
+  for (const name of names)
+    await writeFile(join(repository, name), "export {};\n");
+  const plan = await planComponents(repository, {
+    maxComponentFiles: 2,
+    codex: {
+      startThread: () => ({
+        run: async (prompt) => {
+          const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
+          return {
+            finalResponse: JSON.stringify({
+              components: [{ name: "Files", paths: scopes }],
+            }),
+          };
+        },
+      }),
+    },
+  });
+  expect(plan.components.flatMap(({ paths }) => paths)).toEqual(names);
+  expect(plan.components.every(({ paths }) => paths.length <= 2)).toBe(true);
+  expect(await normalizeComponentPlan(repository, plan)).toEqual(plan);
+});
+
+test.each([".", "apps"])(
+  "rejects a model scope spanning planning batches: %s",
+  async (path) => {
+    const paths = await fixture();
+    await expect(
+      planComponents(paths.repository, {
+        maxComponentFiles: 1,
+        codex: fakeCodex(() => ({
+          components: [{ name: "Too broad", paths: [path] }],
+        })),
+      }),
+    ).rejects.toThrow("outside its planning batch");
+  },
+);
+
+test("does not start another planning call after cancellation", async () => {
+  const paths = await fixture();
+  const controller = new AbortController();
+  let calls = 0;
+  await expect(
+    planComponents(paths.repository, {
+      maxComponentFiles: 1,
+      signal: controller.signal,
+      codex: {
+        startThread: () => ({
+          run: async (prompt) => {
+            calls++;
+            controller.abort(new Error("planning canceled"));
+            const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
+            return {
+              finalResponse: JSON.stringify({
+                components: [{ name: "Files", paths: scopes }],
+              }),
+            };
+          },
+        }),
+      },
+    }),
+  ).rejects.toThrow("planning canceled");
+  expect(calls).toBe(1);
+});
+
 test("keeps scoped inventories and plans aligned after a case-only Git rename", async () => {
   const paths = await fixture();
   const source = "src";
@@ -1155,6 +1303,101 @@ test.each(["auto", "explicit", "file"])(
     );
   },
 );
+
+test("CLI saves and reuses a plan with bounded component sizes", async () => {
+  const paths = await fixture();
+  const result = await cli(
+    paths,
+    ["--auto", "--max-component-files", "2", "--plan-only"],
+    {
+      planComponents: async (repository, options) => {
+        expect(options?.maxComponentFiles).toBe(2);
+        return planComponents(repository, {
+          ...options,
+          codex: {
+            startThread: () => ({
+              run: async (prompt) => {
+                const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
+                return {
+                  finalResponse: JSON.stringify({
+                    components: [{ name: "Batch", paths: scopes }],
+                  }),
+                };
+              },
+            }),
+          },
+        });
+      },
+      createSecurity: () => {
+        throw new Error("unexpected scan");
+      },
+    },
+  );
+  expect(result.code).toBe(0);
+  const planPath = join(paths.outputDir, "components.json");
+  const plan = await json(planPath);
+  expect(plan.components).toEqual([
+    { name: "Batch", paths: ["apps"] },
+    { name: "Batch", paths: ["package.json", "shared"] },
+  ]);
+  const scanned: unknown[] = [];
+  const resumed = await cli(
+    { ...paths, outputDir: join(paths.root, "scans") },
+    ["--components-file", planPath],
+    {
+      createSecurity: client(async (_repository, options) => {
+        scanned.push(options.target);
+        return completed(options);
+      }),
+      matchFindings: async () => noMatches,
+    },
+  );
+  expect(resumed.code).toBe(0);
+  expect(scanned).toEqual(
+    plan.components.map(({ paths }: { paths: string[] }) => paths),
+  );
+});
+
+test.each(["0", "-1", "1.5", "NaN", "9007199254740992"])(
+  "CLI rejects an invalid component file limit: %s",
+  async (value) => {
+    const paths = await fixture();
+    const result = await cli(paths, [
+      "--auto",
+      `--max-component-files=${value}`,
+      "--plan-only",
+    ]);
+    expect(result.code).not.toBe(0);
+  },
+);
+
+test("component file limits require automatic planning and appear in help", async () => {
+  const paths = await fixture();
+  const result = await cli(paths, [
+    "--component",
+    "apps",
+    "--max-component-files",
+    "2",
+    "--plan-only",
+  ]);
+  expect(result.code).toBe(2);
+  expect(result.stderr).toContain("requires automatic planning");
+  for (const value of [
+    0,
+    -1,
+    1.5,
+    Infinity,
+    NaN,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    await expect(
+      planComponents(paths.repository, { maxComponentFiles: value }),
+    ).rejects.toThrow("positive integer");
+  }
+  const help = await cli(paths, ["--help"]);
+  expect(help.code).toBe(0);
+  expect(help.stdout).toContain("--max-component-files <number>");
+});
 
 test.each(["auto", "chatgpt", "api-key"] as const)(
   "CLI uses %s authentication for planning, scans, and matching",

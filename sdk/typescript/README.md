@@ -384,6 +384,29 @@ npx @openai/codex-security scan-components /path/to/project \
   --output-dir /path/outside/project/results
 ```
 
+For a large repository, limit the number of inventoried files in each automatic
+component. For example, plan components of at most 500 files:
+
+```bash
+npx @openai/codex-security scan-components /path/to/project \
+  --auto --max-component-files 500 --plan-only \
+  --output-dir /path/outside/project/plan
+```
+
+`--max-component-files` requires `--auto` and a positive integer. It has no
+default file-count limit. Planning preserves directory boundaries where possible,
+splitting oversized packages and flat directories into smaller scopes as needed.
+Review the saved plan, then run it with `--components-file` as above; the file
+limit also applies to automatically added `Other files` components. The SDK
+accepts the same setting as `maxComponentFiles` in `planComponents` and
+`runComponentScans`.
+
+Automatic planning splits inventories that exceed Codex's input character limit
+into separate calls, even without `--max-component-files`. Each call uses a fresh
+context and can select only paths within its batch. File counts are a sizing aid,
+not a token budget: individual files and scan activity can use different amounts
+of context. Smaller components can mean more planning calls and separate scans.
+
 Components use repository-relative paths:
 
 ```json
