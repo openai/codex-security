@@ -455,7 +455,9 @@ including the optional `candidate_id` column. JSON accepts a complete
 `codex-security.findings` document or `{ "findings": [...] }`, with each finding
 matching the existing findings schema. On `scan import`, `--json` selects the
 input file; use `--format json` for JSON output. Other commands retain their
-existing `--json` output flag.
+existing `--json` output flag. The selected input must be a regular file, and its
+path must not traverse symbolic links or directory junctions. Use the direct
+filesystem path when the file or a parent directory is linked.
 
 Each import creates one completed scan using the configured
 `CODEX_SECURITY_STATE_DIR`. The target is a retained copy of the input dataset,

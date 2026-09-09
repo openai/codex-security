@@ -1,16 +1,18 @@
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   realpath,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { CodexSecurityConfig } from "./config.js";
-import { loadContract } from "./contract.js";
+import { loadContract, sameCheckedFileDevice } from "./contract.js";
 import {
   CodexSecurityError,
   ScanInterruptedError,
@@ -66,6 +68,52 @@ export interface ImportScanDependencies {
 const IMPORT_DESCRIPTION =
   "Imported findings; no security analysis was performed. Coverage is unknown. Source locations describe the imported reports.";
 
+async function readImportSource(
+  inputPath: string,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  signal?.throwIfAborted();
+  const selected = await lstat(inputPath, { bigint: true });
+  if (!selected.isFile()) {
+    throw new CodexSecurityError("Import source must be a regular file.");
+  }
+  for (let parent = dirname(inputPath); ; parent = dirname(parent)) {
+    signal?.throwIfAborted();
+    if ((await lstat(parent)).isSymbolicLink()) {
+      throw new CodexSecurityError(
+        "Import source must not traverse directory links. Use the direct filesystem path.",
+      );
+    }
+    if (dirname(parent) === parent) break;
+  }
+  const path = join(await realpath(dirname(inputPath)), basename(inputPath));
+  const file = await open(
+    path,
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
+  );
+  try {
+    signal?.throwIfAborted();
+    const opened = await file.stat({ bigint: true });
+    const current = await lstat(path, { bigint: true });
+    if (
+      !opened.isFile() ||
+      !current.isFile() ||
+      current.dev !== selected.dev ||
+      current.ino !== selected.ino ||
+      !(await sameCheckedFileDevice(file, { path, metadata: selected }, opened))
+    ) {
+      throw new CodexSecurityError(
+        "Import source must remain the selected regular file.",
+      );
+    }
+    return await file.readFile({ signal });
+  } finally {
+    await file.close();
+  }
+}
+
 /** Save supplied findings through the normal scan completion and indexing flow. */
 export async function importScan(
   options: ImportScanOptions,
@@ -74,7 +122,7 @@ export async function importScan(
   const { signal } = options;
   const environment = dependencies.environment ?? process.env;
   const inputPath = resolve(expandHome(options.sourcePath, environment));
-  const source = await readFile(inputPath, { signal });
+  const source = await readImportSource(inputPath, signal);
   const workspace = await mkdtemp(
     join(await realpath(tmpdir()), "codex-security-import-"),
   );

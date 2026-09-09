@@ -1,14 +1,19 @@
+import { execFileSync } from "node:child_process";
 import {
+  mkdir,
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
+import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { importScan, type ImportScanOptions } from "../src/import-scan.js";
@@ -17,6 +22,7 @@ import { ScanResult } from "../src/result.js";
 import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -260,6 +266,126 @@ test.each(["csv", "json"] as const)(
     expect(imported.format).toBe(format);
     expect(imported.sourcePath).not.toBe(context.options.sourcePath);
     expect(await readFile(imported.sourcePath, "utf8")).toBe(context.source);
+  },
+);
+
+test.each(["csv", "json"] as const)(
+  "%s import rejects a symlinked source before persistence",
+  async (format) => {
+    const context = await fixture(format);
+    const linked = join(context.root, `linked.${format}`);
+    await symlink(context.options.sourcePath, linked, "file");
+    for (const dryRun of [false, true]) {
+      await expect(
+        importScan(
+          { ...context.options, sourcePath: linked, dryRun },
+          { environment: context.environment },
+        ),
+      ).rejects.toThrow("Import source must be a regular file");
+      await expect(stat(context.stateDirectory)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+  },
+);
+
+test.each(["csv", "json"] as const)(
+  "%s import rejects directory links before persistence",
+  async (format) => {
+    const context = await fixture(format);
+    const repository = join(context.root, "repository");
+    await mkdir(repository);
+    const linked = join(repository, "reports");
+    await symlink(
+      context.root,
+      linked,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    for (const dryRun of [false, true]) {
+      await expect(
+        importScan(
+          {
+            ...context.options,
+            sourcePath: join(linked, `findings.${format}`),
+            dryRun,
+          },
+          { environment: context.environment },
+        ),
+      ).rejects.toThrow("Import source must not traverse directory links");
+      await expect(stat(context.stateDirectory)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+  },
+);
+
+test.each(process.platform === "win32" ? ["directory"] : ["directory", "FIFO"])(
+  "import rejects a %s source before persistence",
+  async (kind) => {
+    const context = await fixture();
+    await rm(context.options.sourcePath);
+    if (kind === "directory") await mkdir(context.options.sourcePath);
+    else execFileSync("mkfifo", [context.options.sourcePath]);
+    await expect(
+      importScan(context.options, { environment: context.environment }),
+    ).rejects.toThrow("Import source must be a regular file");
+    await expect(stat(context.stateDirectory)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  },
+);
+
+test.each(["regular file", "symbolic link"])(
+  "import rejects a source replaced with a %s before reading",
+  async (replacement) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `import rejects a source replaced with a ${replacement} before reading`,
+      )
+    )
+      return;
+    const context = await fixture("json");
+    const originalOpen = filesystem.open;
+    let replaced = false;
+    let read = false;
+    let restoreRead: (() => void) | undefined;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof filesystem.open>) => {
+        if (String(args[0]) !== context.options.sourcePath) {
+          return await originalOpen(...args);
+        }
+        opening.mockRestore();
+        const previous = join(context.root, "previous.json");
+        await rename(context.options.sourcePath, previous);
+        if (replacement === "symbolic link") {
+          await symlink(previous, context.options.sourcePath, "file");
+        } else {
+          await writeFile(context.options.sourcePath, context.source);
+        }
+        replaced = true;
+        const file = await originalOpen(...args);
+        const reading = spyOn(file, "readFile").mockImplementation(async () => {
+          read = true;
+          throw new Error("Read a replaced source");
+        });
+        restoreRead = () => reading.mockRestore();
+        return file;
+      },
+    );
+    try {
+      await expect(
+        importScan(context.options, { environment: context.environment }),
+      ).rejects.toThrow();
+      expect(replaced).toBe(true);
+      expect(read).toBe(false);
+      await expect(stat(context.stateDirectory)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      restoreRead?.();
+      opening.mockRestore();
+    }
   },
 );
 
