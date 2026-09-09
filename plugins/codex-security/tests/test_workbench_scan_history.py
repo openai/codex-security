@@ -349,7 +349,15 @@ def test_cli_scan_history_persists_per_scan_cost(tmp_path: Path) -> None:
         "cachedInputTokens": 200,
         "cacheWriteInputTokens": 0,
         "outputTokens": 30,
-        "estimatedUsd": 0.00625,
+        "estimatedUsd": 0.00488,
+        "cacheWriteInputTokensReported": False,
+        "pricing": {
+            "source": "https://developers.openai.com/api/docs/pricing",
+            "asOf": "2026-09-09",
+            "serviceTier": "standard",
+            "context": "short",
+            "usdPerMillionTokens": {"input": 4, "cacheRead": 0.4, "cacheWrite": 5, "output": 20},
+        },
     }
     scan = create_cli_scan(state_dir, tmp_path / "results", repository, cost=cost)
 

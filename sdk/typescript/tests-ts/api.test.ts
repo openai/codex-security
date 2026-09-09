@@ -3898,6 +3898,8 @@ describe("CodexSecurity orchestration", () => {
   });
 
   const pricedModels = [
+    "gpt-5.5",
+    "gpt-6-astra",
     "gpt-5.6-terra",
     "gpt-daybreak-blue-latest",
     "gpt-daybreak-red-latest",
@@ -4183,10 +4185,10 @@ describe("CodexSecurity orchestration", () => {
     await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
     const approvals = new Map<number, () => void>();
     const firstApproval = new Promise<void>((resolve) =>
-      approvals.set(0.01, resolve),
+      approvals.set(0.008, resolve),
     );
     const secondApproval = new Promise<void>((resolve) =>
-      approvals.set(0.02, resolve),
+      approvals.set(0.016, resolve),
     );
     const requests: number[] = [];
     const commands: Array<readonly string[]> = [];
@@ -4248,7 +4250,7 @@ describe("CodexSecurity orchestration", () => {
     const keepAlive = setTimeout(() => {}, 10_000);
     try {
       const result = await client.run(repository, {
-        maxCostUsd: 0.005,
+        maxCostUsd: 0.004,
         signal: AbortSignal.timeout(5_000),
         onBudgetApproaching: ({ maxCostUsd, signal }) => {
           requests.push(maxCostUsd);
@@ -4261,15 +4263,15 @@ describe("CodexSecurity orchestration", () => {
       });
       expect(result.cost).toMatchObject({
         inputTokens: 2_600,
-        estimatedUsd: 0.013,
+        estimatedUsd: 0.0104,
       });
       expect(starts).toBe(1);
-      expect(requests).toEqual([0.005, 0.01]);
+      expect(requests).toEqual([0.004, 0.008]);
       expect(
         commands
           .filter(([command]) => command === "set-scan-cost-limit")
           .map((args) => args.at(-1)),
-      ).toEqual(["0.01", "0.02"]);
+      ).toEqual(["0.008", "0.016"]);
       expect(commands.some(([command]) => command === "fail-scan")).toBe(false);
       expect(budgetSignal?.aborted).toBe(true);
     } finally {
@@ -4380,7 +4382,7 @@ describe("CodexSecurity orchestration", () => {
       const keepAlive = setTimeout(() => {}, 10_000);
       try {
         const scan = client.run(repository, {
-          maxCostUsd: 0.005,
+          maxCostUsd: 0.004,
           signal: AbortSignal.any([
             controller.signal,
             AbortSignal.timeout(5_000),
@@ -4390,9 +4392,9 @@ describe("CodexSecurity orchestration", () => {
             budgetSignal = signal;
             requested();
             if (scenario === "declined") return undefined;
-            if (scenario === "invalid") return 0.005;
+            if (scenario === "invalid") return 0.004;
             if (scenario === "save-failed" || scenario === "saving")
-              return 0.02;
+              return 0.016;
             return lateAnswer;
           },
           onCost: (cost, limit) => {
@@ -4403,20 +4405,20 @@ describe("CodexSecurity orchestration", () => {
         });
         if (scenario === "completed")
           await expect(scan).resolves.toMatchObject({
-            cost: { estimatedUsd: 0.0045 },
+            cost: { estimatedUsd: 0.0036 },
           });
         else if (scenario === "canceled")
           await expect(scan).rejects.toBeInstanceOf(ScanInterruptedError);
         else
           await expect(scan).rejects.toMatchObject({
             name: ScanCostLimitExceededError.name,
-            maxCostUsd: 0.005,
-            cost: { estimatedUsd: 0.01 },
+            maxCostUsd: 0.004,
+            cost: { estimatedUsd: 0.008 },
           });
-        answer(0.02);
+        answer(0.016);
         await new Promise((resolve) => setImmediate(resolve));
         expect(requestCount).toBe(1);
-        expect(reportedLimit).toBe(0.005);
+        expect(reportedLimit).toBe(0.004);
         expect(budgetSignal?.aborted).toBe(true);
         expect(
           commands.filter(([command]) => command === "set-scan-cost-limit"),
@@ -4445,14 +4447,11 @@ describe("CodexSecurity orchestration", () => {
     const commands: Array<readonly string[]> = [];
     const costs: number[] = [];
     let turns = 0;
-    const cost = {
-      model: "gpt-5.6-sol",
-      inputTokens: 1_250,
-      cachedInputTokens: 200,
-      cacheWriteInputTokens: 0,
-      outputTokens: 30,
-      estimatedUsd: 0.00625,
-    };
+    const cost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    })!;
     const client = new TestClient(
       {},
       {
@@ -4529,14 +4528,14 @@ describe("CodexSecurity orchestration", () => {
     try {
       await expect(
         client.run(repository, {
-          maxCostUsd: 0.005,
+          maxCostUsd: 0.004,
           postScanPrompt: "Record the scan cost.",
           onCost: (cost) => costs.push(cost.estimatedUsd),
           signal: AbortSignal.timeout(5_000),
         }),
       ).rejects.toMatchObject({
         name: ScanCostLimitExceededError.name,
-        maxCostUsd: 0.005,
+        maxCostUsd: 0.004,
         scanDir,
         cost,
       });
@@ -4544,7 +4543,7 @@ describe("CodexSecurity orchestration", () => {
       clearTimeout(keepEventLoopAlive);
     }
     expect(turns).toBe(1);
-    expect(costs.at(-1)).toBe(0.00625);
+    expect(costs.at(-1)).toBe(0.00488);
     expect(commands[1]).toEqual([
       "get-scan-feedback",
       "--scan-id",
@@ -4562,7 +4561,7 @@ describe("CodexSecurity orchestration", () => {
       "--scan-id",
       "scan_example_001",
       "--message",
-      `Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
+      `Scan stopped: estimated cost $0.00488 exceeded the $0.004 limit; partial output remains at ${scanDir}.`,
       "--cost-json",
       JSON.stringify(cost),
     ]);
@@ -4672,7 +4671,7 @@ describe("CodexSecurity orchestration", () => {
       try {
         const result = client.run(repository, {
           mode: "deep",
-          maxCostUsd: 0.005,
+          maxCostUsd: 0.004,
           postScanPrompt: "Do not spend another model turn.",
           onWarning: (warning) => warnings.push(warning),
           signal: AbortSignal.timeout(5_000),
@@ -4693,9 +4692,9 @@ describe("CodexSecurity orchestration", () => {
           expect(recovered.coverage.completeness).toBe(completion);
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
-          expect(recovered.cost?.estimatedUsd).toBe(0.00625);
+          expect(recovered.cost?.estimatedUsd).toBe(0.00488);
           expect(warnings).toEqual([
-            `Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
+            `Scan stopped: estimated cost $0.00488 exceeded the $0.004 limit; partial output remains at ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
         }

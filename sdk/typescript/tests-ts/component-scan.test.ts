@@ -527,7 +527,7 @@ test.each(["dashboard", "headless", "ci"])(
         "apps/api validating findings | Files: 2/2",
       );
       expect(stderr.text()).toContain(
-        "apps/api | Tokens: 100 input, 10 cached, 20 output | Cost: $0.00123",
+        "apps/api | Tokens: 90 uncached input, 10 cache reads, 0 cache writes, 20 output, 120 total | Cost: $0.00123",
       );
     }
     expect(

@@ -116,7 +116,7 @@ export class ScanCostTracker {
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
-  #lastCost: number | null = null;
+  #lastCost: string | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -300,9 +300,13 @@ export class ScanCostTracker {
         }
         this.#reportWorkerProgress(session);
       }
+      const receipt = usages.get(threadId);
       if (
         session.usage !== null &&
-        session.usage.total_tokens > (usages.get(threadId)?.total_tokens ?? -1)
+        (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
+          // The SDK inserts zero when the final receipt omits cache writes.
+          (session.usage.total_tokens === receipt?.total_tokens &&
+            receipt.cache_write_input_tokens === 0))
       ) {
         usages.set(threadId, session.usage);
       }
@@ -362,8 +366,10 @@ export class ScanCostTracker {
   }
 
   #reportCost(cost: ScanCost | null): void {
-    if (cost === null || cost.estimatedUsd === this.#lastCost) return;
-    this.#lastCost = cost.estimatedUsd;
+    if (cost === null) return;
+    const signature = JSON.stringify(cost);
+    if (signature === this.#lastCost) return;
+    this.#lastCost = signature;
     this.#options.onCost?.(cost);
   }
 }
@@ -799,6 +805,10 @@ function addTokenUsage(
       previous.cached_input_tokens + next.cached_input_tokens,
     cache_write_input_tokens:
       previous.cache_write_input_tokens + next.cache_write_input_tokens,
+    ...(previous.cache_write_input_tokens_reported === false ||
+    next.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
     output_tokens: previous.output_tokens + next.output_tokens,
     reasoning_output_tokens:
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
@@ -816,6 +826,10 @@ function subtractTokenUsage(
       usage.cached_input_tokens - inherited.cached_input_tokens,
     cache_write_input_tokens:
       usage.cache_write_input_tokens - inherited.cache_write_input_tokens,
+    ...(usage.cache_write_input_tokens_reported === false ||
+    inherited.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
     output_tokens: usage.output_tokens - inherited.output_tokens,
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,

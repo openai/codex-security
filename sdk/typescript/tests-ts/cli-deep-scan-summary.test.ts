@@ -104,9 +104,9 @@ describe("deep scan completion summary", () => {
           throw new Error("The exceeded cost limit is already known");
         },
       },
-      ["--mode", "deep", "--max-cost", "0.005"],
+      ["--mode", "deep", "--max-cost", "0.004"],
     );
-    expect(text).toContain("Reached the $0.005 cost limit");
+    expect(text).toContain("Reached the $0.004 cost limit");
     expect(text).toContain("higher --max-cost");
     expect(text).not.toContain("--max-discovery-runs");
   });

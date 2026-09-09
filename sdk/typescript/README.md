@@ -439,6 +439,39 @@ Scans are report-only by default. Set `--fail-on-severity high` to exit with
 `1` if a completed scan finds high or critical issues. Incomplete scans exit
 with `2`, writing available results to stdout and a coverage warning to stderr.
 
+### Import findings as a saved scan
+
+Import an existing findings CSV or JSON file into local scan history and SQLite:
+
+```bash
+codex-security scan import --csv /path/to/findings.csv
+codex-security scan import --json /path/to/findings.json --format json
+codex-security scan import --csv /path/to/findings.csv --dry-run
+```
+
+Supply exactly one of `--csv PATH` or `--json PATH`. CSV uses the existing
+[findings CSV template](https://github.com/openai/codex-security/blob/main/examples/findings.csv),
+including the optional `candidate_id` column. JSON accepts a complete
+`codex-security.findings` document or `{ "findings": [...] }`, with each finding
+matching the existing findings schema. On `scan import`, `--json` selects the
+input file; use `--format json` for JSON output. Other commands retain their
+existing `--json` output flag. The selected input must be a regular file, and its
+path must not traverse symbolic links or directory junctions. Use the direct
+filesystem path when the file or a parent directory is linked.
+
+Each import creates one completed scan using the configured
+`CODEX_SECURITY_STATE_DIR`. The target is a retained copy of the input dataset,
+independent of the current repository. Every source occurrence remains a separate
+finding, including duplicate reports. Original identifiers are preserved in
+`extensions.import`; the original file is sealed under `artifacts/import/`.
+JSON writeup paths are retained as source metadata without reading external files.
+
+Completion means the import finished. Coverage is unknown and the report states
+that no security analysis was performed. Importing requires no model calls or
+authentication. `--dry-run` validates without saving a scan. `--output-dir` and
+`--archive-existing` control saved output, and `scans rerun SCAN_ID` reimports the
+retained input.
+
 ### Generate mock scan results
 
 Use `--mock` to populate a Standard scan with synthetic test data in seconds,
@@ -726,10 +759,28 @@ Interactive scans show full-screen progress; CI, redirected output, and
 diagnostics to stderr. Add `--verbose` for diagnostics. Check logs for
 sensitive information before sharing them.
 
+The token summary shows uncached input, cache reads, cache writes, output,
+and total tokens. Total tokens include all input plus output; cache reads and
+writes are subsets of input, not extra tokens. When cache-write usage is missing,
+the summary shows uncached input and cache writes as unavailable.
+The final summary preserves missing-data information from a matching session log.
+If the Codex runtime converts an omitted count to zero before recording it, the
+CLI cannot distinguish that zero from reported usage.
+
 JSON results, scan history, and bulk-scan receipts record the model, tokens,
-and estimated cost. Estimates use
-[standard API token prices](https://developers.openai.com/api/docs/models/compare),
-including cached input and cache writes, but exclude fees and surcharges.
+estimated cost, and `cost.pricing`: the price source, verification date, processing
+tier, context category, and rates in USD per million tokens. Estimates use
+[standard, short-context API prices](https://developers.openai.com/api/docs/pricing),
+including cache reads and writes. They exclude long-context and other processing
+tier adjustments, fees, and surcharges. GPT-5.5 and GPT-6 Astra are supported;
+models without known prices show an unavailable estimate.
+
+For compatibility, `cacheWriteInputTokens` remains the reported token subtotal.
+`cacheWriteInputTokensReported: false` means at least one included usage record
+did not report cache writes. Raw usage uses `cache_write_input_tokens_reported`.
+In that case, the estimate prices unclassified input at the ordinary input rate;
+it may undercount cache-write charges. Older saved records lack this distinction
+and the saved pricing basis.
 
 `--max-cost USD` stops the scan and its workers when estimated cost exceeds
 the limit, though in-flight requests can finish above it. If deep-scan
@@ -1168,6 +1219,25 @@ JSON exports from versions without database checkpoints must be reclassified
 once before they can be reused.
 Pass `signal` to cancel any classification operation. Keep human overrides in the
 calling workflow or issue tracker; assessments remain separate recommendations.
+
+### Feedback
+
+Send a problem report to OpenAI and share the returned feedback ID with support:
+
+```sh
+codex-security feedback --reason "The scan stopped before it finished"
+codex-security feedback SCAN_ID --reason "The scan stopped before it finished" --include-logs
+```
+
+Without an ID, `feedback` selects the most recently started scan in the current
+repository, including active or failed scans. If there are no saved scans, it sends
+a general report. The report includes your description, version details, and the selected
+scan and session IDs. Add `--json` for structured output.
+
+Logs are off by default. `--include-logs` uploads Codex diagnostics and saved scan
+and worker activity. These can contain source code, prompts, findings, tool
+output, and other sensitive data. Only include logs you can share with OpenAI.
+The command uses Codex's feedback service and respects `feedback.enabled = false`.
 
 ### Scan history and reruns
 

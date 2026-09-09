@@ -100,6 +100,7 @@ import {
   type JsonValue,
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
+import { formatScanCostTokens, formatTokenUsage } from "./cost-model.js";
 import {
   CodexSecurityError,
   ConfigurationError,
@@ -139,6 +140,7 @@ import {
   type PublishScanResult,
 } from "./publish.js";
 import type { ScanResult } from "./result.js";
+import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
   canonicalizeModelSafePath,
@@ -169,7 +171,12 @@ import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
 } from "./thread-source.js";
-import { findScanSession, readScanLogs } from "./scan-logs.js";
+import {
+  findScanSession,
+  readSavedScanLogs,
+  type ScanLogSource,
+} from "./scan-logs.js";
+import { sendFeedback } from "./feedback.js";
 import {
   renderScanHistory,
   type HistoryCommand,
@@ -1162,6 +1169,7 @@ interface CliDependencies {
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
   publishScanToCustom?: typeof publishScanToCustom;
+  sendFeedback?: typeof sendFeedback;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
     repository: string,
@@ -1197,6 +1205,7 @@ interface CliDependencies {
   planComponents?: typeof planComponents;
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
+  importScan?: typeof importScan;
   runWorkbench(
     args: readonly string[],
     input?: string,
@@ -1605,7 +1614,7 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
-  argv = defaultListCommand(argv);
+  argv = normalizeScanImportArguments(defaultListCommand(argv));
   const policyFullOutput =
     argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
   const positionals: string[] = [];
@@ -1641,6 +1650,8 @@ export async function main(
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
   let renderedPolicy: string | undefined;
+  const runImport = (options: ImportScanOptions) =>
+    runScanImport(options, errorOutput, dependencies);
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
@@ -1987,35 +1998,11 @@ export async function main(
         if (scanId === undefined) return;
         return await history(
           ["get-scan", "--scan-id", scanId],
-          async (value) => {
-            const scan = value["scan"] as {
-              scanId: string;
-              continuationThreadId?: string;
-              mode?: string;
-              progress?: { status?: string; updatedAt?: string };
-              scanDir?: string;
-            };
-            const threadId = scan.continuationThreadId;
-            if (!threadId) {
-              throw new CodexSecurityError(
-                `No session is associated with scan ${scan.scanId}.`,
-              );
-            }
-            return (await readScanLogs({
-              scanId: scan.scanId,
-              threadId,
-              codexHome: codexSecurityCredentialHome(dependencies.environment),
-              scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
-              completedAt:
-                scan.progress?.status === "running"
-                  ? null
-                  : scan.progress?.status === "complete" ||
-                      scan.progress?.status === "failed" ||
-                      scan.progress?.status === "canceled"
-                    ? scan.progress.updatedAt ?? ""
-                    : "",
-            })) as unknown as JsonObject;
-          },
+          async (value) =>
+            (await readSavedScanLogs(
+              value["scan"] as ScanLogSource,
+              codexSecurityCredentialHome(dependencies.environment),
+            )) as unknown as JsonObject,
         );
       },
     })
@@ -2113,6 +2100,44 @@ export async function main(
             "--scan-id",
             scanId,
           ]);
+          if (
+            recipe !== undefined &&
+            isJsonObject(recipe) &&
+            recipe["import"] !== undefined &&
+            isJsonObject(recipe["import"])
+          ) {
+            if (options.validationPromptFile !== undefined) {
+              throw new CodexSecurityError(
+                "--validation-prompt-file is not supported when rerunning an imported scan; imports do not perform security analysis.",
+              );
+            }
+            const imported = recipe["import"];
+            const sourcePath = imported["sourcePath"];
+            const format = imported["format"];
+            if (
+              typeof sourcePath !== "string" ||
+              sourcePath.length === 0 ||
+              (format !== "csv" && format !== "json")
+            ) {
+              throw new CodexSecurityError(
+                "The saved scan recipe contains invalid import settings.",
+              );
+            }
+            const outcome = await runImport({
+              sourcePath,
+              format,
+              parentScanId: scanId,
+            });
+            exitCode = outcome.exitCode;
+            if (outcome.error !== undefined) {
+              return incurError({
+                code: "SCAN_IMPORT_FAILED",
+                message: outcome.error,
+                exitCode,
+              });
+            }
+            return outcome.data;
+          }
           scanArguments = scanArgumentsFromRecipe(
             recipe,
             scanId,
@@ -3160,6 +3185,11 @@ export async function main(
     })
     .command("scan", {
       description: "Run a Codex Security scan.",
+      hint:
+        "Import existing findings without security analysis:\n" +
+        "  codex-security scan import --csv findings.csv\n" +
+        "  codex-security scan import --json findings.json\n" +
+        "Use ./import to scan a repository named import.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -5003,6 +5033,80 @@ export async function main(
         }
       },
     })
+    .command("feedback", {
+      description: "Send feedback to OpenAI and return a feedback ID.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        scanId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Scan ID or unique prefix (default: most recently started scan in the current repository).",
+          ),
+      }),
+      options: z.object({
+        reason: z.string().trim().min(1).describe("Describe the problem."),
+        includeLogs: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Upload diagnostic logs, including scan and worker conversations and tool output. Defaults to off.",
+          ),
+      }),
+      output: z.object({
+        feedbackId: z.string(),
+        scanId: z.string().nullable(),
+        includedLogs: z.boolean(),
+      }),
+      async run({ args, options }) {
+        let scanId = args.scanId;
+        if (scanId === undefined) {
+          const value = await history([
+            "list-scans",
+            "--repository",
+            dependencies.currentDirectory(),
+          ]);
+          const scans = value["scans"] as {
+            scanId: string;
+            startedAt: string;
+          }[];
+          scanId = scans.toSorted((a, b) =>
+            b.startedAt.localeCompare(a.startedAt),
+          )[0]?.scanId;
+        }
+        const scan =
+          scanId === undefined
+            ? undefined
+            : ((await history(["get-scan", "--scan-id", scanId]))[
+                "scan"
+              ] as ScanLogSource);
+        const controller = new AbortController();
+        const onInterrupt = () => controller.abort("SIGINT");
+        const onTerminate = () => controller.abort("SIGTERM");
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          return await (dependencies.sendFeedback ?? sendFeedback)({
+            ...options,
+            scan,
+            environment: dependencies.environment,
+            workingDirectory: dependencies.currentDirectory(),
+            signal: controller.signal,
+          });
+        } catch (error) {
+          if (controller.signal.aborted) {
+            exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+            errorOutput.write("codex-security: Feedback upload canceled.\n");
+          }
+          throw error;
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command("info", {
       description: "Show read-only SDK and bundled-plugin metadata.",
       mcp: {
@@ -5040,6 +5144,92 @@ export async function main(
         };
       },
     });
+
+  // Incur cannot mount a command with both a handler and subcommands.
+  // Select the nested import route while preserving scan [repository].
+  if (isScanImportCommand(argv)) {
+    cli.command(
+      Cli.create("scan", {
+        description: "Run or import a saved scan.",
+      }).command("import", {
+        description:
+          "Save CSV or JSON findings as a completed scan without security analysis.",
+        destructive: true,
+        mcp: false,
+        options: z
+          .object({
+            csv: optionValue("--csv")
+              .optional()
+              .describe("Findings CSV in the codex-security export format."),
+            json: optionValue("--json")
+              .optional()
+              .describe(
+                "Findings JSON document or object with a findings array.",
+              ),
+            outputDir: optionValue("--output-dir")
+              .optional()
+              .describe(
+                "Artifact directory (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+              ),
+            archiveExisting: z
+              .boolean()
+              .default(false)
+              .describe("Archive existing results; requires --output-dir."),
+            dryRun: z
+              .boolean()
+              .default(false)
+              .describe("Validate the input without saving a scan."),
+          })
+          .refine(
+            (options) =>
+              Number(options.csv !== undefined) +
+                Number(options.json !== undefined) ===
+              1,
+            { message: "Provide exactly one of --csv FILE or --json FILE." },
+          )
+          .refine(
+            (options) =>
+              !options.archiveExisting || options.outputDir !== undefined,
+            { message: "--archive-existing requires --output-dir." },
+          ),
+        examples: [
+          { options: { csv: "findings.csv" } },
+          { options: { json: "findings.json" } },
+        ],
+        hint: "Each input row is retained, including duplicates. --json selects the input file; use --format json for JSON output.",
+        output: z.record(z.string(), z.unknown()).optional(),
+        async run({ options, format, error: incurError }) {
+          const directory = dependencies.currentDirectory();
+          const outcome = await runImport({
+            sourcePath: resolveCliPath(directory, options.csv ?? options.json!),
+            format: options.csv === undefined ? "json" : "csv",
+            outputDir:
+              options.outputDir === undefined
+                ? undefined
+                : resolveCliPath(directory, options.outputDir),
+            archiveExisting: options.archiveExisting,
+            dryRun: options.dryRun,
+          });
+          exitCode = outcome.exitCode;
+          if (outcome.error !== undefined) {
+            return incurError({
+              code: "SCAN_IMPORT_FAILED",
+              message: outcome.error,
+              exitCode,
+            });
+          }
+          if (
+            !options.dryRun &&
+            format === "toon" &&
+            !argv.some((argument) => OUTPUT_OPTION.test(argument))
+          ) {
+            return;
+          }
+          return outcome.data;
+        },
+      }),
+    );
+  }
 
   let notice: UpdateNotice | undefined;
   try {
@@ -5090,6 +5280,77 @@ export async function main(
     errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
     return 2;
   }
+}
+
+async function runScanImport(
+  options: ImportScanOptions,
+  errorOutput: Writable,
+  dependencies: CliDependencies,
+): Promise<ScanOutcome> {
+  const controller = new AbortController();
+  const onInterrupt = () => controller.abort("SIGINT");
+  const onTerminate = () => controller.abort("SIGTERM");
+  dependencies.addSignalListener("SIGINT", onInterrupt);
+  dependencies.addSignalListener("SIGTERM", onTerminate);
+  try {
+    const result = await (dependencies.importScan ?? importScan)(
+      { ...options, signal: controller.signal },
+      { environment: dependencies.environment },
+    );
+    if ("dryRun" in result) return { exitCode: 0, data: { ...result } };
+    try {
+      errorOutput.write(
+        `Imported ${result.findings.findings.length} findings as scan ${result.manifest.scan.id}.\n` +
+          `Artifacts: ${result.scanDir}\n`,
+      );
+    } catch {}
+    return { exitCode: 0, data: result.toJSON() };
+  } catch (error) {
+    const signal = controller.signal.reason;
+    const message =
+      signal === "SIGINT" || signal === "SIGTERM"
+        ? "Scan import canceled."
+        : safeErrorMessage(error);
+    errorOutput.write(`codex-security: ${message}\n`);
+    return {
+      exitCode: signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2,
+      error: message,
+    };
+  } finally {
+    dependencies.removeSignalListener("SIGINT", onInterrupt);
+    dependencies.removeSignalListener("SIGTERM", onTerminate);
+  }
+}
+
+function isScanImportCommand(argv: readonly string[]): boolean {
+  const commandIndex = cliCommandIndex(argv);
+  return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
+}
+
+function normalizeScanImportArguments(
+  argv: readonly string[],
+): readonly string[] {
+  if (!isScanImportCommand(argv)) return argv;
+  const normalized: string[] = [];
+  const subcommandIndex = cliCommandIndex(argv) + 1;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!;
+    const next = argv[index + 1];
+    // Incur reserves bare --json for output, but parses --json=FILE normally.
+    if (
+      index > subcommandIndex &&
+      argument === "--json" &&
+      next !== undefined &&
+      !next.startsWith("--") &&
+      next !== "-h"
+    ) {
+      normalized.push(`--json=${next}`);
+      index += 1;
+    } else {
+      normalized.push(argument);
+    }
+  }
+  return normalized;
 }
 
 function cliCommandIndex(argv: readonly string[]): number {
@@ -5311,6 +5572,7 @@ function validateCliArguments(
       "login",
       "logout",
       "serve",
+      "feedback",
       "info",
     ].includes(command)
   ) {
@@ -5369,7 +5631,9 @@ function validateCliArguments(
       return "Markdown output is not supported for scan results.";
     }
   }
+  const scanImport = isScanImportCommand(argv);
   const nestedCommand =
+    scanImport ||
     command === "scans" ||
     command === "findings" ||
     command === "publish" ||
@@ -5419,7 +5683,11 @@ function validateCliArguments(
     }
     const equals = value.indexOf("=");
     const option = equals < 0 ? value : value.slice(0, equals);
-    if (equals >= 0 || !VALUE_OPTIONS.has(option)) continue;
+    if (
+      equals >= 0 ||
+      (!VALUE_OPTIONS.has(option) && !(scanImport && option === "--json"))
+    )
+      continue;
     const next = argv[index + 1];
     if (next === undefined || next.startsWith("--") || next === "-h") {
       return `Missing value for flag: ${option}`;
@@ -5442,7 +5710,10 @@ function validateCliArguments(
     command !== "verify-fix" &&
     command !== "patch" &&
     positionals.length >
-      (command === "logout" || command === "info" || command === "serve"
+      (scanImport ||
+      command === "logout" ||
+      command === "info" ||
+      command === "serve"
         ? 0
         : subcommand === "compare" || subcommand === "match"
           ? 2
@@ -7241,12 +7512,7 @@ async function executeScan(
         );
       }
       if (runningCost !== null) {
-        const tokens = formatTokenUsage({
-          input_tokens: runningCost.inputTokens,
-          cached_input_tokens: runningCost.cachedInputTokens,
-          output_tokens: runningCost.outputTokens,
-        });
-        if (tokens !== null) details.push(`Tokens: ${tokens}`);
+        details.push(`Tokens: ${formatScanCostTokens(runningCost)}`);
         details.push(`Cost: ${formatUsd(runningCost.estimatedUsd)}`);
       }
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
@@ -7317,13 +7583,8 @@ async function executeScan(
         }
         progress?.stopTimer();
         if (maxCostUsd === undefined) {
-          const tokens = formatTokenUsage({
-            input_tokens: cost.inputTokens,
-            cached_input_tokens: cost.cachedInputTokens,
-            output_tokens: cost.outputTokens,
-          });
           progress?.stage(
-            `${tokens === null ? "" : `Tokens: ${tokens}. `}Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
+            `Tokens: ${formatScanCostTokens(cost)}. Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
           );
         } else {
           progress?.stage(
@@ -8073,41 +8334,17 @@ function printScanSummary(
   if (tokenSummary !== null) {
     errorOutput.write(`  ${paint("TOKENS", 1)}    ${tokenSummary}\n`);
   }
-  if (result.cost !== null) {
-    errorOutput.write(
-      `  ${paint("COST", 1)}      ${formatUsd(result.cost.estimatedUsd)}\n`,
-    );
-  }
+  const costSummary =
+    result.cost === null
+      ? "unavailable (model pricing or usage missing)"
+      : `${formatUsd(result.cost.estimatedUsd)} (standard, short context)`;
+  errorOutput.write(`  ${paint("COST", 1)}      ${costSummary}\n`);
   errorOutput.write(
     `  ${paint("RESULTS", 1)}   ${errorMessage(result.scanDir)}\n`,
   );
   if (deepScanStop?.nextStep !== undefined) {
     errorOutput.write(`\n  ${deepScanStop.nextStep}\n`);
   }
-}
-
-function formatTokenUsage(usage: unknown): string | null {
-  if (usage === null || typeof usage !== "object") return null;
-  const values = usage as Record<string, unknown>;
-  return (
-    (
-      [
-        ["input_tokens", "input"],
-        ["cached_input_tokens", "cached"],
-        ["output_tokens", "output"],
-      ] as const
-    )
-      .map(([key, label]) => {
-        const value = values[key];
-        return typeof value === "number" &&
-          Number.isSafeInteger(value) &&
-          value >= 0
-          ? `${value.toLocaleString("en-US")} ${label}`
-          : null;
-      })
-      .filter((value): value is string => value !== null)
-      .join(", ") || null
-  );
 }
 
 function componentScanEventLine(
@@ -8120,12 +8357,7 @@ function componentScanEventLine(
   }
   if (event.type !== "cost") return null;
   const cost = event.value;
-  const tokens = formatTokenUsage({
-    input_tokens: cost.inputTokens,
-    cached_input_tokens: cost.cachedInputTokens,
-    output_tokens: cost.outputTokens,
-  });
-  return `codex-security: ${componentName} | ${tokens === null ? "" : `Tokens: ${tokens} | `}Cost: ${formatUsd(cost.estimatedUsd)}\n`;
+  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)} | Cost: ${formatUsd(cost.estimatedUsd)}\n`;
 }
 
 function protectedRootErrorMessage(
