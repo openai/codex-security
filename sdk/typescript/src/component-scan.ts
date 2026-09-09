@@ -10,7 +10,6 @@ import {
 import {
   normalizeComponentPlan,
   planComponents,
-  validateMaxComponentFiles,
   type ComponentPlan,
   type ComponentPlanningOptions,
 } from "./component-plan.js";
@@ -37,8 +36,6 @@ export interface ComponentScanOptions {
   outputDir: string;
   components?: ComponentPlan["components"];
   auto?: boolean;
-  /** Maximum inventoried files per component; requires automatic planning. */
-  maxComponentFiles?: number;
   planOnly?: boolean;
   workers?: number;
   config?: CodexSecurityConfig;
@@ -128,10 +125,6 @@ export interface ComponentScanResult {
 export async function runComponentScans(
   options: ComponentScanOptions,
 ): Promise<ComponentScanResult> {
-  validateMaxComponentFiles(options.maxComponentFiles);
-  if (options.maxComponentFiles !== undefined && !options.auto) {
-    throw new Error("Maximum component files requires automatic planning.");
-  }
   const workers = options.workers ?? 4;
   if (!Number.isSafeInteger(workers) || workers < 1)
     throw new Error("Component workers must be a positive integer.");
@@ -164,7 +157,6 @@ export async function runComponentScans(
     options.auto
       ? await (options.planComponents ?? planComponents)(repository, {
           auth,
-          maxComponentFiles: options.maxComponentFiles,
           config: options.config,
           environment,
           signal: options.signal,

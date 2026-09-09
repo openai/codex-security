@@ -263,7 +263,6 @@ const VALUE_OPTIONS = new Set([
   "--path",
   "--component",
   "--components-file",
-  "--max-component-files",
   "--knowledge-base",
   "--rubric",
   "--finding-id",
@@ -3469,15 +3468,6 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Ask Codex to divide the project into components."),
-          maxComponentFiles: z
-            .number()
-            .int()
-            .positive()
-            .max(Number.MAX_SAFE_INTEGER)
-            .optional()
-            .describe(
-              "Maximum files per automatic component; requires --auto (default: no file-count limit).",
-            ),
           planOnly: z
             .boolean()
             .default(false)
@@ -3620,7 +3610,6 @@ export async function main(
             outputDir: resolveCliPath(directory, options.outputDir),
             ...(options.auto ? { auto: true } : { components }),
             planOnly: options.planOnly,
-            maxComponentFiles: options.maxComponentFiles,
             workers: options.workers,
             config,
             scanOptions: {

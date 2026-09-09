@@ -43,8 +43,6 @@ export interface ComponentPlan {
 export interface ComponentPlanningOptions {
   /** @internal Authentication already selected by the calling scan. */
   auth?: ScanAuthMode;
-  /** Maximum inventoried files per automatically planned component. */
-  maxComponentFiles?: number;
   config?: CodexSecurityConfig;
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
@@ -69,14 +67,13 @@ export async function planComponents(
   repository: string,
   options: ComponentPlanningOptions = {},
 ): Promise<ComponentPlan> {
-  validateMaxComponentFiles(options.maxComponentFiles);
   repository = await normalizeRepository(repository, options.signal);
   const files = await inventoryFiles(repository, options.signal);
   if (files.length === 0)
     throw new Error("No files found to divide into components.");
   const counts = directoryCounts(files);
   const plan: ComponentPlan = { components: [] };
-  for (const batch of componentPlanningBatches(files, options)) {
+  for (const batch of componentPlanningBatches(files, options.signal)) {
     options.signal?.throwIfAborted();
     const response = await runReadOnlyCodex(
       batch.prompt,
@@ -133,37 +130,24 @@ export async function planComponents(
   return await normalizeComponentPlan(repository, plan, options.signal);
 }
 
-/** @internal */
-export function validateMaxComponentFiles(value: number | undefined): void {
-  if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
-    throw new Error("Maximum component files must be a positive integer.");
-  }
-}
-
 // Codex turn/start rejects text inputs above this character limit.
 const MAX_PLANNING_PROMPT_CHARS = 1_048_576;
 
 /** @internal */
 export function* componentPlanningBatches(
   files: readonly string[],
-  options: Pick<ComponentPlanningOptions, "maxComponentFiles" | "signal"> = {},
+  signal?: AbortSignal,
 ): Generator<{ files: readonly string[]; prompt: string }> {
-  validateMaxComponentFiles(options.maxComponentFiles);
   const counts = directoryCounts(files);
   const pending = [files];
   while (pending.length > 0) {
-    options.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     const batch = pending.pop()!;
     if (batch.length === 0) continue;
-    if (
-      options.maxComponentFiles === undefined ||
-      batch.length <= options.maxComponentFiles
-    ) {
-      const prompt = planningPrompt(batch, counts);
-      if (prompt.length <= MAX_PLANNING_PROMPT_CHARS) {
-        yield { files: batch, prompt };
-        continue;
-      }
+    const prompt = planningPrompt(batch, counts);
+    if (prompt.length <= MAX_PLANNING_PROMPT_CHARS) {
+      yield { files: batch, prompt };
+      continue;
     }
     if (batch.length === 1) {
       throw new Error(
