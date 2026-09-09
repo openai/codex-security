@@ -74,6 +74,8 @@ EXPECTED_TABLES = {
     "finding_workflows",
     "findings",
     "scan_artifacts",
+    "scan_checkpoints",
+    "scan_review_files",
     "scan_comparison_matches",
     "scan_comparisons",
     "scan_progress",
@@ -210,6 +212,65 @@ def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
         check=False,
     )
     assert stopped["returncode"] != 0
+
+
+@pytest.mark.parametrize(
+    "status,prompt",
+    [
+        ("complete", "Saved follow-up."),
+        ("complete", None),
+        ("complete", "  "),
+        ("failed", "Saved follow-up."),
+    ],
+)
+def test_terminal_followup_budget_preserves_completed_scan(
+    tmp_path: Path, status: str, prompt: str | None
+) -> None:
+    state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path, mode="standard")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        recipe = json.loads(
+            connection.execute("SELECT recipe_json FROM scans WHERE id = ?", (scan_id,)).fetchone()[
+                0
+            ]
+        )
+        if prompt is not None:
+            recipe["postScanPrompt"] = prompt
+        connection.execute(
+            "UPDATE scans SET recipe_json = ? WHERE id = ?", (json.dumps(recipe), scan_id)
+        )
+    write_completed_contract(scan_dir, scan_id, target, relative_path="app.py")
+    if status == "complete":
+        run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    else:
+        run_workbench(
+            state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Synthetic interruption"
+        )
+    artifacts = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        before = dict(connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone())
+    result = run_workbench(
+        state_dir,
+        "set-scan-cost-limit",
+        "--scan-id",
+        scan_id,
+        "--max-cost-usd",
+        "0.01",
+        check=False,
+    )
+    allowed = status == "complete" and bool(prompt and prompt.strip())
+    assert (result["returncode"] == 0) is allowed
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        after = dict(connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone())
+    assert {
+        key: value for key, value in after.items() if key not in {"recipe_json", "updated_at"}
+    } == {key: value for key, value in before.items() if key not in {"recipe_json", "updated_at"}}
+    assert json.loads(after["recipe_json"]) == {**recipe, "maxCostUsd": 0.01 if allowed else 0.005}
+    assert artifacts == {name: (scan_dir / name).read_bytes() for name in artifacts}
 
 
 @pytest.mark.parametrize("limit", ["0", "-1", "nan", "inf", "0.004", "0.005"])
@@ -1042,7 +1103,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (42,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 

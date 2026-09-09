@@ -249,6 +249,46 @@ export function renderScanHistory(
     if (result["failureMessage"]) {
       wrap(String(result["failureMessage"]), 11, `  ${paint("ERROR", 31)}  `);
     }
+    const checkpoint = result["checkpoint"] as JsonObject | undefined;
+    if (checkpoint && status !== "complete") {
+      const saved = Number(checkpoint["findingCount"]);
+      const pending = Number(checkpoint["pendingCount"]);
+      const reviewed = Number(checkpoint["reviewedFileCount"]);
+      const remaining = Number(checkpoint["remainingFileCount"]);
+      lines.push(
+        `  ${strong("Saved checkpoint")}  ${clean(checkpoint["savedAt"])}`,
+        `    ${saved} saved finding observations; ${pending} pending items; ${checkpoint["coverageComplete"] ? "saved coverage is complete; scan remains provisional" : "coverage remains incomplete"}.`,
+        `    ${reviewed} source files reviewed; ${remaining} remaining.`,
+      );
+      for (const source of checkpoint["sources"] as JsonObject[]) {
+        wrap(String(source["checkpointPath"]), 6, "    • ");
+      }
+      const recipe = result["recipe"] as JsonObject | undefined;
+      if (
+        recipe !== undefined &&
+        (result["mode"] === "standard" || result["mode"] === "deep") &&
+        recipe["validationMode"] !== "custom"
+      ) {
+        lines.push(
+          `    Resume: codex-security scans resume ${clean(result["scanId"])}`,
+        );
+      }
+    }
+    if (status !== "complete") {
+      const progress = result["progress"] as JsonObject;
+      if (progress["phase"])
+        lines.push(`  ${strong("PHASE")}  ${clean(progress["phase"])}`);
+      if (result["continuationThreadId"]) {
+        lines.push(
+          `  ${strong("SESSION")}  ${clean(result["continuationThreadId"])}`,
+        );
+      }
+      if (result["scanDir"])
+        lines.push(`  ${strong("SAVED FILES")}  ${clean(result["scanDir"])}`);
+      lines.push(
+        `  Logs: codex-security scans logs ${clean(result["scanId"])}`,
+      );
+    }
     const warnings = result["warnings"];
     if (Array.isArray(warnings)) {
       for (const warning of warnings) {

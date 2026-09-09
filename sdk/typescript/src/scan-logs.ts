@@ -89,6 +89,27 @@ export async function findScanSession(
   return null;
 }
 
+export async function findScanSessionForDirectory(
+  codexHome: string,
+  scanDirectory: string,
+  signal?: AbortSignal,
+): Promise<SessionLog | null> {
+  signal?.throwIfAborted();
+  let found: SessionLog | null = null;
+  for await (const session of scanSessions(codexHome)) {
+    signal?.throwIfAborted();
+    if (
+      session.parentThreadId !== null ||
+      session.workingDirectory !== scanDirectory
+    )
+      continue;
+    if (found !== null && found.threadId !== session.threadId) return null;
+    found = session;
+  }
+  signal?.throwIfAborted();
+  return found;
+}
+
 export async function readScanLogs(options: ScanLogOptions) {
   const logs = new Map<string, SessionLog>();
   for await (const session of scanSessions(options.codexHome)) {

@@ -21,6 +21,7 @@ await testCanonicalCommitProtocol();
 await testTerminalProtocol();
 testCanonicalNullAndPartialParsing();
 testRunErrorParsing();
+testSelectedPathsParsing();
 testConfiguredMaximumDurationParsing();
 await testWriteSerializationAndRecovery();
 await testBeginUsesTheWriteQueue();
@@ -793,6 +794,14 @@ function testConfiguredMaximumDurationParsing() {
   }
   const legacyState = parseDeepScan(stateResult(randomUUID()));
   assert.equal(Object.hasOwn(legacyState.config, "maxTimeHours"), false);
+}
+
+function testSelectedPathsParsing() {
+  const scopePaths = ["src", "explicit.ignored"];
+  assert.deepEqual(parseDeepScan(stateResult(randomUUID(), {
+    deepScan: { scopePaths }
+  })).scopePaths, scopePaths);
+  assert.equal(parseDeepScan(stateResult(randomUUID())).scopePaths, undefined);
 }
 
 function testRunErrorParsing() {

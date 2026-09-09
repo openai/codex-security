@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
+import type { JsonObject } from "../src/config.js";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
@@ -266,6 +267,71 @@ describe("scan history renderer", () => {
     );
     expect(failed).toContain("ERROR  Repository checkout became unavailable.");
   });
+
+  const resumeCases: Array<{
+    mode: string;
+    recipe: JsonObject | undefined;
+    resumable: boolean;
+  }> = [
+    { mode: "standard", recipe: { mode: "standard" }, resumable: true },
+    { mode: "deep", recipe: { mode: "deep" }, resumable: true },
+    { mode: "standard", recipe: undefined, resumable: false },
+    { mode: "diff", recipe: { mode: "diff" }, resumable: false },
+    {
+      mode: "standard",
+      recipe: { mode: "standard", validationMode: "custom" },
+      resumable: false,
+    },
+  ];
+  test.each(resumeCases)(
+    "shows CLI recovery only for a resumable saved recipe (%j)",
+    ({ mode, recipe, resumable }) => {
+      const output = renderScanHistory(
+        {
+          scanId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          targetPath: "/demo/repository",
+          scanDir: "/demo/output",
+          continuationThreadId: "native-session",
+          mode,
+          ...(recipe === undefined ? {} : { recipe }),
+          progress: { status: "failed", phase: "validation" },
+          findings: [],
+          artifacts: {},
+          failureMessage: "Native process disconnected.",
+          checkpoint: {
+            savedAt: "2026-09-09T10:00:00Z",
+            findingCount: 1,
+            pendingCount: 1,
+            reviewedFileCount: 1,
+            remainingFileCount: 1,
+            coverageComplete: false,
+            sources: [
+              { source: ".", checkpointPath: "checkpoints/saved.json" },
+            ],
+          },
+        },
+        "show",
+        { color: false },
+      );
+      expect(output).toContain(
+        "1 saved finding observations; 1 pending items; coverage remains incomplete.",
+      );
+      expect(output).toContain("1 source files reviewed; 1 remaining.");
+      expect(output).toContain("checkpoints/saved.json");
+      if (resumable) {
+        expect(output).toContain(
+          "Resume: codex-security scans resume aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        );
+      } else {
+        expect(output).not.toContain("Resume:");
+      }
+      expect(output).toContain("SESSION  native-session");
+      expect(output).toContain("SAVED FILES  /demo/output");
+      expect(output).toContain(
+        "Logs: codex-security scans logs aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      );
+    },
+  );
 
   test("shows saved completion warnings without marking a scan failed", () => {
     const output = stripVTControlCharacters(

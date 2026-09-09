@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
@@ -734,6 +734,8 @@ export function createCodexSecurityServer(): McpServer {
       }
       const immediate = deepScanTerminalResult(begun.run);
       if (immediate) return { begun, immediate };
+      const pythonCommand = await resolvePythonCommand();
+      const database = await runWorkbench(["database-info"]);
       const started = await startOrJoinDeepScanCoordinator({
         begin: begun,
         registry: deepScanCoordinators,
@@ -747,7 +749,11 @@ export function createCodexSecurityServer(): McpServer {
               scanRoot: begun.run.scanDir,
               repoRoot: begun.run.targetPath,
               scanId: begun.run.scanId,
-              scope: begun.run.scope
+              scope: begun.run.scope,
+              pythonCommand: /[/\\]/.test(pythonCommand)
+                ? resolve(PLUGIN_ROOT, pythonCommand)
+                : pythonCommand,
+              stateDirectory: dirname(database.databasePath as string)
             }
           }),
           pluginRoot: PLUGIN_ROOT,

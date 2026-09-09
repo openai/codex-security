@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { hasCompletedCustomValidation } from "./custom-validation.js";
+
 import {
   execFile as execFileCallback,
   execFileSync,
@@ -1007,6 +1009,7 @@ export function resolveCliPath(directory: string, value: string): string {
 
 interface ScanArguments extends DeepScanOptions {
   resumeScanId?: string;
+  continuationScanId?: string;
   mock?: boolean;
   workflowId?: string;
   auth?: ScanAuthMode;
@@ -2007,10 +2010,11 @@ export async function main(
       },
     })
     .command("resume", {
-      description: "Resume an interrupted Deep Scan in its original session.",
+      description:
+        "Resume an interrupted scan from its saved session or checkpoints.",
       mcp: false,
       args: z.object({
-        scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
+        scanId: z.string().min(1).describe("Interrupted scan identifier."),
       }),
       options: z.object({
         verbose: z
@@ -2038,10 +2042,17 @@ export async function main(
           scanArguments = scanArgumentsFromRecipe(
             saved["recipe"],
             saved["scanId"],
+            undefined,
+            saved["completionReady"] === true &&
+              hasCompletedCustomValidation(saved["checkpoint"]),
           );
-          scanArguments.resumeScanId = saved["scanId"];
-          scanArguments.outputDir = saved["scanDir"];
-          scanArguments.parentScanId = undefined;
+          if (saved["resumeMode"] === "checkpoint") {
+            scanArguments.continuationScanId = saved["scanId"];
+          } else {
+            scanArguments.resumeScanId = saved["scanId"];
+            scanArguments.outputDir = saved["scanDir"];
+            scanArguments.parentScanId = undefined;
+          }
           // Resume uses the installed engine with the saved recipe and checkpoints.
           scanArguments.expectedPluginVersion = undefined;
           scanArguments.verbose = options.verbose;
@@ -5383,6 +5394,7 @@ function scanArgumentsFromRecipe(
   recipe: JsonValue | undefined,
   parentScanId: string,
   validationPromptFile?: string,
+  completedCustomValidation = false,
 ): ScanArguments {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -5391,7 +5403,8 @@ function scanArgumentsFromRecipe(
   }
   if (
     recipe["validationMode"] === "custom" &&
-    validationPromptFile === undefined
+    validationPromptFile === undefined &&
+    !completedCustomValidation
   ) {
     throw new CodexSecurityError(
       "This scan used custom validation. Supply --validation-prompt-file to rerun it.",
@@ -7540,6 +7553,9 @@ async function executeScan(
       ...(arguments_.resumeScanId === undefined
         ? {}
         : { resumeScanId: arguments_.resumeScanId }),
+      ...(arguments_.continuationScanId === undefined
+        ? {}
+        : { continuationScanId: arguments_.continuationScanId }),
       ...(arguments_.mock ? { mock: true } : {}),
       ...(arguments_.workflowId === undefined
         ? {}
@@ -7822,11 +7838,63 @@ async function executeScan(
     removeSignalListeners();
   }
 
+  const printRecoveryHint = async (): Promise<void> => {
+    if (scanDir === null) return;
+    try {
+      // A locked workbench must not keep a failed or canceled scan alive.
+      const recoverySignal = AbortSignal.timeout(2_000);
+      const history = await dependencies.runWorkbench(
+        ["list-scans", "--scan-root", scanDir],
+        undefined,
+        recoverySignal,
+      );
+      const scans = history["scans"];
+      if (!Array.isArray(scans)) return;
+      const saved = scans.find(
+        (value) => isJsonObject(value) && value["scanDir"] === scanDir,
+      );
+      if (
+        saved === undefined ||
+        !isJsonObject(saved) ||
+        typeof saved["scanId"] !== "string"
+      )
+        return;
+      const scanId = saved["scanId"];
+      errorOutput.write(
+        `Inspect saved progress: codex-security scans show ${quoteCliPath(scanId)}\n`,
+      );
+      const context = await dependencies.runWorkbench(
+        ["get-cli-scan-resume", "--scan-id", scanId, "--allow-unavailable"],
+        undefined,
+        recoverySignal,
+      );
+      const recipe = context["recipe"];
+      if (
+        recipe !== undefined &&
+        isJsonObject(recipe) &&
+        recipe["validationMode"] === "custom" &&
+        !(
+          context["completionReady"] === true &&
+          hasCompletedCustomValidation(context["checkpoint"])
+        )
+      )
+        return;
+      if (typeof context["unavailable"] !== "string") {
+        errorOutput.write(
+          `Resume saved work: codex-security scans resume ${quoteCliPath(scanId)}\n`,
+        );
+      }
+    } catch {
+      // Recovery diagnostics must not replace the original failure.
+    }
+  };
+
   if (requestedSignal !== null) {
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
       partial_output: scanDir !== null,
     });
+    await printRecoveryHint();
     return {
       exitCode: interruptedExit(requestedSignal, scanDir, errorOutput),
       error:
@@ -7855,6 +7923,7 @@ async function executeScan(
     });
     errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {
+      await printRecoveryHint();
       return { exitCode: 2, error: message };
     }
     if (scanDir !== null) {
@@ -7862,6 +7931,7 @@ async function executeScan(
         `Partial output was kept at ${errorMessage(scanDir)}.\n`,
       );
     }
+    await printRecoveryHint();
     return { exitCode: 2, error: message };
   }
   if (preflight !== null) {

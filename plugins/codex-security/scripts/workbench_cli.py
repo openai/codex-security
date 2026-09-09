@@ -160,6 +160,9 @@ def parse_args(description: str) -> argparse.Namespace:
     set_scan_thread.add_argument("--scan-id", required=True)
     set_scan_thread.add_argument("--thread-id", required=True)
 
+    start_scan_inference = subparsers.add_parser("start-scan-inference")
+    start_scan_inference.add_argument("--scan-id", required=True)
+
     set_scan_cost_limit = subparsers.add_parser("set-scan-cost-limit")
     set_scan_cost_limit.add_argument("--scan-id", required=True)
     set_scan_cost_limit.add_argument("--max-cost-usd", required=True, type=float)
@@ -270,6 +273,16 @@ def parse_args(description: str) -> argparse.Namespace:
     write_scan_draft.add_argument("--checkpoint-path")
     write_scan_draft.add_argument("--expected-draft-digest")
     write_scan_draft.add_argument("--claim-token")
+
+    record_checkpoint = subparsers.add_parser("record-scan-checkpoint")
+    record_checkpoint.add_argument("--scan-id", required=True)
+    record_checkpoint.add_argument("--checkpoint-path", required=True)
+    record_checkpoint.add_argument("--custom-validation-complete", action="store_true")
+
+    continue_checkpoint = subparsers.add_parser("continue-scan-checkpoint")
+    continue_checkpoint.add_argument("--scan-id", required=True)
+    continue_checkpoint.add_argument("--parent-scan-id", required=True)
+    continue_checkpoint.add_argument("--cost-json")
 
     mark_handoff_delivered = subparsers.add_parser("mark-handoff-delivered")
     mark_handoff_delivered.add_argument("--scan-id", required=True)

@@ -282,11 +282,7 @@ test.each([
         ? "revision or contents changed"
         : scenario === "replaced"
           ? "checkout is missing or was replaced"
-          : scenario === "wrong-owner"
-            ? "original owning CLI session"
-            : scenario === "standard"
-              ? "Deep Scan with a saved CLI launch recipe"
-              : "running scan; completed, failed, and canceled",
+          : "saved semantic checkpoints",
     );
     expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
       before,
@@ -590,7 +586,7 @@ test.each([
     );
     await expect(
       f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
-    ).rejects.toThrow("running scan");
+    ).rejects.toThrow("saved semantic checkpoints");
   },
 );
 

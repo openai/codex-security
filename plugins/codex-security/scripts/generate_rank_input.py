@@ -518,6 +518,75 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
     print(f"Wrote {len(rows)} rows to {output}")
 
 
+def repo_scope_paths(
+    repo: Path, scope_path: Path, *, allow_unfiltered_fallback: bool = False
+) -> list[Path]:
+    """Enumerate source files, preserving strict ignore rules for scoped reviews."""
+    if scope_path.is_file():
+        candidates = (scope_path,)
+    else:
+        git_candidates = git_directory_snapshot_paths(scope_path)
+        if git_candidates is not None:
+            candidates = git_candidates
+        else:
+            command = [
+                "rg",
+                "--files",
+                "--hidden",
+                "--no-require-git",
+                "--null",
+                "--glob",
+                "!.git/**",
+                "--",
+                str(scope_path.relative_to(repo)),
+            ]
+            try:
+                result = subprocess.run(command, cwd=repo, capture_output=True, check=False)
+            except OSError as exc:
+                ignore_names = (".gitignore", ".ignore", ".rgignore")
+                ancestors = (scope_path, *scope_path.parents)
+                has_ignore_rules = (
+                    any((ancestor / ".git").exists() for ancestor in (repo, *repo.parents))
+                    or any(
+                        (ancestor / name).is_file()
+                        for ancestor in ancestors
+                        if ancestor == repo or repo in ancestor.parents
+                        for name in ignore_names
+                    )
+                    or any(
+                        path.name in ignore_names
+                        for path in scope_path.rglob("*")
+                        if path.is_file()
+                    )
+                )
+                # Full-directory scans already support filesystem-only enumeration.
+                if has_ignore_rules and not allow_unfiltered_fallback:
+                    raise SystemExit(
+                        "Could not safely enumerate ignored scoped files without Git or ripgrep."
+                    ) from exc
+                candidates = scope_path.rglob("*")
+            else:
+                if result.returncode not in (0, 1):
+                    detail = result.stderr.decode("utf-8", errors="replace").strip()
+                    raise SystemExit(f"Could not enumerate scoped repository files: {detail}")
+                candidates = (
+                    repo / os.fsdecode(path) for path in result.stdout.split(b"\0") if path
+                )
+    paths = []
+    for path in candidates:
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative = path.resolve(strict=True).relative_to(repo)
+        except (OSError, ValueError):
+            continue
+        if ".git" in relative.parts:
+            continue
+        paths.append(repo / relative)
+
+    return paths
+
+
 def make_repo_scope_input(args: argparse.Namespace) -> None:
     repo = Path(args.repo).expanduser().resolve()
     if not repo.is_dir():
@@ -527,65 +596,9 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
     rows_by_path: dict[str, JsonRow] = {}
     for scope in scopes:
         scope_path = resolve_scope(repo, scope, expand_user=False, reject_symlinks=True)
-        if scope_path.is_file():
-            candidates = (scope_path,)
-        else:
-            git_candidates = git_directory_snapshot_paths(scope_path)
-            if git_candidates is not None:
-                candidates = git_candidates
-            else:
-                command = [
-                    "rg",
-                    "--files",
-                    "--hidden",
-                    "--no-require-git",
-                    "--null",
-                    "--glob",
-                    "!.git/**",
-                    "--",
-                    str(scope_path.relative_to(repo)),
-                ]
-                try:
-                    result = subprocess.run(command, cwd=repo, capture_output=True, check=False)
-                except OSError as exc:
-                    ignore_names = (".gitignore", ".ignore", ".rgignore")
-                    ancestors = (scope_path, *scope_path.parents)
-                    has_ignore_rules = (
-                        any((ancestor / ".git").exists() for ancestor in (repo, *repo.parents))
-                        or any(
-                            (ancestor / name).is_file()
-                            for ancestor in ancestors
-                            if ancestor == repo or repo in ancestor.parents
-                            for name in ignore_names
-                        )
-                        or any(
-                            path.name in ignore_names
-                            for path in scope_path.rglob("*")
-                            if path.is_file()
-                        )
-                    )
-                    if has_ignore_rules:
-                        raise SystemExit(
-                            "Could not safely enumerate ignored scoped files without Git or ripgrep."
-                        ) from exc
-                    candidates = scope_path.rglob("*")
-                else:
-                    if result.returncode not in (0, 1):
-                        detail = result.stderr.decode("utf-8", errors="replace").strip()
-                        raise SystemExit(f"Could not enumerate scoped repository files: {detail}")
-                    candidates = (
-                        repo / os.fsdecode(path) for path in result.stdout.split(b"\0") if path
-                    )
-        for path in candidates:
-            try:
-                if path.is_symlink() or not path.is_file():
-                    continue
-                relative = path.resolve(strict=True).relative_to(repo)
-            except (OSError, ValueError):
-                continue
-            if ".git" in relative.parts:
-                continue
-            rows_by_path.setdefault(relative.as_posix(), {"path": relative.as_posix()})
+        for path in repo_scope_paths(repo, scope_path):
+            relative = path.relative_to(repo).as_posix()
+            rows_by_path.setdefault(relative, {"path": relative})
 
     rows = sorted(rows_by_path.values(), key=lambda row: str(row["path"]))
     output = Path(args.out).expanduser()

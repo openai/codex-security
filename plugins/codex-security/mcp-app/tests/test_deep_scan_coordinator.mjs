@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { build } from "esbuild";
 import { testDeepScanPublication } from "./deep_scan_publication_cases.mjs";
+import { testCheckpointResume, testResumedDiscoveryDeadlines } from "./deep_scan_checkpoint_cases.mjs";
 
 const bundle = await build({
   bundle: true,
@@ -25,8 +26,9 @@ const {
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
 const temporaryRoots = [];
-async function testCappedQueueAndSerialDedup() {
+async function testCappedQueueAndSerialDedup(scopePaths) {
   const fixture = await fixtureRun({ workers: 3, subagents: 2, stopAfterNoNew: 10, maxDiscoveryRuns: 5 });
+  fixture.run.scopePaths = scopePaths;
   const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor({ dedupNewFindings: [1, 0] });
   const completedDrafts = [];
@@ -90,6 +92,7 @@ async function testCappedQueueAndSerialDedup() {
   ))) {
     const result = JSON.parse(await readFile(worker.resultManifestPath, "utf8"));
     const context = await promptContext(worker.promptPath);
+    assert.deepEqual(context.scope, scopePaths ?? ".");
     assert.equal(result.scanId, fixture.run.scanId);
     assert.match(result.threatModel.summary, new RegExp(context.workerLabel));
     assert.equal(context.pluginRoot, fixture.pluginRoot);
@@ -102,21 +105,26 @@ async function testCappedQueueAndSerialDedup() {
   assert.equal(terminal.manifestPath, path.join(fixture.run.scanDir, "scan-manifest.json"));
 }
 
-async function testStandardWorkersReceiveExistingFalsePositiveFeedback() {
+async function testStandardWorkersReceiveExistingFalsePositiveFeedback(currentAttempt = false) {
   const fixture = await fixtureRun({
     workers: 1,
     subagents: 0,
     stopAfterNoNew: 1,
     maxDiscoveryRuns: 1
   });
-  const feedbackPath = path.join(
+  const inheritedFeedbackPath = path.join(
     fixture.run.scanDir,
     "artifacts",
     "01_context",
     "false_positive_feedback.json"
   );
+  const feedbackPath = currentAttempt
+    ? path.join(path.dirname(inheritedFeedbackPath), `false_positive_feedback-${fixture.run.scanId}.json`)
+    : inheritedFeedbackPath;
   await mkdir(path.dirname(feedbackPath), { recursive: true });
-  await writeFile(feedbackPath, JSON.stringify([{ reason: "existing control still applies" }]));
+  const inheritedFeedback = JSON.stringify([{ reason: "existing control still applies" }]);
+  await writeFile(inheritedFeedbackPath, inheritedFeedback);
+  if (currentAttempt) await writeFile(feedbackPath, "[]\n");
   const store = new FakeStore(fixture.run);
   const coordinator = new DeepScanCoordinator({
     run: fixture.run,
@@ -135,6 +143,10 @@ async function testStandardWorkersReceiveExistingFalsePositiveFeedback() {
   assert.ok(worker);
   const prompt = await readFile(worker.promptPath, "utf8");
   assert.equal(prompt.includes(JSON.stringify(feedbackPath)), true);
+  if (currentAttempt) {
+    assert.equal(prompt.includes(JSON.stringify(inheritedFeedbackPath)), false);
+    assert.equal(await readFile(inheritedFeedbackPath, "utf8"), inheritedFeedback);
+  }
   assert.equal(Object.hasOwn(await promptContext(worker.promptPath), "falsePositiveFeedbackPath"), false);
   await assert.rejects(readFile(path.join(
     worker.artifactDir,
@@ -2941,90 +2953,6 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
   assert.equal(await readFile(accepted.resultManifestPath, "utf8"), acceptedResult);
 }
 
-async function testResumedDiscoveryDeadlineUsesPersistedCreationTime(
-  alreadyExpired = false,
-  maxTimeHours
-) {
-  const fixture = await fixtureRun({
-    workers: 1,
-    subagents: 0,
-    stopAfterNoNew: 99,
-    maxDiscoveryRuns: 8,
-    ...(maxTimeHours === undefined ? {} : { maxTimeHours })
-  });
-  const discoveryTimeoutMs = (maxTimeHours ?? 96) * 60 * 60 * 1_000;
-  let currentTime = immediateClock.now();
-  const clock = {
-    now: () => currentTime,
-    sleep: immediateClock.sleep
-  };
-  const createdAt = new Date(currentTime - discoveryTimeoutMs + 30_000).toISOString();
-  const store = new FakeStore({
-    ...fixture.run,
-    createdAt,
-    phase: "setup",
-    coordinatorGeneration: 2
-  });
-  const originalExecutor = new FakeExecutor({
-    blockDiscoveryAfterCalls: 1,
-    discoveryCandidateId: "candidate-1"
-  });
-  const original = new DeepScanCoordinator({
-    run: store.run,
-    store,
-    executor: originalExecutor,
-    pluginRoot: fixture.pluginRoot,
-    clock
-  });
-  original.start();
-  await eventually(() => (
-    originalExecutor.discoveryCalls === 2
-    && originalExecutor.runningDiscovery === 1
-    && [...store.workers.values()].some((worker) => (
-      worker.kind === "discovery" && worker.status === "succeeded"
-    ))
-  ));
-
-  original.cancel("mcp server process restarted");
-  await eventually(() => originalExecutor.runningDiscovery === 0);
-  assert.equal(store.run.status, "running");
-  assert.equal(store.run.createdAt, createdAt);
-  currentTime = Date.parse(createdAt) + discoveryTimeoutMs + (alreadyExpired ? 1_000 : -1_000);
-  store.run = {
-    ...store.run,
-    persistedWorkers: [...store.workers.values()].map((worker) => structuredClone(worker))
-  };
-
-  const resumedExecutor = new FakeExecutor({
-    blockDiscovery: true,
-    canonicalCandidateId: "candidate-1",
-    dedupNewFindings: [1]
-  });
-  const resumed = new DeepScanCoordinator({
-    run: store.run,
-    store,
-    executor: resumedExecutor,
-    pluginRoot: fixture.pluginRoot,
-    clock
-  });
-  resumed.start();
-  if (!alreadyExpired) await resumedExecutor.discoveryStarted;
-
-  const terminal = await resumed.wait(undefined, 5_000);
-  assert.equal(terminal?.status, "succeeded");
-  assert.equal(terminal?.terminalReason, "capped");
-  assert.equal(store.failCalls, 0);
-  assert.equal(resumedExecutor.discoveryCalls, alreadyExpired ? 0 : 1);
-  assert.equal(resumedExecutor.dedupCalls, 1);
-  assert.equal(resumedExecutor.runningDiscovery, 0);
-
-  const manifest = JSON.parse(await readFile(terminal.manifestPath, "utf8"));
-  assert.equal(store.run.config.maxTimeHours, maxTimeHours);
-  assert.equal(store.dedupClaims[0].workerIds.length, 1);
-  assert.equal([...store.workers.values()].some((worker) => worker.status === "canceled"), true);
-  assert.deepEqual(manifest.findings.map((finding) => finding.provenance.candidateId), ["candidate-1"]);
-}
-
 async function testResumedManifestPreservesCompletedReducer(includeUnstartedReducer = false) {
   const fixture = await fixtureRun({
     workers: 2,
@@ -3957,7 +3885,9 @@ function boundedFixtureErrorText(message, maximum) {
 
 try {
   await testCappedQueueAndSerialDedup();
+  await testCappedQueueAndSerialDedup(["src", "explicit.ignored"]);
   await testStandardWorkersReceiveExistingFalsePositiveFeedback();
+  await testStandardWorkersReceiveExistingFalsePositiveFeedback(true);
   await testDiscoveryWorkersKeepOneContextAfterPersistedUpdate();
   await testPersistedContextDoesNotChangeAnotherProcessDiscoverySnapshot();
   await testWorkerScopedCandidateSourceAggregation();
@@ -4033,10 +3963,8 @@ try {
   await testRemoteObserverRetriesTransientPersistenceFailures();
   await testJoinAndOrphanRules();
   await testPausedDiscoverySurvivesCoordinatorRestart();
-  await testResumedDiscoveryDeadlineUsesPersistedCreationTime();
-  await testResumedDiscoveryDeadlineUsesPersistedCreationTime(true);
-  await testResumedDiscoveryDeadlineUsesPersistedCreationTime(false, 2.5);
-  await testResumedDiscoveryDeadlineUsesPersistedCreationTime(true, 96);
+  await testCheckpointResume({ DeepScanCoordinator, FakeStore, FakeExecutor, fixtureRun, standardScanDraft, immediateClock, deferred, eventually });
+  await testResumedDiscoveryDeadlines({ DeepScanCoordinator, FakeStore, FakeExecutor, fixtureRun, immediateClock, eventually });
   await testResumedManifestPreservesCompletedReducer();
   await testResumedManifestPreservesCompletedReducer(true);
   await testResumeUsesHistoricalCandidateSnapshotForEachReducer();

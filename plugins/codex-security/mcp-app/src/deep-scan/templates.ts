@@ -12,7 +12,7 @@ export interface DiscoveryPromptInput {
   scanId: string;
   pluginRoot: string;
   targetPath: string;
-  scope: string;
+  scope: string | string[];
   userContext?: string;
   workerLabel: string;
   subagents: number;
