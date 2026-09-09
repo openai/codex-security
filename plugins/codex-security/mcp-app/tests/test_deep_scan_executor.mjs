@@ -77,6 +77,9 @@ try {
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
     await testRuntimePermissionProfileFallbackStopsAndDiscards();
     await testWorkerLaunchesWithoutGlobalCodex();
+    await testExecutorPinsCodexExecutableAcrossWorkers();
+    await testExecutorRejectsReplacedPinnedExecutable();
+    await testExecutorRejectsReplacementAfterPreflight();
     await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
     await testSdkInvocationAndThreadCapture();
     await testBedrockCredentialsReachWorker();
@@ -531,6 +534,122 @@ async function testWorkerLaunchesWithoutGlobalCodex() {
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousCodexPath);
     restoreEnv("PATH", previousSearchPath);
+  }
+}
+
+async function testExecutorPinsCodexExecutableAcrossWorkers() {
+  const firstFixture = await fakeCodexFixture();
+  const replacementFixture = await fakeCodexFixture();
+  const previousCodexPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = firstFixture.executablePath;
+
+  try {
+    const promptPath = path.join(firstFixture.root, "prompt.md");
+    const workingDirectory = path.join(firstFixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    await writeFile(promptPath, "fixture pinned worker executable\n");
+    const executor = new CodexSdkWorkerExecutor({
+      parentSandbox: trustedParentSandbox
+    });
+    const request = {
+      kind: "discovery",
+      promptPath,
+      workingDirectory,
+      subagents: 0,
+      signal: new AbortController().signal
+    };
+
+    assert.equal((await executor.run(request)).finalResponse, "fixture final response");
+    process.env.CODEX_CLI_PATH = replacementFixture.executablePath;
+    assert.equal((await executor.run(request)).finalResponse, "fixture final response");
+
+    await assert.rejects(
+      readFile(replacementFixture.preflightMarkerPath),
+      (error) => error?.code === "ENOENT"
+    );
+    const preflight = JSON.parse(await readFile(firstFixture.preflightMarkerPath, "utf8"));
+    assert.deepEqual(preflight.requests, [
+      { method: "config/read", cwd: workingDirectory },
+      { method: "permissionProfile/list", cwd: workingDirectory }
+    ]);
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousCodexPath);
+  }
+}
+
+async function testExecutorRejectsReplacedPinnedExecutable() {
+  const fixture = await fakeCodexFixture();
+  const previousCodexPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    const workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    await writeFile(promptPath, "fixture replaced pinned worker executable\n");
+    const executor = new CodexSdkWorkerExecutor({
+      parentSandbox: trustedParentSandbox
+    });
+    const request = {
+      kind: "discovery",
+      promptPath,
+      workingDirectory,
+      subagents: 0,
+      signal: new AbortController().signal
+    };
+
+    assert.equal((await executor.run(request)).finalResponse, "fixture final response");
+    await rm(fixture.preflightMarkerPath);
+    const originalExecutable = await readFile(fixture.executablePath, "utf8");
+    await writeFile(fixture.executablePath, `${originalExecutable}\n// replaced after scan start\n`);
+
+    await assert.rejects(
+      executor.run(request),
+      (error) => error?.name === "DeepScanNonRetryableError"
+        && /changed after this Deep Scan started/i.test(error.message)
+    );
+    await assert.rejects(
+      readFile(fixture.preflightMarkerPath),
+      (error) => error?.code === "ENOENT"
+    );
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousCodexPath);
+  }
+}
+
+async function testExecutorRejectsReplacementAfterPreflight() {
+  const fixture = await fakeCodexFixture();
+  const previousCodexPath = process.env.CODEX_CLI_PATH;
+  const previousReplaceAfterPreflight = process.env.FAKE_CODEX_REPLACE_AFTER_PREFLIGHT;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  process.env.FAKE_CODEX_REPLACE_AFTER_PREFLIGHT = "1";
+
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    const workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    await writeFile(promptPath, "fixture replacement after preflight\n");
+
+    await assert.rejects(
+      new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox
+      }).run({
+        kind: "discovery",
+        promptPath,
+        workingDirectory,
+        subagents: 0,
+        signal: new AbortController().signal
+      }),
+      (error) => error?.name === "DeepScanNonRetryableError"
+        && /changed after this Deep Scan started/i.test(error.message)
+    );
+    await assert.rejects(
+      readFile(fixture.markerPath),
+      (error) => error?.code === "ENOENT"
+    );
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousCodexPath);
+    restoreEnv("FAKE_CODEX_REPLACE_AFTER_PREFLIGHT", previousReplaceAfterPreflight);
   }
 }
 
@@ -1378,6 +1497,7 @@ async function fakeCodexFixture(
     "        continue;",
     "      }",
     "      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');",
+    "      if (message.method === 'permissionProfile/list' && process.env.FAKE_CODEX_REPLACE_AFTER_PREFLIGHT === '1') writeFileSync(process.argv[1], '#!/usr/bin/env node\\nprocess.exit(97);\\n');",
     "    }",
     "  });",
     "  process.stdin.on('end', () => process.exit(0));",
