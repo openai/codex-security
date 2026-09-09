@@ -790,6 +790,14 @@ describe("CodexSecurity policy API", () => {
       const overrides = f
         .configuration()!
         .configOverrides!.map((override) => parseToml(override));
+      expect(overrides).toHaveLength(1);
+      expect(overrides[0]).toMatchObject({
+        permissions: {
+          codex_security_policy: {
+            filesystem: { ":minimal": "read", ":workspace_roots": "read" },
+          },
+        },
+      });
       for (const path of [
         join(f.repository, ".git"),
         join(component, ".git"),
@@ -800,12 +808,40 @@ describe("CodexSecurity policy API", () => {
         bareAlternate,
         commonAlternate,
       ]) {
-        expect(overrides).toContainEqual({
+        expect(overrides[0]).toMatchObject({
           permissions: {
             codex_security_policy: { filesystem: { [path]: { ".": "deny" } } },
           },
         });
       }
+      const environment: NodeJS.ProcessEnv = {
+        ...process.env,
+        CODEX_HOME: f.runtime.codexHome,
+      };
+      delete environment["OPENAI_API_KEY"];
+      delete environment["CODEX_API_KEY"];
+      expect(() =>
+        execFileSync(
+          "node",
+          [
+            join(
+              import.meta.dir,
+              "..",
+              "node_modules",
+              "@openai",
+              "codex",
+              "bin",
+              "codex.js",
+            ),
+            ...f
+              .configuration()!
+              .configOverrides!.flatMap((override) => ["--config", override]),
+            "features",
+            "list",
+          ],
+          { cwd: f.outputDir, env: environment, stdio: "pipe" },
+        ),
+      ).not.toThrow();
       expect(f.threads).toHaveLength(3);
       expect(f.prompts.join("\n")).not.toContain("Bare Git policy fixture");
       expect(f.prompts.join("\n")).toContain("Component policy fixture");

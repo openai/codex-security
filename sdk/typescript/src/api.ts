@@ -51,6 +51,7 @@ import {
 import {
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
+  inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
   mergedCodexConfig,
@@ -999,11 +1000,12 @@ export class CodexSecurity {
         },
         options.auth,
         policyCodexConfig(session.sessionConfig),
-        inputs.gitMetadataPaths.map(
-          (path) =>
-            // A scoped "." keeps native permission keys literal, including glob characters.
-            `permissions.${POLICY_PERMISSION_PROFILE}.filesystem.${JSON.stringify(path)}."."="deny"`,
-        ),
+        inputs.gitMetadataPaths.length === 0
+          ? []
+          : [
+              // CLI override keys split on dots, so keep paths inside the TOML value.
+              `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystemPermissions(inputs.gitMetadataPaths))}`,
+            ],
       );
       const reportCost = (current: Readonly<ScanCost>): void => {
         const total = addScanCosts(accumulatedCost, current);
@@ -4426,13 +4428,23 @@ export function scanRuntimeCodexConfig(
         },
       },
       [POLICY_PERMISSION_PROFILE]: {
-        filesystem: {
-          ":minimal": "read",
-          ":workspace_roots": "read",
-        },
+        filesystem: policyFilesystemPermissions(),
         network: { enabled: false },
       },
     },
+  };
+}
+
+function policyFilesystemPermissions(
+  gitMetadataPaths: readonly string[] = [],
+): JsonObject {
+  return {
+    ":minimal": "read",
+    ":workspace_roots": "read",
+    // A scoped "." keeps native permission paths literal, including glob characters.
+    ...Object.fromEntries(
+      gitMetadataPaths.map((path) => [path, { ".": "deny" }]),
+    ),
   };
 }
 
