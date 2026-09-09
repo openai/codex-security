@@ -71,6 +71,11 @@ import {
   publishScanToCustom,
   type CustomPublicationResult,
 } from "./custom-publish.js";
+import {
+  SeverityClassificationError,
+  severityRetryCommand,
+  type SeverityClassificationProgress,
+} from "./classify-severity.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import {
   classifyScanSeverityInternal,
@@ -3613,66 +3618,111 @@ export async function main(
         ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ options }) {
-        const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
-        try {
-          if (
-            (options.scan === undefined) ===
-            (options.scanDir === undefined)
-          ) {
-            throw new CodexSecurityError(
-              "Severity classification requires exactly one of --scan or --scan-dir.",
+      run: ({ options }) =>
+        withTerminalErrorsHandled(errorOutput, async () => {
+          const controller = new AbortController();
+          let lastProgress: SeverityClassificationProgress | undefined;
+          const onInterrupt = () => controller.abort("SIGINT");
+          const onTerminate = () => controller.abort("SIGTERM");
+          dependencies.addSignalListener("SIGINT", onInterrupt);
+          dependencies.addSignalListener("SIGTERM", onTerminate);
+          try {
+            if (
+              (options.scan === undefined) ===
+              (options.scanDir === undefined)
+            ) {
+              throw new CodexSecurityError(
+                "Severity classification requires exactly one of --scan or --scan-dir.",
+              );
+            }
+            const currentDirectory = dependencies.currentDirectory();
+            const settings = {
+              environment: dependencies.environment,
+              workingDirectory: currentDirectory,
+              signal: controller.signal,
+              rubricPath:
+                options.rubric === undefined
+                  ? undefined
+                  : resolveCliPath(currentDirectory, options.rubric),
+              knowledgeBasePaths: options.knowledgeBase.map((path) =>
+                resolveCliPath(currentDirectory, path),
+              ),
+              findingIds:
+                options.findingId.length === 0 ? undefined : options.findingId,
+              reprocess: options.reprocess,
+              model: options.model,
+              reasoningEffort: options.effort,
+              onProgress: (progress: SeverityClassificationProgress) => {
+                if (
+                  lastProgress?.completed !== progress.completed ||
+                  lastProgress?.status !== progress.status
+                ) {
+                  errorOutput.write(
+                    `codex-security: Severity classification ${progress.status}: ${progress.completed}/${progress.total} completed (${progress.reused} reused), ${progress.remaining} remaining.\n`,
+                  );
+                }
+                lastProgress = progress;
+              },
+            };
+            const result =
+              options.scan !== undefined
+                ? await (
+                    dependencies.classifyScanSeverity ??
+                    classifyScanSeverityInternal
+                  )(options.scan, settings, dependencies, "cli")
+                : await (
+                    dependencies.classifyScanDirectorySeverity ??
+                    classifyScanDirectorySeverityInternal
+                  )(
+                    resolveCliPath(currentDirectory, options.scanDir!),
+                    settings,
+                    "cli",
+                  );
+            return { ...result };
+          } catch (error) {
+            const signal = controller.signal.reason;
+            errorOutput.write(
+              `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : safeErrorMessage(error)}\n`,
             );
-          }
-          const currentDirectory = dependencies.currentDirectory();
-          const settings = {
-            environment: dependencies.environment,
-            workingDirectory: currentDirectory,
-            signal: controller.signal,
-            rubricPath:
-              options.rubric === undefined
-                ? undefined
-                : resolveCliPath(currentDirectory, options.rubric),
-            knowledgeBasePaths: options.knowledgeBase.map((path) =>
-              resolveCliPath(currentDirectory, path),
-            ),
-            findingIds:
-              options.findingId.length === 0 ? undefined : options.findingId,
-            reprocess: options.reprocess,
-            model: options.model,
-            reasoningEffort: options.effort,
-          };
-          const result =
-            options.scan !== undefined
-              ? await (
-                  dependencies.classifyScanSeverity ??
-                  classifyScanSeverityInternal
-                )(options.scan, settings, dependencies, "cli")
-              : await (
-                  dependencies.classifyScanDirectorySeverity ??
-                  classifyScanDirectorySeverityInternal
-                )(
-                  resolveCliPath(currentDirectory, options.scanDir!),
-                  settings,
-                  "cli",
+            const progress =
+              error instanceof SeverityClassificationError
+                ? error.progress
+                : lastProgress;
+            if (progress !== undefined) {
+              if (progress.runId !== undefined)
+                errorOutput.write(
+                  `codex-security: Classification run: ${progress.runId}.\n`,
                 );
-          return { ...result };
-        } catch (error) {
-          const signal = controller.signal.reason;
-          errorOutput.write(
-            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : safeErrorMessage(error)}\n`,
-          );
-          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
-          return undefined;
-        } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
-        }
-      },
+              if (progress.findingId !== undefined)
+                errorOutput.write(
+                  `codex-security: Failed finding: ${progress.findingId}.\n`,
+                );
+              if (progress.failure !== undefined)
+                errorOutput.write(
+                  `codex-security: Failure during ${progress.failure.stage}: ${progress.failure.message}${progress.failure.cause ? ` Cause: ${progress.failure.cause}` : ""}\n`,
+                );
+              if (progress.threadId !== undefined)
+                errorOutput.write(
+                  `codex-security: Codex thread: ${progress.threadId}.\n`,
+                );
+              if (progress.retryArguments !== undefined) {
+                errorOutput.write(
+                  `codex-security: Retry${process.platform === "win32" ? " in PowerShell" : ""} with the same environment: ${severityRetryCommand(progress.retryArguments)}\n`,
+                );
+                if (progress.retryArguments.includes("--reprocess"))
+                  errorOutput.write(
+                    "codex-security: --reprocess repeats the selected findings, including previously saved assessments.\n",
+                  );
+              }
+            }
+            exitCode =
+              signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+            return undefined;
+          } finally {
+            dependencies.removeSignalListener("SIGINT", onInterrupt);
+            dependencies.removeSignalListener("SIGTERM", onTerminate);
+          }
+        }),
     })
     .command("dedupe", {
       description:

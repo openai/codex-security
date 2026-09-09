@@ -1,10 +1,12 @@
 import { stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   severityClassificationSchema,
   type SeverityAssessment,
   type SeverityClassification,
   type SeverityClassificationCheckpoint,
+  type SeverityClassificationProgress,
 } from "./classify-severity.js";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
@@ -21,6 +23,7 @@ import {
 /** @internal */
 export class SeverityStore {
   private options?: Promise<WorkbenchCommandOptions>;
+  readonly runId = randomUUID();
 
   constructor(
     private readonly environment: NodeJS.ProcessEnv,
@@ -28,10 +31,23 @@ export class SeverityStore {
     private readonly signal?: AbortSignal,
   ) {}
 
+  async isRegisteredScan(scanId: string): Promise<boolean> {
+    const response = await this.run(["severity-classification"], {
+      action: "source",
+      scanId,
+      scanDirectory: this.scanDirectory,
+    });
+    return response["registeredScan"] === true;
+  }
+
   checkpoint(
     scanId: string,
     findingIds: string[],
     reprocess: boolean,
+    savedProgress: (progress: SeverityClassificationProgress) => {
+      progress: SeverityClassificationProgress;
+      registeredScan: boolean;
+    },
   ): SeverityClassificationCheckpoint {
     return {
       load: async (result) => {
@@ -50,18 +66,43 @@ export class SeverityStore {
               result,
             );
       },
-      save: async (finding, assessment, result) => {
-        await this.run(["severity-classification"], {
-          action: "save",
-          finding,
-          assessment: {
-            ...assessment,
-            rubricSha256: result.rubricSha256,
-            knowledgeBaseSha256: result.knowledgeBaseSha256,
+      save: async (finding, assessment, result, progress) => {
+        await this.run(
+          ["severity-classification"],
+          {
+            action: "save",
+            finding,
+            assessment: {
+              ...assessment,
+              rubricSha256: result.rubricSha256,
+              knowledgeBaseSha256: result.knowledgeBaseSha256,
+            },
+            scanId,
+            runId: this.runId,
+            ...savedProgress(progress),
           },
-        });
+          true,
+        );
       },
     };
+  }
+
+  async progress(
+    scanId: string,
+    progress: SeverityClassificationProgress,
+    registeredScan: boolean,
+  ): Promise<void> {
+    await this.run(
+      ["severity-classification"],
+      {
+        action: "progress",
+        scanId,
+        runId: this.runId,
+        progress,
+        registeredScan,
+      },
+      true,
+    );
   }
 
   async read(scanId: string): Promise<SeverityClassification | undefined> {
@@ -102,10 +143,10 @@ export class SeverityStore {
     return result;
   }
 
-  private async run(args: string[], input?: object) {
+  private async run(args: string[], input?: object, finishWrite = false) {
     const options = await (this.options ??= this.resolveOptions());
     return runWorkbench(
-      options,
+      finishWrite ? { ...options, signal: undefined } : options,
       args,
       input === undefined ? undefined : JSON.stringify(input),
     );

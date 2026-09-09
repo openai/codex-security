@@ -931,6 +931,21 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        45,
+        "retain severity classification progress and failures",
+        """
+        CREATE TABLE severity_classification_runs (
+            id TEXT PRIMARY KEY,
+            scan_id TEXT NOT NULL,
+            progress_json TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX severity_classification_runs_by_scan
+        ON severity_classification_runs(scan_id, started_at DESC);
+        """,
+    ),
 )
 
 

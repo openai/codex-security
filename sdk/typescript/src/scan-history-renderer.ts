@@ -1,5 +1,6 @@
 import { basename, relative } from "node:path";
 import type { JsonObject } from "./config.js";
+import { severityRetryCommand } from "./classify-severity.js";
 
 export type HistoryCommand =
   | "list"
@@ -288,6 +289,32 @@ export function renderScanHistory(
       lines.push(
         `  Logs: codex-security scans logs ${clean(result["scanId"])}`,
       );
+    }
+    const classification = result["severityClassification"] as
+      | JsonObject
+      | undefined;
+    if (classification) {
+      wrap(
+        `Severity classification ${classification["status"]}: ${classification["completed"]}/${classification["total"]} completed (${classification["reused"]} reused), ${classification["remaining"]} remaining.`,
+        2,
+      );
+      if (classification["findingId"])
+        wrap(`Finding: ${classification["findingId"]}`, 4);
+      if (classification["threadId"])
+        wrap(`Codex thread: ${classification["threadId"]}`, 4);
+      const failure = classification["failure"] as JsonObject | undefined;
+      if (failure)
+        wrap(
+          `${failure["stage"]}: ${failure["message"]}${failure["cause"] ? ` Cause: ${failure["cause"]}` : ""}`,
+          4,
+        );
+      const retryArguments = classification["retryArguments"] as
+        | string[]
+        | undefined;
+      if (retryArguments && classification["status"] !== "completed")
+        lines.push(
+          `    Retry with the same environment: ${severityRetryCommand(retryArguments)}`,
+        );
     }
     const warnings = result["warnings"];
     if (Array.isArray(warnings)) {

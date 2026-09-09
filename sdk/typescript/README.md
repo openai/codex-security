@@ -1167,6 +1167,25 @@ assessment; each row is replaced only after its new assessment succeeds. A faile
 or canceled run keeps completed checkpoints, so a normal retry resumes missing
 work. Changing only the model or effort requires `--reprocess`.
 
+The CLI reports completed, reused, and remaining counts on stderr while keeping
+the result on stdout unchanged. Failures identify the current finding, failure
+stage, underlying cause, and Codex thread when available, followed by a retry
+command bound to the saved scan ID for completed registered scans, including those
+selected by directory. These retries follow the original scan after its output
+directory is archived and reused. External directories and explicit copies retain
+their selected paths. Scans with sealed artifacts and incomplete history also
+retry by directory. Run the retry with the same environment and unchanged
+policy/context files. `scans show SCAN_ID --json` includes the latest
+`severityClassification` progress and failure saved in SQLite; `scans show`
+also displays a summary. Each invocation retains its own diagnostic run record.
+SDK callers can observe `onProgress` and inspect `SeverityClassificationError.progress`.
+Progress reporting failures do not stop assessment checkpoints.
+
+An interrupted `--reprocess` invocation still repeats its selected findings when
+retried with `--reprocess`. If only the final JSON export failed, the suggested
+retry omits `--reprocess`: the completed SQLite assessments rebuild the export
+without another model call.
+
 SQLite is authoritative. A successful run also exports the complete selected
 result to `severity-classification.json` alongside the sealed artifacts. The file
 is replaced atomically and is not read for reuse or publication. The scan's

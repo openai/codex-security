@@ -143,6 +143,7 @@ export function unionFindingGroups(
 /** @internal */
 interface ReadOnlyCodex {
   startThread(options: ThreadOptions): {
+    readonly id?: string | null;
     run(
       input: string,
       options: TurnOptions,
@@ -644,14 +645,23 @@ export async function runReadOnlyCodex(
   runtimeOptions: {
     surface: CodexSecuritySurface;
     threadSource: ReadOnlyCodexThreadSource;
+    onThread?: (threadId: string) => void;
   },
 ): Promise<string> {
   const thread = await startReadOnlyCodexThread(options, runtimeOptions);
-  const turn = await thread.run(prompt, {
-    outputSchema,
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
-  });
-  return turn.finalResponse;
+  try {
+    const turn = await thread.run(prompt, {
+      outputSchema,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+    return turn.finalResponse;
+  } finally {
+    if (thread.id) {
+      try {
+        runtimeOptions.onThread?.(thread.id);
+      } catch {}
+    }
+  }
 }
 
 export async function disabledMcpServers(

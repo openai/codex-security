@@ -1551,8 +1551,7 @@ def complete_scan_locked(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
             completion_binding=completion_binding,
-            # Ordinary Deep results remain as submitted. A linked continuation
-            # also retains inherited work that its coordinator did not consume.
+            # Linked continuations retain unconsumed inherited work.
             completion_warnings=warnings if scan["mode"] != "deep" else None,
             draft_documents=saved_results.merge_saved_results(
                 scan_dir,
@@ -2862,6 +2861,7 @@ def scan_result(
         "findingCount": finding_count,
         "findingsTruncated": finding_count > len(occurrence_rows),
         "severityCounts": severity_counts,
+        "severityClassification": severity.latest_progress(connection, scan["id"]),
         "handoffClaimedAt": scan["handoff_claimed_at"],
         "handoffClaimToken": scan["handoff_claim_token"],
         "handoffStatus": scan["handoff_status"],
