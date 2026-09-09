@@ -463,13 +463,19 @@ test.each(["dashboard", "headless", "ci"])(
             presentation === "ci" ? { CI: "true" } : { NO_COLOR: "1" },
         }),
         createSecurity: client(async (_repository, options) => {
-          expect(typeof options.onProgress).toBe(
-            presentation === "dashboard" ? "function" : "undefined",
-          );
+          expect(typeof options.onProgress).toBe("function");
           options.onProgress?.({
             phase: "validation",
             filesCompleted: 2,
             filesTotal: 2,
+          });
+          options.onCost?.({
+            model: "gpt-5.6",
+            inputTokens: 100,
+            cachedInputTokens: 10,
+            cacheWriteInputTokens: 0,
+            outputTokens: 20,
+            estimatedUsd: 0.00123,
           });
           return completed(options);
         }),
@@ -490,6 +496,14 @@ test.each(["dashboard", "headless", "ci"])(
         stderr.text().indexOf("Component scans:"),
       );
     } else expect(stderr.text()).toContain("apps/api completed");
+    if (presentation !== "dashboard") {
+      expect(stderr.text()).toContain(
+        "apps/api validating findings | Files: 2/2",
+      );
+      expect(stderr.text()).toContain(
+        "apps/api | Tokens: 100 input, 10 cached, 20 output | Cost: $0.00123",
+      );
+    }
     expect(
       [...signals.listeners.values()].every(
         (listeners) => listeners.size === 0,

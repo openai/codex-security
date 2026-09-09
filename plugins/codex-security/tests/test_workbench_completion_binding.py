@@ -462,7 +462,7 @@ def test_completion_keeps_recoverable_prewrite_failures_resumable(
     assert completed["findingCount"] == 1
 
 
-def test_deep_completion_recovers_malformed_inventory_without_dropping_findings(
+def test_deep_completion_derives_inventory_without_downgrading_coverage(
     tmp_path: Path,
 ) -> None:
     for index, inventory in enumerate((None, "", "invalid_strategy")):
@@ -481,13 +481,11 @@ def test_deep_completion_recovers_malformed_inventory_without_dropping_findings(
 
         assert completed["scan"]["progress"]["status"] == "complete"
         assert completed["scan"]["findingCount"] == 1
-        assert completed["scan"]["warnings"] == [
-            "Recovered malformed Deep Scan inventory strategy; marked coverage as partial."
-        ]
+        assert completed["scan"]["warnings"] == []
         sealed_coverage = json.loads(coverage_path.read_text())
         assert sealed_coverage["mode"] == "deep_repository"
         assert sealed_coverage["inventoryStrategy"] == "repository"
-        assert sealed_coverage["completeness"] == "partial"
+        assert sealed_coverage["completeness"] == "complete"
         assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
         assert (scan_dir / "report.md").is_file()
 

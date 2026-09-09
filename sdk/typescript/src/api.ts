@@ -115,7 +115,6 @@ import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   matchCompletedScan,
   matchScanFindingsInternal,
-  type matchScanFindings,
 } from "./scan-comparison.js";
 import {
   scanProgressUpdatesFromEvent,
@@ -415,7 +414,7 @@ interface ClientDependencies {
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
-  matchFindings?: typeof matchScanFindings;
+  matchFindings?: typeof matchScanFindingsInternal;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -1705,13 +1704,15 @@ export class CodexSecurity {
             falsePositives: falsePositiveExamples as Record<string, unknown>[],
             findings: result.findings.findings,
             workbench: runWorkbench,
-            matchFindings:
-              this.#dependencies.matchFindings ??
-              ((input, comparisonOptions) =>
-                matchScanFindingsInternal(input, comparisonOptions, {
+            matchFindings: (input, comparisonOptions) =>
+              (this.#dependencies.matchFindings ?? matchScanFindingsInternal)(
+                input,
+                comparisonOptions,
+                {
                   surface: this.#surface,
-                  allowBatching: false,
-                })),
+                  singleTurn: options.maxCostUsd !== undefined,
+                },
+              ),
             environment,
             model,
             signal,
@@ -3459,7 +3460,7 @@ function scanPrompt(
             "This exhaustive scan authorizes the delegated-worker phases required by the selected skill; use available subagent tools and continue with parent-agent fallback if capacity changes.",
           ]),
     "This SDK host does not render MCP Apps; use the terminal/chat workflow.",
-    `Use ${python} as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.`,
+    `Use ${python} as <python_command> for plugin Python helper scripts (.py files); replace any literal python or python3 helper invocation with this exact interpreter.`,
     `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
     `Use this exact scan directory for all scan output: ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR")}`,
     `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest, findings, and coverage.`,

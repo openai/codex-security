@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } fr
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { build } from "esbuild";
+import { testDeepScanPublication } from "./deep_scan_publication_cases.mjs";
 
 const bundle = await build({
   bundle: true,
@@ -790,7 +791,7 @@ async function testDiscoveryDeadlineWithoutAcceptedWorkersPublishesEmptyResults(
   assert.deepEqual(JSON.parse(await readFile(terminal.manifestPath, "utf8")).findings, []);
 }
 
-async function testSaturationDoesNotHideTerminalWorkerFailure() {
+async function testSaturationIgnoresWorkerFailureSettledAfterStop() {
   const fixture = await fixtureRun({ workers: 3, subagents: 0, stopAfterNoNew: 2, maxDiscoveryRuns: 3 });
   const store = new FakeStore(fixture.run);
   store.blockDiscoveryFailure = true;
@@ -814,21 +815,24 @@ async function testSaturationDoesNotHideTerminalWorkerFailure() {
 
   await Promise.all([executor.dedupStarted, store.discoveryFailureBlocked.promise]);
   executor.releaseDedup();
-  await eventually(() => coordinator.snapshot().noNewStreak === 2);
+  await eventually(() => executor.dedupSignal?.aborted === true);
   store.releaseDiscoveryFailure();
 
   const terminal = await coordinator.wait(undefined, 5_000);
-  assert.equal(terminal?.status, "failed");
-  assert.equal(terminal?.terminalReason, undefined);
-  assert.equal(completedDrafts.length, 0);
-  assert.match(terminal.error, /fixture configuration failure/);
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(terminal?.terminalReason, "saturated");
+  assert.equal(completedDrafts.length, 1);
+  assert.equal(completedDrafts[0].coverage.completeness, "complete");
+  assert.deepEqual(completedDrafts[0].findings, []);
   const failedWorker = [...store.workers.values()].find((worker) => (
     worker.status === "failed" && path.basename(path.dirname(worker.promptPath)) === "discovery-0003"
   ));
   assert.ok(failedWorker);
   assert.equal(failedWorker.status, "failed");
-  assert.equal(store.failCalls, 1);
-  assert.equal(store.finishCalls.length, 0);
+  assert.equal(store.failCalls, 0);
+  assert.equal(store.finishCalls.length, 1);
+  assert.equal(executor.discoveryCalls, 3);
+  assert.equal(executor.dedupCalls, 1);
 }
 
 async function testSettledReducerIsNotStarvedByDiscoveryBacklog() {
@@ -1743,7 +1747,7 @@ async function testMissingReducerResultResumesExistingThread() {
   assert.equal(new Set(executor.dedupThreadIds).size, 1);
   assert.match(
     executor.dedupContinuationPrompts[1] ?? "",
-    /record_codex_security_deep_reduction\(\{ scanId, findings, coverage, threatModel\?, scope\? \}\)/
+    /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/
   );
   assert.doesNotMatch(executor.dedupContinuationPrompts[1] ?? "", /\{ candidates, merges \}/);
   assert.match(executor.dedupContinuationPrompts[1] ?? "", /retry the call until it succeeds/);
@@ -2157,7 +2161,7 @@ async function testReducerTraceabilityRetryNamesExactMissingSource() {
   ]);
   assert.doesNotMatch(basePrompt, /artifact_validation_failed/);
   assert.match(retryPrompt, /artifact_validation_failed/);
-  assert.match(retryPrompt, /coverage.*completeness/s);
+  assert.match(retryPrompt, /findings/s);
   assert.equal(context.claimedWorkerIds.includes(missingWorkerId), true);
 }
 
@@ -3848,7 +3852,8 @@ async function writeDedupArtifacts(request, consumedOverride, options = {}) {
   if (options.canonicalCandidateId && draft.findings.length > 0) {
     draft.findings[0].provenance.candidateId = options.canonicalCandidateId;
   }
-  if (consumedOverride || options.omitLastWorkerSource) draft.coverage.completeness = "invalid";
+  delete draft.coverage;
+  if (consumedOverride || options.omitLastWorkerSource) draft.findings = "invalid";
   if (options.dropLastFinding) draft.findings.pop();
   const resultPath = path.join(artifactContext.root, "result.json");
   await mkdir(path.dirname(resultPath), { recursive: true });
@@ -3962,6 +3967,10 @@ try {
   await testSandboxDiagnosticSurvivesArtifactRetries();
   await testCompletionOrdering();
   await testSaturationPreservesFindingAlreadyBuffered();
+  await testDeepScanPublication({
+    fixtureRun, FakeStore, FakeExecutor, DeepScanCoordinator, deferred,
+    immediateClock, eventually,
+  });
   await testDirectReducerCannotDropAcceptedFinding();
   await testSaturationDrainsBufferedAndCancelsInflight();
   await testDiscoveryDeadlineDrainsActiveReducerAndPreservesFindings();
@@ -3970,7 +3979,7 @@ try {
   await testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence();
   await testDiscoveryDeadlineBeforeWorkerDispatchReturnsPartialEvidence();
   await testDiscoveryDeadlineWithoutAcceptedWorkersPublishesEmptyResults();
-  await testSaturationDoesNotHideTerminalWorkerFailure();
+  await testSaturationIgnoresWorkerFailureSettledAfterStop();
   await testSettledReducerIsNotStarvedByDiscoveryBacklog();
   await testSingletonHardCapReduction();
   await testExhaustedRetryFailsScan();

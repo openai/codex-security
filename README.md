@@ -70,6 +70,12 @@ command uploads completed findings and their repository ID. The SDK and
 reviews locally, and persist accepted duplicate groups; `--all-repositories`
 opts into the broader scope.
 
+Use `codex-security classify-severity --scan SCAN_ID --rubric /path/to/policy.md`
+to assess selected findings under your own policy before publishing tickets.
+Scan classification checkpoints each finding in SQLite and reuses matching
+assessments on reruns; `--reprocess` forces reassessment. The SDK exposes the same
+classification operation; original scan severity stays unchanged. See [severity classification](sdk/typescript/README.md#classify-finding-severity).
+
 ## Other providers
 
 To use another inference provider, set its API key and select a model:

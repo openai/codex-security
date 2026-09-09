@@ -25,6 +25,7 @@ const rendered = renderDiscoveryPrompt({
 assert.doesNotMatch(rendered, /false_positive_feedback\.json/);
 assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
 assert.match(rendered, /record_codex_security_scan_draft/);
+assert.match(rendered, /coverage\.deferred/);
 const discoveryContext = firstJsonBlock(rendered);
 assert.deepEqual(discoveryContext, {
   scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
@@ -68,6 +69,8 @@ const dedup = renderDedupPrompt({
   }]
 });
 const dedupContext = firstJsonBlock(dedup);
+assert.doesNotMatch(dedup, /\bcoverage\b/i);
+assert.match(dedup, /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/);
 assert.deepEqual(dedupContext, {
   reducerLabel: "dedup-0001",
   claimedWorkerIds: ["worker-001"]
