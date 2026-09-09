@@ -842,8 +842,45 @@ even after a failed or incomplete scan, but not after cancellation or a
 cost-limit stop.
 
 `--workers` defaults to `4`. `--max-attempts` defaults to `1` attempt per pending
-repository per invocation. Rerun the command to resume; `bulk-scan --help`
-lists all options.
+repository per invocation. Rerunning the command continues the campaign, skips
+completed results, and starts new attempts for pending repositories. If an
+attempt directory is occupied, that repository stops before replacing its
+checkout and the command recommends `--recover`.
+
+#### Recovering failed or interrupted bulk scans
+
+Use the original CSV, output directory, and campaign options with `--recover`:
+
+```bash
+npx @openai/codex-security bulk-scan repositories.csv \
+  --output-dir /path/outside/repositories/security-scans --recover
+```
+
+Recovery requires an existing campaign with a matching manifest. It skips
+completed results, including partial coverage, and repositories never started.
+For each failed or interrupted repository, it checks the latest attempt:
+
+- A sealed scan is recorded in `results.jsonl` without scanning again.
+- An eligible running Deep Scan resumes its original session, keeping its scan
+  ID, completed workers, artifacts, saved settings, and accumulated cost.
+- A failed, canceled, or otherwise unavailable scan starts a new attempt at the
+  CSV's pinned revision. Attempt numbers account for both receipts and existing
+  directories. Old artifacts and checkouts are preserved; new attempts use
+  `recovery-checkouts/<id>/attempt-<n>`.
+
+`--workers` still defaults to `4`; `--max-attempts` defaults to one recovery or
+new attempt per repository. A resume connection failure stops that repository
+for this invocation instead of starting another scan. Other repositories
+continue. Failed and interrupted recovery checkouts remain available for a later
+`--recover`; fresh completed checkouts are removed after recording the result.
+If a reboot interrupted a receipt write, its unfinished tail is saved beside
+`results.jsonl` as `results.jsonl.interrupted-<id>` before appending valid records.
+
+Same-scan resume requires the original checkout, session logs, and Codex Security
+state directory. Recovery does not reconstruct deleted checkpoints or fix the
+underlying cause of execution failures. New attempts incur new scan costs.
+Any remaining failures or partial coverage keep exit code `2`.
+`bulk-scan --help` lists all options.
 
 ### Custom validation
 
@@ -1212,12 +1249,50 @@ unique prefix of at least eight characters.
 | `scans list [REPOSITORY]`                             | List scans. Filter by artifact root with `--scan-root DIR`.                                                 |
 | `scans show [SCAN_ID]`                                | Show a scan; defaults to the latest completed one. `--show-linked-findings` includes earlier finding links. |
 | `scans logs [SCAN_ID]`                                | Show session events; defaults to the latest scan, including active scans.                                   |
+| `scans resume SCAN_ID`                                | Resume an interrupted Deep Scan in its original session and output directory.                               |
 | `scans rerun [SCAN_ID]`                               | Repeat a scan on the current checkout; defaults to the latest completed scan.                               |
 | `scans match BEFORE AFTER`                            | Link findings with the same root cause.                                                                     |
 | `scans match --all`                                   | Match completed scans across the repository's worktrees and clones.                                         |
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to the latest two completed scans.                                                  |
 | `findings list [REPOSITORY]`                          | List open findings. `findings` is an alias.                                                                 |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Mark a false positive. Later scans dismiss matches only while the reason applies.                           |
+
+#### Resuming an interrupted Deep Scan
+
+After the CLI process or host stops unexpectedly, find the scan and rejoin it:
+
+```bash
+npx @openai/codex-security scans list --scan-root /path/to/security-scans
+npx @openai/codex-security scans resume SCAN_ID
+```
+
+The scan must still be `running`, with its original checkout, output directory,
+and owning Codex session available in the same Codex Security state directory.
+The checkout's identity, revision, and contents must match the saved target.
+Completed, failed, and canceled scans cannot resume; `scans rerun` starts a new scan.
+
+Resume uses the saved configuration and instructions with the installed plugin.
+New scans save the explicit safety identifier and post-scan prompt contents.
+Single-scan resume restores them even if the prompt file changes or disappears.
+Older records that did not save these values cannot reconstruct them. Bulk
+recovery still requires matching campaign inputs and options; it uses the supplied
+post-scan prompt when the scan has no saved prompt.
+It keeps the scan ID, completed workers, artifacts, and accumulated session cost.
+The existing coordinator recovers interrupted workers after its lease expires.
+If discovery finished before the interruption, resume completes and seals the
+same scan. No archiving or new attempt directory is needed. A failed connection
+leaves the existing scan available for another resume attempt.
+
+Compatible saved scans can resume after a plugin update. Already-sealed results
+keep their original producer version and contents when completion is recorded.
+Unsupported or invalid sealed artifacts are rejected before resuming, preserving
+the saved scan state and files.
+
+For bulk campaigns, use [`bulk-scan --recover`](#recovering-failed-or-interrupted-bulk-scans)
+to recover eligible attempts and update `results.jsonl`. Individual `scans resume`
+does not update campaign receipts.
+
+#### Matching saved scans
 
 Matching requires sealed artifacts and reuses saved matches unless you pass
 `--force`. Comparisons classify findings as new, persisting, reopened, resolved,

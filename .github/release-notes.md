@@ -19,6 +19,7 @@
 - import CSV and JSON findings as saved scans ([#850](https://github.com/openai/codex-security/pull/850))
 - add a feedback command ([#854](https://github.com/openai/codex-security/pull/854))
 - improve scan usage and cost reports ([#853](https://github.com/openai/codex-security/pull/853))
+- recover interrupted Deep Scans and bulk campaigns ([#835](https://github.com/openai/codex-security/pull/835))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

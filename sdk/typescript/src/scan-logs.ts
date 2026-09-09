@@ -57,9 +57,8 @@ interface SessionLog {
   path: string;
 }
 
-export async function readScanLogs(options: ScanLogOptions) {
-  const logs = new Map<string, SessionLog>();
-  for await (const path of sessionFiles(join(options.codexHome, "sessions"))) {
+async function* scanSessions(codexHome: string): AsyncGenerator<SessionLog> {
+  for await (const path of sessionFiles(join(codexHome, "sessions"))) {
     for await (const first of sessionEvents(path)) {
       if (first["type"] !== "session_meta" || !isRecord(first["payload"])) {
         break;
@@ -67,16 +66,33 @@ export async function readScanLogs(options: ScanLogOptions) {
       const metadata = first["payload"];
       const threadId = metadata["id"];
       if (typeof threadId !== "string") break;
-      logs.set(threadId, {
+      yield {
         threadId,
         parentThreadId: sessionParentThreadId(metadata),
         startedAt: sessionStartedAt(metadata["timestamp"]),
         workingDirectory:
           typeof metadata["cwd"] === "string" ? metadata["cwd"] : null,
         path,
-      });
+      };
       break;
     }
+  }
+}
+
+export async function findScanSession(
+  codexHome: string,
+  threadId: string,
+): Promise<SessionLog | null> {
+  for await (const session of scanSessions(codexHome)) {
+    if (session.threadId === threadId) return session;
+  }
+  return null;
+}
+
+export async function readScanLogs(options: ScanLogOptions) {
+  const logs = new Map<string, SessionLog>();
+  for await (const session of scanSessions(options.codexHome)) {
+    logs.set(session.threadId, session);
   }
 
   const root = logs.get(options.threadId);

@@ -64,6 +64,7 @@ import {
   type ScanPreflight,
 } from "./api.js";
 import { accountStatus } from "./auth.js";
+import { loadContract } from "./contract.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import {
@@ -170,7 +171,11 @@ import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
 } from "./thread-source.js";
-import { readSavedScanLogs, type ScanLogSource } from "./scan-logs.js";
+import {
+  findScanSession,
+  readSavedScanLogs,
+  type ScanLogSource,
+} from "./scan-logs.js";
 import { sendFeedback } from "./feedback.js";
 import {
   renderScanHistory,
@@ -1001,6 +1006,7 @@ export function resolveCliPath(directory: string, value: string): string {
 }
 
 interface ScanArguments extends DeepScanOptions {
+  resumeScanId?: string;
   mock?: boolean;
   workflowId?: string;
   auth?: ScanAuthMode;
@@ -1012,6 +1018,7 @@ interface ScanArguments extends DeepScanOptions {
   scanPromptFile?: string;
   validationPromptFile?: string;
   postScanPromptFile?: string;
+  postScanPrompt?: string;
   diff?: string;
   workingTree: boolean;
   head?: string;
@@ -1997,6 +2004,67 @@ export async function main(
               codexSecurityCredentialHome(dependencies.environment),
             )) as unknown as JsonObject,
         );
+      },
+    })
+    .command("resume", {
+      description: "Resume an interrupted Deep Scan in its original session.",
+      mcp: false,
+      args: z.object({
+        scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
+      }),
+      options: z.object({
+        verbose: z
+          .boolean()
+          .default(false)
+          .describe("Print scan diagnostics to stderr."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, error: incurError, options }) {
+        let scanArguments: ScanArguments;
+        try {
+          const saved = await dependencies.runWorkbench([
+            "get-cli-scan-resume",
+            "--scan-id",
+            args.scanId,
+          ]);
+          if (
+            typeof saved["scanId"] !== "string" ||
+            typeof saved["scanDir"] !== "string"
+          ) {
+            throw new CodexSecurityError(
+              "The workbench returned invalid scan resume context.",
+            );
+          }
+          scanArguments = scanArgumentsFromRecipe(
+            saved["recipe"],
+            saved["scanId"],
+          );
+          scanArguments.resumeScanId = saved["scanId"];
+          scanArguments.outputDir = saved["scanDir"];
+          scanArguments.parentScanId = undefined;
+          // Resume uses the installed engine with the saved recipe and checkpoints.
+          scanArguments.expectedPluginVersion = undefined;
+          scanArguments.verbose = options.verbose;
+        } catch (error) {
+          const message = errorMessage(error);
+          errorOutput.write(`codex-security: ${message}\n`);
+          exitCode = 2;
+          return incurError({
+            code: "SCAN_RESUME_UNAVAILABLE",
+            message,
+            exitCode,
+          });
+        }
+        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        exitCode = outcome.exitCode;
+        if (outcome.error !== undefined) {
+          return incurError({
+            code: "SCAN_FAILED",
+            message: outcome.error,
+            exitCode,
+          });
+        }
+        return outcome.data;
       },
     })
     .command("rerun", {
@@ -3938,6 +4006,12 @@ export async function main(
           ),
       }),
       options: z.object({
+        recover: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Recover failed or interrupted attempts in an existing campaign, preserving their artifacts and checkouts.",
+          ),
         outputDir: z
           .string()
           .min(1, "--output-dir must not be empty.")
@@ -4029,6 +4103,11 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
+          if (options.recover && args.input === undefined) {
+            throw new Error(
+              "Bulk recovery requires the original repository CSV and --output-dir.",
+            );
+          }
           const prompts = await readPromptFiles(
             currentDirectory,
             options.scanPromptFile,
@@ -4090,6 +4169,99 @@ export async function main(
               ),
             },
             createSecurity: dependencies.createSecurity,
+            ...(options.recover
+              ? {
+                  recoverScan: async (scanDir: string) => {
+                    const history = await dependencies.runWorkbench(
+                      ["list-scans", "--scan-root", scanDir],
+                      undefined,
+                      controller.signal,
+                    );
+                    const scan = (history["scans"] as SavedScan[]).find(
+                      (scan) => resolve(scan.scanDir) === scanDir,
+                    );
+                    if (scan === undefined) return undefined;
+                    const status = (scan["progress"] as JsonObject)["status"];
+                    if (status === "complete") {
+                      const contract = await loadContract(scanDir, {
+                        pluginRoot: await bundledPluginRoot(),
+                        expectedScanId: scan.scanId,
+                        signal: controller.signal,
+                      });
+                      return {
+                        coverage: contract.coverage,
+                        cost:
+                          (scan["cost"] as unknown as ScanCost | undefined) ??
+                          null,
+                      };
+                    }
+                    if (status !== "running" || scan["mode"] !== "deep")
+                      return undefined;
+                    const saved = await dependencies.runWorkbench(
+                      [
+                        "get-cli-scan-resume",
+                        "--scan-id",
+                        scan.scanId,
+                        "--allow-unavailable",
+                      ],
+                      undefined,
+                      controller.signal,
+                    );
+                    if (typeof saved["unavailable"] === "string") {
+                      errorOutput.write(
+                        `codex-security: ${scan.scanId}: ${saved["unavailable"]} Preserving this attempt and starting a new one.\n`,
+                      );
+                      return undefined;
+                    }
+                    const session =
+                      typeof saved["threadId"] === "string"
+                        ? await findScanSession(
+                            codexSecurityCredentialHome(
+                              dependencies.environment,
+                            ),
+                            saved["threadId"],
+                          )
+                        : null;
+                    if (session?.workingDirectory !== scanDir) {
+                      errorOutput.write(
+                        `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
+                      );
+                      return undefined;
+                    }
+                    const recipe = scanArgumentsFromRecipe(
+                      saved["recipe"],
+                      scan.scanId,
+                    );
+                    const security = dependencies.createSecurity({
+                      pluginPath: options.pluginPath,
+                      pythonPath: options.python,
+                      codexOverrides: recipe.codexOverrides,
+                    });
+                    try {
+                      return await security.run(recipe.repository!, {
+                        resumeScanId: scan.scanId,
+                        outputDir: scanDir,
+                        mode: recipe.mode,
+                        target: targetFromArguments(recipe),
+                        knowledgeBasePaths: recipe.knowledgeBasePaths,
+                        workers: recipe.workers,
+                        subagents: recipe.subagents,
+                        stopAfterNoNew: recipe.stopAfterNoNew,
+                        maxDiscoveryRuns: recipe.maxDiscoveryRuns,
+                        maxTimeHours: recipe.maxTimeHours,
+                        maxCostUsd: recipe.maxCostUsd,
+                        failureSeverity: recipe.failOnSeverity,
+                        safetyIdentifier: recipe.safetyIdentifier,
+                        postScanPrompt:
+                          recipe.postScanPrompt ?? prompts.postScanPrompt,
+                        signal: controller.signal,
+                      });
+                    } finally {
+                      await security.close();
+                    }
+                  },
+                }
+              : {}),
             signal: controller.signal,
             onProgress: ({ repository, status, attempt, error, warning }) => {
               const detail = error ?? warning;
@@ -5334,11 +5506,23 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains deep scan settings for a standard scan.",
     );
   }
+  const safetyIdentifier = recipe["safetyIdentifier"];
+  const postScanPrompt = recipe["postScanPrompt"];
+  if (
+    (safetyIdentifier !== undefined && typeof safetyIdentifier !== "string") ||
+    (postScanPrompt !== undefined && typeof postScanPrompt !== "string")
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid launch settings.",
+    );
+  }
   return {
     repository,
     paths,
     knowledgeBasePaths,
     validationPromptFile,
+    safetyIdentifier,
+    postScanPrompt,
     diff: kind === "refs" ? reference : undefined,
     workingTree: kind === "working_tree",
     head: kind === "refs" ? head ?? "HEAD" : undefined,
@@ -7353,6 +7537,9 @@ async function executeScan(
       );
     }
     const options: ScanOptions = {
+      ...(arguments_.resumeScanId === undefined
+        ? {}
+        : { resumeScanId: arguments_.resumeScanId }),
       ...(arguments_.mock ? { mock: true } : {}),
       ...(arguments_.workflowId === undefined
         ? {}
@@ -7362,6 +7549,7 @@ async function executeScan(
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
       ...prompts,
+      postScanPrompt: arguments_.postScanPrompt ?? prompts.postScanPrompt,
       mode: arguments_.mode,
       workers: arguments_.workers,
       subagents: arguments_.subagents,
