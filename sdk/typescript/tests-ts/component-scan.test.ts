@@ -80,10 +80,11 @@ async function fixture() {
 }
 
 function largePlanningFiles() {
+  // Exceed the prompt limit with paths short enough for macOS fixtures.
   return Array.from(
-    { length: 120 },
+    { length: 300 },
     (_, index) =>
-      `apps/large/branch-${String(index).padStart(3, "0")}/${("directory-" + "x".repeat(70) + "/").repeat(15)}package.json`,
+      `apps/large/branch-${String(index).padStart(3, "0")}/${("directory-" + "x".repeat(50) + "/").repeat(10)}package.json`,
   );
 }
 
