@@ -17,7 +17,7 @@ import { join, relative, resolve, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
-import { resolveSourceMcp } from "../src/source-mcp.js";
+import { resolveSourceMcp } from "../src/deduplication/source-mcp.js";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
@@ -239,14 +239,10 @@ for (const {
         controller.signal,
         checkout,
         sourceMcp
-          ? await resolveSourceMcp(
-              "sourcegraph",
-              {},
-              {
-                CODEX_HOME: modelHome,
-                SOURCE_AUTH: "token synthetic-source-auth",
-              },
-            )
+          ? await resolveSourceMcp("sourcegraph", {
+              CODEX_HOME: modelHome,
+              SOURCE_AUTH: "token synthetic-source-auth",
+            })
           : undefined,
       );
       let validations = 0;

@@ -1,6 +1,3 @@
-import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
-import { readSourceMcpRuntime } from "./source-mcp.js";
 import { execFile as nodeExecFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -10,7 +7,6 @@ import reviewItemsSchema from "../../schemas/tools/review-items.schema.json";
 import {
   artifactDestination,
   paginateArtifactRows,
-  readArtifactJsonl,
   readArtifactText,
   type ArtifactContext,
   type ArtifactPage
@@ -90,16 +86,6 @@ export async function prepareCodexSecurityReviewItems(
   }
 
   const destination = await artifactDestination(context, inventoryComponents, label);
-  const source = await readSourceMcpRuntime(context.repoRoot, context.scanId);
-  if (source !== undefined) {
-    const items = await readArtifactJsonl<ReviewItem>(context, ["scoped-source-input.jsonl"], label, reviewItemSchema);
-    const digest = createHash("sha256").update(JSON.stringify(items.map(({ path }) => path))).digest("hex");
-    if (digest !== source.inventoryDigest) {
-      throw new Error("Source MCP inventory changed after scan registration.");
-    }
-    await writeFile(destination, items.map(({ path }) => path + "\n").join(""), { mode: 0o600 });
-    return { reviewItemsTotal: items.length };
-  }
   const pythonCommand = context.pythonCommand ?? await resolvePythonCommand();
   const helper = join(context.pluginRoot, "scripts", "generate_in_scope_files.py");
   const arguments_ = [

@@ -44,7 +44,7 @@ import {
   sourceMcpConfig,
   sourceMcpInstructions,
   type SourceMcp,
-} from "../source-mcp.js";
+} from "./source-mcp.js";
 
 const reviewErrorSchema = z
   .object({ reason: z.string().trim().min(1) })
@@ -140,12 +140,7 @@ export class CodexReviewRunner {
       const sourceInstructions =
         source === undefined
           ? sourceReviewInstructions
-          : await sourceMcpInstructions(
-              source,
-              workingDirectory,
-              null,
-              this.signal,
-            );
+          : await sourceMcpInstructions(source, workingDirectory, this.signal);
       const environment = await comparisonEnvironment(
         this.environment,
         undefined,

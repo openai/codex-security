@@ -2,7 +2,6 @@ import { accessSync, constants as fsConstants, existsSync, promises as fs, readd
 import { createRequire } from "node:module";
 import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { Codex } from "@openai/codex-sdk";
-import { readSourceMcpRuntime } from "../source-mcp.js";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
   classifyCodexWorkerError,
@@ -49,14 +48,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           "Deep Scan cannot start a read-only worker without verified parent sandbox metadata."
         );
       }
-      const source = await readSourceMcpRuntime(this.modelSettings.artifactContext?.repoRoot, this.modelSettings.artifactContext?.scanId);
       const workerProfile = workerPermissionProfile(parentSandbox);
-      if (source !== undefined) {
-        (workerProfile.filesystem as TomlObject)[dirname(process.env.CODEX_SECURITY_SOURCE_MCP_CONFIG_PATH!)] = "deny";
-      }
       const configOverrides = workerPermissionProfileConfigOverrides(workerProfile);
       const originalCwd = process.cwd();
-      const childEnv = { ...await snapshotWorkerEnvironment(), ...source?.environment };
+      const childEnv = await snapshotWorkerEnvironment();
       const codexPath = resolveCodexPath(
         childEnv,
         process.platform,
@@ -73,12 +68,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         signal: request.signal
       });
       const prompt = await fs.readFile(request.promptPath, "utf8");
-      const servers = {
-        "codex-security": { command: "node", enabled: false },
-        ...this.compactArtifactServer(request),
-        ...(source?.config.mcp_servers as Record<string, TomlValue> | undefined)
-      };
-      if (source !== undefined) configOverrides.push(`mcp_servers=${tomlInlineValue(servers)}`);
       const codex = new Codex({
         codexPathOverride: executablePathForSpawn(codexPath),
         env: childEnv,
@@ -87,10 +76,12 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ...(this.modelSettings.reasoningEffort
             ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
             : {}),
-          ...(source === undefined ? { mcp_servers: servers } : {
-            shell_environment_policy: source.config.shell_environment_policy,
-            approvals_reviewer: "auto_review"
-          }),
+          mcp_servers: {
+            // Discovery workers use the bundled skills and artifacts, not the parent workbench MCP.
+            // A disabled server still needs a valid transport while Codex resolves plugin configuration.
+            "codex-security": { command: "node", enabled: false },
+            ...this.compactArtifactServer(request)
+          },
           ...workerSubagentConfig(request.subagents)
         },
         // Structured SDK config cannot preserve literal filesystem keys such as
@@ -100,17 +91,16 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const threadOptions = {
         ...(this.modelSettings.model ? { model: this.modelSettings.model } : {}),
         threadSource: "security_scan",
-        approvalPolicy: source?.config.approval_policy === "on-request" ? "on-request" : "never",
+        approvalPolicy: "never",
         skipGitRepoCheck: true,
         workingDirectory: request.workingDirectory
       } as const;
       const thread = request.resumeThreadId
         ? codex.resumeThread(request.resumeThreadId, threadOptions)
         : codex.startThread(threadOptions);
-      const taskPrompt = request.resumeThreadId
+      const input = request.resumeThreadId
         ? request.continuationPrompt ?? prompt
         : prompt;
-      const input = source === undefined ? taskPrompt : `${taskPrompt}\n${source.instructions}\nUse the parent scan's prepared review_items inventory, including files absent from the sparse checkout. Do not regenerate it from local source files.`;
       const controller = new AbortController();
       const forwardAbort = () => controller.abort(request.signal.reason);
       if (request.signal.aborted) {
@@ -264,7 +254,7 @@ function workerSubagentConfig(subagents: number) {
   };
 }
 
-type TomlValue = string | number | boolean | TomlObject | TomlValue[];
+type TomlValue = string | number | boolean | TomlObject;
 type TomlObject = { [key: string]: TomlValue };
 
 function workerPermissionProfile(
@@ -300,7 +290,6 @@ function workerPermissionProfileConfigOverrides(profile: TomlObject): string[] {
 }
 
 function tomlInlineValue(value: TomlValue): string {
-  if (Array.isArray(value)) return `[${value.map(tomlInlineValue).join(",")}]`;
   if (typeof value === "string") return tomlString(value);
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "true" : "false";

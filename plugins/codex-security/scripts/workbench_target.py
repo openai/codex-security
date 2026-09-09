@@ -11,14 +11,13 @@ import stat
 import subprocess
 import sys
 import tempfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, BinaryIO
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
-from workbench_validation import path_within_scope
 
 
 def git_output(
@@ -775,51 +774,6 @@ def scan_target_warning(scan: sqlite3.Row) -> str | None:
             "results were saved for the original revision or snapshot."
         )
     return None
-
-
-def validate_scan_recipe_source(
-    repository: Path, recipe: dict[str, Any], source_files: list[str] | None = None
-) -> None:
-    source_mcp = recipe.get("sourceMcp")
-    target = recipe["target"]
-    for path in target["paths"]:
-        candidate = PurePosixPath(path)
-        if (
-            not path
-            or candidate.is_absolute()
-            or ".." in candidate.parts
-            or "\\" in path
-            or (source_mcp is None and not (repository / candidate).exists())
-            or not (repository / candidate).resolve().is_relative_to(repository)
-        ):
-            raise SystemExit("Scan launch recipe target paths must exist inside the repository.")
-    if source_mcp is None:
-        return
-    if not isinstance(source_mcp, str) or not source_mcp.strip():
-        raise SystemExit("Scan launch recipe sourceMcp must name a configured MCP server.")
-    if target["kind"] == "working_tree":
-        raise SystemExit("Source MCP cannot read uncommitted working-tree changes.")
-    if git_bytes(repository, "status", "--porcelain=v1", "--untracked-files=all") != b"":
-        raise SystemExit("Source MCP requires a clean Git checkout.")
-    current_revision = git_revision(repository)
-    if recipe.get("repositoryRevision", current_revision) != current_revision or (
-        target["kind"] == "refs" and target.get("head") != current_revision
-    ):
-        raise SystemExit("Repository HEAD changed before the source MCP scan started.")
-    # The SDK owns committed-file enumeration. This registration payload is
-    # separate from the saved recipe and must stay inside its approved scope.
-    if not isinstance(source_files, list) or not all(
-        isinstance(path, str) and path and "\\" not in path for path in source_files
-    ):
-        raise SystemExit("Source MCP registration requires the SDK's committed-source inventory.")
-    if any(
-        not any(path_within_scope(path, scope) for scope in target["paths"] or ["."])
-        for path in source_files
-    ):
-        raise SystemExit("Source MCP inventory paths must stay inside the requested scope.")
-    for path in target["paths"]:
-        if not any(path_within_scope(item, path) for item in source_files):
-            raise SystemExit("Scan launch recipe target path must contain committed source files.")
 
 
 def main() -> None:

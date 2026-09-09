@@ -30,7 +30,7 @@ import {
   CheckpointedReviewRunner,
   reviewSettingsDigest,
 } from "./checkpointed-review.js";
-import { resolveSourceMcp } from "../source-mcp.js";
+import { resolveSourceMcp } from "./source-mcp.js";
 import { normalizeRepository } from "../targets.js";
 
 export interface DeduplicateScanOptions {
@@ -158,12 +158,7 @@ async function deduplicateResolvedScan(
   const source =
     options.sourceMcp === undefined
       ? undefined
-      : await resolveSourceMcp(
-          options.sourceMcp,
-          {},
-          environment,
-          options.signal,
-        );
+      : await resolveSourceMcp(options.sourceMcp, environment, options.signal);
   const { contract, scanDirectory } = await loadContractWithScanDirectory(
     selectedDirectory,
     {

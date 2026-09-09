@@ -154,3 +154,29 @@ test("dedupe forwards cancellation and removes signal handlers", async () => {
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   }
 });
+
+test("source MCP is a dedupe-only flag", async () => {
+  for (const command of ["dedupe", "scan"]) {
+    const stdout = capture();
+    expect(
+      await main(
+        [command, "--help"],
+        stdout.stream,
+        capture().stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    if (command === "dedupe") expect(stdout.text()).toContain("--source-mcp");
+    else expect(stdout.text()).not.toContain("--source-mcp");
+  }
+  const stderr = capture();
+  expect(
+    await main(
+      ["scan", "--source-mcp", "sourcegraph"],
+      capture().stream,
+      stderr.stream,
+      dependencies(),
+    ),
+  ).not.toBe(0);
+  expect(stderr.text()).toContain("source-mcp");
+});

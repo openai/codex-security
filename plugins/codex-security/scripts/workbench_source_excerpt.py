@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sqlite3
 import sys
 from pathlib import Path, PurePosixPath
@@ -23,9 +22,6 @@ def finding_source_excerpt(
     target: Path | None,
     locations: list[dict[str, Any]],
 ) -> str | None:
-    # MCP findings already carry codeEvidence. Avoid lazy Git blob downloads for UI excerpts.
-    if "recipe_json" in scan.keys() and json.loads(scan["recipe_json"] or "{}").get("sourceMcp"):
-        return None
     if target is None or not locations:
         return None
     location = next(

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { execFile as nodeExecFile } from "node:child_process";
 import {
   mkdir,
@@ -32,7 +31,6 @@ const inventory = await import(
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
-  await testSourceMcpInventoryUsesCommittedPaths();
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
   await testPrepareIncludesStagedAndUnstagedChanges();
   await testWorkerReadsItsOwnBoundInventory();
@@ -107,33 +105,6 @@ async function testPrepareUsesTheExistingStandardGenerator() {
     [...first.items, ...second.items].map((item) => item.path),
     expected.split("\n").filter(Boolean)
   );
-}
-
-async function testSourceMcpInventoryUsesCommittedPaths() {
-  const fixture = await createFixture("remote source inventory");
-  const previous = process.env.CODEX_SECURITY_SOURCE_MCP_CONFIG_PATH;
-  const sourcePath = path.join(fixture.repoRoot, "host-test-config.json");
-  const inventoryDigest = createHash("sha256").update(JSON.stringify(["absent/source.ts", "deleted/base.ts"])).digest("hex");
-  await writeFile(sourcePath, JSON.stringify({ repository: fixture.repoRoot, scanId: fixture.scan.scanId, inventoryDigest }));
-  const inventoryPath = path.join(fixture.scan.root, "scoped-source-input.jsonl");
-  await writeFile(inventoryPath, '{"path":"absent/source.ts"}\n{"path":"deleted/base.ts"}\n');
-  process.env.CODEX_SECURITY_SOURCE_MCP_CONFIG_PATH = sourcePath;
-  try {
-    assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(fixture.scan), { reviewItemsTotal: 2 });
-    assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), { items: [{ path: "absent/source.ts" }, { path: "deleted/base.ts" }] });
-    await assert.rejects(inventory.prepareCodexSecurityReviewItems({ ...fixture.scan, repoRoot: path.join(fixture.repoRoot, "other") }), /different scan or repository/);
-    await assert.rejects(inventory.prepareCodexSecurityReviewItems({ ...fixture.scan, scanId: "other-scan" }), /different scan or repository/);
-    await writeFile(inventoryPath, '{"path":"other/source.ts"}\n');
-    await assert.rejects(inventory.prepareCodexSecurityReviewItems(fixture.scan), /changed after scan registration/);
-    await writeFile(inventoryPath, '{"path":"../outside.ts"}\n');
-    await assert.rejects(inventory.prepareCodexSecurityReviewItems(fixture.scan), /artifact schema/);
-    assert.equal(await readFile(fixture.scanInventory, "utf8"), "absent/source.ts\ndeleted/base.ts\n");
-    await unlink(inventoryPath);
-    await assert.rejects(inventory.prepareCodexSecurityReviewItems(fixture.scan), /unavailable/);
-  } finally {
-    if (previous === undefined) delete process.env.CODEX_SECURITY_SOURCE_MCP_CONFIG_PATH;
-    else process.env.CODEX_SECURITY_SOURCE_MCP_CONFIG_PATH = previous;
-  }
 }
 
 async function testPrepareUsesOnlyAuthoritativeDiffChanges() {

@@ -196,18 +196,8 @@ import {
   type ScanTarget,
   validatedGitEnvironment,
   validateCommittedDiffCheckout,
-  validateSourceMcpTarget,
   validateMode,
 } from "./targets.js";
-
-import {
-  resolveSourceMcp,
-  sourceMcpConfig,
-  sourceMcpInstructions,
-  writeSourceMcpRuntime,
-  SOURCE_MCP_CONFIG_PATH,
-  type SourceMcp,
-} from "./source-mcp.js";
 
 interface CodexThreadLike {
   readonly id: string | null;
@@ -269,8 +259,6 @@ export interface DeepScanOptions {
 }
 
 export interface ScanOptions extends DeepScanOptions {
-  /** Require this configured Codex MCP server for committed source access. */
-  sourceMcp?: string;
   /** Save synthetic Standard scan results without calling Codex or a model. */
   mock?: boolean;
   /** Opt into a durable scan -> custom publication -> dedupe workflow. */
@@ -408,7 +396,6 @@ type ScanObserverName =
   | "onWarning";
 
 export interface ScanPreflight extends DeepScanOptions {
-  sourceMcp?: string;
   repository: string;
   target: NormalizedTarget;
   mode: ScanMode;
@@ -427,12 +414,6 @@ interface LocalScanInputs
   protectedRoot: string;
   protectedRoots: readonly string[];
   stateDirectory: string;
-  source?: {
-    mcp: SourceMcp;
-    files: string[];
-    instructions: string;
-    revision: string;
-  };
 }
 
 export interface CodexSecurityMetadata {
@@ -787,9 +768,6 @@ export class CodexSecurity {
         : null;
     this.#requireOpen();
     return {
-      ...(options.sourceMcp === undefined
-        ? {}
-        : { sourceMcp: options.sourceMcp }),
       repository: inputs.repository,
       target: inputs.target,
       mode: inputs.mode,
@@ -1212,7 +1190,6 @@ export class CodexSecurity {
     let scanDir = "";
     let archivedScanDir: string | null = null;
     let targetPathsFile: string | null = null;
-    let sourceRuntimeDirectory: string | undefined;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
     let deepProgressTracker: DeepScanProgressTracker | null = null;
@@ -1251,15 +1228,13 @@ export class CodexSecurity {
         outputDir: requestedOutput,
         protectedRoot,
         stateDirectory,
-        source,
       } = await this.#validateLocalInputs(repository, options, signal);
       checkOpen();
       let temporaryRoot: string | undefined;
       if (
         requestedOutput === null ||
         this.#runtime === null ||
-        options.knowledgeBasePaths?.length ||
-        source !== undefined
+        options.knowledgeBasePaths?.length
       ) {
         temporaryRoot = await realpath(tmpdir());
         requireOutputOutsideRepository(
@@ -1294,16 +1269,6 @@ export class CodexSecurity {
         python,
       } = session;
       releaseCredentialHome = session.releaseCredentialHome;
-      let sourceRuntimePath: string | undefined;
-      if (source !== undefined) {
-        sourceRuntimeDirectory = await mkdtemp(
-          join(temporaryRoot!, "codex-security-source-"),
-        );
-        session.sessionConfig = {
-          ...session.sessionConfig,
-          ...sourceMcpConfig(source.mcp, session.sessionConfig),
-        };
-      }
       const deepScanConfigPath =
         mode === "deep"
           ? runtime.deepScanConfigPath ??
@@ -1403,12 +1368,9 @@ export class CodexSecurity {
       checkOpen();
       const expectation: ScanExpectation = {
         repository: repo,
-        repositoryRevision:
-          source?.revision ??
-          (await (this.#dependencies.repositoryRevision ?? repositoryRevision)(
-            repo,
-            signal,
-          )),
+        repositoryRevision: await (
+          this.#dependencies.repositoryRevision ?? repositoryRevision
+        )(repo, signal),
         target: normalized,
         mode,
         pluginVersion: runtime.plugin.version,
@@ -1581,7 +1543,6 @@ export class CodexSecurity {
         options.maxCostUsd,
         deepScanOptions(options),
       );
-      if (source !== undefined) recipe["sourceMcp"] = source.mcp.name;
       if (options.validationPrompt !== undefined)
         recipe["validationMode"] = "custom";
       const workbenchOptions: WorkbenchCommandOptions = {
@@ -1617,7 +1578,6 @@ export class CodexSecurity {
         ],
         JSON.stringify({
           recipe,
-          ...(source === undefined ? {} : { sourceFiles: source.files }),
           userContext: options.scanPrompt,
           ...(options.workflowId === undefined
             ? {}
@@ -1691,22 +1651,6 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
-      if (source !== undefined && targetRevision !== source.revision) {
-        throw new CodexSecurityError(
-          "Repository HEAD changed before the source MCP scan started. Retry at the selected revision.",
-        );
-      }
-      if (source !== undefined) {
-        sourceRuntimePath = await writeSourceMcpRuntime(
-          sourceRuntimeDirectory!,
-          source.mcp,
-          source.instructions,
-          repo,
-          scanId,
-          source.files,
-          approvalPolicy,
-        );
-      }
       if (mode === "deep" && options.onDeepProgress !== undefined) {
         let progressWarningReported = false;
         deepProgressTracker = new DeepScanProgressTracker({
@@ -1756,7 +1700,6 @@ export class CodexSecurity {
         options.scanPrompt,
         options.maxCostUsd !== undefined,
         discoveryPrompt,
-        source?.instructions,
       );
       checkOpen();
       const feedback = await workbench(
@@ -1817,10 +1760,6 @@ export class CodexSecurity {
             )
           : null;
       const runtimePaths = {
-        ...(source === undefined ? {} : source.mcp.environment),
-        ...(sourceRuntimePath === undefined
-          ? {}
-          : { [SOURCE_MCP_CONFIG_PATH]: sourceRuntimePath }),
         PYTHON: python,
         CODEX_SECURITY_STARTED_AT: new Date().toISOString(),
         CODEX_SECURITY_REPOSITORY: repo,
@@ -2354,9 +2293,6 @@ export class CodexSecurity {
         for (const cleanup of await Promise.allSettled([
           knowledgeBase?.cleanup(),
           removeTargetPathsFile(targetPathsFile),
-          sourceRuntimeDirectory === undefined
-            ? undefined
-            : rm(sourceRuntimeDirectory, { recursive: true, force: true }),
         ])) {
           if (cleanup.status === "rejected") {
             warnCleanupFailed(options, cleanup.reason);
@@ -2638,41 +2574,21 @@ export class CodexSecurity {
         sdkEnvironment,
       );
     }
-    const sourceRuntimePath = runtimePaths[SOURCE_MCP_CONFIG_PATH];
-    const overrides = [
-      ...(commandAuth ? modelProviderConfigOverride(sessionConfig) : []),
-      ...configOverrides,
-    ];
-    if (sourceRuntimePath !== undefined) {
-      const profile = (sessionConfig["permissions"] as JsonObject)[
-        SCAN_PERMISSION_PROFILE
-      ] as JsonObject;
-      const sourceProfile = {
-        ...profile,
-        filesystem: {
-          ...(profile["filesystem"] as JsonObject),
-          [dirname(sourceRuntimePath)]: "deny",
-          [join(
-            configuredCodexHome(this.#dependencies.environment),
-            "config.toml",
-          )]: "deny",
-        },
-      };
-      overrides.push(
-        `permissions.${SCAN_PERMISSION_PROFILE}=${inlineToml(sourceProfile)}`,
-      );
-      // Native names can contain dots; serialize the whole table with literal keys.
-      overrides.push(
-        `mcp_servers=${inlineToml(sdkCodexConfig["mcp_servers"]!)}`,
-      );
-      delete sdkCodexConfig["mcp_servers"];
-    }
     const codex = this.#dependencies.createCodex({
       ...(codexPathOverride === undefined
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      ...(overrides.length ? { configOverrides: overrides } : {}),
+      ...(commandAuth || configOverrides.length > 0
+        ? {
+            configOverrides: [
+              ...(commandAuth
+                ? modelProviderConfigOverride(sessionConfig)
+                : []),
+              ...configOverrides,
+            ],
+          }
+        : {}),
       env: sdkEnvironment,
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
@@ -3148,14 +3064,8 @@ export class CodexSecurity {
               options.knowledgeBasePaths,
               options.maxCostUsd,
             ),
-            ...(local.source === undefined
-              ? {}
-              : { sourceMcp: local.source.mcp.name }),
             mock: true,
           },
-          ...(local.source === undefined
-            ? {}
-            : { sourceFiles: local.source.files }),
           userContext: options.scanPrompt,
           ...(options.workflowId === undefined
             ? {}
@@ -3308,12 +3218,7 @@ export class CodexSecurity {
     throwIfAborted(signal);
     const requestedTarget = options.target ?? "repository";
     validatedGitEnvironment(this.#dependencies.environment);
-    const normalized = await normalizeTarget(
-      repo,
-      requestedTarget,
-      signal,
-      options.sourceMcp !== undefined,
-    );
+    const normalized = await normalizeTarget(repo, requestedTarget, signal);
     throwIfAborted(signal);
     const mode = options.mode ?? "standard";
     validateMode(normalized, mode);
@@ -3331,44 +3236,7 @@ export class CodexSecurity {
           "Custom validation is not supported for Deep scans.",
         );
     }
-    await validateCommittedDiffCheckout(
-      repo,
-      normalized,
-      signal,
-      options.sourceMcp !== undefined,
-    );
-    let source: LocalScanInputs["source"];
-    if (options.sourceMcp !== undefined) {
-      const mcp = await resolveSourceMcp(
-        options.sourceMcp,
-        this.config.codexOverrides ?? {},
-        this.#dependencies.environment,
-        signal,
-      );
-      const revision = await repositoryRevision(repo, signal);
-      if (revision === null)
-        throw new ConfigurationError(
-          "Source MCP requires a Git checkout with a committed HEAD.",
-        );
-      const files = await validateSourceMcpTarget(
-        repo,
-        normalized,
-        signal,
-        revision,
-      );
-      source = {
-        mcp,
-        files,
-        revision,
-        instructions: await sourceMcpInstructions(
-          mcp,
-          repo,
-          normalized,
-          signal,
-          revision,
-        ),
-      };
-    }
+    await validateCommittedDiffCheckout(repo, normalized, signal);
     throwIfAborted(signal);
     const protectedRoot =
       protectedRoots?.[0] ??
@@ -3409,7 +3277,6 @@ export class CodexSecurity {
       protectedRoot,
       protectedRoots,
       stateDirectory,
-      ...(source === undefined ? {} : { source }),
     };
   }
 
@@ -4032,7 +3899,6 @@ function scanPrompt(
   additionalPrompt?: string,
   enforceCostLimit = false,
   discoveryPrompt?: string,
-  sourceInstructions?: string,
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
@@ -4095,13 +3961,7 @@ function scanPrompt(
         ]
       : []),
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
-    ...(sourceInstructions === undefined
-      ? []
-      : [
-          sourceInstructions,
-          "Use the complete committed scope inventory at scoped-source-input.jsonl.",
-        ]),
-    targetInstruction(target, python, sourceInstructions !== undefined),
+    targetInstruction(target, python),
     ...(skillName === "security-scan" || enforceCostLimit || customValidation
       ? [
           "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
@@ -4125,11 +3985,7 @@ function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
   return mode === "deep" ? "deep-security-scan" : "security-scan";
 }
 
-function targetInstruction(
-  target: NormalizedTarget,
-  python: string,
-  sourceMcp = false,
-): string {
+function targetInstruction(target: NormalizedTarget, python: string): string {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths") {
@@ -4140,10 +3996,7 @@ function targetInstruction(
     const scopes = shellEnvironmentReference(
       "CODEX_SECURITY_TARGET_PATHS_FILE",
     );
-    const enumeration = sourceMcp
-      ? "use the prepared committed-file inventory."
-      : `resolve every requested file and all non-ignored descendants of requested directories using ${python} ${helper} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}.`;
-    return `Scan target paths: ${enumeration} Before finalization, preserve every requested scope with ${python} ${helper} bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}. Do not print, evaluate, or modify the target-paths file.`;
+    return `Scan target paths: resolve every requested file and all non-ignored descendants of requested directories using ${python} ${helper} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}. Before finalization, preserve every requested scope with ${python} ${helper} bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}. Do not print, evaluate, or modify the target-paths file.`;
   }
   if (target.kind === "refs") {
     return `Scan target: Git diff from ${target.base} to ${target.head}.`;

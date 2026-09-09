@@ -496,7 +496,6 @@ export async function normalizeTarget(
   repository: string,
   target: ScanTarget,
   signal?: AbortSignal,
-  committedSource = false,
 ): Promise<NormalizedTarget> {
   const root = await normalizeRepository(repository, signal);
   throwIfAborted(signal);
@@ -581,21 +580,12 @@ export async function normalizeTarget(
     const candidate = isAbsolute(expandHome(value))
       ? resolve(expandHome(value))
       : resolve(root, expandHome(value));
-    if (!committedSource && !existsSync(candidate)) {
+    if (!existsSync(candidate)) {
       throw new InvalidTargetError(`Path target does not exist: ${value}`);
     }
     let canonical: string;
     try {
-      if (committedSource && !existsSync(candidate)) {
-        let ancestor = dirname(candidate);
-        while (!existsSync(ancestor)) ancestor = dirname(ancestor);
-        canonical = resolve(
-          await realpath(ancestor),
-          relative(ancestor, candidate),
-        );
-      } else {
-        canonical = await abortable(() => realpath(candidate), signal);
-      }
+      canonical = await abortable(() => realpath(candidate), signal);
     } catch (error) {
       throwIfAborted(signal);
       throw new InvalidTargetError(`Path target does not exist: ${value}`, {
@@ -626,7 +616,6 @@ export async function validateCommittedDiffCheckout(
   repository: string,
   target: NormalizedTarget,
   signal?: AbortSignal,
-  sourceMcp = false,
 ): Promise<void> {
   if (target.kind !== "refs") return;
 
@@ -648,7 +637,6 @@ export async function validateCommittedDiffCheckout(
     );
   }
 
-  if (sourceMcp) return;
   const tracked = await gitOutput(repository, ["ls-files", "-t", "-z"], signal);
   if (tracked.split("\0").some((entry) => entry.startsWith("S "))) {
     throw new InvalidTargetError(
@@ -669,99 +657,6 @@ export function validateMode(target: NormalizedTarget, mode: ScanMode): void {
       "Deep mode supports repository and path targets only.",
     );
   }
-}
-
-/** Source servers can inspect committed files absent from a sparse checkout. */
-export async function validateSourceMcpTarget(
-  repository: string,
-  target: NormalizedTarget,
-  signal?: AbortSignal,
-  selectedRevision?: string,
-): Promise<string[]> {
-  await requireGitRepository(repository, signal);
-  if (target.kind === "working_tree") {
-    throw new InvalidTargetError(
-      "Source MCP cannot read uncommitted working-tree changes.",
-    );
-  }
-  if (
-    (
-      await gitOutput(
-        repository,
-        ["status", "--porcelain=v1", "--untracked-files=all"],
-        signal,
-      )
-    ).length
-  ) {
-    throw new InvalidTargetError(
-      "Source MCP requires a clean checkout because the source server cannot read local changes.",
-    );
-  }
-  const revision =
-    selectedRevision ?? (await resolveGitRef(repository, "HEAD", signal));
-  if (target.kind === "refs" && revision !== target.head) {
-    throw new InvalidTargetError(
-      "Source MCP checkout HEAD changed before the committed-diff scan started.",
-    );
-  }
-  const tree = await gitOutput(
-    repository,
-    ["ls-tree", "-r", "-z", "--full-tree", revision],
-    signal,
-  );
-  const paths = tree.split("\0").flatMap((entry) => {
-    const match = /^100[0-7]{3} blob [0-9a-f]+\t([\s\S]+)$/u.exec(entry);
-    return match ? [match[1]!] : [];
-  });
-  const selected = target.paths.length ? target.paths : ["."];
-  for (const scope of target.paths) {
-    if (
-      !paths.some(
-        (path) =>
-          scope === "." || path === scope || path.startsWith(`${scope}/`),
-      )
-    ) {
-      throw new InvalidTargetError(
-        `Path target does not contain committed source files: ${scope}`,
-      );
-    }
-  }
-  if (target.kind === "refs") {
-    // Tree comparisons need no blobs, textconv, external diff tool, or rename scoring.
-    const changed = await gitOutput(
-      repository,
-      [
-        "diff-tree",
-        "--no-commit-id",
-        "--name-only",
-        "--no-renames",
-        "-r",
-        "-z",
-        target.base!,
-        target.head!,
-      ],
-      signal,
-    );
-    const baseTree = await gitOutput(
-      repository,
-      ["ls-tree", "-r", "-z", "--full-tree", target.base!],
-      signal,
-    );
-    const regular = new Set([
-      ...paths,
-      ...baseTree.split("\0").flatMap((entry) => {
-        const match = /^100[0-7]{3} blob [0-9a-f]+\t([\s\S]+)$/u.exec(entry);
-        return match ? [match[1]!] : [];
-      }),
-    ]);
-    return changed.split("\0").filter((path) => regular.has(path));
-  }
-  return paths.filter((path) =>
-    selected.some(
-      (scope) =>
-        scope === "." || path === scope || path.startsWith(`${scope}/`),
-    ),
-  );
 }
 
 export async function repositoryRevision(

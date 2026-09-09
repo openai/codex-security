@@ -80,8 +80,6 @@ try {
     await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
     await testSdkInvocationAndThreadCapture();
     await testBedrockCredentialsReachWorker();
-    await testSourceMcpReachesWorker("on-request");
-    await testSourceMcpReachesWorker("never");
     await testArtifactServerUsesExtendedStartupTimeout();
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
@@ -670,48 +668,6 @@ async function testSdkInvocationAndThreadCapture() {
     assert.equal(invocation.argv.includes("mcp_servers.codex-security.enabled=false"), true);
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
-  }
-}
-
-async function testSourceMcpReachesWorker(approvalPolicy) {
-  const privateRoot = await mkdtemp(path.join(tmpdir(), "codex-security-source-host-"));
-  temporaryRoots.push(privateRoot);
-  const profile = { ...emptyWorkerPermissionProfile, filesystem: { ":root": "read", [privateRoot]: "deny" } };
-  const fixture = await fakeCodexFixture(profile);
-  const sourcePath = path.join(privateRoot, "source.json");
-  const previous = { CODEX_CLI_PATH: process.env.CODEX_CLI_PATH, CODEX_SECURITY_SOURCE_MCP_CONFIG_PATH: process.env.CODEX_SECURITY_SOURCE_MCP_CONFIG_PATH };
-  Object.assign(process.env, { CODEX_CLI_PATH: fixture.executablePath, CODEX_SECURITY_SOURCE_MCP_CONFIG_PATH: sourcePath });
-  try {
-    const promptPath = path.join(fixture.root, "prompt.md");
-    await writeFile(promptPath, "worker source review");
-    await writeFile(sourcePath, JSON.stringify({
-      repository: fixture.root,
-      scanId: "synthetic-scan",
-      instructions: "Source access: synthetic code.host at immutable revision.",
-      environment: { SYNTHETIC_SOURCE_AUTH: "token synthetic-source-auth" },
-      config: {
-        approval_policy: approvalPolicy,
-        mcp_servers: { "code.host": { url: "https://source.example.com/.api/mcp", enabled: true, required: true, default_tools_approval_mode: "prompt", env_http_headers: { Authorization: "SYNTHETIC_SOURCE_AUTH" } } },
-        shell_environment_policy: { exclude: ["SYNTHETIC_SOURCE_AUTH"] }
-      }
-    }));
-    const result = await new CodexSdkWorkerExecutor({
-      parentSandbox: trustedParentSandbox,
-      artifactContext: { pluginRoot: fixture.root, scanRoot: fixture.root, repoRoot: fixture.root, scanId: "synthetic-scan" }
-    }).run({ kind: "discovery", promptPath, workingDirectory: fixture.root, artifactContext: { root: fixture.root, layout: "worker" }, subagents: 0, signal: new AbortController().signal });
-    assert.equal(result.threadId, "fixture-thread-id");
-    const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
-    assert.equal(invocation.sourceAuthentication, "token synthetic-source-auth");
-    assert.ok(invocation.argv.includes(`approval_policy=${JSON.stringify(approvalPolicy)}`));
-    assert.ok(invocation.argv.includes('approvals_reviewer="auto_review"'));
-    assert.match(invocation.stdin, /code.host at immutable revision/);
-    assert.ok(invocation.argv.some((value) => value.startsWith("mcp_servers=") && value.includes('"code.host"') && value.includes("required=true") && value.includes('default_tools_approval_mode="prompt"')));
-    assert.ok(invocation.argv.includes('shell_environment_policy.exclude=["SYNTHETIC_SOURCE_AUTH"]'));
-    assert.ok(!invocation.argv.join(" ").includes("token synthetic-source-auth"));
-    assert.match(workerPermissionProfileOverride(invocation.argv), /network=\{enabled=false\}/);
-    assert.ok(workerPermissionProfileOverride(invocation.argv).includes(`${JSON.stringify(privateRoot)}="deny"`));
-  } finally {
-    for (const [name, value] of Object.entries(previous)) restoreEnv(name, value);
   }
 }
 
@@ -1429,7 +1385,7 @@ async function fakeCodexFixture(
     "let stdin = '';",
     "for await (const chunk of process.stdin) stdin += chunk;",
     "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
-    "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ sourceAuthentication: process.env.SYNTHETIC_SOURCE_AUTH, argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
+    "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
     "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
     "if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }",
     "if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }",

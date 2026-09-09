@@ -999,7 +999,6 @@ export function resolveCliPath(directory: string, value: string): string {
 }
 
 interface ScanArguments extends DeepScanOptions {
-  sourceMcp?: string;
   mock?: boolean;
   workflowId?: string;
   auth?: ScanAuthMode;
@@ -3108,11 +3107,6 @@ export async function main(
       }),
       options: z
         .object({
-          sourceMcp: optionValue("--source-mcp")
-            .optional()
-            .describe(
-              "Require a configured Codex MCP server for committed source reads (supports sparse checkouts).",
-            ),
           workflowId: optionValue("--workflow-id")
             .optional()
             .describe(
@@ -3272,13 +3266,6 @@ export async function main(
         .refine((options) => !options.createPr || options.patch, {
           message: "--create-pr requires --patch.",
         })
-        .refine(
-          (options) => !options.patch || options.sourceMcp === undefined,
-          {
-            message:
-              "--source-mcp cannot inspect local patch changes. Materialize source and run patch separately.",
-          },
-        )
         .refine((options) => !options.patch || !options.dryRun, {
           message: "--patch cannot be combined with --dry-run.",
         })
@@ -3327,7 +3314,6 @@ export async function main(
         }
         const outcome = await runScan(
           {
-            sourceMcp: options.sourceMcp,
             auth: options.auth,
             workflowId: options.workflowId,
             safetyIdentifier: options.safetyIdentifier,
@@ -4991,11 +4977,6 @@ function scanArgumentsFromRecipe(
       "This scan used custom validation. Supply --validation-prompt-file to rerun it.",
     );
   }
-  const sourceMcp = z
-    .string()
-    .refine((name) => name.trim().length > 0)
-    .optional()
-    .parse(recipe["sourceMcp"]);
   const repository = recipe["repository"];
   if (typeof repository !== "string" || repository.length === 0) {
     throw new CodexSecurityError(
@@ -5106,7 +5087,6 @@ function scanArgumentsFromRecipe(
     );
   }
   return {
-    sourceMcp,
     repository,
     paths,
     knowledgeBasePaths,
@@ -7120,9 +7100,6 @@ async function executeScan(
       );
     }
     const options: ScanOptions = {
-      ...(arguments_.sourceMcp === undefined
-        ? {}
-        : { sourceMcp: arguments_.sourceMcp }),
       ...(arguments_.mock ? { mock: true } : {}),
       ...(arguments_.workflowId === undefined
         ? {}

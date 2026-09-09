@@ -2569,8 +2569,6 @@ describe("CLI", () => {
           "--knowledge-base",
           "/shared/architecture.pdf",
           "--knowledge-base=/shared/threat-models",
-          "--source-mcp",
-          "sourcegraph",
           "--mode",
           "deep",
           "--workers",
@@ -2601,7 +2599,6 @@ describe("CLI", () => {
       ),
     ).toBe(0);
     expect(pathOptions).toMatchObject({
-      sourceMcp: "sourcegraph",
       target: ["src", "--fixtures"],
       knowledgeBasePaths: ["/shared/architecture.pdf", "/shared/threat-models"],
       workers: 2,
@@ -3224,11 +3221,8 @@ describe("CLI", () => {
         stdout.stream,
         stderr.stream,
         dependencies({
-          onTurn: (_repository, options) =>
-            expect(options).toMatchObject({ sourceMcp: "sourcegraph" }),
           onWorkbench: () => ({
             recipe: {
-              sourceMcp: "sourcegraph",
               repository: "/original/repository",
               target: { kind: "repository", paths: [] },
               mode: "standard",
