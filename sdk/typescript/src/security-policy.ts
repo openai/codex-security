@@ -31,6 +31,7 @@ import {
   enclosingGitWorktreeRoot,
   enclosingGitWorktreeRoots,
   gitMetadataDirectories,
+  gitObjectDirectories,
   isGitMetadataDirectory,
   normalizeRepository,
   normalizeTarget,
@@ -552,7 +553,9 @@ async function securityPolicyPaths(
       directories.push(join(directory, entry.name));
     }
   }
-  // A nested checkout can register a Git directory visited earlier in the walk.
+  for (const path of await gitObjectDirectories([...gitDirectories], signal))
+    gitDirectories.add(path);
+  // Git storage can reference a directory visited earlier in the walk.
   return {
     paths: [...policies, ...reportingPaths].filter((path) => !isGitData(path)),
     gitMetadataPaths: [...gitDirectories],

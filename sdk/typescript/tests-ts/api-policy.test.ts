@@ -750,6 +750,8 @@ describe("CodexSecurity policy API", () => {
       const bare = join(component, "cache[1].git");
       const common = join(component, "shared-data");
       const alternate = join(component, "object-cache[1]");
+      const bareAlternate = join(component, "bare-object-cache");
+      const commonAlternate = join(component, "common-object-cache");
       await mkdir(component);
       policyGit(component, "init", "--quiet", "--separate-git-dir", metadata);
       policyGit(component, "config", "core.worktree", component);
@@ -769,6 +771,17 @@ describe("CodexSecurity policy API", () => {
       policyGit(component, "init", "--quiet", "--bare", bare);
       policyGit(component, "init", "--quiet", "--bare", common);
       await rm(join(common, "HEAD"));
+      for (const [store, objectDirectory] of [
+        [bare, bareAlternate],
+        [common, commonAlternate],
+      ] as const) {
+        await mkdir(join(objectDirectory, "info"), { recursive: true });
+        await mkdir(join(objectDirectory, "pack"));
+        await writeFile(
+          join(store, "objects", "info", "alternates"),
+          `${objectDirectory}\n`,
+        );
+      }
       await writeFile(join(bare, "SECURITY.md"), "Bare Git policy fixture");
       await f.security.generatePolicy(f.repository, {
         path: scope,
@@ -784,6 +797,8 @@ describe("CodexSecurity policy API", () => {
         bare,
         common,
         alternate,
+        bareAlternate,
+        commonAlternate,
       ]) {
         expect(overrides).toContainEqual({
           permissions: {

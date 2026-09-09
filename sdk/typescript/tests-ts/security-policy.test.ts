@@ -11,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   inspectSecurityPolicySources,
@@ -417,7 +418,7 @@ describe("security policy generation", () => {
     const f = await fixture();
     policyGit(f.repository, "init", "--quiet");
     const primary = join(f.repository, ".git", "objects");
-    const first = join(f.repository, "object-cache");
+    const first = join(f.repository, "object-cache-\u00e9");
     const second = join(f.root, "shared-object-cache");
     for (const directory of [first, second]) {
       await mkdir(join(directory, "info"), { recursive: true });
@@ -425,9 +426,10 @@ describe("security policy generation", () => {
     }
     await writeFile(
       join(primary, "info", "alternates"),
-      `${relative(primary, first)}\n`,
+      `# Shared object storage\nmissing-store\n${relative(primary, first)}\n`,
     );
     await writeFile(join(first, "info", "alternates"), `${second}\n`);
+    await writeFile(join(second, "info", "alternates"), `${first}\n`);
     await writeFile(join(first, "SECURITY.md"), "Object-store fixture\n");
     const target = await resolveSecurityPolicyTarget(f.repository);
     const inventory = await inspectSecurityPolicySources(target);
@@ -459,15 +461,118 @@ describe("security policy generation", () => {
     const alternate = join(f.repository, name);
     await mkdir(join(alternate, "info"), { recursive: true });
     await mkdir(join(alternate, "pack"));
+    const quoted = JSON.stringify(alternate)
+      .replaceAll("\u00e9", "\\303\\251")
+      .replace(/\\u00([0-9a-f]{2})/gu, (_escape, hex: string) =>
+        hex === "07"
+          ? "\\a"
+          : hex === "0b"
+            ? "\\v"
+            : `\\${Number.parseInt(hex, 16).toString(8).padStart(3, "0")}`,
+      );
     await writeFile(
       join(f.repository, ".git", "objects", "info", "alternates"),
-      `${alternate.includes("\n") ? JSON.stringify(alternate) : alternate}\n`,
+      `${quoted}\n`,
     );
+    const listed = execFileSync(
+      "git",
+      ["-C", f.repository, "count-objects", "--verbose"],
+      { encoding: "utf8" },
+    );
+    expect(
+      listed.split("\n").filter((line) => line.startsWith("alternate: ")),
+    ).toHaveLength(1);
+    if (name.includes("\\")) {
+      // Bun's POSIX realpath misreads backslashes; verify the supported Node runtime.
+      const build = await Bun.build({
+        entrypoints: [
+          fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        ],
+        target: "node",
+        format: "esm",
+      });
+      expect(build.success).toBe(true);
+      const module = join(f.root, "targets.mjs");
+      await writeFile(module, await build.outputs[0]!.text());
+      const output = execFileSync(
+        "node",
+        [
+          "--input-type=module",
+          "--eval",
+          `import { gitObjectDirectories } from ${JSON.stringify(pathToFileURL(module).href)}; console.log(JSON.stringify(await gitObjectDirectories([${JSON.stringify(join(f.repository, ".git"))}])));`,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(JSON.parse(output)).toContain(alternate);
+      return;
+    }
     const target = await resolveSecurityPolicyTarget(f.repository);
     expect(
       (await inspectSecurityPolicySources(target)).gitMetadataPaths,
     ).toContain(alternate);
   });
+
+  test.each(["bare", "headless", "archived"])(
+    "protects alternate object stores for nested %s metadata",
+    async (kind) => {
+      const f = await fixture();
+      const metadata = join(f.repository, "metadata");
+      const alternate = join(f.repository, "zz-object-cache");
+      policyGit(f.repository, "init", "--quiet", "--bare", metadata);
+      if (kind === "archived") {
+        const administrative = join(f.repository, "archived-admin");
+        await mkdir(administrative);
+        await writeFile(
+          join(administrative, "HEAD"),
+          await readFile(join(metadata, "HEAD")),
+        );
+        await writeFile(join(administrative, "commondir"), `${metadata}\n`);
+      }
+      if (kind !== "bare") await rm(join(metadata, "HEAD"));
+      await mkdir(join(alternate, "info"), { recursive: true });
+      await mkdir(join(alternate, "pack"));
+      await writeFile(
+        join(metadata, "objects", "info", "alternates"),
+        `${alternate}\n`,
+      );
+      await writeFile(join(alternate, "SECURITY.md"), "Object-store fixture\n");
+      const inventory = await inspectSecurityPolicySources(
+        await resolveSecurityPolicyTarget(f.repository),
+      );
+      expect(inventory.gitMetadataPaths).toContain(alternate);
+      expect(inventory.policyPaths).toEqual([]);
+    },
+  );
+
+  test.each(["worktree", "headless"])(
+    "protects a relocated primary Git object store for %s metadata",
+    async (kind) => {
+      const f = await fixture();
+      const metadata = join(
+        f.repository,
+        kind === "worktree" ? ".git" : "metadata",
+      );
+      if (kind === "worktree") policyGit(f.repository, "init", "--quiet");
+      else {
+        policyGit(f.repository, "init", "--quiet", "--bare", metadata);
+        await rm(join(metadata, "HEAD"));
+      }
+      const primary = join(metadata, "objects");
+      const relocated = join(f.repository, "object-cache");
+      await rename(primary, relocated);
+      await symlink(
+        relocated,
+        primary,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const target = await resolveSecurityPolicyTarget(f.repository);
+      expect(
+        (await inspectSecurityPolicySources(target)).gitMetadataPaths,
+      ).toContain(relocated);
+      if (kind === "worktree")
+        expect(await securityPolicyProtectedRoots(target)).toContain(relocated);
+    },
+  );
 
   test("keeps linked worktrees and submodules as their own policy roots", async () => {
     const f = await fixture();
