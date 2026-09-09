@@ -605,8 +605,77 @@ fn main() -> std::io::Result<()> {
                 String::from_utf8_lossy(&complete.stderr)
             )));
         }
+        let scopes_name = raw("requested-", 0xd800);
+        let manifest_name = raw("manifest-", 0xdc80);
+        let coverage_name = raw("coverage-", 0xdfff);
+        let scopes_path = repo.join(&scopes_name);
+        let manifest_path = repo.join(&manifest_name);
+        let coverage_path = repo.join(&coverage_name);
+        let scope_contents = r#"["src","\udfff","src"]"#;
+        fs::write(&scopes_path, scope_contents)?;
+        for prefix in ["requested-", "manifest-", "coverage-"] {
+            fs::write(repo.join(raw(prefix, 0xfffd)), "replacement scope sentinel")?;
+        }
+        let manifest_before =
+            r#"{"scan":{"scope":{"includePaths":["old"],"excludePaths":[]}},"sha256":"unchanged"}"#;
+        let coverage_before = r#"{"includePaths":["old"],"excludePaths":[]}"#;
+        let manifest_after = concat!(
+            "{\n  \"scan\": {\n    \"scope\": {\n      \"includePaths\": [\n",
+            "        \"src\",\n        \"\\udfff\",\n        \"src\"\n      ],\n",
+            "      \"excludePaths\": []\n    }\n  },\n  \"sha256\": \"unchanged\"\n}\n",
+        );
+        let coverage_after = concat!(
+            "{\n  \"includePaths\": [\n    \"src\",\n    \"\\udfff\",\n",
+            "    \"src\"\n  ],\n  \"excludePaths\": []\n}\n",
+        );
+        for prefix in [repo.clone(), PathBuf::from("~"), PathBuf::from(".")] {
+            fs::write(
+                &manifest_path,
+                format!("{manifest_before}{}", " ".repeat(512)),
+            )?;
+            fs::write(
+                &coverage_path,
+                format!("{coverage_before}{}", " ".repeat(512)),
+            )?;
+            let bind_args = [
+                "--scopes-file".into(),
+                prefix.join(&scopes_name),
+                "--manifest".into(),
+                prefix.join(&manifest_name),
+                "--coverage".into(),
+                prefix.join(&coverage_name),
+            ];
+            let bound = invoke("bind-repo-scopes", &bind_args)?;
+            if !bound.status.success()
+                || !bound.stderr.is_empty()
+                || bound.stdout != b"Bound 3 requested scopes into the scan contract\r\n"
+                || fs::read(&manifest_path)? != manifest_after.as_bytes()
+                || fs::read(&coverage_path)? != coverage_after.as_bytes()
+                || fs::read(&scopes_path)? != scope_contents.as_bytes()
+            {
+                return Err(io::Error::other(format!(
+                    "Wide scope binding failed: {}",
+                    String::from_utf8_lossy(&bound.stderr)
+                )));
+            }
+            fs::write(&coverage_path, "{")?;
+            let invalid = invoke("bind-repo-scopes", &bind_args)?;
+            if invalid.status.code() != Some(1)
+                || !invalid.stdout.is_empty()
+                || invalid.stderr != b"Unable to bind requested scopes into the scan contract\r\n"
+                || fs::read(&manifest_path)? != manifest_after.as_bytes()
+                || fs::read(&coverage_path)? != b"{"
+            {
+                return Err(io::Error::other("Invalid wide scope contract was changed"));
+            }
+        }
+        for prefix in ["requested-", "manifest-", "coverage-"] {
+            if fs::read(repo.join(raw(prefix, 0xfffd)))? != b"replacement scope sentinel" {
+                return Err(io::Error::other("Scope binding changed a replacement path"));
+            }
+        }
         println!(
-            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"rankShardHelperRawPaths\":true,\"rankPoolHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
+            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"rankShardHelperRawPaths\":true,\"rankPoolHelperRawPaths\":true,\"bindScopesHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
         );
         Ok(())
     }
