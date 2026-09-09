@@ -3,8 +3,21 @@ export interface ScanCost {
   inputTokens: number;
   cachedInputTokens: number;
   cacheWriteInputTokens: number;
+  cacheWriteInputTokensReported?: boolean;
   outputTokens: number;
   estimatedUsd: number;
+  pricing?: {
+    source: string;
+    asOf: string;
+    serviceTier: "standard";
+    context: "short";
+    usdPerMillionTokens: {
+      input: number;
+      cacheRead: number;
+      cacheWrite: number;
+      output: number;
+    };
+  };
 }
 
 type ModelPricing = readonly [
@@ -18,18 +31,23 @@ export interface ScanTokenUsage {
   input_tokens: number;
   cached_input_tokens: number;
   cache_write_input_tokens: number;
+  cache_write_input_tokens_reported?: boolean;
   output_tokens: number;
   reasoning_output_tokens: number;
   total_tokens: number;
 }
 
 const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
-  "gpt-5.6": [5_000, 500, 6_250, 30_000],
-  "gpt-5.6-sol": [5_000, 500, 6_250, 30_000],
+  // GPT-5.5 has no additional cache-write charge.
+  "gpt-5.5": [5_000, 500, 5_000, 30_000],
+  "gpt-5.5-2026-04-23": [5_000, 500, 5_000, 30_000],
+  "gpt-6-astra": [10_000, 1_000, 12_500, 50_000],
+  "gpt-5.6": [4_000, 400, 5_000, 20_000],
+  "gpt-5.6-sol": [4_000, 400, 5_000, 20_000],
   "gpt-5.6-terra": [2_000, 200, 2_500, 12_000],
   "gpt-5.6-luna": [200, 20, 250, 1_200],
   // https://developers.openai.com/api/docs/pricing#cyber-models
-  "gpt-daybreak-blue-latest": [5_000, 500, 6_250, 30_000],
+  "gpt-daybreak-blue-latest": [4_000, 400, 5_000, 20_000],
   "gpt-daybreak-red-latest": [12_500, 1_250, 15_625, 75_000],
 };
 
@@ -65,6 +83,10 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
     input_tokens: input,
     cached_input_tokens: cached,
     cache_write_input_tokens: cacheWrite,
+    ...(value["cache_write_input_tokens_reported"] === false ||
+    (canonicalCacheWrite == null && legacyCacheWrite == null)
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
     output_tokens: output,
     reasoning_output_tokens: reasoning,
     total_tokens: input + output,
@@ -102,9 +124,63 @@ export function estimateScanCost(
     inputTokens,
     cachedInputTokens,
     cacheWriteInputTokens,
+    ...(normalized.cache_write_input_tokens_reported === false
+      ? { cacheWriteInputTokensReported: false }
+      : {}),
     outputTokens,
     estimatedUsd: nanodollars / 1_000_000_000,
+    pricing: {
+      source: pricingModel.startsWith("gpt-5.5")
+        ? "https://developers.openai.com/api/docs/models/gpt-5.5"
+        : "https://developers.openai.com/api/docs/pricing",
+      asOf: "2026-09-09",
+      serviceTier: "standard",
+      context: "short",
+      usdPerMillionTokens: {
+        input: inputRate / 1_000,
+        cacheRead: cachedInputRate / 1_000,
+        cacheWrite: cacheWriteInputRate / 1_000,
+        output: outputRate / 1_000,
+      },
+    },
   };
+}
+
+export function formatTokenUsage(value: unknown): string | null {
+  const usage = tokenUsage(value);
+  if (usage === null) return null;
+  const writes =
+    usage.cache_write_input_tokens_reported === false
+      ? null
+      : usage.cache_write_input_tokens;
+  const uncached =
+    writes === null
+      ? null
+      : usage.input_tokens - usage.cached_input_tokens - writes;
+  return (
+    [
+      [uncached, "uncached input"],
+      [usage.cached_input_tokens, "cache reads"],
+      [writes, "cache writes"],
+      [usage.output_tokens, "output"],
+      [usage.total_tokens, "total"],
+    ] as const
+  )
+    .map(
+      ([count, label]) =>
+        `${count === null ? "unavailable" : count.toLocaleString("en-US")} ${label}`,
+    )
+    .join(", ");
+}
+
+export function formatScanCostTokens(cost: Readonly<ScanCost>): string {
+  return formatTokenUsage({
+    input_tokens: cost.inputTokens,
+    cached_input_tokens: cost.cachedInputTokens,
+    cache_write_input_tokens: cost.cacheWriteInputTokens,
+    cache_write_input_tokens_reported: cost.cacheWriteInputTokensReported,
+    output_tokens: cost.outputTokens,
+  })!;
 }
 
 export function formatUsd(value: number): string {

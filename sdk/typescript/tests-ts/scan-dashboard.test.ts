@@ -567,7 +567,9 @@ describe("live scan dashboard", () => {
     expect(text).toContain("0 / 1,258 reviewed");
     expect(text).not.toContain("opened");
     expect(text).not.toContain("3 / 6 active");
-    expect(text).toContain("17,985 in · 10,496 cached · 236 out");
+    expect(text.replace(/\s+/gu, " ")).toContain(
+      "unavailable uncached input, 10,496 cache reads, unavailable cache writes, 236 output, 18,221 total",
+    );
     expect(text).toContain("/ $2.00");
     expect(stderr.text()).toContain("\u001B[?1049h");
     expect(stderr.text()).toContain("\u001B[?1049l");
@@ -620,7 +622,7 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("FILES");
     expect(frame).not.toContain("inspecting repository files");
     expect(frame).not.toContain("0 / 1,258 reviewed");
-    expect(frame).toContain("worker 1 · Reviewed source file 1");
+    expect(frame).toContain("worker 1 · Reviewed source file 2");
     expect(frame).toContain("worker 1 · Reviewed source file 6");
     expect(frame).toContain("TOKENS");
     expect(frame).toContain("COST");

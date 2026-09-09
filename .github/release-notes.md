@@ -18,6 +18,7 @@
 - shard automatic component planning for large repositories ([#845](https://github.com/openai/codex-security/pull/845))
 - import CSV and JSON findings as saved scans ([#850](https://github.com/openai/codex-security/pull/850))
 - add a feedback command ([#854](https://github.com/openai/codex-security/pull/854))
+- improve scan usage and cost reports ([#853](https://github.com/openai/codex-security/pull/853))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
