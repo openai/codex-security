@@ -269,6 +269,7 @@ describe("CLI", () => {
       ["patch"],
       ["login"],
       ["logout"],
+      ["feedback"],
       ["info"],
       ["install-hook"],
       ["scans", "list"],

@@ -1165,6 +1165,25 @@ once before they can be reused.
 Pass `signal` to cancel any classification operation. Keep human overrides in the
 calling workflow or issue tracker; assessments remain separate recommendations.
 
+### Feedback
+
+Send a problem report to OpenAI and share the returned feedback ID with support:
+
+```sh
+codex-security feedback --reason "The scan stopped before it finished"
+codex-security feedback SCAN_ID --reason "The scan stopped before it finished" --include-logs
+```
+
+Without an ID, `feedback` selects the most recently started scan in the current
+repository, including active or failed scans. If there are no saved scans, it sends
+a general report. The report includes your description, version details, and the selected
+scan and session IDs. Add `--json` for structured output.
+
+Logs are off by default. `--include-logs` uploads Codex diagnostics and saved scan
+and worker activity. These can contain source code, prompts, findings, tool
+output, and other sensitive data. Only include logs you can share with OpenAI.
+The command uses Codex's feedback service and respects `feedback.enabled = false`.
+
 ### Scan history and reruns
 
 Commands default to the current repository. Select scans by full ID or a

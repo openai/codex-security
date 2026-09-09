@@ -169,7 +169,8 @@ import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
 } from "./thread-source.js";
-import { readScanLogs } from "./scan-logs.js";
+import { readSavedScanLogs, type ScanLogSource } from "./scan-logs.js";
+import { sendFeedback } from "./feedback.js";
 import {
   renderScanHistory,
   type HistoryCommand,
@@ -1160,6 +1161,7 @@ interface CliDependencies {
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
   publishScanToCustom?: typeof publishScanToCustom;
+  sendFeedback?: typeof sendFeedback;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
     repository: string,
@@ -1988,35 +1990,11 @@ export async function main(
         if (scanId === undefined) return;
         return await history(
           ["get-scan", "--scan-id", scanId],
-          async (value) => {
-            const scan = value["scan"] as {
-              scanId: string;
-              continuationThreadId?: string;
-              mode?: string;
-              progress?: { status?: string; updatedAt?: string };
-              scanDir?: string;
-            };
-            const threadId = scan.continuationThreadId;
-            if (!threadId) {
-              throw new CodexSecurityError(
-                `No session is associated with scan ${scan.scanId}.`,
-              );
-            }
-            return (await readScanLogs({
-              scanId: scan.scanId,
-              threadId,
-              codexHome: codexSecurityCredentialHome(dependencies.environment),
-              scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
-              completedAt:
-                scan.progress?.status === "running"
-                  ? null
-                  : scan.progress?.status === "complete" ||
-                      scan.progress?.status === "failed" ||
-                      scan.progress?.status === "canceled"
-                    ? scan.progress.updatedAt ?? ""
-                    : "",
-            })) as unknown as JsonObject;
-          },
+          async (value) =>
+            (await readSavedScanLogs(
+              value["scan"] as ScanLogSource,
+              codexSecurityCredentialHome(dependencies.environment),
+            )) as unknown as JsonObject,
         );
       },
     })
@@ -4882,6 +4860,80 @@ export async function main(
         }
       },
     })
+    .command("feedback", {
+      description: "Send feedback to OpenAI and return a feedback ID.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        scanId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Scan ID or unique prefix (default: most recently started scan in the current repository).",
+          ),
+      }),
+      options: z.object({
+        reason: z.string().trim().min(1).describe("Describe the problem."),
+        includeLogs: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Upload diagnostic logs, including scan and worker conversations and tool output. Defaults to off.",
+          ),
+      }),
+      output: z.object({
+        feedbackId: z.string(),
+        scanId: z.string().nullable(),
+        includedLogs: z.boolean(),
+      }),
+      async run({ args, options }) {
+        let scanId = args.scanId;
+        if (scanId === undefined) {
+          const value = await history([
+            "list-scans",
+            "--repository",
+            dependencies.currentDirectory(),
+          ]);
+          const scans = value["scans"] as {
+            scanId: string;
+            startedAt: string;
+          }[];
+          scanId = scans.toSorted((a, b) =>
+            b.startedAt.localeCompare(a.startedAt),
+          )[0]?.scanId;
+        }
+        const scan =
+          scanId === undefined
+            ? undefined
+            : ((await history(["get-scan", "--scan-id", scanId]))[
+                "scan"
+              ] as ScanLogSource);
+        const controller = new AbortController();
+        const onInterrupt = () => controller.abort("SIGINT");
+        const onTerminate = () => controller.abort("SIGTERM");
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          return await (dependencies.sendFeedback ?? sendFeedback)({
+            ...options,
+            scan,
+            environment: dependencies.environment,
+            workingDirectory: dependencies.currentDirectory(),
+            signal: controller.signal,
+          });
+        } catch (error) {
+          if (controller.signal.aborted) {
+            exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+            errorOutput.write("codex-security: Feedback upload canceled.\n");
+          }
+          throw error;
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command("info", {
       description: "Show read-only SDK and bundled-plugin metadata.",
       mcp: {
@@ -5335,6 +5387,7 @@ function validateCliArguments(
       "login",
       "logout",
       "serve",
+      "feedback",
       "info",
     ].includes(command)
   ) {

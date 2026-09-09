@@ -3,6 +3,7 @@ import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
+import type { JsonObject } from "./config.js";
 import {
   isScanArtifactDirectory,
   sessionParentThreadId,
@@ -15,6 +16,37 @@ interface ScanLogOptions {
   codexHome: string;
   scanDirectory?: string;
   completedAt?: string | null;
+}
+
+export type ScanLogSource = JsonObject & {
+  scanId: string;
+  continuationThreadId?: string;
+  mode?: string;
+  scanDir?: string;
+  progress?: { status?: string; updatedAt?: string };
+};
+
+export function readSavedScanLogs(scan: ScanLogSource, codexHome: string) {
+  const threadId = scan.continuationThreadId;
+  if (!threadId) {
+    throw new CodexSecurityError(
+      `No session is associated with scan ${scan.scanId}.`,
+    );
+  }
+  return readScanLogs({
+    scanId: scan.scanId,
+    threadId,
+    codexHome,
+    scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
+    completedAt:
+      scan.progress?.status === "running"
+        ? null
+        : scan.progress?.status === "complete" ||
+            scan.progress?.status === "failed" ||
+            scan.progress?.status === "canceled"
+          ? scan.progress.updatedAt ?? ""
+          : "",
+  });
 }
 
 interface SessionLog {
