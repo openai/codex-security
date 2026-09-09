@@ -723,9 +723,10 @@ describe("CodexSecurity policy API", () => {
     expect(f.threads[0]!.additionalDirectories).not.toContain(f.repository);
     expect(
       execFileSync(
-        PYTHON,
+        process.execPath,
         [
-          join(PLUGIN_ROOT, "scripts", "resolve_security_md.py"),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "resolve-security-md",
           "--repo",
           f.repository,
           "--scope",
@@ -747,6 +748,7 @@ describe("CodexSecurity policy API", () => {
       const component = join(f.repository, "component");
       const metadata = join(f.repository, "git-data[1]");
       const bare = join(component, "cache[1].git");
+      const common = join(component, "shared-data");
       await mkdir(component);
       policyGit(component, "init", "--quiet", "--separate-git-dir", metadata);
       policyGit(component, "config", "core.worktree", component);
@@ -758,6 +760,8 @@ describe("CodexSecurity policy API", () => {
         "Component policy fixture",
       );
       policyGit(component, "init", "--quiet", "--bare", bare);
+      policyGit(component, "init", "--quiet", "--bare", common);
+      await rm(join(common, "HEAD"));
       await writeFile(join(bare, "SECURITY.md"), "Bare Git policy fixture");
       await f.security.generatePolicy(f.repository, {
         path: scope,
@@ -771,6 +775,7 @@ describe("CodexSecurity policy API", () => {
         join(component, ".git"),
         metadata,
         bare,
+        common,
       ]) {
         expect(overrides).toContainEqual({
           permissions: {
@@ -1194,12 +1199,13 @@ describe("CodexSecurity policy API", () => {
       const pluginRoot = await policyPlugin(
         f.root,
         [
-          "import pathlib, sys",
-          "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
-          "policy = root / 'SECURITY.md'",
-          "previous = policy.read_text()",
-          "policy.write_bytes(b'# Concurrent policy\\n')",
-          "print(previous)",
+          'import { readFileSync, writeFileSync } from "node:fs";',
+          'import { join } from "node:path";',
+          'const root = process.argv[process.argv.indexOf("--repo") + 1];',
+          'const policy = join(root, "SECURITY.md");',
+          'const previous = readFileSync(policy, "utf8");',
+          'writeFileSync(policy, "# Concurrent policy\\n");',
+          "console.log(previous);",
         ].join("\n"),
       );
       for (const name of [
@@ -1291,7 +1297,7 @@ describe("CodexSecurity policy API", () => {
     for (const path of [
       "references/threat-model.md",
       "skills/define-security-policy/SKILL.md",
-      "scripts/resolve_security_md.py",
+      "mcp/helpers.mjs",
     ]) {
       const destination = join(pluginRoot, path);
       await mkdir(dirname(destination), { recursive: true });

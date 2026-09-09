@@ -329,10 +329,12 @@ links from `.github/SECURITY.md` or `docs/SECURITY.md`: copying can change their
 guidance too. Preserve reporting instructions and obtain owner approval for
 exclusions, accepted risks, and severity decisions. Later scans read this policy.
 
-Generation and preview reject changes to the selected or inherited policies.
+Generation and preview check for changes to the selected or inherited policies.
 If governing guidance changes during generation, completed documents remain for
 inspection, but no completed-draft manifest is written. Other source files are not
 frozen; regenerate if relevant source or neighboring policies change.
+A failed terminal preview reports a warning and the saved draft paths. Explicit
+output formats return the draft directly without running a diff preview.
 
 Use `--headless` or an explicit output format to skip questions. Unanswered
 questions remain in the review notes. Drafts default to the Codex Security state
@@ -1258,8 +1260,8 @@ assessment skill once on the completed patch. The assessment is advisory and
 does not change the patch or its merge state. Human-readable commands print the
 report after the patch results; saved-finding JSON output returns it as
 `patchRisk.report` in the same result object. When combined with `--create-pr`,
-the draft pull request body includes only the concise Markdown summary from the
-assessment; the validated JSON remains in the command result.
+the draft pull request or merge request body includes only the concise Markdown
+summary from the assessment; the validated JSON remains in the command result.
 
 ```bash
 npx @openai/codex-security validate "Possible SQL injection" --effort high
@@ -1281,11 +1283,25 @@ to select findings and add patch instructions. Results include a `patches`
 entry per finding with status `verified`, `no_change`, `blocked`, or `failed`.
 Verified and already-fixed findings no longer fail `--fail-on-severity`.
 
-`--create-pr` commits generated patch files and opens a draft PR with `gh`.
-Supplied-issue pull requests require a clean working tree before patching so
+`--create-pr` commits generated patch files and opens a draft GitHub pull request
+with `gh` or a draft GitLab merge request with `glab`. Install and authenticate
+the appropriate CLI first (`gh auth login` or `glab auth login`). GitLab.com is
+selected from the `origin` push URL, including SSH URLs and subgroup projects.
+For self-hosted GitLab, set `GITLAB_HOST` to the host in that URL and authenticate
+with `glab auth login --hostname HOST`. The existing `GITLAB_URI` and `GL_HOST`
+aliases are also accepted, in that order after `GITLAB_HOST`. Other hosts retain
+the GitHub workflow.
+
+```bash
+GITLAB_HOST=gitlab.example.com npx @openai/codex-security patch --scan SCAN_ID --create-pr
+```
+
+Both providers use the existing `pullRequest: { branch, url }` JSON result.
+Supplied-issue requests require a clean working tree before patching so
 existing work is never included. If publication fails, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
 commit without rerunning Codex, but refuses to publish if the branch changed.
+Use the same GitLab host setting when resuming a self-hosted merge request.
 
 To patch Linear issues, repeat `--linear-issue ISSUE` (ID or URL), or use
 `--linear-project "PROJECT"` with an optional native JSON `--linear-filter`.
@@ -1347,7 +1363,9 @@ checkout or Node.js installation is required. `CODEX_SECURITY_FINDINGS_IMAGE`
 defaults to `ghcr.io/openai/codex-security:latest`. Set it to a published
 version, `sha-<commit>` tag, or digest for repeatable deployments.
 
-To build from a source checkout instead:
+To build from a source checkout, first prepare the
+[universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
+for that checkout. Then run from the repository root:
 
 ```bash
 docker build --target scanner -t codex-security:local .
@@ -1894,7 +1912,9 @@ Export `OPENAI_API_KEY` or `CODEX_API_KEY` to import findings with embeddings.
 Startup and listing need no key. The service does not load `.env` or authenticate
 requests; keep it on loopback or behind an authenticated TLS proxy.
 
-From a source checkout's `sdk/typescript` directory:
+For a source build, first prepare the
+[universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
+for that checkout. Then run from its `sdk/typescript` directory:
 
 ```bash
 pnpm install --frozen-lockfile

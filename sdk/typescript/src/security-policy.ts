@@ -174,7 +174,7 @@ export interface SecurityPolicyDraft
 const execFileAsync = promisify(execFile);
 const MANIFEST_NAME = "policy-draft.json";
 const ORIGINAL_NAME = "previous-SECURITY.md";
-// This is the input contract enforced by resolve_security_md.py.
+// This is the input contract enforced by the resolve-security-md helper.
 const MAX_SECURITY_MD_BYTES = 1024 * 1024;
 // The define-security-policy skill asks at most three questions at once.
 const OWNER_QUESTION_BATCH_SIZE = 3;
@@ -497,13 +497,7 @@ async function securityPolicyPaths(
     const directory = directories.pop()!;
     if (isGitData(directory)) continue;
     const entries = await readdir(directory, { withFileTypes: true });
-    // HEAD also identifies candidates that use a linked-worktree commondir.
-    if (
-      entries.some(
-        (entry) => entry.name.toLowerCase() === "head" && !entry.isDirectory(),
-      ) &&
-      (await isGitMetadataDirectory(directory, signal))
-    ) {
+    if (await isGitMetadataDirectory(directory, signal)) {
       gitDirectories.add(directory);
       const common = await readFile(join(directory, "commondir"), "utf8").catch(
         (error: NodeJS.ErrnoException) => {
@@ -659,16 +653,7 @@ async function requirePolicyOutsideGitMetadata(
   let directory = parent;
   for (;;) {
     signal?.throwIfAborted();
-    const head = await lstat(join(directory, "HEAD")).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-        throw error;
-      },
-    );
-    if (
-      (head?.isFile() || head?.isSymbolicLink()) &&
-      (await isGitMetadataDirectory(directory, signal))
-    )
+    if (await isGitMetadataDirectory(directory, signal))
       throw new InvalidTargetError(
         "Security-policy links must not point into Git metadata.",
       );
@@ -731,7 +716,6 @@ export async function requireUnchangedSecurityPolicy(
 
 export async function resolveSecurityPolicyGuidance(
   target: SecurityPolicyTarget,
-  python: string,
   pluginRoot: string,
   environment?: ProcessEnvironment,
   signal?: AbortSignal,
@@ -739,10 +723,10 @@ export async function resolveSecurityPolicyGuidance(
   gitMetadataPaths: readonly string[] = [],
 ): Promise<string> {
   const { stdout } = await execFileAsync(
-    python,
+    process.execPath,
     [
-      "-I",
-      join(pluginRoot, "scripts", "resolve_security_md.py"),
+      join(pluginRoot, "mcp", "helpers.mjs"),
+      "resolve-security-md",
       "--repo",
       target.repository,
       "--scope",

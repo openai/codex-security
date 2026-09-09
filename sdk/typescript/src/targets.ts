@@ -234,6 +234,47 @@ export async function isGitMetadataDirectory(
   repository: string,
   signal?: AbortSignal,
 ): Promise<boolean> {
+  const metadata = async (name: string) =>
+    await lstat(join(repository, name)).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+        throw error;
+      },
+    );
+  const head = await metadata("HEAD");
+  if (head === null) {
+    // A common directory can outlive its main worktree's HEAD. Require both
+    // Git storage directories and its format declaration, not names alone.
+    if (!(await metadata("config"))?.isFile()) return false;
+    const [objects, refs] = await Promise.all([
+      metadata("objects"),
+      metadata("refs"),
+    ]);
+    if (!objects?.isDirectory() || !refs?.isDirectory()) return false;
+    try {
+      const version = await gitOutput(
+        repository,
+        [
+          "config",
+          "--no-includes",
+          "--file",
+          join(repository, "config"),
+          "--type=int",
+          "--get",
+          "core.repositoryformatversion",
+        ],
+        signal,
+      );
+      return /^\d+$/u.test(version);
+    } catch (error) {
+      throwIfAborted(signal);
+      // git config uses status 1 when the requested key is absent.
+      if (error instanceof Error && "code" in error && error.code === 1)
+        return false;
+      throw error;
+    }
+  }
+  if (!head.isFile() && !head.isSymbolicLink()) return false;
   try {
     // This resolver validates Git directories without loading their configuration.
     const directory = await gitOutput(

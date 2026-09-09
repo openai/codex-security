@@ -524,7 +524,7 @@ describe("CLI workbench", () => {
   });
 
   test.each([false, true])(
-    "keeps matching progress on stderr with TTY=%s",
+    "keeps matching progress on stderr with TTY=%p",
     async (isTTY) => {
       const stdout = capture();
       const stderr = capture(isTTY);
@@ -1136,7 +1136,7 @@ describe("CLI workbench", () => {
   });
 
   test.each([false, true])(
-    "preserves surviving indirect matches during forced recomputation (%s)",
+    "preserves surviving indirect matches during forced recomputation (%p)",
     async (force) => {
       const before = [{ occurrenceId: "old", findingId: "identity-old" }];
       const after = [{ occurrenceId: "new", findingId: "identity-new" }];

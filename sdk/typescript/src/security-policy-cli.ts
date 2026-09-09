@@ -159,17 +159,24 @@ export async function runPolicyCommand(
     });
     controller.signal.throwIfAborted();
     const cost = draft.cost;
-    const diff = await security.previewPolicy(draft, {
-      signal: controller.signal,
-    });
-    const changed = diff.length > 0;
+    const changed = draft.previousContent !== draft.content;
     const humanOutput = options.format === "toon" && !options.explicitOutput;
     if (humanOutput) {
+      let diff: string;
+      try {
+        diff = await security.previewPolicy(draft, {
+          signal: controller.signal,
+        });
+      } catch (error) {
+        controller.signal.throwIfAborted();
+        diff = "Preview unavailable. Review the saved draft.";
+        write(
+          `codex-security: Could not preview the policy: ${display(safeErrorMessage(error))}`,
+        );
+      }
       const preview = [
         `\nPolicy target: ${display(draft.targetPath)}`,
-        changed
-          ? diff.replace(/\n$/u, "")
-          : "SECURITY.md is already up to date.",
+        diff.replace(/\n$/u, "") || "SECURITY.md is already up to date.",
         ...(draft.reviewNotes.length === 0
           ? []
           : [

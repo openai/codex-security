@@ -52,6 +52,7 @@ function policyDependencies(
       options: SecurityPolicyOptions,
     ) => void | Promise<void>;
     onClose?: () => void;
+    onPreview?: () => void;
     onConfig?: (config: unknown) => void;
     signals?: FakeSignals;
   } = {},
@@ -103,11 +104,13 @@ function policyDependencies(
         previewPolicy: async (
           draft: SecurityPolicyDraft,
           preview: { signal?: AbortSignal } = {},
-        ) =>
-          formatSecurityPolicyText(
+        ) => {
+          options.onPreview?.();
+          return formatSecurityPolicyText(
             await securityPolicyDiff(draft, PYTHON, preview.signal),
             true,
-          ),
+          );
+        },
         close: async () => {
           options.onClose?.();
         },
@@ -422,7 +425,7 @@ describe("policy CLI", () => {
     expect(JSON.parse(stdout.text()).status).toBe("draft");
   });
 
-  test("preserves a completed draft when the interactive preview fails", async () => {
+  test("preserves a completed draft when writing the preview fails", async () => {
     const f = await fixture();
     const draft = await f.generate();
     expect(
@@ -446,6 +449,47 @@ describe("policy CLI", () => {
     expect(await readFile(draft.draftPath, "utf8")).toBe(POLICY);
     expect(await readdir(f.repository)).toEqual([]);
   });
+
+  test("preserves a completed draft when the diff preview fails", async () => {
+    const f = await fixture();
+    const stderr = capture(true);
+    const draft = await f.generate();
+    expect(
+      await main(
+        ["policy"],
+        capture(true).stream,
+        stderr.stream,
+        policyDependencies(f, {
+          draft,
+          onPreview: () => {
+            throw new Error("Python preview failed");
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(stderr.text()).toContain("Python preview failed");
+    expect(stderr.text()).toContain(draft.draftPath);
+    expect(await readFile(draft.draftPath, "utf8")).toBe(POLICY);
+  });
+
+  test.each(["json", "md", "toon"])(
+    "does not run a diff preview for %s output",
+    async (format) => {
+      const f = await fixture();
+      const stdout = capture();
+      let previews = 0;
+      expect(
+        await main(
+          ["policy", "--format", format],
+          stdout.stream,
+          capture().stream,
+          policyDependencies(f, { onPreview: () => previews++ }),
+        ),
+      ).toBe(0);
+      expect(previews).toBe(0);
+      expect(stdout.text().length).toBeGreaterThan(0);
+    },
+  );
 
   test("asks owner questions and previews the exact draft without writing source", async () => {
     const f = await fixture();

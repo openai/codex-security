@@ -141,11 +141,11 @@ export async function policyPlugin(
 ): Promise<string> {
   const plugin = await mkdtemp(join(root, "custom-plugin-"));
   await mkdir(join(plugin, ".codex-plugin"));
-  await mkdir(join(plugin, "scripts"));
+  await mkdir(join(plugin, "mcp"));
   await writeFile(
     join(plugin, ".codex-plugin", "plugin.json"),
     JSON.stringify({ name: "codex-security", version: "test-policy-plugin" }),
   );
-  await writeFile(join(plugin, "scripts", "resolve_security_md.py"), script);
+  await writeFile(join(plugin, "mcp", "helpers.mjs"), script);
   return plugin;
 }

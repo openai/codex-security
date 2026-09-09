@@ -101,7 +101,30 @@ describe("bundled plugin build", () => {
       },
     );
 
-    expect(await files(destination)).toContain("server.mjs");
+    const contract = JSON.parse(
+      await readFile(
+        new URL(
+          "../../../plugins/codex-security/plugin-files.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as { shippedExact: string[] };
+    expect(await files(destination)).toEqual(
+      contract.shippedExact
+        .filter((path) => path.startsWith("mcp/"))
+        .map((path) => path.slice(4))
+        .sort(),
+    );
+    const helper = await execFileAsync("node", [
+      join(destination, "helpers.mjs"),
+      "resolve-security-md",
+      "--repo",
+      root,
+      "--list",
+    ]);
+    expect(helper.stdout).toBe("[]\n");
+    expect(helper.stderr).toBe("");
   });
 
   test("builds from a source snapshot without Git metadata", async () => {

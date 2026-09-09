@@ -908,14 +908,14 @@ export class CodexSecurity {
         signal,
         temporaryRoot,
       );
-      const { runtime, python, effectiveConfig } = session;
+      const { runtime, effectiveConfig } = session;
       const model = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model.model);
       for (const path of [
         "references/threat-model.md",
         "references/security-guidance.md",
         "skills/define-security-policy/SKILL.md",
-        "scripts/resolve_security_md.py",
+        "mcp/helpers.mjs",
       ]) {
         const metadata = await lstat(
           join(runtime.plugin.pluginRoot, path),
@@ -968,7 +968,6 @@ export class CodexSecurity {
       );
       const guidance = await resolveSecurityPolicyGuidance(
         target,
-        python,
         runtime.plugin.pluginRoot,
         session.scanEnvironment,
         signal,
@@ -3924,7 +3923,7 @@ function scanPrompt(
             "This exhaustive scan authorizes the delegated-worker phases required by the selected skill; use available subagent tools and continue with parent-agent fallback if capacity changes.",
           ]),
     "This SDK host does not render MCP Apps; use the terminal/chat workflow.",
-    `Use ${python} as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.`,
+    `Use ${python} as <python_command> for plugin Python helper scripts (.py files); replace any literal python or python3 helper invocation with this exact interpreter.`,
     `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
     `Use this exact scan directory for all scan output: ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR")}`,
     `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest, findings, and coverage.`,
