@@ -96,7 +96,7 @@
     "scan-activity.test.ts": 0.006,
     "scan-comparison.property.test.ts": 0.127,
     "scan-comparison.test.ts": 0.14,
-    "scan-continuation.test.ts": 255.197,
+    "scan-continuation.test.ts": 328.785,
     "scan-dashboard.test.ts": 0.058,
     "scan-history-renderer.test.ts": 0.004,
     "scan-logs.test.ts": 0.039,
