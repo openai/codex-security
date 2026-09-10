@@ -233,6 +233,7 @@ async function resume(
           environment: f.environment,
           prepareRuntime: async () => {
             const runtime = preparedRuntime(f.codexHome);
+            runtime.persistentCredentialHome = true;
             runtime.plugin.version = JSON.parse(
               await readFile(
                 join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
@@ -358,6 +359,9 @@ test("Standard continuation preserves the sealed parent and resumes only unfinis
     cost: result.cost,
     checkpoint: { remainingFileCount: 0 },
   });
+  expect(
+    (await f.command(["get-scan", "--scan-id", childId]))["scan"],
+  ).not.toHaveProperty("sourceThreadId");
   await expect(
     f.command(["get-cli-scan-resume", "--scan-id", childId]),
   ).rejects.toThrow("already completed");
@@ -1442,6 +1446,80 @@ test.each([false, true])(
     expect(result.threadId).toBe(f.threadId);
     expect(result.coverage.completeness).toBe("complete");
     expect(result.findings.findings).toHaveLength(1);
+  },
+);
+
+test.each([false, true])(
+  "checkpoint-only completion keeps explicit and latest CLI logs (retried export: %s)",
+  async (retryExport) => {
+    const f = await savedScan({ maxCostUsd: 10 });
+    await saveCompleteCheckpoint(f);
+    const event = {
+      type: "event_msg",
+      payload: { type: "agent_message", message: "Saved source analysis" },
+    };
+    await appendFile(f.sessionPath, JSON.stringify(event) + "\n");
+    const originalLog = await readFile(f.sessionPath, "utf8");
+    const noModel = () => {
+      throw new Error("Completed source work must not run inference");
+    };
+    let parentId = f.scanId;
+    if (retryExport) {
+      const interrupted = await resume(f, noModel, { failExport: true });
+      expect(interrupted.code).toBe(2);
+      const scans = (
+        await f.command(["list-scans", "--repository", f.repository])
+      )["scans"] as Array<{ scanId: string; parentScanId: string }>;
+      parentId = scans.find((scan) => scan.parentScanId === f.scanId)!.scanId;
+    }
+    const outcome = await resume({ ...f, scanId: parentId }, noModel);
+    expect(outcome.code, outcome.stderr).toBe(0);
+    const result = JSON.parse(outcome.stdout);
+    const childId = result.manifest.scan.id;
+    expect(result.threadId).toBe(f.threadId);
+    expect(result.cost).toEqual(previousCost);
+    for (const args of [
+      ["scans", "logs", childId, "--json"],
+      ["scans", "logs", "--json"],
+    ]) {
+      const stdout = capture();
+      const stderr = capture();
+      const code = await main(args, stdout.stream, stderr.stream, {
+        ...dependencies({
+          environment: f.environment,
+          currentDirectory: f.repository,
+        }),
+        runWorkbench: f.command,
+      });
+      expect(code, stderr.text()).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        scanId: childId,
+        threadId: f.threadId,
+        sessions: [{ threadId: f.threadId, path: f.sessionPath }],
+        events: [{ threadId: f.threadId }, { threadId: f.threadId, event }],
+      });
+    }
+    expect(
+      (await f.command(["get-scan", "--scan-id", childId]))["scan"],
+    ).toMatchObject({
+      parentScanId: parentId,
+      continuationThreadId: null,
+      cost: previousCost,
+    });
+    const database = await f.command(["database-info"]);
+    expect(
+      execFileSync(
+        f.python,
+        [
+          "-c",
+          "import sqlite3, sys; db = sqlite3.connect(sys.argv[1]); print(db.execute('SELECT inference_started FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()[0])",
+          database["databasePath"] as string,
+          childId,
+        ],
+        { encoding: "utf8" },
+      ).trim(),
+    ).toBe("0");
+    expect(await readFile(f.sessionPath, "utf8")).toBe(originalLog);
   },
 );
 

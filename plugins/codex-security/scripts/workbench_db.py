@@ -2846,6 +2846,11 @@ def scan_result(
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
+        **(
+            {"sourceThreadId": scan_history.source_thread_id(connection, scan)}
+            if scan["inference_started"] == 0
+            else {}
+        ),
         "parentScanId": scan["parent_scan_id"],
         "failureMessage": scan["failure_message"],
         "findings": [

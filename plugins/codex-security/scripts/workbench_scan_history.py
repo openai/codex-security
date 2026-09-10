@@ -48,6 +48,20 @@ def preserve_sealed_completion(
     return binding
 
 
+def source_thread_id(connection: sqlite3.Connection, scan: sqlite3.Row) -> str | None:
+    source_thread_id = scan["continuation_thread_id"]
+    ancestor_id = scan["parent_scan_id"]
+    while source_thread_id is None and ancestor_id is not None:
+        ancestor = connection.execute(
+            "SELECT continuation_thread_id, parent_scan_id FROM scans WHERE id = ?", (ancestor_id,)
+        ).fetchone()
+        if ancestor is None:
+            break
+        source_thread_id = ancestor["continuation_thread_id"]
+        ancestor_id = ancestor["parent_scan_id"]
+    return source_thread_id
+
+
 def cli_scan_resume(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -65,16 +79,6 @@ def cli_scan_resume(
         raise SystemExit("Resume requires a saved CLI launch recipe.")
     checkpoint = checkpoint_state(connection, scan["id"])
     thread_id = scan["continuation_thread_id"]
-    source_thread_id = thread_id
-    ancestor_id = scan["parent_scan_id"]
-    while source_thread_id is None and ancestor_id is not None:
-        ancestor = connection.execute(
-            "SELECT continuation_thread_id, parent_scan_id FROM scans WHERE id = ?", (ancestor_id,)
-        ).fetchone()
-        if ancestor is None:
-            break
-        source_thread_id = ancestor["continuation_thread_id"]
-        ancestor_id = ancestor["parent_scan_id"]
     owner = scan["deep_scan_owner_thread_id"] or workspace["thread_id"]
     run = connection.execute(
         "SELECT status, cancel_requested FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
@@ -137,7 +141,7 @@ def cli_scan_resume(
         "targetId": scan["target_id"],
         "targetRevision": scan["target_revision"],
         "threadId": thread_id,
-        "sourceThreadId": source_thread_id,
+        "sourceThreadId": source_thread_id(connection, scan),
         "userContext": scan["user_context"],
     }
     # Active coordinators may still be writing drafts. Validate sealed results
