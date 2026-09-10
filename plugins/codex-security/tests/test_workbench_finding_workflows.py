@@ -56,15 +56,16 @@ def test_source_snapshot_excludes_generated_home_without_following_its_leaf_link
     assert snapshot()["content"] != changed["content"]
 
 
+@pytest.mark.parametrize("database_name", ["workbench.sqlite3", "external.sqlite3"])
 def test_source_snapshot_separates_linked_database_storage_from_managed_directories(
-    workbench_api, tmp_path
+    workbench_api, tmp_path, database_name
 ):
     repository = tmp_path / "repository"
     state = repository / "local-state"
     state.mkdir(parents=True)
     storage = repository / "database-storage"
     storage.mkdir()
-    database = storage / "workbench.sqlite3"
+    database = storage / database_name
     selected_database = state / "workbench.sqlite3"
     selected_database.symlink_to(database)
     with sqlite3.connect(selected_database) as connection:
@@ -89,6 +90,14 @@ def test_source_snapshot_separates_linked_database_storage_from_managed_director
             directory.mkdir()
             (directory / "generated").write_text("managed output")
             assert snapshot() == original
+        locks = storage / (
+            "dedupe-locks"
+            if database_name == "workbench.sqlite3"
+            else f"{database_name}.dedupe-locks"
+        )
+        locks.mkdir()
+        (locks / "operation.sqlite3").write_text("managed lock")
+        assert snapshot() == original
         ordinary = storage / "dedupe"
         ordinary.mkdir()
         (ordinary / "source.ts").write_text("export const source = 1;\n")

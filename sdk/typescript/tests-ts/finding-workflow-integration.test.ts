@@ -1371,7 +1371,7 @@ test.each([false, true])(
       await fixture();
     const state = join(repository, "local-state");
     await mkdir(state);
-    const database = join(root, "external-workbench.sqlite3");
+    const database = join(repository, "external-workbench.sqlite3");
     await writeFile(database, "");
     await symlink(database, join(state, "workbench.sqlite3"), "file");
     environment.CODEX_SECURITY_STATE_DIR = linkedState
@@ -1763,15 +1763,17 @@ test("dedupe stops before reviewing candidates it cannot checkpoint", async () =
   expect(modelCalls).toBe(0);
 });
 
-test("a live dedupe owner blocks duplicate work and process death releases its saved reviews", async () => {
-  const { environment, document, history, scanDir, repository } =
-    await fixture();
-  const originals = [
-    document.findings[0]!,
-    { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
-  ];
-  const options = { findingsUrl: "http://synthetic.test" };
-  const script = `import { deduplicateScanDirectoryInternal } from ${JSON.stringify(new URL("../src/deduplication/scan.ts", import.meta.url).href)};
+test.each([false, true])(
+  "a live dedupe owner blocks duplicate work and process death releases its saved reviews (shared database: %j)",
+  async (sharedDatabase) => {
+    const { root, environment, document, history, scanDir, repository } =
+      await fixture();
+    const originals = [
+      document.findings[0]!,
+      { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
+    ];
+    const options = { findingsUrl: "http://synthetic.test" };
+    const script = `import { deduplicateScanDirectoryInternal } from ${JSON.stringify(new URL("../src/deduplication/scan.ts", import.meta.url).href)};
 await deduplicateScanDirectoryInternal(${JSON.stringify(scanDir)}, { repository: ${JSON.stringify(repository)}, ...${JSON.stringify(options)} }, {
   environment: ${JSON.stringify(environment)},
   fetch: async () => Response.json({ finding: ${JSON.stringify(originals[0])}, potentialDuplicates: ${JSON.stringify(originals.slice(1))} }),
@@ -1784,58 +1786,74 @@ await deduplicateScanDirectoryInternal(${JSON.stringify(scanDir)}, { repository:
     });
   } },
 });`;
-  const child = spawn(process.execPath, ["--eval", script], {
-    env: environment,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  const closed = once(child, "close");
-  let output = "";
-  let errors = "";
-  child.stderr.on("data", (chunk) => {
-    errors += String(chunk);
-  });
-  const ready = new Promise<void>((resolve, reject) => {
-    child.stdout.on("data", (chunk) => {
-      output += String(chunk);
-      if (output.includes("ready\n")) resolve();
+    const child = spawn(process.execPath, ["--eval", script], {
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
     });
-    child.once("close", () =>
-      reject(
-        new Error(errors || "Dedupe process exited before its checkpoint"),
-      ),
-    );
-    child.once("error", reject);
-  });
-  try {
-    await ready;
-    await expect(
-      deduplicateScanInternal(document.scanId, options, {
-        environment,
-        runWorkbench: history,
-        fetch: async () => {
-          throw new Error("The live owner must prevent remote calls");
-        },
-      }),
-    ).rejects.toThrow("already running");
-  } finally {
-    child.kill("SIGKILL");
-    await closed;
-  }
-  let modelCalls = 0;
-  await deduplicateScanInternal(document.scanId, options, {
-    environment,
-    runWorkbench: history,
-    fetch: async (url) => {
-      expect(url.pathname).toContain("/dedupe-groups");
-      return Response.json([]);
-    },
-    reviewRunner: {
-      async run<T>(review: CodexReview<T>): Promise<T> {
-        expect(review.stage).toBe("pair-review");
-        modelCalls++;
-        return review.validate(merged(originals));
+    const closed = once(child, "close");
+    let output = "";
+    let errors = "";
+    child.stderr.on("data", (chunk) => {
+      errors += String(chunk);
+    });
+    const ready = new Promise<void>((resolve, reject) => {
+      child.stdout.on("data", (chunk) => {
+        output += String(chunk);
+        if (output.includes("ready\n")) resolve();
+      });
+      child.once("close", () =>
+        reject(
+          new Error(errors || "Dedupe process exited before its checkpoint"),
+        ),
+      );
+      child.once("error", reject);
+    });
+    try {
+      await ready;
+      if (sharedDatabase) {
+        const state = join(root, "other-state");
+        await mkdir(state);
+        await symlink(
+          join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+          join(state, "workbench.sqlite3"),
+          "file",
+        );
+        environment.CODEX_SECURITY_STATE_DIR = state;
+      }
+      await expect(
+        deduplicateScanInternal(document.scanId, options, {
+          environment,
+          runWorkbench: history,
+          fetch: async () => {
+            throw new Error("The live owner must prevent remote calls");
+          },
+          reviewRunner: {
+            async run() {
+              throw new Error("The live owner must prevent duplicate reviews");
+            },
+          },
+        }),
+      ).rejects.toThrow("already running");
+    } finally {
+      child.kill("SIGKILL");
+      await closed;
+    }
+    let modelCalls = 0;
+    await deduplicateScanInternal(document.scanId, options, {
+      environment,
+      runWorkbench: history,
+      fetch: async (url) => {
+        expect(url.pathname).toContain("/dedupe-groups");
+        return Response.json([]);
       },
-    },
-  });
-  expect(modelCalls).toBe(1);
-});
+      reviewRunner: {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          expect(review.stage).toBe("pair-review");
+          modelCalls++;
+          return review.validate(merged(originals));
+        },
+      },
+    });
+    expect(modelCalls).toBe(1);
+  },
+);

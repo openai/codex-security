@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, readlink } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { loadContractWithScanDirectory } from "../contract.js";
 import {
   bundledPluginRoot,
@@ -242,15 +242,21 @@ async function deduplicateResolvedScan(
     workflow = makeWorkflow(selected.id);
   }
   const operationKey = workflowDigest(workflow.id);
+  const lockDirectory = join(
+    dirname(database),
+    basename(database) === "workbench.sqlite3"
+      ? "dedupe-locks"
+      : `${basename(database)}.dedupe-locks`,
+  );
   await workflow.protectArtifacts(
     scanDirectory,
-    join(
-      codexSecurityStateDirectory(environment),
-      "dedupe-locks",
-      `${operationKey}.sqlite3`,
-    ),
+    join(lockDirectory, `${operationKey}.sqlite3`),
   );
-  const release = await acquireDedupeLock(environment, operationKey);
+  const release = await acquireDedupeLock(
+    environment,
+    lockDirectory,
+    operationKey,
+  );
   try {
     const state = await workflow.bind({
       ...binding,
@@ -443,12 +449,13 @@ async function deduplicateResolvedScan(
 
 async function acquireDedupeLock(
   environment: NodeJS.ProcessEnv,
+  lockDirectory: string,
   key: string,
 ): Promise<() => Promise<void>> {
-  const directory = await prepareCodexSecurityStateSubdirectory(
-    join(codexSecurityStateDirectory(environment), "dedupe-locks"),
-    environment,
-  );
+  const directory = await prepareCodexSecurityStateSubdirectory(lockDirectory, {
+    ...environment,
+    CODEX_SECURITY_STATE_DIR: dirname(lockDirectory),
+  });
   const lockPath = join(directory, `${key}.sqlite3`);
   const metadata = await lstat(lockPath).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;

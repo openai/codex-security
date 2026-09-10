@@ -1888,6 +1888,7 @@ false. Changing a workflow's scan, destination, or bound scope is an error: choo
 a different workflow ID. A live dedupe operation holds a process-owned SQLite
 lock: a concurrent retry stops before reviewing or writing groups. Process exit
 releases that lock; a slow or paused process retains ownership.
+State directories linked to the same physical workflow database share that ownership.
 
 Workflow metadata, stage statuses, errors, publication receipts, and results live
 in the local workbench SQLite database under `CODEX_SECURITY_STATE_DIR`, outside

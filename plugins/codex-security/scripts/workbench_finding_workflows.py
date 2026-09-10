@@ -195,9 +195,15 @@ def finding_workflow(
         database_file = connection.execute("PRAGMA database_list").fetchone()[2]
         if database_file:
             database = Path(database_file)
+            physical_database = database.resolve()
+            lock_name = (
+                "dedupe-locks"
+                if physical_database.name == "workbench.sqlite3"
+                else f"{physical_database.name}.dedupe-locks"
+            )
             # SQLite sidecars follow its reported pathname, even when the DB leaf is a symlink.
             # Keep the source link and ordinary files under the state directory in the snapshot.
-            excluded = (database.resolve(),) + tuple(
+            excluded = (physical_database, physical_database.parent / lock_name) + tuple(
                 Path(f"{database}{suffix}") for suffix in ("-wal", "-shm", "-journal")
             )
         if payload.get("credentialHome"):
