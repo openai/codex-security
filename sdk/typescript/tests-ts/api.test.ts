@@ -1652,6 +1652,15 @@ describe("CodexSecurity orchestration", () => {
         },
         "concise",
       ],
+      [
+        {
+          profile: "cloud.production",
+          profiles: {
+            "cloud.production": { model_reasoning_summary: "concise" },
+          },
+        },
+        "concise",
+      ],
     ];
     let started = 0;
     let release!: () => void;
