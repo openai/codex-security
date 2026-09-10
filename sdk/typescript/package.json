@@ -84,7 +84,7 @@
     "pdfjs-dist": "6.2.108",
     "react": "19.2.4",
     "semver": "7.8.5",
-    "smol-toml": "1.6.1"
+    "smol-toml": "1.7.1"
   },
   "devDependencies": {
     "@openai/apps-sdk-ui": "0.2.2",
