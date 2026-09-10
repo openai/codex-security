@@ -39,6 +39,7 @@ const rawOverrides = [
 await testAllowedProfileAndRawArgv();
 await testPreflightStartsInWorkerCwd();
 await testProvidedEnvForwardedWithoutMutation();
+await testOpenAiApiKeyFallbackPreservesNativeAuthentication();
 await testSequentialPaginatedResponsesAcrossChunks();
 await testMalformedStreamFailsClosed();
 await testRepeatedCatalogCursorFailsClosed();
@@ -122,6 +123,39 @@ async function testProvidedEnvForwardedWithoutMutation() {
     });
     assert.deepEqual(Object.entries(env), originalEntries);
   });
+}
+
+async function testOpenAiApiKeyFallbackPreservesNativeAuthentication() {
+  for (const { account, requiresOpenaiAuth, forcedLoginMethod, expected } of [
+    { account: null, requiresOpenaiAuth: true, expected: true },
+    { account: { type: "apiKey" }, requiresOpenaiAuth: true, expected: false },
+    { account: { type: "chatgpt", email: "fixture@example.com", planType: "pro" }, requiresOpenaiAuth: true, expected: false },
+    { account: null, requiresOpenaiAuth: false, expected: false },
+    { account: null, requiresOpenaiAuth: true, forcedLoginMethod: "chatgpt", expected: false }
+  ]) {
+    const configResult = configReadResult(expectedProfile);
+    if (forcedLoginMethod) configResult.config.forced_login_method = forcedLoginMethod;
+    await withFakeCodex({
+      configResult,
+      catalogResults: [catalogResult(true)],
+      accountResult: { account, requiresOpenaiAuth }
+    }, async ({ codexPath, cwd, callsPath }) => {
+      const result = await preflightDeepScanWorkerPermissionProfile({
+        codexPath,
+        cwd,
+        profileId,
+        configOverrides: rawOverrides,
+        expectedProfile,
+        allowOpenAiApiKeyFallback: true,
+        signal: new AbortController().signal
+      });
+      assert.equal(result.useOpenAiApiKey, expected);
+      const calls = await readJsonLines(callsPath);
+      const accountCalls = calls.filter((call) => call.method === "account/read");
+      assert.equal(accountCalls.length, forcedLoginMethod === "chatgpt" ? 0 : 1);
+      if (accountCalls.length) assert.deepEqual(accountCalls[0].params, { refreshToken: false });
+    });
+  }
 }
 
 async function testPreflightStartsInWorkerCwd() {
@@ -598,6 +632,10 @@ function handle(message) {
   }
   if (message.method === "permissionProfile/list") {
     send(message.id, scenario.catalogResults?.[catalogIndex++] ?? { data: [], nextCursor: null });
+    return;
+  }
+  if (message.method === "account/read") {
+    send(message.id, scenario.accountResult);
     return;
   }
   if (message.method === "configRequirements/read") {

@@ -82,6 +82,8 @@ async function testDeepScanStdioLifecycle() {
 
   const environment = {
     ...process.env,
+    OPENAI_API_KEY: "synthetic-stdio-key",
+    CODEX_API_KEY: "",
     CODEX_CLI_PATH: fakeCodexPath,
     CODEX_HOME: codexHome,
     CODEX_SECURITY_SCAN_ROOT: scanRoot,
@@ -151,6 +153,7 @@ async function testDeepScanStdioLifecycle() {
     const scanId = await waitForScanId({ server });
     await waitForDeepScanWorker({ environment, scanId, threadId });
     const [startedWorker] = await waitForJsonLines(startLogPath, 1);
+    assert.equal(startedWorker.hasExpectedApiKey, true);
     const workerContext = discoveryPromptContext(startedWorker.stdin);
     assert.match(startedWorker.stdin, /record_codex_security_scan_draft/);
     const startedState = await getDeepScan({ environment, scanId, threadId });
@@ -639,7 +642,7 @@ function startServer(serverPath, env) {
       return responses.get(id);
     },
     async stop() {
-      if (child.exitCode !== null) return;
+      if (child.exitCode !== null || child.signalCode !== null) return;
       child.stdin.end();
       const exited = new Promise((resolve) => child.once("exit", resolve));
       const graceful = await Promise.race([exited.then(() => true), delay(2_000).then(() => false)]);
@@ -777,6 +780,8 @@ async function writeFakeCodex(executablePath) {
     "        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read' }, network: { enabled: false } } } }, origins: {}, layers: null };",
     "      } else if (message.method === 'permissionProfile/list') {",
     "        result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };",
+    "      } else if (message.method === 'account/read') {",
+    "        result = { account: null, requiresOpenaiAuth: true };",
     "      } else {",
     "        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }) + '\\n');",
     "        continue;",
@@ -790,7 +795,7 @@ async function writeFakeCodex(executablePath) {
     "for await (const chunk of process.stdin) stdin += chunk;",
     "const context = JSON.parse(stdin.match(/```json\\n([\\s\\S]*?)\\n```/u)[1]);",
     "const root = process.argv[process.argv.indexOf('--cd') + 1];",
-    "appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin }) + '\\n');",
+    "appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key' }) + '\\n');",
     "console.log(JSON.stringify({ type: 'thread.started', thread_id: `stdio-fixture-${process.pid}` }));",
     "if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {",
     "  const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');",
