@@ -47,26 +47,11 @@ export function parseJson(source: string, rejectDuplicates = false): unknown {
     index++;
   }
   function string(token: string, start: number): string {
-    const unterminated = token.length === 1;
-    const contents = unterminated ? source.slice(start) : token;
-    const end = contents.length - (unterminated ? 0 : 1);
-    for (let offset = 1; offset < end; offset++) {
-      const character = contents[offset];
-      if (character.charCodeAt(0) < 0x20)
-        error("Invalid control character at", start + offset);
-      if (character !== "\\") continue;
-      const escape = contents[++offset];
-      if (escape === undefined) break;
-      if (escape === "u") {
-        if (!/^[0-9a-fA-F]{4}$/u.test(contents.slice(offset + 1, offset + 5)))
-          error("Invalid \\uXXXX escape", start + offset);
-        offset += 4;
-      } else if (!'"\\/bfnrt'.includes(escape)) {
-        error("Invalid \\escape", start + offset - 1);
-      }
+    try {
+      return JSON.parse(token) as string;
+    } catch (cause) {
+      return error((cause as Error).message, start);
     }
-    if (unterminated) error("Unterminated string starting at", start);
-    return JSON.parse(token) as string;
   }
   function value(): unknown {
     const start = position();
