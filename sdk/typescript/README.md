@@ -219,6 +219,13 @@ credentials, and the default AWS credential chain. Set `AWS_REGION` and choose
 a Bedrock model with `--model`; OpenAI models such as `openai.gpt-5.6-luna`
 support `--max-cost`.
 
+Bedrock scans default to `model_reasoning_summary = "none"` because some
+Bedrock models reject `reasoning.summary`. This leaves reasoning effort
+unchanged. Explicit summary settings in `--codex` overrides or the selected
+Codex profile take precedence. On older CLI versions, append
+`--codex 'model_reasoning_summary="none"'` to your scan command if Bedrock
+reports that `reasoning.summary` is unsupported.
+
 On Windows, set the API key in PowerShell:
 
 ```powershell
@@ -657,7 +664,7 @@ approvals_reviewer = "auto_review"
 cli_auth_credentials_store = "auto"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
-model_reasoning_summary = "detailed"
+model_reasoning_summary = "detailed" # "none" for amazon-bedrock
 show_raw_agent_reasoning = true
 
 [features]

@@ -1478,6 +1478,10 @@ describe("CodexSecurity orchestration", () => {
       expect((codexOptions as CodexOptions | null)?.env).toMatchObject(
         credentials,
       );
+      expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
+        model_reasoning_summary: "none",
+        model_reasoning_effort: "xhigh",
+      });
       const configuration = JSON.parse(
         await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
       ) as { mcpServers: Record<string, { env_vars: string[] }> };
@@ -1603,6 +1607,10 @@ describe("CodexSecurity orchestration", () => {
     expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
       AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
       AWS_REGION: "us-east-2",
+    });
+    expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
+      model_reasoning_summary: "none",
+      model_reasoning_effort: "xhigh",
     });
     expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
       "OPENAI_API_KEY",

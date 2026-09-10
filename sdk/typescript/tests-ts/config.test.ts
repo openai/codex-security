@@ -12,6 +12,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
+  type JsonObject,
   resolveCodexProfile,
   scanModelConfiguration,
   scanModelProvider,
@@ -254,6 +255,80 @@ describe("Codex configuration", () => {
       });
 
       expect(() => scanModelConfiguration(config)).toThrow(message);
+    }
+  });
+
+  test("disables reasoning summaries by default for the selected Bedrock provider", async () => {
+    const scenarios: JsonObject[] = [
+      { model_provider: "amazon-bedrock" },
+      {
+        model_provider: "openai",
+        profile: "cloud",
+        profiles: { cloud: { model_provider: "amazon-bedrock" } },
+      },
+      {
+        model_provider: "amazon-bedrock",
+        profile: "cloud",
+        profiles: { cloud: { model: "openai.gpt-5.6-luna" } },
+      },
+    ];
+    for (const overrides of scenarios) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(resolveCodexProfile(config)).toMatchObject({
+        model_reasoning_summary: "none",
+        model_reasoning_effort: "xhigh",
+      });
+    }
+  });
+
+  test("keeps reasoning summaries when the selected provider is not Bedrock", async () => {
+    const scenarios: JsonObject[] = [
+      {
+        model_provider: "amazon-bedrock",
+        profile: "direct",
+        profiles: { direct: { model_provider: "openai" } },
+      },
+      {
+        model_provider: "openai",
+        profiles: { cloud: { model_provider: "amazon-bedrock" } },
+      },
+    ];
+    for (const overrides of scenarios) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(resolveCodexProfile(config)["model_reasoning_summary"]).toBe(
+        "detailed",
+      );
+    }
+  });
+
+  test("preserves explicit Bedrock reasoning summary settings", async () => {
+    for (const [overrides, expected] of [
+      [
+        { model_provider: "amazon-bedrock", model_reasoning_summary: "auto" },
+        "auto",
+      ],
+      [
+        {
+          model_reasoning_summary: "concise",
+          profile: "cloud",
+          profiles: { cloud: { model_provider: "amazon-bedrock" } },
+        },
+        "concise",
+      ],
+      [
+        {
+          model_provider: "amazon-bedrock",
+          model_reasoning_summary: "none",
+          profile: "cloud",
+          profiles: { cloud: { model_reasoning_summary: "detailed" } },
+        },
+        "detailed",
+      ],
+    ] as const) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(resolveCodexProfile(config)["model_reasoning_summary"]).toBe(
+        expected,
+      );
     }
   });
 
