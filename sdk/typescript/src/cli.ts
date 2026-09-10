@@ -105,6 +105,7 @@ import {
   mergedCodexConfig,
   scanModelConfiguration,
   scanModelProvider,
+  writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
   type JsonObject,
@@ -1427,6 +1428,7 @@ export async function runCodexSkillCommand(
           : await readCodexHomeConfig(processEnvironment);
     const provider = scanModelProvider(config);
     modelProvider = output.modelProvider;
+    let credentialConfig: JsonObject | undefined;
     authentication = scanAuthentication(
       processEnvironment,
       output.auth,
@@ -1466,6 +1468,19 @@ export async function runCodexSkillCommand(
       const release = await acquireCodexSecurityCredentialHomeLock(codexHome);
       let credentialsAvailable: boolean;
       try {
+        const ambientConfig = await readCodexHomeConfig(selected);
+        credentialConfig = await readCodexHomeConfig({
+          ...selected,
+          CODEX_HOME: codexHome,
+        });
+        for (const key of CODEX_AUTH_CONFIG_KEYS) {
+          const value = ambientConfig[key];
+          if (value !== undefined) credentialConfig[key] = value;
+        }
+        await writeCodexConfig(
+          join(codexHome, "config.toml"),
+          credentialConfig,
+        );
         credentialsAvailable = await initialCredentialsAvailable(
           selected,
           configuredCodexHome(selected),
@@ -1485,17 +1500,6 @@ export async function runCodexSkillCommand(
       ) {
         throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
       }
-      if (output.appServer === undefined) {
-        const credentialConfig = await readCodexHomeConfig(selected);
-        args = [
-          ...args,
-          ...CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
-            credentialConfig[key] === undefined
-              ? []
-              : ["--config", `${key}=${inlineToml(credentialConfig[key])}`],
-          ),
-        ];
-      }
     } else if (
       authentication.method === "api_key" &&
       !isExternalModelProvider(provider)
@@ -1509,6 +1513,18 @@ export async function runCodexSkillCommand(
       if (output.appServer !== undefined) {
         args = [...args, "--config", 'cli_auth_credentials_store="ephemeral"'];
       }
+    }
+    if (output.appServer === undefined) {
+      const authConfig =
+        credentialConfig ?? (await readCodexHomeConfig(selected));
+      args = [
+        ...args,
+        ...CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
+          authConfig[key] === undefined
+            ? []
+            : ["--config", `${key}=${inlineToml(authConfig[key])}`],
+        ),
+      ];
     }
     processEnvironment = selected;
   }

@@ -231,9 +231,11 @@ credential home for stored OpenAI credentials:
 `$CODEX_SECURITY_STATE_DIR/codex-home`, or
 `$CODEX_HOME/state/plugins/codex-security/codex-home`. Keep this credential
 home outside the target directory and every enclosing Git worktree, including
-when running a command from a subdirectory. Codex uses the configured file or
-keyring storage and managed-device policies. If this home has no
-credentials, it imports an existing file-based Codex sign-in. Logout disables
+when running a command from a subdirectory. Codex carries
+`cli_auth_credentials_store`, `forced_login_method`, and
+`forced_chatgpt_workspace_id` from the ambient configuration into this home.
+Managed-device policies still apply. If this home has no credentials, it imports
+an existing file-based Codex sign-in. Logout disables
 imports until you log in again.
 
 Finish operations using older versions before upgrading. Runtime preparation

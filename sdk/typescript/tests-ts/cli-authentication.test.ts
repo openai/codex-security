@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { CodexSecurityError, type ScanOptions } from "../src/index.js";
 import {
@@ -1280,6 +1281,12 @@ describe("skill authentication", () => {
         mode: 0o600,
       });
       await writeFile(join(ambientHome, "auth.json"), stored, { mode: 0o600 });
+      if (auth === "chatgpt") {
+        await writeFile(
+          join(ambientHome, "config.toml"),
+          'forced_login_method = "api"',
+        );
+      }
       const requestLog = join(stateDirectory, "requests.jsonl");
       const stderr = capture();
       const stdout = capture();
@@ -1349,6 +1356,13 @@ describe("skill authentication", () => {
       expect(await readFile(join(ambientHome, "auth.json"), "utf8")).toBe(
         stored,
       );
+      if (auth === "chatgpt") {
+        expect(
+          parseToml(
+            await readFile(join(credentialHome, "config.toml"), "utf8"),
+          ),
+        ).toMatchObject({ forced_login_method: "api" });
+      }
     },
   );
 
@@ -1390,48 +1404,83 @@ describe("skill authentication", () => {
     await expect(run()).rejects.toThrow("No credentials were found");
     expect(existsSync(join(credentialHome, "auth.json"))).toBe(false);
   });
-  test("validation honors the shared credential storage and login restrictions", async () => {
-    const environment = {
-      CODEX_SECURITY_STATE_DIR: stateDirectory,
-      CODEX_HOME: join(stateDirectory, "ambient"),
-    };
-    const home = await prepareCodexSecurityCredentialHome(environment);
-    await writeFile(
-      join(home, "config.toml"),
-      [
-        'cli_auth_credentials_store = "keyring"',
-        'forced_login_method = "chatgpt"',
-        'forced_chatgpt_workspace_id = "synthetic-workspace"',
-        'model = "unrelated-model"',
-      ].join("\n"),
-    );
-    await writeFile(
-      join(home, "auth.json"),
-      JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "SYNTHETIC_KEY" }),
-      { mode: 0o600 },
-    );
-    const stdout = capture();
-    const source =
-      'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify(process.argv)}}))';
-    expect(
-      await runCodexSkillCommand(
-        ["-e", source, "--"],
-        {
-          command: "validate",
-          auth: "auto",
-          stdout: stdout.stream,
-          stderr: capture().stream,
-        },
-        { command: process.execPath },
-        environment,
-      ),
-    ).toBe(0);
-    const args = JSON.parse(stdout.text());
-    expect(args).toContain('cli_auth_credentials_store="keyring"');
-    expect(args).toContain('forced_login_method="chatgpt"');
-    expect(args).toContain('forced_chatgpt_workspace_id="synthetic-workspace"');
-    expect(args).not.toContain('model="unrelated-model"');
-  });
+  test.each([
+    ["shared", "auto"],
+    ["ambient", "auto"],
+    ["ambient", "api-key"],
+  ] as const)(
+    "validation honors %s credential storage and login restrictions with %s auth",
+    async (authSource, auth) => {
+      const environment = {
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+        CODEX_HOME: join(stateDirectory, "ambient"),
+        ...(auth === "api-key"
+          ? { OPENAI_API_KEY: "SYNTHETIC_SESSION_KEY" }
+          : {}),
+      };
+      const home = await prepareCodexSecurityCredentialHome(environment);
+      const sourceHome =
+        authSource === "shared" ? home : environment.CODEX_HOME;
+      await mkdir(sourceHome, { recursive: true });
+      if (authSource === "ambient") {
+        await writeFile(join(home, "config.toml"), 'model = "existing-model"');
+      }
+      await writeFile(
+        join(sourceHome, "config.toml"),
+        [
+          'cli_auth_credentials_store = "keyring"',
+          'forced_login_method = "chatgpt"',
+          'forced_chatgpt_workspace_id = "synthetic-workspace"',
+          'model = "unrelated-model"',
+        ].join("\n"),
+      );
+      await writeFile(
+        join(sourceHome, "auth.json"),
+        JSON.stringify({
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "SYNTHETIC_KEY",
+        }),
+        { mode: 0o600 },
+      );
+      const stdout = capture();
+      const source =
+        'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({args:process.argv,home:process.env.CODEX_HOME})}}))';
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source, "--"],
+          {
+            command: "validate",
+            auth,
+            stdout: stdout.stream,
+            stderr: capture().stream,
+          },
+          { command: process.execPath },
+          environment,
+        ),
+      ).toBe(0);
+      const { args, home: runtimeHome } = JSON.parse(stdout.text());
+      expect(runtimeHome).toBe(
+        auth === "api-key" ? environment.CODEX_HOME : home,
+      );
+      expect(args).toContain('cli_auth_credentials_store="keyring"');
+      expect(args).toContain('forced_login_method="chatgpt"');
+      expect(args).toContain(
+        'forced_chatgpt_workspace_id="synthetic-workspace"',
+      );
+      expect(args).not.toContain('model="unrelated-model"');
+      expect(
+        parseToml(await readFile(join(runtimeHome, "config.toml"), "utf8")),
+      ).toMatchObject({
+        cli_auth_credentials_store: "keyring",
+        forced_login_method: "chatgpt",
+        forced_chatgpt_workspace_id: "synthetic-workspace",
+        model:
+          auth === "auto" && authSource === "ambient"
+            ? "existing-model"
+            : "unrelated-model",
+      });
+    },
+  );
   test.each(["patch", "verify-fix"] as const)(
     "%s requires the selected external provider key",
     async (command) => {
