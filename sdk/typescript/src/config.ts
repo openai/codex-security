@@ -322,6 +322,11 @@ function validateOverrides(overrides: JsonObject): void {
         `Codex override profile ${name} must be a TOML table.`,
       );
     }
+    if ("plugins" in profile || "marketplaces" in profile) {
+      throw new ConfigurationError(
+        `Codex Security owns plugin loading configuration in profile ${name}.`,
+      );
+    }
     const profileFeatures = profile["features"];
     if (profileFeatures !== undefined && !isObject(profileFeatures)) {
       throw new ConfigurationError(
