@@ -26,6 +26,7 @@
 - accept a UTF-8 byte order mark in imported findings JSON ([#856](https://github.com/openai/codex-security/pull/856))
 - authenticate deep workers with OpenAI API keys ([#870](https://github.com/openai/codex-security/pull/870))
 - drop canonical document size limits that do not exist ([#868](https://github.com/openai/codex-security/pull/868))
+- pin native Rust formatting edition ([#863](https://github.com/openai/codex-security/pull/863))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
