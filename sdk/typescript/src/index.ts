@@ -1,10 +1,14 @@
 export { CodexSecurity, createSecurity } from "./api.js";
-export { classifySeverity } from "./classify-severity.js";
+export {
+  classifySeverity,
+  SeverityClassificationError,
+} from "./classify-severity.js";
 export type {
   ClassifySeverityOptions,
   SeverityClassificationFinding,
   SeverityClassification,
   SeverityAssessment,
+  SeverityClassificationProgress,
 } from "./classify-severity.js";
 export {
   classifyScanSeverity,

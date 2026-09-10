@@ -2,8 +2,47 @@ import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import type { JsonObject } from "../src/config.js";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
+import { severityRetryCommand } from "../src/classify-severity.js";
 
 describe("scan history renderer", () => {
+  test("shows saved severity progress and recovery alongside completed scan results", () => {
+    const retryArguments = [
+      "classify-severity",
+      "--scan-dir",
+      "/saved/scan  one",
+      "--rubric",
+      "/saved/security  policy.md",
+    ];
+    const text = renderScanHistory(
+      {
+        targetPath: "/repo",
+        scanId: "scan-example",
+        mode: "standard",
+        progress: { status: "complete" },
+        findings: [],
+        severityClassification: {
+          status: "failed",
+          completed: 4,
+          total: 7,
+          reused: 2,
+          remaining: 3,
+          findingId: "finding-example",
+          threadId: "thread-example",
+          failure: { stage: "model", message: "Connection reset" },
+          retryArguments,
+        },
+      },
+      "show",
+      { color: false },
+    );
+    expect(text).toContain("4/7 completed (2 reused), 3 remaining");
+    expect(text).toContain("finding-example");
+    expect(text).toContain("thread-example");
+    expect(text).toContain("Connection reset");
+    expect(
+      text.split("\n").find((line) => line.includes("Retry with")),
+    ).toContain(severityRetryCommand(retryArguments));
+  });
   test("separates current repository findings from earlier observations", () => {
     const text = renderScanHistory(
       {

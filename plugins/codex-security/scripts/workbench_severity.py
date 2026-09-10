@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -37,9 +38,46 @@ def assessments(connection: sqlite3.Connection, finding_ids: list[str]) -> list[
     return [{key: row[column] for key, column in FIELDS.items()} for row in rows]
 
 
+def write_progress(connection: sqlite3.Connection, payload: dict[str, Any], timestamp: str) -> None:
+    progress = dict(payload["progress"])
+    if payload.get("registeredScan"):
+        progress["registeredScan"] = True
+    connection.execute(
+        """INSERT INTO severity_classification_runs
+        (id, scan_id, progress_json, started_at, updated_at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            progress_json = excluded.progress_json, updated_at = excluded.updated_at""",
+        (
+            payload["runId"],
+            payload["scanId"],
+            json.dumps(progress, allow_nan=False),
+            timestamp,
+            timestamp,
+        ),
+    )
+
+
 def checkpoint(
     connection: sqlite3.Connection, payload: dict[str, Any], timestamp: str
 ) -> dict[str, Any]:
+    if payload["action"] == "source":
+        scan = connection.execute(
+            "SELECT scan_dir, status, canceled_at FROM scans WHERE id = ?", (payload["scanId"],)
+        ).fetchone()
+        # Saved-scan selection requires completed history, even when a
+        # prepare-only interruption already left sealed directory artifacts.
+        registered = scan is not None and scan["status"] == "complete" and not scan["canceled_at"]
+        if registered:
+            try:
+                registered = os.path.samefile(scan["scan_dir"], payload["scanDirectory"])
+            except OSError:
+                # A copied directory can outlive its original registered output.
+                registered = False
+        return {"registeredScan": registered}
+    if payload["action"] == "progress":
+        with connection:
+            write_progress(connection, payload, timestamp)
+        return {}
     if payload["action"] == "begin":
         with connection:
             connection.execute(
@@ -83,7 +121,36 @@ def checkpoint(
             {updates}""",
             tuple(assessment[key] for key in FIELDS),
         )
+    if "progress" in payload:
+        try:
+            with connection:
+                write_progress(connection, payload, timestamp)
+        except Exception:
+            # Keep the required assessment even if optional progress cannot commit.
+            pass
     return {}
+
+
+def latest_progress(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any] | None:
+    row = connection.execute(
+        "SELECT run.id, run.progress_json, run.started_at, run.updated_at, scan.scan_dir "
+        "FROM severity_classification_runs AS run LEFT JOIN scans AS scan ON scan.id = run.scan_id "
+        "WHERE run.scan_id = ? ORDER BY run.started_at DESC, run.rowid DESC LIMIT 1",
+        (scan_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    progress = json.loads(row["progress_json"])
+    registered_scan = progress.pop("registeredScan", False)
+    if row["scan_dir"] is not None and registered_scan:
+        # Follow archived registered scans; preserve explicitly selected copies.
+        progress["scanDirectory"] = row["scan_dir"]
+    return {
+        **progress,
+        "runId": row["id"],
+        "startedAt": row["started_at"],
+        "updatedAt": row["updated_at"],
+    }
 
 
 def read_classification(database: Path, scan_id: str) -> dict[str, Any]:
