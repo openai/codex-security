@@ -1262,6 +1262,7 @@ describe("skill authentication", () => {
     ["auto", false, undefined],
     ["chatgpt", false, undefined],
     ["chatgpt", true, undefined],
+    ["chatgpt", false, "synthetic"],
     ["api-key", false, undefined],
     ["api-key", true, undefined],
     ["auto", false, "synthetic"],
@@ -1276,6 +1277,19 @@ describe("skill authentication", () => {
       const credentialHome = await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: stateDirectory,
       });
+      await writeFile(
+        join(credentialHome, "config.toml"),
+        [
+          'model_provider = "stale"',
+          'profile = "stale"',
+          "[profiles.stale]",
+          'model_provider = "stale"',
+          "[model_providers.stale]",
+          'name = "Stale provider"',
+          'base_url = "https://example.com/v1"',
+          'env_key = "STALE_API_KEY"',
+        ].join("\n"),
+      );
       const stored = JSON.stringify({
         auth_mode: "apikey",
         OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
@@ -1294,12 +1308,13 @@ describe("skill authentication", () => {
         await writeFile(
           join(ambientHome, "config.toml"),
           [
+            ...(auth === "chatgpt" ? ['forced_login_method = "api"'] : []),
             'model_provider = "synthetic"',
             "[model_providers.synthetic]",
             'name = "Synthetic provider"',
             'base_url = "https://example.com/v1"',
             'env_key = "OPENAI_API_KEY"',
-            "requires_openai_auth = false",
+            `requires_openai_auth = ${auth === "chatgpt"}`,
           ].join("\n"),
         );
       }
@@ -1309,7 +1324,7 @@ describe("skill authentication", () => {
       const stdout = capture();
       const environment = {
         CODEX_HOME: ambientHome,
-        ...(provider === undefined
+        ...(provider === undefined || auth === "chatgpt"
           ? {
               OpenAI_API_KEY: "  SYNTHETIC_OPENAI_KEY  ",
               CODEX_API_KEY: "SYNTHETIC_CODEX_KEY",
@@ -1319,6 +1334,12 @@ describe("skill authentication", () => {
               SYNTHETIC_EXPECTED_CUSTOM_KEY: "SYNTHETIC_CUSTOM_KEY",
             }),
         SYNTHETIC_REQUEST_LOG: requestLog,
+        ...(auth === "chatgpt"
+          ? { SYNTHETIC_EXPECTED_PROVIDER: provider ?? "openai" }
+          : {}),
+        ...(auth === "chatgpt" && provider === undefined
+          ? { SYNTHETIC_CHECK_STARTUP_LOCK: "1" }
+          : {}),
         ...(loginFailure ? { SYNTHETIC_LOGIN_FAILURE: "1" } : {}),
         SYNTHETIC_EXPECTED_HOME:
           auth === "chatgpt" ? credentialHome : ambientHome,
@@ -1367,8 +1388,9 @@ describe("skill authentication", () => {
       const methods = requests.map((request) => request.method);
       if (!loginFailure) {
         expect(
-          requests.find((request) => request.method === "thread/start").params,
-        ).not.toHaveProperty("modelProvider");
+          requests.find((request) => request.method === "thread/start").params
+            .modelProvider,
+        ).toBe(auth === "chatgpt" ? provider ?? "openai" : undefined);
       }
       expect(methods).toEqual([
         "initialize",
@@ -1384,6 +1406,9 @@ describe("skill authentication", () => {
         stored,
       );
       if (auth === "chatgpt") {
+        expect(
+          existsSync(join(credentialHome, ".codex-security-scan.lock")),
+        ).toBe(false);
         expect(
           parseToml(
             await readFile(join(credentialHome, "config.toml"), "utf8"),
@@ -1513,6 +1538,7 @@ describe("skill authentication", () => {
         parseToml(await readFile(join(runtimeHome, "config.toml"), "utf8")),
       ).toEqual({
         model: auth === "auto" ? "existing-model" : "unrelated-model",
+        ...(auth === "auto" ? { model_provider: "openai" } : {}),
       });
     },
   );

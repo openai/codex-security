@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { parse as parseToml } from "smol-toml";
 import { createInterface } from "node:readline";
 
 const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -8,6 +10,12 @@ for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
   appendFileSync(process.env.SYNTHETIC_REQUEST_LOG, `${line}\n`);
   if (request.method === "initialize") {
+    if (process.env.SYNTHETIC_CHECK_STARTUP_LOCK) {
+      assert.equal(
+        existsSync(join(process.env.CODEX_HOME, ".codex-security-scan.lock")),
+        true,
+      );
+    }
     send({ id: request.id, result: {} });
   } else if (request.method === "account/login/start") {
     assert.deepEqual(request.params, {
@@ -25,6 +33,28 @@ for await (const line of createInterface({ input: process.stdin })) {
       send({ id: request.id, result: { type: "apiKey" } });
     }
   } else if (request.method === "thread/start") {
+    if (process.env.SYNTHETIC_CHECK_STARTUP_LOCK) {
+      assert.equal(
+        existsSync(join(process.env.CODEX_HOME, ".codex-security-scan.lock")),
+        true,
+      );
+    }
+    if (process.env.SYNTHETIC_EXPECTED_PROVIDER) {
+      const config = parseToml(
+        readFileSync(join(process.env.CODEX_HOME, "config.toml"), "utf8"),
+      );
+      assert.equal(
+        config.model_provider,
+        process.env.SYNTHETIC_EXPECTED_PROVIDER,
+      );
+      assert.equal(config.profile, undefined);
+      assert.equal(config.model_providers?.stale, undefined);
+      if (config.model_provider === "synthetic")
+        assert.equal(
+          config.model_providers.synthetic.requires_openai_auth,
+          true,
+        );
+    }
     assert.equal(loggedIn, Boolean(process.env.SYNTHETIC_EXPECTED_KEY));
     assert.equal(process.env.CODEX_HOME, process.env.SYNTHETIC_EXPECTED_HOME);
     assert.equal(process.env.CODEX_API_KEY, process.env.SYNTHETIC_EXPECTED_KEY);
@@ -51,6 +81,12 @@ for await (const line of createInterface({ input: process.stdin })) {
       send({ id: request.id, result: { thread: { id: "synthetic-thread" } } });
     }
   } else if (request.method === "turn/start") {
+    if (process.env.SYNTHETIC_CHECK_STARTUP_LOCK) {
+      assert.equal(
+        existsSync(join(process.env.CODEX_HOME, ".codex-security-scan.lock")),
+        false,
+      );
+    }
     send({ id: request.id, result: { turn: { id: "synthetic-turn" } } });
     send({
       method: "item/completed",

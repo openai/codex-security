@@ -227,7 +227,8 @@ npx @openai/codex-security scan C:\code\repository
 ```
 
 Login, logout, scans, validation, patching, and fix verification share a private
-credential home for stored OpenAI credentials:
+credential home for stored OpenAI credentials, including custom providers with
+`requires_openai_auth = true`:
 `$CODEX_SECURITY_STATE_DIR/codex-home`, or
 `$CODEX_HOME/state/plugins/codex-security/codex-home`. Keep this credential
 home outside the target directory and every enclosing Git worktree, including
@@ -235,6 +236,9 @@ when running a command from a subdirectory. Codex carries
 `cli_auth_credentials_store`, `forced_login_method`, and
 `forced_chatgpt_workspace_id` from the ambient configuration into this home,
 including removing settings that are no longer present in the ambient configuration.
+Each command carries its selected provider into this home. Patching and fix
+verification hold the credential-home lock until the app-server thread is ready,
+then release it before model execution.
 Managed-device policies still apply. If this home has no credentials, it imports
 an existing file-based Codex sign-in. Logout disables
 imports until you log in again.
@@ -733,7 +737,7 @@ preserved when `scan --patch` starts remediation and when
 is also accepted; omitting the setting preserves the command's existing
 configuration and Codex defaults. Validation ignores user configuration.
 For stored OpenAI credentials, patching and verification read configuration
-from the shared credential home. API-key and custom-provider commands retain
+from the shared credential home. API-key commands and custom providers that use their own credentials retain
 their ambient Codex configuration. Commands preserve project trust in the
 selected home; explicit `--codex` settings apply to the command and its
 patch-risk assessment.
