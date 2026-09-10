@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
@@ -419,6 +420,12 @@ def write_feedback(request: Mapping[str, Any], output: TextIO) -> bool:
 
 
 def main() -> None:
+    argparse.ArgumentParser(
+        description=(
+            "Read one JSON line containing scanIds or threadIds from stdin and write "
+            "a feedback attachment to stdout."
+        )
+    ).parse_args()
     write_feedback(json.loads(sys.stdin.readline()), sys.stdout)
 
 
