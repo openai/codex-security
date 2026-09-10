@@ -92,7 +92,7 @@ from workbench_findings import (
     list_stored_findings,
     read_receipt,
     store_dedupe_groups,
-    store_findings,
+    store_findings_payload,
 )
 from workbench_remediation import remediation_claim_is_active
 from workbench_scan_start import (
@@ -3656,14 +3656,7 @@ def main() -> None:
         elif args.command == "dashboard":
             result = dashboard(connection, json.load(sys.stdin))
         elif args.command == "store-findings":
-            payload = json.load(sys.stdin)
-            result = store_findings(
-                connection,
-                payload["entries"],
-                now(),
-                payload.get("repositoryId"),
-                payload.get("receipt"),
-            )
+            result = store_findings_payload(connection, json.load(sys.stdin), now)
         elif args.command == "finding-import-receipt":
             result = read_receipt(connection, json.load(sys.stdin)) or {}
         elif args.command == "embedding-chunks":

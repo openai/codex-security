@@ -8,6 +8,7 @@ import json
 import math
 import sqlite3
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,18 @@ def embedding_chunks(connection: sqlite3.Connection, payload: dict[str, Any]) ->
             ),
         )
     return {}
+
+
+def store_findings_payload(
+    connection: sqlite3.Connection, payload: dict[str, Any], now: Callable[[], str]
+) -> dict[str, Any]:
+    return store_findings(
+        connection,
+        payload["entries"],
+        now(),
+        payload.get("repositoryId"),
+        payload.get("receipt"),
+    )
 
 
 def store_findings(
