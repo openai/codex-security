@@ -461,7 +461,7 @@ test.each([
   [false, true],
   [true, true],
 ])(
-  "resumed CLI seals the original scan (coordinator finished: %s, bulk: %s)",
+  "resumed CLI seals the original scan (coordinator finished: %p, bulk: %p)",
   async (alreadyFinished, bulk) => {
     const f = await interruptedScan("deep", bulk);
     if (alreadyFinished) await finishDiscovery(f);
@@ -791,7 +791,7 @@ test("CLI saves launch settings before execution without depending on the prompt
 });
 
 test.each([false, true])(
-  "resume restores saved launch settings (bulk: %s)",
+  "resume restores saved launch settings (bulk: %p)",
   async (bulk) => {
     const settings = {
       safetyIdentifier: "synthetic-original-user",

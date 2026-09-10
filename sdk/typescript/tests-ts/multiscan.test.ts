@@ -373,7 +373,7 @@ describe("multiscan", () => {
   });
 
   test.each([false, true])(
-    "recovery records the original attempt and preserves it after resume failure=%s",
+    "recovery records the original attempt and preserves it after resume failure=%p",
     async (failure) => {
       const paths = await fixture();
       const source = await repository(paths.root, "retained");
