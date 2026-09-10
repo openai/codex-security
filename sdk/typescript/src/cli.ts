@@ -1493,14 +1493,15 @@ export async function runCodexSkillCommand(
           if (value === undefined) delete credentialConfig[key];
           else credentialConfig[key] = value;
         }
-        modelProvider = typeof provider === "string" ? provider : "openai";
-        credentialConfig["model_provider"] = modelProvider;
+        if (typeof provider === "string")
+          credentialConfig["model_provider"] = provider;
+        else delete credentialConfig["model_provider"];
         delete credentialConfig["profile"];
-        if (providerConfiguration === undefined)
+        if (typeof provider !== "string" || providerConfiguration === undefined)
           delete credentialConfig["model_providers"];
         else
           credentialConfig["model_providers"] = {
-            [modelProvider]: providerConfiguration,
+            [provider]: providerConfiguration,
           };
         await writeCodexConfig(
           join(codexHome, "config.toml"),

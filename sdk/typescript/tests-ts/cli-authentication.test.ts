@@ -1335,7 +1335,7 @@ describe("skill authentication", () => {
             }),
         SYNTHETIC_REQUEST_LOG: requestLog,
         ...(auth === "chatgpt"
-          ? { SYNTHETIC_EXPECTED_PROVIDER: provider ?? "openai" }
+          ? { SYNTHETIC_EXPECTED_PROVIDER: provider ?? "" }
           : {}),
         ...(auth === "chatgpt" && provider === undefined
           ? { SYNTHETIC_CHECK_STARTUP_LOCK: "1" }
@@ -1390,7 +1390,7 @@ describe("skill authentication", () => {
         expect(
           requests.find((request) => request.method === "thread/start").params
             .modelProvider,
-        ).toBe(auth === "chatgpt" ? provider ?? "openai" : undefined);
+        ).toBeUndefined();
       }
       expect(methods).toEqual([
         "initialize",
@@ -1538,7 +1538,6 @@ describe("skill authentication", () => {
         parseToml(await readFile(join(runtimeHome, "config.toml"), "utf8")),
       ).toEqual({
         model: auth === "auto" ? "existing-model" : "unrelated-model",
-        ...(auth === "auto" ? { model_provider: "openai" } : {}),
       });
     },
   );

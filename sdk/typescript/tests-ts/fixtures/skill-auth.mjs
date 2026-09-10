@@ -39,13 +39,13 @@ for await (const line of createInterface({ input: process.stdin })) {
         true,
       );
     }
-    if (process.env.SYNTHETIC_EXPECTED_PROVIDER) {
+    if (process.env.SYNTHETIC_EXPECTED_PROVIDER !== undefined) {
       const config = parseToml(
         readFileSync(join(process.env.CODEX_HOME, "config.toml"), "utf8"),
       );
       assert.equal(
         config.model_provider,
-        process.env.SYNTHETIC_EXPECTED_PROVIDER,
+        process.env.SYNTHETIC_EXPECTED_PROVIDER || undefined,
       );
       assert.equal(config.profile, undefined);
       assert.equal(config.model_providers?.stale, undefined);
