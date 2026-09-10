@@ -1258,18 +1258,16 @@ function validateComparison(
     ...[...new Set(findingIds.values())].map((findingId) => [findingId]),
   ]);
   if (enforceConfirmedIdentities) {
+    const occurrencesByFinding = Map.groupBy(
+      findingIds.keys(),
+      (occurrenceId) => findingIds.get(occurrenceId)!,
+    );
     for (const knownGroup of confirmedGroups) {
-      const knownFindingIds = new Set(knownGroup);
-      const knownBefore = input.before.filter(({ occurrenceId }) => {
-        const findingId = findingIds.get(occurrenceId);
-        return findingId !== undefined && knownFindingIds.has(findingId);
-      });
-      const knownAfter = input.after.filter(({ occurrenceId }) => {
-        const findingId = findingIds.get(occurrenceId);
-        return findingId !== undefined && knownFindingIds.has(findingId);
-      });
+      const knownOccurrences = knownGroup.flatMap(
+        (findingId) => occurrencesByFinding.get(findingId) ?? [],
+      );
       const matchedGroups = new Set(
-        [...knownBefore, ...knownAfter].flatMap(({ occurrenceId }) => {
+        knownOccurrences.flatMap((occurrenceId) => {
           const group =
             matchedBefore.get(occurrenceId) ?? matchedAfter.get(occurrenceId);
           return group === undefined ? [] : [group];
@@ -1278,13 +1276,13 @@ function validateComparison(
       if (
         matchedGroups.size > 1 ||
         (matchedGroups.size === 1 &&
-          [...knownBefore, ...knownAfter].some(
-            ({ occurrenceId }) =>
+          knownOccurrences.some(
+            (occurrenceId) =>
               !matchedBefore.has(occurrenceId) &&
               !matchedAfter.has(occurrenceId),
           )) ||
-        (knownBefore.length > 0 &&
-          knownAfter.length > 0 &&
+        (knownOccurrences.some((occurrenceId) => beforeIds.has(occurrenceId)) &&
+          knownOccurrences.some((occurrenceId) => afterIds.has(occurrenceId)) &&
           matchedGroups.size === 0)
       ) {
         throw new CodexSecurityError(

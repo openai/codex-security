@@ -138,6 +138,7 @@ from workbench_validation import (
     optional_text,
     parse_scan_cost,
     path_within_scope,
+    reject_non_finite_json,
     require_close_note,
     require_occurrence,
     require_uuid,
@@ -506,6 +507,8 @@ def manifest_target_kind(manifest: dict[str, Any]) -> str | None:
 def workbench_completion_binding(
     scan: sqlite3.Row,
     completed_at: str,
+    manifest: dict[str, Any] | None = None,
+    *,
     target_kind: str | None = None,
 ) -> dict[str, Any]:
     contract = scan_contract(scan)
@@ -529,6 +532,8 @@ def workbench_completion_binding(
         if scan["target_revision"] != "unversioned":
             target["revision"] = scan["target_revision"]
         if target_kind is None:
+            target_kind = manifest_target_kind(manifest) if manifest is not None else None
+        if target_kind is None:
             target_kind = target_contract["allowedKinds"][0]
         if "requiredSnapshotDigest" in target_contract and target_kind != "git_revision":
             target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
@@ -538,7 +543,7 @@ def workbench_completion_binding(
         "excludePaths": contract["scope"]["requiredExcludePaths"],
     }
 
-    return {
+    binding: dict[str, Any] = {
         "scanId": scan["id"],
         "startedAt": scan["started_at"],
         "completedAt": completed_at,
@@ -548,6 +553,7 @@ def workbench_completion_binding(
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
     }
+    return scan_history.preserve_sealed_completion(binding, manifest)
 
 
 def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None:
@@ -1491,24 +1497,33 @@ def complete_scan_locked(
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
     current_manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-    current_manifest = (
-        read_json_object(current_manifest_path) if current_manifest_path is not None else {}
-    )
-    target_kind = manifest_target_kind(current_manifest)
-    completion_binding = workbench_completion_binding(scan, completion_timestamp, target_kind)
-    if (
-        isinstance(current_manifest.get("scan"), dict)
-        and current_manifest["scan"].get("complete") is False
-    ):
-        raise SystemExit(
-            "The latest saved scan draft is incomplete; continue the scan before completing it."
+    current_manifest = None
+    if current_manifest_path is not None:
+        current_manifest = read_json_object(current_manifest_path)
+        if (
+            isinstance(current_manifest.get("scan"), dict)
+            and current_manifest["scan"].get("complete") is False
+        ):
+            raise SystemExit(
+                "The latest saved scan draft is incomplete; continue the scan before completing it."
+            )
+    already_sealed = (
+        current_manifest_path is not None
+        and current_manifest is not None
+        and isinstance(current_manifest.get("scan"), dict)
+        and (
+            current_manifest["scan"].get("sealedAt") is not None
+            or current_manifest["scan"].get("artifacts") is not None
         )
-    already_sealed = isinstance(current_manifest.get("scan"), dict) and (
-        current_manifest["scan"].get("sealedAt") is not None
-        or current_manifest["scan"].get("artifacts") is not None
+    )
+    target_kind = manifest_target_kind(current_manifest) if current_manifest is not None else None
+    completion_binding = workbench_completion_binding(
+        scan,
+        completion_timestamp,
+        current_manifest,
+        target_kind=target_kind,
     )
     if scan["recipe_json"] is not None:
-        draft_artifacts: dict[str, Path] = {}
         missing_drafts = []
         for file_name in (
             ARTIFACTS["manifest"],
@@ -1520,20 +1535,13 @@ def complete_scan_locked(
             except FileNotFoundError:
                 missing_drafts.append(file_name)
                 continue
-            draft_path = artifact_path(scan_dir, file_name, required=True)
-            if draft_path is not None:
-                draft_artifacts[file_name] = draft_path
+            artifact_path(scan_dir, file_name, required=True)
         if missing_drafts:
             raise SystemExit(
                 "Scan agent did not create required draft artifacts: "
                 f"{', '.join(missing_drafts)}. Check that the scan agent can run shell "
                 "commands and write to the scan directory before retrying."
             )
-        manifest = read_json_object(draft_artifacts[ARTIFACTS["manifest"]])
-        manifest_scan = manifest.get("scan")
-        if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
-            completion_binding["startedAt"] = manifest_scan.get("startedAt")
-            completion_binding["completedAt"] = manifest_scan.get("completedAt")
     wrote = False
     try:
         prepared = _prepare_scan_finalization(
@@ -1562,7 +1570,11 @@ def complete_scan_locked(
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
-        if wrote or (scan["mode"] == "deep" and not isinstance(exc, RecoverableContractError)):
+        if wrote or (
+            scan["mode"] == "deep"
+            and not already_sealed
+            and not isinstance(exc, RecoverableContractError)
+        ):
             args = argparse.Namespace(claim_token=claim_token, cost_json=cost_json)
             args.message, args.scan_id = str(exc), scan_id
             fail_scan_locked(connection, args)
@@ -1871,17 +1883,6 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
         if not isinstance(target.get("base"), str) or not isinstance(target.get("head"), str):
             raise SystemExit("Diff scan launch recipes require resolved base and head revisions.")
     return recipe
-
-
-def get_scan_recipe(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    scan = require_scan(connection, args.scan_id)
-    if scan["recipe_json"] is None:
-        raise SystemExit("This scan does not have a saved launch recipe.")
-    return {
-        "parentScanId": scan["parent_scan_id"],
-        "recipe": json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json),
-        "scanId": scan["id"],
-    }
 
 
 _WORKBENCH_DB_CONTEXT: saved_results.WorkbenchDbContext
@@ -3380,10 +3381,6 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
-def reject_non_finite_json(value: str) -> None:
-    raise ValueError(f"non-finite JSON number {value!r} is not supported")
-
-
 _WORKBENCH_PUBLICATION_CONTEXT = publication.WorkbenchPublicationContext(
     ARTIFACTS=ARTIFACTS,
     artifact_path=artifact_path,
@@ -3523,7 +3520,25 @@ def main() -> None:
         elif args.command == "set-scan-cost-limit":
             result = set_scan_cost_limit(connection, args)
         elif args.command == "get-scan-recipe":
-            result = get_scan_recipe(connection, args)
+            result = scan_history.scan_recipe(require_scan(connection, args.scan_id))
+        elif args.command == "get-cli-scan-resume":
+            scan = require_scan(connection, args.scan_id)
+            try:
+                result = scan_history.cli_scan_resume(
+                    connection,
+                    scan,
+                    require_workspace(connection, scan["workspace_id"]),
+                    parse_scan_recipe=parse_scan_recipe,
+                    scan_contract=scan_contract,
+                    require_scan_directory=require_canonical_scan_directory,
+                    artifact_path=artifact_path,
+                    read_json_object=read_json_object,
+                    workbench_completion_binding=workbench_completion_binding,
+                )
+            except SystemExit as exc:
+                if not args.allow_unavailable:
+                    raise
+                result = {"unavailable": str(exc)}
         elif args.command == "compare-scans":
             result = scan_history.compare_scans(
                 connection,

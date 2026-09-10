@@ -64,6 +64,7 @@ import {
   type ScanPreflight,
 } from "./api.js";
 import { accountStatus } from "./auth.js";
+import { loadContract } from "./contract.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import {
@@ -99,6 +100,7 @@ import {
   type JsonValue,
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
+import { formatScanCostTokens, formatTokenUsage } from "./cost-model.js";
 import {
   CodexSecurityError,
   ConfigurationError,
@@ -138,6 +140,7 @@ import {
   type PublishScanResult,
 } from "./publish.js";
 import type { ScanResult } from "./result.js";
+import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
   canonicalizeModelSafePath,
@@ -168,12 +171,23 @@ import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
 } from "./thread-source.js";
-import { readScanLogs } from "./scan-logs.js";
+import {
+  findScanSession,
+  readSavedScanLogs,
+  type ScanLogSource,
+} from "./scan-logs.js";
+import { sendFeedback } from "./feedback.js";
 import {
   renderScanHistory,
   type HistoryCommand,
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
+import {
+  policyDisplayData,
+  runPolicyCommand,
+  type PolicyPrompt,
+  type PolicySecurity,
+} from "./security-policy-cli.js";
 import type { PatchSelection } from "./patch-tui.js";
 import {
   scanPhaseLabel as scanPhase,
@@ -323,7 +337,9 @@ const PROVIDER_OPTION = z
 const CREATE_PR_OPTION = z
   .boolean()
   .default(false)
-  .describe("Create a draft GitHub pull request after verified patches.");
+  .describe(
+    "Create a draft GitHub pull request or GitLab merge request after verified patches.",
+  );
 const ASSESS_PATCH_RISK_OPTION = z
   .boolean()
   .default(false)
@@ -990,6 +1006,7 @@ export function resolveCliPath(directory: string, value: string): string {
 }
 
 interface ScanArguments extends DeepScanOptions {
+  resumeScanId?: string;
   mock?: boolean;
   workflowId?: string;
   auth?: ScanAuthMode;
@@ -1001,6 +1018,7 @@ interface ScanArguments extends DeepScanOptions {
   scanPromptFile?: string;
   validationPromptFile?: string;
   postScanPromptFile?: string;
+  postScanPrompt?: string;
   diff?: string;
   workingTree: boolean;
   head?: string;
@@ -1132,6 +1150,8 @@ interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
+  createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
+  policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
   prepareAuthenticationHome?: (
     environment: NodeJS.ProcessEnv,
@@ -1149,6 +1169,7 @@ interface CliDependencies {
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
   publishScanToCustom?: typeof publishScanToCustom;
+  sendFeedback?: typeof sendFeedback;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
     repository: string,
@@ -1174,7 +1195,7 @@ interface CliDependencies {
     input?: string,
   ): Promise<number>;
   runRepositoryCommand(
-    command: "git" | "gh",
+    command: "git" | "gh" | "glab",
     args: readonly string[],
     repository: string,
     options?: { trim?: boolean; environment?: NodeJS.ProcessEnv },
@@ -1184,6 +1205,7 @@ interface CliDependencies {
   planComponents?: typeof planComponents;
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
+  importScan?: typeof importScan;
   runWorkbench(
     args: readonly string[],
     input?: string,
@@ -1592,10 +1614,12 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
-  argv = defaultListCommand(argv);
+  argv = normalizeScanImportArguments(defaultListCommand(argv));
+  const policyFullOutput =
+    argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
   const positionals: string[] = [];
   const argumentError = validateCliArguments(argv, positionals);
-  if (argumentError !== undefined) {
+  if (argumentError !== undefined && !policyFullOutput) {
     errorOutput.write(`codex-security: ${argumentError}\n`);
     return 2;
   }
@@ -1625,6 +1649,9 @@ export async function main(
   let frameworkOutput = "";
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
+  let renderedPolicy: string | undefined;
+  const runImport = (options: ImportScanOptions) =>
+    runScanImport(options, errorOutput, dependencies);
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
@@ -1971,36 +1998,73 @@ export async function main(
         if (scanId === undefined) return;
         return await history(
           ["get-scan", "--scan-id", scanId],
-          async (value) => {
-            const scan = value["scan"] as {
-              scanId: string;
-              continuationThreadId?: string;
-              mode?: string;
-              progress?: { status?: string; updatedAt?: string };
-              scanDir?: string;
-            };
-            const threadId = scan.continuationThreadId;
-            if (!threadId) {
-              throw new CodexSecurityError(
-                `No session is associated with scan ${scan.scanId}.`,
-              );
-            }
-            return (await readScanLogs({
-              scanId: scan.scanId,
-              threadId,
-              codexHome: codexSecurityCredentialHome(dependencies.environment),
-              scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
-              completedAt:
-                scan.progress?.status === "running"
-                  ? null
-                  : scan.progress?.status === "complete" ||
-                      scan.progress?.status === "failed" ||
-                      scan.progress?.status === "canceled"
-                    ? scan.progress.updatedAt ?? ""
-                    : "",
-            })) as unknown as JsonObject;
-          },
+          async (value) =>
+            (await readSavedScanLogs(
+              value["scan"] as ScanLogSource,
+              codexSecurityCredentialHome(dependencies.environment),
+            )) as unknown as JsonObject,
         );
+      },
+    })
+    .command("resume", {
+      description: "Resume an interrupted Deep Scan in its original session.",
+      mcp: false,
+      args: z.object({
+        scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
+      }),
+      options: z.object({
+        verbose: z
+          .boolean()
+          .default(false)
+          .describe("Print scan diagnostics to stderr."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, error: incurError, options }) {
+        let scanArguments: ScanArguments;
+        try {
+          const saved = await dependencies.runWorkbench([
+            "get-cli-scan-resume",
+            "--scan-id",
+            args.scanId,
+          ]);
+          if (
+            typeof saved["scanId"] !== "string" ||
+            typeof saved["scanDir"] !== "string"
+          ) {
+            throw new CodexSecurityError(
+              "The workbench returned invalid scan resume context.",
+            );
+          }
+          scanArguments = scanArgumentsFromRecipe(
+            saved["recipe"],
+            saved["scanId"],
+          );
+          scanArguments.resumeScanId = saved["scanId"];
+          scanArguments.outputDir = saved["scanDir"];
+          scanArguments.parentScanId = undefined;
+          // Resume uses the installed engine with the saved recipe and checkpoints.
+          scanArguments.expectedPluginVersion = undefined;
+          scanArguments.verbose = options.verbose;
+        } catch (error) {
+          const message = errorMessage(error);
+          errorOutput.write(`codex-security: ${message}\n`);
+          exitCode = 2;
+          return incurError({
+            code: "SCAN_RESUME_UNAVAILABLE",
+            message,
+            exitCode,
+          });
+        }
+        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        exitCode = outcome.exitCode;
+        if (outcome.error !== undefined) {
+          return incurError({
+            code: "SCAN_FAILED",
+            message: outcome.error,
+            exitCode,
+          });
+        }
+        return outcome.data;
       },
     })
     .command("rerun", {
@@ -2036,6 +2100,44 @@ export async function main(
             "--scan-id",
             scanId,
           ]);
+          if (
+            recipe !== undefined &&
+            isJsonObject(recipe) &&
+            recipe["import"] !== undefined &&
+            isJsonObject(recipe["import"])
+          ) {
+            if (options.validationPromptFile !== undefined) {
+              throw new CodexSecurityError(
+                "--validation-prompt-file is not supported when rerunning an imported scan; imports do not perform security analysis.",
+              );
+            }
+            const imported = recipe["import"];
+            const sourcePath = imported["sourcePath"];
+            const format = imported["format"];
+            if (
+              typeof sourcePath !== "string" ||
+              sourcePath.length === 0 ||
+              (format !== "csv" && format !== "json")
+            ) {
+              throw new CodexSecurityError(
+                "The saved scan recipe contains invalid import settings.",
+              );
+            }
+            const outcome = await runImport({
+              sourcePath,
+              format,
+              parentScanId: scanId,
+            });
+            exitCode = outcome.exitCode;
+            if (outcome.error !== undefined) {
+              return incurError({
+                code: "SCAN_IMPORT_FAILED",
+                message: outcome.error,
+                exitCode,
+              });
+            }
+            return outcome.data;
+          }
           scanArguments = scanArgumentsFromRecipe(
             recipe,
             scanId,
@@ -2880,7 +2982,7 @@ export async function main(
   });
   const cli = Cli.create("codex-security", {
     description:
-      "Run, import, validate, patch, verify fixes, export, and publish Codex Security findings.",
+      "Draft security policies; run, import, validate, patch, verify fixes, export, and publish Codex Security findings.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -2888,8 +2990,206 @@ export async function main(
         "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
     },
   })
+    .command("policy", {
+      description:
+        "Draft SECURITY.md guidance for future scans and owner review.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        repository: z
+          .string()
+          .optional()
+          .describe(
+            "Repository or component directory (default: current directory).",
+          ),
+      }),
+      options: z.object({
+        path: optionValue("--path")
+          .optional()
+          .describe(
+            "Generate SECURITY.md for this repository-relative component directory.",
+          ),
+        knowledgeBase: z
+          .array(optionValue("--knowledge-base"))
+          .default([])
+          .describe(
+            "Add architecture or security-context files; repeat for multiple paths.",
+          ),
+        outputDir: optionValue("--output-dir")
+          .optional()
+          .describe(
+            "Private artifact directory outside the repository (default: Codex Security state).",
+          ),
+        headless: z
+          .boolean()
+          .default(false)
+          .describe("Skip owner questions and authentication prompts."),
+        dryRun: z
+          .boolean()
+          .default(false)
+          .describe("Validate local generation inputs without starting Codex."),
+        auth: z
+          .enum(["auto", "chatgpt", "api-key"])
+          .default("auto")
+          .describe("Select ChatGPT, API-key, or automatic authentication."),
+        model: optionValue("--model")
+          .optional()
+          .describe(
+            `Model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+          ),
+        effort: effortOption(),
+        provider: PROVIDER_OPTION.describe(
+          "Inference provider for policy generation.",
+        ),
+        maxCost: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            "Stop when estimated total USD cost across all three stages exceeds AMOUNT.",
+          ),
+        pluginPath: optionValue("--plugin-path")
+          .optional()
+          .describe(PLUGIN_PATH_DESCRIPTION),
+        python: optionValue("--python")
+          .optional()
+          .describe(PYTHON_PATH_DESCRIPTION),
+        codex: z
+          .array(optionValue("--codex"))
+          .default([])
+          .describe(CODEX_OVERRIDE_DESCRIPTION),
+      }),
+      examples: [
+        { args: { repository: "." } },
+        { args: { repository: "." }, options: { path: "services/api" } },
+      ],
+      hint:
+        "Save a draft for review:\n" +
+        "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json",
+      output: z
+        .union([z.record(z.string(), z.unknown()), z.string()])
+        .optional(),
+      async run({ args, error: incurError, options, format, formatExplicit }) {
+        const outputOptions = argv.filter((argument) =>
+          OUTPUT_OPTION.test(argument),
+        );
+        const explicitOutput = formatExplicit || outputOptions.length > 0;
+        const transformOutput = outputOptions.some(
+          (argument) => !argument.startsWith("--format"),
+        );
+        const filterOutput = outputOptions.some((argument) =>
+          argument.startsWith("--filter-output"),
+        );
+        const fail = (message: string, failureExitCode: number) => {
+          exitCode = failureExitCode;
+          return incurError({
+            code: "POLICY_FAILED",
+            message,
+            exitCode: failureExitCode,
+          });
+        };
+        try {
+          if (argumentError !== undefined) return fail(argumentError, 2);
+          const directory = dependencies.currentDirectory();
+          const outcome = await withTerminalErrorsHandled(errorOutput, () =>
+            runPolicyCommand(
+              {
+                repository: resolveCliPath(directory, args.repository ?? "."),
+                config: {
+                  pluginPath: options.pluginPath,
+                  pythonPath: options.python,
+                  codexOverrides: parseCodexOverrides(
+                    options.codex,
+                    options.model,
+                    options.effort,
+                    options.provider,
+                  ),
+                },
+                generation: {
+                  auth: options.auth,
+                  path: options.path,
+                  knowledgeBasePaths: options.knowledgeBase.map((path) =>
+                    resolveCliPath(directory, path),
+                  ),
+                  outputDir:
+                    options.outputDir === undefined
+                      ? undefined
+                      : resolveCliPath(directory, options.outputDir),
+                  maxCostUsd: options.maxCost,
+                },
+                headless: options.headless || explicitOutput,
+                dryRun: options.dryRun,
+                format,
+                explicitOutput,
+              },
+              {
+                createSecurity:
+                  dependencies.createPolicySecurity ??
+                  ((config) =>
+                    createSecurityInternal(config, { surface: "cli" })),
+                chooseAuthentication: (config, auth, signal) =>
+                  chooseInteractiveAuthentication(
+                    {
+                      auth,
+                      provider: scanModelProvider({
+                        ...DEFAULT_CODEX_CONFIG,
+                        ...config.codexOverrides,
+                      }),
+                      command: "policy",
+                      signal,
+                    },
+                    errorOutput,
+                    dependencies,
+                  ),
+                prompt:
+                  dependencies.policyPrompt ??
+                  createBulkScanDiscoveryDependencies({
+                    output: errorOutput,
+                    now: dependencies.now,
+                    currentDirectory: dependencies.currentDirectory,
+                  }).prompt,
+                environment: dependencies.environment,
+                errorOutput,
+                now: dependencies.now,
+                addSignalListener: dependencies.addSignalListener,
+                removeSignalListener: dependencies.removeSignalListener,
+                forceExit: dependencies.forceExit,
+              },
+            ),
+          );
+          exitCode = outcome.exitCode;
+          if (exitCode !== 0) {
+            return fail(outcome.error ?? "Policy command failed.", exitCode);
+          }
+          if (
+            format === "md" &&
+            outcome.markdown !== undefined &&
+            !filterOutput
+          ) {
+            if (!transformOutput) renderedPolicy = outcome.markdown;
+            return outcome.markdown;
+          }
+          return format === "toon" && !explicitOutput && !options.dryRun
+            ? undefined
+            : format === "toon"
+              ? policyDisplayData(outcome.data)
+              : outcome.data;
+        } catch (error) {
+          const message = safeErrorMessage(error);
+          try {
+            errorOutput.write(`codex-security: ${message}\n`);
+          } catch {}
+          return fail(message, 2);
+        }
+      },
+    })
     .command("scan", {
       description: "Run a Codex Security scan.",
+      hint:
+        "Import existing findings without security analysis:\n" +
+        "  codex-security scan import --csv findings.csv\n" +
+        "  codex-security scan import --json findings.json\n" +
+        "Use ./import to scan a repository named import.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3706,6 +4006,12 @@ export async function main(
           ),
       }),
       options: z.object({
+        recover: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Recover failed or interrupted attempts in an existing campaign, preserving their artifacts and checkouts.",
+          ),
         outputDir: z
           .string()
           .min(1, "--output-dir must not be empty.")
@@ -3797,6 +4103,11 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
+          if (options.recover && args.input === undefined) {
+            throw new Error(
+              "Bulk recovery requires the original repository CSV and --output-dir.",
+            );
+          }
           const prompts = await readPromptFiles(
             currentDirectory,
             options.scanPromptFile,
@@ -3858,6 +4169,99 @@ export async function main(
               ),
             },
             createSecurity: dependencies.createSecurity,
+            ...(options.recover
+              ? {
+                  recoverScan: async (scanDir: string) => {
+                    const history = await dependencies.runWorkbench(
+                      ["list-scans", "--scan-root", scanDir],
+                      undefined,
+                      controller.signal,
+                    );
+                    const scan = (history["scans"] as SavedScan[]).find(
+                      (scan) => resolve(scan.scanDir) === scanDir,
+                    );
+                    if (scan === undefined) return undefined;
+                    const status = (scan["progress"] as JsonObject)["status"];
+                    if (status === "complete") {
+                      const contract = await loadContract(scanDir, {
+                        pluginRoot: await bundledPluginRoot(),
+                        expectedScanId: scan.scanId,
+                        signal: controller.signal,
+                      });
+                      return {
+                        coverage: contract.coverage,
+                        cost:
+                          (scan["cost"] as unknown as ScanCost | undefined) ??
+                          null,
+                      };
+                    }
+                    if (status !== "running" || scan["mode"] !== "deep")
+                      return undefined;
+                    const saved = await dependencies.runWorkbench(
+                      [
+                        "get-cli-scan-resume",
+                        "--scan-id",
+                        scan.scanId,
+                        "--allow-unavailable",
+                      ],
+                      undefined,
+                      controller.signal,
+                    );
+                    if (typeof saved["unavailable"] === "string") {
+                      errorOutput.write(
+                        `codex-security: ${scan.scanId}: ${saved["unavailable"]} Preserving this attempt and starting a new one.\n`,
+                      );
+                      return undefined;
+                    }
+                    const session =
+                      typeof saved["threadId"] === "string"
+                        ? await findScanSession(
+                            codexSecurityCredentialHome(
+                              dependencies.environment,
+                            ),
+                            saved["threadId"],
+                          )
+                        : null;
+                    if (session?.workingDirectory !== scanDir) {
+                      errorOutput.write(
+                        `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
+                      );
+                      return undefined;
+                    }
+                    const recipe = scanArgumentsFromRecipe(
+                      saved["recipe"],
+                      scan.scanId,
+                    );
+                    const security = dependencies.createSecurity({
+                      pluginPath: options.pluginPath,
+                      pythonPath: options.python,
+                      codexOverrides: recipe.codexOverrides,
+                    });
+                    try {
+                      return await security.run(recipe.repository!, {
+                        resumeScanId: scan.scanId,
+                        outputDir: scanDir,
+                        mode: recipe.mode,
+                        target: targetFromArguments(recipe),
+                        knowledgeBasePaths: recipe.knowledgeBasePaths,
+                        workers: recipe.workers,
+                        subagents: recipe.subagents,
+                        stopAfterNoNew: recipe.stopAfterNoNew,
+                        maxDiscoveryRuns: recipe.maxDiscoveryRuns,
+                        maxTimeHours: recipe.maxTimeHours,
+                        maxCostUsd: recipe.maxCostUsd,
+                        failureSeverity: recipe.failOnSeverity,
+                        safetyIdentifier: recipe.safetyIdentifier,
+                        postScanPrompt:
+                          recipe.postScanPrompt ?? prompts.postScanPrompt,
+                        signal: controller.signal,
+                      });
+                    } finally {
+                      await security.close();
+                    }
+                  },
+                }
+              : {}),
             signal: controller.signal,
             onProgress: ({ repository, status, attempt, error, warning }) => {
               const detail = error ?? warning;
@@ -4629,6 +5033,80 @@ export async function main(
         }
       },
     })
+    .command("feedback", {
+      description: "Send feedback to OpenAI and return a feedback ID.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        scanId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Scan ID or unique prefix (default: most recently started scan in the current repository).",
+          ),
+      }),
+      options: z.object({
+        reason: z.string().trim().min(1).describe("Describe the problem."),
+        includeLogs: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Upload diagnostic logs, including scan and worker conversations and tool output. Defaults to off.",
+          ),
+      }),
+      output: z.object({
+        feedbackId: z.string(),
+        scanId: z.string().nullable(),
+        includedLogs: z.boolean(),
+      }),
+      async run({ args, options }) {
+        let scanId = args.scanId;
+        if (scanId === undefined) {
+          const value = await history([
+            "list-scans",
+            "--repository",
+            dependencies.currentDirectory(),
+          ]);
+          const scans = value["scans"] as {
+            scanId: string;
+            startedAt: string;
+          }[];
+          scanId = scans.toSorted((a, b) =>
+            b.startedAt.localeCompare(a.startedAt),
+          )[0]?.scanId;
+        }
+        const scan =
+          scanId === undefined
+            ? undefined
+            : ((await history(["get-scan", "--scan-id", scanId]))[
+                "scan"
+              ] as ScanLogSource);
+        const controller = new AbortController();
+        const onInterrupt = () => controller.abort("SIGINT");
+        const onTerminate = () => controller.abort("SIGTERM");
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          return await (dependencies.sendFeedback ?? sendFeedback)({
+            ...options,
+            scan,
+            environment: dependencies.environment,
+            workingDirectory: dependencies.currentDirectory(),
+            signal: controller.signal,
+          });
+        } catch (error) {
+          if (controller.signal.aborted) {
+            exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+            errorOutput.write("codex-security: Feedback upload canceled.\n");
+          }
+          throw error;
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command("info", {
       description: "Show read-only SDK and bundled-plugin metadata.",
       mcp: {
@@ -4667,6 +5145,92 @@ export async function main(
       },
     });
 
+  // Incur cannot mount a command with both a handler and subcommands.
+  // Select the nested import route while preserving scan [repository].
+  if (isScanImportCommand(argv)) {
+    cli.command(
+      Cli.create("scan", {
+        description: "Run or import a saved scan.",
+      }).command("import", {
+        description:
+          "Save CSV or JSON findings as a completed scan without security analysis.",
+        destructive: true,
+        mcp: false,
+        options: z
+          .object({
+            csv: optionValue("--csv")
+              .optional()
+              .describe("Findings CSV in the codex-security export format."),
+            json: optionValue("--json")
+              .optional()
+              .describe(
+                "Findings JSON document or object with a findings array.",
+              ),
+            outputDir: optionValue("--output-dir")
+              .optional()
+              .describe(
+                "Artifact directory (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+              ),
+            archiveExisting: z
+              .boolean()
+              .default(false)
+              .describe("Archive existing results; requires --output-dir."),
+            dryRun: z
+              .boolean()
+              .default(false)
+              .describe("Validate the input without saving a scan."),
+          })
+          .refine(
+            (options) =>
+              Number(options.csv !== undefined) +
+                Number(options.json !== undefined) ===
+              1,
+            { message: "Provide exactly one of --csv FILE or --json FILE." },
+          )
+          .refine(
+            (options) =>
+              !options.archiveExisting || options.outputDir !== undefined,
+            { message: "--archive-existing requires --output-dir." },
+          ),
+        examples: [
+          { options: { csv: "findings.csv" } },
+          { options: { json: "findings.json" } },
+        ],
+        hint: "Each input row is retained, including duplicates. --json selects the input file; use --format json for JSON output.",
+        output: z.record(z.string(), z.unknown()).optional(),
+        async run({ options, format, error: incurError }) {
+          const directory = dependencies.currentDirectory();
+          const outcome = await runImport({
+            sourcePath: resolveCliPath(directory, options.csv ?? options.json!),
+            format: options.csv === undefined ? "json" : "csv",
+            outputDir:
+              options.outputDir === undefined
+                ? undefined
+                : resolveCliPath(directory, options.outputDir),
+            archiveExisting: options.archiveExisting,
+            dryRun: options.dryRun,
+          });
+          exitCode = outcome.exitCode;
+          if (outcome.error !== undefined) {
+            return incurError({
+              code: "SCAN_IMPORT_FAILED",
+              message: outcome.error,
+              exitCode,
+            });
+          }
+          if (
+            !options.dryRun &&
+            format === "toon" &&
+            !argv.some((argument) => OUTPUT_OPTION.test(argument))
+          ) {
+            return;
+          }
+          return outcome.data;
+        },
+      }),
+    );
+  }
+
   let notice: UpdateNotice | undefined;
   try {
     await cli.serve(
@@ -4692,17 +5256,24 @@ export async function main(
   }
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
-    if (exitCode !== 0) return exitCode;
-    errorOutput.write(
-      `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
-    );
-    return 2;
+    if (policyFullOutput) {
+      if (exitCode === 0) exitCode = 2;
+    } else {
+      if (exitCode !== 0) return exitCode;
+      errorOutput.write(
+        `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+      );
+      return 2;
+    }
   }
   if (frameworkOutput.length === 0) return exitCode;
   try {
     await writeCliOutput(
       output,
-      renderedPublication ?? renderedHistory ?? frameworkOutput,
+      renderedPolicy ??
+        renderedPublication ??
+        renderedHistory ??
+        frameworkOutput,
     );
     return exitCode;
   } catch (error) {
@@ -4711,11 +5282,86 @@ export async function main(
   }
 }
 
-function defaultListCommand(argv: readonly string[]): readonly string[] {
-  const commandIndex = argv.findIndex((value, index) => {
+async function runScanImport(
+  options: ImportScanOptions,
+  errorOutput: Writable,
+  dependencies: CliDependencies,
+): Promise<ScanOutcome> {
+  const controller = new AbortController();
+  const onInterrupt = () => controller.abort("SIGINT");
+  const onTerminate = () => controller.abort("SIGTERM");
+  dependencies.addSignalListener("SIGINT", onInterrupt);
+  dependencies.addSignalListener("SIGTERM", onTerminate);
+  try {
+    const result = await (dependencies.importScan ?? importScan)(
+      { ...options, signal: controller.signal },
+      { environment: dependencies.environment },
+    );
+    if ("dryRun" in result) return { exitCode: 0, data: { ...result } };
+    try {
+      errorOutput.write(
+        `Imported ${result.findings.findings.length} findings as scan ${result.manifest.scan.id}.\n` +
+          `Artifacts: ${result.scanDir}\n`,
+      );
+    } catch {}
+    return { exitCode: 0, data: result.toJSON() };
+  } catch (error) {
+    const signal = controller.signal.reason;
+    const message =
+      signal === "SIGINT" || signal === "SIGTERM"
+        ? "Scan import canceled."
+        : safeErrorMessage(error);
+    errorOutput.write(`codex-security: ${message}\n`);
+    return {
+      exitCode: signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2,
+      error: message,
+    };
+  } finally {
+    dependencies.removeSignalListener("SIGINT", onInterrupt);
+    dependencies.removeSignalListener("SIGTERM", onTerminate);
+  }
+}
+
+function isScanImportCommand(argv: readonly string[]): boolean {
+  const commandIndex = cliCommandIndex(argv);
+  return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
+}
+
+function normalizeScanImportArguments(
+  argv: readonly string[],
+): readonly string[] {
+  if (!isScanImportCommand(argv)) return argv;
+  const normalized: string[] = [];
+  const subcommandIndex = cliCommandIndex(argv) + 1;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!;
+    const next = argv[index + 1];
+    // Incur reserves bare --json for output, but parses --json=FILE normally.
+    if (
+      index > subcommandIndex &&
+      argument === "--json" &&
+      next !== undefined &&
+      !next.startsWith("--") &&
+      next !== "-h"
+    ) {
+      normalized.push(`--json=${next}`);
+      index += 1;
+    } else {
+      normalized.push(argument);
+    }
+  }
+  return normalized;
+}
+
+function cliCommandIndex(argv: readonly string[]): number {
+  return argv.findIndex((value, index) => {
     if (value.startsWith("-")) return false;
     return index === 0 || !VALUE_OPTIONS.has(argv[index - 1]!);
   });
+}
+
+function defaultListCommand(argv: readonly string[]): readonly string[] {
+  const commandIndex = cliCommandIndex(argv);
   if (
     commandIndex < 0 ||
     !["scans", "findings"].includes(argv[commandIndex]!) ||
@@ -4860,11 +5506,23 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains deep scan settings for a standard scan.",
     );
   }
+  const safetyIdentifier = recipe["safetyIdentifier"];
+  const postScanPrompt = recipe["postScanPrompt"];
+  if (
+    (safetyIdentifier !== undefined && typeof safetyIdentifier !== "string") ||
+    (postScanPrompt !== undefined && typeof postScanPrompt !== "string")
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid launch settings.",
+    );
+  }
   return {
     repository,
     paths,
     knowledgeBasePaths,
     validationPromptFile,
+    safetyIdentifier,
+    postScanPrompt,
     diff: kind === "refs" ? reference : undefined,
     workingTree: kind === "working_tree",
     head: kind === "refs" ? head ?? "HEAD" : undefined,
@@ -4893,9 +5551,13 @@ function validateCliArguments(
   positionals: string[],
 ): string | undefined {
   if (argv.includes("--help") || argv.includes("-h")) return undefined;
-  const commandIndex = argv.findIndex((value) =>
-    [
+  const commandIndex = cliCommandIndex(argv);
+  const command = argv[commandIndex];
+  if (
+    command === undefined ||
+    ![
       "scan",
+      "policy",
       "install-hook",
       "bulk-scan",
       "scan-components",
@@ -4910,11 +5572,12 @@ function validateCliArguments(
       "login",
       "logout",
       "serve",
+      "feedback",
       "info",
-    ].includes(value),
-  );
-  if (commandIndex < 0) return undefined;
-  const command = argv[commandIndex]!;
+    ].includes(command)
+  ) {
+    return undefined;
+  }
   const structuredOutput = argv.some(
     (value, index) =>
       value === "--json" ||
@@ -4968,7 +5631,9 @@ function validateCliArguments(
       return "Markdown output is not supported for scan results.";
     }
   }
+  const scanImport = isScanImportCommand(argv);
   const nestedCommand =
+    scanImport ||
     command === "scans" ||
     command === "findings" ||
     command === "publish" ||
@@ -5018,7 +5683,11 @@ function validateCliArguments(
     }
     const equals = value.indexOf("=");
     const option = equals < 0 ? value : value.slice(0, equals);
-    if (equals >= 0 || !VALUE_OPTIONS.has(option)) continue;
+    if (
+      equals >= 0 ||
+      (!VALUE_OPTIONS.has(option) && !(scanImport && option === "--json"))
+    )
+      continue;
     const next = argv[index + 1];
     if (next === undefined || next.startsWith("--") || next === "-h") {
       return `Missing value for flag: ${option}`;
@@ -5041,7 +5710,10 @@ function validateCliArguments(
     command !== "verify-fix" &&
     command !== "patch" &&
     positionals.length >
-      (command === "logout" || command === "info" || command === "serve"
+      (scanImport ||
+      command === "logout" ||
+      command === "info" ||
+      command === "serve"
         ? 0
         : subcommand === "compare" || subcommand === "match"
           ? 2
@@ -5367,36 +6039,90 @@ async function publishPatchBranch(
   stderr: Writable,
   dependencies: CliDependencies,
 ): Promise<{ branch: string; url: string }> {
-  const run = (command: "git" | "gh", args: string[]) =>
+  const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
   try {
-    let url = await run("gh", [
-      "pr",
-      "list",
-      "--head",
-      branch,
-      "--state",
-      "all",
-      "--json",
-      "url",
-      "--jq",
-      ".[0].url // empty",
-    ]);
+    const remote = await run("git", ["remote", "get-url", "--push", "origin"]);
+    const host = patchRemoteHost(remote);
+    const gitlabHost =
+      dependencies.environment["GITLAB_HOST"] ||
+      dependencies.environment["GITLAB_URI"] ||
+      dependencies.environment["GL_HOST"];
+    const gitlab =
+      host === "gitlab.com" ||
+      (host !== undefined &&
+        gitlabHost !== undefined &&
+        host ===
+          patchRemoteHost(
+            gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
+          ));
+    const command = gitlab ? "glab" : "gh";
+    let url = await run(
+      command,
+      gitlab
+        ? [
+            "mr",
+            "list",
+            "--all",
+            "--source-branch",
+            branch,
+            "--output",
+            "json",
+            "--jq",
+            ".[0].web_url // empty",
+            "--repo",
+            remote,
+          ]
+        : [
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--json",
+            "url",
+            "--jq",
+            ".[0].url // empty",
+          ],
+    );
     if (!url) {
       await run("git", ["push", "--set-upstream", "origin", branch]);
-      url = await run("gh", [
-        "pr",
-        "create",
-        "--draft",
-        "--head",
-        branch,
-        "--title",
-        PATCH_PR_TITLE,
-        "--body",
-        body,
-      ]);
+      url = await run(
+        command,
+        gitlab
+          ? [
+              "mr",
+              "create",
+              "--draft",
+              "--head",
+              remote,
+              "--source-branch",
+              branch,
+              "--title",
+              PATCH_PR_TITLE,
+              "--description",
+              body,
+              "--yes",
+              "--repo",
+              remote,
+            ]
+          : [
+              "pr",
+              "create",
+              "--draft",
+              "--head",
+              branch,
+              "--title",
+              PATCH_PR_TITLE,
+              "--body",
+              body,
+            ],
+      );
     }
-    stderr.write(`Pull request: ${safePatchText(url)}\n`);
+    stderr.write(
+      `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url)}\n`,
+    );
     return { branch, url };
   } catch (error) {
     stderr.write(
@@ -5404,6 +6130,11 @@ async function publishPatchBranch(
     );
     throw error;
   }
+}
+
+function patchRemoteHost(remote: string): string | undefined {
+  if (remote.includes("://")) return new URL(remote).hostname.toLowerCase();
+  return /^(?:[^@/]+@)?([^:/]+):[^/]/u.exec(remote)?.[1]?.toLowerCase();
 }
 
 async function resumePatchPullRequest(
@@ -5484,14 +6215,14 @@ async function createPatchPullRequest(
 
   const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
   const body = patchPullRequestBody(patchRiskSummary, introduction);
-  const run = (command: "git" | "gh", args: string[]) =>
-    dependencies.runRepositoryCommand(command, args, repository);
+  const run = (args: string[]) =>
+    dependencies.runRepositoryCommand("git", args, repository);
   stderr.write(
-    "Creating a draft GitHub pull request for verified patches...\n",
+    "Creating a draft pull request or merge request for verified patches...\n",
   );
-  await run("git", ["switch", "-c", branch]);
-  await run("git", ["--literal-pathspecs", "add", "--", ...files]);
-  await run("git", [
+  await run(["switch", "-c", branch]);
+  await run(["--literal-pathspecs", "add", "--", ...files]);
+  await run([
     "--literal-pathspecs",
     "commit",
     "--only",
@@ -5500,14 +6231,9 @@ async function createPatchPullRequest(
     "--",
     ...files,
   ]);
-  const commit = await run("git", ["rev-parse", "HEAD"]);
-  await run("git", ["config", "--local", patchCommitKey(branch), commit]);
-  await run("git", [
-    "config",
-    "--local",
-    patchPullRequestBodyKey(branch),
-    body,
-  ]);
+  const commit = await run(["rev-parse", "HEAD"]);
+  await run(["config", "--local", patchCommitKey(branch), commit]);
+  await run(["config", "--local", patchPullRequestBodyKey(branch), body]);
   return publishPatchBranch(repository, branch, body, stderr, dependencies);
 }
 
@@ -6786,12 +7512,7 @@ async function executeScan(
         );
       }
       if (runningCost !== null) {
-        const tokens = formatTokenUsage({
-          input_tokens: runningCost.inputTokens,
-          cached_input_tokens: runningCost.cachedInputTokens,
-          output_tokens: runningCost.outputTokens,
-        });
-        if (tokens !== null) details.push(`Tokens: ${tokens}`);
+        details.push(`Tokens: ${formatScanCostTokens(runningCost)}`);
         details.push(`Cost: ${formatUsd(runningCost.estimatedUsd)}`);
       }
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
@@ -6816,6 +7537,9 @@ async function executeScan(
       );
     }
     const options: ScanOptions = {
+      ...(arguments_.resumeScanId === undefined
+        ? {}
+        : { resumeScanId: arguments_.resumeScanId }),
       ...(arguments_.mock ? { mock: true } : {}),
       ...(arguments_.workflowId === undefined
         ? {}
@@ -6825,6 +7549,7 @@ async function executeScan(
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
       ...prompts,
+      postScanPrompt: arguments_.postScanPrompt ?? prompts.postScanPrompt,
       mode: arguments_.mode,
       workers: arguments_.workers,
       subagents: arguments_.subagents,
@@ -6858,13 +7583,8 @@ async function executeScan(
         }
         progress?.stopTimer();
         if (maxCostUsd === undefined) {
-          const tokens = formatTokenUsage({
-            input_tokens: cost.inputTokens,
-            cached_input_tokens: cost.cachedInputTokens,
-            output_tokens: cost.outputTokens,
-          });
           progress?.stage(
-            `${tokens === null ? "" : `Tokens: ${tokens}. `}Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
+            `Tokens: ${formatScanCostTokens(cost)}. Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
           );
         } else {
           progress?.stage(
@@ -7614,41 +8334,17 @@ function printScanSummary(
   if (tokenSummary !== null) {
     errorOutput.write(`  ${paint("TOKENS", 1)}    ${tokenSummary}\n`);
   }
-  if (result.cost !== null) {
-    errorOutput.write(
-      `  ${paint("COST", 1)}      ${formatUsd(result.cost.estimatedUsd)}\n`,
-    );
-  }
+  const costSummary =
+    result.cost === null
+      ? "unavailable (model pricing or usage missing)"
+      : `${formatUsd(result.cost.estimatedUsd)} (standard, short context)`;
+  errorOutput.write(`  ${paint("COST", 1)}      ${costSummary}\n`);
   errorOutput.write(
     `  ${paint("RESULTS", 1)}   ${errorMessage(result.scanDir)}\n`,
   );
   if (deepScanStop?.nextStep !== undefined) {
     errorOutput.write(`\n  ${deepScanStop.nextStep}\n`);
   }
-}
-
-function formatTokenUsage(usage: unknown): string | null {
-  if (usage === null || typeof usage !== "object") return null;
-  const values = usage as Record<string, unknown>;
-  return (
-    (
-      [
-        ["input_tokens", "input"],
-        ["cached_input_tokens", "cached"],
-        ["output_tokens", "output"],
-      ] as const
-    )
-      .map(([key, label]) => {
-        const value = values[key];
-        return typeof value === "number" &&
-          Number.isSafeInteger(value) &&
-          value >= 0
-          ? `${value.toLocaleString("en-US")} ${label}`
-          : null;
-      })
-      .filter((value): value is string => value !== null)
-      .join(", ") || null
-  );
 }
 
 function componentScanEventLine(
@@ -7661,12 +8357,7 @@ function componentScanEventLine(
   }
   if (event.type !== "cost") return null;
   const cost = event.value;
-  const tokens = formatTokenUsage({
-    input_tokens: cost.inputTokens,
-    cached_input_tokens: cost.cachedInputTokens,
-    output_tokens: cost.outputTokens,
-  });
-  return `codex-security: ${componentName} | ${tokens === null ? "" : `Tokens: ${tokens} | `}Cost: ${formatUsd(cost.estimatedUsd)}\n`;
+  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)} | Cost: ${formatUsd(cost.estimatedUsd)}\n`;
 }
 
 function protectedRootErrorMessage(

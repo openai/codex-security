@@ -1213,7 +1213,7 @@ def preserve_scan_results_locked(
                 raise ContractError("Stopped scan sources changed after terminal publication.")
     target_kind = db.manifest_target_kind(existing_scan)
     binding = {
-        **db.workbench_completion_binding(scan, scan["completed_at"], target_kind),
+        **db.workbench_completion_binding(scan, scan["completed_at"], target_kind=target_kind),
         "status": outcome,
     }
     documents = merge_saved_results(
@@ -1391,7 +1391,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
         target_kind = db.manifest_target_kind(manifest)
-        binding = db.workbench_completion_binding(scan, db.now(), target_kind)
+        binding = db.workbench_completion_binding(scan, db.now(), target_kind=target_kind)
         # Validate on copies: saved canonical documents remain ordinary unsealed drafts.
         copied_manifest = copy.deepcopy(manifest)
         copied_findings = copy.deepcopy(findings)

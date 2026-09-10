@@ -1,6 +1,6 @@
 # Codex Security
 
-`@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code.
+`@openai/codex-security` is a CLI and TypeScript SDK for defining security policy and finding, validating, and fixing security vulnerabilities in your code.
 
 **👉👉 See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for full documentation.
 
@@ -19,6 +19,21 @@ codex-security scan /path/to/directory
 ```
 
 For CI, set `OPENAI_API_KEY` instead of signing in.
+
+## Generate SECURITY.md
+
+Draft repository-wide or component-scoped `SECURITY.md` guidance for future scans:
+
+```bash
+codex-security policy .
+codex-security policy . --path services/api --knowledge-base architecture.md
+```
+
+The command saves a draft outside the checkout; it does not install it or run a
+vulnerability scan. Review the proposed diff before copying the policy. Supporting architecture,
+threat-model, and review documents stay outside the repository and may contain
+sensitive details. See the [SDK policy guide](sdk/typescript/README.md#generate-a-security-policy)
+for headless generation, saved artifacts, and SDK usage.
 
 ## TypeScript SDK
 

@@ -826,16 +826,26 @@ describe("scan and patch workflow", () => {
     }
   });
 
-  test.each(["push", "create"])(
-    "resumes publication after %s fails without patching again",
-    async (failure) => {
+  test.each([
+    ["github", "push"],
+    ["github", "create"],
+    ["gitlab", "push"],
+    ["gitlab", "create"],
+    ["gitlab", "missing client"],
+  ])(
+    "resumes %s publication after %s fails without patching again",
+    async (provider, failure) => {
       const directory = await mkdtemp(
         join(tmpdir(), "codex-security-pr-retry-"),
       );
       const repository = join(directory, "repository");
       const remote = join(directory, "remote.git");
       const branch = "codex-security/patch-scan-1";
-      const url = "https://github.example.test/example/repository/pull/16";
+      const gitlab = provider === "gitlab";
+      const origin = "https://gitlab.com/example/subgroup/repository.git";
+      const url = gitlab
+        ? "https://gitlab.com/example/subgroup/repository/-/merge_requests/16"
+        : "https://github.example.test/example/repository/pull/16";
       const result = resultWithFindings(["high"]);
       let modelCalls = 0;
       let pushCalls = 0;
@@ -880,6 +890,10 @@ describe("scan and patch workflow", () => {
           },
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
+              if (gitlab && args[0] === "remote") {
+                expect(args).toEqual(["remote", "get-url", "--push", "origin"]);
+                return origin;
+              }
               if (args[0] === "push") {
                 pushCalls += 1;
                 if (failure === "push" && failOnce) {
@@ -888,6 +902,11 @@ describe("scan and patch workflow", () => {
                 }
               }
               return git(...args);
+            }
+            expect(command).toBe(gitlab ? "glab" : "gh");
+            if (failure === "missing client" && failOnce) {
+              failOnce = false;
+              throw new Error("spawn glab ENOENT");
             }
             if (args[1] === "list") return publishedUrl;
             expect(args[1]).toBe("create");
@@ -907,6 +926,10 @@ describe("scan and patch workflow", () => {
         );
         expect(first.exitCode).toBe(2);
         expect(first.stderr).toContain(`patch --resume-pr ${branch}`);
+        if (failure === "missing client") {
+          expect(first.stderr).toContain("spawn glab ENOENT");
+          expect(pushCalls).toBe(0);
+        }
         const commit = git("rev-parse", "HEAD");
         expect(
           git("config", "--get", `branch.${branch}.codexSecurityPatchCommit`),
@@ -1382,28 +1405,127 @@ describe("scan and patch workflow", () => {
     });
   });
 
-  test("creates a draft pull request for verified saved-finding patches", async () => {
-    const result = resultWithFindings(["high"]);
-    const url = "https://github.example.test/example/repository/pull/14";
-    let repository = "";
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        onWorkbench: () => savedScan(result),
-        onRepositoryCommand: (command, args, target) => {
-          repository = target;
-          return command === "gh" && args[1] === "create" ? url : "";
+  test.each([
+    [
+      "https://github.example.test/example/repository.git",
+      { GITLAB_HOST: "gitlab.com" },
+      "gh",
+    ],
+    ["https://gitlab.com/example/subgroup/repository.git", {}, "glab"],
+    ["git@gitlab.com:example/subgroup/repository.git", {}, "glab"],
+    ["ssh://git@gitlab.com:2222/example/subgroup/repository.git", {}, "glab"],
+    [
+      "git@gitlab.example.test:example/subgroup/repository.git",
+      { GITLAB_HOST: "gitlab.example.test" },
+      "glab",
+    ],
+    [
+      "https://gitlab.example.test/example/repository.git",
+      { GITLAB_HOST: "https://gitlab.example.test" },
+      "glab",
+    ],
+    [
+      "https://gitlab.example.test/example/repository.git",
+      { GITLAB_URI: "https://gitlab.example.test" },
+      "glab",
+    ],
+    [
+      "https://gitlab.example.test/example/repository.git",
+      { GL_HOST: "gitlab.example.test" },
+      "glab",
+    ],
+    ["https://gitlab.example.test/example/repository.git", {}, "gh"],
+  ] as const)(
+    "publishes saved-finding patches for origin %s with environment %j using %s",
+    async (origin, environment, client) => {
+      const result = resultWithFindings(["high"]);
+      const url =
+        client === "glab"
+          ? "https://gitlab.example.test/example/repository/-/merge_requests/14"
+          : "https://github.example.test/example/repository/pull/14";
+      const publicationCommands: Array<readonly string[]> = [];
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "--scan",
+          "scan-1",
+          "--assess-patch-risk",
+          "--create-pr",
+          "--json",
+        ],
+        {
+          environment,
+          onWorkbench: () => savedScan(result),
+          onRepositoryCommand: (command, args, target) => {
+            expect(target).toBe(SAVED_REPOSITORY);
+            if (command === "git") {
+              if (args[0] === "remote") {
+                expect(args).toEqual(["remote", "get-url", "--push", "origin"]);
+                return origin;
+              }
+              return "";
+            }
+            expect(command).toBe(client);
+            publicationCommands.push(args);
+            return args[1] === "create" ? url : "";
+          },
         },
-      },
-    );
+        {
+          configure: (current) => {
+            Object.assign(current, {
+              assessPatchRisk: async () => patchRiskAssessment(),
+            });
+          },
+        },
+      );
 
-    expect(outcome.exitCode).toBe(0);
-    expect(repository).toBe(SAVED_REPOSITORY);
-    expect(JSON.parse(outcome.stdout)).toMatchObject({
-      scanId: "scan-1",
-      pullRequest: { branch: "codex-security/patch-scan-1", url },
-    });
-  });
+      expect(outcome.exitCode).toBe(0);
+      expect(publicationCommands.map((args) => args[1])).toEqual([
+        "list",
+        "create",
+      ]);
+      if (client === "glab") {
+        expect(publicationCommands).toEqual([
+          [
+            "mr",
+            "list",
+            "--all",
+            "--source-branch",
+            "codex-security/patch-scan-1",
+            "--output",
+            "json",
+            "--jq",
+            ".[0].web_url // empty",
+            "--repo",
+            origin,
+          ],
+          [
+            "mr",
+            "create",
+            "--draft",
+            "--head",
+            origin,
+            "--source-branch",
+            "codex-security/patch-scan-1",
+            "--title",
+            "fix: patch verified security findings",
+            "--description",
+            expect.stringContaining(patchRiskSummary()),
+            "--yes",
+            "--repo",
+            origin,
+          ],
+        ]);
+      }
+      expect(outcome.stderr).toContain(
+        `${client === "glab" ? "Merge" : "Pull"} request: ${url}`,
+      );
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        scanId: "scan-1",
+        pullRequest: { branch: "codex-security/patch-scan-1", url },
+      });
+    },
+  );
 
   test("redacts credentials when saved-finding pull request creation fails", async () => {
     const result = resultWithFindings(["high"]);

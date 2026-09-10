@@ -13,7 +13,7 @@ npx @openai/codex-security --version
 ```
 
 Use Node.js 22.13.0+ (22.x), 24.x, or 26.x on macOS, Linux, or Windows.
-Scans, exports, scan history, and saved findings also need Python 3.10+
+Policy drafting, scans, exports, scan history, and saved findings also need Python 3.10+
 (plus `tomli` on Python 3.10).
 
 ## Run a scan from TypeScript
@@ -265,9 +265,145 @@ Some cybersecurity requests and protected findings require Trusted Access for
 Cyber approval. Apply or check your access at
 [chatgpt.com/cyber](https://chatgpt.com/cyber).
 
+## Generate a security policy
+
+`policy` drafts `SECURITY.md` guidance for future scans. It does not run a
+vulnerability scan, change application settings, or install the draft in the
+checkout. It uses the scan runtime and authentication, requesting read-only
+access to the selected repository or component and required tools. Network access,
+web search, apps, and MCP servers are disabled. Drafts stay outside the checkout.
+The host resolves inherited guidance once and includes each checked descendant
+policy separately. Descendant policy links must stay within the selected component.
+Inherited and reporting-policy links may also resolve to ancestor `SECURITY.md`
+files or the checkout's `.github/SECURITY.md` and `docs/SECURITY.md`.
+The model cannot read sibling components or Git metadata. Policy turns deny
+access to the resolved Git metadata and markers, including those inside the
+selected source tree, nested bare repositories, and associated alternate object
+stores.
+Policy shell tools inherit only Codex's core environment; custom shell environment
+settings, login shells, and shell snapshots are disabled for these turns.
+Knowledge-base text stays with the private review artifacts during generation
+and is removed afterward.
+
+Known limitation: policy preflight and generation currently fail on Unix
+directories with non-UTF-8 names.
+
+On macOS, the pinned Codex runtime does not fully enforce write restrictions
+under `/tmp` (including `/private/tmp`). Keep the repository and artifacts outside
+that tree when read-only enforcement is required. See the
+[upstream sandbox limitation](https://github.com/openai/codex/issues/32395).
+
+```bash
+npx @openai/codex-security policy .
+npx @openai/codex-security policy . --path services/api
+npx @openai/codex-security policy . --knowledge-base architecture.md --model gpt-5.6-terra --effort high
+npx @openai/codex-security policy . --dry-run --json
+```
+
+The repository defaults to the current directory. `--path` selects a component,
+which inherits policies from its Git root, with the closest policy taking
+precedence. Linked worktrees and initialized submodules use their own roots.
+Targets and policy links must stay in the selected checkout, outside Git
+metadata; ancestor links cannot widen a component policy's scope.
+
+For an intentional separate Git directory, set `core.worktree` to the checkout's
+absolute path. Use `git worktree repair` for moved linked worktrees.
+
+Generation uses three Codex stages: describe the system, build a threat model,
+then draft the policy. The first two documents support review; they are not
+additional approval steps or policies to install.
+In a terminal, it asks about facts the source cannot establish and shows the
+exact diff. If both ChatGPT and API-key credentials are available, it asks which
+to use; `--auth chatgpt` or `--auth api-key` selects one explicitly.
+
+| Invocation                   | Calls Codex? | Result                                                                  |
+| ---------------------------- | ------------ | ----------------------------------------------------------------------- |
+| `policy .`                   | Yes          | Ask owner questions, save documents, and preview the draft.             |
+| `policy . --headless --json` | Yes          | Save documents without prompts and return their paths and review notes. |
+| `policy . --format md`       | Yes          | Generate a draft and write its Markdown to stdout.                      |
+| `policy . --dry-run --json`  | No           | Check local inputs and show the resolved target and settings.           |
+
+None of these commands installs `SECURITY.md` in the repository. Output formats
+change presentation; they do not turn generation into a saved-draft read.
+
+### Review the draft
+
+Review the saved `SECURITY.md` before copying it to the reported target. Check
+links from `.github/SECURITY.md` or `docs/SECURITY.md`: copying can change their
+guidance too. Preserve reporting instructions and obtain owner approval for
+exclusions, accepted risks, and severity decisions. Later scans read this policy.
+
+Generation and preview check for changes to the selected or inherited policies.
+If governing guidance changes during generation, completed documents remain for
+inspection, but no completed-draft manifest is written. Other source files are not
+frozen; regenerate if relevant source or neighboring policies change.
+A failed terminal preview reports a warning and the saved draft paths. Explicit
+output formats return the draft directly without running a diff preview.
+
+Use `--headless` or an explicit output format to skip questions. Unanswered
+questions remain in the review notes. Drafts default to the Codex Security state
+directory; `--output-dir` selects an empty directory outside every enclosing
+Git checkout and its Git metadata.
+
+```bash
+npx @openai/codex-security policy . --path services/api \
+  --headless --output-dir /path/outside/repository/api-policy --json
+```
+
+The artifact directory contains:
+
+| File                   | Purpose                                                   |
+| ---------------------- | --------------------------------------------------------- |
+| `SECURITY.md`          | Editable policy draft.                                    |
+| `THREAT_MODEL.md`      | Detailed threat model with source references.             |
+| `project-spec.md`      | System description and security boundaries.               |
+| `previous-SECURITY.md` | Original policy used for the diff.                        |
+| `policy-draft.json`    | Target, policy hashes, revision, model, and review notes. |
+
+Keep supporting documents private until reviewed for disclosure. A generated
+threat scenario is neither owner approval nor a confirmed vulnerability.
+
+`--format md` writes the draft to stdout. `--json` returns paths, review notes,
+status, and estimated cost. Global filters and token options work with these
+formats. Progress goes to stderr. `--full-output` reports failures with
+`ok: false`. `--max-cost` applies to the whole generation. If a stage cannot
+inspect required source evidence, generation stops and preserves completed
+documents. Fix the reported problem and use a new output directory to retry.
+
+### Generate a policy from TypeScript
+
+```ts
+import { CodexSecurity } from "@openai/codex-security";
+
+const security = new CodexSecurity();
+try {
+  const draft = await security.generatePolicy("/path/to/repository", {
+    path: "services/api",
+    knowledgeBasePaths: ["/path/to/architecture.md"],
+    onStage: (stage) => console.error(stage),
+  });
+
+  console.log(await security.previewPolicy(draft));
+  // Open draft.draftPath in an editor to review the saved policy.
+} finally {
+  await security.close();
+}
+```
+
+`preflightPolicy()` checks local inputs without starting Codex.
+`previewPolicy()` previews the supplied in-memory draft, uses the client's Python
+setting, and makes terminal control characters visible. Editing the saved file
+does not change that object. The standalone `securityPolicyDiff()` returns a raw diff
+for files or other non-terminal uses; pass an interpreter explicitly if needed.
+`generatePolicy()` accepts `auth`, `path`, `knowledgeBasePaths`, `outputDir`,
+`maxCostUsd`, `signal`, and progress and cost callbacks. An optional
+`answerQuestions` callback receives each group of up to three owner questions
+and a cancellation signal. Without it, the questions remain unresolved.
+
 ## CLI
 
 ```bash
+npx @openai/codex-security policy . --path services/api
 npx @openai/codex-security scan .
 npx @openai/codex-security scan /path/to/repository --path src --path tests
 npx @openai/codex-security scan /path/to/repository --diff origin/main --json
@@ -302,6 +438,39 @@ SARIF output, when produced, is at `<scan-dir>/exports/results.sarif`.
 Scans are report-only by default. Set `--fail-on-severity high` to exit with
 `1` if a completed scan finds high or critical issues. Incomplete scans exit
 with `2`, writing available results to stdout and a coverage warning to stderr.
+
+### Import findings as a saved scan
+
+Import an existing findings CSV or JSON file into local scan history and SQLite:
+
+```bash
+codex-security scan import --csv /path/to/findings.csv
+codex-security scan import --json /path/to/findings.json --format json
+codex-security scan import --csv /path/to/findings.csv --dry-run
+```
+
+Supply exactly one of `--csv PATH` or `--json PATH`. CSV uses the existing
+[findings CSV template](https://github.com/openai/codex-security/blob/main/examples/findings.csv),
+including the optional `candidate_id` column. JSON accepts a complete
+`codex-security.findings` document or `{ "findings": [...] }`, with each finding
+matching the existing findings schema. On `scan import`, `--json` selects the
+input file; use `--format json` for JSON output. Other commands retain their
+existing `--json` output flag. The selected input must be a regular file, and its
+path must not traverse symbolic links or directory junctions. Use the direct
+filesystem path when the file or a parent directory is linked.
+
+Each import creates one completed scan using the configured
+`CODEX_SECURITY_STATE_DIR`. The target is a retained copy of the input dataset,
+independent of the current repository. Every source occurrence remains a separate
+finding, including duplicate reports. Original identifiers are preserved in
+`extensions.import`; the original file is sealed under `artifacts/import/`.
+JSON writeup paths are retained as source metadata without reading external files.
+
+Completion means the import finished. Coverage is unknown and the report states
+that no security analysis was performed. Importing requires no model calls or
+authentication. `--dry-run` validates without saving a scan. `--output-dir` and
+`--archive-existing` control saved output, and `scans rerun SCAN_ID` reimports the
+retained input.
 
 ### Generate mock scan results
 
@@ -383,6 +552,14 @@ npx @openai/codex-security scan-components /path/to/project \
   --components-file /path/outside/project/plan/components.json \
   --output-dir /path/outside/project/results
 ```
+
+For large repositories, automatic planning splits inventories into separate calls
+that fit Codex's input character limit. It preserves directory boundaries where
+possible and subdivides oversized packages and flat directories as needed. Each
+call uses a fresh context and can select only paths within its batch. Omitted
+files are retained in `Other files` components within those same boundaries.
+Large repositories can therefore require more planning calls and produce more
+components. Review or edit the saved plan before scanning with `--components-file`.
 
 Components use repository-relative paths:
 
@@ -582,10 +759,28 @@ Interactive scans show full-screen progress; CI, redirected output, and
 diagnostics to stderr. Add `--verbose` for diagnostics. Check logs for
 sensitive information before sharing them.
 
+The token summary shows uncached input, cache reads, cache writes, output,
+and total tokens. Total tokens include all input plus output; cache reads and
+writes are subsets of input, not extra tokens. When cache-write usage is missing,
+the summary shows uncached input and cache writes as unavailable.
+The final summary preserves missing-data information from a matching session log.
+If the Codex runtime converts an omitted count to zero before recording it, the
+CLI cannot distinguish that zero from reported usage.
+
 JSON results, scan history, and bulk-scan receipts record the model, tokens,
-and estimated cost. Estimates use
-[standard API token prices](https://developers.openai.com/api/docs/models/compare),
-including cached input and cache writes, but exclude fees and surcharges.
+estimated cost, and `cost.pricing`: the price source, verification date, processing
+tier, context category, and rates in USD per million tokens. Estimates use
+[standard, short-context API prices](https://developers.openai.com/api/docs/pricing),
+including cache reads and writes. They exclude long-context and other processing
+tier adjustments, fees, and surcharges. GPT-5.5 and GPT-6 Astra are supported;
+models without known prices show an unavailable estimate.
+
+For compatibility, `cacheWriteInputTokens` remains the reported token subtotal.
+`cacheWriteInputTokensReported: false` means at least one included usage record
+did not report cache writes. Raw usage uses `cache_write_input_tokens_reported`.
+In that case, the estimate prices unclassified input at the ordinary input rate;
+it may undercount cache-write charges. Older saved records lack this distinction
+and the saved pricing basis.
 
 `--max-cost USD` stops the scan and its workers when estimated cost exceeds
 the limit, though in-flight requests can finish above it. If deep-scan
@@ -647,8 +842,45 @@ even after a failed or incomplete scan, but not after cancellation or a
 cost-limit stop.
 
 `--workers` defaults to `4`. `--max-attempts` defaults to `1` attempt per pending
-repository per invocation. Rerun the command to resume; `bulk-scan --help`
-lists all options.
+repository per invocation. Rerunning the command continues the campaign, skips
+completed results, and starts new attempts for pending repositories. If an
+attempt directory is occupied, that repository stops before replacing its
+checkout and the command recommends `--recover`.
+
+#### Recovering failed or interrupted bulk scans
+
+Use the original CSV, output directory, and campaign options with `--recover`:
+
+```bash
+npx @openai/codex-security bulk-scan repositories.csv \
+  --output-dir /path/outside/repositories/security-scans --recover
+```
+
+Recovery requires an existing campaign with a matching manifest. It skips
+completed results, including partial coverage, and repositories never started.
+For each failed or interrupted repository, it checks the latest attempt:
+
+- A sealed scan is recorded in `results.jsonl` without scanning again.
+- An eligible running Deep Scan resumes its original session, keeping its scan
+  ID, completed workers, artifacts, saved settings, and accumulated cost.
+- A failed, canceled, or otherwise unavailable scan starts a new attempt at the
+  CSV's pinned revision. Attempt numbers account for both receipts and existing
+  directories. Old artifacts and checkouts are preserved; new attempts use
+  `recovery-checkouts/<id>/attempt-<n>`.
+
+`--workers` still defaults to `4`; `--max-attempts` defaults to one recovery or
+new attempt per repository. A resume connection failure stops that repository
+for this invocation instead of starting another scan. Other repositories
+continue. Failed and interrupted recovery checkouts remain available for a later
+`--recover`; fresh completed checkouts are removed after recording the result.
+If a reboot interrupted a receipt write, its unfinished tail is saved beside
+`results.jsonl` as `results.jsonl.interrupted-<id>` before appending valid records.
+
+Same-scan resume requires the original checkout, session logs, and Codex Security
+state directory. Recovery does not reconstruct deleted checkpoints or fix the
+underlying cause of execution failures. New attempts incur new scan costs.
+Any remaining failures or partial coverage keep exit code `2`.
+`bulk-scan --help` lists all options.
 
 ### Custom validation
 
@@ -988,6 +1220,25 @@ once before they can be reused.
 Pass `signal` to cancel any classification operation. Keep human overrides in the
 calling workflow or issue tracker; assessments remain separate recommendations.
 
+### Feedback
+
+Send a problem report to OpenAI and share the returned feedback ID with support:
+
+```sh
+codex-security feedback --reason "The scan stopped before it finished"
+codex-security feedback SCAN_ID --reason "The scan stopped before it finished" --include-logs
+```
+
+Without an ID, `feedback` selects the most recently started scan in the current
+repository, including active or failed scans. If there are no saved scans, it sends
+a general report. The report includes your description, version details, and the selected
+scan and session IDs. Add `--json` for structured output.
+
+Logs are off by default. `--include-logs` uploads Codex diagnostics and saved scan
+and worker activity. These can contain source code, prompts, findings, tool
+output, and other sensitive data. Only include logs you can share with OpenAI.
+The command uses Codex's feedback service and respects `feedback.enabled = false`.
+
 ### Scan history and reruns
 
 Commands default to the current repository. Select scans by full ID or a
@@ -998,12 +1249,50 @@ unique prefix of at least eight characters.
 | `scans list [REPOSITORY]`                             | List scans. Filter by artifact root with `--scan-root DIR`.                                                 |
 | `scans show [SCAN_ID]`                                | Show a scan; defaults to the latest completed one. `--show-linked-findings` includes earlier finding links. |
 | `scans logs [SCAN_ID]`                                | Show session events; defaults to the latest scan, including active scans.                                   |
+| `scans resume SCAN_ID`                                | Resume an interrupted Deep Scan in its original session and output directory.                               |
 | `scans rerun [SCAN_ID]`                               | Repeat a scan on the current checkout; defaults to the latest completed scan.                               |
 | `scans match BEFORE AFTER`                            | Link findings with the same root cause.                                                                     |
 | `scans match --all`                                   | Match completed scans across the repository's worktrees and clones.                                         |
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to the latest two completed scans.                                                  |
 | `findings list [REPOSITORY]`                          | List open findings. `findings` is an alias.                                                                 |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Mark a false positive. Later scans dismiss matches only while the reason applies.                           |
+
+#### Resuming an interrupted Deep Scan
+
+After the CLI process or host stops unexpectedly, find the scan and rejoin it:
+
+```bash
+npx @openai/codex-security scans list --scan-root /path/to/security-scans
+npx @openai/codex-security scans resume SCAN_ID
+```
+
+The scan must still be `running`, with its original checkout, output directory,
+and owning Codex session available in the same Codex Security state directory.
+The checkout's identity, revision, and contents must match the saved target.
+Completed, failed, and canceled scans cannot resume; `scans rerun` starts a new scan.
+
+Resume uses the saved configuration and instructions with the installed plugin.
+New scans save the explicit safety identifier and post-scan prompt contents.
+Single-scan resume restores them even if the prompt file changes or disappears.
+Older records that did not save these values cannot reconstruct them. Bulk
+recovery still requires matching campaign inputs and options; it uses the supplied
+post-scan prompt when the scan has no saved prompt.
+It keeps the scan ID, completed workers, artifacts, and accumulated session cost.
+The existing coordinator recovers interrupted workers after its lease expires.
+If discovery finished before the interruption, resume completes and seals the
+same scan. No archiving or new attempt directory is needed. A failed connection
+leaves the existing scan available for another resume attempt.
+
+Compatible saved scans can resume after a plugin update. Already-sealed results
+keep their original producer version and contents when completion is recorded.
+Unsupported or invalid sealed artifacts are rejected before resuming, preserving
+the saved scan state and files.
+
+For bulk campaigns, use [`bulk-scan --recover`](#recovering-failed-or-interrupted-bulk-scans)
+to recover eligible attempts and update `results.jsonl`. Individual `scans resume`
+does not update campaign receipts.
+
+#### Matching saved scans
 
 Matching requires sealed artifacts and reuses saved matches unless you pass
 `--force`. Comparisons classify findings as new, persisting, reopened, resolved,
@@ -1128,8 +1417,8 @@ assessment skill once on the completed patch. The assessment is advisory and
 does not change the patch or its merge state. Human-readable commands print the
 report after the patch results; saved-finding JSON output returns it as
 `patchRisk.report` in the same result object. When combined with `--create-pr`,
-the draft pull request body includes only the concise Markdown summary from the
-assessment; the validated JSON remains in the command result.
+the draft pull request or merge request body includes only the concise Markdown
+summary from the assessment; the validated JSON remains in the command result.
 
 ```bash
 npx @openai/codex-security validate "Possible SQL injection" --effort high
@@ -1151,11 +1440,25 @@ to select findings and add patch instructions. Results include a `patches`
 entry per finding with status `verified`, `no_change`, `blocked`, or `failed`.
 Verified and already-fixed findings no longer fail `--fail-on-severity`.
 
-`--create-pr` commits generated patch files and opens a draft PR with `gh`.
-Supplied-issue pull requests require a clean working tree before patching so
+`--create-pr` commits generated patch files and opens a draft GitHub pull request
+with `gh` or a draft GitLab merge request with `glab`. Install and authenticate
+the appropriate CLI first (`gh auth login` or `glab auth login`). GitLab.com is
+selected from the `origin` push URL, including SSH URLs and subgroup projects.
+For self-hosted GitLab, set `GITLAB_HOST` to the host in that URL and authenticate
+with `glab auth login --hostname HOST`. The existing `GITLAB_URI` and `GL_HOST`
+aliases are also accepted, in that order after `GITLAB_HOST`. Other hosts retain
+the GitHub workflow.
+
+```bash
+GITLAB_HOST=gitlab.example.com npx @openai/codex-security patch --scan SCAN_ID --create-pr
+```
+
+Both providers use the existing `pullRequest: { branch, url }` JSON result.
+Supplied-issue requests require a clean working tree before patching so
 existing work is never included. If publication fails, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
 commit without rerunning Codex, but refuses to publish if the branch changed.
+Use the same GitLab host setting when resuming a self-hosted merge request.
 
 To patch Linear issues, repeat `--linear-issue ISSUE` (ID or URL), or use
 `--linear-project "PROJECT"` with an optional native JSON `--linear-filter`.
@@ -1217,7 +1520,9 @@ checkout or Node.js installation is required. `CODEX_SECURITY_FINDINGS_IMAGE`
 defaults to `ghcr.io/openai/codex-security:latest`. Set it to a published
 version, `sha-<commit>` tag, or digest for repeatable deployments.
 
-To build from a source checkout instead:
+To build from a source checkout, first prepare the
+[universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
+for that checkout. Then run from the repository root:
 
 ```bash
 docker build --target scanner -t codex-security:local .
@@ -1560,7 +1865,7 @@ use another workflow ID for a fresh review rather than changing that saved resul
 2. Screen each nonempty neighborhood with `gpt-5.6-luna` at `xhigh` reasoning
    effort. The review covers every anchor-neighbor pair; nominations between
    neighbors are rejected.
-3. Independently review each nominated pair once with `gpt-5.6-sol` at `xhigh`
+3. Independently review each nominated pair once with `gpt-5.6-sol` at `high`
    reasoning effort. Only accepted pairs contribute to duplicate groups.
 4. Group accepted duplicate pairs transitively unless a Luna or Sol `DISTINCT`
    decision contradicts the resulting component. Contradicted components are
@@ -1764,7 +2069,9 @@ Export `OPENAI_API_KEY` or `CODEX_API_KEY` to import findings with embeddings.
 Startup and listing need no key. The service does not load `.env` or authenticate
 requests; keep it on loopback or behind an authenticated TLS proxy.
 
-From a source checkout's `sdk/typescript` directory:
+For a source build, first prepare the
+[universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
+for that checkout. Then run from its `sdk/typescript` directory:
 
 ```bash
 pnpm install --frozen-lockfile
