@@ -29,7 +29,10 @@ afterEach(cleanup);
 async function interruptedScan(
   mode: "deep" | "standard" = "deep",
   bulk = false,
-  settings: Pick<ScanOptions, "safetyIdentifier" | "postScanPrompt"> = {},
+  settings: Pick<
+    ScanOptions,
+    "auth" | "safetyIdentifier" | "postScanPrompt"
+  > = {},
 ) {
   const root = await temporaryDirectory();
   const repository = bulk
@@ -96,7 +99,7 @@ async function interruptedScan(
     TMP: process.env["TMP"],
     CODEX_HOME: codexHome,
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    ...(settings.safetyIdentifier === undefined
+    ...(settings.safetyIdentifier === undefined && settings.auth === undefined
       ? {}
       : { OPENAI_API_KEY: "synthetic-resume-key" }),
   };
@@ -743,6 +746,8 @@ test("CLI saves launch settings before execution without depending on the prompt
       "deep",
       "--output-dir",
       join(root, "scan"),
+      "--auth",
+      "api-key",
       "--safety-identifier",
       "synthetic-original-user",
       "--post-scan-prompt-file",
@@ -783,6 +788,7 @@ test("CLI saves launch settings before execution without depending on the prompt
     scans[0]!.scanId,
   ]);
   expect(saved["recipe"]).toMatchObject({
+    auth: "api-key",
     safetyIdentifier: "synthetic-original-user",
     postScanPrompt,
   });
@@ -845,6 +851,60 @@ test.each([false, true])(
       progress: { status: "complete" },
       continuationThreadId: f.threadId,
     });
+  },
+);
+
+test.each([
+  ["chatgpt", false],
+  ["api-key", false],
+  ["chatgpt", true],
+  ["api-key", true],
+] as const)(
+  "resume preserves %s authentication with an ambient key (bulk: %p)",
+  async (auth, bulk) => {
+    const f = await interruptedScan("deep", bulk, { auth });
+    const stdout = capture();
+    const stderr = capture();
+    let resumedThread: string | undefined;
+    const code = await main(
+      bulk
+        ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
+        : ["scans", "resume", f.scanId, "--json"],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...dependencies({
+          environment: f.environment,
+          currentDirectory: f.root,
+        }),
+        runWorkbench: f.command,
+        createSecurity: resumeClient(f, (options) => {
+          expect(options.apiKey).toBe(
+            auth === "api-key" ? "synthetic-resume-key" : undefined,
+          );
+          expect(options.env?.["OPENAI_API_KEY"]).toBeUndefined();
+          expect(options.env?.["CODEX_API_KEY"]).toBeUndefined();
+          return {
+            startThread() {
+              throw new Error("Resume must use the original session.");
+            },
+            resumeThread(threadId) {
+              resumedThread = threadId;
+              return {
+                id: threadId,
+                async runStreamed() {
+                  throw new Error("Synthetic resume transport stopped");
+                },
+              };
+            },
+          };
+        }),
+      },
+    );
+    expect(code).toBe(2);
+    expect(stderr.text()).toContain("Synthetic resume transport stopped");
+    expect(resumedThread).toBe(f.threadId);
+    expect(f.environment.OPENAI_API_KEY).toBe("synthetic-resume-key");
   },
 );
 

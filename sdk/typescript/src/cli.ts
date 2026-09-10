@@ -4445,6 +4445,7 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         resumeScanId: scan.scanId,
+                        auth: recipe.auth,
                         outputDir: scanDir,
                         mode: recipe.mode,
                         target: targetFromArguments(recipe),
@@ -5730,6 +5731,7 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains deep scan settings for a standard scan.",
     );
   }
+  const auth = z.enum(SCAN_AUTH_MODES).optional().parse(recipe["auth"]);
   const safetyIdentifier = recipe["safetyIdentifier"];
   const postScanPrompt = recipe["postScanPrompt"];
   if (
@@ -5745,6 +5747,7 @@ function scanArgumentsFromRecipe(
     paths,
     knowledgeBasePaths,
     validationPromptFile,
+    auth,
     safetyIdentifier,
     postScanPrompt,
     diff: kind === "refs" ? reference : undefined,

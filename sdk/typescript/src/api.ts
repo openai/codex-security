@@ -1552,6 +1552,7 @@ export class CodexSecurity {
         options.maxCostUsd,
         deepScanOptions(options),
       );
+      if (options.auth !== undefined) recipe["auth"] = options.auth;
       if (options.safetyIdentifier !== undefined)
         recipe["safetyIdentifier"] = options.safetyIdentifier;
       if (options.postScanPrompt !== undefined)
