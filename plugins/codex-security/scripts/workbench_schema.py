@@ -867,38 +867,6 @@ MIGRATIONS = (
         );
         """,
     ),
-    (
-        42,
-        "retain deep scan worker attempts",
-        """
-        CREATE TABLE deep_scan_worker_attempts (
-            scan_id TEXT NOT NULL,
-            worker_id TEXT NOT NULL,
-            attempt INTEGER NOT NULL,
-            sdk_thread_id TEXT,
-            status TEXT NOT NULL,
-            error_message TEXT,
-            created_at TEXT NOT NULL,
-            started_at TEXT,
-            completed_at TEXT,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (scan_id, worker_id, attempt),
-            FOREIGN KEY (scan_id, worker_id)
-                REFERENCES deep_scan_workers(scan_id, id) ON DELETE CASCADE
-        );
-
-        -- Older retries could inherit a preceding attempt's thread ID and start
-        -- time. Only the first attempt can be backfilled without that ambiguity.
-        INSERT INTO deep_scan_worker_attempts (
-            scan_id, worker_id, attempt, sdk_thread_id, status, error_message,
-            created_at, started_at, completed_at, updated_at
-        )
-        SELECT scan_id, id, attempt, sdk_thread_id, status, error_message,
-            created_at, started_at, completed_at, updated_at
-        FROM deep_scan_workers
-        WHERE attempt = 1;
-        """,
-    ),
 )
 
 

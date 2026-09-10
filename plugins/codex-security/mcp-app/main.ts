@@ -1,15 +1,8 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { resolve } from "node:path";
 import { createCodexSecurityArtifactWriterServer } from "./artifact-writer-main.js";
 import { createCodexSecurityServer } from "./server.js";
-import { collectFeedbackCommand } from "./src/helpers/collect-feedback.js";
 
 async function main(): Promise<void> {
-  const helperIndex = process.argv.indexOf("--helper");
-  if (helperIndex !== -1 && process.argv[helperIndex + 1] === "collect-feedback") {
-    process.exitCode = await collectFeedbackCommand(resolve(__dirname, ".."));
-    return;
-  }
   const artifactWriter = process.argv.includes("--artifact-writer");
   const server = artifactWriter
     ? await createCodexSecurityArtifactWriterServer()
@@ -36,11 +29,9 @@ async function main(): Promise<void> {
 
 main().catch((error) => {
   console.error(
-    process.argv.includes("--helper")
-      ? "Codex Security feedback collector failed to start:"
-      : process.argv.includes("--artifact-writer")
-        ? "Codex Security artifact writer failed to start:"
-        : "Codex Security MCP server failed to start:",
+    process.argv.includes("--artifact-writer")
+      ? "Codex Security artifact writer failed to start:"
+      : "Codex Security MCP server failed to start:",
     error
   );
   process.exitCode = 1;

@@ -1193,78 +1193,6 @@ def require_worker_transition(current: str, requested: str) -> None:
         raise SystemExit(f"Deep Scan worker cannot transition from {current} to {requested}.")
 
 
-def record_deep_scan_worker_attempt(
-    connection: sqlite3.Connection, worker_id: str, timestamp: str
-) -> None:
-    # Retry errors leave the logical worker running. Retain its last observed
-    # state for that attempt without inferring a terminal status or completion time.
-    worker = require_deep_scan_worker(connection, worker_id)
-    if worker["attempt"] < 1:
-        return
-    started_at = worker["started_at"] if worker["attempt"] == 1 else None
-    if started_at is None and worker["status"] == "running":
-        started_at = timestamp
-    connection.execute(
-        """
-        INSERT INTO deep_scan_worker_attempts (
-            scan_id, worker_id, attempt, sdk_thread_id, status, error_message,
-            created_at, started_at, completed_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (scan_id, worker_id, attempt) DO UPDATE SET
-            sdk_thread_id = excluded.sdk_thread_id,
-            status = excluded.status,
-            error_message = CASE
-                WHEN excluded.status = 'canceled'
-                    AND excluded.error_message LIKE 'coordinator_shutdown:%'
-                THEN COALESCE(deep_scan_worker_attempts.error_message, excluded.error_message)
-                ELSE COALESCE(excluded.error_message, deep_scan_worker_attempts.error_message)
-            END,
-            started_at = COALESCE(deep_scan_worker_attempts.started_at, excluded.started_at),
-            completed_at = excluded.completed_at,
-            updated_at = excluded.updated_at
-        """,
-        (
-            worker["scan_id"],
-            worker_id,
-            worker["attempt"],
-            worker["sdk_thread_id"],
-            worker["status"],
-            worker["error_message"],
-            timestamp,
-            started_at,
-            worker["completed_at"],
-            worker["updated_at"],
-        ),
-    )
-
-
-def sync_deep_scan_worker_attempt_statuses(connection: sqlite3.Connection, scan_id: str) -> None:
-    # Parent cancellation and reducer commits update workers directly. Keep
-    # their attempt lifecycle in step without replacing execution errors with
-    # coordinator cleanup messages or inventing history for legacy retries.
-    updates = connection.execute(
-        """
-        SELECT workers.status, workers.completed_at, workers.updated_at,
-            attempts.scan_id, attempts.worker_id, attempts.attempt
-        FROM deep_scan_worker_attempts AS attempts
-        JOIN deep_scan_workers AS workers
-            ON attempts.scan_id = workers.scan_id
-                AND attempts.worker_id = workers.id
-                AND attempts.attempt = workers.attempt
-        WHERE workers.scan_id = ?
-        """,
-        (scan_id,),
-    ).fetchall()
-    connection.executemany(
-        """
-        UPDATE deep_scan_worker_attempts
-        SET status = ?, completed_at = ?, updated_at = ?
-        WHERE scan_id = ? AND worker_id = ? AND attempt = ?
-        """,
-        updates,
-    )
-
-
 def upsert_deep_scan_worker(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
@@ -1371,7 +1299,6 @@ def upsert_deep_scan_worker(
                     timestamp,
                 ),
             )
-            record_deep_scan_worker_attempt(connection, worker_id, timestamp)
             connection.commit()
             return deep_scan_result(connection, scan_id)
 
@@ -1466,18 +1393,14 @@ def upsert_deep_scan_worker(
             else existing["completed_at"]
         )
         error_message = optional_text(args.error_message, maximum=2400)
-        new_attempt = attempt != existing["attempt"]
-        if error_message is None and args.status != "succeeded" and not new_attempt:
+        if error_message is None and args.status != "succeeded":
             error_message = existing["error_message"]
-        sdk_thread_id = optional_text(args.sdk_thread_id, maximum=512)
-        if sdk_thread_id is None and not new_attempt:
-            sdk_thread_id = existing["sdk_thread_id"]
         started_at = existing["started_at"] or (timestamp if args.status == "running" else None)
         connection.execute(
             """
             UPDATE deep_scan_workers
             SET status = ?, result_manifest_path = ?, attempt = ?,
-                sdk_thread_id = ?,
+                sdk_thread_id = COALESCE(?, sdk_thread_id),
                 completion_sequence = ?, merge_state = ?,
                 error_message = ?,
                 started_at = ?, completed_at = ?, updated_at = ?
@@ -1487,7 +1410,7 @@ def upsert_deep_scan_worker(
                 args.status,
                 result_manifest_path or existing["result_manifest_path"],
                 attempt,
-                sdk_thread_id,
+                optional_text(args.sdk_thread_id, maximum=512),
                 completion_sequence,
                 merge_state,
                 error_message,
@@ -1497,20 +1420,6 @@ def upsert_deep_scan_worker(
                 worker_id,
             ),
         )
-        # Legacy retries can carry an earlier attempt's error and start time.
-        # Keep them in the worker record until a new, known attempt starts.
-        if (
-            new_attempt
-            or connection.execute(
-                """
-                SELECT 1 FROM deep_scan_worker_attempts
-                WHERE scan_id = ? AND worker_id = ? AND attempt = ?
-                """,
-                (scan_id, worker_id, attempt),
-            ).fetchone()
-            is not None
-        ):
-            record_deep_scan_worker_attempt(connection, worker_id, timestamp)
         connection.commit()
     except BaseException:
         connection.rollback()
@@ -1765,7 +1674,6 @@ def commit_deep_scan_dedup_locked(
             """,
             (result_manifest_path, timestamp, timestamp, timestamp, worker_id),
         )
-        sync_deep_scan_worker_attempt_statuses(connection, scan_id)
         no_new_streak = (
             0 if args.new_findings_count > 0 else run["consecutive_no_new"] + len(inputs)
         )
@@ -2254,7 +2162,6 @@ def cancel_active_workers(connection: sqlite3.Connection, scan_id: str, timestam
         """,
         (timestamp, timestamp, scan_id),
     )
-    sync_deep_scan_worker_attempt_statuses(connection, scan_id)
 
 
 def other_running_deep_scans(

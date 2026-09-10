@@ -2,9 +2,7 @@
 setlocal DisableDelayedExpansion
 
 set "CODEX_SECURITY_MCP_SCRIPT=%~dp0..\mcp\server.mjs"
-set "CODEX_SECURITY_MCP_HELPER="
-for %%A in (%*) do if "%%~A"=="--helper" set "CODEX_SECURITY_MCP_HELPER=1"
-if defined CODEX_SECURITY_MCP_HELPER (
+if "%~1"=="--helper" (
   set "CODEX_SECURITY_MCP_SCRIPT=%~dp0..\mcp\helpers.mjs"
   goto launch
 )
@@ -59,5 +57,5 @@ exit /b 127
 :run
 rem Direct invocation also chains batch shims without CALL reparsing paths.
 "%CODEX_SECURITY_MCP_NODE%" "%CODEX_SECURITY_MCP_SCRIPT%" %*
-if defined CODEX_SECURITY_MCP_HELPER exit /b %errorlevel%
+if "%~1"=="--helper" exit /b %errorlevel%
 exit

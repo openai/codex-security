@@ -279,7 +279,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         return claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (42,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -3670,18 +3670,6 @@ def test_running_worker_updates_preserve_identity_and_dispatch_count(tmp_path: P
     assert replayed_worker["startedAt"] == initial_worker["startedAt"]
 
 
-def worker_attempts(state_dir: Path, worker_id: str) -> list[dict[str, object]]:
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.row_factory = sqlite3.Row
-        return [
-            dict(row)
-            for row in connection.execute(
-                "SELECT * FROM deep_scan_worker_attempts WHERE worker_id = ? ORDER BY attempt",
-                (worker_id,),
-            )
-        ]
-
-
 def test_terminal_worker_updates_are_exact_idempotent_replays(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
@@ -4204,8 +4192,6 @@ def test_cancel_scan_cancels_coordinator_and_active_workers(tmp_path: Path) -> N
         prompt_path=prompt,
         artifact_dir=artifact_dir,
         attempt=1,
-        thread_id="thread-canceled-worker",
-        error="worker execution error",
     )
 
     run_workbench(
@@ -4230,12 +4216,6 @@ def test_cancel_scan_cancels_coordinator_and_active_workers(tmp_path: Path) -> N
     assert canceled["phase"] == "terminal"
     assert canceled["cancelRequested"] is True
     assert canceled["workers"][0]["status"] == "canceled"
-    retained = worker_attempts(state_dir, worker_id)
-    assert len(retained) == 1
-    assert retained[0]["status"] == "canceled"
-    assert retained[0]["sdk_thread_id"] == "thread-canceled-worker"
-    assert retained[0]["error_message"] == "worker execution error"
-    assert retained[0]["completed_at"] == canceled["workers"][0]["completedAt"]
 
 
 def test_failure_manifest_is_confined_persisted_and_exactly_replayable(

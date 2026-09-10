@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 
 const requests = [];
 for await (const line of createInterface({ input: process.stdin })) {
@@ -12,7 +12,6 @@ for await (const line of createInterface({ input: process.stdin })) {
       request.params.extraLogFiles.map(async (path) => ({
         path,
         content: await readFile(path, "utf8"),
-        mode: (await stat(path)).mode & 0o777,
       })),
     );
     await writeFile(

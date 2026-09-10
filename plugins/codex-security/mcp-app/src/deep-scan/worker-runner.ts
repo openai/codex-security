@@ -473,14 +473,11 @@ export class DeepScanWorkerRunner {
     const attemptPromptPaths = [input.promptPath];
     for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
       if (signal.aborted) {
-        return await this.cancelAttempt(
-          input, attempt === 1 ? attempt : attempt - 1, lastThreadId, attemptPromptPaths
-        );
+        return await this.cancelAttempt(input, attempt, lastThreadId, attemptPromptPaths);
       }
       let validationStarted = false;
       let validationCompleted = false;
       let activeThreadId = resumableThreadId;
-      lastThreadId = activeThreadId;
       const baseMutation: DeepScanWorkerMutation = {
         id: input.workerId,
         scanId: run.scanId,
@@ -529,13 +526,6 @@ export class DeepScanWorkerRunner {
             });
           }
         });
-        if (result.threadId && result.threadId !== activeThreadId) {
-          activeThreadId = result.threadId;
-          lastThreadId = result.threadId;
-          if (!signal.aborted) {
-            await this.options.store.updateWorker({ ...baseMutation, threadId: activeThreadId });
-          }
-        }
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId, attemptPromptPaths);
         }
@@ -580,7 +570,6 @@ export class DeepScanWorkerRunner {
             : undefined;
           const persistedFailure = await this.options.store.updateWorker({
             ...baseMutation,
-            threadId: activeThreadId,
             status: replaceableFailureKind ? "canceled" : "failed",
             error: boundedDeepScanErrorMessage(
               replaceableFailureKind
@@ -605,7 +594,6 @@ export class DeepScanWorkerRunner {
         }
         await this.options.store.updateWorker({
           ...baseMutation,
-          threadId: activeThreadId,
           error: boundedDeepScanErrorMessage(normalized)
         });
         if (

@@ -56,7 +56,6 @@
     "schemas/tools/review-items.schema.json",
     "schemas/tools/scan-draft.schema.json",
     "schemas/tools/worker-threat-model.schema.json",
-    "scripts/collect_feedback.py",
     "scripts/config_preflight.py",
     "scripts/deep_scan_config.py",
     "scripts/deep_scan_workbench.py",

@@ -1,20 +1,12 @@
-import {
-  spawn,
-  spawnSync,
-  type ChildProcessWithoutNullStreams,
-} from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, toNamespacedPath } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { sendFeedback } from "../src/feedback.js";
-import {
-  codexSecurityCredentialHome,
-  codexSecurityStateDirectory,
-  resolvePluginPython,
-} from "../src/runtime.js";
+import { codexSecurityCredentialHome } from "../src/runtime.js";
 import { VERSION, BUNDLED_PLUGIN_VERSION } from "../src/version.js";
 
 const fixture = fileURLToPath(
@@ -26,15 +18,12 @@ afterEach(async () => {
     await rm(directory, { recursive: true, force: true });
 });
 
-async function setup(explicitState = true) {
+async function setup() {
   const directory = await mkdtemp(join(tmpdir(), "feedback-test-"));
   directories.push(directory);
   const environment = {
     CODEX_HOME: join(directory, "ambient"),
-    ...(explicitState
-      ? { CODEX_SECURITY_STATE_DIR: join(directory, "state") }
-      : {}),
-    PYTHON: await resolvePluginPython(),
+    CODEX_SECURITY_STATE_DIR: join(directory, "state"),
     CODEX_CLI_PATH: process.execPath,
     FEEDBACK_REQUEST_FILE: join(directory, "requests.json"),
     FEEDBACK_SCENARIO: "success",
@@ -46,6 +35,7 @@ async function setup(explicitState = true) {
     type: "session_meta",
     payload: {
       id: "worker-1",
+      source: { subagent: { thread_spawn: { parent_thread_id: "thread-1" } } },
     },
   };
   await writeFile(
@@ -60,24 +50,6 @@ async function setup(explicitState = true) {
     join(home, "sessions", "rollout-unrelated.jsonl"),
     JSON.stringify({ type: "session_meta", payload: { id: "unrelated" } }),
   );
-  const seeded = spawnSync(
-    environment.PYTHON,
-    [
-      "-c",
-      `import sqlite3, sys
-with sqlite3.connect(sys.argv[1]) as connection:
-    connection.executescript("""
-        CREATE TABLE scans (id TEXT, workspace_id TEXT, mode TEXT, status TEXT, continuation_thread_id TEXT);
-        INSERT INTO scans VALUES ('scan-1', 'workspace-1', 'deep', 'failed', 'thread-1');
-        CREATE TABLE deep_scan_workers (scan_id TEXT, id TEXT, sdk_thread_id TEXT, status TEXT, attempt INTEGER, error_message TEXT);
-        INSERT INTO deep_scan_workers VALUES ('scan-1', 'worker-record-1', 'worker-1', 'failed', 1, 'Worker stopped');
-        INSERT INTO deep_scan_workers VALUES ('scan-1', 'worker-record-2', NULL, 'failed', 1, 'Worker could not start');
-    """)`,
-      join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
-    ],
-    { encoding: "utf8" },
-  );
-  expect(seeded.status, seeded.stderr || seeded.error?.message).toBe(0);
   let child: ChildProcessWithoutNullStreams | undefined;
   const startCodex: NonNullable<Parameters<typeof sendFeedback>[1]> = (
     command,
@@ -132,21 +104,60 @@ test("uploads selected scan and worker logs through Codex and removes temporary 
     },
   });
   expect(attachments).toHaveLength(1);
-  if (process.platform !== "win32") expect(attachments[0].mode).toBe(0o600);
   expect(
-    JSON.parse(attachments[0].content).scans[0].sessions.map(
+    JSON.parse(attachments[0].content).sessions.map(
       (session: { threadId: string }) => session.threadId,
     ),
   ).toEqual(["thread-1", "worker-1"]);
-  expect(JSON.parse(attachments[0].content).scans[0].workers).toContainEqual(
-    expect.objectContaining({
-      id: "worker-record-2",
-      error: "Worker could not start",
-    }),
-  );
   expect(existsSync(attachments[0].path)).toBe(false);
   context.expectClosed();
 });
+
+for (const missingParent of [false, true]) {
+  test(`uploads Desktop scan logs across both homes with parent ${missingParent ? "missing" : "available"}`, async () => {
+    const context = await setup();
+    const archived = join(context.environment.CODEX_HOME, "archived_sessions");
+    await mkdir(archived, { recursive: true });
+    const sessions: [string, string, string | null][] = [
+      [archived, "sdk-worker", null],
+      [join(context.home, "sessions"), "worker-child", "sdk-worker"],
+    ];
+    if (!missingParent) sessions.unshift([archived, "desktop-owner", null]);
+    for (const [directory, id, parent] of sessions) {
+      await writeFile(
+        join(directory, `rollout-${id}.jsonl`),
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id, parent_thread_id: parent },
+        }),
+      );
+    }
+    await sendFeedback(
+      {
+        ...context.options,
+        scan: {
+          scanId: "desktop-scan",
+          threadIds: ["desktop-owner", "sdk-worker"],
+        },
+      },
+      context.startCodex,
+    );
+    const { requests, attachments } = await context.transcript();
+    expect(requests[2].params.tags.codex_security_scan_id).toBe("desktop-scan");
+    expect(attachments).toHaveLength(1);
+    expect(
+      JSON.parse(attachments[0].content).sessions.map(
+        (session: { threadId: string }) => session.threadId,
+      ),
+    ).toEqual([
+      ...(!missingParent ? ["desktop-owner"] : []),
+      "sdk-worker",
+      "worker-child",
+    ]);
+    expect(existsSync(attachments[0].path)).toBe(false);
+    context.expectClosed();
+  });
+}
 
 test("without log opt-in, does not read or attach saved sessions", async () => {
   const context = await setup();
@@ -197,88 +208,19 @@ test("respects disabled feedback without starting Codex", async () => {
   ).rejects.toThrow("disabled by configuration");
 });
 
-test("uploads retained worker errors when saved conversations are missing", async () => {
+test("sends feedback when saved session logs are unavailable", async () => {
   const context = await setup();
   await rm(join(context.home, "sessions"), { recursive: true });
-  await sendFeedback(
-    { ...context.options, scan: { scanId: "scan-1" } },
-    context.startCodex,
-  );
-  const { requests, attachments } = await context.transcript();
-  expect(requests[2].params.threadId).toBeUndefined();
-  expect(JSON.parse(attachments[0].content).scans[0]).toMatchObject({
+  expect(await sendFeedback(context.options, context.startCodex)).toEqual({
+    feedbackId: "feedback-1",
     scanId: "scan-1",
-    sessions: [],
-    workers: [
-      { id: "worker-record-1", error: "Worker stopped" },
-      { id: "worker-record-2", error: "Worker could not start" },
-    ],
+    includedLogs: true,
   });
-  expect(existsSync(attachments[0].path)).toBe(false);
-});
-
-test("uses the original default state directory with the isolated credential home", async () => {
-  const context = await setup(false);
-  await sendFeedback(context.options, context.startCodex);
-  const { attachments } = await context.transcript();
-  expect(JSON.parse(attachments[0].content).scans[0].scanId).toBe("scan-1");
-});
-
-test("does not attach an empty result when no saved scan matches", async () => {
-  const context = await setup();
-  await sendFeedback(
-    { ...context.options, scan: { scanId: "missing-scan" } },
-    context.startCodex,
-  );
-  const { attachments } = await context.transcript();
+  const { requests, attachments } = await context.transcript();
+  expect(requests[2].params.includeLogs).toBe(true);
+  expect(requests[2].params.extraLogFiles).toEqual([]);
   expect(attachments).toEqual([]);
-});
-
-test("collector failure keeps basic feedback working and removes partial diagnostics", async () => {
-  const context = await setup();
-  const warning = spyOn(console, "warn").mockImplementation(() => undefined);
-  let attachment: string | undefined;
-  try {
-    expect(
-      await sendFeedback(
-        context.options,
-        context.startCodex,
-        async ({ path }) => {
-          attachment = path;
-          await writeFile(path, "partial diagnostics", { mode: 0o600 });
-          throw new Error("Synthetic collector failure");
-        },
-      ),
-    ).toMatchObject({ feedbackId: "feedback-1", includedLogs: true });
-    const { attachments } = await context.transcript();
-    expect(attachments).toEqual([]);
-    expect(warning).toHaveBeenCalledTimes(1);
-    expect(existsSync(attachment!)).toBe(false);
-  } finally {
-    warning.mockRestore();
-  }
-});
-
-test("cancellation during collection removes partial diagnostics without uploading", async () => {
-  const context = await setup();
-  const controller = new AbortController();
-  let attachment: string | undefined;
-  await expect(
-    sendFeedback(
-      { ...context.options, signal: controller.signal },
-      () => {
-        throw new Error("Must not upload");
-      },
-      async ({ path }) => {
-        attachment = path;
-        await writeFile(path, "partial diagnostics", { mode: 0o600 });
-        controller.abort();
-        controller.signal.throwIfAborted();
-        return true;
-      },
-    ),
-  ).rejects.toThrow("abort");
-  expect(existsSync(attachment!)).toBe(false);
+  context.expectClosed();
 });
 
 test("reports failure to start Codex", async () => {

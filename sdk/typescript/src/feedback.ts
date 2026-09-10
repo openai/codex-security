@@ -3,19 +3,18 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { readCodexHomeConfig } from "./auth.js";
+import { configuredCodexHome, readCodexHomeConfig } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
-import { collectFeedbackLogs } from "./feedback-logs.js";
 import {
   codexSecurityCredentialHome,
   executablePathForSpawn,
   resolveCodexCommand,
 } from "./runtime.js";
-import type { ScanLogSource } from "./scan-logs.js";
+import { readSavedScanLogs, type ScanLogSource } from "./scan-logs.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   CODEX_EXECUTABLE_VERSION,
@@ -41,7 +40,6 @@ type StartCodex = (
 export async function sendFeedback(
   options: FeedbackOptions,
   startCodex: StartCodex = spawn,
-  collectLogs: typeof collectFeedbackLogs = collectFeedbackLogs,
 ) {
   const { scan, environment, includeLogs } = options;
   options.signal?.throwIfAborted();
@@ -59,23 +57,21 @@ export async function sendFeedback(
     const extraLogFiles: string[] = [];
     if (includeLogs && scan !== undefined) {
       try {
-        directory = await mkdtemp(join(tmpdir(), "codex-security-feedback-"));
-        const path = join(directory, "scan-logs.json");
-        if (
-          await collectLogs({
-            scanId: scan.scanId,
-            path,
-            environment,
-            workingDirectory: options.workingDirectory,
-            signal: options.signal,
-          })
-        ) {
+        const logs = await readSavedScanLogs(
+          scan,
+          [codexHome, configuredCodexHome(environment)],
+          { allowMissingRoot: true },
+        );
+        if (logs.sessions.length > 0) {
+          directory = await mkdtemp(join(tmpdir(), "codex-security-feedback-"));
+          const path = join(directory, "scan-logs.json");
+          await writeFile(path, JSON.stringify(logs), { mode: 0o600 });
           extraLogFiles.push(path);
         }
       } catch {
         options.signal?.throwIfAborted();
         console.warn(
-          "Codex Security could not attach scan and worker diagnostics; sending feedback with available Codex logs.",
+          "Codex Security could not attach saved scan logs; sending feedback with available Codex logs.",
         );
       }
     }

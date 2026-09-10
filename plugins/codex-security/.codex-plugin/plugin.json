@@ -18,10 +18,6 @@
   "skills": "./skills/",
   "apps": "./.app.json",
   "mcpServers": "./.mcp.json",
-  "feedbackCollector": {
-    "mcpServer": "codex-security",
-    "args": ["--helper", "collect-feedback"]
-  },
   "interface": {
     "displayName": "Codex Security",
     "shortDescription": "Security scanning for your codebase",
