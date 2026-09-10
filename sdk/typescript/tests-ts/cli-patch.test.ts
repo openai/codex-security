@@ -998,6 +998,7 @@ describe("scan and patch workflow", () => {
       ["--linear-issue", "SEC-123"],
       ["--create-pr"],
       ["--assess-patch-risk"],
+      ["--external-sandbox"],
       ["occ_1"],
     ]) {
       let commandStarted = false;
@@ -1046,9 +1047,13 @@ describe("scan and patch workflow", () => {
             );
             return 0;
           },
-          onRepositoryCommand: () => {
-            commandStarted = true;
-            return "";
+          onRepositoryCommand: (command, args) => {
+            commandStarted ||=
+              command !== "git" ||
+              ["checkout", "commit", "push"].includes(args[0]!);
+            return status === "outside" && args.includes("--name-only")
+              ? "src/finding-1.ts\0"
+              : "";
           },
         },
       );
@@ -1071,8 +1076,10 @@ describe("scan and patch workflow", () => {
       ["scan", "--patch", "--create-pr", "--json"],
       {
         result: resultWithFindings(["high"]),
-        onRepositoryCommand: () => {
-          throw new Error("GitHub authentication failed.");
+        onRepositoryCommand: (command, args) => {
+          if (command === "gh")
+            throw new Error("GitHub authentication failed.");
+          return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
         },
       },
     );
@@ -1357,7 +1364,11 @@ describe("scan and patch workflow", () => {
         result: resultWithFindings(["high"]),
         onRepositoryCommand: (command, args) => {
           published ||= command === "gh" && args[1] === "create";
-          return command === "gh" && args[1] === "create" ? url : "";
+          return command === "gh" && args[1] === "create"
+            ? url
+            : args.includes("--name-only")
+              ? "src/finding-1.ts\0"
+              : "";
         },
       },
       {
@@ -1463,7 +1474,7 @@ describe("scan and patch workflow", () => {
                 expect(args).toEqual(["remote", "get-url", "--push", "origin"]);
                 return origin;
               }
-              return "";
+              return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
             }
             expect(command).toBe(client);
             publicationCommands.push(args);
