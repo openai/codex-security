@@ -31,6 +31,7 @@ export interface ArtifactContext {
   status?: string;
   mode?: string;
   deepReducer?: DeepReducerContext;
+  onCheckpoint?: (path: string) => Promise<void>;
 }
 
 export interface ArtifactPage {

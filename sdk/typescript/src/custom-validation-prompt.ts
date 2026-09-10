@@ -9,9 +9,9 @@ import { PLUGIN_NAME } from "./runtime.js";
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
   "references/core-scan.md":
-    "77b082eb8613cf93427ff730e4ae5d85b0a0dca37c02a8af1ea69f679ac3d1d9",
+    "f9cd0af44132ea2192f01737fdf5eade75ebe03423a01e9c8c55e102dcc51d3f",
   "skills/security-scan/SKILL.md":
-    "5b8f5d7debeca14c6b37e8e7ba737671362b8eb4b7f49e693c99c6bd04bc8fa0",
+    "aa8a5826fa39944828b77d7af02040ab16eb6f0bf2cdfcfdadb35ce67edf1b17",
   "skills/security-diff-scan/SKILL.md":
     "0a4c519ad713585876ea7eb0a8af4b59892c86746f4c69851db9ab347b7fad2f",
 } as const;
@@ -72,7 +72,7 @@ export async function customDiscoveryPrompt(
       "## Discovery workflow",
       `1. ${step(skill, 1)}`,
       "2. Perform the embedded core discovery workflow below. Do not reload the ordinary core-scan.md or top-level security-scan skill.",
-      `3. ${step(skill, 3).split("For an SDK-owned or prompt-only headless scan, ")[1]}`,
+      `3. ${step(skill, 3).split("Only when the host does not supply the bound semantic writer, ")[1]}`,
       `4. ${HANDOFF}`,
       "## Embedded core discovery workflow",
       discovery,

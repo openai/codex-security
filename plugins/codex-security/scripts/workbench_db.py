@@ -38,6 +38,7 @@ import workbench_progress as progress
 import workbench_publication as publication
 import workbench_remediation as remediation
 import workbench_saved_results as saved_results
+import workbench_scan_checkpoints as scan_checkpoints
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
 import workbench_severity as severity
@@ -101,6 +102,9 @@ from workbench_scan_start import (
     scan_target_identity,
     stored_diff_target,
 )
+from workbench_scan_start import (
+    parse_scan_recipe as parse_scan_launch_recipe,
+)
 from workbench_schema import (
     MIGRATIONS,
 )
@@ -149,7 +153,6 @@ from workbench_validation import (
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
 FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
-SCAN_RECIPE_MAX_BYTES = 256 * 1024
 
 
 def now() -> str:
@@ -537,6 +540,7 @@ def workbench_completion_binding(
 
     binding: dict[str, Any] = {
         "scanId": scan["id"],
+        "scanMode": scan["mode"],
         "startedAt": scan["started_at"],
         "completedAt": completed_at,
         "producer": {"name": PRODUCER_NAME, "version": plugin_version},
@@ -862,6 +866,11 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             diff_target,
             metadata=target_metadata,
         )
+        review_files = (
+            scan_checkpoints.review_file_inventory(target, [scope])
+            if workspace["default_mode"] in {"standard", "deep"}
+            else []
+        )
         target_root = scan_target_root(args.scan_root, target)
         target_root.mkdir(parents=True, exist_ok=True)
         if manages_transaction:
@@ -914,6 +923,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             target_summary=target_summary,
             scope_file_count=scope_file_count,
             timestamp=timestamp,
+            review_files=review_files,
             model=args.model,
             reasoning_effort=args.reasoning_effort,
         )
@@ -966,6 +976,11 @@ def _start_prompt_driven_scan(
     )
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
+    review_files = (
+        scan_checkpoints.review_file_inventory(target, [scope])
+        if args.mode in {"standard", "deep"}
+        else []
+    )
     target_root = scan_target_root(args.scan_root, target)
 
     connection.execute("BEGIN IMMEDIATE")
@@ -1072,6 +1087,7 @@ def _start_prompt_driven_scan(
             target_summary=target_summary,
             scope_file_count=scope_file_count,
             timestamp=timestamp,
+            review_files=review_files,
             handoff_status="delivered",
             model=args.model,
             reasoning_effort=args.reasoning_effort,
@@ -1533,8 +1549,8 @@ def complete_scan_locked(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
             completion_binding=completion_binding,
-            # Save the finished Deep result as submitted. Worker drafts and
-            # recovery repairs belong to the stopped-scan path.
+            # Ordinary Deep results remain as submitted. A linked continuation
+            # also retains inherited work that its coordinator did not consume.
             completion_warnings=warnings if scan["mode"] != "deep" else None,
             draft_documents=saved_results.merge_saved_results(
                 scan_dir,
@@ -1549,6 +1565,10 @@ def complete_scan_locked(
                 reason="",
             )
             if scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
+            else scan_checkpoints.continued_deep_documents(
+                connection, scan, completion_binding, warnings
+            )
+            if not already_sealed
             else None,
         )
         add_warning()
@@ -1694,6 +1714,11 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             diff_target["contentDigest"] = worktree_content_digest(repository)
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
+    review_files = (
+        scan_checkpoints.review_file_inventory(repository, paths)
+        if mode in {"standard", "deep"}
+        else []
+    )
     scope_file_count = (
         directory_snapshot_regular_file_count(repository)
         if not paths
@@ -1755,6 +1780,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             target_summary=None,
             scope_file_count=scope_file_count,
             timestamp=timestamp,
+            review_files=review_files,
             handoff_status="delivered",
             scan_dir=scan_dir,
         )
@@ -1801,9 +1827,21 @@ def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace
         raise SystemExit("The scan cost limit must be a positive finite USD amount.")
     with scan_completion_lock(scan_id), connection:
         scan = require_scan(connection, scan_id)
-        if scan["status"] != "running" or scan["recipe_json"] is None:
-            raise SystemExit("Only a running CLI scan can increase its cost limit.")
-        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        recipe = (
+            json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+            if scan["recipe_json"] is not None
+            else {}
+        )
+        follow_up = recipe.get("postScanPrompt")
+        if scan["recipe_json"] is None or (
+            scan["status"] != "running"
+            and not (
+                scan["status"] == "complete" and isinstance(follow_up, str) and follow_up.strip()
+            )
+        ):
+            raise SystemExit(
+                "Only a running CLI scan or saved completed follow-up can increase its cost limit."
+            )
         previous = recipe.get("maxCostUsd")
         if (
             not isinstance(previous, (int, float))
@@ -1820,54 +1858,7 @@ def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace
 
 
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
-    if len(value.encode("utf-8")) > SCAN_RECIPE_MAX_BYTES:
-        raise SystemExit("Scan launch recipe must be no larger than 256 KiB.")
-    try:
-        recipe = json.loads(value, parse_constant=reject_non_finite_json)
-    except (TypeError, UnicodeError, ValueError) as exc:
-        raise SystemExit("Scan launch recipe must be a valid JSON object.") from exc
-    if not isinstance(recipe, dict):
-        raise SystemExit("Scan launch recipe must be a JSON object.")
-    requested_repository = recipe.get("repository")
-    if (
-        not isinstance(requested_repository, str)
-        or require_target(requested_repository) != repository
-    ):
-        raise SystemExit("Scan launch recipe repository must match the scanned repository.")
-    if recipe.get("mode") not in {"standard", "deep"}:
-        raise SystemExit("Scan launch recipe mode must be standard or deep.")
-    if not isinstance(recipe.get("config"), dict):
-        raise SystemExit("Scan launch recipe config must be a JSON object.")
-    target = recipe.get("target")
-    if not isinstance(target, dict) or target.get("kind") not in {
-        "repository",
-        "paths",
-        "refs",
-        "working_tree",
-    }:
-        raise SystemExit("Scan launch recipe target must identify a supported scan target.")
-    paths = target.get("paths")
-    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
-        raise SystemExit("Scan launch recipe target paths must be an array of strings.")
-    if target["kind"] == "paths" and not paths:
-        raise SystemExit("A scoped scan launch recipe must include at least one target path.")
-    if target["kind"] != "paths" and paths:
-        raise SystemExit("Only scoped scan launch recipes can include target paths.")
-    for path in paths:
-        candidate = PurePosixPath(path)
-        if (
-            not path
-            or candidate.is_absolute()
-            or ".." in candidate.parts
-            or "\\" in path
-            or not (repository / candidate).exists()
-            or not (repository / candidate).resolve().is_relative_to(repository)
-        ):
-            raise SystemExit("Scan launch recipe target paths must exist inside the repository.")
-    if target["kind"] in {"refs", "working_tree"}:
-        if not isinstance(target.get("base"), str) or not isinstance(target.get("head"), str):
-            raise SystemExit("Diff scan launch recipes require resolved base and head revisions.")
-    return recipe
+    return parse_scan_launch_recipe(value, repository, require_target=require_target)
 
 
 _WORKBENCH_DB_CONTEXT: saved_results.WorkbenchDbContext
@@ -2844,11 +2835,23 @@ def scan_result(
         connection, scan["id"], (row["id"] for row in occurrence_rows)
     )
     return {
+        **(
+            {"checkpoint": checkpoint}
+            if (checkpoint := scan_checkpoints.checkpoint_summary(connection, scan["id"]))
+            is not None
+            else {}
+        ),
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
+        **(
+            {"sourceThreadId": scan_history.source_thread_id(connection, scan)}
+            if scan["inference_started"] == 0
+            else {}
+        ),
+        "parentScanId": scan["parent_scan_id"],
         "failureMessage": scan["failure_message"],
         "findings": [
             finding_result(connection, scan, row, related=relations.get(row["id"], []))
@@ -3424,6 +3427,7 @@ def main() -> None:
             require_remediation_target=require_remediation_target,
             require_scannable_target=require_scannable_target,
             require_scope=require_scope,
+            requested_scan_paths=requested_scan_paths,
             ensure_security_target=ensure_security_target,
             require_canonical_scan_directory=require_canonical_scan_directory,
             safe_segment=safe_segment,
@@ -3501,6 +3505,8 @@ def main() -> None:
             result = register_cli_scan(connection, args)
         elif args.command == "set-scan-thread":
             result = set_scan_thread(connection, args)
+        elif args.command == "start-scan-inference":
+            result = scan_checkpoints.start_inference(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "set-scan-cost-limit":
             result = set_scan_cost_limit(connection, args)
         elif args.command == "get-scan-recipe":
@@ -3508,6 +3514,8 @@ def main() -> None:
         elif args.command == "get-cli-scan-resume":
             scan = require_scan(connection, args.scan_id)
             try:
+                with scan_completion_lock(scan["id"]):
+                    scan_checkpoints.reconcile_checkpoints(connection, scan, now())
                 result = scan_history.cli_scan_resume(
                     connection,
                     scan,
@@ -3515,6 +3523,7 @@ def main() -> None:
                     parse_scan_recipe=parse_scan_recipe,
                     scan_contract=scan_contract,
                     require_scan_directory=require_canonical_scan_directory,
+                    read_coverage=coverage_for_comparison,
                     artifact_path=artifact_path,
                     read_json_object=read_json_object,
                     workbench_completion_binding=workbench_completion_binding,
@@ -3567,6 +3576,12 @@ def main() -> None:
             result = recover_scan_results(connection, args)
         elif args.command == "write-scan-draft":
             result = write_scan_draft(connection, args)
+        elif args.command == "record-scan-checkpoint":
+            result = scan_checkpoints.record_scan_checkpoint(
+                _WORKBENCH_DB_CONTEXT, connection, args
+            )
+        elif args.command == "continue-scan-checkpoint":
+            result = scan_checkpoints.continue_checkpoint(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "mark-handoff-delivered":
             result = handoff.mark_handoff_delivered(
                 connection,

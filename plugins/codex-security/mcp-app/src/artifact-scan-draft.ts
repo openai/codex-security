@@ -134,7 +134,7 @@ export async function recordCodexSecurityScanDraft(
         manifest: { scan: manifestScan },
       };
       if (publishDraft) {
-        await publishDraft(draft, preserved.previousDigest, parsed);
+        await publishDraft(draft, preserved.previousDigest, reconciled);
       } else {
         const destinations = await Promise.all([
           artifactDestination(context, ["findings.json"], "scan draft findings"),
@@ -223,8 +223,25 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   );
 }
 
-/** Preserve one complete Standard scan draft inside its assigned worker output. */
+const workerDraftQueues = new Map<string, Promise<void>>();
+
+/** Serialize reconciliation and acceptance inside this worker's assigned output. */
 export async function recordCodexSecurityWorkerScanDraft(
+  context: ArtifactContext,
+  input: ScanDraftInput,
+): Promise<ScanDraftResult> {
+  const previous = workerDraftQueues.get(context.root) ?? Promise.resolve();
+  const operation = previous.then(() => writeWorkerScanDraft(context, input));
+  const settled = operation.then(() => undefined, () => undefined);
+  workerDraftQueues.set(context.root, settled);
+  try {
+    return await operation;
+  } finally {
+    if (workerDraftQueues.get(context.root) === settled) workerDraftQueues.delete(context.root);
+  }
+}
+
+async function writeWorkerScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
 ): Promise<ScanDraftResult> {
@@ -287,7 +304,8 @@ export async function saveScanDraftCheckpoint(
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     await replaceArtifactJson(destination, snapshot);
   }
-  if (context.layout === "worker" && updateHead) {
+  if (updateHead) await context.onCheckpoint?.(destination);
+  if (context.layout === "worker" && updateHead && !context.onCheckpoint) {
     const head = await artifactDestination(
       context,
       ["checkpoint-head.json"],
@@ -356,6 +374,13 @@ async function preserveScanDraft(
         && typeof surface.candidateId === "string"
     ));
     const candidateRows = [...deferred, ...dispositions];
+    const resolvedIds = new Set([
+      ...result.findings.map(findingCandidateId),
+      ...candidateRows.map((item) => item.candidateId ?? item.id),
+    ].filter((value): value is string => typeof value === "string"));
+    const sourcePendingIds = new Set((source.coverage.deferred as JsonObject[]).map(
+      (item) => item.candidateId ?? item.id,
+    ));
     for (const pending of source.coverage.deferred as JsonObject[]) {
       const candidateId = pending.candidateId ?? pending.id;
       if (typeof candidateId !== "string") continue;
@@ -379,6 +404,11 @@ async function preserveScanDraft(
     }
     for (const finding of source.findings) {
       const candidateId = findingCandidateId(finding);
+      // An incomplete source can retain finding evidence while validation remains
+      // pending. Importing that evidence does not itself finish its deferred work.
+      if (candidateId !== undefined && (result.complete !== false || !sourcePendingIds.has(candidateId))) {
+        resolvedIds.add(candidateId);
+      }
       const disposition = candidateId === undefined ? undefined : dispositions.find((item) => (
         item.candidateId === candidateId || item.id === candidateId
       ));
@@ -395,10 +425,6 @@ async function preserveScanDraft(
         if (!matches.some((current) => containsSavedFinding(current, finding))) result.findings.push(structuredClone(finding));
       }
     }
-    const resolvedIds = new Set([
-      ...result.findings.map(findingCandidateId),
-      ...candidateRows.map((item) => item.candidateId ?? item.id),
-    ].filter((value): value is string => typeof value === "string"));
     const previousCoverage = {
       ...source.coverage,
       deferred: (source.coverage.deferred as JsonObject[]).filter((item) => {
@@ -453,7 +479,7 @@ async function readCurrentCheckpoints(
   }
 
   let checkpointHead: string | undefined;
-  if (context.layout === "worker") {
+  if (context.layout === "worker" || context.layout === "scan") {
     const headMetadata = await lstatIfExists(join(context.root, "checkpoint-head.json"));
     if (headMetadata !== undefined) {
       if (headMetadata.isSymbolicLink() || !headMetadata.isFile()) {
@@ -499,6 +525,12 @@ async function readCurrentCheckpoints(
     if (input.scanId !== context.scanId) {
       throw new Error("scan checkpoint: current checkpoint belongs to a different scan.");
     }
+    // Only the accepted cumulative head can credit completion or reviewed files.
+    // Unaccepted snapshots preserve findings, but may contain rejected declarations.
+    if (entry.name !== checkpointHead) {
+      input.complete = false;
+      delete input.coverage.reviewedFiles;
+    }
     checkpoints.push({
       input,
       modifiedMs: Number(checkpointMetadata.mtimeMs),
@@ -521,7 +553,7 @@ async function readCurrentCheckpoints(
 
 function scanDraftCheckpointName(input: Omit<ScanDraftInput, "coverage">): string {
   const { handoffClaimToken: _claim, ...snapshot } = input;
-  return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") + ".json";
+  return createHash("sha256").update(JSON.stringify(snapshot, null, 2) + "\n").digest("hex") + ".json";
 }
 
 async function readPreviousScanDraft(
@@ -693,6 +725,9 @@ async function readArchivedWorkerCheckpoints(
           parseJsonObject(contents, "archived scan checkpoint"),
         );
         requireMatchingScan(context, draft);
+        // The accepted head above carries completion and cumulative reviewed coverage.
+        draft.complete = false;
+        delete draft.coverage.reviewedFiles;
         drafts.push({
           input: draft,
           modifiedMs: Number(checkpointMetadata.mtimeMs),
@@ -873,6 +908,11 @@ export function preserveScanCoverage(
     }
     if (field !== "openQuestions" || values.length > 0 || result[field] !== undefined) result[field] = values;
   }
+  const reviewedFiles = exactUnion(
+    (result.reviewedFiles as string[] | undefined) ?? [],
+    ...sources.map((source) => (source.reviewedFiles as string[] | undefined) ?? []),
+  );
+  if (reviewedFiles.length > 0 || result.reviewedFiles !== undefined) result.reviewedFiles = reviewedFiles;
   if (
     coverageHasOutstandingWork(result)
     || (preserveCompleteness && sources.some((source) => (

@@ -593,6 +593,9 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
     updatedAt: optionalString(value.updatedAt),
     targetPath: requiredString(value.targetPath, "deepScan.targetPath"),
     scope: requiredString(value.scope, "deepScan.scope"),
+    scopePaths: value.scopePaths === undefined
+      ? undefined
+      : stringArray(value.scopePaths, "deepScan.scopePaths"),
     userContext: optionalString(value.userContext),
     scanDir: requiredString(value.scanDir, "deepScan.scanDir"),
     config,
@@ -611,6 +614,13 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
     persistedWorkers: parsePersistedWorkers(value.workers),
     persistedDedupInputs: parsePersistedDedupInputs(value.dedupInputs)
   };
+}
+
+function stringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`Codex Security workbench returned invalid ${label}.`);
+  }
+  return value.map((entry) => requiredString(entry, label));
 }
 
 function parsePersistedDedupInputs(value: unknown): PersistedDeepScanDedupInput[] {

@@ -88,6 +88,7 @@
     "scripts/workbench_publication.py",
     "scripts/workbench_remediation.py",
     "scripts/workbench_saved_results.py",
+    "scripts/workbench_scan_checkpoints.py",
     "scripts/workbench_scan_history.py",
     "scripts/workbench_scan_start.py",
     "scripts/workbench_scan_usage.py",

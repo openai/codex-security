@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import errno
 import importlib.util
 import os
 from pathlib import Path
@@ -80,3 +82,49 @@ def test_native_windows_backend_rejects_symlink_ancestor(tmp_path: Path) -> None
     with pytest.raises(WINDOWS_FILES.WindowsScanLocalFileError):
         WINDOWS_FILES.atomic_write(scan_dir, "exports/results.sarif", b"blocked")
     assert not (external_dir / "results.sarif").exists()
+
+
+@pytest.mark.parametrize("error_code", [2, 3, 5, 32, 123])
+def test_read_missing_errors_preserve_filesystem_exception_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_code: int
+) -> None:
+    @contextlib.contextmanager
+    def locked_parent(*_args: object, **_kwargs: object):
+        yield tmp_path, "missing.json"
+
+    monkeypatch.setattr(WINDOWS_FILES, "_locked_parent", locked_parent)
+    monkeypatch.setattr(WINDOWS_FILES, "_kernel32", object())
+    monkeypatch.setattr(
+        WINDOWS_FILES,
+        "_CreateFileW",
+        lambda *_args: WINDOWS_FILES._INVALID_HANDLE_VALUE,
+        raising=False,
+    )
+    monkeypatch.setattr(WINDOWS_FILES.ctypes, "get_last_error", lambda: error_code, raising=False)
+    monkeypatch.setattr(
+        WINDOWS_FILES.ctypes, "FormatError", lambda _code: "Native file error", raising=False
+    )
+
+    expected = (
+        FileNotFoundError if error_code in {2, 3} else WINDOWS_FILES.WindowsScanLocalFileError
+    )
+    with pytest.raises(expected) as caught:
+        WINDOWS_FILES.open_read_fd(tmp_path, "missing.json", "Saved checkpoint artifact")
+    assert "Saved checkpoint artifact" in str(caught.value)
+    if error_code in {2, 3}:
+        assert caught.value.errno == errno.ENOENT
+        assert caught.value.__cause__.errno == error_code
+    else:
+        assert not isinstance(caught.value, FileNotFoundError)
+        assert caught.value.errno == error_code
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")
+@pytest.mark.parametrize("relative_path", ["missing.json", "missing/proof.json"])
+def test_native_windows_backend_reports_missing_read_as_file_not_found(
+    tmp_path: Path, relative_path: str
+) -> None:
+    with pytest.raises(FileNotFoundError) as caught:
+        WINDOWS_FILES.open_read_fd(tmp_path, relative_path, "Saved checkpoint artifact")
+    assert caught.value.errno == errno.ENOENT
+    assert caught.value.__cause__.errno in {2, 3}

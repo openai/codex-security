@@ -39,7 +39,8 @@ with tempfile.TemporaryDirectory() as scan_dir:
     if case["operation"] == "deadline":
         result = deep_scan.deep_scan_deadline_reached(run)
     else:
-        result = deep_scan.coordinator_lease_is_live(connection, run, {"scan_dir": scan_dir}, case["now"])
+        scan = {"scan_dir": scan_dir, "parent_scan_id": None, "continuation_checkpoint_path": None}
+        result = deep_scan.coordinator_lease_is_live(connection, run, scan, case["now"])
     print(json.dumps(result))
 `;
 

@@ -1,4 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { execFile } from "node:child_process";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import {
   createWorkerArtifactContext,
   type DeepReducerContext
@@ -6,6 +9,7 @@ import {
 import { CODEX_SANDBOX_STATE_META_CAPABILITY } from "./src/deep-scan/parent-sandbox.js";
 import { registerCompactWorkerArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { MCP_APP_VERSION } from "./src/version.js";
+import { resolvePythonCommand } from "./src/python_command.js";
 
 /** Build the narrow worker-only MCP from coordinator-inherited state. */
 export async function createCodexSecurityArtifactWriterServer(
@@ -44,6 +48,22 @@ export async function createCodexSecurityArtifactWriterServer(
       : {}),
     ...(deepReducer ? { deepReducer } : {})
   });
+  if (environment.CODEX_SECURITY_WORKER_ID) {
+    const pluginRoot = requiredEnvironment(environment, "CODEX_SECURITY_PLUGIN_ROOT");
+    const scanId = requiredEnvironment(environment, "CODEX_SECURITY_SCAN_ID");
+    const python = context.pythonCommand ?? await resolvePythonCommand();
+    context.onCheckpoint = async (path) => {
+      try {
+        await promisify(execFile)(python, [
+          join(pluginRoot, "scripts", "workbench_db.py"),
+          "record-scan-checkpoint", "--scan-id", scanId, "--checkpoint-path", path
+        ], { env: environment, encoding: "utf8" });
+      } catch (error) {
+        const stderr = (error as { stderr?: string }).stderr?.trim();
+        throw new Error(`Could not commit worker checkpoint${stderr ? `: ${stderr}` : "."}`, { cause: error });
+      }
+    };
+  }
   const server = new McpServer(
     { name: "codex-security-artifacts", version: MCP_APP_VERSION },
     {

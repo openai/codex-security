@@ -20,14 +20,15 @@ interface ScanLogOptions {
 
 export type ScanLogSource = JsonObject & {
   scanId: string;
-  continuationThreadId?: string;
+  continuationThreadId?: string | null;
+  sourceThreadId?: string | null;
   mode?: string;
   scanDir?: string;
   progress?: { status?: string; updatedAt?: string };
 };
 
 export function readSavedScanLogs(scan: ScanLogSource, codexHome: string) {
-  const threadId = scan.continuationThreadId;
+  const threadId = scan.continuationThreadId ?? scan.sourceThreadId;
   if (!threadId) {
     throw new CodexSecurityError(
       `No session is associated with scan ${scan.scanId}.`,
@@ -87,6 +88,27 @@ export async function findScanSession(
     if (session.threadId === threadId) return session;
   }
   return null;
+}
+
+export async function findScanSessionForDirectory(
+  codexHome: string,
+  scanDirectory: string,
+  signal?: AbortSignal,
+): Promise<SessionLog | null> {
+  signal?.throwIfAborted();
+  let found: SessionLog | null = null;
+  for await (const session of scanSessions(codexHome)) {
+    signal?.throwIfAborted();
+    if (
+      session.parentThreadId !== null ||
+      session.workingDirectory !== scanDirectory
+    )
+      continue;
+    if (found !== null && found.threadId !== session.threadId) return null;
+    found = session;
+  }
+  signal?.throwIfAborted();
+  return found;
 }
 
 export async function readScanLogs(options: ScanLogOptions) {

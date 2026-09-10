@@ -136,6 +136,141 @@ try {
   };
   const workerResultPath = path.join(workerRoot, "result.json");
 
+  for (const rejectFirst of [false, true]) {
+    const overlappingRoot = path.join(root, `overlapping-worker-${rejectFirst}`);
+    const independentRoot = path.join(root, `independent-worker-${rejectFirst}`);
+    await mkdir(overlappingRoot);
+    await mkdir(independentRoot);
+    const firstEntered = Promise.withResolvers();
+    const releaseFirst = Promise.withResolvers();
+    const accepted = [];
+    const commitFailure = new Error("First checkpoint acceptance failed");
+    let calls = 0;
+    const overlappingContext = {
+      ...workerContext,
+      root: overlappingRoot,
+      onCheckpoint: async (checkpointPath) => {
+        if (++calls === 1) {
+          firstEntered.resolve();
+          await releaseFirst.promise;
+          if (rejectFirst) throw commitFailure;
+        }
+        accepted.push(JSON.parse(await readFile(checkpointPath, "utf8")));
+        await writeFile(path.join(overlappingRoot, "checkpoint-head.json"), JSON.stringify({
+          checkpoint: path.basename(checkpointPath),
+        }));
+      },
+    };
+    const additionalFinding = structuredClone(finding);
+    additionalFinding.title = "Unsafe extraction in the additional importer";
+    additionalFinding.locations = [{ path: "src/import.py", startLine: 10, endLine: 12 }];
+    additionalFinding.identity = { anchor: "additional-worker-finding" };
+    additionalFinding.provenance.candidateId = "additional-worker-candidate";
+    additionalFinding.extensions.candidateId = "additional-worker-candidate";
+    const first = recordCodexSecurityWorkerScanDraft(overlappingContext, {
+      ...workerInput, complete: false,
+      coverage: { ...coverage, completeness: "partial", reviewedFiles: ["clean.ts"] },
+    }).then((result) => ({ result }), (error) => ({ error }));
+    await firstEntered.promise;
+    const second = recordCodexSecurityWorkerScanDraft({ ...overlappingContext }, {
+      ...workerInput, complete: false, findings: [additionalFinding],
+      coverage: {
+        ...coverage, completeness: "partial", reviewedFiles: ["pending.ts"],
+        deferred: [{ candidateId: "unfinished-candidate", reason: "Runtime validation remains pending." }],
+      },
+    });
+    try {
+      // Another worker can accept successive updates while this worker's first
+      // acceptance is held. Neither worker needs a timer or a persistent lock.
+      const independentContext = { ...workerContext, root: independentRoot };
+      await recordCodexSecurityWorkerScanDraft(independentContext, {
+        ...workerInput, complete: false,
+      });
+      await recordCodexSecurityWorkerScanDraft(independentContext, {
+        ...workerInput, complete: false, findings: [additionalFinding],
+      });
+      assert.equal(accepted.length, 0, "the second call must wait for this worker's outstanding acceptance");
+    } finally {
+      releaseFirst.resolve();
+      await Promise.allSettled([first, second]);
+    }
+    const firstOutcome = await first;
+    if (rejectFirst) assert.equal(firstOutcome.error, commitFailure);
+    else assert.equal(firstOutcome.result.findingCount, 1);
+    assert.equal((await second).findingCount, 2, "a failed earlier call must not poison the worker queue");
+    assert.equal(accepted.length, rejectFirst ? 1 : 2);
+    const final = JSON.parse(await readFile(path.join(overlappingRoot, "result.json"), "utf8"));
+    assert.deepEqual(final, accepted.at(-1), "the replaceable result and accepted checkpoint must agree");
+    assert.deepEqual(new Set(final.findings.map((item) => item.provenance.candidateId)), new Set([
+      finding.provenance.candidateId, additionalFinding.provenance.candidateId,
+    ]));
+    assert.deepEqual(new Set(final.coverage.reviewedFiles), new Set(
+      rejectFirst ? ["pending.ts"] : ["clean.ts", "pending.ts"],
+    ));
+    assert.equal(final.coverage.deferred[0].candidateId, "unfinished-candidate");
+  }
+
+  const committedRoot = path.join(root, "committed-worker");
+  await mkdir(committedRoot);
+  const committedSnapshots = [];
+  let failCommit = false;
+  const committedContext = {
+    ...workerContext,
+    root: committedRoot,
+    onCheckpoint: async (checkpointPath) => {
+      if (failCommit) throw new Error("SQLite commit unavailable");
+      committedSnapshots.push(JSON.parse(await readFile(checkpointPath, "utf8")));
+    },
+  };
+  await recordCodexSecurityWorkerScanDraft(committedContext, {
+    ...workerInput, complete: false,
+    coverage: { ...coverage, reviewedFiles: ["clean.ts"] },
+  });
+  await recordCodexSecurityWorkerScanDraft(committedContext, {
+    ...workerInput, complete: false, findings: [],
+    coverage: { ...coverage, reviewedFiles: ["pending.ts"] },
+  });
+  assert.equal(committedSnapshots.length, 2, "only cumulative checkpoints are committed");
+  assert.deepEqual(committedSnapshots[1].findings, [finding]);
+  assert.deepEqual(new Set(committedSnapshots[1].coverage.reviewedFiles), new Set(["clean.ts", "pending.ts"]));
+  const committedResult = await readFile(path.join(committedRoot, "result.json"), "utf8");
+  failCommit = true;
+  await assert.rejects(
+    recordCodexSecurityWorkerScanDraft(committedContext, { ...workerInput, complete: false }),
+    /SQLite commit unavailable/u,
+  );
+  assert.equal(await readFile(path.join(committedRoot, "result.json"), "utf8"), committedResult);
+
+  const whitespaceRoot = path.join(root, "whitespace-path-worker");
+  await mkdir(whitespaceRoot);
+  const whitespaceSnapshots = [];
+  const whitespaceContext = {
+    ...workerContext,
+    root: whitespaceRoot,
+    onCheckpoint: async (checkpointPath) => {
+      whitespaceSnapshots.push(JSON.parse(await readFile(checkpointPath, "utf8")));
+    },
+  };
+  const distinctPaths = ["a.ts", " a.ts", "a.ts "];
+  for (const [index, filename] of distinctPaths.entries()) {
+    await recordCodexSecurityWorkerScanDraft(whitespaceContext, {
+      ...workerInput,
+      complete: false,
+      coverage: {
+        ...coverage,
+        reviewedFiles: [filename],
+        openQuestions: [index === 0 ? "Check the caller boundary?" : " Check the caller boundary? "],
+      },
+    });
+  }
+  const whitespaceResult = await readJson(whitespaceRoot, "result.json");
+  assert.deepEqual(new Set(whitespaceResult.coverage.reviewedFiles), new Set(distinctPaths));
+  assert.deepEqual(whitespaceSnapshots.at(-1), whitespaceResult);
+  assert.deepEqual(
+    whitespaceResult.coverage.openQuestions.map((question) => question.trim()),
+    ["Check the caller boundary?"],
+  );
+
   const checkpointRoot = path.join(root, "checkpoint-worker");
   await mkdir(checkpointRoot);
   const checkpointContext = { ...workerContext, root: checkpointRoot };
@@ -638,6 +773,64 @@ try {
   const resolvedRejection = JSON.parse(await readFile(path.join(pendingRoot, "result.json"), "utf8"));
   assert.deepEqual(resolvedRejection.coverage.deferred, []);
   assert.deepEqual(resolvedRejection.coverage.surfaces[0].candidate, candidate);
+
+  for (const disposition of ["rejected", "reported", "pending"]) {
+    const continuationRoot = path.join(root, `accepted-${disposition}-continuation`);
+    await mkdir(continuationRoot);
+    const continuationContext = { ...workerContext, root: continuationRoot };
+    await saveScanDraftCheckpoint(continuationContext, {
+      ...pending, findings: [finding],
+      coverage: { ...pending.coverage, reviewedFiles: ["clean.ts"] },
+    });
+    const decision = {
+      label: "Saved validation", candidateId: finding.provenance.candidateId,
+      disposition, reason: "The saved worker completed validation.",
+      provenance: { workerId: finding.provenance.workerId },
+    };
+    await saveScanDraftCheckpoint(continuationContext, {
+      ...pending, findings: disposition === "rejected" ? [] : [finding],
+      coverage: {
+        ...pending.coverage,
+        surfaces: disposition === "pending" ? [] : [decision],
+        deferred: disposition === "pending" ? pending.coverage.deferred : [],
+        reviewedFiles: ["clean.ts"],
+      },
+    });
+    await recordCodexSecurityWorkerScanDraft(continuationContext, {
+      ...pending, coverage: { ...pending.coverage, deferred: [] },
+    });
+    const continued = JSON.parse(await readFile(path.join(continuationRoot, "result.json"), "utf8"));
+    assert.equal(continued.complete, false);
+    assert.equal(continued.coverage.deferred.length, disposition === "pending" ? 1 : 0, "an empty partial draft must preserve the accepted continuation decision");
+    assert.deepEqual(continued.coverage.reviewedFiles, ["clean.ts"]);
+    assert.equal(continued.findings.length, disposition === "rejected" ? 0 : 1);
+    if (disposition === "rejected") {
+      assert.ok(continued.coverage.surfaces.some((surface) => (
+        surface.candidateId === finding.provenance.candidateId && surface.disposition === disposition
+      )), "an empty partial draft must retain the accepted head's rejection");
+    } else {
+      assert.equal(continued.findings[0].provenance.candidateId, finding.provenance.candidateId);
+      assert.equal(continued.findings[0].provenance.workerId, finding.provenance.workerId);
+    }
+    if (disposition === "pending") {
+      assert.deepEqual(continued.coverage.deferred[0].candidate, candidate);
+      // The retained pending state also survives another empty update after result.json exists.
+      await recordCodexSecurityWorkerScanDraft(continuationContext, {
+        ...pending, coverage: { ...pending.coverage, deferred: [] },
+      });
+      assert.equal(JSON.parse(await readFile(path.join(continuationRoot, "result.json"), "utf8")).coverage.deferred.length, 1);
+      for (const resolution of ["reported", "rejected"]) {
+        await recordCodexSecurityWorkerScanDraft(continuationContext, {
+          ...pending,
+          findings: resolution === "reported" ? [finding] : [],
+          coverage: { ...pending.coverage, deferred: [], surfaces: resolution === "reported" ? [] : [rejection] },
+        });
+        const resolved = JSON.parse(await readFile(path.join(continuationRoot, "result.json"), "utf8"));
+        assert.deepEqual(resolved.coverage.deferred, [], "a fresh validation decision resolves retained pending work");
+        assert.equal(resolved.findings.length, resolution === "reported" ? 1 : 0);
+      }
+    }
+  }
 
   const undefinedCandidateRoot = path.join(root, "undefined-candidate-worker");
   await mkdir(undefinedCandidateRoot);

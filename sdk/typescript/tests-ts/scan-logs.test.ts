@@ -9,7 +9,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { readScanLogs } from "../src/scan-logs.js";
+import {
+  findScanSessionForDirectory,
+  readSavedScanLogs,
+  readScanLogs,
+} from "../src/scan-logs.js";
 
 const directories: string[] = [];
 
@@ -80,6 +84,84 @@ function commandEvent(command: string, id: string, timestamp?: string) {
 }
 
 describe("saved scan logs", () => {
+  test("a scan's own session takes precedence over its inherited log source", async () => {
+    const home = await temporaryHome();
+    await writeSession(home, "parent", [
+      commandEvent("parent analysis", "parent-call"),
+    ]);
+    await writeSession(home, "child", [
+      commandEvent("child follow-up", "child-call"),
+    ]);
+    const result = await readSavedScanLogs(
+      {
+        scanId: "child-scan",
+        continuationThreadId: "child",
+        sourceThreadId: "parent",
+      },
+      home,
+    );
+    expect(result.scanId).toBe("child-scan");
+    expect(result.threadId).toBe("child");
+    expect(result.sessions.map(({ threadId }) => threadId)).toEqual(["child"]);
+    expect(JSON.stringify(result)).not.toContain("parent analysis");
+  });
+
+  test("recovers only a unique root session for the exact scan directory", async () => {
+    const home = await temporaryHome();
+    const scanDirectory = join(home, "scan");
+    await writeSession(home, "scan", [], undefined, undefined, scanDirectory);
+    await writeSession(home, "spawned", [], "scan", undefined, scanDirectory);
+    await writeSession(
+      home,
+      "validation",
+      [],
+      undefined,
+      undefined,
+      join(scanDirectory, "artifacts"),
+    );
+    await writeSession(
+      home,
+      "worker",
+      [],
+      undefined,
+      undefined,
+      join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "1",
+        "output",
+      ),
+    );
+    await writeSession(home, "unrelated", [], undefined, undefined, home);
+    expect(
+      await findScanSessionForDirectory(home, scanDirectory),
+    ).toMatchObject({ threadId: "scan", workingDirectory: scanDirectory });
+    expect(
+      await findScanSessionForDirectory(home, join(home, "missing")),
+    ).toBeNull();
+    await writeSession(
+      home,
+      "another-root",
+      [],
+      undefined,
+      undefined,
+      scanDirectory,
+    );
+    expect(await findScanSessionForDirectory(home, scanDirectory)).toBeNull();
+  });
+
+  test("directory session recovery preserves cancellation", async () => {
+    const home = await temporaryHome();
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation");
+    controller.abort(reason);
+    await expect(
+      findScanSessionForDirectory(home, join(home, "scan"), controller.signal),
+    ).rejects.toBe(reason);
+  });
+
   test("returns complete parent and worker events without unrelated sessions", async () => {
     const home = await temporaryHome();
     await writeSession(home, "parent", [

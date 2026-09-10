@@ -46,6 +46,7 @@ export interface DeepScanRunState {
   updatedAt?: string;
   targetPath: string;
   scope: string;
+  scopePaths?: string[];
   userContext?: string;
   scanDir: string;
   config: DeepScanConfig;
@@ -184,6 +185,7 @@ export interface DeepScanStore {
 
 /** Host-bound worker artifact state; never populate this from model input. */
 export interface CodexWorkerArtifactContext {
+  workerId?: string;
   root: string;
   layout: "worker" | "reducer";
   deepReducer?: DeepReducerContext;

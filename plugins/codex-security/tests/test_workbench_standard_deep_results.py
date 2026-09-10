@@ -510,12 +510,14 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     [None, {}],
     ids=["missing-source-map", "empty-source-map"],
 )
+@pytest.mark.parametrize("rejected_parent", [False, True])
 def test_explicit_recovery_retries_frozen_parent_after_write_failure(
     tmp_path: Path,
     published_sources: dict[str, str] | None,
+    rejected_parent: bool,
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     contract_dir = tmp_path / "contract"
     contract_dir.mkdir()
     scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
@@ -526,6 +528,13 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
         relative_path="app.py",
         coverage_mode="deep_repository",
     )
+    if rejected_parent:
+        findings_path = contract_dir / "findings.json"
+        findings = json.loads(findings_path.read_text())
+        finding = findings["findings"][0]
+        finding["extensions"] = {"candidateId": "legacy-candidate"}
+        finding["provenance"].update(candidateId="legacy-candidate", workerId=worker_id)
+        findings_path.write_text(json.dumps(findings))
     subprocess.run(
         [
             sys.executable,
@@ -557,9 +566,21 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
     late_finding["identity"]["anchor"] = "late-checkpoint"
     late_finding["ruleId"] = "late.checkpoint"
     late_finding["title"] = "Late checkpoint finding"
+    if rejected_parent:
+        late_finding["extensions"] = {"candidateId": "late-candidate"}
+        late_finding["provenance"]["candidateId"] = "late-candidate"
     late = json.loads(result_path.read_text())
     late["complete"] = False
     late["findings"] = [late_finding]
+    if rejected_parent:
+        late["coverage"]["surfaces"] = [
+            {
+                "label": "Validated existing control",
+                "candidateId": "legacy-candidate",
+                "disposition": "rejected",
+                "notes": "The current worker rejected the previously reported candidate.",
+            }
+        ]
     result_path.write_text(json.dumps(late))
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
@@ -621,11 +642,17 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
     )["scan"]
 
     assert recovered["resultsRecoveryNeeded"] is False
-    assert recovered["findingCount"] == 2
-    assert {finding["title"] for finding in recovered["findings"]} == {
-        parent_finding["title"],
-        late_finding["title"],
-    }
+    expected_titles = {late_finding["title"]}
+    if not rejected_parent:
+        expected_titles.add(parent_finding["title"])
+    assert recovered["findingCount"] == len(expected_titles)
+    assert {finding["title"] for finding in recovered["findings"]} == expected_titles
+    if rejected_parent:
+        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        assert any(
+            item.get("candidateId") == "legacy-candidate" and item["disposition"] == "rejected"
+            for item in coverage["surfaces"]
+        )
     published_sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"][
         "preservedSources"
     ]
@@ -759,7 +786,8 @@ def test_malformed_current_finding_does_not_override_worker_rejection(tmp_path: 
     checkpoint = json.loads(result_path.read_text())
     checkpoint["complete"] = False
     checkpoint["findings"] = [copy.deepcopy(finding)]
-    write_checkpoint(result_path.parent / "checkpoints", checkpoint)
+    checkpoint_path = write_checkpoint(result_path.parent / "checkpoints", checkpoint)
+    checkpoint_bytes = checkpoint_path.read_bytes()
     finding["summary"] = ""
     current = json.loads(result_path.read_text())
     current["findings"] = [finding]
@@ -772,6 +800,7 @@ def test_malformed_current_finding_does_not_override_worker_rejection(tmp_path: 
         }
     ]
     result_path.write_text(json.dumps(current))
+    current_bytes = result_path.read_bytes()
 
     run_workbench(
         state_dir,
@@ -788,6 +817,12 @@ def test_malformed_current_finding_does_not_override_worker_rejection(tmp_path: 
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["surfaces"][0]["disposition"] == "rejected"
     assert len(coverage["surfaces"][0]["previousFindings"]) == 1
+    assert (
+        coverage["surfaces"][0]["previousFindings"][0]["summary"]
+        == checkpoint["findings"][0]["summary"]
+    )
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert result_path.read_bytes() == current_bytes
 
 
 def test_stopped_recovery_accepts_trailing_slash_scope(tmp_path: Path) -> None:

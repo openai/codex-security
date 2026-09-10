@@ -40,6 +40,8 @@ export interface ScanResultOptions {
   scanDir: string;
   threadId: string;
   turnResult: TurnResultMetadata;
+  /** Cumulative cost when a scan continues a saved attempt. */
+  cost?: Readonly<ScanCost> | null;
   sarifPath?: string | null;
   repositoryFindings?: readonly RepositoryFinding[];
 }
@@ -63,10 +65,10 @@ export class ScanResult {
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
     this.repositoryFindings = options.repositoryFindings;
-    this.cost = estimateScanCost(
-      options.turnResult.model,
-      options.turnResult.usage,
-    );
+    this.cost =
+      options.cost !== undefined
+        ? options.cost
+        : estimateScanCost(options.turnResult.model, options.turnResult.usage);
     if (options.sarifPath !== undefined) {
       this.sarifPath = options.sarifPath;
     } else {

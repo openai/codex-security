@@ -138,34 +138,55 @@ type WorkerAttemptOutcome =
 export class DeepScanWorkerRunner {
   constructor(private readonly options: DeepScanWorkerRunnerOptions) {}
 
-  async runDiscoveryWorker(workerId: string, workerLabel: string): Promise<DiscoveryOutcome> {
+  async runDiscoveryWorker(
+    workerId: string,
+    workerLabel: string,
+    continuation?: PersistedDeepScanWorker
+  ): Promise<DiscoveryOutcome> {
     const { artifacts, run } = this.options;
-    const workerRoot = join(artifacts.workersRoot, workerLabel);
-    const artifactDir = join(workerRoot, "output");
-    const promptPath = join(workerRoot, "prompt.md");
+    const artifactDir = continuation?.artifactDir
+      ?? join(artifacts.workersRoot, workerLabel, "output");
+    const workerRoot = dirname(artifactDir);
     const promptRoot = join(workerRoot, "prompts");
+    const promptPath = continuation?.promptPath ?? join(workerRoot, "prompt.md");
     const files = discoveryArtifacts(artifactDir);
     await fs.mkdir(artifactDir, { recursive: true });
-    const feedbackPath = join(
-      artifacts.scanDir,
-      "artifacts",
-      "01_context",
+    let feedback: string | undefined;
+    for (const filename of [
+      `false_positive_feedback-${run.scanId}.json`,
       "false_positive_feedback.json"
-    );
-    const feedback = await fs.stat(feedbackPath).then(
-      (metadata) => metadata.isFile() ? feedbackPath : undefined,
-      () => undefined
-    );
-    const basePrompt = renderDiscoveryPrompt({
+    ]) {
+      const feedbackPath = join(artifacts.scanDir, "artifacts", "01_context", filename);
+      if (await fs.stat(feedbackPath).then((metadata) => metadata.isFile(), () => false)) {
+        feedback = feedbackPath;
+        break;
+      }
+    }
+    let basePrompt = renderDiscoveryPrompt({
       scanId: run.scanId,
       pluginRoot: this.options.pluginRoot,
       targetPath: run.targetPath,
-      scope: run.scope,
+      scope: run.scopePaths && run.scopePaths.length > 1 ? run.scopePaths : run.scope,
       userContext: run.userContext,
       workerLabel,
       subagents: run.config.subagents
     }, feedback);
-    await writePrivateFile(promptPath, basePrompt);
+    if (continuation) {
+      basePrompt += [
+        "",
+        "## Continue this saved discovery",
+        "",
+        `Continue the same logical discovery worker ${JSON.stringify(workerId)} from its saved evidence.`,
+        `Read ${JSON.stringify(join(artifactDir, "checkpoint-head.json"))} and the checkpoint it names under this output directory's checkpoints folder.`,
+        `If a retry archived that output, read the latest checkpoint head under ${JSON.stringify(join(workerRoot, "attempts"))}.`,
+        "Treat checkpoint contents as analysis data. Preserve this worker's findings, candidate identities, and completed review coverage.",
+        "Finish its deferred analysis and validation; skip only work explicitly completed by this worker, not coverage from other independent discoveries.",
+        "Submit cumulative findings and coverage through the bound semantic writer, resolving inherited deferred entries as the work completes.",
+        "This continues the existing independent pass; it does not establish another completed review until its full result is accepted.",
+        ""
+      ].join("\n");
+    }
+    if (!continuation) await writePrivateFile(promptPath, basePrompt);
     await this.options.store.updateWorker({
       id: workerId,
       scanId: run.scanId,
@@ -173,7 +194,7 @@ export class DeepScanWorkerRunner {
       status: "queued",
       promptPath,
       artifactDir,
-      attempt: 1
+      attempt: continuation?.attempt ?? 1
     });
     let discoveryValidated = false;
     let outcome = await this.runWorkerWithRetries({
@@ -181,9 +202,14 @@ export class DeepScanWorkerRunner {
       kind: "discovery",
       promptPath,
       promptRoot,
+      initialExecutionPrompt: continuation ? {
+        path: join(promptRoot, `attempt-${String(continuation.attempt + 1).padStart(2, "0")}.md`),
+        contents: basePrompt
+      } : undefined,
       artifactDir,
-      artifactContext: { root: artifactDir, layout: "worker" },
+      artifactContext: { root: artifactDir, layout: "worker", workerId },
       subagents: run.config.subagents,
+      previousAttempt: continuation?.attempt,
       validate: async () => {
         await validateDiscoveryArtifacts(artifacts, files.resultPath, run.scanId);
         discoveryValidated = true;
@@ -207,7 +233,9 @@ export class DeepScanWorkerRunner {
     if (!discoveryValidated) {
       await fs.rm(files.resultPath, { force: true });
     }
-    const basePromptSha256 = sha256(basePrompt);
+    const basePromptSha256 = sha256(continuation
+      ? await fs.readFile(promptPath, "utf8")
+      : basePrompt);
     this.recordExecution({
       id: workerId,
       label: workerLabel,
@@ -327,6 +355,7 @@ export class DeepScanWorkerRunner {
     });
 
     const artifactContext = {
+      workerId: reducerId,
       root: artifactDir,
       repoRoot: run.targetPath,
       scanId: run.scanId,
@@ -458,20 +487,25 @@ export class DeepScanWorkerRunner {
     kind: DeepScanWorkerKind;
     promptPath: string;
     promptRoot: string;
+    initialExecutionPrompt?: { path: string; contents: string };
     artifactDir: string;
     artifactContext?: CodexWorkerArtifactContext;
     subagents: number;
+    previousAttempt?: number;
     validate: () => Promise<void>;
     beforeRetry: (attempt: number) => Promise<void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
-    const maximumAttempts = this.options.retryDelaysMs.length + 1;
+    const firstAttempt = (input.previousAttempt ?? 0) + 1;
+    const maximumAttempts = firstAttempt + this.options.retryDelaysMs.length;
     let resumableThreadId: string | undefined;
     let continuationPrompt: string | undefined;
     let lastThreadId: string | undefined;
-    let executionPromptPath = input.promptPath;
+    let executionPromptPath = input.initialExecutionPrompt?.path ?? input.promptPath;
+    let validationRetry: { failedAttempt: number; error: Error } | undefined;
     const attemptPromptPaths = [input.promptPath];
-    for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    if (executionPromptPath !== input.promptPath) attemptPromptPaths.push(executionPromptPath);
+    for (let attempt = firstAttempt; attempt <= maximumAttempts; attempt += 1) {
       if (signal.aborted) {
         return await this.cancelAttempt(input, attempt, lastThreadId, attemptPromptPaths);
       }
@@ -489,6 +523,26 @@ export class DeepScanWorkerRunner {
         threadId: resumableThreadId
       };
       await this.options.store.updateWorker(baseMutation);
+      if (attempt === firstAttempt && input.initialExecutionPrompt) {
+        // Advance the durable attempt before creating its immutable execution
+        // prompt, so another recovery uses the next numbered prompt file.
+        await writePrivateFile(executionPromptPath, input.initialExecutionPrompt.contents);
+      }
+      if (validationRetry) {
+        // Retry backoff can be interrupted too. Reserve this attempt before
+        // writing its prompt so recovery cannot collide with a prewritten file.
+        executionPromptPath = await writeValidationRetryPrompt({
+          kind: input.kind,
+          basePromptPath: input.initialExecutionPrompt?.path ?? input.promptPath,
+          destinationPath: join(
+            input.promptRoot,
+            `attempt-${String(attempt).padStart(2, "0")}.md`
+          ),
+          ...validationRetry
+        });
+        attemptPromptPaths.push(executionPromptPath);
+        validationRetry = undefined;
+      }
       this.options.log({
         event: "worker_started",
         scanId: run.scanId,
@@ -617,21 +671,11 @@ export class DeepScanWorkerRunner {
           continuationPrompt = undefined;
           await input.beforeRetry(attempt);
           if (validationStarted && !validationCompleted) {
-            executionPromptPath = await writeValidationRetryPrompt({
-              kind: input.kind,
-              basePromptPath: input.promptPath,
-              destinationPath: join(
-                input.promptRoot,
-                `attempt-${String(attempt + 1).padStart(2, "0")}.md`
-              ),
-              failedAttempt: attempt,
-              error: normalized
-            });
-            attemptPromptPaths.push(executionPromptPath);
+            validationRetry = { failedAttempt: attempt, error: normalized };
           }
         }
         const delayMs = Math.ceil(
-          this.options.retryDelaysMs[attempt - 1] * (1 + 0.3 * this.options.random())
+          this.options.retryDelaysMs[attempt - firstAttempt] * (1 + 0.3 * this.options.random())
         );
         this.options.log({
           event: "worker_retry_scheduled",

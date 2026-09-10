@@ -10,19 +10,76 @@ import sys
 import tempfile
 from collections.abc import Callable
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
 from workbench_feedback import get_scan_feedback
+from workbench_scan_checkpoints import freeze_review_files
 from workbench_target import (
     directory_content_digest,
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text, user_text
+from workbench_validation import optional_text, reject_non_finite_json, user_text
+
+SCAN_RECIPE_MAX_BYTES = 256 * 1024
+
+
+def parse_scan_recipe(
+    value: str, repository: Path, *, require_target: Callable[[str], Path]
+) -> dict[str, Any]:
+    if len(value.encode("utf-8")) > SCAN_RECIPE_MAX_BYTES:
+        raise SystemExit("Scan launch recipe must be no larger than 256 KiB.")
+    try:
+        recipe = json.loads(value, parse_constant=reject_non_finite_json)
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise SystemExit("Scan launch recipe must be a valid JSON object.") from exc
+    if not isinstance(recipe, dict):
+        raise SystemExit("Scan launch recipe must be a JSON object.")
+    requested_repository = recipe.get("repository")
+    if (
+        not isinstance(requested_repository, str)
+        or require_target(requested_repository) != repository
+    ):
+        raise SystemExit("Scan launch recipe repository must match the scanned repository.")
+    if recipe.get("mode") not in {"standard", "deep"}:
+        raise SystemExit("Scan launch recipe mode must be standard or deep.")
+    if not isinstance(recipe.get("config"), dict):
+        raise SystemExit("Scan launch recipe config must be a JSON object.")
+    target = recipe.get("target")
+    if not isinstance(target, dict) or target.get("kind") not in {
+        "repository",
+        "paths",
+        "refs",
+        "working_tree",
+    }:
+        raise SystemExit("Scan launch recipe target must identify a supported scan target.")
+    paths = target.get("paths")
+    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+        raise SystemExit("Scan launch recipe target paths must be an array of strings.")
+    if target["kind"] == "paths" and not paths:
+        raise SystemExit("A scoped scan launch recipe must include at least one target path.")
+    if target["kind"] != "paths" and paths:
+        raise SystemExit("Only scoped scan launch recipes can include target paths.")
+    for path in paths:
+        candidate = PurePosixPath(path)
+        if (
+            not path
+            or candidate.is_absolute()
+            or ".." in candidate.parts
+            or "\\" in path
+            or not (repository / candidate).exists()
+            or not (repository / candidate).resolve().is_relative_to(repository)
+        ):
+            raise SystemExit("Scan launch recipe target paths must exist inside the repository.")
+    if target["kind"] in {"refs", "working_tree"}:
+        if not isinstance(target.get("base"), str) or not isinstance(target.get("head"), str):
+            raise SystemExit("Diff scan launch recipes require resolved base and head revisions.")
+    return recipe
 
 
 def safe_segment(value: str) -> str:
@@ -146,6 +203,41 @@ def archive_scan(
                 artifact["kind"],
             ),
         )
+    for table, key, columns in (
+        ("deep_scan_workers", "id", ("prompt_path", "artifact_dir", "result_manifest_path")),
+        (
+            "deep_scan_runs",
+            "scan_id",
+            (
+                "canonical_inventory_path",
+                "canonical_finding_report_path",
+                "canonical_candidates_path",
+                "dedupe_report_path",
+                "seed_research_path",
+                "work_ledger_path",
+                "raw_candidates_path",
+                "coverage_ledger_path",
+                "findings_dir",
+                "manifest_path",
+            ),
+        ),
+    ):
+        rows = connection.execute(
+            f"SELECT {key}, {', '.join(columns)} FROM {table} WHERE scan_id = ?",
+            (previous_scan["id"],),
+        ).fetchall()
+        for row in rows:
+            for column in columns:
+                if row[column] is None:
+                    continue
+                try:
+                    relative_path = Path(row[column]).relative_to(scan_dir)
+                except ValueError:
+                    continue
+                connection.execute(
+                    f"UPDATE {table} SET {column} = ? WHERE {key} = ?",
+                    (str(archived_scan_dir / relative_path), row[key]),
+                )
 
 
 def insert_running_scan(
@@ -161,6 +253,7 @@ def insert_running_scan(
     target_summary: str | None,
     scope_file_count: int,
     timestamp: str,
+    review_files: list[tuple[str, str]],
     handoff_status: str = "pending",
     model: str | None = None,
     reasoning_effort: str | None = None,
@@ -224,6 +317,7 @@ def insert_running_scan(
         "UPDATE workspaces SET active_scan_id = ?, updated_at = ? WHERE id = ?",
         (scan_id, timestamp, workspace["id"]),
     )
+    freeze_review_files(connection, scan_id, review_files)
     if native_scan:
         scan = next(connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)))
         false_positives = get_scan_feedback(connection, scan)["falsePositives"]

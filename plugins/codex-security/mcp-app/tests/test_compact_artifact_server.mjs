@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -22,12 +22,24 @@ const temporaryRoot = await mkdtemp(path.join(tmpdir(), "codex-security-artifact
 try {
   const runtimeBundle = path.join(temporaryRoot, "server.cjs");
   await bundleEntrypoint("main.ts", runtimeBundle);
+  const workerDraftBundle = await build({
+    entryPoints: [path.join(applicationRoot, "src", "artifact-scan-draft.ts")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    write: false
+  });
+  const { recordCodexSecurityWorkerScanDraft } = await import(
+    `data:text/javascript;base64,${Buffer.from(workerDraftBundle.outputFiles[0].text).toString("base64")}`
+  );
 
   await testParentToolList(runtimeBundle);
   await testClaimedParentArtifactOperations(runtimeBundle, "source");
   await testSemanticScanDraftCompletion(runtimeBundle, "source");
   await testCompactDiffScanCompletion(runtimeBundle, "source");
   await testDiscoveryWorkerToolList(runtimeBundle);
+  await testWorkerCheckpointDatabase(runtimeBundle, "source", recordCodexSecurityWorkerScanDraft);
+  await testStandardContinuationDraft(runtimeBundle, "source");
   await testReducerWorkerToolList(runtimeBundle);
 
   const shippedRuntime = path.join(bundledPluginRoot, "mcp", "server.mjs");
@@ -36,6 +48,8 @@ try {
   await testSemanticScanDraftCompletion(shippedRuntime, "shipped");
   await testCompactDiffScanCompletion(shippedRuntime, "shipped");
   await testDiscoveryWorkerToolList(shippedRuntime);
+  await testWorkerCheckpointDatabase(shippedRuntime, "shipped", recordCodexSecurityWorkerScanDraft);
+  await testStandardContinuationDraft(shippedRuntime, "shipped");
   await testReducerWorkerToolList(shippedRuntime);
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
@@ -228,10 +242,11 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
     `def execute(query):\n${sourceLine}\n`
   );
 
-  const client = await startClient(bundle, {
+  const serverEnvironment = {
     CODEX_SECURITY_SCAN_ROOT: scanRoot,
     CODEX_SECURITY_STATE_DIR: stateRoot
-  });
+  };
+  let client = await startClient(bundle, serverEnvironment);
   const ownerThread = `semantic-draft-owner-${runtimeLabel}`;
   const call = (name, arguments_) => client.callTool({
     name,
@@ -524,6 +539,24 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
         originalDraft,
         `${runtimeLabel}: rejecting ${description} must not write canonical artifacts`
       );
+    }
+
+    for (const complete of [false, true]) {
+      requireToolError(await call("record_codex_security_scan_draft", {
+        scanId, handoffClaimToken, complete, findings: [finding],
+        coverage: { ...coverage, reviewedFiles: [complete ? "another-typo.py" : "mistyped.py"] }
+      }), /outside the saved inventory or changed/, `${runtimeLabel}: reject Standard reviewed-file typo`);
+      await client.close();
+      client = await startClient(bundle, serverEnvironment);
+      requireSuccessfulTool(await call("get_codex_security_scan_context", {
+        scanId, handoffClaimToken
+      }), `${runtimeLabel}: restore the Standard checkpoint context`);
+      requireSuccessfulTool(await call("record_codex_security_scan_draft", {
+        scanId, handoffClaimToken, complete: false, findings: [finding],
+        coverage: { ...coverage, reviewedFiles: ["src/fixture.py"] }
+      }), `${runtimeLabel}: correct a rejected Standard checkpoint after restart`);
+      assert.equal(JSON.parse(await readFile(path.join(scanDirectory, "scan-manifest.json"), "utf8")).scan.complete, false);
+      assert.deepEqual(JSON.parse(await readFile(path.join(scanDirectory, "coverage.json"), "utf8")).reviewedFiles, ["src/fixture.py"]);
     }
 
     const drafted = requireSuccessfulTool(await call(
@@ -1106,6 +1139,502 @@ async function testDiscoveryWorkerToolList(bundle) {
   }
 }
 
+async function testWorkerCheckpointDatabase(bundle, runtimeLabel, recordWorkerDraft) {
+  const workerPluginRoot = runtimeLabel === "shipped" ? bundledPluginRoot : pluginRoot;
+  const fixtureRoot = path.join(temporaryRoot, `worker-checkpoint-${runtimeLabel}`);
+  const repoRoot = path.join(fixtureRoot, "repository");
+  const scanRoot = path.join(fixtureRoot, "scan");
+  const stateRoot = path.join(fixtureRoot, "state");
+  const workerRoot = path.join(scanRoot, "artifacts", "deep_discovery", "workers", "discovery-0001");
+  const artifactRoot = path.join(workerRoot, "output");
+  await mkdir(scanRoot, { recursive: true, mode: 0o700 });
+  await Promise.all([
+    mkdir(repoRoot, { recursive: true }),
+    mkdir(stateRoot, { recursive: true })
+  ]);
+  await writeFile(path.join(repoRoot, "clean.ts"), "export const clean = true;\n");
+  await writeFile(path.join(repoRoot, "pending.ts"), "export const pending = true;\n");
+  await writeFile(path.join(repoRoot, "unreviewed.ts"), "export const remaining = true;\n");
+  const unusualPaths = process.platform === "win32" ? [] : ["back\\slash.ts", "line\nbreak.ts"];
+  for (const filename of unusualPaths) {
+    await writeFile(path.join(repoRoot, filename), "export const unusual = true;\n");
+  }
+  const python = process.env.CODEX_SECURITY_PYTHON_COMMAND ?? "python3";
+  const environment = { ...process.env, CODEX_SECURITY_STATE_DIR: stateRoot };
+  const workbench = (...arguments_) => JSON.parse(execFileSync(python, [
+    path.join(workerPluginRoot, "scripts", "workbench_db.py"), ...arguments_
+  ], { env: environment, encoding: "utf8" }));
+  const { scanId } = workbench("register-cli-scan", "--repository", repoRoot,
+    "--scan-dir", scanRoot, "--recipe-json", JSON.stringify({
+      repository: repoRoot,
+      target: { kind: "repository", paths: [] },
+      mode: "deep",
+      config: {}
+    }));
+  await mkdir(artifactRoot, { recursive: true });
+  const workerId = randomUUID();
+  const promptPath = path.join(workerRoot, "prompt.md");
+  await writeFile(promptPath, "Synthetic discovery worker\n");
+  execFileSync(python, ["-c", `
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute("INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase, workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at) VALUES (?, 1, 'deep-security-scan/v1', 'running', 'discovery', 1, 0, 1, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')", (sys.argv[2],))
+    connection.execute("INSERT INTO deep_scan_workers (id, scan_id, kind, status, prompt_path, artifact_dir, attempt, created_at, updated_at) VALUES (?, ?, 'discovery', 'running', ?, ?, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')", (sys.argv[3], sys.argv[2], sys.argv[4], sys.argv[5]))
+`, path.join(stateRoot, "workbench.sqlite3"), scanId, workerId, promptPath, artifactRoot]);
+  const workerEnvironment = {
+    CODEX_SECURITY_ARTIFACT_ROOT: artifactRoot,
+    CODEX_SECURITY_REPO_ROOT: repoRoot,
+    CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
+    CODEX_SECURITY_SCAN_ID: scanId,
+    CODEX_SECURITY_WORKER_ID: workerId,
+    CODEX_SECURITY_PLUGIN_ROOT: workerPluginRoot,
+    CODEX_SECURITY_PYTHON_COMMAND: python,
+    CODEX_SECURITY_STATE_DIR: stateRoot
+  };
+  const input = {
+    scanId,
+    complete: false,
+    findings: [],
+    coverage: {
+      completeness: "partial",
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [{ candidateId: "candidate-1", reason: 'Inspect the "café" control.\nKeep its evidence.' }],
+      reviewedFiles: ["clean.ts"]
+    }
+  };
+  let client = await startClient(bundle, workerEnvironment);
+  try {
+    for (const reviewedFiles of [[42], [""]]) {
+      requireToolError(await client.callTool({
+        name: "record_codex_security_scan_draft",
+        arguments: { ...input, coverage: { ...input.coverage, reviewedFiles } }
+      }), /reviewedFiles/, `${runtimeLabel}: reject malformed reviewed filenames`);
+    }
+    requireToolError(await client.callTool({
+      name: "record_codex_security_scan_draft",
+      arguments: { ...input, coverage: { ...input.coverage, reviewedFiles: ["mistyped.ts"] } }
+    }), /outside the saved inventory or changed/, `${runtimeLabel}: reject invalid reviewed paths`);
+  } finally {
+    await client.close();
+  }
+  client = await startClient(bundle, workerEnvironment);
+  try {
+    requireSuccessfulTool(await client.callTool({
+      name: "record_codex_security_scan_draft", arguments: input
+    }), `${runtimeLabel}: commit worker checkpoint through Python`);
+    if (unusualPaths.length > 0) {
+      requireSuccessfulTool(await client.callTool({
+        name: "record_codex_security_scan_draft",
+        arguments: { ...input, coverage: { ...input.coverage, reviewedFiles: unusualPaths } }
+      }), `${runtimeLabel}: save exact inventory-backed POSIX filenames`);
+    }
+  } finally {
+    await client.close();
+  }
+  const { checkpoint } = workbench("get-scan", "--scan-id", scanId).scan;
+  assert.equal(checkpoint.reviewedFileCount, 1 + unusualPaths.length);
+  assert.equal(checkpoint.pendingCount, 1);
+  const savedPath = path.join(scanRoot, checkpoint.sources[0].checkpointPath);
+  const saved = await readFile(savedPath);
+  assert.equal(path.basename(savedPath), `${createHash("sha256").update(saved).digest("hex")}.json`);
+  assert.deepEqual(new Set(JSON.parse(saved).coverage.reviewedFiles), new Set(["clean.ts", ...unusualPaths]));
+
+  // The prior writer used a compact JSON digest for pretty-printed bytes. Replay
+  // those existing files without changing their immutable names or string data.
+  const legacy = JSON.parse(saved);
+  legacy.coverage.deferred[0].candidate = { summary: "Saved evidence", score: 1e-7 };
+  const legacyName = `${createHash("sha256").update(JSON.stringify(legacy)).digest("hex")}.json`;
+  const legacyPath = path.join(artifactRoot, "checkpoints", legacyName);
+  await writeFile(legacyPath, JSON.stringify(legacy, null, 2) + "\n");
+  workbench("record-scan-checkpoint", "--scan-id", scanId, "--checkpoint-path", legacyPath);
+  assert.equal(workbench("get-scan", "--scan-id", scanId).scan.checkpoint.pendingCount, 1);
+
+  client = await startClient(bundle, workerEnvironment);
+  try {
+    requireToolError(await client.callTool({
+      name: "record_codex_security_scan_draft",
+      arguments: { ...input, coverage: { ...input.coverage, reviewedFiles: ["another-typo.ts"] } }
+    }), /outside the saved inventory or changed/, `${runtimeLabel}: keep accepted coverage after a rejected update`);
+    // A retry archives the failed attempt's bytes; those rejected declarations
+    // must not be reintroduced from either current or archived checkpoints.
+    const rejectedRoot = path.join(workerRoot, "attempts", "attempt-01", "checkpoints");
+    await mkdir(rejectedRoot, { recursive: true });
+    for (const name of await readdir(path.join(artifactRoot, "checkpoints"))) {
+      const source = path.join(artifactRoot, "checkpoints", name);
+      if (JSON.parse(await readFile(source, "utf8")).coverage.reviewedFiles?.includes("another-typo.ts")) {
+        await rename(source, path.join(rejectedRoot, name));
+      }
+    }
+    requireSuccessfulTool(await client.callTool({
+      name: "record_codex_security_scan_draft",
+      arguments: {
+        ...input,
+        complete: true,
+        coverage: {
+          completeness: "complete",
+          surfaces: [{ label: "Saved control", candidateId: "candidate-1", disposition: "rejected", reason: "The control is effective." }],
+          explicitExclusions: [],
+          deferred: [],
+          reviewedFiles: ["pending.ts"]
+        }
+      }
+    }), `${runtimeLabel}: resume worker evidence after restarting MCP`);
+  } finally {
+    await client.close();
+  }
+  const resumed = workbench("get-scan", "--scan-id", scanId).scan.checkpoint;
+  assert.equal(resumed.reviewedFileCount, 2 + unusualPaths.length);
+  assert.equal(resumed.pendingCount, 0);
+  assert.equal(JSON.parse(await readFile(path.join(artifactRoot, "result.json"), "utf8")).complete, true);
+
+  const finding = JSON.parse(await readFile(path.join(workerPluginRoot, "examples", "completed-scan", "findings.json"), "utf8")).findings[0];
+  delete finding.findingId;
+  delete finding.occurrenceId;
+  delete finding.fingerprints;
+  finding.locations = [{ path: "clean.ts", startLine: 1 }];
+  finding.provenance.candidateId = "candidate-reaccepted";
+  finding.provenance.workerId = workerId;
+  finding.extensions.candidateId = "candidate-reaccepted";
+  const headPath = path.join(artifactRoot, "checkpoint-head.json");
+  client = await startClient(bundle, workerEnvironment);
+  let accepted;
+  let firstHead;
+  try {
+    requireSuccessfulTool(await client.callTool({
+      name: "record_codex_security_scan_draft",
+      arguments: {
+        ...input,
+        complete: true,
+        findings: [finding],
+        coverage: { ...input.coverage, deferred: [], reviewedFiles: ["clean.ts", "pending.ts"] }
+      }
+    }), `${runtimeLabel}: accept the finding before revalidation`);
+    firstHead = JSON.parse(await readFile(headPath, "utf8"));
+    accepted = JSON.parse(await readFile(path.join(artifactRoot, "checkpoints", firstHead.checkpoint), "utf8"));
+    requireSuccessfulTool(await client.callTool({
+      name: "record_codex_security_scan_draft",
+      arguments: {
+        ...accepted,
+        findings: [],
+        coverage: {
+          ...accepted.coverage,
+          surfaces: [
+            ...accepted.coverage.surfaces,
+            { candidateId: "candidate-reaccepted", label: "Revalidation", disposition: "rejected", reason: "Synthetic counterevidence." }
+          ]
+        }
+      }
+    }), `${runtimeLabel}: checkpoint the intervening rejection`);
+    assert.equal(JSON.parse(await readFile(path.join(artifactRoot, "result.json"), "utf8")).findings.length, 0);
+    assert.notEqual(JSON.parse(await readFile(headPath, "utf8")).checkpoint, firstHead.checkpoint);
+  } finally {
+    await client.close();
+  }
+  client = await startClient(bundle, workerEnvironment);
+  try {
+    requireSuccessfulTool(await client.callTool({
+      name: "record_codex_security_scan_draft", arguments: accepted
+    }), `${runtimeLabel}: reaccept identical saved finding bytes after restart`);
+  } finally {
+    await client.close();
+  }
+  const currentHead = JSON.parse(await readFile(headPath, "utf8"));
+  assert.deepEqual(JSON.parse(await readFile(path.join(artifactRoot, "checkpoints", currentHead.checkpoint), "utf8")), accepted);
+  assert.equal(currentHead.checkpoint, firstHead.checkpoint);
+  assert.notEqual(currentHead.acceptanceId, firstHead.acceptanceId);
+  for (let replay = 0; replay < 2; replay++) {
+    const recovered = workbench("get-cli-scan-resume", "--scan-id", scanId).checkpoint;
+    assert.deepEqual(recovered.sources[0].findings.map((item) => item.provenance.candidateId), ["candidate-reaccepted"]);
+    assert.deepEqual(JSON.parse(await readFile(headPath, "utf8")), currentHead);
+  }
+
+  // Pause an actual writer after SQLite accepts its checkpoint and before its
+  // replaceable result exists. Coordinator recovery must isolate this process.
+  const resultPath = path.join(artifactRoot, "result.json");
+  await rm(resultPath);
+  const checkpointAccepted = Promise.withResolvers();
+  const releaseOldWriter = Promise.withResolvers();
+  const oldWrite = recordWorkerDraft({
+    root: artifactRoot,
+    repoRoot,
+    layout: "worker",
+    scanId,
+    onCheckpoint: async (checkpointPath) => {
+      try {
+        workbench("record-scan-checkpoint", "--scan-id", scanId, "--checkpoint-path", checkpointPath);
+        checkpointAccepted.resolve();
+      } catch (error) {
+        checkpointAccepted.reject(error);
+        throw error;
+      }
+      await releaseOldWriter.promise;
+    }
+  }, accepted);
+  const oldOutcome = oldWrite.then(
+    (value) => ({ value }),
+    (error) => ({ error })
+  );
+  let replacement;
+  let replacementResult;
+  let replacementHead;
+  try {
+    await Promise.race([checkpointAccepted.promise, oldWrite]);
+    await assert.rejects(readFile(resultPath), { code: "ENOENT" });
+    const oldHead = JSON.parse(await readFile(headPath, "utf8"));
+    execFileSync(python, ["-c", `
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute("UPDATE scans SET deep_scan_owner_thread_id = 'fixture-owner', handoff_status = 'delivered' WHERE id = ?", (sys.argv[2],))
+    connection.execute("UPDATE deep_scan_runs SET coordinator_generation = 2, discovery_runs_dispatched = 1, updated_at = '2026-01-01T00:00:00Z' WHERE scan_id = ?", (sys.argv[2],))
+`, path.join(stateRoot, "workbench.sqlite3"), scanId]);
+    const reclaimed = workbench("claim-deep-scan-coordinator", "--scan-id", scanId, "--thread-id", "fixture-owner");
+    assert.equal(reclaimed.coordinatorDisposition, "adopted");
+    assert.equal(reclaimed.deepScan.coordinatorGeneration, 3);
+    replacement = reclaimed.deepScan.workers.find((worker) => worker.id === workerId);
+    assert.notEqual(replacement.artifactDir, artifactRoot);
+    assert.deepEqual(JSON.parse(await readFile(path.join(replacement.artifactDir, "checkpoint-head.json"), "utf8")), oldHead);
+
+    client = await startClient(bundle, {
+      ...workerEnvironment,
+      CODEX_SECURITY_ARTIFACT_ROOT: replacement.artifactDir
+    });
+    try {
+      requireSuccessfulTool(await client.callTool({
+        name: "record_codex_security_scan_draft",
+        arguments: {
+          ...accepted,
+          findings: [],
+          coverage: {
+            ...accepted.coverage,
+            surfaces: [{
+              candidateId: "candidate-reaccepted",
+              provenance: { workerId },
+              label: "Recovered validation",
+              disposition: "rejected",
+              reason: "The replacement established effective controls."
+            }],
+            deferred: []
+          }
+        }
+      }), `${runtimeLabel}: replacement worker resolves the accepted candidate`);
+    } finally {
+      await client.close();
+    }
+    replacementResult = await readFile(path.join(replacement.artifactDir, "result.json"), "utf8");
+    replacementHead = await readFile(path.join(replacement.artifactDir, "checkpoint-head.json"), "utf8");
+    assert.deepEqual(JSON.parse(replacementResult).findings, []);
+  } finally {
+    releaseOldWriter.resolve();
+    await oldOutcome;
+  }
+  assert.equal((await oldOutcome).error, undefined);
+  assert.equal(JSON.parse(await readFile(resultPath, "utf8")).findings.length, 1);
+  assert.equal(await readFile(path.join(replacement.artifactDir, "result.json"), "utf8"), replacementResult);
+  assert.equal(await readFile(path.join(replacement.artifactDir, "checkpoint-head.json"), "utf8"), replacementHead);
+  const recovered = workbench("get-cli-scan-resume", "--scan-id", scanId).checkpoint;
+  assert.equal(recovered.sources.length, 1);
+  assert.equal(path.join(scanRoot, recovered.sources[0].source), replacement.artifactDir);
+  assert.deepEqual(recovered.sources[0].findings, []);
+
+  // Preserve accepted and unaccepted versions of the same worker receipt.
+  const receipt = "artifacts/review/retained.json";
+  await mkdir(path.dirname(path.join(replacement.artifactDir, receipt)), { recursive: true });
+  await writeFile(path.join(replacement.artifactDir, receipt), "Accepted receipt\n");
+  const acceptedWithReceipt = JSON.parse(replacementResult);
+  acceptedWithReceipt.coverage.surfaces.push({
+    candidateId: "accepted-receipt", label: "Completed review", disposition: "rejected", receiptRefs: [receipt]
+  });
+  await recordWorkerDraft({
+    root: replacement.artifactDir, repoRoot, layout: "worker", scanId,
+    onCheckpoint: async (checkpointPath) => {
+      workbench("record-scan-checkpoint", "--scan-id", scanId, "--checkpoint-path", checkpointPath);
+    }
+  }, acceptedWithReceipt);
+  const acceptedHead = JSON.parse(await readFile(path.join(replacement.artifactDir, "checkpoint-head.json"), "utf8"));
+  const archive = path.join(path.dirname(replacement.artifactDir), "attempts", "attempt-01");
+  await mkdir(path.join(archive, "checkpoints"), { recursive: true });
+  await mkdir(path.dirname(path.join(archive, receipt)), { recursive: true });
+  await rename(path.join(replacement.artifactDir, "checkpoint-head.json"), path.join(archive, "checkpoint-head.json"));
+  await rename(path.join(replacement.artifactDir, "checkpoints", acceptedHead.checkpoint), path.join(archive, "checkpoints", acceptedHead.checkpoint));
+  await rename(path.join(replacement.artifactDir, receipt), path.join(archive, receipt));
+  await writeFile(path.join(replacement.artifactDir, receipt), "Unaccepted receipt\n");
+  const raw = {
+    scanId, complete: false, findings: [],
+    coverage: {
+      completeness: "partial", reviewedFiles: ["unreviewed.ts"], explicitExclusions: [], deferred: [],
+      surfaces: [{ candidateId: "raw-receipt", label: "Unfinished review", disposition: "needs_follow_up", receiptRefs: [receipt] }]
+    }
+  };
+  const rawBytes = JSON.stringify(raw);
+  const rawPath = path.join(replacement.artifactDir, "checkpoints", `${createHash("sha256").update(rawBytes).digest("hex")}.json`);
+  await writeFile(rawPath, rawBytes);
+
+  // A completed independent pass remains completed while this worker resumes.
+  const completedOutput = path.join(scanRoot, "artifacts", "deep_discovery", "workers", "discovery-0002", "output");
+  await mkdir(completedOutput, { recursive: true });
+  const completedPrompt = path.join(path.dirname(completedOutput), "prompt.md");
+  await writeFile(completedPrompt, "Completed independent pass\n");
+  await writeFile(path.join(completedOutput, "result.json"), JSON.stringify({
+    ...raw, complete: true,
+    coverage: { ...raw.coverage, completeness: "complete", reviewedFiles: ["clean.ts", "pending.ts"], surfaces: [] }
+  }));
+  execFileSync(python, ["-c", `
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute("UPDATE deep_scan_runs SET discovery_runs_dispatched = 2, max_discovery_runs = 2, completion_sequence = 1 WHERE scan_id = ?", (sys.argv[2],))
+    connection.execute("INSERT INTO deep_scan_workers (id, scan_id, kind, status, prompt_path, artifact_dir, result_manifest_path, attempt, completion_sequence, created_at, updated_at, completed_at) VALUES (?, ?, 'discovery', 'succeeded', ?, ?, ?, 1, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')", (sys.argv[3], sys.argv[2], sys.argv[4], sys.argv[5], sys.argv[6]))
+`, path.join(stateRoot, "workbench.sqlite3"), scanId, randomUUID(), completedPrompt, completedOutput, path.join(completedOutput, "result.json")]);
+
+  const childRoot = path.join(fixtureRoot, "continued-scan");
+  const staleWorkerFiles = [
+    "result.json.lock", "checkpoint-head.json.lock",
+    "artifacts/01_context/threat_model.md.lock", `.${randomUUID()}.tmp`
+  ];
+  for (const directory of [replacement.artifactDir, archive]) {
+    await mkdir(path.join(directory, "artifacts", "01_context"), { recursive: true });
+    for (const relative of staleWorkerFiles) {
+      await writeFile(path.join(directory, relative), "Interrupted writer\n");
+    }
+  }
+  const retainedWorkerFiles = {
+    "artifacts/01_context/threat_model.md": "# Saved threat model\n",
+    "example.lock": "Ordinary lock-file evidence\n",
+    ".example.tmp": "Ordinary temporary-file evidence\n"
+  };
+  for (const [relative, contents] of Object.entries(retainedWorkerFiles)) {
+    for (const directory of [replacement.artifactDir, archive]) {
+      await writeFile(path.join(directory, relative), contents);
+    }
+  }
+  await mkdir(childRoot, { mode: 0o700 });
+  const { scanId: childId } = workbench("register-cli-scan", "--repository", repoRoot,
+    "--scan-dir", childRoot, "--parent-scan-id", scanId, "--recipe-json", JSON.stringify({
+      repository: repoRoot,
+      target: { kind: "repository", paths: [] },
+      mode: "deep",
+      config: {}
+    }));
+  const parentBytes = await artifactBytes(scanRoot);
+  const continued = workbench("continue-scan-checkpoint", "--scan-id", childId, "--parent-scan-id", scanId);
+  assert.deepEqual(await artifactBytes(scanRoot), parentBytes);
+  assert.equal(continued.restoredWorkers, 2);
+  const restored = JSON.parse(execFileSync(python, ["-c", `
+import json, sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    print(json.dumps(connection.execute("SELECT status, completion_sequence FROM deep_scan_workers WHERE scan_id = ? ORDER BY status", (sys.argv[2],)).fetchall()))
+`, path.join(stateRoot, "workbench.sqlite3"), childId], { encoding: "utf8" }));
+  assert.deepEqual(restored, [["queued", null], ["succeeded", 1]]);
+  assert.deepEqual(JSON.parse(await readFile(path.join(childRoot, "findings.json"), "utf8")).findings, []);
+  const childCoverage = JSON.parse(await readFile(path.join(childRoot, "coverage.json"), "utf8"));
+  assert.ok(childCoverage.surfaces.some((surface) => surface.candidateId === "candidate-reaccepted" && surface.disposition === "rejected"));
+  assert.equal(childCoverage.deferred.some((item) => item.candidateId === "candidate-reaccepted"), false);
+  const childOutput = path.join(childRoot, path.relative(scanRoot, replacement.artifactDir));
+  for (const relative of staleWorkerFiles) {
+    await assert.rejects(readFile(path.join(childOutput, relative)), { code: "ENOENT" });
+    assert.equal(await readFile(path.join(replacement.artifactDir, relative), "utf8"), "Interrupted writer\n");
+  }
+  for (const [relative, contents] of Object.entries(retainedWorkerFiles)) {
+    assert.equal(await readFile(path.join(childOutput, relative), "utf8"), contents);
+  }
+  const childHead = JSON.parse(await readFile(path.join(childOutput, "checkpoint-head.json"), "utf8"));
+  const childDraft = JSON.parse(await readFile(path.join(childOutput, "checkpoints", childHead.checkpoint), "utf8"));
+  const childWorkerId = childDraft.coverage.surfaces.find((surface) => surface.candidateId === "candidate-reaccepted").provenance.workerId;
+  const acceptedReceipt = childDraft.coverage.surfaces.find((surface) => surface.candidateId === "accepted-receipt").receiptRefs[0];
+  const rawReceipt = childDraft.coverage.surfaces.find((surface) => surface.candidateId === "raw-receipt").receiptRefs[0];
+  assert.notEqual(acceptedReceipt, rawReceipt);
+  assert.equal(await readFile(path.join(childOutput, acceptedReceipt), "utf8"), "Accepted receipt\n");
+  assert.equal(await readFile(path.join(childOutput, rawReceipt), "utf8"), "Unaccepted receipt\n");
+  assert.equal(childDraft.coverage.reviewedFiles.includes("unreviewed.ts"), false);
+  client = await startClient(bundle, {
+    ...workerEnvironment,
+    CODEX_SECURITY_ARTIFACT_ROOT: childOutput,
+    CODEX_SECURITY_SCAN_ID: childId,
+    CODEX_SECURITY_WORKER_ID: childWorkerId
+  });
+  try {
+    requireSuccessfulTool(await client.callTool({
+      name: "record_codex_security_scan_draft",
+      arguments: {
+        scanId: childId, complete: false, findings: [],
+        coverage: { completeness: "partial", surfaces: [], explicitExclusions: [], deferred: [] }
+      }
+    }), `${runtimeLabel}: a valid fresh draft can read the retained worker checkpoint`);
+    requireSuccessfulTool(await client.callTool({
+      name: "record_codex_security_scan_draft",
+      arguments: {
+        ...childDraft, complete: true,
+        coverage: { ...childDraft.coverage, completeness: "complete", surfaces: childDraft.coverage.surfaces.map((surface) => ({ ...surface, disposition: "rejected" })) }
+      }
+    }), `${runtimeLabel}: linked worker can publish after its parent's writer was interrupted`);
+  } finally {
+    await client.close();
+  }
+  assert.deepEqual(JSON.parse(await readFile(path.join(childOutput, "result.json"), "utf8")).findings, []);
+}
+
+async function testStandardContinuationDraft(bundle, runtimeLabel) {
+  const currentPluginRoot = runtimeLabel === "shipped" ? bundledPluginRoot : pluginRoot;
+  const fixtureRoot = path.join(temporaryRoot, `standard-continuation-${runtimeLabel}`);
+  const repoRoot = path.join(fixtureRoot, "repository");
+  const stateRoot = path.join(fixtureRoot, "state");
+  const parentRoot = path.join(fixtureRoot, "parent");
+  const childRoot = path.join(fixtureRoot, "child");
+  for (const directory of [repoRoot, stateRoot, parentRoot, childRoot]) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+  }
+  for (const filename of ["clean.ts", "pending.ts"]) {
+    await writeFile(path.join(repoRoot, filename), "export const safe = true;\n");
+  }
+  const python = process.env.CODEX_SECURITY_PYTHON_COMMAND ?? "python3";
+  const environment = { ...process.env, CODEX_SECURITY_STATE_DIR: stateRoot };
+  const workbench = (...arguments_) => JSON.parse(execFileSync(python, [
+    path.join(currentPluginRoot, "scripts", "workbench_db.py"), ...arguments_
+  ], { env: environment, encoding: "utf8" }));
+  const recipe = JSON.stringify({
+    repository: repoRoot, target: { kind: "repository", paths: [] }, mode: "standard", config: {}
+  });
+  const { scanId: parentId } = workbench("register-cli-scan", "--repository", repoRoot,
+    "--scan-dir", parentRoot, "--recipe-json", recipe);
+  const coverage = {
+    completeness: "partial", surfaces: [], explicitExclusions: [], deferred: [], reviewedFiles: ["clean.ts"]
+  };
+  const contents = JSON.stringify({ scanId: parentId, complete: false, findings: [], coverage }) + "\n";
+  const checkpoint = path.join(parentRoot, "checkpoints", `${createHash("sha256").update(contents).digest("hex")}.json`);
+  await mkdir(path.dirname(checkpoint));
+  await writeFile(checkpoint, contents);
+  workbench("record-scan-checkpoint", "--scan-id", parentId, "--checkpoint-path", checkpoint);
+  const { scanId: childId } = workbench("register-cli-scan", "--repository", repoRoot,
+    "--scan-dir", childRoot, "--parent-scan-id", parentId, "--recipe-json", recipe);
+  workbench("continue-scan-checkpoint", "--scan-id", childId, "--parent-scan-id", parentId);
+  const head = JSON.parse(await readFile(path.join(childRoot, "checkpoint-head.json"), "utf8"));
+  const baselinePath = path.join(childRoot, "checkpoints", head.checkpoint);
+  const baselineBytes = await readFile(baselinePath, "utf8");
+  const client = await startClient(bundle, {
+    CODEX_SECURITY_STATE_DIR: stateRoot,
+    CODEX_SECURITY_PLUGIN_ROOT: currentPluginRoot,
+    CODEX_SECURITY_PYTHON_COMMAND: python
+  });
+  try {
+    for (const complete of [false, true]) {
+      requireSuccessfulTool(await client.callTool({
+        name: "record_codex_security_scan_draft",
+        arguments: {
+          scanId: childId, complete, findings: [],
+          coverage: { ...coverage, completeness: complete ? "complete" : "partial", reviewedFiles: ["pending.ts"] }
+        }
+      }), `${runtimeLabel}: submit ${complete ? "final" : "incremental"} Standard continuation draft`);
+    }
+  } finally {
+    await client.close();
+  }
+  assert.equal(await readFile(baselinePath, "utf8"), baselineBytes);
+  assert.equal(Object.hasOwn(JSON.parse(baselineBytes), "preservedSources"), false);
+  const resumedCoverage = JSON.parse(await readFile(path.join(childRoot, "coverage.json"), "utf8"));
+  assert.deepEqual(new Set(resumedCoverage.reviewedFiles), new Set(["clean.ts", "pending.ts"]));
+  assert.equal(workbench("complete-scan", "--scan-id", childId).scan.progress.status, "complete");
+}
+
 async function testReducerWorkerToolList(bundle) {
   const repoRoot = path.join(temporaryRoot, "reducer-repository");
   const scanRoot = path.join(temporaryRoot, "reducer-scan");
@@ -1219,4 +1748,15 @@ async function startClient(bundle, environment) {
   });
   await client.connect(transport);
   return client;
+}
+
+async function artifactBytes(root) {
+  const files = {};
+  for (const entry of await readdir(root, { withFileTypes: true, recursive: true })) {
+    if (entry.isFile()) {
+      const file = path.join(entry.parentPath, entry.name);
+      files[path.relative(root, file)] = createHash("sha256").update(await readFile(file)).digest("hex");
+    }
+  }
+  return files;
 }

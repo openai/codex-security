@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
@@ -196,6 +196,7 @@ export async function runCustomValidation(options: {
   falsePositives?: readonly unknown[];
   signal: AbortSignal;
   run(prompt: string, outputSchema: unknown): Promise<string>;
+  checkpoint?(path: string, validated: boolean): Promise<void>;
 }): Promise<void> {
   const { scanDir, scanId, signal } = options;
   const directory = join(scanDir, DIRECTORY);
@@ -302,6 +303,26 @@ export async function runCustomValidation(options: {
     },
     signal,
   );
+  const checkpoint = async (validated: boolean) => {
+    if (options.checkpoint === undefined) return;
+    const snapshot = {
+      scanId,
+      complete: validated && coverage.completeness === "complete",
+      scope: manifest.scan.scope,
+      ...(manifest.scan.threatModel === undefined
+        ? {}
+        : { threatModel: manifest.scan.threatModel }),
+      findings: findingsDocument.findings,
+      // Validation does not grant new source-review credit. Previously accepted
+      // discovery checkpoints remain the authority for reviewed files.
+      coverage: { ...coverage, reviewedFiles: [] },
+    };
+    const contents = `${JSON.stringify(snapshot, null, 2)}\n`;
+    const name = `checkpoints/${createHash("sha256").update(contents).digest("hex")}.json`;
+    await writeJson(scanDir, name, snapshot, signal);
+    await options.checkpoint(join(scanDir, name), validated);
+  };
+  await checkpoint(false);
   let result: CustomValidationResult;
   try {
     if (candidates.length === 0) {
@@ -372,6 +393,41 @@ export async function runCustomValidation(options: {
   for (const candidate of candidates) {
     const update = updates.get(candidate.candidateId)!;
     const { validation } = update;
+    const provenance = candidate.finding["provenance"] as Record<
+      string,
+      unknown
+    >;
+    const sourceCandidateId = [
+      provenance["candidateId"],
+      candidate.finding.extensions?.["candidateId"],
+      candidate.finding.extensions?.["reportId"],
+      candidate.finding.extensions?.["ledgerRowId"],
+    ].find(
+      (value): value is string =>
+        typeof value === "string" && value.trim().length > 0,
+    );
+    const validationId = `custom-validation-${candidate.candidateId}`;
+    let surfaceId = validationId;
+    let suffix = 2;
+    while (surfaceIds.has(surfaceId)) surfaceId = `${validationId}-${suffix++}`;
+    surfaceIds.add(surfaceId);
+    coverage.surfaces.push({
+      id: surfaceId,
+      ...(sourceCandidateId === undefined
+        ? {}
+        : { candidateId: sourceCandidateId }),
+      previousFindings: [structuredClone(candidate.finding)],
+      label: candidate.finding.title,
+      disposition:
+        validation.disposition === "reportable"
+          ? "reported"
+          : validation.disposition === "suppressed"
+            ? "rejected"
+            : validation.disposition === "deferred"
+              ? "needs_follow_up"
+              : "not_applicable",
+      receiptRefs: [RESULTS, ...validation.artifact_paths],
+    });
     for (const id of candidate.surfaceIds) {
       const values = decisions.get(id) ?? [];
       values.push(update);
@@ -380,17 +436,30 @@ export async function runCustomValidation(options: {
     if (validation.disposition === "deferred") {
       coverage.completeness = "partial";
       coverage.deferred.push({
-        id: `custom-validation-${candidate.candidateId}`,
+        id: surfaceId,
+        ...(sourceCandidateId === undefined
+          ? {}
+          : { candidateId: sourceCandidateId }),
         reason:
           validation.counterevidence_or_proof_gap ||
           validation.remaining_uncertainty ||
           validation.evidence.join("\n"),
         paths: candidate.finding.locations.map((location) => location.path),
         surfaceIds: candidate.surfaceIds,
+        previousFindings: [structuredClone(candidate.finding)],
       });
     }
     if (validation.disposition !== "reportable") continue;
     const finding = candidate.finding;
+    const previous = structuredClone(finding);
+    const previousHistory = provenance["previousFindings"];
+    delete (previous["provenance"] as Record<string, unknown>)[
+      "previousFindings"
+    ];
+    provenance["previousFindings"] = [
+      ...(Array.isArray(previousHistory) ? previousHistory : []),
+      previous,
+    ];
     finding.validation = {
       ...validation,
       summary: validation.evidence.join("\n"),
@@ -438,8 +507,24 @@ export async function runCustomValidation(options: {
   ];
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
+  await writeCustomValidationStatus(scanDir, { scanId, ...result }, signal);
+  await checkpoint(true);
   // Rewrite the captured draft, not any canonical-file edits made during validation.
   for (const [index, name] of DOCUMENTS.entries())
     await writeJson(scanDir, name, documents[index], signal);
-  await writeCustomValidationStatus(scanDir, { scanId, ...result }, signal);
+}
+
+export function hasCompletedCustomValidation(checkpoint: unknown): boolean {
+  if (typeof checkpoint !== "object" || checkpoint === null) return false;
+  const sources = (checkpoint as Record<string, unknown>)["sources"];
+  return (
+    Array.isArray(sources) &&
+    sources.length > 0 &&
+    sources.every((source: unknown) => {
+      if (typeof source !== "object" || source === null) return false;
+      return (
+        (source as Record<string, unknown>)["customValidationComplete"] === true
+      );
+    })
+  );
 }

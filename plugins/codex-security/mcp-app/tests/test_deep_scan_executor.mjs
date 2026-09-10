@@ -764,7 +764,8 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
         pluginRoot: fixture.root,
         scanRoot: path.join(fixture.root, "scans"),
         repoRoot: fixture.root,
-        scanId: "fixture-scan-id"
+        scanId: "fixture-scan-id",
+        stateDirectory: path.join(fixture.root, "fallback-state")
       }
     }).run({
       kind: "discovery",
@@ -781,6 +782,12 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
       true
     );
     assert.equal(invocation.argv.includes("mcp_servers.cs_artifacts.required=true"), true);
+    assert.equal(
+      invocation.argv.includes(
+        `mcp_servers.cs_artifacts.env.CODEX_SECURITY_STATE_DIR=${JSON.stringify(path.join(fixture.root, "fallback-state"))}`
+      ),
+      true
+    );
     assert.equal(
       invocation.argv.includes("mcp_servers.cs_artifacts.tool_timeout_sec=86400"),
       true
