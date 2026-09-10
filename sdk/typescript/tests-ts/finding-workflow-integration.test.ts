@@ -1778,12 +1778,15 @@ await deduplicateScanDirectoryInternal(${JSON.stringify(scanDir)}, { repository:
   reviewRunner: { run: async (review) => {
     if (review.stage === "screening") return review.validate({ decisions: { "pair-1": ${JSON.stringify(sameRecommendation)} } });
     process.stdout.write("ready\\n");
-    await new Promise(() => {});
+    await new Promise((resolve) => {
+      process.stdin.once("end", resolve);
+      process.stdin.resume();
+    });
   } },
 });`;
   const child = spawn(process.execPath, ["--eval", script], {
     env: environment,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
   const closed = once(child, "close");
   let output = "";
