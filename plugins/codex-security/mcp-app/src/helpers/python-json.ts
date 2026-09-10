@@ -24,7 +24,7 @@ export function objectEntries(value: Row): [string, unknown][] {
 
 export class JsonSyntaxError extends Error {}
 
-// json.loads(bytes) detects UTF-8/16/32 and decodes with surrogatepass.
+// Detect UTF-8/16/32 JSON bytes; UTF-8 input uses the shared strict decoder.
 export function parseJsonBytes(bytes: Buffer): unknown {
   let width = 1;
   let little = true;
@@ -53,26 +53,7 @@ export function parseJsonBytes(bytes: Buffer): unknown {
   }
   let text = "";
   if (width === 1) {
-    let start = offset;
-    for (let index = offset; index + 2 < bytes.length; index++) {
-      const second = bytes[index + 1]!;
-      const third = bytes[index + 2]!;
-      if (
-        bytes[index] === 0xed &&
-        second >= 0xa0 &&
-        second <= 0xbf &&
-        third >= 0x80 &&
-        third <= 0xbf
-      ) {
-        text += decodeUtf8(bytes.subarray(start, index));
-        text += String.fromCharCode(
-          0xd000 | ((second & 0x3f) << 6) | (third & 0x3f),
-        );
-        index += 2;
-        start = index + 1;
-      }
-    }
-    text += decodeUtf8(bytes.subarray(start));
+    text = decodeUtf8(bytes.subarray(offset));
   } else {
     if ((bytes.length - offset) % width !== 0)
       throw new Error(`Truncated UTF-${width * 8} JSON input`);
@@ -116,26 +97,11 @@ export function parseJson(source: string, rejectDuplicates = false): unknown {
     index++;
   }
   function string(token: string, start: number): string {
-    const unterminated = token.length === 1;
-    const contents = unterminated ? source.slice(start) : token;
-    const end = contents.length - (unterminated ? 0 : 1);
-    for (let offset = 1; offset < end; offset++) {
-      const character = contents[offset];
-      if (character.charCodeAt(0) < 0x20)
-        error("Invalid control character at", start + offset);
-      if (character !== "\\") continue;
-      const escape = contents[++offset];
-      if (escape === undefined) break;
-      if (escape === "u") {
-        if (!/^[0-9a-fA-F]{4}$/u.test(contents.slice(offset + 1, offset + 5)))
-          error("Invalid \\uXXXX escape", start + offset);
-        offset += 4;
-      } else if (!'"\\/bfnrt'.includes(escape)) {
-        error("Invalid \\escape", start + offset - 1);
-      }
+    try {
+      return JSON.parse(token) as string;
+    } catch (cause) {
+      return error((cause as Error).message, start);
     }
-    if (unterminated) error("Unterminated string starting at", start);
-    return JSON.parse(token) as string;
   }
   function value(): unknown {
     const start = position();

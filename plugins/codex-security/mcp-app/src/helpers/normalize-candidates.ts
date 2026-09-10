@@ -26,7 +26,7 @@ import {
   windowsFileSystem,
 } from "../../../native/windows-files.mjs";
 
-import { object, parseJson } from "./python-json";
+import { object } from "./python-json";
 
 const trim = (value: string) =>
   value.replace(
@@ -269,8 +269,8 @@ function cweIds(row: Row): string[] {
     .map((number) => `CWE-${number}`);
 }
 
-function positiveLine(value: unknown, field: string): bigint {
-  if (typeof value !== "bigint" || value < 1n)
+function positiveLine(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1)
     throw new Error(`${field}: expected a positive integer`);
   return value;
 }
@@ -316,14 +316,14 @@ function normalizeLocations(
       lineCounts.set(key, lines);
     }
     const count = lineCounts.get(key)!;
-    if (end > BigInt(count))
+    if (end > count)
       throw new Error(`line range ${start}-${end} exceeds ${name}:${count}`);
     if (typeof item.role !== "string" || !roles.includes(item.role))
       throw new Error(`role: unsupported value ${String(item.role)}`);
     const location = {
       path: name,
-      start_line: Number(start),
-      end_line: Number(end),
+      start_line: start,
+      end_line: end,
       role: item.role,
     };
     normalized.set(stableJson(location), location);
@@ -494,19 +494,7 @@ export function normalizeCandidatesCommand(
     const scopePath = paths("in-scope-files")[0]!;
     const inputs = [
       ...new Map(paths("input").map((path) => [pathKey(path), path])).values(),
-    ].sort((a, b) => {
-      const left = pathKey(a).split(sep),
-        right = pathKey(b).split(sep);
-      for (
-        let index = 0;
-        index < Math.min(left.length, right.length);
-        index++
-      ) {
-        const order = compare(left[index]!, right[index]!);
-        if (order !== 0) return order;
-      }
-      return left.length - right.length;
-    });
+    ].sort((a, b) => compare(pathKey(a), pathKey(b)));
     if (inputs.some((path) => pathKey(path) === pathKey(output)))
       throw new Error("--out: must not also be an input");
     if (pathKey(output) === pathKey(scopePath))
@@ -523,7 +511,7 @@ export function normalizeCandidatesCommand(
       for (const [index, line] of lines.entries()) {
         if (trim(line) === "") continue;
         try {
-          const row = parseJson(line);
+          const row: unknown = JSON.parse(line);
           if (!object(row)) throw new Error("expected a JSON object");
           rows.push(normalizeCandidate(row, root, scope, lineCounts));
         } catch (error) {

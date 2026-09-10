@@ -341,10 +341,10 @@ describe("rank pool helpers", () => {
 
   test("checks shard existence and names before loading a missing or malformed plan", () => {
     const f = fixture(0);
-    expect(validate(f).stderr).toContain("Rank pool plan missing");
+    expect(validate(f).stderr).toContain(f.plan);
     writeFileSync(f.plan, "bad");
     writeFileSync(join(f.directory, "rank-shard-001.input.jsonl"), "");
-    expect(validate(f).stderr).toContain("invalid name");
+    expect(validate(f).stderr).toContain("contiguous canonical names");
     expect(make(f).status).toBe(1);
     expect(readFileSync(f.plan, "utf8")).toBe("bad");
     rmSync(f.directory, { recursive: true });
@@ -456,7 +456,7 @@ describe("rank pool helpers", () => {
         p.workers[0]!.input_shards[1] = shardName(1);
         p.workers[0]!.output_shards[1] = shardName(1, true);
       },
-      "duplicates=['rank-shard-0001.input.jsonl']",
+      "does not match the deterministic round_robin assignment",
     ],
     [
       "round robin",
@@ -522,6 +522,25 @@ describe("rank pool helpers", () => {
     },
   );
 
+  test("rejects malformed UTF-8 even in an overwritten plan value", () => {
+    const f = fixture(0);
+    make(f);
+    const rest = readFileSync(f.plan, "utf8").slice(1);
+    writeFileSync(f.plan, '{"strategy":"\\ud800",' + rest);
+    expect(validate(f).status).toBe(0);
+    writeFileSync(
+      f.plan,
+      Buffer.concat([
+        Buffer.from('{"strategy":"'),
+        Buffer.from([0xed, 0xa0, 0x80]),
+        Buffer.from('",' + rest),
+      ]),
+    );
+    const result = validate(f);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+  });
+
   test("preserves duplicate-key last value and integer-versus-float validation", () => {
     const f = fixture(0);
     make(f);
@@ -571,7 +590,7 @@ describe("rank pool helpers", () => {
       expect(run(f, command, []).status).toBe(2);
       expect(run(f, command, ["--help"]).status).toBe(0);
     }
-    expect(validate(f, "0").stderr).toContain("Rank pool plan missing");
+    expect(validate(f, "0").stderr).toContain(f.plan);
     make(f);
     expect(validate(f, "0").stderr).toBe(
       `--slot must be an integer of at least 1${newline}`,

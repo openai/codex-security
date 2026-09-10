@@ -1,6 +1,6 @@
 import { decodeUtf8 } from "./utf8";
 import { dirname } from "node:path";
-import { exists, mkdir, readFile, writeFile } from "./helper-files";
+import { mkdir, readFile, writeFile } from "./helper-files";
 import { encodePosixPath } from "./posix-path";
 import { JsonSyntaxError, object, parseJson, pythonRepr } from "./python-json";
 import { expandHome, parsedPath } from "./resolve-security-md";
@@ -27,12 +27,7 @@ export function compare(left: string, right: string): number {
   return a.length - b.length;
 }
 
-export function loadRankRows(
-  path: string,
-  selection: boolean,
-  label = selection ? "Rank output" : "Rank input",
-): RankRow[] {
-  if (!exists(path)) throw new Error(`${label} missing: ${path}`);
+export function loadRankRows(path: string, selection: boolean): RankRow[] {
   const contents = decodeUtf8(readFile(path));
   const lines = contents === "" ? [] : contents.split(/\r\n|[\r\n]/u);
   if (lines.at(-1) === "") lines.pop();
