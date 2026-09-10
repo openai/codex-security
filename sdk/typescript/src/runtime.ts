@@ -2331,7 +2331,7 @@ async function rejectBackslashZipNames(
 
 export async function resolvePluginPath(
   pluginPath: string | undefined,
-  workspace: string,
+  workspace: string | (() => Promise<string>),
   signal?: AbortSignal,
 ): Promise<string> {
   if (pluginPath === undefined) {
@@ -2341,9 +2341,11 @@ export async function resolvePluginPath(
   const path = resolve(expandHome(pluginPath));
   const metadata = await lstat(path).catch(() => null);
   if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
+    const extractionRoot =
+      typeof workspace === "function" ? await workspace() : workspace;
     return await extractPluginZip(
       path,
-      join(workspace, "extracted-plugin"),
+      join(extractionRoot, "extracted-plugin"),
       signal,
     );
   }
