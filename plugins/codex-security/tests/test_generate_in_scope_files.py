@@ -359,6 +359,7 @@ def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path) -
     write_file(repository, "app/new handler.py", b"handler = True\n")
     write_file(repository, "app/binary.py", b"\x00\xff\x01")
     write_file(repository, "tests/demo.py", b"excluded = True\n")
+    write_file(repository, ".github/workflows/ci.yml", b"name: CI\n")
     (repository / "app/évidence.py").unlink()
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "change")
@@ -374,6 +375,7 @@ def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8").splitlines() == [
+        ".github/workflows/ci.yml",
         "app/new handler.py",
         "app/routes.py",
         "app/évidence.py",
@@ -427,6 +429,7 @@ def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> 
     write_file(repository, "app/staged.py", b"staged = True\n")
     git(repository, "add", "app/staged.py")
     write_file(repository, "app/untracked.py", b"untracked = True\n")
+    write_file(repository, ".github/workflows/ci.yaml", b"name: CI\n")
     write_file(repository, "app/untracked-binary.py", b"\x00\xff\x01")
     index_only = write_file(repository, "app/index-only.py", b"index_only = True\n")
     git(repository, "add", "app/index-only.py")
@@ -442,6 +445,7 @@ def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> 
 
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8").splitlines() == [
+        ".github/workflows/ci.yaml",
         "app/routes.py",
         "app/staged.py",
         "app/untracked.py",
