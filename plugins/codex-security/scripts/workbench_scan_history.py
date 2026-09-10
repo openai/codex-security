@@ -51,14 +51,17 @@ def preserve_sealed_completion(
 def source_thread_id(connection: sqlite3.Connection, scan: sqlite3.Row) -> str | None:
     source_thread_id = scan["continuation_thread_id"]
     ancestor_id = scan["parent_scan_id"]
-    while source_thread_id is None and ancestor_id is not None:
+    inference_started = scan["inference_started"]
+    while source_thread_id is None and ancestor_id is not None and inference_started == 0:
         ancestor = connection.execute(
-            "SELECT continuation_thread_id, parent_scan_id FROM scans WHERE id = ?", (ancestor_id,)
+            "SELECT continuation_thread_id, parent_scan_id, inference_started FROM scans WHERE id = ?",
+            (ancestor_id,),
         ).fetchone()
         if ancestor is None:
             break
         source_thread_id = ancestor["continuation_thread_id"]
         ancestor_id = ancestor["parent_scan_id"]
+        inference_started = ancestor["inference_started"]
     return source_thread_id
 
 

@@ -55,6 +55,8 @@ def test_deep_resume_uses_sealed_coverage_with_coverage_less_reducer(
 @pytest.mark.parametrize("marker", [None, False, True])
 def test_reseeding_preserves_the_inference_boundary(tmp_path: Path, marker: bool | None) -> None:
     state, repository, parent_dir, parent_id = scan_fixture(tmp_path)
+    thread_id = "00000000-0000-4000-8000-000000000001"
+    run_workbench(state, "set-scan-thread", "--scan-id", parent_id, "--thread-id", thread_id)
     save(
         state,
         parent_id,
@@ -90,7 +92,6 @@ def test_reseeding_preserves_the_inference_boundary(tmp_path: Path, marker: bool
                 "UPDATE scans SET inference_started = NULL WHERE id = ?", (child_id,)
             )
     run_workbench(state, *seed)
-    assert (
-        run_workbench(state, "get-cli-scan-resume", "--scan-id", child_id)["inferenceStarted"]
-        is marker
-    )
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", child_id)
+    assert resumed["inferenceStarted"] is marker
+    assert resumed["sourceThreadId"] == (thread_id if marker is False else None)

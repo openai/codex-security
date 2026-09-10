@@ -1304,6 +1304,121 @@ test("failed session registration and export retain locally resumable completed 
 });
 
 test.each(["missing", "ambiguous"])(
+  "checkpoint recovery does not cross an inference attempt with %s own logs",
+  async (identity) => {
+    const f = await savedScan({ maxCostUsd: 100 });
+    const threadId = randomUUID();
+    let childId = "";
+    let directory = "";
+    let modelCalls = 0;
+    const interrupted = await resume(
+      f,
+      (options) => ({
+        startThread(threadOptions) {
+          childId = options.env!["CODEX_SECURITY_SCAN_ID"]!;
+          directory = threadOptions.workingDirectory!;
+          return {
+            id: threadId,
+            async runStreamed() {
+              modelCalls++;
+              await finishChild(f, directory, childId);
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      }),
+      {
+        failExport: true,
+        beforeWorkbench: async (args) => {
+          if (args[0] === "set-scan-thread")
+            throw new Error("Synthetic session registration failure");
+        },
+      },
+    );
+    expect(interrupted.code).toBe(2);
+    expect(interrupted.stderr).toContain("Synthetic local export failure");
+    const saved = await f.command([
+      "get-cli-scan-resume",
+      "--scan-id",
+      childId,
+    ]);
+    expect(saved).toMatchObject({
+      threadId: null,
+      inferenceStarted: true,
+      completionReady: true,
+    });
+    expect(
+      (await f.command(["get-scan", "--scan-id", childId]))["scan"],
+    ).toMatchObject({ parentScanId: f.scanId });
+    expect(saved["cost"]).toMatchObject({
+      inputTokens: previousCost.inputTokens + 10,
+      outputTokens: previousCost.outputTokens + 3,
+    });
+    const session = (id: string) =>
+      JSON.stringify({
+        type: "session_meta",
+        payload: { id, cwd: directory },
+      }) + "\n";
+    const currentLog = join(
+      f.codexHome,
+      "sessions",
+      `rollout-${threadId}.jsonl`,
+    );
+    const otherLog = join(f.codexHome, "sessions", "rollout-other.jsonl");
+    if (identity === "ambiguous") {
+      await writeFile(currentLog, session(threadId));
+      await writeFile(otherLog, session(randomUUID()));
+    }
+    const noModel = () => {
+      modelCalls++;
+      throw new Error("Completed analysis must not run again");
+    };
+    const unavailable = await resume({ ...f, scanId: childId }, noModel);
+    expect(unavailable.code, unavailable.stderr).toBe(2);
+    expect(unavailable.stderr).toContain(
+      "session identity for this completed scan is missing or ambiguous",
+    );
+    expect(unavailable.stdout).not.toContain(f.threadId);
+    async function checkLogs(scanId: string, expectedThread: string | null) {
+      for (const args of [
+        ["scans", "logs", scanId, "--json"],
+        ["scans", "logs", "--json"],
+      ]) {
+        const stdout = capture();
+        const stderr = capture();
+        const code = await main(args, stdout.stream, stderr.stream, {
+          ...dependencies({
+            environment: f.environment,
+            currentDirectory: f.repository,
+          }),
+          runWorkbench: f.command,
+        });
+        expect(code, stderr.text()).toBe(expectedThread === null ? 2 : 0);
+        if (expectedThread === null)
+          expect(stdout.text()).not.toContain(f.threadId);
+        else
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            scanId,
+            threadId: expectedThread,
+            sessions: [{ threadId: expectedThread, path: currentLog }],
+          });
+      }
+    }
+    await checkLogs(childId, null);
+    // The current attempt's own native identity remains recoverable.
+    await rm(otherLog, { force: true });
+    await writeFile(currentLog, session(threadId));
+    const recovered = await resume({ ...f, scanId: childId }, noModel);
+    expect(recovered.code, recovered.stderr).toBe(0);
+    const result = JSON.parse(recovered.stdout);
+    expect(result.threadId).toBe(threadId);
+    expect(result.cost).toEqual(saved["cost"]);
+    expect(modelCalls).toBe(1);
+    await checkLogs(result.manifest.scan.id, threadId);
+  },
+);
+
+test.each(["missing", "ambiguous"])(
   "completed checkpoint does not repeat inference with %s native identity",
   async (identity) => {
     const f = await savedScan({
