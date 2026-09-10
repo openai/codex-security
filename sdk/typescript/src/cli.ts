@@ -64,6 +64,7 @@ import {
   type ScanPreflight,
 } from "./api.js";
 import { accountStatus } from "./auth.js";
+import { loadContract } from "./contract.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import {
@@ -99,6 +100,7 @@ import {
   type JsonValue,
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
+import { formatScanCostTokens, formatTokenUsage } from "./cost-model.js";
 import {
   CodexSecurityError,
   ConfigurationError,
@@ -166,7 +168,12 @@ import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
 } from "./thread-source.js";
-import { readScanLogs } from "./scan-logs.js";
+import {
+  findScanSession,
+  readSavedScanLogs,
+  type ScanLogSource,
+} from "./scan-logs.js";
+import { sendFeedback } from "./feedback.js";
 import {
   renderScanHistory,
   type HistoryCommand,
@@ -993,6 +1000,7 @@ export function resolveCliPath(directory: string, value: string): string {
 }
 
 interface ScanArguments extends DeepScanOptions {
+  resumeScanId?: string;
   mock?: boolean;
   workflowId?: string;
   auth?: ScanAuthMode;
@@ -1004,6 +1012,7 @@ interface ScanArguments extends DeepScanOptions {
   scanPromptFile?: string;
   validationPromptFile?: string;
   postScanPromptFile?: string;
+  postScanPrompt?: string;
   diff?: string;
   workingTree: boolean;
   head?: string;
@@ -1152,6 +1161,7 @@ interface CliDependencies {
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
   publishScanToCustom?: typeof publishScanToCustom;
+  sendFeedback?: typeof sendFeedback;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
     repository: string,
@@ -1969,36 +1979,73 @@ export async function main(
         if (scanId === undefined) return;
         return await history(
           ["get-scan", "--scan-id", scanId],
-          async (value) => {
-            const scan = value["scan"] as {
-              scanId: string;
-              continuationThreadId?: string;
-              mode?: string;
-              progress?: { status?: string; updatedAt?: string };
-              scanDir?: string;
-            };
-            const threadId = scan.continuationThreadId;
-            if (!threadId) {
-              throw new CodexSecurityError(
-                `No session is associated with scan ${scan.scanId}.`,
-              );
-            }
-            return (await readScanLogs({
-              scanId: scan.scanId,
-              threadId,
-              codexHome: codexSecurityCredentialHome(dependencies.environment),
-              scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
-              completedAt:
-                scan.progress?.status === "running"
-                  ? null
-                  : scan.progress?.status === "complete" ||
-                      scan.progress?.status === "failed" ||
-                      scan.progress?.status === "canceled"
-                    ? scan.progress.updatedAt ?? ""
-                    : "",
-            })) as unknown as JsonObject;
-          },
+          async (value) =>
+            (await readSavedScanLogs(
+              value["scan"] as ScanLogSource,
+              codexSecurityCredentialHome(dependencies.environment),
+            )) as unknown as JsonObject,
         );
+      },
+    })
+    .command("resume", {
+      description: "Resume an interrupted Deep Scan in its original session.",
+      mcp: false,
+      args: z.object({
+        scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
+      }),
+      options: z.object({
+        verbose: z
+          .boolean()
+          .default(false)
+          .describe("Print scan diagnostics to stderr."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, error: incurError, options }) {
+        let scanArguments: ScanArguments;
+        try {
+          const saved = await dependencies.runWorkbench([
+            "get-cli-scan-resume",
+            "--scan-id",
+            args.scanId,
+          ]);
+          if (
+            typeof saved["scanId"] !== "string" ||
+            typeof saved["scanDir"] !== "string"
+          ) {
+            throw new CodexSecurityError(
+              "The workbench returned invalid scan resume context.",
+            );
+          }
+          scanArguments = scanArgumentsFromRecipe(
+            saved["recipe"],
+            saved["scanId"],
+          );
+          scanArguments.resumeScanId = saved["scanId"];
+          scanArguments.outputDir = saved["scanDir"];
+          scanArguments.parentScanId = undefined;
+          // Resume uses the installed engine with the saved recipe and checkpoints.
+          scanArguments.expectedPluginVersion = undefined;
+          scanArguments.verbose = options.verbose;
+        } catch (error) {
+          const message = errorMessage(error);
+          errorOutput.write(`codex-security: ${message}\n`);
+          exitCode = 2;
+          return incurError({
+            code: "SCAN_RESUME_UNAVAILABLE",
+            message,
+            exitCode,
+          });
+        }
+        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        exitCode = outcome.exitCode;
+        if (outcome.error !== undefined) {
+          return incurError({
+            code: "SCAN_FAILED",
+            message: outcome.error,
+            exitCode,
+          });
+        }
+        return outcome.data;
       },
     })
     .command("rerun", {
@@ -3928,6 +3975,12 @@ export async function main(
           ),
       }),
       options: z.object({
+        recover: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Recover failed or interrupted attempts in an existing campaign, preserving their artifacts and checkouts.",
+          ),
         outputDir: z
           .string()
           .min(1, "--output-dir must not be empty.")
@@ -4018,6 +4071,11 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
+          if (options.recover && args.input === undefined) {
+            throw new Error(
+              "Bulk recovery requires the original repository CSV and --output-dir.",
+            );
+          }
           const prompts = await readPromptFiles(
             currentDirectory,
             options.scanPromptFile,
@@ -4078,6 +4136,98 @@ export async function main(
               ),
             },
             createSecurity: dependencies.createSecurity,
+            ...(options.recover
+              ? {
+                  recoverScan: async (scanDir: string) => {
+                    const history = await dependencies.runWorkbench(
+                      ["list-scans", "--scan-root", scanDir],
+                      undefined,
+                      controller.signal,
+                    );
+                    const scan = (history["scans"] as SavedScan[]).find(
+                      (scan) => resolve(scan.scanDir) === scanDir,
+                    );
+                    if (scan === undefined) return undefined;
+                    const status = (scan["progress"] as JsonObject)["status"];
+                    if (status === "complete") {
+                      const contract = await loadContract(scanDir, {
+                        pluginRoot: await bundledPluginRoot(),
+                        expectedScanId: scan.scanId,
+                        signal: controller.signal,
+                      });
+                      return {
+                        coverage: contract.coverage,
+                        cost:
+                          (scan["cost"] as unknown as ScanCost | undefined) ??
+                          null,
+                      };
+                    }
+                    if (status !== "running" || scan["mode"] !== "deep")
+                      return undefined;
+                    const saved = await dependencies.runWorkbench(
+                      [
+                        "get-cli-scan-resume",
+                        "--scan-id",
+                        scan.scanId,
+                        "--allow-unavailable",
+                      ],
+                      undefined,
+                      controller.signal,
+                    );
+                    if (typeof saved["unavailable"] === "string") {
+                      errorOutput.write(
+                        `codex-security: ${scan.scanId}: ${saved["unavailable"]} Preserving this attempt and starting a new one.\n`,
+                      );
+                      return undefined;
+                    }
+                    const session =
+                      typeof saved["threadId"] === "string"
+                        ? await findScanSession(
+                            codexSecurityCredentialHome(
+                              dependencies.environment,
+                            ),
+                            saved["threadId"],
+                          )
+                        : null;
+                    if (session?.workingDirectory !== scanDir) {
+                      errorOutput.write(
+                        `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
+                      );
+                      return undefined;
+                    }
+                    const recipe = scanArgumentsFromRecipe(
+                      saved["recipe"],
+                      scan.scanId,
+                    );
+                    const security = dependencies.createSecurity({
+                      pluginPath: options.pluginPath,
+                      codexOverrides: recipe.codexOverrides,
+                    });
+                    try {
+                      return await security.run(recipe.repository!, {
+                        resumeScanId: scan.scanId,
+                        outputDir: scanDir,
+                        mode: recipe.mode,
+                        target: targetFromArguments(recipe),
+                        knowledgeBasePaths: recipe.knowledgeBasePaths,
+                        workers: recipe.workers,
+                        subagents: recipe.subagents,
+                        stopAfterNoNew: recipe.stopAfterNoNew,
+                        maxDiscoveryRuns: recipe.maxDiscoveryRuns,
+                        maxTimeHours: recipe.maxTimeHours,
+                        maxCostUsd: recipe.maxCostUsd,
+                        failureSeverity: recipe.failOnSeverity,
+                        safetyIdentifier: recipe.safetyIdentifier,
+                        postScanPrompt:
+                          recipe.postScanPrompt ?? prompts.postScanPrompt,
+                        signal: controller.signal,
+                      });
+                    } finally {
+                      await security.close();
+                    }
+                  },
+                }
+              : {}),
             signal: controller.signal,
             onProgress: ({ repository, status, attempt, error, warning }) => {
               const detail = error ?? warning;
@@ -4845,6 +4995,80 @@ export async function main(
         }
       },
     })
+    .command("feedback", {
+      description: "Send feedback to OpenAI and return a feedback ID.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        scanId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Scan ID or unique prefix (default: most recently started scan in the current repository).",
+          ),
+      }),
+      options: z.object({
+        reason: z.string().trim().min(1).describe("Describe the problem."),
+        includeLogs: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Upload diagnostic logs, including scan and worker conversations and tool output. Defaults to off.",
+          ),
+      }),
+      output: z.object({
+        feedbackId: z.string(),
+        scanId: z.string().nullable(),
+        includedLogs: z.boolean(),
+      }),
+      async run({ args, options }) {
+        let scanId = args.scanId;
+        if (scanId === undefined) {
+          const value = await history([
+            "list-scans",
+            "--repository",
+            dependencies.currentDirectory(),
+          ]);
+          const scans = value["scans"] as {
+            scanId: string;
+            startedAt: string;
+          }[];
+          scanId = scans.toSorted((a, b) =>
+            b.startedAt.localeCompare(a.startedAt),
+          )[0]?.scanId;
+        }
+        const scan =
+          scanId === undefined
+            ? undefined
+            : ((await history(["get-scan", "--scan-id", scanId]))[
+                "scan"
+              ] as ScanLogSource);
+        const controller = new AbortController();
+        const onInterrupt = () => controller.abort("SIGINT");
+        const onTerminate = () => controller.abort("SIGTERM");
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          return await (dependencies.sendFeedback ?? sendFeedback)({
+            ...options,
+            scan,
+            environment: dependencies.environment,
+            workingDirectory: dependencies.currentDirectory(),
+            signal: controller.signal,
+          });
+        } catch (error) {
+          if (controller.signal.aborted) {
+            exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+            errorOutput.write("codex-security: Feedback upload canceled.\n");
+          }
+          throw error;
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command("info", {
       description: "Show read-only SDK and bundled-plugin metadata.",
       mcp: {
@@ -5244,11 +5468,23 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains deep scan settings for a standard scan.",
     );
   }
+  const safetyIdentifier = recipe["safetyIdentifier"];
+  const postScanPrompt = recipe["postScanPrompt"];
+  if (
+    (safetyIdentifier !== undefined && typeof safetyIdentifier !== "string") ||
+    (postScanPrompt !== undefined && typeof postScanPrompt !== "string")
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid launch settings.",
+    );
+  }
   return {
     repository,
     paths,
     knowledgeBasePaths,
     validationPromptFile,
+    safetyIdentifier,
+    postScanPrompt,
     diff: kind === "refs" ? reference : undefined,
     workingTree: kind === "working_tree",
     head: kind === "refs" ? head ?? "HEAD" : undefined,
@@ -5298,6 +5534,7 @@ function validateCliArguments(
       "login",
       "logout",
       "serve",
+      "feedback",
       "info",
     ].includes(command)
   ) {
@@ -7236,12 +7473,7 @@ async function executeScan(
         );
       }
       if (runningCost !== null) {
-        const tokens = formatTokenUsage({
-          input_tokens: runningCost.inputTokens,
-          cached_input_tokens: runningCost.cachedInputTokens,
-          output_tokens: runningCost.outputTokens,
-        });
-        if (tokens !== null) details.push(`Tokens: ${tokens}`);
+        details.push(`Tokens: ${formatScanCostTokens(runningCost)}`);
         details.push(`Cost: ${formatUsd(runningCost.estimatedUsd)}`);
       }
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
@@ -7266,6 +7498,9 @@ async function executeScan(
       );
     }
     const options: ScanOptions = {
+      ...(arguments_.resumeScanId === undefined
+        ? {}
+        : { resumeScanId: arguments_.resumeScanId }),
       ...(arguments_.mock ? { mock: true } : {}),
       ...(arguments_.workflowId === undefined
         ? {}
@@ -7275,6 +7510,7 @@ async function executeScan(
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
       ...prompts,
+      postScanPrompt: arguments_.postScanPrompt ?? prompts.postScanPrompt,
       mode: arguments_.mode,
       workers: arguments_.workers,
       subagents: arguments_.subagents,
@@ -7308,13 +7544,8 @@ async function executeScan(
         }
         progress?.stopTimer();
         if (maxCostUsd === undefined) {
-          const tokens = formatTokenUsage({
-            input_tokens: cost.inputTokens,
-            cached_input_tokens: cost.cachedInputTokens,
-            output_tokens: cost.outputTokens,
-          });
           progress?.stage(
-            `${tokens === null ? "" : `Tokens: ${tokens}. `}Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
+            `Tokens: ${formatScanCostTokens(cost)}. Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
           );
         } else {
           progress?.stage(
@@ -8063,41 +8294,17 @@ function printScanSummary(
   if (tokenSummary !== null) {
     errorOutput.write(`  ${paint("TOKENS", 1)}    ${tokenSummary}\n`);
   }
-  if (result.cost !== null) {
-    errorOutput.write(
-      `  ${paint("COST", 1)}      ${formatUsd(result.cost.estimatedUsd)}\n`,
-    );
-  }
+  const costSummary =
+    result.cost === null
+      ? "unavailable (model pricing or usage missing)"
+      : `${formatUsd(result.cost.estimatedUsd)} (standard, short context)`;
+  errorOutput.write(`  ${paint("COST", 1)}      ${costSummary}\n`);
   errorOutput.write(
     `  ${paint("RESULTS", 1)}   ${errorMessage(result.scanDir)}\n`,
   );
   if (deepScanStop?.nextStep !== undefined) {
     errorOutput.write(`\n  ${deepScanStop.nextStep}\n`);
   }
-}
-
-function formatTokenUsage(usage: unknown): string | null {
-  if (usage === null || typeof usage !== "object") return null;
-  const values = usage as Record<string, unknown>;
-  return (
-    (
-      [
-        ["input_tokens", "input"],
-        ["cached_input_tokens", "cached"],
-        ["output_tokens", "output"],
-      ] as const
-    )
-      .map(([key, label]) => {
-        const value = values[key];
-        return typeof value === "number" &&
-          Number.isSafeInteger(value) &&
-          value >= 0
-          ? `${value.toLocaleString("en-US")} ${label}`
-          : null;
-      })
-      .filter((value): value is string => value !== null)
-      .join(", ") || null
-  );
 }
 
 function componentScanEventLine(
@@ -8110,12 +8317,7 @@ function componentScanEventLine(
   }
   if (event.type !== "cost") return null;
   const cost = event.value;
-  const tokens = formatTokenUsage({
-    input_tokens: cost.inputTokens,
-    cached_input_tokens: cost.cachedInputTokens,
-    output_tokens: cost.outputTokens,
-  });
-  return `codex-security: ${componentName} | ${tokens === null ? "" : `Tokens: ${tokens} | `}Cost: ${formatUsd(cost.estimatedUsd)}\n`;
+  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)} | Cost: ${formatUsd(cost.estimatedUsd)}\n`;
 }
 
 function protectedRootErrorMessage(

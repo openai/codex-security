@@ -549,7 +549,20 @@ describe("malformed scan artifact recovery", () => {
         cachedInputTokens: 200,
         cacheWriteInputTokens: 0,
         outputTokens: 30,
-        estimatedUsd: 0.00625,
+        estimatedUsd: 0.00488,
+        cacheWriteInputTokensReported: false,
+        pricing: {
+          source: "https://developers.openai.com/api/docs/pricing",
+          asOf: "2026-09-09",
+          serviceTier: "standard",
+          context: "short",
+          usdPerMillionTokens: {
+            input: 4,
+            cacheRead: 0.4,
+            cacheWrite: 5,
+            output: 20,
+          },
+        },
       };
 
       const reconciled = await workbench(fixture, [
@@ -575,6 +588,16 @@ describe("malformed scan artifact recovery", () => {
         usage: initiallyCompleted.usage,
         cost,
       });
+      const listed = await workbench(fixture, [
+        "list-scans",
+        "--repository",
+        fixture.repository,
+      ]);
+      expect(
+        (listed["scans"] as { scanId: string }[]).find(
+          (scan) => scan.scanId === fixture.scanId,
+        ),
+      ).toMatchObject({ cost });
       expect(
         await Promise.all(
           artifactNames.map((name) => readFile(join(fixture.scanDir, name))),

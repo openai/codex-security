@@ -20,6 +20,7 @@ export function workbenchCompletionBinding(
   scan: Row,
   completedAt: string,
   pluginRoot: string,
+  sealedManifest: Record<string, unknown> | null = null,
 ): Record<string, unknown> {
   const contract = scanContract(scan),
     targetContract = contract["target"] as Record<string, unknown>;
@@ -55,16 +56,29 @@ export function workbenchCompletionBinding(
       "requiredExcludePaths"
     ],
   };
-  return {
+  const producer: Record<string, unknown> = {
+    name: "codex-security-plugin",
+    version,
+  };
+  const binding: Record<string, unknown> = {
     scanId: scan.get("id"),
     startedAt: scan.get("started_at"),
     completedAt,
-    producer: { name: "codex-security-plugin", version },
+    producer,
     target,
     allowedTargetKinds: targetContract["allowedKinds"],
     scope,
     coverageMode: expectedCoverageMode(scan),
   };
+  const sealedScan = sealedManifest?.["scan"];
+  if (object(sealedScan) && (sealedScan["sealedAt"] ?? null) !== null) {
+    // Keep the original producer; finalization still validates schema, seal and owner.
+    binding["startedAt"] = sealedScan["startedAt"] ?? null;
+    binding["completedAt"] = sealedScan["completedAt"] ?? null;
+    if (object(sealedScan["producer"]))
+      producer["version"] = sealedScan["producer"]["version"] ?? null;
+  }
+  return binding;
 }
 
 export function verifyManifestBinding(

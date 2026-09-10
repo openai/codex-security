@@ -1,12 +1,29 @@
-import type { Connection } from "../../native/sqlite.mjs";
+import { dirname } from "node:path";
+import type { Connection, Row } from "../../native/sqlite.mjs";
+import { contractValuesEqual } from "./helpers/contract-validation";
 import { fileInfo } from "./helpers/helper-files";
 import { JsonSyntaxError, object } from "./helpers/python-json";
 import { appendPath, pathKey, relativePath } from "./helpers/rank-selection";
 import { resolvedPath } from "./helpers/resolve-path";
 import { parsedPath } from "./helpers/resolve-security-md";
 import { JsonValueError, loadsJson } from "./helpers/scan-contract-json";
+import { ContractError } from "./helpers/scan-contract-errors";
+import { prepareScanFinalization } from "./helpers/scan-finalization";
+import { schemaDirectory } from "./helpers/sealed-scan";
 import { encodeUtf8, UnicodeDecodeError } from "./helpers/utf8";
 import { requireScan } from "./workbench-records";
+import { workbenchCompletionBinding } from "./workbench-binding";
+import {
+  artifactPath,
+  readJsonObject,
+  requireCanonicalScanDirectory,
+} from "./workbench-files";
+import { TargetInspectionError } from "./workbench-git-snapshot";
+import { scanContract } from "./workbench-results";
+import {
+  requireScanTargetIdentity,
+  scanTargetIdentity,
+} from "./workbench-target";
 import { requireTarget } from "./workbench-setup";
 import { WorkbenchValidationError } from "./workbench-validation";
 
@@ -160,4 +177,121 @@ export function getScanRecipe(
     recipe: loadsJson(scan.get("recipe_json") as string | Buffer),
     scanId: scan.get("id"),
   };
+}
+
+export function cliScanResume(
+  connection: Connection,
+  scan: Row,
+  workspace: Row,
+): Record<string, unknown> {
+  if (scan.get("mode") !== "deep" || scan.get("recipe_json") === null)
+    throw new WorkbenchValidationError(
+      "Resume requires a Deep Scan with a saved CLI launch recipe.",
+    );
+  if (scan.get("status") !== "running" || scan.get("canceled_at") !== null)
+    throw new WorkbenchValidationError(
+      "Resume requires a running scan; completed, failed, and canceled scans cannot resume.",
+    );
+  const threadId = scan.get("continuation_thread_id"),
+    owner = scan.get("deep_scan_owner_thread_id") || workspace.get("thread_id");
+  if (
+    !threadId ||
+    (owner !== null && owner !== threadId) ||
+    scan.get("handoff_status") !== "delivered" ||
+    scan.get("handoff_claim_token") !== null
+  )
+    throw new WorkbenchValidationError(
+      "Resume requires the original owning CLI session.",
+    );
+  const run = connection
+    .prepare(
+      "SELECT status, cancel_requested FROM deep_scan_runs WHERE scan_id = ?",
+    )
+    .get([scan.get("id")]);
+  if (
+    run !== undefined &&
+    (!["running", "succeeded"].includes(run.get("status") as string) ||
+      run.get("cancel_requested"))
+  )
+    throw new WorkbenchValidationError(
+      "This Deep Scan has stopped and cannot resume.",
+    );
+  let repository: string;
+  try {
+    repository = requireScanTargetIdentity({
+      target_path: scan.get("target_path") as string,
+      target_inode: scan.get("target_inode"),
+    });
+  } catch (error) {
+    if (!(error instanceof TargetInspectionError)) throw error;
+    throw new WorkbenchValidationError(
+      "Cannot resume: the original checkout is missing or was replaced.",
+    );
+  }
+  if (
+    !contractValuesEqual(scanTargetIdentity(repository, null), [
+      scan.get("target_revision"),
+      scan.get("target_snapshot_digest"),
+      scan.get("target_device"),
+      scan.get("target_inode"),
+    ])
+  )
+    throw new WorkbenchValidationError(
+      "Cannot resume: the original checkout revision or contents changed.",
+    );
+  const recipe = parseScanRecipe(scan.get("recipe_json") as string, repository),
+    scanDir = requireCanonicalScanDirectory(
+      parsedPath(scan.get("scan_dir") as string),
+    ),
+    progress = connection
+      .prepare("SELECT scope_file_count FROM scan_progress WHERE scan_id = ?")
+      .get([scan.get("id")]);
+  const result: Record<string, unknown> = {
+    contract: scanContract(scan),
+    recipe,
+    scanDir,
+    scanId: scan.get("id"),
+    scopeFileCount: progress!.get("scope_file_count"),
+    startedAt: scan.get("started_at"),
+    targetId: scan.get("target_id"),
+    targetRevision: scan.get("target_revision"),
+    threadId,
+    userContext: scan.get("user_context"),
+  };
+  // Active coordinators may still be writing drafts. Validate sealed results
+  // before attaching to a coordinator that has finished.
+  if (run?.get("status") === "succeeded") {
+    const manifestPath = artifactPath(scanDir, "scan-manifest.json", false);
+    if (manifestPath !== null) {
+      const manifest = readJsonObject(manifestPath),
+        manifestScan = manifest["scan"];
+      if (
+        object(manifestScan) &&
+        ((manifestScan["sealedAt"] ?? null) !== null ||
+          (manifestScan["artifacts"] ?? null) !== null)
+      ) {
+        try {
+          const binding = workbenchCompletionBinding(
+            scan,
+            scan.get("started_at") as string,
+            dirname(schemaDirectory()),
+            manifest,
+          );
+          prepareScanFinalization(scanDir, undefined, {
+            expectedCoverageMode: binding["coverageMode"] as string,
+            completionBinding: binding,
+          });
+          result["sealedProducerVersion"] = (
+            manifestScan["producer"] as Record<string, unknown>
+          )["version"];
+        } catch (error) {
+          if (!(error instanceof ContractError)) throw error;
+          throw new WorkbenchValidationError(
+            `Cannot resume sealed scan: ${error.message}`,
+          );
+        }
+      }
+    }
+  }
+  return result;
 }

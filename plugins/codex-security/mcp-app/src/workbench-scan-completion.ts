@@ -168,11 +168,6 @@ export function completeScanLocked(
       parsedPath(scan.get("scan_dir") as string),
     ),
     completionTimestamp = context.now(),
-    binding = workbenchCompletionBinding(
-      scan,
-      completionTimestamp,
-      dirname(schemaDirectory()),
-    ),
     currentManifestPath = artifactPath(scanDir, artifacts.manifest, false),
     currentManifest =
       currentManifestPath === null ? null : readJsonObject(currentManifestPath),
@@ -185,9 +180,14 @@ export function completeScanLocked(
     object(currentScan) &&
     ((currentScan["sealedAt"] ?? null) !== null ||
       (currentScan["artifacts"] ?? null) !== null);
+  const binding = workbenchCompletionBinding(
+    scan,
+    completionTimestamp,
+    dirname(schemaDirectory()),
+    currentManifest,
+  );
   if (scan.get("recipe_json") !== null) {
-    const drafts: Record<string, string> = {},
-      missing: string[] = [];
+    const missing: string[] = [];
     for (const name of [
       artifacts.manifest,
       artifacts.findings,
@@ -203,18 +203,12 @@ export function completeScanLocked(
         missing.push(name);
         continue;
       }
-      const draft = artifactPath(scanDir, name, true);
-      if (draft !== null) drafts[name] = draft;
+      artifactPath(scanDir, name, true);
     }
     if (missing.length)
       throw new WorkbenchValidationError(
         `Scan agent did not create required draft artifacts: ${missing.join(", ")}. Check that the scan agent can run shell commands and write to the scan directory before retrying.`,
       );
-    const manifestScan = readJsonObject(drafts[artifacts.manifest]!)["scan"];
-    if (object(manifestScan) && (manifestScan["sealedAt"] ?? null) !== null) {
-      binding["startedAt"] = manifestScan["startedAt"] ?? null;
-      binding["completedAt"] = manifestScan["completedAt"] ?? null;
-    }
   }
   let wrote = false,
     manifest: Table,
@@ -252,6 +246,7 @@ export function completeScanLocked(
     if (
       wrote ||
       (scan.get("mode") === "deep" &&
+        !alreadySealed &&
         !(error instanceof RecoverableContractError))
     )
       failScanLocked(context, connection, {

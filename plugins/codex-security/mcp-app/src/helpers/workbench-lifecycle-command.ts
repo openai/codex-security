@@ -4,14 +4,18 @@ import { processBinding, sqliteBinding } from "../native";
 import { connect } from "../workbench-db";
 import { registerCliScan } from "../workbench-cli-registration";
 import { TargetInspectionError } from "../workbench-git-snapshot";
-import { requireWorkspace } from "../workbench-records";
+import { requireScan, requireWorkspace } from "../workbench-records";
 import { resultCallbacks, workspaceState } from "../workbench-results";
 import {
   startHeadlessStandardScan,
   startPromptOnlyScan,
   startScan,
 } from "../workbench-scan-kickoff";
-import { getScanRecipe, setScanThread } from "../workbench-scan-recipes";
+import {
+  cliScanResume,
+  getScanRecipe,
+  setScanThread,
+} from "../workbench-scan-recipes";
 import { createWorkspace, saveWorkspace } from "../workbench-setup";
 import { WorkbenchValidationError } from "../workbench-validation";
 import { decodePosixBytes } from "./posix-path";
@@ -31,7 +35,8 @@ type Command =
   | "start-headless-standard-scan"
   | "register-cli-scan"
   | "set-scan-thread"
-  | "get-scan-recipe";
+  | "get-scan-recipe"
+  | "get-cli-scan-resume";
 const diffOptions = {
   "diff-target-kind": ["working_tree", "commit", "range"],
   "diff-base-revision": undefined,
@@ -111,6 +116,11 @@ const specifications: Record<Command, WorkbenchCommandSpecification> = {
   },
   "set-scan-thread": { required: ["scan-id", "thread-id"], options: {} },
   "get-scan-recipe": { required: ["scan-id"], options: {} },
+  "get-cli-scan-resume": {
+    required: ["scan-id"],
+    options: {},
+    flags: ["allow-unavailable"],
+  },
 };
 
 export async function workbenchLifecycleCommand(
@@ -228,6 +238,25 @@ export async function workbenchLifecycleCommand(
         case "get-scan-recipe":
           result = getScanRecipe(connection, { scanId: text("scan-id")! });
           break;
+        case "get-cli-scan-resume": {
+          const scan = requireScan(connection, text("scan-id")!);
+          try {
+            result = cliScanResume(
+              connection,
+              scan,
+              requireWorkspace(connection, scan.get("workspace_id") as string),
+            );
+          } catch (error) {
+            if (
+              !options["allow-unavailable"] ||
+              (!(error instanceof WorkbenchValidationError) &&
+                !(error instanceof TargetInspectionError))
+            )
+              throw error;
+            result = { unavailable: error.message };
+          }
+          break;
+        }
       }
       print(
         stringifyJson(result, {
