@@ -5,6 +5,8 @@ description: Develop evidence-backed structural and architectural security harde
 
 # Propose Security Hardening
 
+For retained output in a non-SDK plugin workflow, read `../../references/artifact-storage.md` and save through its MCP tools. Use `scanId` for a running scan or `targetPath` for standalone/after-completion output. SDK-owned output and actual repository/configuration edits retain their existing rules.
+
 ## Objective
 
 Turn a collection of security evidence into a decision-ready portfolio of structural or architectural hardening opportunities. The evidence may be a Codex Security scan that is still in final reporting or is already complete,

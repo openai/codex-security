@@ -5,6 +5,8 @@ description: Use when Codex is already in the validation phase of a security sca
 
 # Security Validation
 
+For retained output in a non-SDK plugin workflow, read `../../references/artifact-storage.md` and save through its MCP tools. Use `scanId` for a running scan or `targetPath` for standalone/after-completion output. SDK-owned output and actual repository/configuration edits retain their existing rules.
+
 ## Objective
 
 Take candidate findings from discovery and produce the strongest evidence-backed validation assessment you can. Prefer targeted, non-interactive reproduction or falsification when it is feasible and proportionate, but use focused code tracing when dynamic execution is blocked by missing services, unavailable infrastructure, or excessive setup relative to the candidate and scan scope.

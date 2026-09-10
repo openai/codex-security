@@ -16,6 +16,7 @@ import {
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { createScanArtifactContext } from "./src/artifact-context.js";
+import { persistentScanRoot } from "./src/artifact-storage.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
 import {
   DeepScanCoordinatorRegistry,
@@ -40,7 +41,6 @@ const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set(["inspect-target", "inspect-
 
 type JsonObject = Record<string, unknown>;
 
-let defaultScanRoot: Promise<string> | undefined;
 let fallbackWorkbenchStateDir: Promise<string> | undefined;
 let fallbackWorkbenchStateLogged = false;
 let persistentWorkbenchStateSucceeded = false;
@@ -81,10 +81,7 @@ const daybreakEntitlementContextSchema = z.object({
 });
 
 function scanRoot(): Promise<string> {
-  if (CONFIGURED_SCAN_ROOT) return Promise.resolve(CONFIGURED_SCAN_ROOT);
-  // Agent turns can write OS temporary directories but cannot write protected Codex state.
-  defaultScanRoot ??= fs.mkdtemp(join(tmpdir(), "codex-security-scans-"));
-  return defaultScanRoot;
+  return Promise.resolve(persistentScanRoot());
 }
 
 interface WorkspaceState extends JsonObject {
@@ -1752,7 +1749,9 @@ async function executeWorkbench(
 
 async function pinFallbackWorkbenchStateDir(): Promise<string> {
   fallbackWorkbenchStateDir ??= (async () => {
-    const stateDir = join(await scanRoot(), "workbench-state");
+    const stateDir = CONFIGURED_SCAN_ROOT
+      ? join(await scanRoot(), "workbench-state")
+      : await fs.mkdtemp(join(tmpdir(), "codex-security-state-"));
     await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
     return stateDir;
   })();

@@ -5,6 +5,8 @@ description: "Assess an immutable patch artifact's program impact, regression ri
 
 # Assess Patch Risk
 
+For retained output in a non-SDK plugin workflow, read `../../references/artifact-storage.md` and save through its MCP tools. Use `scanId` for a running scan or `targetPath` for standalone/after-completion output. SDK-owned output and actual repository/configuration edits retain their existing rules.
+
 Explain what can change if the patch merges and whether the available evidence supports merging it. Keep these concepts separate:
 
 - **impact if wrong**: the consequence and blast radius of a regression;

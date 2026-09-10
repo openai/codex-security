@@ -1334,6 +1334,44 @@ def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]
     return db.scan_context(connection, scan_id)
 
 
+def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
+    """Publish supplemental bytes under the same lock as finalization and recovery."""
+    scan_id = db.require_uuid(args.scan_id, "scan-id")
+    with db.scan_completion_lock(scan_id):
+        scan = db.require_scan(connection, scan_id)
+        db.handoff.require_current_continuation(
+            scan,
+            args.claim_token,
+            error_message="Scan artifacts are owned by another continuation.",
+        )
+        if scan["status"] != "running" or scan["seal_manifest_digest"] is not None:
+            raise SystemExit("The scan stopped; its artifacts cannot be modified.")
+        scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+        manifest_path = db.artifact_path(scan_dir, "scan-manifest.json", required=False)
+        if manifest_path is not None:
+            manifest = db.read_json_object(manifest_path).get("scan", {})
+            if manifest.get("sealedAt") is not None or manifest.get("artifacts") is not None:
+                raise SystemExit("The scan is sealed; its artifacts cannot be modified.")
+        output = args.artifact_path
+        key = output.lower()
+        if (
+            not (
+                key.startswith(("artifacts/", "findings/", "hardening/"))
+                or key == "report_validation.md"
+            )
+            or key.startswith("artifacts/deep_discovery/")
+            or key
+            in {
+                "artifacts/02_discovery/candidate_ledger.jsonl",
+                "artifacts/02_discovery/in_scope_files.txt",
+                "artifacts/01_context/false_positive_feedback.json",
+            }
+        ):
+            raise SystemExit("Use the typed scan tools for canonical artifacts and checkpoints.")
+        write_scan_local_bytes(scan_dir, output, Path(args.source_path).read_bytes())
+    return {"scanId": scan_id, "path": str(scan_dir / output)}
+
+
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):

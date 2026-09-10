@@ -5,6 +5,8 @@ description: Use when Codex is already in the attack-path-analysis phase of a se
 
 # Security Attack Path Analysis
 
+For retained output in a non-SDK plugin workflow, read `../../references/artifact-storage.md` and save through its MCP tools. Use `scanId` for a running scan or `targetPath` for standalone/after-completion output. SDK-owned output and actual repository/configuration edits retain their existing rules.
+
 ## Objective
 
 Turn validated or still-plausible findings into explicit attacker stories, structured attack-path analysis facts, severity calibration, and a final reportability decision grounded in the threat model.

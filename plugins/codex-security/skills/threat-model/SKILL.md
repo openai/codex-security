@@ -5,6 +5,8 @@ description: Use when Codex is already in the threat-modeling phase of a securit
 
 # Security Threat Model
 
+For retained output in a non-SDK plugin workflow, read `../../references/artifact-storage.md` and save through its MCP tools. Use `scanId` for a running scan or `targetPath` for standalone/after-completion output. SDK-owned output and actual repository/configuration edits retain their existing rules.
+
 Create or reuse the repository-scoped threat model defined in `../../references/scan-artifacts.md`. Honor explicit user-provided input and output paths. If an explicitly required input is missing, ask for it instead of substituting a generated model. A generated model describes the repository's actual architecture, attacker capabilities, trust boundaries, and security-relevant failure modes.
 
 Standard scans and Deep Scan workers build their threat models within their ordinary Standard scan workflow; neither invokes this separate phase skill.

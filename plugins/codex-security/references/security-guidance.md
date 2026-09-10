@@ -4,6 +4,8 @@
 
 ## Resolve
 
+For non-SDK plugin workflows, request `--out -` and consume the result directly. If the scan requires a retained `security_guidance.md`, save that exact output through `save_codex_security_artifact` following `artifact-storage.md`; do not pass the persistent artifact path to the helper. SDK-owned workflows retain their existing output behavior.
+
 Compile the full `SECURITY.md` policy for a file or directory with:
 
 ```

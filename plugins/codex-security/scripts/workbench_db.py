@@ -3567,6 +3567,8 @@ def main() -> None:
             result = recover_scan_results(connection, args)
         elif args.command == "write-scan-draft":
             result = write_scan_draft(connection, args)
+        elif args.command == "save-scan-artifact":
+            result = saved_results.save_scan_artifact(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "mark-handoff-delivered":
             result = handoff.mark_handoff_delivered(
                 connection,
