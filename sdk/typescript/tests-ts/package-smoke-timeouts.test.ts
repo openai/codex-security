@@ -12,30 +12,26 @@ const { packageSmokeTimeouts } = (await import(
 )) as PackageSmokeTimeouts;
 
 describe("npm package smoke timeouts", () => {
-  test("preserves the existing timeout on Linux and macOS", () => {
+  test("preserves the command timeout on Linux and macOS", () => {
     for (const platform of ["linux", "darwin"] as const) {
-      expect(packageSmokeTimeouts(platform)).toEqual({
-        commandTimeoutMs: 120_000,
-        processTimeoutMs: 150_000,
-      });
+      expect(packageSmokeTimeouts(platform).commandTimeoutMs).toBe(120_000);
     }
   });
 
   test("allows the Windows npm install to complete", () => {
-    expect(packageSmokeTimeouts("win32")).toEqual({
-      commandTimeoutMs: 180_000,
-      processTimeoutMs: 210_000,
-    });
+    expect(packageSmokeTimeouts("win32").commandTimeoutMs).toBe(180_000);
   });
 
-  test("keeps the parent smoke timeout above the command timeout", () => {
-    for (const platform of ["linux", "darwin", "win32"] as const) {
+  test.each(["linux", "darwin", "win32"] as const)(
+    "allows installation and verification to each use a command budget on %s",
+    (platform) => {
       const { commandTimeoutMs, processTimeoutMs } =
         packageSmokeTimeouts(platform);
 
-      expect(processTimeoutMs).toBe(commandTimeoutMs + 30_000);
-    }
-  });
+      const remainingAfterInstallation = processTimeoutMs - commandTimeoutMs;
+      expect(remainingAfterInstallation).toBeGreaterThan(commandTimeoutMs);
+    },
+  );
 
   test("uses the active runtime platform by default", () => {
     expect(packageSmokeTimeouts()).toEqual(

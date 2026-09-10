@@ -9,6 +9,7 @@ import type {
   ComponentScanResult,
 } from "./component-scan.js";
 import { formatUsd, type ScanCost, type ScanSessionEvent } from "./cost.js";
+import { estimateScanCost, formatScanCostTokens } from "./cost-model.js";
 import type { ScanActivity } from "./scan-activity.js";
 import type { ScanMode } from "./targets.js";
 import { scanPhaseLabel, type ScanProgress } from "./worker-progress.js";
@@ -562,14 +563,15 @@ export class ScanDashboard {
       this.#files === null
         ? "waiting for inventory"
         : `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`;
-    const tokens =
-      this.#cost === null
-        ? "waiting for usage"
-        : `${formatCount(this.#cost.inputTokens)} in · ${formatCount(this.#cost.cachedInputTokens)} cached · ${formatCount(this.#cost.outputTokens)} out`;
     const cost =
       this.#cost === null
         ? this.#options.maxCostUsd === undefined
-          ? "waiting for usage"
+          ? estimateScanCost(this.#options.model?.model, {
+              input_tokens: 0,
+              output_tokens: 0,
+            }) === null
+            ? "unavailable (model pricing missing)"
+            : "waiting for usage"
           : `— / ${formatUsd(this.#options.maxCostUsd)}`
         : `${formatUsd(this.#cost.estimatedUsd)}${this.#options.maxCostUsd === undefined ? "" : ` / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
 
@@ -618,7 +620,7 @@ export class ScanDashboard {
             ...(this.#options.mode === "deep"
               ? []
               : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
-            `  TOKENS   ${tokens}`,
+            ...this.#tokenLines(),
             `  COST     ${cost}`,
             ...(this.#budget === null
               ? []
@@ -803,13 +805,25 @@ export class ScanDashboard {
       1,
       (this.#stream.rows ?? 24) -
         FIXED_SCREEN_ROWS -
-        (this.#budget === null ? 0 : 2) +
+        (this.#budget === null ? 0 : 2) -
+        (this.#options.presentation === "publication" ||
+        this.#options.presentation === "verification"
+          ? 0
+          : this.#tokenLines().length - 1) +
         (this.#options.presentation === "publication"
           ? 2
           : this.#options.mode === "deep"
             ? 2
             : 0),
     );
+  }
+
+  #tokenLines(): string[] {
+    const tokens =
+      this.#cost === null
+        ? "waiting for usage"
+        : formatScanCostTokens(this.#cost);
+    return wrapActivity("  TOKENS   ", tokens, this.#width());
   }
 
   #activityLines(width: number): DashboardActivityLine[] {

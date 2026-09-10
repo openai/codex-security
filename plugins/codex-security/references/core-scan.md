@@ -21,7 +21,7 @@ Resolve one working native local search command before scanning and pass its ver
 
 ## Repository Security Policy
 
-Resolve and cache directory-specific security guidance with `<python_command> <plugin_dir>/scripts/resolve_security_md.py --repo <repo_root> --scope <file_or_directory> --out -`. Resolve once per distinct reviewed directory or investigation packet, pass the matching inherited policy to its worker, and let the closest nested `SECURITY.md` take precedence.
+Resolve and cache directory-specific security guidance with `<plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --scope <file_or_directory> --out -` (use `launch_codex_security_mcp.cmd` on Windows). Resolve once per distinct reviewed directory or investigation packet, pass the matching inherited policy to its worker, and let the closest nested `SECURITY.md` take precedence.
 
 ## Threat Map And Investigation Packets
 

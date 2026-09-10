@@ -64,8 +64,13 @@ import {
   type ScanPreflight,
 } from "./api.js";
 import { accountStatus } from "./auth.js";
+import { loadContract } from "./contract.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
+import {
+  classifyScanSeverityInternal,
+  classifyScanDirectorySeverityInternal,
+} from "./classify-scan-severity.js";
 import {
   resolveCompletedScan,
   resolveWorkflowScan,
@@ -95,6 +100,7 @@ import {
   type JsonValue,
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
+import { formatScanCostTokens, formatTokenUsage } from "./cost-model.js";
 import {
   CodexSecurityError,
   ConfigurationError,
@@ -121,7 +127,10 @@ import {
 import type { Finding, SeverityLevel } from "./models.js";
 import { runMultiscan } from "./multiscan.js";
 import { componentPlanSchema, planComponents } from "./component-plan.js";
-import { runComponentScans } from "./component-scan.js";
+import {
+  runComponentScans,
+  type ComponentScanEvent,
+} from "./component-scan.js";
 import {
   checkScanPublication,
   forceTerminatePublicationProcesses as terminatePublishers,
@@ -131,6 +140,7 @@ import {
   type PublishScanResult,
 } from "./publish.js";
 import type { ScanResult } from "./result.js";
+import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
   canonicalizeModelSafePath,
@@ -148,23 +158,36 @@ import {
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
+  comparisonForScan,
   matchScanFindingsInternal,
   unionFindingGroups,
   type matchScanFindings,
   type ScanComparisonInput,
-  type ScanComparisonResult,
+  type ScanComparisonOptions,
+  type ScanMatchingBatch,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
 import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
 } from "./thread-source.js";
-import { readScanLogs } from "./scan-logs.js";
+import {
+  findScanSession,
+  readSavedScanLogs,
+  type ScanLogSource,
+} from "./scan-logs.js";
+import { sendFeedback } from "./feedback.js";
 import {
   renderScanHistory,
   type HistoryCommand,
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
+import {
+  policyDisplayData,
+  runPolicyCommand,
+  type PolicyPrompt,
+  type PolicySecurity,
+} from "./security-policy-cli.js";
 import type { PatchSelection } from "./patch-tui.js";
 import {
   scanPhaseLabel as scanPhase,
@@ -199,6 +222,7 @@ const OUTPUT_OPTION =
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
 const CHILD_TERMINATION_GRACE_MS = 1_000;
+const DUPLICATE_SIGNAL_WINDOW_MS = 500;
 const PUBLICATION_GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
@@ -254,6 +278,8 @@ const VALUE_OPTIONS = new Set([
   "--component",
   "--components-file",
   "--knowledge-base",
+  "--rubric",
+  "--finding-id",
   "--scan-prompt-file",
   "--validation-prompt-file",
   "--post-scan-prompt-file",
@@ -311,7 +337,9 @@ const PROVIDER_OPTION = z
 const CREATE_PR_OPTION = z
   .boolean()
   .default(false)
-  .describe("Create a draft GitHub pull request after verified patches.");
+  .describe(
+    "Create a draft GitHub pull request or GitLab merge request after verified patches.",
+  );
 const ASSESS_PATCH_RISK_OPTION = z
   .boolean()
   .default(false)
@@ -978,6 +1006,7 @@ export function resolveCliPath(directory: string, value: string): string {
 }
 
 interface ScanArguments extends DeepScanOptions {
+  resumeScanId?: string;
   mock?: boolean;
   workflowId?: string;
   auth?: ScanAuthMode;
@@ -989,6 +1018,7 @@ interface ScanArguments extends DeepScanOptions {
   scanPromptFile?: string;
   validationPromptFile?: string;
   postScanPromptFile?: string;
+  postScanPrompt?: string;
   diff?: string;
   workingTree: boolean;
   head?: string;
@@ -1039,19 +1069,12 @@ interface ExportArguments {
   pythonPath?: string;
 }
 
-interface MatchingBatch {
-  afterScanId: string;
-  afterFindings: ScanComparisonInput["after"];
-  beforeScans: { scanId: string; findings: ScanComparisonInput["before"] }[];
-  knownFindingGroups?: ScanComparisonInput["knownFindingGroups"];
-}
-
 type MatchingPlan = JsonObject & {
   repository: string;
   scanCount: number;
   unavailableScans: number;
   skippedPairs: number;
-  batches: (JsonObject & MatchingBatch)[];
+  batches: (JsonObject & ScanMatchingBatch)[];
 };
 
 type SkillThreadSource = Extract<
@@ -1138,6 +1161,8 @@ interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
+  createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
+  policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
   prepareAuthenticationHome?: (
     environment: NodeJS.ProcessEnv,
@@ -1150,9 +1175,12 @@ interface CliDependencies {
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
   deduplicateScan?: typeof deduplicateScanInternal;
+  classifyScanSeverity?: typeof classifyScanSeverityInternal;
+  classifyScanDirectorySeverity?: typeof classifyScanDirectorySeverityInternal;
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
   publishScanToCustom?: typeof publishScanToCustom;
+  sendFeedback?: typeof sendFeedback;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
     repository: string,
@@ -1178,7 +1206,7 @@ interface CliDependencies {
     input?: string,
   ): Promise<number>;
   runRepositoryCommand(
-    command: "git" | "gh",
+    command: "git" | "gh" | "glab",
     args: readonly string[],
     repository: string,
     options?: { trim?: boolean; environment?: NodeJS.ProcessEnv },
@@ -1188,7 +1216,12 @@ interface CliDependencies {
   planComponents?: typeof planComponents;
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
-  runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
+  importScan?: typeof importScan;
+  runWorkbench(
+    args: readonly string[],
+    input?: string,
+    signal?: AbortSignal,
+  ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
 }
@@ -1336,17 +1369,18 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     }
     return undefined;
   },
-  runWorkbench: async (args, input) => {
+  runWorkbench: async (args, input, signal) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
     };
-    const python = await resolvePluginPython({ environment });
+    const python = await resolvePluginPython({ environment, signal });
     return await runWorkbench(
       {
         python,
         pluginRoot: await bundledPluginRoot(),
         environment,
+        signal,
         failureMessage: "Could not read Codex Security scan history",
       },
       args,
@@ -1591,10 +1625,12 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
-  argv = defaultListCommand(argv);
+  argv = normalizeScanImportArguments(defaultListCommand(argv));
+  const policyFullOutput =
+    argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
   const positionals: string[] = [];
   const argumentError = validateCliArguments(argv, positionals);
-  if (argumentError !== undefined) {
+  if (argumentError !== undefined && !policyFullOutput) {
     errorOutput.write(`codex-security: ${argumentError}\n`);
     return 2;
   }
@@ -1624,6 +1660,9 @@ export async function main(
   let frameworkOutput = "";
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
+  let renderedPolicy: string | undefined;
+  const runImport = (options: ImportScanOptions) =>
+    runScanImport(options, errorOutput, dependencies);
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
@@ -1664,39 +1703,106 @@ export async function main(
     );
     return result?.["scans"] as SavedScan[] | undefined;
   };
+  const runMatching = async (
+    operation: (options: ScanComparisonOptions) => Promise<JsonObject>,
+  ): Promise<JsonObject> => {
+    const controller = new AbortController();
+    let firstSignalAt = 0;
+    const cancel = (signal: SignalName): void => {
+      if (controller.signal.aborted) {
+        if (
+          signal === controller.signal.reason &&
+          dependencies.now() - firstSignalAt < DUPLICATE_SIGNAL_WINDOW_MS
+        ) {
+          return;
+        }
+        removeListeners();
+        dependencies.forceExit(signal);
+      } else {
+        firstSignalAt = dependencies.now();
+        controller.abort(signal);
+      }
+    };
+    const onInterrupt = (): void => cancel("SIGINT");
+    const onTerminate = (): void => cancel("SIGTERM");
+    const removeListeners = (): void => {
+      dependencies.removeSignalListener("SIGINT", onInterrupt);
+      dependencies.removeSignalListener("SIGTERM", onTerminate);
+    };
+    dependencies.addSignalListener("SIGINT", onInterrupt);
+    dependencies.addSignalListener("SIGTERM", onTerminate);
+    let previousProgress = "";
+    try {
+      const result = await operation({
+        environment: dependencies.environment,
+        workingDirectory: dependencies.currentDirectory(),
+        signal: controller.signal,
+        onProgress(progress) {
+          if (errorOutput.isTTY !== true || progress.phase === "complete")
+            return;
+          const message =
+            progress.phase === "evidence"
+              ? "Reading selected finding evidence."
+              : `Matching ${progress.afterFindings} findings against ${progress.beforeIssues} known issues${(progress.pages ?? 1) > 1 ? ` (catalogue page ${progress.page}/${progress.pages})` : ""}.`;
+          if (message === previousProgress) return;
+          previousProgress = message;
+          errorOutput.write(`codex-security: ${message}\n`);
+        },
+      });
+      controller.signal.throwIfAborted();
+      return result;
+    } catch (error) {
+      const interrupted = controller.signal.reason;
+      exitCode =
+        interrupted === "SIGINT" ? 130 : interrupted === "SIGTERM" ? 143 : 2;
+      const message =
+        interrupted === "SIGINT"
+          ? "Finding matching canceled by Ctrl-C. Saved comparisons are preserved."
+          : interrupted === "SIGTERM"
+            ? "Finding matching terminated by SIGTERM. Saved comparisons are preserved."
+            : errorMessage(error);
+      errorOutput.write(`codex-security: ${message}\n`);
+      throw error;
+    } finally {
+      removeListeners();
+    }
+  };
   const matchScanPair = async (
     beforeId: string,
     afterId: string,
     force = false,
-  ): Promise<JsonObject | undefined> =>
-    history(
-      [
-        "compare-scans",
-        "--before-scan-id",
-        beforeId,
-        "--after-scan-id",
-        afterId,
-        "--include-matching-inputs",
-      ],
-      async ({ matchingCached, matchingInputs, ...comparison }) => {
-        if (matchingCached && !force) return comparison;
-        return await dependencies.runWorkbench(
+  ): Promise<JsonObject> =>
+    runMatching(async (options) => {
+      const { matchingCached, matchingInputs, ...comparison } =
+        await dependencies.runWorkbench(
           [
-            "save-scan-comparison",
+            "compare-scans",
             "--before-scan-id",
             beforeId,
             "--after-scan-id",
             afterId,
-            "--matches-json-stdin",
+            "--include-matching-inputs",
           ],
-          JSON.stringify(
-            await dependencies.matchFindings(
-              matchingInputs as JsonObject & ScanComparisonInput,
-            ),
-          ),
+          undefined,
+          options.signal,
         );
-      },
-    );
+      if (matchingCached && !force) return comparison;
+      const input = matchingInputs as JsonObject & ScanComparisonInput;
+      const matching = await dependencies.matchFindings(input, options);
+      options.signal?.throwIfAborted();
+      return await dependencies.runWorkbench(
+        [
+          "save-scan-comparison",
+          "--before-scan-id",
+          beforeId,
+          "--after-scan-id",
+          afterId,
+          "--matches-json-stdin",
+        ],
+        JSON.stringify(matching),
+        options.signal,
+      );
+    });
   const presentHistory = (
     result: JsonObject | undefined,
     command: HistoryCommand,
@@ -1903,36 +2009,73 @@ export async function main(
         if (scanId === undefined) return;
         return await history(
           ["get-scan", "--scan-id", scanId],
-          async (value) => {
-            const scan = value["scan"] as {
-              scanId: string;
-              continuationThreadId?: string;
-              mode?: string;
-              progress?: { status?: string; updatedAt?: string };
-              scanDir?: string;
-            };
-            const threadId = scan.continuationThreadId;
-            if (!threadId) {
-              throw new CodexSecurityError(
-                `No session is associated with scan ${scan.scanId}.`,
-              );
-            }
-            return (await readScanLogs({
-              scanId: scan.scanId,
-              threadId,
-              codexHome: codexSecurityCredentialHome(dependencies.environment),
-              scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
-              completedAt:
-                scan.progress?.status === "running"
-                  ? null
-                  : scan.progress?.status === "complete" ||
-                      scan.progress?.status === "failed" ||
-                      scan.progress?.status === "canceled"
-                    ? scan.progress.updatedAt ?? ""
-                    : "",
-            })) as unknown as JsonObject;
-          },
+          async (value) =>
+            (await readSavedScanLogs(
+              value["scan"] as ScanLogSource,
+              codexSecurityCredentialHome(dependencies.environment),
+            )) as unknown as JsonObject,
         );
+      },
+    })
+    .command("resume", {
+      description: "Resume an interrupted Deep Scan in its original session.",
+      mcp: false,
+      args: z.object({
+        scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
+      }),
+      options: z.object({
+        verbose: z
+          .boolean()
+          .default(false)
+          .describe("Print scan diagnostics to stderr."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, error: incurError, options }) {
+        let scanArguments: ScanArguments;
+        try {
+          const saved = await dependencies.runWorkbench([
+            "get-cli-scan-resume",
+            "--scan-id",
+            args.scanId,
+          ]);
+          if (
+            typeof saved["scanId"] !== "string" ||
+            typeof saved["scanDir"] !== "string"
+          ) {
+            throw new CodexSecurityError(
+              "The workbench returned invalid scan resume context.",
+            );
+          }
+          scanArguments = scanArgumentsFromRecipe(
+            saved["recipe"],
+            saved["scanId"],
+          );
+          scanArguments.resumeScanId = saved["scanId"];
+          scanArguments.outputDir = saved["scanDir"];
+          scanArguments.parentScanId = undefined;
+          // Resume uses the installed engine with the saved recipe and checkpoints.
+          scanArguments.expectedPluginVersion = undefined;
+          scanArguments.verbose = options.verbose;
+        } catch (error) {
+          const message = errorMessage(error);
+          errorOutput.write(`codex-security: ${message}\n`);
+          exitCode = 2;
+          return incurError({
+            code: "SCAN_RESUME_UNAVAILABLE",
+            message,
+            exitCode,
+          });
+        }
+        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        exitCode = outcome.exitCode;
+        if (outcome.error !== undefined) {
+          return incurError({
+            code: "SCAN_FAILED",
+            message: outcome.error,
+            exitCode,
+          });
+        }
+        return outcome.data;
       },
     })
     .command("rerun", {
@@ -1968,6 +2111,44 @@ export async function main(
             "--scan-id",
             scanId,
           ]);
+          if (
+            recipe !== undefined &&
+            isJsonObject(recipe) &&
+            recipe["import"] !== undefined &&
+            isJsonObject(recipe["import"])
+          ) {
+            if (options.validationPromptFile !== undefined) {
+              throw new CodexSecurityError(
+                "--validation-prompt-file is not supported when rerunning an imported scan; imports do not perform security analysis.",
+              );
+            }
+            const imported = recipe["import"];
+            const sourcePath = imported["sourcePath"];
+            const format = imported["format"];
+            if (
+              typeof sourcePath !== "string" ||
+              sourcePath.length === 0 ||
+              (format !== "csv" && format !== "json")
+            ) {
+              throw new CodexSecurityError(
+                "The saved scan recipe contains invalid import settings.",
+              );
+            }
+            const outcome = await runImport({
+              sourcePath,
+              format,
+              parentScanId: scanId,
+            });
+            exitCode = outcome.exitCode;
+            if (outcome.error !== undefined) {
+              return incurError({
+                code: "SCAN_IMPORT_FAILED",
+                message: outcome.error,
+                exitCode,
+              });
+            }
+            return outcome.data;
+          }
           scanArguments = scanArgumentsFromRecipe(
             recipe,
             scanId,
@@ -2024,24 +2205,20 @@ export async function main(
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
-        try {
-          if (options.all) {
-            return presentHistory(
-              await matchAllScans(dependencies, options.force),
-              "match-all",
-              format,
-            );
-          }
+        if (options.all) {
           return presentHistory(
-            await matchScanPair(args.beforeId!, args.afterId!, options.force),
-            "compare",
+            await runMatching((matchingOptions) =>
+              matchAllScans(dependencies, options.force, matchingOptions),
+            ),
+            "match-all",
             format,
           );
-        } catch (error) {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
-          exitCode = 2;
-          throw error;
         }
+        return presentHistory(
+          await matchScanPair(args.beforeId!, args.afterId!, options.force),
+          "compare",
+          format,
+        );
       },
     })
     .command("compare", {
@@ -2107,6 +2284,12 @@ export async function main(
         .describe("Completed scan directory; omit to select a saved scan."),
     }),
     options: PUBLICATION_DESTINATION_OPTIONS.extend({
+      findingId: z
+        .array(optionValue("--finding-id"))
+        .default([])
+        .describe(
+          "Publish only this finding ID; repeat to select deduplicated findings (Linear only).",
+        ),
       workflowId: optionValue("--workflow-id")
         .optional()
         .describe(
@@ -2219,6 +2402,11 @@ export async function main(
       };
       try {
         const currentDirectory = dependencies.currentDirectory();
+        if (options.findingId.length > 0 && options.to !== "linear") {
+          throw new CodexSecurityError(
+            "--finding-id is only supported with --to linear.",
+          );
+        }
         const csvPath =
           options.csv === undefined
             ? undefined
@@ -2628,6 +2816,9 @@ export async function main(
             resolveCliPath(currentDirectory, scanDir),
             {
               ...destination!,
+              ...(options.findingId.length === 0
+                ? {}
+                : { findingIds: options.findingId }),
               ...(selectedScans[0]?.scanId === undefined
                 ? {}
                 : { expectedScanId: selectedScans[0].scanId }),
@@ -2802,7 +2993,7 @@ export async function main(
   });
   const cli = Cli.create("codex-security", {
     description:
-      "Run, import, validate, patch, verify fixes, export, and publish Codex Security findings.",
+      "Draft security policies; run, import, validate, patch, verify fixes, export, and publish Codex Security findings.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -2810,8 +3001,206 @@ export async function main(
         "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
     },
   })
+    .command("policy", {
+      description:
+        "Draft SECURITY.md guidance for future scans and owner review.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        repository: z
+          .string()
+          .optional()
+          .describe(
+            "Repository or component directory (default: current directory).",
+          ),
+      }),
+      options: z.object({
+        path: optionValue("--path")
+          .optional()
+          .describe(
+            "Generate SECURITY.md for this repository-relative component directory.",
+          ),
+        knowledgeBase: z
+          .array(optionValue("--knowledge-base"))
+          .default([])
+          .describe(
+            "Add architecture or security-context files; repeat for multiple paths.",
+          ),
+        outputDir: optionValue("--output-dir")
+          .optional()
+          .describe(
+            "Private artifact directory outside the repository (default: Codex Security state).",
+          ),
+        headless: z
+          .boolean()
+          .default(false)
+          .describe("Skip owner questions and authentication prompts."),
+        dryRun: z
+          .boolean()
+          .default(false)
+          .describe("Validate local generation inputs without starting Codex."),
+        auth: z
+          .enum(["auto", "chatgpt", "api-key"])
+          .default("auto")
+          .describe("Select ChatGPT, API-key, or automatic authentication."),
+        model: optionValue("--model")
+          .optional()
+          .describe(
+            `Model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+          ),
+        effort: effortOption(),
+        provider: PROVIDER_OPTION.describe(
+          "Inference provider for policy generation.",
+        ),
+        maxCost: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            "Stop when estimated total USD cost across all three stages exceeds AMOUNT.",
+          ),
+        pluginPath: optionValue("--plugin-path")
+          .optional()
+          .describe(PLUGIN_PATH_DESCRIPTION),
+        python: optionValue("--python")
+          .optional()
+          .describe(PYTHON_PATH_DESCRIPTION),
+        codex: z
+          .array(optionValue("--codex"))
+          .default([])
+          .describe(CODEX_OVERRIDE_DESCRIPTION),
+      }),
+      examples: [
+        { args: { repository: "." } },
+        { args: { repository: "." }, options: { path: "services/api" } },
+      ],
+      hint:
+        "Save a draft for review:\n" +
+        "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json",
+      output: z
+        .union([z.record(z.string(), z.unknown()), z.string()])
+        .optional(),
+      async run({ args, error: incurError, options, format, formatExplicit }) {
+        const outputOptions = argv.filter((argument) =>
+          OUTPUT_OPTION.test(argument),
+        );
+        const explicitOutput = formatExplicit || outputOptions.length > 0;
+        const transformOutput = outputOptions.some(
+          (argument) => !argument.startsWith("--format"),
+        );
+        const filterOutput = outputOptions.some((argument) =>
+          argument.startsWith("--filter-output"),
+        );
+        const fail = (message: string, failureExitCode: number) => {
+          exitCode = failureExitCode;
+          return incurError({
+            code: "POLICY_FAILED",
+            message,
+            exitCode: failureExitCode,
+          });
+        };
+        try {
+          if (argumentError !== undefined) return fail(argumentError, 2);
+          const directory = dependencies.currentDirectory();
+          const outcome = await withTerminalErrorsHandled(errorOutput, () =>
+            runPolicyCommand(
+              {
+                repository: resolveCliPath(directory, args.repository ?? "."),
+                config: {
+                  pluginPath: options.pluginPath,
+                  pythonPath: options.python,
+                  codexOverrides: parseCodexOverrides(
+                    options.codex,
+                    options.model,
+                    options.effort,
+                    options.provider,
+                  ),
+                },
+                generation: {
+                  auth: options.auth,
+                  path: options.path,
+                  knowledgeBasePaths: options.knowledgeBase.map((path) =>
+                    resolveCliPath(directory, path),
+                  ),
+                  outputDir:
+                    options.outputDir === undefined
+                      ? undefined
+                      : resolveCliPath(directory, options.outputDir),
+                  maxCostUsd: options.maxCost,
+                },
+                headless: options.headless || explicitOutput,
+                dryRun: options.dryRun,
+                format,
+                explicitOutput,
+              },
+              {
+                createSecurity:
+                  dependencies.createPolicySecurity ??
+                  ((config) =>
+                    createSecurityInternal(config, { surface: "cli" })),
+                chooseAuthentication: (config, auth, signal) =>
+                  chooseInteractiveAuthentication(
+                    {
+                      auth,
+                      provider: scanModelProvider({
+                        ...DEFAULT_CODEX_CONFIG,
+                        ...config.codexOverrides,
+                      }),
+                      command: "policy",
+                      signal,
+                    },
+                    errorOutput,
+                    dependencies,
+                  ),
+                prompt:
+                  dependencies.policyPrompt ??
+                  createBulkScanDiscoveryDependencies({
+                    output: errorOutput,
+                    now: dependencies.now,
+                    currentDirectory: dependencies.currentDirectory,
+                  }).prompt,
+                environment: dependencies.environment,
+                errorOutput,
+                now: dependencies.now,
+                addSignalListener: dependencies.addSignalListener,
+                removeSignalListener: dependencies.removeSignalListener,
+                forceExit: dependencies.forceExit,
+              },
+            ),
+          );
+          exitCode = outcome.exitCode;
+          if (exitCode !== 0) {
+            return fail(outcome.error ?? "Policy command failed.", exitCode);
+          }
+          if (
+            format === "md" &&
+            outcome.markdown !== undefined &&
+            !filterOutput
+          ) {
+            if (!transformOutput) renderedPolicy = outcome.markdown;
+            return outcome.markdown;
+          }
+          return format === "toon" && !explicitOutput && !options.dryRun
+            ? undefined
+            : format === "toon"
+              ? policyDisplayData(outcome.data)
+              : outcome.data;
+        } catch (error) {
+          const message = safeErrorMessage(error);
+          try {
+            errorOutput.write(`codex-security: ${message}\n`);
+          } catch {}
+          return fail(message, 2);
+        }
+      },
+    })
     .command("scan", {
       description: "Run a Codex Security scan.",
+      hint:
+        "Import existing findings without security analysis:\n" +
+        "  codex-security scan import --csv findings.csv\n" +
+        "  codex-security scan import --json findings.json\n" +
+        "Use ./import to scan a repository named import.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3170,6 +3559,110 @@ export async function main(
     .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
+    .command("classify-severity", {
+      description:
+        "Classify saved findings using an optional rubric and save a separate severity assessment.",
+      destructive: true,
+      mcp: false,
+      options: z.object({
+        reprocess: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Reclassify selected findings even when a matching assessment is saved.",
+          ),
+        scan: optionValue("--scan")
+          .optional()
+          .describe("Saved scan ID, unique prefix, or latest."),
+        scanDir: optionValue("--scan-dir")
+          .optional()
+          .describe("External completed scan directory."),
+        rubric: optionValue("--rubric")
+          .optional()
+          .describe(
+            "Classification policy document; omit to inherit existing severity without a model call.",
+          ),
+        knowledgeBase: z
+          .array(optionValue("--knowledge-base"))
+          .default([])
+          .describe(
+            "Supporting security context; repeat for more files or directories.",
+          ),
+        findingId: z
+          .array(optionValue("--finding-id"))
+          .default([])
+          .describe(
+            "Classify only this finding ID; repeat to select deduplicated findings.",
+          ),
+        model: optionValue("--model")
+          .optional()
+          .describe("Model for rubric classification."),
+        effort: effortOption().describe(
+          "Classification reasoning effort (default: medium).",
+        ),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ options }) {
+        const controller = new AbortController();
+        const onInterrupt = () => controller.abort("SIGINT");
+        const onTerminate = () => controller.abort("SIGTERM");
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          if (
+            (options.scan === undefined) ===
+            (options.scanDir === undefined)
+          ) {
+            throw new CodexSecurityError(
+              "Severity classification requires exactly one of --scan or --scan-dir.",
+            );
+          }
+          const currentDirectory = dependencies.currentDirectory();
+          const settings = {
+            environment: dependencies.environment,
+            workingDirectory: currentDirectory,
+            signal: controller.signal,
+            rubricPath:
+              options.rubric === undefined
+                ? undefined
+                : resolveCliPath(currentDirectory, options.rubric),
+            knowledgeBasePaths: options.knowledgeBase.map((path) =>
+              resolveCliPath(currentDirectory, path),
+            ),
+            findingIds:
+              options.findingId.length === 0 ? undefined : options.findingId,
+            reprocess: options.reprocess,
+            model: options.model,
+            reasoningEffort: options.effort,
+          };
+          const result =
+            options.scan !== undefined
+              ? await (
+                  dependencies.classifyScanSeverity ??
+                  classifyScanSeverityInternal
+                )(options.scan, settings, dependencies, "cli")
+              : await (
+                  dependencies.classifyScanDirectorySeverity ??
+                  classifyScanDirectorySeverityInternal
+                )(
+                  resolveCliPath(currentDirectory, options.scanDir!),
+                  settings,
+                  "cli",
+                );
+          return { ...result };
+        } catch (error) {
+          const signal = controller.signal.reason;
+          errorOutput.write(
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : safeErrorMessage(error)}\n`,
+          );
+          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          return undefined;
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command("dedupe", {
       description:
         "Review a saved scan with local Codex and save duplicate groups to the findings API.",
@@ -3358,6 +3851,7 @@ export async function main(
       async run({ args, options }) {
         const controller = new AbortController();
         let dashboard: ScanDashboard | null = null;
+        const componentNames = new Map<string, string>();
         const stopDashboard = (): void => {
           try {
             dashboard?.stop();
@@ -3452,10 +3946,20 @@ export async function main(
             createSecurity: dependencies.createSecurity,
             planComponents: dependencies.planComponents,
             matchFindings: dependencies.matchFindings,
-            onPlan: (components) => dashboard?.setComponents(components),
+            onPlan: (components) => {
+              for (const component of components)
+                componentNames.set(component.id, component.name);
+              dashboard?.setComponents(components);
+            },
             onScanEvent:
               dashboard === null
-                ? undefined
+                ? (event) => {
+                    const componentName =
+                      componentNames.get(event.componentId) ??
+                      event.componentId;
+                    const line = componentScanEventLine(componentName, event);
+                    if (line !== null) errorOutput.write(line);
+                  }
                 : (event) => dashboard?.recordComponentEvent(event),
             onDeduplicationStarted: () => {
               if (dashboard !== null)
@@ -3520,6 +4024,12 @@ export async function main(
           ),
       }),
       options: z.object({
+        recover: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Recover failed or interrupted attempts in an existing campaign, preserving their artifacts and checkouts.",
+          ),
         outputDir: z
           .string()
           .min(1, "--output-dir must not be empty.")
@@ -3611,6 +4121,11 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
+          if (options.recover && args.input === undefined) {
+            throw new Error(
+              "Bulk recovery requires the original repository CSV and --output-dir.",
+            );
+          }
           const prompts = await readPromptFiles(
             currentDirectory,
             options.scanPromptFile,
@@ -3672,6 +4187,99 @@ export async function main(
               ),
             },
             createSecurity: dependencies.createSecurity,
+            ...(options.recover
+              ? {
+                  recoverScan: async (scanDir: string) => {
+                    const history = await dependencies.runWorkbench(
+                      ["list-scans", "--scan-root", scanDir],
+                      undefined,
+                      controller.signal,
+                    );
+                    const scan = (history["scans"] as SavedScan[]).find(
+                      (scan) => resolve(scan.scanDir) === scanDir,
+                    );
+                    if (scan === undefined) return undefined;
+                    const status = (scan["progress"] as JsonObject)["status"];
+                    if (status === "complete") {
+                      const contract = await loadContract(scanDir, {
+                        pluginRoot: await bundledPluginRoot(),
+                        expectedScanId: scan.scanId,
+                        signal: controller.signal,
+                      });
+                      return {
+                        coverage: contract.coverage,
+                        cost:
+                          (scan["cost"] as unknown as ScanCost | undefined) ??
+                          null,
+                      };
+                    }
+                    if (status !== "running" || scan["mode"] !== "deep")
+                      return undefined;
+                    const saved = await dependencies.runWorkbench(
+                      [
+                        "get-cli-scan-resume",
+                        "--scan-id",
+                        scan.scanId,
+                        "--allow-unavailable",
+                      ],
+                      undefined,
+                      controller.signal,
+                    );
+                    if (typeof saved["unavailable"] === "string") {
+                      errorOutput.write(
+                        `codex-security: ${scan.scanId}: ${saved["unavailable"]} Preserving this attempt and starting a new one.\n`,
+                      );
+                      return undefined;
+                    }
+                    const session =
+                      typeof saved["threadId"] === "string"
+                        ? await findScanSession(
+                            codexSecurityCredentialHome(
+                              dependencies.environment,
+                            ),
+                            saved["threadId"],
+                          )
+                        : null;
+                    if (session?.workingDirectory !== scanDir) {
+                      errorOutput.write(
+                        `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
+                      );
+                      return undefined;
+                    }
+                    const recipe = scanArgumentsFromRecipe(
+                      saved["recipe"],
+                      scan.scanId,
+                    );
+                    const security = dependencies.createSecurity({
+                      pluginPath: options.pluginPath,
+                      pythonPath: options.python,
+                      codexOverrides: recipe.codexOverrides,
+                    });
+                    try {
+                      return await security.run(recipe.repository!, {
+                        resumeScanId: scan.scanId,
+                        outputDir: scanDir,
+                        mode: recipe.mode,
+                        target: targetFromArguments(recipe),
+                        knowledgeBasePaths: recipe.knowledgeBasePaths,
+                        workers: recipe.workers,
+                        subagents: recipe.subagents,
+                        stopAfterNoNew: recipe.stopAfterNoNew,
+                        maxDiscoveryRuns: recipe.maxDiscoveryRuns,
+                        maxTimeHours: recipe.maxTimeHours,
+                        maxCostUsd: recipe.maxCostUsd,
+                        failureSeverity: recipe.failOnSeverity,
+                        safetyIdentifier: recipe.safetyIdentifier,
+                        postScanPrompt:
+                          recipe.postScanPrompt ?? prompts.postScanPrompt,
+                        signal: controller.signal,
+                      });
+                    } finally {
+                      await security.close();
+                    }
+                  },
+                }
+              : {}),
             signal: controller.signal,
             onProgress: ({ repository, status, attempt, error, warning }) => {
               const detail = error ?? warning;
@@ -3781,7 +4389,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
+            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
           ),
       }),
       async run({ options }) {
@@ -3837,7 +4445,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
+            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -4060,7 +4668,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
+            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -4443,6 +5051,80 @@ export async function main(
         }
       },
     })
+    .command("feedback", {
+      description: "Send feedback to OpenAI and return a feedback ID.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        scanId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Scan ID or unique prefix (default: most recently started scan in the current repository).",
+          ),
+      }),
+      options: z.object({
+        reason: z.string().trim().min(1).describe("Describe the problem."),
+        includeLogs: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Upload diagnostic logs, including scan and worker conversations and tool output. Defaults to off.",
+          ),
+      }),
+      output: z.object({
+        feedbackId: z.string(),
+        scanId: z.string().nullable(),
+        includedLogs: z.boolean(),
+      }),
+      async run({ args, options }) {
+        let scanId = args.scanId;
+        if (scanId === undefined) {
+          const value = await history([
+            "list-scans",
+            "--repository",
+            dependencies.currentDirectory(),
+          ]);
+          const scans = value["scans"] as {
+            scanId: string;
+            startedAt: string;
+          }[];
+          scanId = scans.toSorted((a, b) =>
+            b.startedAt.localeCompare(a.startedAt),
+          )[0]?.scanId;
+        }
+        const scan =
+          scanId === undefined
+            ? undefined
+            : ((await history(["get-scan", "--scan-id", scanId]))[
+                "scan"
+              ] as ScanLogSource);
+        const controller = new AbortController();
+        const onInterrupt = () => controller.abort("SIGINT");
+        const onTerminate = () => controller.abort("SIGTERM");
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          return await (dependencies.sendFeedback ?? sendFeedback)({
+            ...options,
+            scan,
+            environment: dependencies.environment,
+            workingDirectory: dependencies.currentDirectory(),
+            signal: controller.signal,
+          });
+        } catch (error) {
+          if (controller.signal.aborted) {
+            exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+            errorOutput.write("codex-security: Feedback upload canceled.\n");
+          }
+          throw error;
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command("info", {
       description: "Show read-only SDK and bundled-plugin metadata.",
       mcp: {
@@ -4481,6 +5163,92 @@ export async function main(
       },
     });
 
+  // Incur cannot mount a command with both a handler and subcommands.
+  // Select the nested import route while preserving scan [repository].
+  if (isScanImportCommand(argv)) {
+    cli.command(
+      Cli.create("scan", {
+        description: "Run or import a saved scan.",
+      }).command("import", {
+        description:
+          "Save CSV or JSON findings as a completed scan without security analysis.",
+        destructive: true,
+        mcp: false,
+        options: z
+          .object({
+            csv: optionValue("--csv")
+              .optional()
+              .describe("Findings CSV in the codex-security export format."),
+            json: optionValue("--json")
+              .optional()
+              .describe(
+                "Findings JSON document or object with a findings array.",
+              ),
+            outputDir: optionValue("--output-dir")
+              .optional()
+              .describe(
+                "Artifact directory (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+              ),
+            archiveExisting: z
+              .boolean()
+              .default(false)
+              .describe("Archive existing results; requires --output-dir."),
+            dryRun: z
+              .boolean()
+              .default(false)
+              .describe("Validate the input without saving a scan."),
+          })
+          .refine(
+            (options) =>
+              Number(options.csv !== undefined) +
+                Number(options.json !== undefined) ===
+              1,
+            { message: "Provide exactly one of --csv FILE or --json FILE." },
+          )
+          .refine(
+            (options) =>
+              !options.archiveExisting || options.outputDir !== undefined,
+            { message: "--archive-existing requires --output-dir." },
+          ),
+        examples: [
+          { options: { csv: "findings.csv" } },
+          { options: { json: "findings.json" } },
+        ],
+        hint: "Each input row is retained, including duplicates. --json selects the input file; use --format json for JSON output.",
+        output: z.record(z.string(), z.unknown()).optional(),
+        async run({ options, format, error: incurError }) {
+          const directory = dependencies.currentDirectory();
+          const outcome = await runImport({
+            sourcePath: resolveCliPath(directory, options.csv ?? options.json!),
+            format: options.csv === undefined ? "json" : "csv",
+            outputDir:
+              options.outputDir === undefined
+                ? undefined
+                : resolveCliPath(directory, options.outputDir),
+            archiveExisting: options.archiveExisting,
+            dryRun: options.dryRun,
+          });
+          exitCode = outcome.exitCode;
+          if (outcome.error !== undefined) {
+            return incurError({
+              code: "SCAN_IMPORT_FAILED",
+              message: outcome.error,
+              exitCode,
+            });
+          }
+          if (
+            !options.dryRun &&
+            format === "toon" &&
+            !argv.some((argument) => OUTPUT_OPTION.test(argument))
+          ) {
+            return;
+          }
+          return outcome.data;
+        },
+      }),
+    );
+  }
+
   let notice: UpdateNotice | undefined;
   try {
     await cli.serve(
@@ -4506,17 +5274,24 @@ export async function main(
   }
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
-    if (exitCode !== 0) return exitCode;
-    errorOutput.write(
-      `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
-    );
-    return 2;
+    if (policyFullOutput) {
+      if (exitCode === 0) exitCode = 2;
+    } else {
+      if (exitCode !== 0) return exitCode;
+      errorOutput.write(
+        `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+      );
+      return 2;
+    }
   }
   if (frameworkOutput.length === 0) return exitCode;
   try {
     await writeCliOutput(
       output,
-      renderedPublication ?? renderedHistory ?? frameworkOutput,
+      renderedPolicy ??
+        renderedPublication ??
+        renderedHistory ??
+        frameworkOutput,
     );
     return exitCode;
   } catch (error) {
@@ -4525,11 +5300,86 @@ export async function main(
   }
 }
 
-function defaultListCommand(argv: readonly string[]): readonly string[] {
-  const commandIndex = argv.findIndex((value, index) => {
+async function runScanImport(
+  options: ImportScanOptions,
+  errorOutput: Writable,
+  dependencies: CliDependencies,
+): Promise<ScanOutcome> {
+  const controller = new AbortController();
+  const onInterrupt = () => controller.abort("SIGINT");
+  const onTerminate = () => controller.abort("SIGTERM");
+  dependencies.addSignalListener("SIGINT", onInterrupt);
+  dependencies.addSignalListener("SIGTERM", onTerminate);
+  try {
+    const result = await (dependencies.importScan ?? importScan)(
+      { ...options, signal: controller.signal },
+      { environment: dependencies.environment },
+    );
+    if ("dryRun" in result) return { exitCode: 0, data: { ...result } };
+    try {
+      errorOutput.write(
+        `Imported ${result.findings.findings.length} findings as scan ${result.manifest.scan.id}.\n` +
+          `Artifacts: ${result.scanDir}\n`,
+      );
+    } catch {}
+    return { exitCode: 0, data: result.toJSON() };
+  } catch (error) {
+    const signal = controller.signal.reason;
+    const message =
+      signal === "SIGINT" || signal === "SIGTERM"
+        ? "Scan import canceled."
+        : safeErrorMessage(error);
+    errorOutput.write(`codex-security: ${message}\n`);
+    return {
+      exitCode: signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2,
+      error: message,
+    };
+  } finally {
+    dependencies.removeSignalListener("SIGINT", onInterrupt);
+    dependencies.removeSignalListener("SIGTERM", onTerminate);
+  }
+}
+
+function isScanImportCommand(argv: readonly string[]): boolean {
+  const commandIndex = cliCommandIndex(argv);
+  return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
+}
+
+function normalizeScanImportArguments(
+  argv: readonly string[],
+): readonly string[] {
+  if (!isScanImportCommand(argv)) return argv;
+  const normalized: string[] = [];
+  const subcommandIndex = cliCommandIndex(argv) + 1;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!;
+    const next = argv[index + 1];
+    // Incur reserves bare --json for output, but parses --json=FILE normally.
+    if (
+      index > subcommandIndex &&
+      argument === "--json" &&
+      next !== undefined &&
+      !next.startsWith("--") &&
+      next !== "-h"
+    ) {
+      normalized.push(`--json=${next}`);
+      index += 1;
+    } else {
+      normalized.push(argument);
+    }
+  }
+  return normalized;
+}
+
+function cliCommandIndex(argv: readonly string[]): number {
+  return argv.findIndex((value, index) => {
     if (value.startsWith("-")) return false;
     return index === 0 || !VALUE_OPTIONS.has(argv[index - 1]!);
   });
+}
+
+function defaultListCommand(argv: readonly string[]): readonly string[] {
+  const commandIndex = cliCommandIndex(argv);
   if (
     commandIndex < 0 ||
     !["scans", "findings"].includes(argv[commandIndex]!) ||
@@ -4674,11 +5524,23 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains deep scan settings for a standard scan.",
     );
   }
+  const safetyIdentifier = recipe["safetyIdentifier"];
+  const postScanPrompt = recipe["postScanPrompt"];
+  if (
+    (safetyIdentifier !== undefined && typeof safetyIdentifier !== "string") ||
+    (postScanPrompt !== undefined && typeof postScanPrompt !== "string")
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid launch settings.",
+    );
+  }
   return {
     repository,
     paths,
     knowledgeBasePaths,
     validationPromptFile,
+    safetyIdentifier,
+    postScanPrompt,
     diff: kind === "refs" ? reference : undefined,
     workingTree: kind === "working_tree",
     head: kind === "refs" ? head ?? "HEAD" : undefined,
@@ -4707,9 +5569,13 @@ function validateCliArguments(
   positionals: string[],
 ): string | undefined {
   if (argv.includes("--help") || argv.includes("-h")) return undefined;
-  const commandIndex = argv.findIndex((value) =>
-    [
+  const commandIndex = cliCommandIndex(argv);
+  const command = argv[commandIndex];
+  if (
+    command === undefined ||
+    ![
       "scan",
+      "policy",
       "install-hook",
       "bulk-scan",
       "scan-components",
@@ -4724,11 +5590,12 @@ function validateCliArguments(
       "login",
       "logout",
       "serve",
+      "feedback",
       "info",
-    ].includes(value),
-  );
-  if (commandIndex < 0) return undefined;
-  const command = argv[commandIndex]!;
+    ].includes(command)
+  ) {
+    return undefined;
+  }
   const structuredOutput = argv.some(
     (value, index) =>
       value === "--json" ||
@@ -4782,7 +5649,9 @@ function validateCliArguments(
       return "Markdown output is not supported for scan results.";
     }
   }
+  const scanImport = isScanImportCommand(argv);
   const nestedCommand =
+    scanImport ||
     command === "scans" ||
     command === "findings" ||
     command === "publish" ||
@@ -4832,7 +5701,11 @@ function validateCliArguments(
     }
     const equals = value.indexOf("=");
     const option = equals < 0 ? value : value.slice(0, equals);
-    if (equals >= 0 || !VALUE_OPTIONS.has(option)) continue;
+    if (
+      equals >= 0 ||
+      (!VALUE_OPTIONS.has(option) && !(scanImport && option === "--json"))
+    )
+      continue;
     const next = argv[index + 1];
     if (next === undefined || next.startsWith("--") || next === "-h") {
       return `Missing value for flag: ${option}`;
@@ -4855,7 +5728,10 @@ function validateCliArguments(
     command !== "verify-fix" &&
     command !== "patch" &&
     positionals.length >
-      (command === "logout" || command === "info" || command === "serve"
+      (scanImport ||
+      command === "logout" ||
+      command === "info" ||
+      command === "serve"
         ? 0
         : subcommand === "compare" || subcommand === "match"
           ? 2
@@ -4868,18 +5744,25 @@ function validateCliArguments(
 async function matchAllScans(
   dependencies: CliDependencies,
   force: boolean,
+  options: ScanComparisonOptions = {},
 ): Promise<JsonObject> {
-  const result = (await dependencies.runWorkbench([
-    "list-unmatched-scan-pairs",
-    "--repository",
-    dependencies.currentDirectory(),
-    ...(force ? ["--force"] : []),
-  ])) as MatchingPlan;
+  const result = (await dependencies.runWorkbench(
+    [
+      "list-unmatched-scan-pairs",
+      "--repository",
+      dependencies.currentDirectory(),
+      ...(force ? ["--force"] : []),
+    ],
+    undefined,
+    options.signal,
+  )) as MatchingPlan;
   const { repository, scanCount, unavailableScans, skippedPairs, batches } =
     result;
 
   let matchedPairs = 0;
   let findingMatches = 0;
+  let relatedPairs = 0;
+  let uncertainPairs = 0;
   const newlyMatchedGroups: string[][] = [];
   for (const {
     afterScanId,
@@ -4887,6 +5770,7 @@ async function matchAllScans(
     beforeScans,
     knownFindingGroups = [],
   } of batches) {
+    options.signal?.throwIfAborted();
     const before = beforeScans.flatMap(({ findings }) => findings);
     const knownGroups = unionFindingGroups([
       ...knownFindingGroups,
@@ -4897,45 +5781,19 @@ async function matchAllScans(
       after: afterFindings,
       ...(knownGroups.length === 0 ? {} : { knownFindingGroups: knownGroups }),
     };
-    const matching: ScanComparisonResult =
+    const matching =
       before.length === 0 || afterFindings.length === 0
         ? { matches: [], uncertain: [] }
         : await dependencies.matchFindings(input, {
+            ...options,
             allowHistoricalUncertainty: true,
           });
-    const comparisons = beforeScans.map(({ scanId, findings }) => {
-      const beforeIds = new Set(
-        findings.map(({ occurrenceId }) => occurrenceId),
-      );
-      const matches = matching.matches.flatMap((match) => {
-        const beforeOccurrenceIds = match.beforeOccurrenceIds.filter((id) =>
-          beforeIds.has(id),
-        );
-        return beforeOccurrenceIds.length === 0
-          ? []
-          : [{ ...match, beforeOccurrenceIds }];
-      });
-      const uncertain = matching.uncertain.filter(({ beforeOccurrenceId }) =>
-        beforeIds.has(beforeOccurrenceId),
-      );
-      const related = matching.related?.filter(({ beforeOccurrenceId }) =>
-        beforeIds.has(beforeOccurrenceId),
-      );
-      const matchedAfter = new Set(
-        matches.flatMap(({ afterOccurrenceIds }) => afterOccurrenceIds),
-      );
-      if (
-        uncertain.some(({ afterOccurrenceId }) =>
-          matchedAfter.has(afterOccurrenceId),
-        )
-      ) {
-        throw new CodexSecurityError(
-          "Scan matching returned conflicting confirmed and uncertain findings.",
-        );
-      }
-      return { scanId, matches, uncertain, related };
-    });
-    for (const { scanId, matches, uncertain, related } of comparisons) {
+    const comparisons = beforeScans.map(({ scanId, findings }) => ({
+      scanId,
+      comparison: comparisonForScan(matching, findings),
+    }));
+    for (const { scanId, comparison } of comparisons) {
+      options.signal?.throwIfAborted();
       await dependencies.runWorkbench(
         [
           "save-scan-comparison",
@@ -4945,14 +5803,17 @@ async function matchAllScans(
           afterScanId,
           "--matches-json-stdin",
         ],
-        JSON.stringify({ matches, uncertain, related }),
+        JSON.stringify(comparison),
+        options.signal,
       );
       matchedPairs += 1;
-      findingMatches += matches.reduce(
+      findingMatches += comparison.matches.reduce(
         (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
           count + beforeOccurrenceIds.length * afterOccurrenceIds.length,
         0,
       );
+      relatedPairs += comparison.related?.length ?? 0;
+      uncertainPairs += comparison.uncertain.length;
     }
     newlyMatchedGroups.push(...comparisonFindingGroups(input, matching));
   }
@@ -4963,6 +5824,8 @@ async function matchAllScans(
     matchedPairs,
     skippedPairs,
     findingMatches,
+    relatedPairs,
+    uncertainPairs,
   };
 }
 
@@ -5194,36 +6057,90 @@ async function publishPatchBranch(
   stderr: Writable,
   dependencies: CliDependencies,
 ): Promise<{ branch: string; url: string }> {
-  const run = (command: "git" | "gh", args: string[]) =>
+  const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
   try {
-    let url = await run("gh", [
-      "pr",
-      "list",
-      "--head",
-      branch,
-      "--state",
-      "all",
-      "--json",
-      "url",
-      "--jq",
-      ".[0].url // empty",
-    ]);
+    const remote = await run("git", ["remote", "get-url", "--push", "origin"]);
+    const host = patchRemoteHost(remote);
+    const gitlabHost =
+      dependencies.environment["GITLAB_HOST"] ||
+      dependencies.environment["GITLAB_URI"] ||
+      dependencies.environment["GL_HOST"];
+    const gitlab =
+      host === "gitlab.com" ||
+      (host !== undefined &&
+        gitlabHost !== undefined &&
+        host ===
+          patchRemoteHost(
+            gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
+          ));
+    const command = gitlab ? "glab" : "gh";
+    let url = await run(
+      command,
+      gitlab
+        ? [
+            "mr",
+            "list",
+            "--all",
+            "--source-branch",
+            branch,
+            "--output",
+            "json",
+            "--jq",
+            ".[0].web_url // empty",
+            "--repo",
+            remote,
+          ]
+        : [
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--json",
+            "url",
+            "--jq",
+            ".[0].url // empty",
+          ],
+    );
     if (!url) {
       await run("git", ["push", "--set-upstream", "origin", branch]);
-      url = await run("gh", [
-        "pr",
-        "create",
-        "--draft",
-        "--head",
-        branch,
-        "--title",
-        PATCH_PR_TITLE,
-        "--body",
-        body,
-      ]);
+      url = await run(
+        command,
+        gitlab
+          ? [
+              "mr",
+              "create",
+              "--draft",
+              "--head",
+              remote,
+              "--source-branch",
+              branch,
+              "--title",
+              PATCH_PR_TITLE,
+              "--description",
+              body,
+              "--yes",
+              "--repo",
+              remote,
+            ]
+          : [
+              "pr",
+              "create",
+              "--draft",
+              "--head",
+              branch,
+              "--title",
+              PATCH_PR_TITLE,
+              "--body",
+              body,
+            ],
+      );
     }
-    stderr.write(`Pull request: ${safePatchText(url)}\n`);
+    stderr.write(
+      `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url)}\n`,
+    );
     return { branch, url };
   } catch (error) {
     stderr.write(
@@ -5231,6 +6148,11 @@ async function publishPatchBranch(
     );
     throw error;
   }
+}
+
+function patchRemoteHost(remote: string): string | undefined {
+  if (remote.includes("://")) return new URL(remote).hostname.toLowerCase();
+  return /^(?:[^@/]+@)?([^:/]+):[^/]/u.exec(remote)?.[1]?.toLowerCase();
 }
 
 async function resumePatchPullRequest(
@@ -5311,14 +6233,14 @@ async function createPatchPullRequest(
 
   const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
   const body = patchPullRequestBody(patchRiskSummary, introduction);
-  const run = (command: "git" | "gh", args: string[]) =>
-    dependencies.runRepositoryCommand(command, args, repository);
+  const run = (args: string[]) =>
+    dependencies.runRepositoryCommand("git", args, repository);
   stderr.write(
-    "Creating a draft GitHub pull request for verified patches...\n",
+    "Creating a draft pull request or merge request for verified patches...\n",
   );
-  await run("git", ["switch", "-c", branch]);
-  await run("git", ["--literal-pathspecs", "add", "--", ...files]);
-  await run("git", [
+  await run(["switch", "-c", branch]);
+  await run(["--literal-pathspecs", "add", "--", ...files]);
+  await run([
     "--literal-pathspecs",
     "commit",
     "--only",
@@ -5327,14 +6249,9 @@ async function createPatchPullRequest(
     "--",
     ...files,
   ]);
-  const commit = await run("git", ["rev-parse", "HEAD"]);
-  await run("git", ["config", "--local", patchCommitKey(branch), commit]);
-  await run("git", [
-    "config",
-    "--local",
-    patchPullRequestBodyKey(branch),
-    body,
-  ]);
+  const commit = await run(["rev-parse", "HEAD"]);
+  await run(["config", "--local", patchCommitKey(branch), commit]);
+  await run(["config", "--local", patchPullRequestBodyKey(branch), body]);
   return publishPatchBranch(repository, branch, body, stderr, dependencies);
 }
 
@@ -5652,12 +6569,19 @@ async function runSkill(
 ): Promise<number> {
   const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
   if (
-    Object.keys(overrides).some(
-      (key) => key !== "model" && key !== "model_reasoning_effort",
+    Object.entries(overrides).some(
+      ([key, value]) =>
+        key !== "model" &&
+        key !== "model_reasoning_effort" &&
+        !(
+          key === "analytics" &&
+          isJsonObject(value) &&
+          Object.keys(value).every((key) => key === "enabled")
+        ),
     )
   ) {
     throw new CodexSecurityError(
-      "Validation and patching only support model and model_reasoning_effort overrides.",
+      "Skill commands only support model, model_reasoning_effort, and analytics.enabled overrides.",
     );
   }
   const { model, reasoningEffort } = scanModelConfiguration(
@@ -5812,6 +6736,12 @@ async function runSkill(
       `model=${JSON.stringify(model)}`,
       "--config",
       `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
+      ...codexOverrides
+        .filter(
+          (value) =>
+            value.startsWith("analytics.") || value.startsWith("analytics="),
+        )
+        .flatMap((value) => ["--config", value]),
       ...(options.provider === undefined
         ? []
         : ["--config", `model_provider=${JSON.stringify(options.provider)}`]),
@@ -6424,7 +7354,7 @@ async function executeScan(
       // A later repeated signal intentionally restores the conventional escape hatch.
       if (
         signal === requestedSignal &&
-        dependencies.now() - firstSignalAt < 500
+        dependencies.now() - firstSignalAt < DUPLICATE_SIGNAL_WINDOW_MS
       ) {
         return;
       }
@@ -6462,6 +7392,7 @@ async function executeScan(
   let effectiveReasoningEffort =
     DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
   let providerOptions: SkillRunOptions = {};
+  let patchAnalyticsOverride: string | undefined;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
@@ -6497,6 +7428,14 @@ async function executeScan(
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
     const provider = scanModelProvider(effectiveConfiguration);
+    const analytics = effectiveConfiguration["analytics"];
+    if (
+      analytics !== undefined &&
+      isJsonObject(analytics) &&
+      analytics["enabled"] !== undefined
+    ) {
+      patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
+    }
     const auth =
       !arguments_.dryRun && !arguments_.mock && interactive
         ? await chooseInteractiveAuthentication(
@@ -6591,12 +7530,7 @@ async function executeScan(
         );
       }
       if (runningCost !== null) {
-        const tokens = formatTokenUsage({
-          input_tokens: runningCost.inputTokens,
-          cached_input_tokens: runningCost.cachedInputTokens,
-          output_tokens: runningCost.outputTokens,
-        });
-        if (tokens !== null) details.push(`Tokens: ${tokens}`);
+        details.push(`Tokens: ${formatScanCostTokens(runningCost)}`);
         details.push(`Cost: ${formatUsd(runningCost.estimatedUsd)}`);
       }
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
@@ -6621,6 +7555,9 @@ async function executeScan(
       );
     }
     const options: ScanOptions = {
+      ...(arguments_.resumeScanId === undefined
+        ? {}
+        : { resumeScanId: arguments_.resumeScanId }),
       ...(arguments_.mock ? { mock: true } : {}),
       ...(arguments_.workflowId === undefined
         ? {}
@@ -6630,6 +7567,7 @@ async function executeScan(
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
       ...prompts,
+      postScanPrompt: arguments_.postScanPrompt ?? prompts.postScanPrompt,
       mode: arguments_.mode,
       workers: arguments_.workers,
       subagents: arguments_.subagents,
@@ -6663,13 +7601,8 @@ async function executeScan(
         }
         progress?.stopTimer();
         if (maxCostUsd === undefined) {
-          const tokens = formatTokenUsage({
-            input_tokens: cost.inputTokens,
-            cached_input_tokens: cost.cachedInputTokens,
-            output_tokens: cost.outputTokens,
-          });
           progress?.stage(
-            `${tokens === null ? "" : `Tokens: ${tokens}. `}Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
+            `Tokens: ${formatScanCostTokens(cost)}. Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
           );
         } else {
           progress?.stage(
@@ -7097,7 +8030,12 @@ async function executeScan(
     try {
       patches = await runFindingPatches(
         selected,
-        [`model=${JSON.stringify(effectiveModel)}`],
+        [
+          `model=${JSON.stringify(effectiveModel)}`,
+          ...(patchAnalyticsOverride === undefined
+            ? []
+            : [patchAnalyticsOverride]),
+        ],
         effectiveReasoningEffort as ScanReasoningEffort,
         errorOutput,
         dependencies,
@@ -7414,11 +8352,11 @@ function printScanSummary(
   if (tokenSummary !== null) {
     errorOutput.write(`  ${paint("TOKENS", 1)}    ${tokenSummary}\n`);
   }
-  if (result.cost !== null) {
-    errorOutput.write(
-      `  ${paint("COST", 1)}      ${formatUsd(result.cost.estimatedUsd)}\n`,
-    );
-  }
+  const costSummary =
+    result.cost === null
+      ? "unavailable (model pricing or usage missing)"
+      : `${formatUsd(result.cost.estimatedUsd)} (standard, short context)`;
+  errorOutput.write(`  ${paint("COST", 1)}      ${costSummary}\n`);
   errorOutput.write(
     `  ${paint("RESULTS", 1)}   ${errorMessage(result.scanDir)}\n`,
   );
@@ -7427,28 +8365,17 @@ function printScanSummary(
   }
 }
 
-function formatTokenUsage(usage: unknown): string | null {
-  if (usage === null || typeof usage !== "object") return null;
-  const values = usage as Record<string, unknown>;
-  return (
-    (
-      [
-        ["input_tokens", "input"],
-        ["cached_input_tokens", "cached"],
-        ["output_tokens", "output"],
-      ] as const
-    )
-      .map(([key, label]) => {
-        const value = values[key];
-        return typeof value === "number" &&
-          Number.isSafeInteger(value) &&
-          value >= 0
-          ? `${value.toLocaleString("en-US")} ${label}`
-          : null;
-      })
-      .filter((value): value is string => value !== null)
-      .join(", ") || null
-  );
+function componentScanEventLine(
+  componentName: string,
+  event: ComponentScanEvent,
+): string | null {
+  if (event.type === "progress") {
+    const progress = event.value;
+    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | Files: ${progress.filesCompleted.toLocaleString("en-US")}/${progress.filesTotal.toLocaleString("en-US")}\n`;
+  }
+  if (event.type !== "cost") return null;
+  const cost = event.value;
+  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)} | Cost: ${formatUsd(cost.estimatedUsd)}\n`;
 }
 
 function protectedRootErrorMessage(

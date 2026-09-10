@@ -1,6 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
@@ -103,7 +110,9 @@ for (const {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
     const modelHome = await mkdtemp(join(tmpdir(), "codex-review-test-"));
-    const checkout = await mkdtemp(join(tmpdir(), "codex-review-source-"));
+    const checkout = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-review-source-")),
+    );
     const ghConfig = await mkdtemp(join(tmpdir(), "codex-review-gh-"));
     const transcript = join(modelHome, "messages.jsonl");
     let child: ChildProcessWithoutNullStreams | undefined;

@@ -814,7 +814,7 @@ def build_report_markdown(
         "",
         _text(
             scope.get("summary"),
-            "The scan reviewed the canonical include paths and exclusions listed below.",
+            "The scan was configured for the include paths and exclusions listed below.",
         ),
         "",
         f"- Scan mode: {coverage['mode']}",

@@ -13,7 +13,7 @@ npx @openai/codex-security --version
 ```
 
 Use Node.js 22.13.0+ (22.x), 24.x, or 26.x on macOS, Linux, or Windows.
-Scans, exports, scan history, and saved findings also need Python 3.10+
+Policy drafting, scans, exports, scan history, and saved findings also need Python 3.10+
 (plus `tomli` on Python 3.10).
 
 ## Run a scan from TypeScript
@@ -40,7 +40,7 @@ try {
 
 `result.findings` contains this scan's findings; `repositoryFindings` also
 includes earlier open findings when available. Matching earlier findings can
-make one extra model call, even with a cost limit.
+make extra model calls; see [Progress and cost](#progress-and-cost).
 
 Keep results outside the repository and restrict access: reports can contain
 source code, vulnerability details, and reproduction steps.
@@ -68,6 +68,10 @@ try {
 Pass literal text or a JSON-serializable object as `finding`, not a file path.
 Validation uses the client's settings and credentials without changing
 repository files or adding a scan to history.
+
+To disable Codex usage analytics and built-in metrics, create the client with
+`new CodexSecurity({ codexOverrides: { analytics: { enabled: false } } })`.
+This setting also applies to scans run by the same client.
 
 Results include `disposition` (`reportable`, `suppressed`, `not_applicable`,
 or `deferred`), a Markdown `report`, `threadId`, and evidence `outputDir`.
@@ -261,9 +265,145 @@ Some cybersecurity requests and protected findings require Trusted Access for
 Cyber approval. Apply or check your access at
 [chatgpt.com/cyber](https://chatgpt.com/cyber).
 
+## Generate a security policy
+
+`policy` drafts `SECURITY.md` guidance for future scans. It does not run a
+vulnerability scan, change application settings, or install the draft in the
+checkout. It uses the scan runtime and authentication, requesting read-only
+access to the selected repository or component and required tools. Network access,
+web search, apps, and MCP servers are disabled. Drafts stay outside the checkout.
+The host resolves inherited guidance once and includes each checked descendant
+policy separately. Descendant policy links must stay within the selected component.
+Inherited and reporting-policy links may also resolve to ancestor `SECURITY.md`
+files or the checkout's `.github/SECURITY.md` and `docs/SECURITY.md`.
+The model cannot read sibling components or Git metadata. Policy turns deny
+access to the resolved Git metadata and markers, including those inside the
+selected source tree, nested bare repositories, and associated alternate object
+stores.
+Policy shell tools inherit only Codex's core environment; custom shell environment
+settings, login shells, and shell snapshots are disabled for these turns.
+Knowledge-base text stays with the private review artifacts during generation
+and is removed afterward.
+
+Known limitation: policy preflight and generation currently fail on Unix
+directories with non-UTF-8 names.
+
+On macOS, the pinned Codex runtime does not fully enforce write restrictions
+under `/tmp` (including `/private/tmp`). Keep the repository and artifacts outside
+that tree when read-only enforcement is required. See the
+[upstream sandbox limitation](https://github.com/openai/codex/issues/32395).
+
+```bash
+npx @openai/codex-security policy .
+npx @openai/codex-security policy . --path services/api
+npx @openai/codex-security policy . --knowledge-base architecture.md --model gpt-5.6-terra --effort high
+npx @openai/codex-security policy . --dry-run --json
+```
+
+The repository defaults to the current directory. `--path` selects a component,
+which inherits policies from its Git root, with the closest policy taking
+precedence. Linked worktrees and initialized submodules use their own roots.
+Targets and policy links must stay in the selected checkout, outside Git
+metadata; ancestor links cannot widen a component policy's scope.
+
+For an intentional separate Git directory, set `core.worktree` to the checkout's
+absolute path. Use `git worktree repair` for moved linked worktrees.
+
+Generation uses three Codex stages: describe the system, build a threat model,
+then draft the policy. The first two documents support review; they are not
+additional approval steps or policies to install.
+In a terminal, it asks about facts the source cannot establish and shows the
+exact diff. If both ChatGPT and API-key credentials are available, it asks which
+to use; `--auth chatgpt` or `--auth api-key` selects one explicitly.
+
+| Invocation                   | Calls Codex? | Result                                                                  |
+| ---------------------------- | ------------ | ----------------------------------------------------------------------- |
+| `policy .`                   | Yes          | Ask owner questions, save documents, and preview the draft.             |
+| `policy . --headless --json` | Yes          | Save documents without prompts and return their paths and review notes. |
+| `policy . --format md`       | Yes          | Generate a draft and write its Markdown to stdout.                      |
+| `policy . --dry-run --json`  | No           | Check local inputs and show the resolved target and settings.           |
+
+None of these commands installs `SECURITY.md` in the repository. Output formats
+change presentation; they do not turn generation into a saved-draft read.
+
+### Review the draft
+
+Review the saved `SECURITY.md` before copying it to the reported target. Check
+links from `.github/SECURITY.md` or `docs/SECURITY.md`: copying can change their
+guidance too. Preserve reporting instructions and obtain owner approval for
+exclusions, accepted risks, and severity decisions. Later scans read this policy.
+
+Generation and preview check for changes to the selected or inherited policies.
+If governing guidance changes during generation, completed documents remain for
+inspection, but no completed-draft manifest is written. Other source files are not
+frozen; regenerate if relevant source or neighboring policies change.
+A failed terminal preview reports a warning and the saved draft paths. Explicit
+output formats return the draft directly without running a diff preview.
+
+Use `--headless` or an explicit output format to skip questions. Unanswered
+questions remain in the review notes. Drafts default to the Codex Security state
+directory; `--output-dir` selects an empty directory outside every enclosing
+Git checkout and its Git metadata.
+
+```bash
+npx @openai/codex-security policy . --path services/api \
+  --headless --output-dir /path/outside/repository/api-policy --json
+```
+
+The artifact directory contains:
+
+| File                   | Purpose                                                   |
+| ---------------------- | --------------------------------------------------------- |
+| `SECURITY.md`          | Editable policy draft.                                    |
+| `THREAT_MODEL.md`      | Detailed threat model with source references.             |
+| `project-spec.md`      | System description and security boundaries.               |
+| `previous-SECURITY.md` | Original policy used for the diff.                        |
+| `policy-draft.json`    | Target, policy hashes, revision, model, and review notes. |
+
+Keep supporting documents private until reviewed for disclosure. A generated
+threat scenario is neither owner approval nor a confirmed vulnerability.
+
+`--format md` writes the draft to stdout. `--json` returns paths, review notes,
+status, and estimated cost. Global filters and token options work with these
+formats. Progress goes to stderr. `--full-output` reports failures with
+`ok: false`. `--max-cost` applies to the whole generation. If a stage cannot
+inspect required source evidence, generation stops and preserves completed
+documents. Fix the reported problem and use a new output directory to retry.
+
+### Generate a policy from TypeScript
+
+```ts
+import { CodexSecurity } from "@openai/codex-security";
+
+const security = new CodexSecurity();
+try {
+  const draft = await security.generatePolicy("/path/to/repository", {
+    path: "services/api",
+    knowledgeBasePaths: ["/path/to/architecture.md"],
+    onStage: (stage) => console.error(stage),
+  });
+
+  console.log(await security.previewPolicy(draft));
+  // Open draft.draftPath in an editor to review the saved policy.
+} finally {
+  await security.close();
+}
+```
+
+`preflightPolicy()` checks local inputs without starting Codex.
+`previewPolicy()` previews the supplied in-memory draft, uses the client's Python
+setting, and makes terminal control characters visible. Editing the saved file
+does not change that object. The standalone `securityPolicyDiff()` returns a raw diff
+for files or other non-terminal uses; pass an interpreter explicitly if needed.
+`generatePolicy()` accepts `auth`, `path`, `knowledgeBasePaths`, `outputDir`,
+`maxCostUsd`, `signal`, and progress and cost callbacks. An optional
+`answerQuestions` callback receives each group of up to three owner questions
+and a cancellation signal. Without it, the questions remain unresolved.
+
 ## CLI
 
 ```bash
+npx @openai/codex-security policy . --path services/api
 npx @openai/codex-security scan .
 npx @openai/codex-security scan /path/to/repository --path src --path tests
 npx @openai/codex-security scan /path/to/repository --diff origin/main --json
@@ -315,6 +455,39 @@ incomplete-scan failures, and human-readable diagnostics remain on stderr.
 Use `scan --schema --format json` to discover this failure variant alongside
 the successful scan output. Cancellation and termination retain their `130`
 and `143` exit codes.
+
+### Import findings as a saved scan
+
+Import an existing findings CSV or JSON file into local scan history and SQLite:
+
+```bash
+codex-security scan import --csv /path/to/findings.csv
+codex-security scan import --json /path/to/findings.json --format json
+codex-security scan import --csv /path/to/findings.csv --dry-run
+```
+
+Supply exactly one of `--csv PATH` or `--json PATH`. CSV uses the existing
+[findings CSV template](https://github.com/openai/codex-security/blob/main/examples/findings.csv),
+including the optional `candidate_id` column. JSON accepts a complete
+`codex-security.findings` document or `{ "findings": [...] }`, with each finding
+matching the existing findings schema. On `scan import`, `--json` selects the
+input file; use `--format json` for JSON output. Other commands retain their
+existing `--json` output flag. The selected input must be a regular file, and its
+path must not traverse symbolic links or directory junctions. Use the direct
+filesystem path when the file or a parent directory is linked.
+
+Each import creates one completed scan using the configured
+`CODEX_SECURITY_STATE_DIR`. The target is a retained copy of the input dataset,
+independent of the current repository. Every source occurrence remains a separate
+finding, including duplicate reports. Original identifiers are preserved in
+`extensions.import`; the original file is sealed under `artifacts/import/`.
+JSON writeup paths are retained as source metadata without reading external files.
+
+Completion means the import finished. Coverage is unknown and the report states
+that no security analysis was performed. Importing requires no model calls or
+authentication. `--dry-run` validates without saving a scan. `--output-dir` and
+`--archive-existing` control saved output, and `scans rerun SCAN_ID` reimports the
+retained input.
 
 ### Generate mock scan results
 
@@ -396,6 +569,14 @@ npx @openai/codex-security scan-components /path/to/project \
   --components-file /path/outside/project/plan/components.json \
   --output-dir /path/outside/project/results
 ```
+
+For large repositories, automatic planning splits inventories into separate calls
+that fit Codex's input character limit. It preserves directory boundaries where
+possible and subdivides oversized packages and flat directories as needed. Each
+call uses a fresh context and can select only paths within its batch. Omitted
+files are retained in `Other files` components within those same boundaries.
+Large repositories can therefore require more planning calls and produce more
+components. Review or edit the saved plan before scanning with `--components-file`.
 
 Components use repository-relative paths:
 
@@ -532,8 +713,29 @@ or `features.plugins` are rejected, including in profiles. Multi-agent v2 must
 stay enabled: `agents.max_threads` and
 `features.multi_agent_v2.enabled=false` are rejected.
 
-`validate` and `patch` accept `--effort` and the `model` and
-`model_reasoning_effort` keys in `--codex`, but no other runtime overrides.
+`validate`, `patch`, and `verify-fix` accept `--effort` and the `model`,
+`model_reasoning_effort`, and `analytics.enabled` keys in `--codex`, but no
+other runtime overrides.
+
+Use `--codex 'analytics.enabled=false'` to disable Codex usage analytics and
+built-in metrics for a command:
+
+```bash
+npx @openai/codex-security validate "Candidate finding" --codex 'analytics.enabled=false'
+npx @openai/codex-security patch "Security issue" --codex 'analytics.enabled=false'
+npx @openai/codex-security verify-fix "Security issue" --codex 'analytics.enabled=false'
+```
+
+The same setting works for `scan` and `bulk-scan`. An explicit setting is
+preserved when `scan --patch` starts remediation and when
+`patch --assess-patch-risk` starts its follow-up assessment. Boolean `true`
+is also accepted; omitting the setting preserves the command's existing
+configuration and Codex defaults. Validation continues to ignore user
+configuration, while patching and verification retain their existing ambient
+configuration and project-trust behavior.
+
+This setting does not control explicitly configured OpenTelemetry log or trace
+exporters, authentication, integrations, or CLI update checks.
 
 See [Local security model](#local-security-model) for approval and filesystem
 restrictions.
@@ -574,16 +776,38 @@ Interactive scans show full-screen progress; CI, redirected output, and
 diagnostics to stderr. Add `--verbose` for diagnostics. Check logs for
 sensitive information before sharing them.
 
+The token summary shows uncached input, cache reads, cache writes, output,
+and total tokens. Total tokens include all input plus output; cache reads and
+writes are subsets of input, not extra tokens. When cache-write usage is missing,
+the summary shows uncached input and cache writes as unavailable.
+The final summary preserves missing-data information from a matching session log.
+If the Codex runtime converts an omitted count to zero before recording it, the
+CLI cannot distinguish that zero from reported usage.
+
 JSON results, scan history, and bulk-scan receipts record the model, tokens,
-and estimated cost. Estimates use
-[standard API token prices](https://developers.openai.com/api/docs/models/compare),
-including cached input and cache writes, but exclude fees and surcharges.
+estimated cost, and `cost.pricing`: the price source, verification date, processing
+tier, context category, and rates in USD per million tokens. Estimates use
+[standard, short-context API prices](https://developers.openai.com/api/docs/pricing),
+including cache reads and writes. They exclude long-context and other processing
+tier adjustments, fees, and surcharges. GPT-5.5 and GPT-6 Astra are supported;
+models without known prices show an unavailable estimate.
+
+For compatibility, `cacheWriteInputTokens` remains the reported token subtotal.
+`cacheWriteInputTokensReported: false` means at least one included usage record
+did not report cache writes. Raw usage uses `cache_write_input_tokens_reported`.
+In that case, the estimate prices unclassified input at the ordinary input rate;
+it may undercount cache-write charges. Older saved records lack this distinction
+and the saved pricing basis.
 
 `--max-cost USD` stops the scan and its workers when estimated cost exceeds
 the limit, though in-flight requests can finish above it. If deep-scan
 discovery has finished, the scan returns a sealed partial report without more
 model calls and lists unvalidated candidates as follow-up work. Bulk scans
 apply the limit per repository attempt.
+
+With `--max-cost`, automatic finding-history matching makes at most one extra
+model call. If it needs more context, the completed scan is kept and a warning
+directs you to run `scans match --all` explicitly.
 
 For a single scan in the interactive dashboard, reaching 80% of the limit
 offers a higher **total** USD limit. Enter a larger amount to approve it, or
@@ -635,8 +859,45 @@ even after a failed or incomplete scan, but not after cancellation or a
 cost-limit stop.
 
 `--workers` defaults to `4`. `--max-attempts` defaults to `1` attempt per pending
-repository per invocation. Rerun the command to resume; `bulk-scan --help`
-lists all options.
+repository per invocation. Rerunning the command continues the campaign, skips
+completed results, and starts new attempts for pending repositories. If an
+attempt directory is occupied, that repository stops before replacing its
+checkout and the command recommends `--recover`.
+
+#### Recovering failed or interrupted bulk scans
+
+Use the original CSV, output directory, and campaign options with `--recover`:
+
+```bash
+npx @openai/codex-security bulk-scan repositories.csv \
+  --output-dir /path/outside/repositories/security-scans --recover
+```
+
+Recovery requires an existing campaign with a matching manifest. It skips
+completed results, including partial coverage, and repositories never started.
+For each failed or interrupted repository, it checks the latest attempt:
+
+- A sealed scan is recorded in `results.jsonl` without scanning again.
+- An eligible running Deep Scan resumes its original session, keeping its scan
+  ID, completed workers, artifacts, saved settings, and accumulated cost.
+- A failed, canceled, or otherwise unavailable scan starts a new attempt at the
+  CSV's pinned revision. Attempt numbers account for both receipts and existing
+  directories. Old artifacts and checkouts are preserved; new attempts use
+  `recovery-checkouts/<id>/attempt-<n>`.
+
+`--workers` still defaults to `4`; `--max-attempts` defaults to one recovery or
+new attempt per repository. A resume connection failure stops that repository
+for this invocation instead of starting another scan. Other repositories
+continue. Failed and interrupted recovery checkouts remain available for a later
+`--recover`; fresh completed checkouts are removed after recording the result.
+If a reboot interrupted a receipt write, its unfinished tail is saved beside
+`results.jsonl` as `results.jsonl.interrupted-<id>` before appending valid records.
+
+Same-scan resume requires the original checkout, session logs, and Codex Security
+state directory. Recovery does not reconstruct deleted checkpoints or fix the
+underlying cause of execution failures. New attempts incur new scan costs.
+Any remaining failures or partial coverage keep exit code `2`.
+`bulk-scan --help` lists all options.
 
 ### Custom validation
 
@@ -843,6 +1104,158 @@ Options include `projectId`, `skipExisting`, `linearApiKey` for direct API
 publication, and `assigneeId` (user ID or email). `checkScanPublication` accepts
 the same destination options for a read-only check.
 
+### Classify finding severity
+
+Classify findings after a scan or dedupe without repeating discovery or changing
+the original severity, evidence, or sealed scan artifacts:
+
+```bash
+codex-security classify-severity --scan SCAN_ID --rubric /path/to/policy.md --json
+codex-security classify-severity --scan latest --rubric /path/to/policy.md --json
+codex-security classify-severity --scan-dir /path/to/completed-scan --json
+```
+
+`--scan` accepts a saved scan ID, unique prefix, or `latest` for the current
+repository, matching `dedupe` and `publish scan`. `--scan-dir` accepts an external
+completed scan without requiring local history. Supply exactly one selector.
+Omitting `--rubric` inherits each finding's existing severity without a model call.
+
+`--rubric PATH` supplies the classification policy. Repeat `--knowledge-base PATH`
+to provide supporting architecture, deployment, or business context. Both accept
+the same Markdown, text, PDF, DOCX, and directory inputs as scan knowledge bases.
+Rubric classification uses the full supplied report and context in a separate
+read-only Codex turn per finding, without source inspection, tools, or new
+validation. `--model` and `--effort` select the classification model and reasoning
+effort; otherwise Codex's configured model and the helper's medium effort apply.
+
+The result contains one assessment per selected finding:
+
+- `decision`: `assessed` or `excluded`; policy exclusions do not become Low.
+- `level`: `critical`, `high`, `medium`, `low`, or `informational`; null for exclusions.
+- `rubricLabel`: the policy's original label, such as `URGENT`, normalized to
+  `critical`; null for inherited severity or exclusions.
+- `rationale`, separate `confidence`, and `reviewTrigger` describing a missing
+  fact that would change the classification. Inherited severity has no new
+  classification-confidence judgment.
+- `findingId`, `occurrenceId`, and `inputSha256` binding the assessment to the
+  report. Top-level metadata includes `assessedAt`, `rubricSha256`, and
+  `knowledgeBaseSha256` for the supplied policy and context snapshots.
+
+Scan classification saves each successful finding immediately in the local
+workbench SQLite database. Rerunning skips assessments with matching finding
+evidence, rubric, and knowledge-base hashes, including exclusions, and returns
+both reused and newly generated assessments. Changed inputs are classified again.
+Use `--reprocess` to rerun every selected finding regardless of its saved
+assessment; each row is replaced only after its new assessment succeeds. A failed
+or canceled run keeps completed checkpoints, so a normal retry resumes missing
+work. Changing only the model or effort requires `--reprocess`.
+
+SQLite is authoritative. A successful run also exports the complete selected
+result to `severity-classification.json` alongside the sealed artifacts. The file
+is replaced atomically and is not read for reuse or publication. The scan's
+original findings and severity are unchanged. The database stores the requested
+selection and policy/context hashes; publication rejects an incomplete selection
+or assessments whose inputs no longer match. Rubric documents are read at
+classification time, not again at publication time.
+
+```bash
+codex-security classify-severity --scan latest --rubric /path/to/policy.md --reprocess
+```
+
+Use repeatable `--finding-id ID` to classify a selected set, such as the
+`uniqueFindingIds` returned by dedupe. With a saved classification, Linear
+publication defaults to that selection, omits excluded records, and uses assessed
+severity for issue priority and title. The description retains original scan
+severity and adds classification reasoning. Without a saved classification,
+publication retains its existing severity mapping and selection behavior.
+Publication rejects assessments whose IDs or evidence hashes no longer match.
+
+```bash
+codex-security classify-severity --scan SCAN_ID --rubric /path/to/policy.md \
+  --finding-id FINDING_ID --json
+codex-security publish scan --scan SCAN_ID --to linear --linear-team TEAM_ID \
+  --dry-run --json
+codex-security publish scan --scan SCAN_ID --to linear --linear-team TEAM_ID \
+  --skip-existing --json
+```
+
+`publish scan --to linear` also accepts repeatable `--finding-id ID` to select a
+subset directly. If a classification exists, every explicitly selected finding
+must have an assessment. Classification does not change existing Linear tickets;
+`--skip-existing` preserves recorded tickets and any human priority edits. It
+retains the existing limitations around unrecorded or concurrent publications.
+
+The SDK exposes the same operations:
+
+```ts
+import {
+  classifySeverity,
+  classifyScanSeverity,
+  classifyScanDirectorySeverity,
+  publishScan,
+} from "@openai/codex-security";
+
+// Supplied reports from any source: returns an assessment without writing files.
+const classification = await classifySeverity(findings, {
+  rubricPath: "/path/to/policy.md",
+  knowledgeBasePaths: ["/path/to/context.md"],
+});
+
+// Saved IDs (including prefixes/latest), or sealed directories; saves an assessment.
+await classifyScanSeverity("SCAN_ID", { rubricPath: "/path/to/policy.md" });
+await classifyScanDirectorySeverity(scanDirectory, {
+  rubricPath: "/path/to/policy.md",
+  findingIds: dedupeResult.uniqueFindingIds,
+});
+
+await publishScan(scanDirectory, {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  skipExisting: true,
+});
+
+// Alternatively supply a classification directly, without a saved assessment.
+await publishScan(scanDirectory, {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  classification,
+  findingIds: classification.assessments.map(({ findingId }) => findingId),
+  dryRun: true,
+});
+```
+
+`classifySeverity` accepts reports with `findingId`, `title`, and `summary`, plus
+their available evidence and metadata. Original `severity` and `occurrenceId`
+may be absent for imported reports; reports without severity require a rubric.
+`classifySeverity` remains an in-memory operation without database persistence.
+The scan wrappers use the local state database (also for external scan
+directories), accept `reprocess: true`, and accept `findingIds: []` as an
+intentionally empty selection. Rows outside the selected set are retained.
+Use the same `CODEX_SECURITY_STATE_DIR` for classification and publication.
+JSON exports from versions without database checkpoints must be reclassified
+once before they can be reused.
+Pass `signal` to cancel any classification operation. Keep human overrides in the
+calling workflow or issue tracker; assessments remain separate recommendations.
+
+### Feedback
+
+Send a problem report to OpenAI and share the returned feedback ID with support:
+
+```sh
+codex-security feedback --reason "The scan stopped before it finished"
+codex-security feedback SCAN_ID --reason "The scan stopped before it finished" --include-logs
+```
+
+Without an ID, `feedback` selects the most recently started scan in the current
+repository, including active or failed scans. If there are no saved scans, it sends
+a general report. The report includes your description, version details, and the selected
+scan and session IDs. Add `--json` for structured output.
+
+Logs are off by default. `--include-logs` uploads Codex diagnostics and saved scan
+and worker activity. These can contain source code, prompts, findings, tool
+output, and other sensitive data. Only include logs you can share with OpenAI.
+The command uses Codex's feedback service and respects `feedback.enabled = false`.
+
 ### Scan history and reruns
 
 Commands default to the current repository. Select scans by full ID or a
@@ -853,6 +1266,7 @@ unique prefix of at least eight characters.
 | `scans list [REPOSITORY]`                             | List scans. Filter by artifact root with `--scan-root DIR`.                                                 |
 | `scans show [SCAN_ID]`                                | Show a scan; defaults to the latest completed one. `--show-linked-findings` includes earlier finding links. |
 | `scans logs [SCAN_ID]`                                | Show session events; defaults to the latest scan, including active scans.                                   |
+| `scans resume SCAN_ID`                                | Resume an interrupted Deep Scan in its original session and output directory.                               |
 | `scans rerun [SCAN_ID]`                               | Repeat a scan on the current checkout; defaults to the latest completed scan.                               |
 | `scans match BEFORE AFTER`                            | Link findings with the same root cause.                                                                     |
 | `scans match --all`                                   | Match completed scans across the repository's worktrees and clones.                                         |
@@ -860,11 +1274,86 @@ unique prefix of at least eight characters.
 | `findings list [REPOSITORY]`                          | List open findings. `findings` is an alias.                                                                 |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Mark a false positive. Later scans dismiss matches only while the reason applies.                           |
 
+#### Resuming an interrupted Deep Scan
+
+After the CLI process or host stops unexpectedly, find the scan and rejoin it:
+
+```bash
+npx @openai/codex-security scans list --scan-root /path/to/security-scans
+npx @openai/codex-security scans resume SCAN_ID
+```
+
+The scan must still be `running`, with its original checkout, output directory,
+and owning Codex session available in the same Codex Security state directory.
+The checkout's identity, revision, and contents must match the saved target.
+Completed, failed, and canceled scans cannot resume; `scans rerun` starts a new scan.
+
+Resume uses the saved configuration and instructions with the installed plugin.
+New scans save the explicit safety identifier and post-scan prompt contents.
+Single-scan resume restores them even if the prompt file changes or disappears.
+Older records that did not save these values cannot reconstruct them. Bulk
+recovery still requires matching campaign inputs and options; it uses the supplied
+post-scan prompt when the scan has no saved prompt.
+It keeps the scan ID, completed workers, artifacts, and accumulated session cost.
+The existing coordinator recovers interrupted workers after its lease expires.
+If discovery finished before the interruption, resume completes and seals the
+same scan. No archiving or new attempt directory is needed. A failed connection
+leaves the existing scan available for another resume attempt.
+
+Compatible saved scans can resume after a plugin update. Already-sealed results
+keep their original producer version and contents when completion is recorded.
+Unsupported or invalid sealed artifacts are rejected before resuming, preserving
+the saved scan state and files.
+
+For bulk campaigns, use [`bulk-scan --recover`](#recovering-failed-or-interrupted-bulk-scans)
+to recover eligible attempts and update `results.jsonl`. Individual `scans resume`
+does not update campaign receipts.
+
+#### Matching saved scans
+
 Matching requires sealed artifacts and reuses saved matches unless you pass
 `--force`. Comparisons classify findings as new, persisting, reopened, resolved,
 or unknown. Missing findings aren't resolved if the later scan is incomplete
 or excludes their original scope. With one ID, `scans compare` compares it
 to the latest completed scan.
+
+Use `scans match --all --force` to rebuild comparisons chronologically while
+retaining stable finding identities. Ctrl-C keeps comparisons already saved.
+Only high-confidence duplicates are grouped; uncertain and independently
+related findings stay separate. Matching preserves triage and sealed artifacts.
+
+Codex is called only when a new decision is needed, using existing authentication.
+Scans without sealed artifacts are skipped, but their confirmed links can still
+be reused. Older custom plugins save confirmed and uncertain matches; use the
+bundled plugin for related links and large comparisons.
+
+SDK callers can compare findings without saving a workbench comparison:
+
+```ts
+import { readFile } from "node:fs/promises";
+import {
+  matchScanFindings,
+  type FindingsDocument,
+} from "@openai/codex-security";
+
+const before = JSON.parse(
+  await readFile("/path/to/earlier-scan/findings.json", "utf8"),
+) as FindingsDocument;
+const after = JSON.parse(
+  await readFile("/path/to/later-scan/findings.json", "utf8"),
+) as FindingsDocument;
+
+const comparison = await matchScanFindings(
+  { before: before.findings, after: after.findings },
+  { workingDirectory: "/path/to/repository" },
+);
+console.log(comparison.matches, comparison.uncertain, comparison.related ?? []);
+```
+
+Pass `knownFindingGroups` to reuse confirmed groups of stable `findingId` values
+from your store. Results identify the original `occurrenceId` values. Options
+include model, reasoning effort, `AbortSignal`, and an optional `onProgress`
+callback whose errors do not interrupt matching.
 
 History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. The CLI and
@@ -945,8 +1434,8 @@ assessment skill once on the completed patch. The assessment is advisory and
 does not change the patch or its merge state. Human-readable commands print the
 report after the patch results; saved-finding JSON output returns it as
 `patchRisk.report` in the same result object. When combined with `--create-pr`,
-the draft pull request body includes only the concise Markdown summary from the
-assessment; the validated JSON remains in the command result.
+the draft pull request or merge request body includes only the concise Markdown
+summary from the assessment; the validated JSON remains in the command result.
 
 ```bash
 npx @openai/codex-security validate "Possible SQL injection" --effort high
@@ -968,11 +1457,25 @@ to select findings and add patch instructions. Results include a `patches`
 entry per finding with status `verified`, `no_change`, `blocked`, or `failed`.
 Verified and already-fixed findings no longer fail `--fail-on-severity`.
 
-`--create-pr` commits generated patch files and opens a draft PR with `gh`.
-Supplied-issue pull requests require a clean working tree before patching so
+`--create-pr` commits generated patch files and opens a draft GitHub pull request
+with `gh` or a draft GitLab merge request with `glab`. Install and authenticate
+the appropriate CLI first (`gh auth login` or `glab auth login`). GitLab.com is
+selected from the `origin` push URL, including SSH URLs and subgroup projects.
+For self-hosted GitLab, set `GITLAB_HOST` to the host in that URL and authenticate
+with `glab auth login --hostname HOST`. The existing `GITLAB_URI` and `GL_HOST`
+aliases are also accepted, in that order after `GITLAB_HOST`. Other hosts retain
+the GitHub workflow.
+
+```bash
+GITLAB_HOST=gitlab.example.com npx @openai/codex-security patch --scan SCAN_ID --create-pr
+```
+
+Both providers use the existing `pullRequest: { branch, url }` JSON result.
+Supplied-issue requests require a clean working tree before patching so
 existing work is never included. If publication fails, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
 commit without rerunning Codex, but refuses to publish if the branch changed.
+Use the same GitLab host setting when resuming a self-hosted merge request.
 
 To patch Linear issues, repeat `--linear-issue ISSUE` (ID or URL), or use
 `--linear-project "PROJECT"` with an optional native JSON `--linear-filter`.
@@ -1034,7 +1537,9 @@ checkout or Node.js installation is required. `CODEX_SECURITY_FINDINGS_IMAGE`
 defaults to `ghcr.io/openai/codex-security:latest`. Set it to a published
 version, `sha-<commit>` tag, or digest for repeatable deployments.
 
-To build from a source checkout instead:
+To build from a source checkout, first prepare the
+[universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
+for that checkout. Then run from the repository root:
 
 ```bash
 docker build --target scanner -t codex-security:local .
@@ -1377,7 +1882,7 @@ use another workflow ID for a fresh review rather than changing that saved resul
 2. Screen each nonempty neighborhood with `gpt-5.6-luna` at `xhigh` reasoning
    effort. The review covers every anchor-neighbor pair; nominations between
    neighbors are rejected.
-3. Independently review each nominated pair once with `gpt-5.6-sol` at `xhigh`
+3. Independently review each nominated pair once with `gpt-5.6-sol` at `high`
    reasoning effort. Only accepted pairs contribute to duplicate groups.
 4. Group accepted duplicate pairs transitively unless a Luna or Sol `DISTINCT`
    decision contradicts the resulting component. Contradicted components are
@@ -1581,7 +2086,9 @@ Export `OPENAI_API_KEY` or `CODEX_API_KEY` to import findings with embeddings.
 Startup and listing need no key. The service does not load `.env` or authenticate
 requests; keep it on loopback or behind an authenticated TLS proxy.
 
-From a source checkout's `sdk/typescript` directory:
+For a source build, first prepare the
+[universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
+for that checkout. Then run from its `sdk/typescript` directory:
 
 ```bash
 pnpm install --frozen-lockfile

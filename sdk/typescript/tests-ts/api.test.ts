@@ -51,6 +51,7 @@ import {
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
+import { matchScanFindingsInternal } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
@@ -365,6 +366,7 @@ describe("CodexSecurity finding validation", () => {
           model: "test-model",
           model_reasoning_effort: "high",
           approval_policy: "never",
+          analytics: { enabled: false },
         },
       },
       {
@@ -451,6 +453,7 @@ describe("CodexSecurity finding validation", () => {
           model: "test-model",
           model_reasoning_effort: "high",
           features: { plugins: false },
+          analytics: { enabled: false },
           responses_api_metadata: { codex_security_surface: "sdk" },
         },
       });
@@ -3638,6 +3641,11 @@ describe("CodexSecurity orchestration", () => {
     ["the repository index fails", "index", "index unavailable"],
     ["a cost limit still allows false-positive matching", "budget", undefined],
     [
+      "cost-limited matching needs additional context",
+      "budget-context",
+      "scans match --all",
+    ],
+    [
       "dismissed history survives missing reviewer feedback",
       "dismissed",
       undefined,
@@ -3645,6 +3653,7 @@ describe("CodexSecurity orchestration", () => {
   ] as const)(
     "keeps a completed scan when %s",
     async (_scenario, failure, warning) => {
+      const limited = failure === "budget" || failure === "budget-context";
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -3670,6 +3679,8 @@ describe("CodexSecurity orchestration", () => {
       const warnings: string[] = [];
       const commands: (readonly string[])[] = [];
       let modelCalled = false;
+      let matchingTurns = 0;
+      let observedSingleTurn: boolean | undefined;
       let matched = false;
       let savedComparisonInput: string | undefined;
       const client = new TestClient(
@@ -3690,7 +3701,7 @@ describe("CodexSecurity orchestration", () => {
               return {
                 scanId: "scan_example_001",
                 targetId: "target_sha256_example",
-                falsePositives: failure === "budget" ? [falsePositive] : [],
+                falsePositives: limited ? [falsePositive] : [],
               };
             }
             if (args[0] === "list-unmatched-scan-pairs") {
@@ -3728,9 +3739,40 @@ describe("CodexSecurity orchestration", () => {
             }
             return mockWorkbench(args, input);
           },
-          async matchFindings() {
+          async matchFindings(input, options, runtimeOptions) {
             modelCalled = true;
+            observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");
+            if (failure === "budget-context") {
+              return await matchScanFindingsInternal(
+                input,
+                {
+                  ...options,
+                  codex: {
+                    startThread() {
+                      return {
+                        async run() {
+                          matchingTurns += 1;
+                          return {
+                            finalResponse: JSON.stringify({
+                              matches: [],
+                              uncertain: [],
+                              request: {
+                                kind: "evidence",
+                                beforeOccurrenceIds: [previous.occurrenceId],
+                                afterOccurrenceIds: [current.occurrenceId],
+                                offset: 0,
+                              },
+                            }),
+                          };
+                        },
+                      };
+                    },
+                  },
+                },
+                runtimeOptions,
+              );
+            }
             return {
               matches: [
                 {
@@ -3756,7 +3798,7 @@ describe("CodexSecurity orchestration", () => {
       );
 
       const result = await client.run(repository, {
-        ...(failure === "budget" ? { maxCostUsd: 1 } : {}),
+        ...(limited ? { maxCostUsd: 1 } : {}),
         onWarning: (message) => warnings.push(message),
       });
       expect(result.threadId).toBe("thread-1");
@@ -3770,11 +3812,16 @@ describe("CodexSecurity orchestration", () => {
             : undefined,
       );
       expect(warnings).toEqual(
-        warning === undefined
-          ? []
-          : [`Could not update repository findings: ${warning}`],
+        warning === undefined ? [] : [expect.stringContaining(warning)],
       );
       expect(modelCalled).toBe(failure !== "index");
+      expect(observedSingleTurn).toBe(
+        failure === "index" ? undefined : limited,
+      );
+      if (failure === "budget-context") {
+        expect(matchingTurns).toBe(1);
+        expect(matched).toBe(false);
+      }
       expect(commands.some(([command]) => command === "complete-scan")).toBe(
         true,
       );
@@ -3851,6 +3898,8 @@ describe("CodexSecurity orchestration", () => {
   });
 
   const pricedModels = [
+    "gpt-5.5",
+    "gpt-6-astra",
     "gpt-5.6-terra",
     "gpt-daybreak-blue-latest",
     "gpt-daybreak-red-latest",
@@ -4136,10 +4185,10 @@ describe("CodexSecurity orchestration", () => {
     await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
     const approvals = new Map<number, () => void>();
     const firstApproval = new Promise<void>((resolve) =>
-      approvals.set(0.01, resolve),
+      approvals.set(0.008, resolve),
     );
     const secondApproval = new Promise<void>((resolve) =>
-      approvals.set(0.02, resolve),
+      approvals.set(0.016, resolve),
     );
     const requests: number[] = [];
     const commands: Array<readonly string[]> = [];
@@ -4201,7 +4250,7 @@ describe("CodexSecurity orchestration", () => {
     const keepAlive = setTimeout(() => {}, 10_000);
     try {
       const result = await client.run(repository, {
-        maxCostUsd: 0.005,
+        maxCostUsd: 0.004,
         signal: AbortSignal.timeout(5_000),
         onBudgetApproaching: ({ maxCostUsd, signal }) => {
           requests.push(maxCostUsd);
@@ -4214,15 +4263,15 @@ describe("CodexSecurity orchestration", () => {
       });
       expect(result.cost).toMatchObject({
         inputTokens: 2_600,
-        estimatedUsd: 0.013,
+        estimatedUsd: 0.0104,
       });
       expect(starts).toBe(1);
-      expect(requests).toEqual([0.005, 0.01]);
+      expect(requests).toEqual([0.004, 0.008]);
       expect(
         commands
           .filter(([command]) => command === "set-scan-cost-limit")
           .map((args) => args.at(-1)),
-      ).toEqual(["0.01", "0.02"]);
+      ).toEqual(["0.008", "0.016"]);
       expect(commands.some(([command]) => command === "fail-scan")).toBe(false);
       expect(budgetSignal?.aborted).toBe(true);
     } finally {
@@ -4333,7 +4382,7 @@ describe("CodexSecurity orchestration", () => {
       const keepAlive = setTimeout(() => {}, 10_000);
       try {
         const scan = client.run(repository, {
-          maxCostUsd: 0.005,
+          maxCostUsd: 0.004,
           signal: AbortSignal.any([
             controller.signal,
             AbortSignal.timeout(5_000),
@@ -4343,9 +4392,9 @@ describe("CodexSecurity orchestration", () => {
             budgetSignal = signal;
             requested();
             if (scenario === "declined") return undefined;
-            if (scenario === "invalid") return 0.005;
+            if (scenario === "invalid") return 0.004;
             if (scenario === "save-failed" || scenario === "saving")
-              return 0.02;
+              return 0.016;
             return lateAnswer;
           },
           onCost: (cost, limit) => {
@@ -4356,20 +4405,20 @@ describe("CodexSecurity orchestration", () => {
         });
         if (scenario === "completed")
           await expect(scan).resolves.toMatchObject({
-            cost: { estimatedUsd: 0.0045 },
+            cost: { estimatedUsd: 0.0036 },
           });
         else if (scenario === "canceled")
           await expect(scan).rejects.toBeInstanceOf(ScanInterruptedError);
         else
           await expect(scan).rejects.toMatchObject({
             name: ScanCostLimitExceededError.name,
-            maxCostUsd: 0.005,
-            cost: { estimatedUsd: 0.01 },
+            maxCostUsd: 0.004,
+            cost: { estimatedUsd: 0.008 },
           });
-        answer(0.02);
+        answer(0.016);
         await new Promise((resolve) => setImmediate(resolve));
         expect(requestCount).toBe(1);
-        expect(reportedLimit).toBe(0.005);
+        expect(reportedLimit).toBe(0.004);
         expect(budgetSignal?.aborted).toBe(true);
         expect(
           commands.filter(([command]) => command === "set-scan-cost-limit"),
@@ -4398,14 +4447,11 @@ describe("CodexSecurity orchestration", () => {
     const commands: Array<readonly string[]> = [];
     const costs: number[] = [];
     let turns = 0;
-    const cost = {
-      model: "gpt-5.6-sol",
-      inputTokens: 1_250,
-      cachedInputTokens: 200,
-      cacheWriteInputTokens: 0,
-      outputTokens: 30,
-      estimatedUsd: 0.00625,
-    };
+    const cost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    })!;
     const client = new TestClient(
       {},
       {
@@ -4482,14 +4528,14 @@ describe("CodexSecurity orchestration", () => {
     try {
       await expect(
         client.run(repository, {
-          maxCostUsd: 0.005,
+          maxCostUsd: 0.004,
           postScanPrompt: "Record the scan cost.",
           onCost: (cost) => costs.push(cost.estimatedUsd),
           signal: AbortSignal.timeout(5_000),
         }),
       ).rejects.toMatchObject({
         name: ScanCostLimitExceededError.name,
-        maxCostUsd: 0.005,
+        maxCostUsd: 0.004,
         scanDir,
         cost,
       });
@@ -4497,7 +4543,7 @@ describe("CodexSecurity orchestration", () => {
       clearTimeout(keepEventLoopAlive);
     }
     expect(turns).toBe(1);
-    expect(costs.at(-1)).toBe(0.00625);
+    expect(costs.at(-1)).toBe(0.00488);
     expect(commands[1]).toEqual([
       "get-scan-feedback",
       "--scan-id",
@@ -4515,7 +4561,7 @@ describe("CodexSecurity orchestration", () => {
       "--scan-id",
       "scan_example_001",
       "--message",
-      `Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
+      `Scan stopped: estimated cost $0.00488 exceeded the $0.004 limit; partial output remains at ${scanDir}.`,
       "--cost-json",
       JSON.stringify(cost),
     ]);
@@ -4625,7 +4671,7 @@ describe("CodexSecurity orchestration", () => {
       try {
         const result = client.run(repository, {
           mode: "deep",
-          maxCostUsd: 0.005,
+          maxCostUsd: 0.004,
           postScanPrompt: "Do not spend another model turn.",
           onWarning: (warning) => warnings.push(warning),
           signal: AbortSignal.timeout(5_000),
@@ -4646,9 +4692,9 @@ describe("CodexSecurity orchestration", () => {
           expect(recovered.coverage.completeness).toBe(completion);
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
-          expect(recovered.cost?.estimatedUsd).toBe(0.00625);
+          expect(recovered.cost?.estimatedUsd).toBe(0.00488);
           expect(warnings).toEqual([
-            `Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
+            `Scan stopped: estimated cost $0.00488 exceeded the $0.004 limit; partial output remains at ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
         }
@@ -5609,7 +5655,17 @@ describe("CodexSecurity orchestration", () => {
     );
     const pythonCommand = `${process.platform === "win32" ? "& " : ""}${shellEnvironmentReference("PYTHON")}`;
     expect(prompt).toContain(
-      `Use ${pythonCommand} as <python_command> for every plugin helper`,
+      `Use ${pythonCommand} as <python_command> for plugin Python helper scripts (.py files)`,
+    );
+    const policyReference = await readFile(
+      join(PLUGIN_ROOT, "references", "security-guidance.md"),
+      "utf8",
+    );
+    const policyCommand = policyReference
+      .split("\n")
+      .find((line) => line.includes("--helper resolve-security-md"));
+    expect(policyCommand).toMatch(
+      /^<plugin_dir>\/scripts\/launch_codex_security_mcp --helper resolve-security-md /,
     );
     const helper = shellEnvironmentReference(
       "CODEX_SECURITY_PLUGIN_ROOT",

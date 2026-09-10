@@ -17,6 +17,7 @@ import { afterEach, expect, test } from "bun:test";
 import type { ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
 import {
+  componentPlanningBatches,
   normalizeComponentPlan,
   planComponents,
   type ComponentPlan,
@@ -76,6 +77,31 @@ async function fixture() {
     await writeFile(join(repository, file), "{}\n");
   }
   return { root, repository, outputDir: join(root, "results") };
+}
+
+function largePlanningFiles() {
+  // Exceed the prompt limit with paths short enough for macOS fixtures.
+  return Array.from(
+    { length: 300 },
+    (_, index) =>
+      `apps/large/branch-${String(index).padStart(3, "0")}/${("directory-" + "x".repeat(50) + "/").repeat(10)}package.json`,
+  );
+}
+
+async function largePlanningFixture() {
+  const paths = await fixture();
+  const files = largePlanningFiles();
+  for (const file of files) {
+    await mkdir(dirname(join(paths.repository, file)), { recursive: true });
+    await writeFile(join(paths.repository, file), "{}\n");
+  }
+  files.push(
+    "apps/api/app.ts",
+    "apps/web/app.ts",
+    "package.json",
+    "shared/util.ts",
+  );
+  return { ...paths, files: files.sort() };
 }
 
 async function json(path: string) {
@@ -463,13 +489,19 @@ test.each(["dashboard", "headless", "ci"])(
             presentation === "ci" ? { CI: "true" } : { NO_COLOR: "1" },
         }),
         createSecurity: client(async (_repository, options) => {
-          expect(typeof options.onProgress).toBe(
-            presentation === "dashboard" ? "function" : "undefined",
-          );
+          expect(typeof options.onProgress).toBe("function");
           options.onProgress?.({
             phase: "validation",
             filesCompleted: 2,
             filesTotal: 2,
+          });
+          options.onCost?.({
+            model: "gpt-5.6",
+            inputTokens: 100,
+            cachedInputTokens: 10,
+            cacheWriteInputTokens: 0,
+            outputTokens: 20,
+            estimatedUsd: 0.00123,
           });
           return completed(options);
         }),
@@ -490,6 +522,14 @@ test.each(["dashboard", "headless", "ci"])(
         stderr.text().indexOf("Component scans:"),
       );
     } else expect(stderr.text()).toContain("apps/api completed");
+    if (presentation !== "dashboard") {
+      expect(stderr.text()).toContain(
+        "apps/api validating findings | Files: 2/2",
+      );
+      expect(stderr.text()).toContain(
+        "apps/api | Tokens: 90 uncached input, 10 cache reads, 0 cache writes, 20 output, 120 total | Cost: $0.00123",
+      );
+    }
     expect(
       [...signals.listeners.values()].every(
         (listeners) => listeners.size === 0,
@@ -843,6 +883,119 @@ test("plans from a Git inventory without tools or ignored files", async () => {
       proposed,
     );
   }
+});
+
+test.each(["directories", "manifests", "root files"])(
+  "batches oversized %s without dropping inventory paths",
+  (layout) => {
+    const files = Array.from({ length: 12_000 }, (_, index) => {
+      const name = `unit-${String(index).padStart(5, "0")}-${"x".repeat(100)}`;
+      return layout === "root files"
+        ? `${name}.ts`
+        : `packages/${name}/${layout === "manifests" ? "package.json" : "app.ts"}`;
+    });
+    const batches = [...componentPlanningBatches(files)];
+    expect(batches.length).toBeGreaterThan(1);
+    expect(batches.flatMap(({ files }) => files)).toEqual(files);
+    for (const { files: batch, prompt } of batches) {
+      expect(prompt.length).toBeLessThanOrEqual(1_048_576);
+      const inventory = JSON.parse(prompt.split("\n").at(-1)!);
+      expect(inventory.scopes).not.toContain(".");
+      for (const file of batch) {
+        expect(
+          inventory.scopes.some(
+            (path: string) => file === path || file.startsWith(`${path}/`),
+          ),
+        ).toBe(true);
+      }
+      if (layout === "manifests") expect(inventory.manifests).toEqual(batch);
+      if (layout === "root files") expect(inventory.rootFiles).toEqual(batch);
+    }
+  },
+);
+
+test("plans large inventories in separate contexts and fills omissions within each batch", async () => {
+  const paths = await largePlanningFixture();
+  const batches: string[][] = [];
+  let threads = 0;
+  const plan = await planComponents(paths.repository, {
+    codex: {
+      startThread: () => {
+        threads++;
+        return {
+          run: async (prompt) => {
+            expect(prompt.length).toBeLessThanOrEqual(1_048_576);
+            const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
+            batches.push(scopes);
+            return {
+              finalResponse: JSON.stringify({
+                components: [{ name: "Selected", paths: [scopes[0]] }],
+              }),
+            };
+          },
+        };
+      },
+    },
+  });
+  expect(threads).toBeGreaterThan(1);
+  expect(threads).toBe(batches.length);
+  expect(plan.components.some(({ name }) => name === "Other files")).toBe(true);
+  const contains = (parent: string, file: string) =>
+    file === parent || file.startsWith(`${parent}/`);
+  const selected = plan.components.flatMap(({ paths }) => paths);
+  for (const file of paths.files) {
+    expect(selected.filter((path) => contains(path, file))).toHaveLength(1);
+  }
+  for (const component of plan.components) {
+    expect(
+      batches.some((scopes) =>
+        component.paths.every((path) =>
+          scopes.some((scope) => contains(scope, path)),
+        ),
+      ),
+    ).toBe(true);
+  }
+  expect(await normalizeComponentPlan(paths.repository, plan)).toEqual(plan);
+});
+
+test.each([".", "apps"])(
+  "rejects a model scope spanning automatic planning batches: %s",
+  async (path) => {
+    const paths = await largePlanningFixture();
+    await expect(
+      planComponents(paths.repository, {
+        codex: fakeCodex(() => ({
+          components: [{ name: "Too broad", paths: [path] }],
+        })),
+      }),
+    ).rejects.toThrow("outside its planning batch");
+  },
+);
+
+test("does not start another automatic planning call after cancellation", async () => {
+  const paths = await largePlanningFixture();
+  const controller = new AbortController();
+  let calls = 0;
+  await expect(
+    planComponents(paths.repository, {
+      signal: controller.signal,
+      codex: {
+        startThread: () => ({
+          run: async (prompt) => {
+            calls++;
+            controller.abort(new Error("planning canceled"));
+            const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
+            return {
+              finalResponse: JSON.stringify({
+                components: [{ name: "Files", paths: scopes }],
+              }),
+            };
+          },
+        }),
+      },
+    }),
+  ).rejects.toThrow("planning canceled");
+  expect(calls).toBe(1);
 });
 
 test("keeps scoped inventories and plans aligned after a case-only Git rename", async () => {

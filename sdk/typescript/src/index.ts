@@ -1,4 +1,19 @@
 export { CodexSecurity, createSecurity } from "./api.js";
+export { classifySeverity } from "./classify-severity.js";
+export type {
+  ClassifySeverityOptions,
+  SeverityClassificationFinding,
+  SeverityClassification,
+  SeverityAssessment,
+} from "./classify-severity.js";
+export {
+  classifyScanSeverity,
+  classifyScanDirectorySeverity,
+} from "./classify-scan-severity.js";
+export type {
+  ClassifyScanSeverityOptions,
+  ScanSeverityClassification,
+} from "./classify-scan-severity.js";
 export { runComponentScans } from "./component-scan.js";
 export type {
   ComponentDeduplicationSummary,
@@ -17,6 +32,13 @@ export type { ScanCost, ScanSessionEvent } from "./cost.js";
 export type { DeepScanProgress } from "./deep-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
+export { matchScanFindings } from "./scan-comparison.js";
+export type {
+  ScanComparisonInput,
+  ScanComparisonOptions,
+  ScanComparisonProgress,
+  ScanComparisonResult,
+} from "./scan-comparison.js";
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,
@@ -71,6 +93,17 @@ export type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
 export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
+export {
+  resolveSecurityPolicyTarget,
+  securityPolicyDiff,
+} from "./security-policy.js";
+export type {
+  SecurityPolicyDraft,
+  SecurityPolicyOptions,
+  SecurityPolicyPreflight,
+  SecurityPolicyStage,
+  SecurityPolicyTarget,
+} from "./security-policy.js";
 export { checkScanPublication, publishScan } from "./publish.js";
 export { publishScanToCustom } from "./custom-publish.js";
 export type {

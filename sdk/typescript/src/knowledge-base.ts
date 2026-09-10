@@ -30,6 +30,7 @@ export interface PreparedKnowledgeBase {
 export async function prepareKnowledgeBase(
   paths: readonly string[],
   signal?: AbortSignal,
+  directory?: string,
 ): Promise<PreparedKnowledgeBase> {
   const sources = new Set<string>();
   const documents = new Set<string>();
@@ -67,7 +68,9 @@ export async function prepareKnowledgeBase(
     sources.add(source);
   }
 
-  const path = await mkdtemp(join(tmpdir(), "codex-security-knowledge-"));
+  const path = await mkdtemp(
+    join(directory ?? tmpdir(), "codex-security-knowledge-"),
+  );
   try {
     let index = 0;
     for (const document of documents) {

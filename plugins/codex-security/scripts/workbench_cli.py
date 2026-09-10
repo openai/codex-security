@@ -167,6 +167,10 @@ def parse_args(description: str) -> argparse.Namespace:
     get_scan_recipe = subparsers.add_parser("get-scan-recipe")
     get_scan_recipe.add_argument("--scan-id", required=True)
 
+    get_cli_scan_resume = subparsers.add_parser("get-cli-scan-resume")
+    get_cli_scan_resume.add_argument("--scan-id", required=True)
+    get_cli_scan_resume.add_argument("--allow-unavailable", action="store_true")
+
     compare_scans = subparsers.add_parser("compare-scans")
     compare_scans.add_argument("--before-scan-id", required=True)
     compare_scans.add_argument("--after-scan-id", required=True)
@@ -354,6 +358,9 @@ def parse_args(description: str) -> argparse.Namespace:
     subparsers.add_parser("database-info")
     subparsers.add_parser("dashboard")
     subparsers.add_parser("finding-workflow")
+    subparsers.add_parser("severity-classification")
+    severity = subparsers.add_parser("read-severity-classification")
+    severity.add_argument("--scan-id", required=True)
     subparsers.add_parser("store-findings")
     subparsers.add_parser("store-dedupe-groups")
     dedupe_groups = subparsers.add_parser("list-dedupe-groups")

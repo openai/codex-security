@@ -51,9 +51,11 @@ import {
 import {
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
+  inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
   mergedCodexConfig,
+  resolveCodexProfile,
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
   scanApprovalPolicy,
@@ -73,6 +75,7 @@ import {
   DeepScanProgressTracker,
   type DeepScanProgress,
 } from "./deep-progress.js";
+import { findScanSession } from "./scan-logs.js";
 import {
   loadContract,
   readScanFile,
@@ -93,6 +96,7 @@ import {
   ConfigurationError,
   IncompleteScanError,
   OutputDirectoryError,
+  OutputDirectoryNotEmptyError,
   errorMessage,
   safeErrorMessage,
   ScanCostLimitExceededError,
@@ -110,12 +114,31 @@ import {
   type ScanResultOptions,
 } from "./result.js";
 import type { SeverityLevel } from "./models.js";
+import {
+  formatSecurityPolicyText,
+  inspectSecurityPolicySources,
+  readSecurityPolicySnapshot,
+  requireUnchangedSecurityPolicy,
+  resolveSecurityPolicyGuidance,
+  resolveSecurityPolicyTarget,
+  runSecurityPolicyStages,
+  parseSecurityPolicyStageResult,
+  securityPolicyDiff,
+  securityPolicyProtectedRoots,
+  requireSecurityPolicyRepositoryBinding,
+  securityPolicyStageOutputSchema,
+  type SecurityPolicyDraft,
+  type SecurityPolicyOptions,
+  type SecurityPolicyPreflight,
+  type SecurityPolicyStage,
+  type SecurityPolicyStageResult,
+  type SecurityPolicyTarget,
+} from "./security-policy.js";
 import { writeMockScanDraft } from "./mock-scan.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   matchCompletedScan,
   matchScanFindingsInternal,
-  type matchScanFindings,
 } from "./scan-comparison.js";
 import {
   scanProgressUpdatesFromEvent,
@@ -147,7 +170,9 @@ import {
   prepareOutputDir,
   preparePersistentOutputRoot,
   requireModelSafeOutputDir,
+  requireOutputOutsideRepositories,
   requireOutputOutsideRepository,
+  requirePrivatePolicyOutputDirectory,
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
@@ -162,6 +187,7 @@ import {
 } from "./runtime.js";
 import {
   enclosingGitWorktreeRoot,
+  enclosingGitWorktreeRoots,
   normalizeRepository,
   normalizeTarget,
   repositoryRevision,
@@ -189,6 +215,7 @@ interface ScanEvent {
 
 interface CodexClientLike {
   startThread(options: ThreadOptions): CodexThreadLike;
+  resumeThread?(threadId: string, options: ThreadOptions): CodexThreadLike;
 }
 
 interface PreparedRuntime {
@@ -234,6 +261,8 @@ export interface DeepScanOptions {
 }
 
 export interface ScanOptions extends DeepScanOptions {
+  /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
+  resumeScanId?: string;
   /** Save synthetic Standard scan results without calling Codex or a model. */
   mock?: boolean;
   /** Opt into a durable scan -> custom publication -> dedupe workflow. */
@@ -367,6 +396,7 @@ type ScanObserverName =
   | "onProgress"
   | "onDeepProgress"
   | "onWorkerStatus"
+  | "onStage"
   | "onWarning";
 
 export interface ScanPreflight extends DeepScanOptions {
@@ -386,6 +416,7 @@ export interface ScanPreflight extends DeepScanOptions {
 interface LocalScanInputs
   extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
   protectedRoot: string;
+  protectedRoots: readonly string[];
   stateDirectory: string;
 }
 
@@ -411,11 +442,12 @@ interface ClientDependencies {
   ) => Promise<PreparedRuntime>;
   resolvePluginPython?: typeof resolvePluginPython;
   prepareOutputDir?: typeof prepareOutputDir;
+  requirePrivatePolicyOutputDirectory?: typeof requirePrivatePolicyOutputDirectory;
   prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
-  matchFindings?: typeof matchScanFindings;
+  matchFindings?: typeof matchScanFindingsInternal;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -424,6 +456,7 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 };
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
+const POLICY_PERMISSION_PROFILE = "codex_security_policy";
 const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
@@ -717,8 +750,8 @@ export class CodexSecurity {
     inputs: LocalScanInputs,
     options: ScanOptions,
   ): Promise<ScanPreflight> {
-    requireOutputOutsideRepository(
-      inputs.protectedRoot,
+    requireOutputOutsideRepositories(
+      inputs.protectedRoots,
       await realpath(tmpdir()),
       "temporary",
     );
@@ -760,6 +793,385 @@ export class CodexSecurity {
         ? {}
         : { maxCostUsd: options.maxCostUsd }),
     };
+  }
+
+  public async preflightPolicy(
+    repository: string,
+    options: SecurityPolicyOptions = {},
+  ): Promise<SecurityPolicyPreflight> {
+    this.#requireOpen();
+    const target = await resolveSecurityPolicyTarget(
+      repository,
+      options.path,
+      options.signal,
+    );
+    const inputs = await this.#validatePolicyInputs(
+      target,
+      options,
+      options.signal,
+    ).catch(rethrowPolicyOutputError);
+    await readSecurityPolicySnapshot(
+      target,
+      options.signal,
+      inputs.gitMetadataPaths,
+    );
+    const preflight = await this.#preflightInputs(inputs, options);
+    return {
+      ...target,
+      outputDir: preflight.outputDir,
+      authentication: preflight.authentication,
+      model: preflight.model,
+      reasoningEffort: preflight.reasoningEffort,
+      ...(options.maxCostUsd === undefined
+        ? {}
+        : { maxCostUsd: options.maxCostUsd }),
+    };
+  }
+
+  public async generatePolicy(
+    repository: string,
+    options: SecurityPolicyOptions = {},
+  ): Promise<SecurityPolicyDraft> {
+    return await this.#trackOperation(() =>
+      this.#generatePolicy(repository, options),
+    ).catch(rethrowPolicyOutputError);
+  }
+
+  public async previewPolicy(
+    draft: SecurityPolicyDraft,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string> {
+    return await this.#trackOperation(async () => {
+      const signal = AbortSignal.any([
+        this.#abortController.signal,
+        ...(options.signal === undefined ? [] : [options.signal]),
+      ]);
+      return formatSecurityPolicyText(
+        await securityPolicyDiff(
+          draft,
+          async () =>
+            await (
+              this.#dependencies.resolvePluginPython ?? resolvePluginPython
+            )({
+              configuredPath: this.config.pythonPath,
+              environment: this.#dependencies.environment,
+              protectedRoot:
+                (await enclosingGitWorktreeRoots(draft.repository, signal)).at(
+                  -1,
+                ) ?? draft.repository,
+              signal,
+            }),
+          signal,
+        ),
+        true,
+      );
+    });
+  }
+
+  async #generatePolicy(
+    repository: string,
+    options: SecurityPolicyOptions,
+  ): Promise<SecurityPolicyDraft> {
+    const budgetController = new AbortController();
+    const signal = AbortSignal.any([
+      this.#abortController.signal,
+      budgetController.signal,
+      ...(options.signal === undefined ? [] : [options.signal]),
+    ]);
+    let outputDir = "";
+    let knowledgeBase: PreparedKnowledgeBase | null = null;
+    let accumulatedCost: ScanCost | null = null;
+    let completeCost = true;
+    const warn = (message: string): void =>
+      notifyObserver(
+        "onWarning",
+        options.onWarning,
+        options.onObserverError,
+        message,
+      );
+    try {
+      const target = await resolveSecurityPolicyTarget(
+        repository,
+        options.path,
+        signal,
+      );
+      const inputs = await this.#validatePolicyInputs(target, options, signal);
+      const snapshot = await readSecurityPolicySnapshot(
+        target,
+        signal,
+        inputs.gitMetadataPaths,
+      );
+      const temporaryRoot = await realpath(tmpdir());
+      requireOutputOutsideRepositories(
+        inputs.protectedRoots,
+        temporaryRoot,
+        "temporary",
+      );
+      const session = await this.#prepareSession(
+        inputs,
+        options,
+        signal,
+        temporaryRoot,
+      );
+      const { runtime, effectiveConfig } = session;
+      const model = scanModelConfiguration(effectiveConfig);
+      validateScanCostLimit(options.maxCostUsd, model.model);
+      for (const path of [
+        "references/threat-model.md",
+        "references/security-guidance.md",
+        "skills/define-security-policy/SKILL.md",
+        "mcp/helpers.mjs",
+      ]) {
+        const metadata = await lstat(
+          join(runtime.plugin.pluginRoot, path),
+        ).catch(() => null);
+        if (
+          metadata === null ||
+          !metadata.isFile() ||
+          metadata.isSymbolicLink()
+        ) {
+          throw new CodexSecurityError(
+            `Installed plugin is missing policy-generation support: ${path}`,
+          );
+        }
+      }
+      const root =
+        inputs.outputDir === null &&
+        this.#dependencies.prepareOutputDir === undefined
+          ? await preparePersistentOutputRoot(
+              inputs.stateDirectory,
+              "policies",
+              basename(target.repository),
+            )
+          : temporaryRoot;
+      outputDir = await (
+        this.#dependencies.prepareOutputDir ?? prepareOutputDir
+      )(
+        inputs.outputDir ?? undefined,
+        `${basename(target.repository)}-policy`,
+        root,
+        (path) => requireOutputOutsideRepositories(inputs.protectedRoots, path),
+      );
+      requireOutputOutsideRepositories(inputs.protectedRoots, outputDir);
+      requireModelSafeOutputDir(outputDir);
+      await (
+        this.#dependencies.requirePrivatePolicyOutputDirectory ??
+        requirePrivatePolicyOutputDirectory
+      )(outputDir);
+      if (options.knowledgeBasePaths?.length) {
+        knowledgeBase = await prepareKnowledgeBase(
+          options.knowledgeBasePaths,
+          signal,
+          outputDir,
+        );
+      }
+      notifyObserver(
+        "onOutputDirReady",
+        options.onOutputDirReady,
+        options.onObserverError,
+        outputDir,
+      );
+      const guidance = await resolveSecurityPolicyGuidance(
+        target,
+        runtime.plugin.pluginRoot,
+        session.scanEnvironment,
+        signal,
+        inputs.policyPaths,
+        inputs.gitMetadataPaths,
+      );
+      await requireUnchangedSecurityPolicy(
+        target,
+        snapshot,
+        signal,
+        inputs.gitMetadataPaths,
+      );
+      await requireSecurityPolicyRepositoryBinding(target, signal);
+      const policyReadRoots = [
+        dirname(target.targetPath),
+        runtime.plugin.pluginRoot,
+        ...(knowledgeBase === null ? [] : [knowledgeBase.path]),
+      ].filter((path, index, roots) => roots.indexOf(path) === index);
+      const { codex } = this.#createSessionCodex(
+        session,
+        {
+          CODEX_SECURITY_REPOSITORY: target.repository,
+          CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
+          CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
+          CODEX_SECURITY_SURFACE: this.#surface,
+          ...(knowledgeBase === null
+            ? {}
+            : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
+        },
+        options.auth,
+        policyCodexConfig(session.sessionConfig),
+        inputs.gitMetadataPaths.length === 0
+          ? []
+          : [
+              // CLI override keys split on dots, so keep paths inside the TOML value.
+              `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystemPermissions(inputs.gitMetadataPaths))}`,
+            ],
+      );
+      const reportCost = (current: Readonly<ScanCost>): void => {
+        const total = addScanCosts(accumulatedCost, current);
+        if (completeCost)
+          notifyObserver(
+            "onCost",
+            options.onCost,
+            options.onObserverError,
+            total,
+          );
+        if (
+          options.maxCostUsd !== undefined &&
+          total.estimatedUsd > options.maxCostUsd
+        ) {
+          budgetController.abort(
+            new CodexSecurityError(
+              `Security-policy generation exceeded its $${options.maxCostUsd} cost limit; partial output remains at ${outputDir}.`,
+            ),
+          );
+        }
+      };
+      const outputSchema = securityPolicyStageOutputSchema();
+      const run = async (
+        stage: SecurityPolicyStage,
+        prompt: string,
+      ): Promise<SecurityPolicyStageResult> => {
+        const thread = codex.startThread({
+          workingDirectory: outputDir,
+          additionalDirectories: policyReadRoots,
+          skipGitRepoCheck: true,
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+          webSearchMode: "disabled",
+        });
+        const tracker = new ScanCostTracker({
+          codexHome: runtime.codexHome,
+          model: model.model,
+          repository: target.repository,
+          scanDirectory: outputDir,
+          maxCostUsd: options.maxCostUsd,
+          onCost:
+            options.onCost === undefined && options.maxCostUsd === undefined
+              ? undefined
+              : reportCost,
+          onError: (error) => {
+            if (options.maxCostUsd !== undefined) budgetController.abort(error);
+            else
+              warn(
+                `Could not track policy-generation cost: ${safeErrorMessage(error)}`,
+              );
+          },
+        });
+        let stopped = false;
+        let usage: unknown = null;
+        try {
+          const { events } = await thread.runStreamed(prompt, {
+            signal,
+            outputSchema,
+          });
+          const turn = await readCodexTurn({
+            thread,
+            events,
+            onEvent: (event) => {
+              if (
+                event.type === "thread.started" &&
+                typeof event["thread_id"] === "string"
+              ) {
+                tracker.start(event["thread_id"]);
+              }
+            },
+            onReconnect: (message) => warn(safeErrorMessage(message)),
+          });
+          usage = turn.usage;
+          signal.throwIfAborted();
+          if (turn.status !== "completed")
+            throw new CodexSecurityError(
+              turn.lastStreamError ??
+                `Security-policy ${stage} stage ended before the turn completed.`,
+            );
+          const snapshot = await tracker.stop(usage).catch((error: unknown) => {
+            if (options.maxCostUsd !== undefined) throw error;
+            warn(
+              `Could not track policy-generation cost: ${safeErrorMessage(error)}`,
+            );
+            const cost = estimateScanCost(model.model, usage);
+            if (cost !== null) reportCost(cost);
+            return { usage, cost };
+          });
+          stopped = true;
+          if (snapshot.cost === null) {
+            completeCost = false;
+            if (options.maxCostUsd !== undefined)
+              throw new CodexSecurityError(
+                "Could not verify the requested policy-generation cost limit.",
+              );
+          } else {
+            accumulatedCost = addScanCosts(accumulatedCost, snapshot.cost);
+          }
+          signal.throwIfAborted();
+          try {
+            return parseSecurityPolicyStageResult(
+              JSON.parse(turn.finalResponse),
+            );
+          } catch (error) {
+            throw new CodexSecurityError(
+              `Security-policy ${stage} stage returned an invalid document response.`,
+              { cause: error },
+            );
+          }
+        } finally {
+          if (!stopped)
+            await tracker
+              .stop(usage)
+              .catch((error: unknown) => warn(safeErrorMessage(error)));
+        }
+      };
+      return await runSecurityPolicyStages({
+        target,
+        snapshot,
+        policyPaths: inputs.policyPaths,
+        gitMetadataPaths: inputs.gitMetadataPaths,
+        outputDir,
+        guidance,
+        pluginRoot: runtime.plugin.pluginRoot,
+        ...(this.config.pluginPath === undefined
+          ? {}
+          : { pluginPath: resolve(expandHome(this.config.pluginPath)) }),
+        ...(knowledgeBase === null
+          ? {}
+          : { knowledgeBasePath: knowledgeBase.path }),
+        revision: await (
+          this.#dependencies.repositoryRevision ?? repositoryRevision
+        )(target.repository, signal),
+        ...model,
+        pluginVersion: runtime.plugin.version,
+        signal,
+        onStage: (stage) =>
+          notifyObserver(
+            "onStage",
+            options.onStage,
+            options.onObserverError,
+            stage,
+          ),
+        answerQuestions: options.answerQuestions,
+        run,
+        cost: () => (completeCost ? accumulatedCost : null),
+      });
+    } catch (error) {
+      if (budgetController.signal.aborted) throw budgetController.signal.reason;
+      if (signal.aborted)
+        throw new CodexSecurityError(
+          `Security-policy generation was interrupted${outputDir ? `; partial output remains at ${outputDir}` : ""}.`,
+          { cause: error },
+        );
+      throw error;
+    } finally {
+      try {
+        await knowledgeBase?.cleanup();
+      } catch (error) {
+        warnCleanupFailed(options, error, "policy generation");
+      }
+    }
   }
 
   async #run(repository: string, options: ScanOptions): Promise<ScanResult> {
@@ -891,22 +1303,25 @@ export class CodexSecurity {
           scanOutputRoot === temporaryRoot ? "temporary" : "output",
         );
       }
-      scanDir = await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
-        requestedOutput ?? undefined,
-        basename(repo),
-        scanOutputRoot,
-        (path) => requireOutputOutsideRepository(protectedRoot, path),
-        options.archiveExisting,
-        (archiveDir) => {
-          archivedScanDir = archiveDir;
-          notifyObserver(
-            "onOutputArchived",
-            options.onOutputArchived,
-            options.onObserverError,
-            archiveDir,
-          );
-        },
-      );
+      scanDir =
+        options.resumeScanId !== undefined
+          ? requestedOutput!
+          : await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
+              requestedOutput ?? undefined,
+              basename(repo),
+              scanOutputRoot,
+              (path) => requireOutputOutsideRepository(protectedRoot, path),
+              options.archiveExisting,
+              (archiveDir) => {
+                archivedScanDir = archiveDir;
+                notifyObserver(
+                  "onOutputArchived",
+                  options.onOutputArchived,
+                  options.onObserverError,
+                  archiveDir,
+                );
+              },
+            );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
       notifyObserver(
@@ -1135,6 +1550,10 @@ export class CodexSecurity {
         options.maxCostUsd,
         deepScanOptions(options),
       );
+      if (options.safetyIdentifier !== undefined)
+        recipe["safetyIdentifier"] = options.safetyIdentifier;
+      if (options.postScanPrompt !== undefined)
+        recipe["postScanPrompt"] = options.postScanPrompt;
       if (options.validationPrompt !== undefined)
         recipe["validationMode"] = "custom";
       const workbenchOptions: WorkbenchCommandOptions = {
@@ -1151,32 +1570,76 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
-      const registration = await workbench(
-        workbenchOptions,
-        [
-          "register-cli-scan",
-          "--repository",
-          repo,
-          "--scan-dir",
-          scanDir,
-          "--registration-json-stdin",
-          ...(options.archiveExisting === true ? ["--archive-existing"] : []),
-          ...(archivedScanDir === null
-            ? []
-            : ["--archived-scan-dir", archivedScanDir]),
-          ...(options.parentScanId === undefined
-            ? []
-            : ["--parent-scan-id", options.parentScanId]),
-        ],
-        JSON.stringify({
-          recipe,
-          userContext: options.scanPrompt,
-          ...(options.workflowId === undefined
-            ? {}
-            : { workflowId: options.workflowId }),
-        }),
-      );
+      const registration =
+        options.resumeScanId !== undefined
+          ? await workbench(workbenchOptions, [
+              "get-cli-scan-resume",
+              "--scan-id",
+              options.resumeScanId,
+            ])
+          : await workbench(
+              workbenchOptions,
+              [
+                "register-cli-scan",
+                "--repository",
+                repo,
+                "--scan-dir",
+                scanDir,
+                "--registration-json-stdin",
+                ...(options.archiveExisting === true
+                  ? ["--archive-existing"]
+                  : []),
+                ...(archivedScanDir === null
+                  ? []
+                  : ["--archived-scan-dir", archivedScanDir]),
+                ...(options.parentScanId === undefined
+                  ? []
+                  : ["--parent-scan-id", options.parentScanId]),
+              ],
+              JSON.stringify({
+                recipe,
+                userContext: options.scanPrompt,
+                ...(options.workflowId === undefined
+                  ? {}
+                  : { workflowId: options.workflowId }),
+              }),
+            );
       const scanId = registration["scanId"];
+      const resumeThreadId =
+        options.resumeScanId === undefined
+          ? undefined
+          : registration["threadId"];
+      if (options.resumeScanId !== undefined) {
+        const savedRecipe = registration["recipe"];
+        if (
+          scanId !== options.resumeScanId ||
+          !isRecord(savedRecipe) ||
+          savedRecipe["repository"] !== repo ||
+          typeof resumeThreadId !== "string" ||
+          !resumeThreadId ||
+          JSON.stringify(savedRecipe["target"]) !==
+            JSON.stringify(recipe["target"])
+        ) {
+          throw new CodexSecurityError(
+            "The workbench returned mismatched scan resume context.",
+          );
+        }
+        const savedSession = await findScanSession(
+          runtime.codexHome,
+          resumeThreadId,
+        );
+        if (
+          savedSession === null ||
+          savedSession.workingDirectory !== scanDir
+        ) {
+          throw new CodexSecurityError(
+            `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
+          );
+        }
+        if (typeof registration["sealedProducerVersion"] === "string") {
+          expectation.pluginVersion = registration["sealedProducerVersion"];
+        }
+      }
       const targetId = registration["targetId"];
       const contract = registration["contract"];
       const contractTarget = isRecord(contract)
@@ -1289,7 +1752,10 @@ export class CodexSecurity {
         scanId,
         runtime.configPath !== undefined,
         knowledgeBase !== null,
-        options.scanPrompt,
+        options.resumeScanId !== undefined &&
+          typeof registration["userContext"] === "string"
+          ? registration["userContext"]
+          : options.scanPrompt,
         options.maxCostUsd !== undefined,
         discoveryPrompt,
       );
@@ -1324,7 +1790,14 @@ export class CodexSecurity {
         scopeFileCount === null
           ? basePrompt
           : `${basePrompt}\nThe SDK's current in-scope file-count estimate is ${scopeFileCount}; use it for scan progress unless exact scoped-source enumeration establishes a different total before review begins.`;
-      if (falsePositiveExamples.length > 0) {
+      if (options.resumeScanId !== undefined) {
+        prompt +=
+          "\nResume the existing Deep Scan through its coordinator. Preserve completed workers and saved artifacts; do not recreate the scan directory or restart completed analysis. If the coordinator already finished, continue with completion of this same scan.";
+      }
+      if (
+        falsePositiveExamples.length > 0 &&
+        options.resumeScanId === undefined
+      ) {
         const feedbackPath = join(
           scanDir,
           "artifacts",
@@ -1353,7 +1826,11 @@ export class CodexSecurity {
           : null;
       const runtimePaths = {
         PYTHON: python,
-        CODEX_SECURITY_STARTED_AT: new Date().toISOString(),
+        CODEX_SECURITY_STARTED_AT:
+          options.resumeScanId !== undefined &&
+          typeof registration["startedAt"] === "string"
+            ? registration["startedAt"]
+            : new Date().toISOString(),
         CODEX_SECURITY_REPOSITORY: repo,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: shellPluginRoot,
@@ -1389,12 +1866,27 @@ export class CodexSecurity {
         runtimePaths,
         options.auth,
       );
-      const thread = codex.startThread({
+      const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
         approvalPolicy,
-      });
+      };
+      let thread: CodexThreadLike;
+      if (typeof resumeThreadId === "string") {
+        if (codex.resumeThread === undefined) {
+          throw new CodexSecurityError(
+            "The configured Codex client does not support resuming sessions.",
+          );
+        }
+        thread = codex.resumeThread(resumeThreadId, threadOptions);
+        tracker.start(resumeThreadId);
+        if (budgetRecovery !== null) budgetRecovery.threadId = resumeThreadId;
+        await tracker.refresh().catch(reportTrackingError);
+        checkOpen();
+      } else {
+        thread = codex.startThread(threadOptions);
+      }
       const serializedPaths =
         normalized.kind === "paths" ? jsonForPrompt(normalized.paths) : null;
       checkOpen();
@@ -1427,6 +1919,14 @@ export class CodexSecurity {
         workbenchValidated: true,
         model,
         onThreadStarted: async (threadId) => {
+          if (resumeThreadId !== undefined) {
+            if (threadId !== resumeThreadId) {
+              throw new CodexSecurityError(
+                "Codex did not resume the original scan session.",
+              );
+            }
+            return;
+          }
           if (budgetRecovery !== null) budgetRecovery.threadId = threadId;
           tracker.start(threadId);
           try {
@@ -1705,13 +2205,15 @@ export class CodexSecurity {
             falsePositives: falsePositiveExamples as Record<string, unknown>[],
             findings: result.findings.findings,
             workbench: runWorkbench,
-            matchFindings:
-              this.#dependencies.matchFindings ??
-              ((input, comparisonOptions) =>
-                matchScanFindingsInternal(input, comparisonOptions, {
+            matchFindings: (input, comparisonOptions) =>
+              (this.#dependencies.matchFindings ?? matchScanFindingsInternal)(
+                input,
+                comparisonOptions,
+                {
                   surface: this.#surface,
-                  allowBatching: false,
-                })),
+                  singleTurn: options.maxCostUsd !== undefined,
+                },
+              ),
             environment,
             model,
             signal,
@@ -1825,7 +2327,9 @@ export class CodexSecurity {
           return result;
         } catch {}
       }
-      if (activeScan !== null) {
+      // A failed attachment must not turn a resumable coordinator into a terminal failure.
+      // Deep Scan orchestration persists its own terminal failures and cancellations.
+      if (activeScan !== null && options.resumeScanId === undefined) {
         if (
           options.validationPrompt !== undefined &&
           !customValidationComplete
@@ -2102,6 +2606,8 @@ export class CodexSecurity {
     session: PreparedSession,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
+    config?: JsonObject,
+    configOverrides: string[] = [],
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
     const {
       runtime,
@@ -2138,7 +2644,7 @@ export class CodexSecurity {
     if (session.safetyIdentifier !== undefined) {
       environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
     }
-    const sdkCodexConfig = { ...sessionConfig };
+    const sdkCodexConfig = { ...(config ?? sessionConfig) };
     // Projects and permissions already live in generated TOML files; the SDK
     // cannot safely encode their path and selector keys as dotted overrides.
     delete sdkCodexConfig["projects"];
@@ -2167,8 +2673,15 @@ export class CodexSecurity {
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      ...(commandAuth
-        ? { configOverrides: modelProviderConfigOverride(sessionConfig) }
+      ...(commandAuth || configOverrides.length > 0
+        ? {
+            configOverrides: [
+              ...(commandAuth
+                ? modelProviderConfigOverride(sessionConfig)
+                : []),
+              ...configOverrides,
+            ],
+          }
         : {}),
       env: sdkEnvironment,
       config: {
@@ -2183,7 +2696,13 @@ export class CodexSecurity {
   }
 
   async #prepareSession(
-    { protectedRoot }: { protectedRoot: string },
+    {
+      protectedRoot,
+      protectedRoots = [protectedRoot],
+    }: {
+      protectedRoot: string;
+      protectedRoots?: readonly string[];
+    },
     options: Pick<
       ScanOptions,
       | "auth"
@@ -2239,7 +2758,7 @@ export class CodexSecurity {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           scanEnvironment,
           (path) =>
-            requireOutputOutsideRepository(protectedRoot, path, "runtime"),
+            requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
         );
         releaseCredentialHome = await acquireCodexSecurityCredentialHomeLock(
           credentialHome,
@@ -2251,7 +2770,7 @@ export class CodexSecurity {
         signal,
         temporaryRoot,
         (path) =>
-          requireOutputOutsideRepository(protectedRoot, path, "runtime"),
+          requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
         options.auth,
         requestedConfig,
       );
@@ -2273,7 +2792,7 @@ export class CodexSecurity {
         await writeCodexConfig(runtime.configPath, preflightConfig);
       }
       const runtimeHome = await realpath(runtime.codexHome);
-      requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
+      requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
       const sessionConfig = scanRuntimeCodexConfig(
         effectiveConfig,
         runtimeHome,
@@ -2471,6 +2990,42 @@ export class CodexSecurity {
         ? join(runtime.bootstrapWorkspace, "deep-scan-config.toml")
         : undefined;
     runtime.effectiveConfig = mergedConfig;
+  }
+
+  async #validatePolicyInputs(
+    target: SecurityPolicyTarget,
+    options: SecurityPolicyOptions,
+    signal?: AbortSignal,
+  ): Promise<
+    LocalScanInputs & { policyPaths: string[]; gitMetadataPaths: string[] }
+  > {
+    policyCodexConfig(await mergedCodexConfig(this.config));
+    const sources = await inspectSecurityPolicySources(target, signal);
+    const protectedRoots = [
+      ...new Set([
+        ...(await securityPolicyProtectedRoots(target, signal)),
+        ...sources.gitMetadataPaths,
+      ]),
+    ];
+    const inputs = await this.#validateLocalInputs(
+      target.repository,
+      {
+        auth: options.auth,
+        target:
+          target.scope === "." ? "repository" : [dirname(target.targetPath)],
+        outputDir: options.outputDir,
+        maxCostUsd: options.maxCostUsd,
+      },
+      signal,
+      protectedRoots,
+    );
+    return {
+      ...inputs,
+      policyPaths: sources.policyPaths,
+      gitMetadataPaths: [
+        ...new Set([...protectedRoots.slice(1), ...sources.gitMetadataPaths]),
+      ],
+    };
   }
 
   async #runMock(
@@ -2719,7 +3274,21 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions,
     signal?: AbortSignal,
+    protectedRoots?: readonly string[],
   ): Promise<LocalScanInputs> {
+    if (
+      options.resumeScanId !== undefined &&
+      (options.mode !== "deep" ||
+        !options.outputDir ||
+        options.archiveExisting ||
+        options.parentScanId !== undefined ||
+        options.workflowId !== undefined ||
+        options.mock)
+    ) {
+      throw new CodexSecurityError(
+        "Resume requires the original Deep Scan output directory without archive, rerun, or workflow options.",
+      );
+    }
     if (
       options.mock &&
       (options.mode === "deep" ||
@@ -2777,13 +3346,16 @@ export class CodexSecurity {
     await validateCommittedDiffCheckout(repo, normalized, signal);
     throwIfAborted(signal);
     const protectedRoot =
-      (await enclosingGitWorktreeRoot(repo, signal)) ?? repo;
+      protectedRoots?.[0] ??
+      (await enclosingGitWorktreeRoot(repo, signal)) ??
+      repo;
+    protectedRoots ??= [protectedRoot];
     const requestedOutput = await validateOutputDir(
       options.outputDir,
-      options.archiveExisting,
+      options.resumeScanId !== undefined || options.archiveExisting,
     );
     if (requestedOutput !== null) {
-      requireOutputOutsideRepository(protectedRoot, requestedOutput);
+      requireOutputOutsideRepositories(protectedRoots, requestedOutput);
     }
     const stateDirectory = codexSecurityStateDirectory(
       this.#dependencies.environment,
@@ -2803,13 +3375,14 @@ export class CodexSecurity {
         canonicalStateDirectory = parent;
       }
     }
-    requireOutputOutsideRepository(protectedRoot, canonicalStateDirectory);
+    requireOutputOutsideRepositories(protectedRoots, canonicalStateDirectory);
     return {
       repository: repo,
       target: normalized,
       mode,
       outputDir: requestedOutput,
       protectedRoot,
+      protectedRoots,
       stateDirectory,
     };
   }
@@ -3459,7 +4032,7 @@ function scanPrompt(
             "This exhaustive scan authorizes the delegated-worker phases required by the selected skill; use available subagent tools and continue with parent-agent fallback if capacity changes.",
           ]),
     "This SDK host does not render MCP Apps; use the terminal/chat workflow.",
-    `Use ${python} as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.`,
+    `Use ${python} as <python_command> for plugin Python helper scripts (.py files); replace any literal python or python3 helper invocation with this exact interpreter.`,
     `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
     `Use this exact scan directory for all scan output: ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR")}`,
     `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest, findings, and coverage.`,
@@ -3583,6 +4156,22 @@ function validateScanCostLimit(
       `A scan cost limit is not available for the configured model: ${model}.`,
     );
   }
+}
+
+function addScanCosts(
+  previous: Readonly<ScanCost> | null,
+  current: Readonly<ScanCost>,
+): ScanCost {
+  if (previous === null) return { ...current };
+  return {
+    model: current.model,
+    inputTokens: previous.inputTokens + current.inputTokens,
+    cachedInputTokens: previous.cachedInputTokens + current.cachedInputTokens,
+    cacheWriteInputTokens:
+      previous.cacheWriteInputTokens + current.cacheWriteInputTokens,
+    outputTokens: previous.outputTokens + current.outputTokens,
+    estimatedUsd: previous.estimatedUsd + current.estimatedUsd,
+  };
 }
 
 async function collectResult(
@@ -3945,7 +4534,75 @@ export function scanRuntimeCodexConfig(
             : { [protectedCredentialHome]: "read" }),
         },
       },
+      [POLICY_PERMISSION_PROFILE]: {
+        filesystem: policyFilesystemPermissions(),
+        network: { enabled: false },
+      },
     },
+  };
+}
+
+function policyFilesystemPermissions(
+  gitMetadataPaths: readonly string[] = [],
+): JsonObject {
+  return {
+    ":minimal": "read",
+    ":workspace_roots": "read",
+    // A scoped "." keeps native permission paths literal, including glob characters.
+    ...Object.fromEntries(
+      gitMetadataPaths.map((path) => [path, { ".": "deny" }]),
+    ),
+  };
+}
+
+function rethrowPolicyOutputError(error: unknown): never {
+  if (error instanceof OutputDirectoryNotEmptyError)
+    throw new OutputDirectoryNotEmptyError(error.directory, "policy");
+  throw error;
+}
+
+function requirePolicyConfigKeys(config: JsonObject): void {
+  const tables = [config];
+  if (isRecord(config["features"])) tables.push(config["features"]);
+  // The Codex SDK flattens these keys without quoting their components.
+  if (
+    tables.some((table) =>
+      Object.keys(table).some((key) => !/^[A-Za-z0-9_-]+$/u.test(key)),
+    )
+  )
+    throw new ConfigurationError(
+      "Policy generation does not accept dotted or quoted Codex override keys. Use nested objects instead.",
+    );
+}
+
+function policyCodexConfig(config: JsonObject): JsonObject {
+  const resolved = resolveCodexProfile(config);
+  requirePolicyConfigKeys(resolved);
+  // The selected provider is already written as TOML. The SDK cannot quote
+  // provider names when it flattens this table into command-line overrides.
+  delete resolved["model_providers"];
+  const features = isRecord(resolved["features"]) ? resolved["features"] : {};
+  return {
+    ...resolved,
+    approval_policy: "never",
+    default_permissions: POLICY_PERMISSION_PROFILE,
+    // The artifact directory may be inside an unrelated checkout.
+    project_doc_max_bytes: 0,
+    project_root_markers: [],
+    allow_login_shell: false,
+    shell_environment_policy: {
+      inherit: "core",
+      ignore_default_excludes: false,
+    },
+    features: {
+      ...features,
+      plugins: false,
+      apps: false,
+      shell_snapshot: false,
+    },
+    mcp_servers: {},
+    web_search: "disabled",
+    sandbox_workspace_write: { network_access: false },
   };
 }
 

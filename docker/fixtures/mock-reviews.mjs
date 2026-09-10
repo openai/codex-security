@@ -57,7 +57,10 @@ const server = createServer(async (request, response) => {
         body.model,
         stage === "screen" ? "gpt-5.6-luna" : "gpt-5.6-sol",
       );
-      assert.equal(body.reasoning.effort, "xhigh");
+      assert.equal(
+        body.reasoning.effort,
+        stage === "screen" ? "xhigh" : "high",
+      );
       const tools = body.input
         .filter((entry) => entry.type === "additional_tools")
         .flatMap((entry) => entry.tools);

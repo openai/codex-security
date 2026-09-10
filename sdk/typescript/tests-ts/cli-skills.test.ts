@@ -140,6 +140,7 @@ describe("CLI skill commands", () => {
         expect(help.text()).toContain("--codex <array>");
         expect(help.text()).toContain('model="gpt-5.6-terra"');
         expect(help.text()).toContain('model_reasoning_effort="high"');
+        expect(help.text()).toContain("analytics.enabled=false");
         expect(help.text()).not.toContain("--provider");
       }
     } finally {
@@ -836,6 +837,89 @@ describe("CLI skill commands", () => {
       expect(started).toBe(false);
     }
   });
+
+  test.each(["validate", "patch", "verify-fix"] as const)(
+    "passes explicit analytics settings to %s",
+    async (command) => {
+      for (const override of [
+        "analytics.enabled=false",
+        "analytics.enabled=true",
+        "analytics={enabled=false}",
+      ]) {
+        let invocation: readonly string[] = [];
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              command,
+              "Synthetic finding",
+              "--effort",
+              "high",
+              "--codex",
+              override,
+            ],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              onCodex: (args, output) => {
+                invocation = args;
+                if (command === "verify-fix") {
+                  output?.stdout.write(
+                    JSON.stringify({
+                      results: [
+                        {
+                          id: "finding-1",
+                          status: "fixed",
+                          evidence: "The original issue no longer reproduces.",
+                        },
+                      ],
+                    }),
+                  );
+                }
+                return 0;
+              },
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(invocation).toContain(override);
+        expect(invocation).toContain('model_reasoning_effort="high"');
+      }
+
+      for (const override of [
+        'model_provider="synthetic"',
+        "features.goals=false",
+        "analytics.unrelated=false",
+        "analytics.enabled=false",
+      ]) {
+        let started = false;
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              command,
+              "Synthetic finding",
+              "--codex",
+              override,
+              ...(override === "analytics.enabled=false"
+                ? ["--codex", "analytics.enabled=true"]
+                : []),
+            ],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              onCodex: () => {
+                started = true;
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toContain("codex-security:");
+        expect(started).toBe(false);
+      }
+    },
+  );
 
   test("selects reasoning effort directly for validation and patching", async () => {
     for (const command of ["validate", "patch"] as const) {
