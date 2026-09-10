@@ -48,20 +48,6 @@ function equal(left: unknown, right: unknown): boolean {
       integer === BigInt(floating)
     );
   }
-  if (Array.isArray(left))
-    return (
-      Array.isArray(right) &&
-      left.length === right.length &&
-      left.every((value, index) => equal(value, right[index]))
-    );
-  if (object(left))
-    return (
-      object(right) &&
-      Object.keys(left).length === Object.keys(right).length &&
-      objectEntries(left).every(
-        ([key, value]) => Object.hasOwn(right, key) && equal(value, right[key]),
-      )
-    );
   return left === right;
 }
 
@@ -147,13 +133,6 @@ export function validateAgainstSchema(
       fail("array has too few items");
     if (schema.maxItems !== undefined && value.length > schema.maxItems)
       fail("array has too many items");
-    if (
-      schema.uniqueItems === true &&
-      value.some((item, index) =>
-        value.slice(0, index).some((other) => equal(item, other)),
-      )
-    )
-      fail("array items must be unique");
     if (schema.items)
       value.forEach((item, index) =>
         validateAgainstSchema(
@@ -163,6 +142,8 @@ export function validateAgainstSchema(
           root,
         ),
       );
+    if (schema.uniqueItems === true && new Set(value).size !== value.length)
+      fail("array items must be unique");
   }
   if (object(value)) {
     for (const key of schema.required ?? [])

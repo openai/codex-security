@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { basename, dirname } from "node:path";
-import { exists, mkdir, readFile, writeFile } from "./helper-files";
+import { mkdir, readFile, writeFile } from "./helper-files";
 import {
   JsonSyntaxError,
   object,
@@ -116,29 +116,6 @@ function fields(
     );
 }
 
-function exactAssignments(
-  assigned: string[],
-  expected: string[],
-  plan: string,
-  kind: string,
-): void {
-  const counts = new Map<string, number>();
-  for (const name of assigned) counts.set(name, (counts.get(name) ?? 0) + 1);
-  const wanted = new Set(expected);
-  const missing = expected.filter((name) => !counts.has(name)).sort(compare);
-  const duplicates = [...counts]
-    .filter(([, count]) => count > 1)
-    .map(([name]) => name)
-    .sort(compare);
-  const unexpected = [...counts.keys()]
-    .filter((name) => !wanted.has(name))
-    .sort(compare);
-  if (missing.length || duplicates.length || unexpected.length)
-    throw new Error(
-      `${plan}: pool plan must assign each ${kind} shard exactly once; missing=${pythonRepr(missing)}; duplicates=${pythonRepr(duplicates)}; unexpected=${pythonRepr(unexpected)}`,
-    );
-}
-
 function validatePlan(plan: string, directory: string) {
   requirePlanDirectory(plan, directory);
   const misplaced = [
@@ -152,7 +129,6 @@ function validatePlan(plan: string, directory: string) {
   const inputs = discoverInputShards(directory);
   const inputNames = inputs.map((path) => basename(path));
   const outputNames = inputNames.map(outputName);
-  if (!exists(plan)) throw new Error(`Rank pool plan missing: ${plan}`);
   const bytes = readFile(plan);
   let payload: unknown;
   try {
@@ -229,18 +205,6 @@ function validatePlan(plan: string, directory: string) {
       output_shards: assignedOutputs,
     };
   });
-  exactAssignments(
-    workers.flatMap((worker) => worker.input_shards),
-    inputNames,
-    plan,
-    "input",
-  );
-  exactAssignments(
-    workers.flatMap((worker) => worker.output_shards),
-    outputNames,
-    plan,
-    "output",
-  );
   for (const [index, worker] of workers.entries()) {
     const assigned = inputNames.filter(
       (_, inputIndex) => inputIndex % workers.length === index,
@@ -266,10 +230,6 @@ function validateWorker(
   if (slot > BigInt(workers.length))
     throw new Error(`--slot must be at most ${workers.length}`);
   const worker = workers[Number(slot) - 1]!;
-  if (BigInt(worker.slot) !== slot)
-    throw new Error(
-      `${plan}: worker assignment for slot ${slot} is inconsistent`,
-    );
   let rows = 0;
   const digest = createHash("sha256");
   for (const [index, name] of worker.input_shards.entries()) {

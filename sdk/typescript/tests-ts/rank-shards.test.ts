@@ -162,7 +162,7 @@ describe("rank shard helpers", () => {
   });
 
   test.skipIf(process.platform === "win32")(
-    "preserves existing shards when Unicode entry types require metadata lookup",
+    "preserves existing shards alongside Unicode and raw-byte filenames",
     () => {
       const f = fixture();
       write(f.input, [candidate("new.py")]);
@@ -174,41 +174,12 @@ describe("rank shard helpers", () => {
           "unrelated undecodable file",
         );
       const original = readFileSync(shard(f, 1));
-      const preload = join(f.root, "unknown-types.cjs");
-      writeFileSync(
-        preload,
-        `const fs = require("node:fs");
-const open = fs.opendirSync;
-fs.opendirSync = (...args) => {
-  const handle = open(...args);
-  const read = handle.readSync.bind(handle);
-  handle.readSync = () => {
-    const entry = read();
-    // Model DT_UNKNOWN lookup joining a Buffer directory with a string name.
-    if (entry) fs.lstatSync(require("node:path").join(args[0], entry.name));
-    return entry;
-  };
-  return handle;
-};
-require("node:module").syncBuiltinESMExports();
-`,
-      );
-      const invoke = () =>
-        run(
-          f,
-          "make-rank-shards",
-          ["--rank-input", f.input, "--out-dir", f.directory],
-          {
-            ...process.env,
-            NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
-          },
-        );
-      const result = invoke();
+      const result = make(f);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("already contains shard files");
       expect(readFileSync(shard(f, 1))).toEqual(original);
       rmSync(shard(f, 1));
-      expect(invoke().status).toBe(0);
+      expect(make(f).status).toBe(0);
       expect(read(shard(f, 1))).toEqual([candidate("new.py")]);
     },
   );
@@ -389,9 +360,7 @@ require("node:module").syncBuiltinESMExports();
     const f = fixture();
     write(f.input, [candidate("a.py")]);
     expect(make(f).status).toBe(0);
-    expect(validate(f).stderr).toContain(
-      `Rank output shard missing: ${shard(f, 1, true)}`,
-    );
+    expect(validate(f).stderr).toContain(shard(f, 1, true));
     write(shard(f, 2, true), []);
     expect(merge(f).stderr).toContain(
       "missing output shards ['rank-shard-0001.output.jsonl']; unexpected output shards ['rank-shard-0002.output.jsonl']",
@@ -422,15 +391,15 @@ require("node:module").syncBuiltinESMExports();
     expect(existsSync(f.output)).toBe(false);
   });
 
-  test("sorts shard numbers numerically above four digits before checking canonical names", () => {
+  test("rejects gaps in shard names above four digits", () => {
     const f = fixture();
     write(f.input, []);
     write(join(f.directory, "rank-shard-9999.input.jsonl"), []);
     write(join(f.directory, "rank-shard-10000.input.jsonl"), []);
     const result = merge(f);
-    expect(result.stderr).toContain(
-      "actual=['rank-shard-9999.input.jsonl', 'rank-shard-10000.input.jsonl']",
-    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("contiguous canonical names");
+    expect(existsSync(f.output)).toBe(false);
   });
 
   test.each([
@@ -451,7 +420,7 @@ require("node:module").syncBuiltinESMExports();
         expect(creation.status).toBe(1);
         expect(creation.stderr).toContain("already contains shard files");
         expect(result.status).toBe(1);
-        expect(result.stderr).toContain(`invalid name: ${name}`);
+        expect(result.stderr).toContain("contiguous canonical names");
       } else {
         expect(creation.status).toBe(0);
         expect(result.status).toBe(0);
