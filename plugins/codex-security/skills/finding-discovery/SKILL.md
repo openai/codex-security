@@ -5,7 +5,7 @@ description: Use when Codex is already in the finding-discovery phase of a secur
 
 # Security Finding Discovery
 
-For retained output in a non-SDK plugin workflow, read `../../references/artifact-storage.md` and save through its MCP tools. Use `scanId` for a running scan or `targetPath` for standalone/after-completion output. SDK-owned output and actual repository/configuration edits retain their existing rules.
+Before choosing paths or saving retained output, read `../../references/artifact-storage.md` and follow its storage policy.
 
 ## Objective
 

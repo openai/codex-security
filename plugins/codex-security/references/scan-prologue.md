@@ -4,7 +4,7 @@ Apply this guidance once when a Standard or Deep Security Scan owns the top-leve
 
 ## Setup and Scan Ownership
 
-Read `artifact-storage.md` before choosing artifact paths. Non-SDK full scans require their existing MCP scan-start route and MCP artifact persistence; the SDK-owned and bound Deep-worker branches retain their existing contracts.
+Read `artifact-storage.md` before choosing artifact paths and follow its scan-ownership and storage rules.
 
 Follow the active scan mode's existing direct-start, native-continuation, SDK-owned, or headless-launch path. Codex CLI, evaluation harnesses, automation, and other headless hosts never open or wait for a desktop workspace. An explicitly identified desktop host retains its documented app continuation and authoritative scan context.
 

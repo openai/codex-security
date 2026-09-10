@@ -2,7 +2,7 @@
 
 Codex Security Standard and diff scan skills should run the read-only helper before substantive scan work. Deep scans have no parent capability requirements and do not run this helper.
 
-The top-level parent reads `artifact-storage.md` once before preflight and establishes any missing non-SDK scan ownership through the documented MCP route. This includes terminal Diff scans. SDK-owned scans preserve their existing identity, direct file-authoring and completion rules.
+The top-level parent reads `artifact-storage.md` once before preflight and follows its scan-ownership rules, including for terminal Diff scans.
 
 Load `desktop-config-preflight.md` only after the host explicitly identifies itself as the Codex desktop app.
 

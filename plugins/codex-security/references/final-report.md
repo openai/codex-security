@@ -1,6 +1,6 @@
 # Final Report and Codex Review Directives
 
-For non-SDK plugin workflows, follow `artifact-storage.md`: submit canonical data through the existing scan tools, let completion generate the report, and save supplementary documents or `report_validation.md` through the artifact MCP. An SDK-owned workflow keeps its existing direct draft-authoring and SDK completion behavior.
+Follow `artifact-storage.md` for storing canonical results, supplementary documents and `report_validation.md`.
 
 Use this guidance when authoring canonical report semantics and returning the generated Codex Security report and review directives.
 

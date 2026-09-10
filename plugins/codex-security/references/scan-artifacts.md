@@ -2,7 +2,7 @@
 
 Use these shared path conventions for Codex Security scan workflows unless the user explicitly provides different input or output paths.
 
-First read `artifact-storage.md`. For non-SDK workflows, its MCP-owned roots and save/read operations govern all retained paths below. `scan_dir` is the authoritative persistent directory returned by the host; standalone artifacts use the target-bound collection returned by the artifact tool. Resolve the shared threat-model cache through that collection, not the legacy temporary path below. The temporary base-path formulas remain only for SDK/legacy caller-owned execution. Helper-generated files use the returned temporary workspace and are imported before being referenced as retained evidence.
+First read `artifact-storage.md` and follow its storage and threat-model cache rules, which take precedence over the legacy temporary base paths below.
 
 ## Base Paths
 
