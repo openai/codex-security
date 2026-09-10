@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import * as z from "zod/v4";
 import {
   readArtifactBytes,
@@ -54,7 +54,8 @@ export async function standaloneArtifactContext(
   targetPath: string,
   runWorkbench: RunArtifactWorkbench,
   create: boolean,
-  scanRoot: string
+  scanRoot: string,
+  storage: ArtifactLocation["storage"]
 ): Promise<ArtifactContext> {
   const target = await runWorkbench(["inspect-target", "--target-path", targetPath]);
   if (typeof target.targetPath !== "string") throw new Error("Missing artifact target.");
@@ -62,12 +63,26 @@ export async function standaloneArtifactContext(
   const name = basename(repoRoot).replace(/[^a-zA-Z0-9._-]+/g, "-") || "repository";
   const identity = createHash("sha256").update(repoRoot).digest("hex");
   const root = join(scanRoot, name, `artifacts-${identity}`);
+  if (storage === "temporary") {
+    // Resolve existing ancestors for stable imports without creating or requiring
+    // the persistent collection. storageContext prepares the temporary root.
+    return { root: await resolveStoragePath(root), repoRoot, layout: "scan" };
+  }
   const existingRoot = await fs.realpath(scanRoot).catch(() => scanRoot);
   if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
     throw new Error("Artifact storage must be outside the target repository.");
   }
   if (create) await fs.mkdir(root, { recursive: true, mode: 0o700 });
   return { root: await requireArtifactRoot(root, "Standalone artifacts"), repoRoot, layout: "scan" };
+}
+
+async function resolveStoragePath(path: string): Promise<string> {
+  try {
+    return await fs.realpath(path);
+  } catch {
+    const parent = dirname(path);
+    return parent === path ? path : join(await resolveStoragePath(parent), basename(path));
+  }
 }
 
 async function storageContext(

@@ -285,7 +285,7 @@ async function supplementalContext(
   if (input.scanId !== undefined) return scanContext({ ...input, scanId: input.scanId }, options, write, requestContext);
   if (input.handoffClaimToken !== undefined) throw new Error("A handoff claim requires a scanId.");
   const root = await options.resolveScanRoot?.() ?? persistentScanRoot(options.pluginRoot);
-  return standaloneArtifactContext(input.targetPath!, options.runWorkbench, write, root);
+  return standaloneArtifactContext(input.targetPath!, options.runWorkbench, write, root, input.storage);
 }
 
 /** Expose only the operations appropriate to the inherited worker phase. */

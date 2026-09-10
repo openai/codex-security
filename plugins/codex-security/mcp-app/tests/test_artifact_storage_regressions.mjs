@@ -67,6 +67,49 @@ async function connect(overrides = {}) {
 }
 
 try {
+  for (const kind of ["missing", "blocked", "alias", "read-only"]) {
+    await test(`standalone temporary storage works with persistent root: ${kind}`, { skip: kind === "read-only" && process.platform === "win32" }, async () => {
+      const parent = path.join(fixture, `temporary-${kind}`);
+      let scanRoot = path.join(parent, "scans");
+      if (kind === "blocked") await fs.writeFile(parent, "unavailable storage");
+      if (kind === "alias" || kind === "read-only") await fs.mkdir(parent);
+      if (kind === "alias") {
+        const alias = path.join(fixture, "temporary-alias-link");
+        await fs.symlink(parent, alias, process.platform === "win32" ? "junction" : "dir");
+        scanRoot = path.join(alias, "scans");
+      }
+      if (kind === "read-only") await fs.chmod(parent, 0o500);
+      try {
+        const overrides = { CODEX_SECURITY_SCAN_ROOT: scanRoot };
+        let call = await connect(overrides);
+        const location = { targetPath: repository, storage: "temporary" };
+        const { directory } = await call("save_codex_security_artifact", location);
+        temporaryDirectories.push(directory);
+        assert.equal(path.dirname(directory), await fs.realpath(tmpdir()));
+        const saved = await call("save_codex_security_artifact", { ...location, path: "note.txt", content: "temporary evidence\n" });
+        assert.equal(saved.directory, directory);
+        assert.equal(await fs.readFile(saved.path, "utf8"), "temporary evidence\n");
+        await clients.at(-1).close();
+        call = await connect(overrides);
+        assert.equal((await call("read_codex_security_artifact", { ...location, path: "note.txt" })).content, "temporary evidence\n");
+        if (kind === "blocked") {
+          assert.equal(await fs.readFile(parent, "utf8"), "unavailable storage");
+          await fs.unlink(parent);
+        } else {
+          await assert.rejects(fs.stat(scanRoot), { code: "ENOENT" });
+        }
+        if (kind === "read-only") await fs.chmod(parent, 0o700);
+        const imported = await call("save_codex_security_artifact", {
+          targetPath: repository, storage: "persistent", path: "artifacts/note.txt", sourcePath: saved.path
+        });
+        assert.equal(await fs.readFile(imported.path, "utf8"), "temporary evidence\n");
+        assert.equal((await call("read_codex_security_artifact", { ...location, path: "note.txt" })).directory, directory);
+      } finally {
+        if (kind === "read-only") await fs.chmod(parent, 0o700);
+      }
+    });
+  }
+
   await test("a save captured before sealing cannot create directories after sealing", async () => {
     const call = await connect();
     const { scanId, scanDir, handoffClaimToken } = await call("start_codex_security_standard_scan", { targetPath: repository });
@@ -87,7 +130,7 @@ try {
 
   for (const storage of ["temporary", "persistent"]) {
     await test(`${storage} publication stays bound to its opened parent during replacement`, { skip: process.platform === "win32" }, async () => {
-      const context = await standaloneArtifactContext(repository, workbench, true, path.join(fixture, `swap-${storage}`));
+      const context = await standaloneArtifactContext(repository, workbench, true, path.join(fixture, `swap-${storage}`), storage);
       const location = { targetPath: repository, storage };
       const { directory } = await saveCodexSecurityArtifact(context, location, workbench);
       if (storage === "temporary") temporaryDirectories.push(directory);
