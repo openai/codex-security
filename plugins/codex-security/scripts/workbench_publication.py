@@ -53,6 +53,10 @@ def linear_publication_input(
     required = {"scanId", "scanDirectory", "destination", "findings"}
     if recording:
         required.add("publications")
+    if recording and "attemptId" in payload:
+        required.add("attemptId")
+        if not isinstance(payload["attemptId"], str) or not payload["attemptId"].strip():
+            raise SystemExit("Linear publication attempt identity must be a nonempty string.")
     if set(payload) != required:
         raise SystemExit("Linear publication input contains unexpected or missing fields.")
 
@@ -164,12 +168,13 @@ def inspect_linear_publication(
         connection.execute("BEGIN")
         scan = verify_linear_publication_scan(db, connection, payload, findings)
         recorded: dict[str, dict[str, str]] = {}
+        publications: list[dict[str, str]] = []
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'finding_publications'"
         ).fetchone():
             for row in connection.execute(
                 """
-                SELECT finding_id, occurrence_id, external_id, external_url
+                SELECT *
                 FROM finding_publications
                 WHERE scan_id = ? AND destination_type = ? AND team_id = ? AND project_id IS ?
                 ORDER BY created_at, external_id
@@ -181,19 +186,28 @@ def inspect_linear_publication(
                     destination.get("projectId"),
                 ),
             ):
-                recorded.setdefault(
-                    row["occurrence_id"],
+                publication = {
+                    "findingId": row["finding_id"],
+                    "occurrenceId": row["occurrence_id"],
+                    "issueIdentifier": row["external_id"],
+                    **({"url": row["external_url"]} if row["external_url"] is not None else {}),
+                }
+                publications.append(
                     {
-                        "findingId": row["finding_id"],
-                        "occurrenceId": row["occurrence_id"],
-                        "issueIdentifier": row["external_id"],
-                        **({"url": row["external_url"]} if row["external_url"] is not None else {}),
-                    },
+                        **publication,
+                        **(
+                            {"attemptId": row["attempt_id"]}
+                            if "attempt_id" in row.keys() and row["attempt_id"] is not None
+                            else {}
+                        ),
+                    }
                 )
+                recorded.setdefault(row["occurrence_id"], publication)
         return {
             "scanId": scan["id"],
             "destination": destination,
             "findingCount": len(findings),
+            "publications": publications,
             "recorded": [
                 recorded[finding["occurrenceId"]]
                 for finding in findings
@@ -300,8 +314,8 @@ def record_linear_publications(
                 """
                 INSERT INTO finding_publications (
                     scan_id, finding_id, occurrence_id, destination_type,
-                    team_id, project_id, external_id, external_url, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    team_id, project_id, external_id, external_url, created_at, attempt_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT DO NOTHING
                 """,
                 (
@@ -314,6 +328,23 @@ def record_linear_publications(
                     publication["issueIdentifier"],
                     publication.get("url"),
                     timestamp,
+                    payload.get("attemptId"),
+                ),
+            )
+            # A separate update also supports SQLite versions before 3.35.
+            connection.execute(
+                """
+                UPDATE finding_publications
+                SET attempt_id = COALESCE(attempt_id, ?)
+                WHERE destination_type = ? AND team_id = ? AND project_id IS ?
+                    AND external_id = ?
+                """,
+                (
+                    payload.get("attemptId"),
+                    destination["type"],
+                    destination["teamId"],
+                    destination.get("projectId"),
+                    publication["issueIdentifier"],
                 ),
             )
 

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import * as fileSystem from "node:fs/promises";
 import {
   appendFile,
   chmod,
@@ -13,10 +14,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { basename, dirname, join } from "node:path";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { NetworkLinearError } from "@linear/sdk";
 import { main } from "../src/cli.js";
-import { prepareScanPublication } from "../src/publication.js";
+import {
+  linearPublicationArguments,
+  prepareScanPublication,
+} from "../src/publication.js";
 import { recordPublishedIssues } from "../src/publication-store.js";
 import type {
   CoverageDocument,
@@ -325,55 +330,1574 @@ function receiptPath(fixture: PublicationFixture): string {
 }
 
 describe("database-backed Linear publication integration", () => {
-  test("publishes classified selections while verifying the complete scan history and preserving earlier tickets", async () => {
+  test.each([false, true])(
+    "one attempt cannot resolve another attempt's unknown mutation (recover earlier=%j)",
+    async (recoverEarlier) => {
+      const completed = await fixture(1);
+      const handoffs: string[] = [];
+      let launches = 0;
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        recordPublishedIssues: async (...args) => {
+          if (recoverEarlier && launches === 1)
+            throw new Error("Synthetic SQLite interruption");
+          return recordPublishedIssues(...args);
+        },
+        runCodex: async (_command, _args, prompt) => {
+          launches++;
+          const payload = await publicationPayload(prompt);
+          handoffs.push(payload.handoffFile);
+          if (launches === (recoverEarlier ? 2 : 1))
+            throw new Error("Synthetic unknown remote outcome");
+          await writeFile(
+            payload.handoffFile,
+            JSON.stringify({
+              scanId: payload.scanId,
+              ...payload.batches.flat()[0]!,
+              issueIdentifier: "EXAMPLE-1",
+            }) + "\n",
+          );
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      };
+      await expect(
+        publishScanInternal(completed.scanDirectory, OPTIONS, runtime),
+      ).rejects.toThrow();
+      const second = publishScanInternal(
+        completed.scanDirectory,
+        OPTIONS,
+        runtime,
+      );
+      if (recoverEarlier) {
+        await expect(second).rejects.toThrow("unknown remote outcome");
+      } else {
+        await second;
+      }
+      const root = dirname(dirname(handoffs[0]!));
+      const entries = await readdir(root, { withFileTypes: true });
+      entries.sort(
+        (a, b) =>
+          handoffs.findIndex((path) => basename(dirname(path)) === a.name) -
+          handoffs.findIndex((path) => basename(dirname(path)) === b.name),
+      );
+      const readDirectory = fileSystem.readdir;
+      const listing = spyOn(fileSystem, "readdir").mockImplementation(((
+        ...args: Parameters<typeof fileSystem.readdir>
+      ) =>
+        args[0] === root
+          ? Promise.resolve(entries)
+          : readDirectory(...args)) as typeof fileSystem.readdir);
+      try {
+        for (let retry = 0; retry < 2; retry++) {
+          await expect(
+            publishScanInternal(
+              completed.scanDirectory,
+              {
+                ...OPTIONS,
+                skipExisting: true,
+              },
+              runtime,
+            ),
+          ).rejects.toThrow("outcome is unknown");
+          expect(
+            storedPublications(completed).map((row) => row.external_id),
+          ).toEqual(["EXAMPLE-1"]);
+          expect(launches).toBe(2);
+        }
+      } finally {
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each(["unknown", "confirmed"])(
+    "retained host receipts recover after the publisher directory is removed (%s)",
+    async (mode) => {
+      const completed = await fixture(1);
+      const before = await artifactDigests(completed.scanDirectory);
+      let directory = "";
+      let launches = 0;
+      let records = 0;
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        recordPublishedIssues: async (...args) => {
+          if (++records === 1 && mode === "confirmed")
+            throw new Error("Synthetic database interruption");
+          return recordPublishedIssues(...args);
+        },
+        runCodex: async (_command, _args, prompt) => {
+          launches++;
+          const payload = await publicationPayload(prompt);
+          directory = dirname(payload.handoffFile);
+          await rm(directory, { recursive: true });
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              type: "item.completed",
+              item: {
+                type: "mcp_tool_call",
+                server: "codex_apps",
+                tool: "linear.save_issue",
+                arguments: payload.batches.flat()[0]!.arguments,
+                status: "completed",
+                result:
+                  mode === "unknown"
+                    ? { id: "33333333-3333-4333-8333-333333333333" }
+                    : { identifier: "EXAMPLE-1" },
+              },
+            }),
+          };
+        },
+      };
+      await expect(
+        publishScanInternal(completed.scanDirectory, OPTIONS, runtime),
+      ).rejects.toThrow(
+        mode === "unknown" ? "could not verify" : "Could not persist",
+      );
+      const receiptPath = join(
+        dirname(dirname(directory)),
+        `${basename(directory)}.json`,
+      );
+      const retained = await readFile(receiptPath, "utf8");
+      expect(Boolean(JSON.parse(retained).outcome.indeterminate)).toBe(
+        mode === "unknown",
+      );
+      expect(storedPublications(completed)).toHaveLength(0);
+      const retryOptions = { ...OPTIONS, skipExisting: true };
+      if (mode === "unknown") {
+        await expect(
+          publishScanInternal(completed.scanDirectory, retryOptions, runtime),
+        ).rejects.toThrow("outcome is unknown");
+        expect(launches).toBe(1);
+        expect(await readFile(receiptPath, "utf8")).toBe(retained);
+        // An operator can still resolve the retained attempt through existing SQLite history.
+        const prepared = await prepareScanPublication(completed.scanDirectory, {
+          ...OPTIONS,
+          environment: completed.environment,
+        });
+        const issue = prepared.issues[0]!;
+        await recordPublishedIssues(
+          prepared,
+          [
+            {
+              findingId: issue.findingId,
+              occurrenceId: issue.occurrenceId,
+              issueIdentifier: "EXAMPLE-1",
+            },
+          ],
+          completed.environment,
+        );
+      }
+      for (let retry = 0; retry < 2; retry++) {
+        const result = await publishScanInternal(
+          completed.scanDirectory,
+          retryOptions,
+          runtime,
+        );
+        expect(result.created).toEqual([]);
+        expect(result.skipped).toMatchObject([
+          { issueIdentifier: "EXAMPLE-1" },
+        ]);
+        expect(launches).toBe(1);
+      }
+      expect(
+        storedPublications(completed).map((row) => row.external_id),
+      ).toEqual(["EXAMPLE-1"]);
+      expect(JSON.parse(await readFile(receiptPath, "utf8")).recovered).toBe(
+        true,
+      );
+      expect(await artifactDigests(completed.scanDirectory)).toEqual(before);
+    },
+  );
+
+  test.each(["completed", "unknown", "missing-receipt"])(
+    "a disappearing Linear handoff requires its completed host receipt (%s)",
+    async (mode) => {
+      const completed = await fixture(1);
+      let handoff = "";
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const response = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let launches = 0;
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        runCodex: async (_command, _args, prompt) => {
+          launches++;
+          const payload = await publicationPayload(prompt);
+          handoff = payload.handoffFile;
+          entered();
+          await response;
+          await writeFile(
+            handoff,
+            JSON.stringify({
+              scanId: payload.scanId,
+              ...payload.batches.flat()[0]!,
+              issueIdentifier: "EXAMPLE-1",
+            }) + "\n",
+          );
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      };
+      const first = publishScanInternal(
+        completed.scanDirectory,
+        OPTIONS,
+        runtime,
+      );
+      await started;
+      const directory = dirname(handoff);
+      const root = dirname(directory);
+      const hostReceipt = join(dirname(root), `${basename(directory)}.json`);
+      const readDirectory = fileSystem.readdir;
+      const listing = spyOn(fileSystem, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof fileSystem.readdir>
+      ) => {
+        const entries = await readDirectory(...args);
+        if (args[0] === root) {
+          if (mode === "completed") {
+            release();
+            await first;
+          } else {
+            await rm(directory, { recursive: true });
+            if (mode === "missing-receipt") await rm(hostReceipt);
+          }
+        }
+        return entries;
+      }) as typeof fileSystem.readdir);
+      try {
+        const retry = publishScanInternal(
+          completed.scanDirectory,
+          { ...OPTIONS, skipExisting: true },
+          runtime,
+        );
+        if (mode === "completed") {
+          expect((await retry).skipped).toMatchObject([
+            { issueIdentifier: "EXAMPLE-1" },
+          ]);
+          expect(
+            JSON.parse(await readFile(hostReceipt, "utf8")).recovered,
+          ).toBe(true);
+        } else await expect(retry).rejects.toThrow("outcome is unknown");
+        expect(launches).toBe(1);
+      } finally {
+        listing.mockRestore();
+        release();
+        await first.catch(() => undefined);
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "a manual SQLite mapping confirms only one unknown attempt (competing claim=%j)",
+    async (competingClaim) => {
+      const completed = await fixture(1);
+      const prepared = await prepareScanPublication(completed.scanDirectory, {
+        ...OPTIONS,
+        environment: completed.environment,
+      });
+      const issue = prepared.issues[0]!;
+      const mapping = (issueIdentifier: string) => ({
+        findingId: issue.findingId,
+        occurrenceId: issue.occurrenceId,
+        issueIdentifier,
+      });
+      const handoffs: string[] = [];
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        runCodex: async (_command, _args, prompt) => {
+          handoffs.push((await publicationPayload(prompt)).handoffFile);
+          throw new Error("Synthetic unknown remote outcome");
+        },
+      };
+      for (let attempt = 0; attempt < 2; attempt++)
+        await expect(
+          publishScanInternal(completed.scanDirectory, OPTIONS, runtime),
+        ).rejects.toThrow("unknown remote outcome");
+      await recordPublishedIssues(
+        prepared,
+        [mapping("EXAMPLE-1")],
+        completed.environment,
+      );
+      const root = dirname(dirname(handoffs[0]!));
+      const entries = await readdir(root, { withFileTypes: true });
+      entries.sort(
+        (a, b) =>
+          handoffs.findIndex((path) => basename(dirname(path)) === a.name) -
+          handoffs.findIndex((path) => basename(dirname(path)) === b.name),
+      );
+      const readDirectory = fileSystem.readdir;
+      const listing = spyOn(fileSystem, "readdir").mockImplementation(((
+        ...args: Parameters<typeof fileSystem.readdir>
+      ) =>
+        args[0] === root
+          ? Promise.resolve(entries)
+          : readDirectory(...args)) as typeof fileSystem.readdir);
+      if (competingClaim)
+        runtime.recordPublishedIssues = async (...args) => {
+          await recordPublishedIssues(
+            args[0],
+            args[1],
+            args[2],
+            entries[1]!.name,
+          );
+          return recordPublishedIssues(...args);
+        };
+      const completedReceipts = async () =>
+        Promise.all(
+          handoffs.map(async (file) =>
+            JSON.parse(
+              await readFile(
+                join(dirname(root), `${basename(dirname(file))}.json`),
+                "utf8",
+              ),
+            ),
+          ),
+        );
+      try {
+        for (let retry = 0; retry < 2; retry++) {
+          await expect(
+            publishScanInternal(
+              completed.scanDirectory,
+              { ...OPTIONS, skipExisting: true },
+              runtime,
+            ),
+          ).rejects.toThrow("outcome is unknown");
+          expect(
+            (await completedReceipts()).filter((receipt) => receipt.recovered),
+          ).toHaveLength(competingClaim ? 0 : 1);
+          expect(handoffs).toHaveLength(2);
+        }
+        delete runtime.recordPublishedIssues;
+        await recordPublishedIssues(
+          prepared,
+          [mapping("EXAMPLE-2")],
+          completed.environment,
+        );
+        await publishScanInternal(
+          completed.scanDirectory,
+          { ...OPTIONS, skipExisting: true },
+          runtime,
+        );
+        const recovered = await completedReceipts();
+        expect(recovered.every((receipt) => receipt.recovered)).toBe(true);
+        expect(
+          new Set(
+            recovered.map(
+              (receipt) => receipt.outcome.created[0].issueIdentifier,
+            ),
+          ).size,
+        ).toBe(2);
+        expect(handoffs).toHaveLength(2);
+      } finally {
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each(["rejected", "unsubmitted"])(
+    "a %s attempt cannot claim a later unknown attempt's manual confirmation",
+    async (firstOutcome) => {
+      const completed = await fixture(1);
+      const prepared = await prepareScanPublication(completed.scanDirectory, {
+        ...OPTIONS,
+        environment: completed.environment,
+      });
+      const issue = prepared.issues[0]!;
+      const controller = new AbortController();
+      const options = {
+        ...OPTIONS,
+        linearApiKey: "lin_api_SYNTHETIC_CONFIRMATION",
+      };
+      type LinearClient = ReturnType<
+        NonNullable<PublishScanDependencies["linearClient"]>
+      >;
+      let unknown = false;
+      let mutations = 0;
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        linearClient: () =>
+          ({
+            createIssue: async () => {
+              mutations++;
+              if (unknown) throw new NetworkLinearError();
+              return { success: false, issue: Promise.resolve(undefined) };
+            },
+          }) as unknown as LinearClient,
+      };
+      const append = fileSystem.appendFile;
+      const journal = spyOn(fileSystem, "appendFile").mockImplementation(
+        async (...args) => {
+          await append(...args);
+          if (
+            firstOutcome === "unsubmitted" &&
+            basename(String(args[0])) === "started-batches.jsonl"
+          )
+            controller.abort();
+        },
+      );
+      try {
+        await expect(
+          publishScanInternal(
+            completed.scanDirectory,
+            {
+              ...options,
+              signal: controller.signal,
+              onProgress: (event) => {
+                if (event.type === "handoff_recorded") controller.abort();
+              },
+            },
+            runtime,
+          ),
+        ).rejects.toThrow("interrupted");
+      } finally {
+        journal.mockRestore();
+      }
+      const root = join(
+        completed.stateDirectory,
+        "publications",
+        "linear",
+        "handoffs",
+      );
+      const first = (await readdir(root))[0]!;
+      expect(mutations).toBe(firstOutcome === "rejected" ? 1 : 0);
+      unknown = true;
+      await expect(
+        publishScanInternal(completed.scanDirectory, options, runtime),
+      ).rejects.toThrow("could not verify every completed mutation");
+      const entries = await readdir(root, { withFileTypes: true });
+      entries.sort(
+        (a, b) => Number(b.name === first) - Number(a.name === first),
+      );
+      expect(entries).toHaveLength(2);
+      const second = entries[1]!.name;
+      await recordPublishedIssues(
+        prepared,
+        [
+          {
+            findingId: issue.findingId,
+            occurrenceId: issue.occurrenceId,
+            issueIdentifier: "EXAMPLE-1",
+          },
+        ],
+        completed.environment,
+      );
+      const readDirectory = fileSystem.readdir;
+      const listing = spyOn(fileSystem, "readdir").mockImplementation(((
+        ...args: Parameters<typeof fileSystem.readdir>
+      ) =>
+        args[0] === root
+          ? Promise.resolve(entries)
+          : readDirectory(...args)) as typeof fileSystem.readdir);
+      try {
+        for (let retry = 0; retry < 2; retry++) {
+          const result = await publishScanInternal(
+            completed.scanDirectory,
+            { ...options, skipExisting: true },
+            runtime,
+          );
+          expect(result.created).toEqual([]);
+          expect(result.skipped).toMatchObject([
+            { issueIdentifier: "EXAMPLE-1" },
+          ]);
+          expect(mutations).toBe(firstOutcome === "rejected" ? 2 : 1);
+        }
+        const receipts = await Promise.all(
+          [first, second].map(async (attempt) =>
+            JSON.parse(
+              await readFile(join(dirname(root), `${attempt}.json`), "utf8"),
+            ),
+          ),
+        );
+        expect(receipts.every((receipt) => receipt.recovered)).toBe(true);
+        expect(receipts[0].outcome.created).toEqual([]);
+        expect(receipts[0].outcome.failed).toHaveLength(1);
+        expect(receipts[1].outcome.created).toMatchObject([
+          { issueIdentifier: "EXAMPLE-1" },
+        ]);
+        expect(
+          JSON.parse(
+            execFileSync(
+              completed.python,
+              [
+                "-I",
+                "-B",
+                "-c",
+                "import json, sqlite3, sys; connection = sqlite3.connect(sys.argv[1]); print(json.dumps(connection.execute('SELECT attempt_id FROM finding_publications').fetchall()))",
+                join(completed.stateDirectory, "workbench.sqlite3"),
+              ],
+              { encoding: "utf8", env: completed.environment },
+            ),
+          ),
+        ).toEqual([[second]]);
+      } finally {
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test("partial handoff cleanup retains the host recovery receipt", async () => {
+    const completed = await fixture(1);
+    let handoff = "";
+    let launches = 0;
+    const remove = fileSystem.rm;
+    const cleanup = spyOn(fileSystem, "rm").mockImplementation(
+      async (path, options) => {
+        if (handoff && path === dirname(handoff) && options?.recursive) {
+          await remove(handoff);
+          throw Object.assign(new Error("Synthetic sharing violation"), {
+            code: "EPERM",
+          });
+        }
+        return remove(path, options);
+      },
+    );
+    const runtime: PublishScanDependencies = {
+      environment: completed.environment,
+      resolveCodex: () => ({ command: "synthetic-codex" }),
+      runCodex: async (_command, _args, prompt) => {
+        launches++;
+        const payload = await publicationPayload(prompt);
+        handoff = payload.handoffFile;
+        await writeFile(
+          handoff,
+          JSON.stringify({
+            scanId: payload.scanId,
+            ...payload.batches.flat()[0]!,
+            issueIdentifier: "EXAMPLE-1",
+          }) + "\n",
+        );
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    try {
+      const first = await publishScanInternal(
+        completed.scanDirectory,
+        OPTIONS,
+        runtime,
+      );
+      expect(first.created).toHaveLength(1);
+    } finally {
+      cleanup.mockRestore();
+    }
+    const directory = dirname(handoff);
+    const receipt = join(
+      dirname(dirname(directory)),
+      `${basename(directory)}.json`,
+    );
+    expect(
+      JSON.parse(await readFile(receipt, "utf8")).outcome.created,
+    ).toHaveLength(1);
+    const retry = await publishScanInternal(
+      completed.scanDirectory,
+      { ...OPTIONS, skipExisting: true },
+      runtime,
+    );
+    expect(retry.skipped).toHaveLength(1);
+    expect(storedPublications(completed)).toHaveLength(1);
+    expect(launches).toBe(1);
+  });
+
+  test.each(["cleanup", "marker", "unknown"])(
+    "saved API failures survive cleanup without authorizing unknown mutations (%s)",
+    async (failure) => {
+      const indeterminate = failure === "unknown";
+      const completed = await fixture(2);
+      const handoffs = join(
+        completed.stateDirectory,
+        "publications",
+        "linear",
+        "handoffs",
+      );
+      const remove = fileSystem.rm;
+      const cleanup = spyOn(fileSystem, "rm").mockImplementation(
+        async (path, options) => {
+          if (
+            failure !== "marker" &&
+            typeof path === "string" &&
+            dirname(path) === handoffs &&
+            options?.recursive
+          ) {
+            await remove(join(path, "issues.jsonl"));
+            throw Object.assign(new Error("Synthetic sharing violation"), {
+              code: "EPERM",
+            });
+          }
+          return remove(path, options);
+        },
+      );
+      const rename = fileSystem.rename;
+      const checkpoint = spyOn(fileSystem, "rename").mockImplementation(
+        async (source, target) => {
+          if (
+            failure === "marker" &&
+            typeof target === "string" &&
+            dirname(target) === dirname(handoffs) &&
+            JSON.parse(await readFile(source, "utf8")).recovered
+          )
+            throw new Error("Synthetic completed receipt write failure");
+          return rename(source, target);
+        },
+      );
+      type LinearClient = ReturnType<
+        NonNullable<PublishScanDependencies["linearClient"]>
+      >;
+      type IssueInput = Parameters<LinearClient["createIssue"]>[0];
+      const attempted: string[] = [];
+      let retry = false;
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        linearClient: () =>
+          ({
+            createIssue: async (input: IssueInput) => {
+              const finding = completed.findings.find(({ findingId }) =>
+                input.description?.includes(findingId),
+              )!;
+              attempted.push(finding.findingId);
+              const second = finding === completed.findings[1];
+              if (second && !retry)
+                return {
+                  success: indeterminate,
+                  issue: Promise.resolve(undefined),
+                };
+              return {
+                success: true,
+                issue: Promise.resolve({
+                  identifier: second ? "EXAMPLE-2" : "EXAMPLE-1",
+                }),
+              };
+            },
+          }) as unknown as LinearClient,
+      };
+      const options = {
+        ...OPTIONS,
+        linearApiKey: "lin_api_SYNTHETIC_CLEANUP",
+      };
+      try {
+        const first = publishScanInternal(
+          completed.scanDirectory,
+          options,
+          runtime,
+        );
+        if (indeterminate) {
+          await expect(first).rejects.toThrow("could not verify");
+        } else {
+          const result = await first;
+          expect(result.created).toHaveLength(1);
+          expect(result.failed).toHaveLength(1);
+        }
+      } finally {
+        cleanup.mockRestore();
+        checkpoint.mockRestore();
+      }
+      const directory = join(handoffs, (await readdir(handoffs))[0]!);
+      if (indeterminate) await rm(join(directory, "issues.jsonl"));
+      const receipt = JSON.parse(
+        await readFile(
+          join(dirname(handoffs), `${basename(directory)}.json`),
+          "utf8",
+        ),
+      );
+      expect(receipt.outcome.indeterminate === true).toBe(indeterminate);
+      expect(receipt.outcome.failed).toHaveLength(1);
+      expect(receipt.recovered === true).toBe(failure === "cleanup");
+      expect((await readdir(directory)).includes("issues.jsonl")).toBe(
+        failure === "marker",
+      );
+      expect(
+        await readFile(join(directory, "started-batches.jsonl"), "utf8"),
+      ).toContain(completed.findings[1]!.findingId);
+      retry = true;
+      const result = publishScanInternal(
+        completed.scanDirectory,
+        { ...options, skipExisting: true },
+        runtime,
+      );
+      if (indeterminate) {
+        await expect(result).rejects.toThrow("outcome is unknown");
+        expect(attempted).toHaveLength(2);
+        expect(storedPublications(completed)).toHaveLength(1);
+      } else {
+        const recovered = await result;
+        expect(recovered.skipped).toHaveLength(1);
+        expect(recovered.created).toHaveLength(1);
+        expect(attempted).toEqual([
+          ...completed.findings.map((finding) => finding.findingId),
+          completed.findings[1]!.findingId,
+        ]);
+        expect(storedPublications(completed)).toHaveLength(2);
+      }
+    },
+  );
+
+  test("an empty legacy publication plan cannot authorize replay", async () => {
+    const completed = await fixture(1);
+    let handoff = "";
+    let launches = 0;
+    const runtime: PublishScanDependencies = {
+      environment: completed.environment,
+      resolveCodex: () => ({ command: "synthetic-codex" }),
+      runCodex: async (_command, _args, prompt) => {
+        launches++;
+        handoff = (await publicationPayload(prompt)).handoffFile;
+        throw new Error("Synthetic unknown remote outcome");
+      },
+    };
+    await expect(
+      publishScanInternal(completed.scanDirectory, OPTIONS, runtime),
+    ).rejects.toThrow("unknown remote outcome");
+    const directory = dirname(handoff);
+    await rm(join(dirname(dirname(directory)), `${basename(directory)}.json`));
+    const path = join(directory, "publication.json");
+    const plan = JSON.parse(await readFile(path, "utf8"));
+    plan.batches = [];
+    await writeFile(path, JSON.stringify(plan));
+    await expect(
+      publishScanInternal(
+        completed.scanDirectory,
+        { ...OPTIONS, skipExisting: true },
+        runtime,
+      ),
+    ).rejects.toThrow("Reconcile");
+    expect(launches).toBe(1);
+    expect(storedPublications(completed)).toEqual([]);
+  });
+
+  test("a recorded mapping does not hide an additional acknowledged native mutation", async () => {
+    const completed = await fixture(1);
+    let launches = 0;
+    const runtime: PublishScanDependencies = {
+      environment: completed.environment,
+      resolveCodex: () => ({ command: "synthetic-codex" }),
+      runCodex: async (_command, _args, prompt) => {
+        launches++;
+        const payload = await publicationPayload(prompt);
+        const request = payload.batches.flat()[0]!;
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout: [1, 2]
+            .map((index) =>
+              JSON.stringify({
+                type: "item.completed",
+                item: {
+                  id: `synthetic-create-${index}`,
+                  type: "mcp_tool_call",
+                  server: "codex_apps",
+                  tool: "linear_save_issue",
+                  status: "completed",
+                  arguments: request.arguments,
+                  result: {
+                    content: [],
+                    structured_content: { identifier: `EXAMPLE-${index}` },
+                  },
+                },
+              }),
+            )
+            .join("\n"),
+        };
+      },
+    };
+    await expect(
+      publishScanInternal(completed.scanDirectory, OPTIONS, runtime),
+    ).rejects.toThrow("could not verify");
+    const prepared = await prepareScanPublication(completed.scanDirectory, {
+      ...OPTIONS,
+      environment: completed.environment,
+    });
+    const issue = prepared.issues[0]!;
+    await recordPublishedIssues(
+      prepared,
+      [
+        {
+          findingId: issue.findingId,
+          occurrenceId: issue.occurrenceId,
+          issueIdentifier: "EXAMPLE-1",
+        },
+      ],
+      completed.environment,
+    );
+    await expect(
+      publishScanInternal(
+        completed.scanDirectory,
+        { ...OPTIONS, skipExisting: true },
+        runtime,
+      ),
+    ).rejects.toThrow("outcome is unknown");
+    expect(storedPublications(completed)).toHaveLength(1);
+    expect(launches).toBe(1);
+  });
+
+  test.each(["EXAMPLE-1", "EXAMPLE-2", "EXAMPLE-3"])(
+    "legacy recovery matches the acknowledged identity across all SQLite history (%s)",
+    async (acknowledgedId) => {
+      const completed = await fixture(1);
+      const sealed = await artifactDigests(completed.scanDirectory);
+      const prepared = await prepareScanPublication(completed.scanDirectory, {
+        ...OPTIONS,
+        environment: completed.environment,
+      });
+      const issue = prepared.issues[0]!;
+      const mapping = (issueIdentifier: string) => ({
+        findingId: issue.findingId,
+        occurrenceId: issue.occurrenceId,
+        issueIdentifier,
+      });
+      for (const identifier of ["EXAMPLE-1", "EXAMPLE-2", "EXAMPLE-3"])
+        await recordPublishedIssues(
+          prepared,
+          [mapping(identifier)],
+          completed.environment,
+        );
+      const stored = storedPublications(completed);
+      const name = `${sha256(prepared.scanId)}-legacy`;
+      const directory = join(
+        completed.stateDirectory,
+        "publications",
+        "linear",
+        "handoffs",
+        name,
+      );
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const request = {
+        findingId: issue.findingId,
+        occurrenceId: issue.occurrenceId,
+        arguments: linearPublicationArguments(prepared.destination, issue),
+      };
+      await writeFile(
+        join(directory, "publication.json"),
+        JSON.stringify({
+          scanId: prepared.scanId,
+          destination: prepared.destination,
+          batches: [[request]],
+        }),
+      );
+      // Older releases appended the host's verified success after a model failure.
+      await writeFile(
+        join(directory, "issues.jsonl"),
+        [
+          {
+            ...request,
+            scanId: prepared.scanId,
+            error: "The model omitted the created issue",
+          },
+          {
+            ...request,
+            scanId: prepared.scanId,
+            issueIdentifier: acknowledgedId,
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join("\n") + "\n",
+      );
+      let launches = 0;
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        runCodex: async () => {
+          launches++;
+          throw new Error("Recorded legacy publication must not be repeated");
+        },
+      };
+      for (let retry = 0; retry < 2; retry++) {
+        const result = await publishScanInternal(
+          completed.scanDirectory,
+          { ...OPTIONS, skipExisting: true },
+          runtime,
+        );
+        expect(result.counts).toEqual({
+          findings: 1,
+          created: 0,
+          failed: 0,
+          skipped: 1,
+        });
+        expect(result.skipped).toEqual([mapping("EXAMPLE-1")]);
+        const receipt = JSON.parse(
+          await readFile(
+            join(dirname(dirname(directory)), `${name}.json`),
+            "utf8",
+          ),
+        );
+        expect(receipt.recovered).toBe(true);
+        expect(receipt.outcome.created).toEqual([mapping(acknowledgedId)]);
+        expect(storedPublications(completed)).toEqual(stored);
+      }
+      expect(launches).toBe(0);
+      expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+    },
+  );
+
+  test.each([false, true])(
+    "unknown repeated attempts require a new acknowledgement or SQLite mapping (legacy=%j)",
+    async (legacy) => {
+      const completed = await fixture(1);
+      const prepared = await prepareScanPublication(completed.scanDirectory, {
+        ...OPTIONS,
+        environment: completed.environment,
+      });
+      const issue = prepared.issues[0]!;
+      const mapping = (issueIdentifier: string) => ({
+        findingId: issue.findingId,
+        occurrenceId: issue.occurrenceId,
+        issueIdentifier,
+      });
+      for (const identifier of ["EXAMPLE-1", "EXAMPLE-2"])
+        await recordPublishedIssues(
+          prepared,
+          [mapping(identifier)],
+          completed.environment,
+        );
+      let launches = 0;
+      let handoff = "";
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        runCodex: async (_command, _args, prompt) => {
+          launches++;
+          handoff = (await publicationPayload(prompt)).handoffFile;
+          throw new Error("Synthetic interruption with unknown remote outcome");
+        },
+      };
+      await expect(
+        publishScanInternal(completed.scanDirectory, OPTIONS, runtime),
+      ).rejects.toThrow("unknown remote outcome");
+      expect(await readFile(handoff, "utf8")).toBe("");
+      const directory = dirname(handoff);
+      const receipt = join(
+        dirname(dirname(directory)),
+        `${basename(directory)}.json`,
+      );
+      expect(
+        JSON.parse(
+          await readFile(receipt, "utf8"),
+        ).previousIssueIdentifiers.sort(),
+      ).toEqual(["EXAMPLE-1", "EXAMPLE-2"]);
+      if (legacy) await rm(receipt);
+      await expect(
+        publishScanInternal(
+          completed.scanDirectory,
+          { ...OPTIONS, skipExisting: true },
+          runtime,
+        ),
+      ).rejects.toThrow("outcome is unknown");
+      if (legacy)
+        await expect(readFile(receipt, "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      else
+        expect(
+          JSON.parse(await readFile(receipt, "utf8")).recovered,
+        ).toBeUndefined();
+      expect(storedPublications(completed)).toHaveLength(2);
+      expect(launches).toBe(1);
+
+      await recordPublishedIssues(
+        prepared,
+        [mapping("EXAMPLE-3")],
+        completed.environment,
+      );
+      if (legacy) {
+        await expect(
+          publishScanInternal(
+            completed.scanDirectory,
+            { ...OPTIONS, skipExisting: true },
+            runtime,
+          ),
+        ).rejects.toThrow("outcome is unknown");
+        const saved = JSON.parse(
+          await readFile(join(directory, "publication.json"), "utf8"),
+        );
+        await writeFile(
+          handoff,
+          JSON.stringify({
+            scanId: prepared.scanId,
+            ...saved.batches.flat()[0],
+            issueIdentifier: "EXAMPLE-3",
+          }) + "\n",
+        );
+      }
+      await publishScanInternal(
+        completed.scanDirectory,
+        { ...OPTIONS, skipExisting: true },
+        runtime,
+      );
+      const recovered = JSON.parse(await readFile(receipt, "utf8"));
+      expect(recovered.recovered).toBe(true);
+      expect(recovered.outcome.created).toEqual([mapping("EXAMPLE-3")]);
+      expect(storedPublications(completed)).toHaveLength(3);
+      expect(launches).toBe(1);
+    },
+  );
+
+  test.each(["receipt", "handoff", "rewritten-handoff"])(
+    "recovers a distinct repeated publication issue (%s)",
+    async (mode) => {
+      const completed = await fixture(1);
+      let launches = 0;
+      let failPersistence = true;
+      let handoff = "";
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        recordPublishedIssues: async (...args) => {
+          if (launches === 2 && failPersistence)
+            throw new Error("Synthetic SQLite interruption");
+          return recordPublishedIssues(...args);
+        },
+        runCodex: async (_command, _args, prompt) => {
+          launches++;
+          const payload = await publicationPayload(prompt);
+          handoff = payload.handoffFile;
+          await writeFile(
+            handoff,
+            JSON.stringify({
+              scanId: payload.scanId,
+              ...payload.batches.flat()[0]!,
+              issueIdentifier: `EXAMPLE-${launches}`,
+            }) + "\n",
+          );
+          if (launches === 2 && mode === "handoff")
+            throw new Error("Synthetic process interruption");
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      };
+      await publishScanInternal(completed.scanDirectory, OPTIONS, runtime);
+      await expect(
+        publishScanInternal(completed.scanDirectory, OPTIONS, runtime),
+      ).rejects.toThrow("interruption");
+      expect(
+        storedPublications(completed).map((row) => row.external_id),
+      ).toEqual(["EXAMPLE-1"]);
+      if (mode === "rewritten-handoff") {
+        const record = JSON.parse(await readFile(handoff, "utf8"));
+        record.issueIdentifier = "EXAMPLE-3";
+        await writeFile(handoff, JSON.stringify(record) + "\n");
+      }
+      failPersistence = false;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await publishScanInternal(
+          completed.scanDirectory,
+          { ...OPTIONS, skipExisting: true },
+          runtime,
+        );
+        expect(
+          storedPublications(completed)
+            .map((row) => row.external_id)
+            .sort(),
+        ).toEqual(["EXAMPLE-1", "EXAMPLE-2"]);
+        expect(launches).toBe(2);
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "recovers legacy mappings in source order (reversed manifest=%j)",
+    async (reverseManifest) => {
+      const completed = await fixture(2);
+      const prepared = await prepareScanPublication(completed.scanDirectory, {
+        ...OPTIONS,
+        environment: completed.environment,
+      });
+      const earlier = prepared.issues[1]!;
+      await recordPublishedIssues(
+        prepared,
+        [
+          {
+            findingId: earlier.findingId,
+            occurrenceId: earlier.occurrenceId,
+            issueIdentifier: "EXAMPLE-10",
+          },
+        ],
+        completed.environment,
+      );
+      let launches = 0;
+      let failPersistence = true;
+      let handoff = "";
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        recordPublishedIssues: async (...args) => {
+          if (failPersistence) throw new Error("Synthetic SQLite interruption");
+          return recordPublishedIssues(...args);
+        },
+        runCodex: async (_command, _args, prompt) => {
+          launches++;
+          const payload = await publicationPayload(prompt);
+          handoff = payload.handoffFile;
+          await writeFile(
+            handoff,
+            payload.batches
+              .flat()
+              .map((request, index) =>
+                JSON.stringify({
+                  scanId: payload.scanId,
+                  ...request,
+                  issueIdentifier: `EXAMPLE-${index + 1}`,
+                }),
+              )
+              .join("\n") + "\n",
+          );
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      };
+      await expect(
+        publishScanInternal(completed.scanDirectory, OPTIONS, runtime),
+      ).rejects.toThrow("Synthetic SQLite interruption");
+      expect(
+        storedPublications(completed).map((row) => row.external_id),
+      ).toEqual(["EXAMPLE-10"]);
+      const directory = dirname(handoff);
+      await rm(
+        join(dirname(dirname(directory)), `${basename(directory)}.json`),
+      );
+      if (reverseManifest) {
+        const path = join(directory, "publication.json");
+        const saved = JSON.parse(await readFile(path, "utf8"));
+        saved.batches = [saved.batches.flat().reverse()];
+        await writeFile(path, JSON.stringify(saved));
+      }
+      failPersistence = false;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await publishScanInternal(
+          completed.scanDirectory,
+          { ...OPTIONS, skipExisting: true },
+          runtime,
+        );
+        expect(result.created).toEqual([]);
+        expect(result.skipped?.map((issue) => issue.findingId)).toEqual(
+          prepared.issues.map((issue) => issue.findingId),
+        );
+        expect(
+          storedPublications(completed)
+            .sort((a, b) => a.external_id.localeCompare(b.external_id))
+            .map((row) => [row.finding_id, row.external_id]),
+        ).toEqual([
+          [prepared.issues[0]!.findingId, "EXAMPLE-1"],
+          [earlier.findingId, "EXAMPLE-10"],
+          [earlier.findingId, "EXAMPLE-2"],
+        ]);
+        expect(launches).toBe(1);
+      }
+    },
+  );
+
+  test("recovers mixed recorded legacy findings after classification narrows", async () => {
     const { classifyScanDirectorySeverity } = await import(
       "../src/classify-scan-severity.js"
     );
     const completed = await fixture(2);
     const rubricPath = join(completed.stateDirectory, "policy.md");
     await writeFile(rubricPath, "Classify bounded impact as Medium.");
-    type LinearClient = ReturnType<
-      NonNullable<PublishScanDependencies["linearClient"]>
-    >;
-    type IssueInput = Parameters<LinearClient["createIssue"]>[0];
-    const created: IssueInput[] = [];
-    const runtime: PublishScanDependencies = {
-      environment: completed.environment,
-      linearClient: () =>
-        ({
-          createIssue: async (input: IssueInput) => {
-            created.push(input);
-            return {
-              success: true,
-              issue: Promise.resolve({
-                identifier: `EXAMPLE-${created.length}`,
-              }),
-            };
-          },
-        }) as unknown as LinearClient,
-    };
-    for (const finding of completed.findings) {
-      await classifyScanDirectorySeverity(completed.scanDirectory, {
+    const classify = (findingIds: string[]) =>
+      classifyScanDirectorySeverity(completed.scanDirectory, {
         environment: completed.environment,
         rubricPath,
-        findingIds: [finding.findingId],
+        findingIds,
         codex: {
           startThread: () => ({
-            run: async () => ({
-              finalResponse: JSON.stringify({
-                findingId: finding.findingId,
-                decision: "assessed",
-                level: "medium",
-                rubricLabel: "MEDIUM",
-                rationale: "Only bounded impact is established.",
-                confidence: "high",
-                reviewTrigger: null,
-              }),
-            }),
+            run: async (prompt) => {
+              const findingId = findingIds.find((id) => prompt.includes(id))!;
+              return {
+                finalResponse: JSON.stringify({
+                  findingId,
+                  decision: "assessed",
+                  level: "medium",
+                  rubricLabel: "MEDIUM",
+                  rationale: "Only bounded impact is established.",
+                  confidence: "high",
+                  reviewTrigger: null,
+                }),
+              };
+            },
           }),
         },
       });
-      const result = await publishScanInternal(
+    await classify(completed.findings.map((finding) => finding.findingId));
+    let launches = 0;
+    let failPersistence = true;
+    let handoff = "";
+    const runtime: PublishScanDependencies = {
+      environment: completed.environment,
+      resolveCodex: () => ({ command: "synthetic-codex" }),
+      recordPublishedIssues: async (publication, issues, environment) => {
+        if (failPersistence) {
+          await recordPublishedIssues(publication, [issues[0]!], environment);
+          throw new Error("Synthetic partial SQLite interruption");
+        }
+        return recordPublishedIssues(publication, issues, environment);
+      },
+      runCodex: async (_command, _args, prompt) => {
+        launches++;
+        const payload = await publicationPayload(prompt);
+        handoff = payload.handoffFile;
+        await writeFile(
+          handoff,
+          payload.batches
+            .flat()
+            .map((request, index) =>
+              JSON.stringify({
+                scanId: payload.scanId,
+                ...request,
+                issueIdentifier: `EXAMPLE-${index + 1}`,
+              }),
+            )
+            .join("\n") + "\n",
+        );
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    await expect(
+      publishScanInternal(completed.scanDirectory, OPTIONS, runtime),
+    ).rejects.toThrow("Synthetic partial SQLite interruption");
+    expect(storedPublications(completed)).toHaveLength(1);
+    const directory = dirname(handoff);
+    await rm(join(dirname(dirname(directory)), `${basename(directory)}.json`));
+    const pendingId = completed.findings[1]!.findingId;
+    await classify([pendingId]);
+    failPersistence = false;
+    const result = await publishScanInternal(
+      completed.scanDirectory,
+      { ...OPTIONS, skipExisting: true },
+      runtime,
+    );
+    expect(result.skipped?.map((issue) => issue.findingId)).toEqual([
+      pendingId,
+    ]);
+    expect(storedPublications(completed)).toHaveLength(2);
+    expect(launches).toBe(1);
+  });
+
+  test("legacy handoffs cannot expand the authorized finding selection", async () => {
+    const completed = await fixture(2);
+    const options = {
+      ...OPTIONS,
+      findingIds: [completed.findings[0]!.findingId],
+    };
+    let launches = 0;
+    let failPersistence = true;
+    let handoff = "";
+    const runtime: PublishScanDependencies = {
+      environment: completed.environment,
+      resolveCodex: () => ({ command: "synthetic-codex" }),
+      recordPublishedIssues: async (...args) => {
+        if (failPersistence) throw new Error("Synthetic SQLite interruption");
+        return recordPublishedIssues(...args);
+      },
+      runCodex: async (_command, _args, prompt) => {
+        launches++;
+        const payload = await publicationPayload(prompt);
+        handoff = payload.handoffFile;
+        await writeFile(
+          handoff,
+          JSON.stringify({
+            scanId: payload.scanId,
+            ...payload.batches.flat()[0]!,
+            issueIdentifier: "EXAMPLE-1",
+          }) + "\n",
+        );
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    await expect(
+      publishScanInternal(completed.scanDirectory, options, runtime),
+    ).rejects.toThrow("Synthetic SQLite interruption");
+    const directory = dirname(handoff);
+    await rm(join(dirname(dirname(directory)), `${basename(directory)}.json`));
+    const manifestPath = join(directory, "publication.json");
+    const manifestText = await readFile(manifestPath, "utf8");
+    const handoffText = await readFile(handoff, "utf8");
+    const manifest = JSON.parse(manifestText);
+    const full = await prepareScanPublication(completed.scanDirectory, {
+      ...OPTIONS,
+      environment: completed.environment,
+      uploadedAt: manifest.uploadedAt,
+    });
+    const extra = full.issues.find(
+      (issue) => issue.findingId === completed.findings[1]!.findingId,
+    )!;
+    const request = {
+      findingId: extra.findingId,
+      occurrenceId: extra.occurrenceId,
+      arguments: linearPublicationArguments(full.destination, extra),
+    };
+    manifest.batches.push([request]);
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await appendFile(
+      handoff,
+      JSON.stringify({
+        scanId: full.scanId,
+        ...request,
+        issueIdentifier: "EXAMPLE-2",
+      }) + "\n",
+    );
+    failPersistence = false;
+    await expect(
+      publishScanInternal(
+        completed.scanDirectory,
+        { ...options, skipExisting: true },
+        runtime,
+      ),
+    ).rejects.toThrow("Reconcile");
+    expect(storedPublications(completed)).toEqual([]);
+    expect(launches).toBe(1);
+
+    await writeFile(manifestPath, manifestText);
+    await writeFile(handoff, handoffText);
+    const result = await publishScanInternal(
+      completed.scanDirectory,
+      { ...options, skipExisting: true },
+      runtime,
+    );
+    expect(result.skipped?.map((issue) => issue.findingId)).toEqual(
+      options.findingIds,
+    );
+    expect(storedPublications(completed).map((row) => row.finding_id)).toEqual(
+      options.findingIds,
+    );
+    expect(launches).toBe(1);
+  });
+
+  test("recovers the original selection before retrying a narrower selection", async () => {
+    const completed = await fixture(2);
+    const controller = new AbortController();
+    let launches = 0;
+    const runtime: PublishScanDependencies = {
+      environment: completed.environment,
+      resolveCodex: () => ({ command: "synthetic-codex" }),
+      runCodex: async (_command, _args, prompt) => {
+        launches++;
+        const payload = await publicationPayload(prompt);
+        await writeFile(
+          payload.handoffFile,
+          payload.batches
+            .flat()
+            .map((issue, index) =>
+              JSON.stringify({
+                scanId: payload.scanId,
+                findingId: issue.findingId,
+                occurrenceId: issue.occurrenceId,
+                arguments: issue.arguments,
+                issueIdentifier: `SEC-${index + 1}`,
+              }),
+            )
+            .join("\n") + "\n",
+        );
+        controller.abort();
+        return { exitCode: 1, stdout: "", stderr: "Synthetic interruption" };
+      },
+    };
+    await expect(
+      publishScanInternal(
+        completed.scanDirectory,
+        { ...OPTIONS, signal: controller.signal },
+        runtime,
+      ),
+    ).rejects.toThrow("interrupted");
+    expect(storedPublications(completed)).toHaveLength(2);
+    const result = await publishScanInternal(
+      completed.scanDirectory,
+      {
+        ...OPTIONS,
+        findingIds: [completed.findings[1]!.findingId],
+        skipExisting: true,
+      },
+      runtime,
+    );
+    expect(result.skipped?.map(({ findingId }) => findingId)).toEqual([
+      completed.findings[1]!.findingId,
+    ]);
+    expect(result.created).toEqual([]);
+    expect(launches).toBe(1);
+    expect(storedPublications(completed)).toHaveLength(2);
+  });
+
+  test("recovers a verified UUID-only connector handoff into SQLite without optional event logs", async () => {
+    const completed = await fixture(1);
+    const entityId = "22222222-2222-4222-8222-222222222222";
+    let launches = 0;
+    let failPersistence = true;
+    let handoff = "";
+    const runtime: PublishScanDependencies = {
+      environment: completed.environment,
+      resolveCodex: () => ({ command: "synthetic-codex" }),
+      writeEvents: async () => {
+        throw new Error("Synthetic optional event log failure");
+      },
+      recordPublishedIssues: async (...args) => {
+        if (failPersistence) throw new Error("Synthetic SQLite interruption");
+        return recordPublishedIssues(...args);
+      },
+      runCodex: async (_command, _args, prompt) => {
+        launches++;
+        const payload = await publicationPayload(prompt);
+        const request = payload.batches.flat()[0]!;
+        handoff = payload.handoffFile;
+        await writeFile(
+          handoff,
+          JSON.stringify({
+            scanId: payload.scanId,
+            ...request,
+            issueIdentifier: entityId,
+          }) + "\n",
+        );
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout: JSON.stringify({
+            type: "item.completed",
+            item: {
+              id: "synthetic-create",
+              type: "mcp_tool_call",
+              server: "codex_apps",
+              tool: "linear_save_issue",
+              status: "completed",
+              arguments: request.arguments,
+              result: {
+                content: [],
+                structured_content: { id: entityId, identifier: "SEC-991" },
+              },
+            },
+          }),
+        };
+      },
+    };
+    await expect(
+      publishScanInternal(completed.scanDirectory, OPTIONS, runtime),
+    ).rejects.toThrow("Synthetic SQLite interruption");
+    expect(storedPublications(completed)).toHaveLength(0);
+    expect(
+      (await readdir(dirname(handoff))).some((name) =>
+        name.startsWith("events-"),
+      ),
+    ).toBe(false);
+    failPersistence = false;
+    const result = await publishScanInternal(
+      completed.scanDirectory,
+      { ...OPTIONS, skipExisting: true },
+      runtime,
+    );
+    expect(result.skipped).toEqual([
+      expect.objectContaining({ issueIdentifier: "SEC-991" }),
+    ]);
+    expect(storedPublications(completed)).toHaveLength(1);
+    expect(launches).toBe(1);
+  });
+
+  test.each(["completed", "interrupted", "legacy-interrupted", "legacy-uuid"])(
+    "publishes classified selections while preserving earlier tickets (%s)",
+    async (mode) => {
+      const { classifyScanDirectorySeverity } = await import(
+        "../src/classify-scan-severity.js"
+      );
+      const completed = await fixture(2);
+      const rubricPath = join(completed.stateDirectory, "policy.md");
+      await writeFile(rubricPath, "Classify bounded impact as Medium.");
+      type LinearClient = ReturnType<
+        NonNullable<PublishScanDependencies["linearClient"]>
+      >;
+      type IssueInput = Parameters<LinearClient["createIssue"]>[0];
+      const created: IssueInput[] = [];
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        linearClient: () =>
+          ({
+            createIssue: async (input: IssueInput) => {
+              created.push(input);
+              return {
+                success: true,
+                issue: Promise.resolve({
+                  identifier: `EXAMPLE-${created.length}`,
+                }),
+              };
+            },
+          }) as unknown as LinearClient,
+      };
+      for (const [index, finding] of completed.findings.entries()) {
+        await classifyScanDirectorySeverity(completed.scanDirectory, {
+          environment: completed.environment,
+          rubricPath,
+          findingIds: [finding.findingId],
+          codex: {
+            startThread: () => ({
+              run: async () => ({
+                finalResponse: JSON.stringify({
+                  findingId: finding.findingId,
+                  decision: "assessed",
+                  level: "medium",
+                  rubricLabel: "MEDIUM",
+                  rationale: "Only bounded impact is established.",
+                  confidence: "high",
+                  reviewTrigger: null,
+                }),
+              }),
+            }),
+          },
+        });
+        const controller = new AbortController();
+        const interrupted = mode !== "completed" && index === 0;
+        const attempt = publishScanInternal(
+          completed.scanDirectory,
+          {
+            ...OPTIONS,
+            linearApiKey: "lin_api_SYNTHETIC_CLASSIFICATION",
+            skipExisting: true,
+            signal: controller.signal,
+            onProgress: (event) => {
+              if (interrupted && event.type === "handoff_recorded")
+                controller.abort();
+            },
+          },
+          runtime,
+        );
+        if (interrupted) {
+          await expect(attempt).rejects.toThrow("interrupted");
+          expect(storedPublications(completed)).toHaveLength(1);
+          if (mode.startsWith("legacy-")) {
+            const handoffs = join(
+              completed.stateDirectory,
+              "publications",
+              "linear",
+              "handoffs",
+            );
+            const directory = join(handoffs, (await readdir(handoffs))[0]!);
+            await rm(join(dirname(handoffs), `${basename(directory)}.json`));
+            const file = join(directory, "issues.jsonl");
+            const record = JSON.parse((await readFile(file, "utf8")).trim());
+            const {
+              issueIdentifier: _identifier,
+              url: _url,
+              ...request
+            } = record;
+            await writeFile(
+              file,
+              `${JSON.stringify({ ...request, ...(mode === "legacy-uuid" ? { issueIdentifier: "22222222-2222-4222-8222-222222222222" } : { error: "The model omitted the created issue" }) })}\n${JSON.stringify(record)}\n`,
+            );
+            const manifest = JSON.parse(
+              await readFile(join(directory, "publication.json"), "utf8"),
+            );
+            delete manifest.transport;
+            delete manifest.uploadedAt;
+            await writeFile(
+              join(directory, "publication.json"),
+              JSON.stringify(manifest),
+            );
+          }
+        } else {
+          const result = await attempt;
+          expect(result.created).toHaveLength(1);
+          expect(result.created[0]!.findingId).toBe(finding.findingId);
+        }
+        expect(created.at(-1)!.priority).toBe(3);
+      }
+      const repeated = await publishScanInternal(
         completed.scanDirectory,
         {
           ...OPTIONS,
@@ -382,24 +1906,12 @@ describe("database-backed Linear publication integration", () => {
         },
         runtime,
       );
-      expect(result.created).toHaveLength(1);
-      expect(result.created[0]!.findingId).toBe(finding.findingId);
-      expect(created.at(-1)!.priority).toBe(3);
-    }
-    const repeated = await publishScanInternal(
-      completed.scanDirectory,
-      {
-        ...OPTIONS,
-        linearApiKey: "lin_api_SYNTHETIC_CLASSIFICATION",
-        skipExisting: true,
-      },
-      runtime,
-    );
-    expect(repeated.created).toEqual([]);
-    expect(repeated.skipped).toHaveLength(1);
-    expect(created).toHaveLength(2);
-    expect(storedPublications(completed)).toHaveLength(2);
-  });
+      expect(repeated.created).toEqual([]);
+      expect(repeated.skipped).toHaveLength(1);
+      expect(created).toHaveLength(2);
+      expect(storedPublications(completed)).toHaveLength(2);
+    },
+  );
 
   test("checks and retries a partial publication without duplicating recorded successes", async () => {
     const completed = await fixture(2);
@@ -1102,13 +2614,16 @@ describe("database-backed Linear publication integration", () => {
         },
       });
       expect(await readFile(handoffFile, "utf8")).toBe(`${handoffLine}\n`);
-      const eventFiles = (await readdir(dirname(handoffFile))).filter(
-        (name) => name.startsWith("events-") && name.endsWith(".jsonl"),
+      const eventDirectory = dirname(dirname(dirname(handoffFile)));
+      const eventFiles = (await readdir(eventDirectory)).filter(
+        (name) =>
+          name.startsWith(`${basename(dirname(handoffFile))}-events-`) &&
+          name.endsWith(".jsonl"),
       );
       expect(eventFiles).toHaveLength(1);
-      expect(
-        await readFile(join(dirname(handoffFile), eventFiles[0]!), "utf8"),
-      ).toBe(`${completedEvent}\n`);
+      expect(await readFile(join(eventDirectory, eventFiles[0]!), "utf8")).toBe(
+        `${completedEvent}\n`,
+      );
       expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
     },
   );
@@ -1402,7 +2917,25 @@ for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
         .split("\n")
         .map((line) => JSON.parse(line) as { issueIdentifier: string })
         .map(({ issueIdentifier }) => issueIdentifier),
-    ).toEqual(["SEC-701", "SEC-702"]);
+    ).toEqual(["SEC-701"]);
+    expect(
+      JSON.parse(
+        await readFile(
+          join(
+            dirname(dirname(dirname(handoffFile))),
+            `${basename(dirname(handoffFile))}.json`,
+          ),
+          "utf8",
+        ),
+      ),
+    ).toMatchObject({
+      outcome: {
+        created: [
+          expect.objectContaining({ issueIdentifier: "SEC-701" }),
+          expect.objectContaining({ issueIdentifier: "SEC-702" }),
+        ],
+      },
+    });
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
     expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);

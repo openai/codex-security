@@ -86,11 +86,13 @@ from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_findings import (
+    embedding_chunks,
     find_potential_duplicates,
     list_dedupe_groups,
     list_stored_findings,
+    read_receipt,
     store_dedupe_groups,
-    store_findings,
+    store_findings_payload,
 )
 from workbench_remediation import remediation_claim_is_active
 from workbench_scan_start import (
@@ -3654,10 +3656,11 @@ def main() -> None:
         elif args.command == "dashboard":
             result = dashboard(connection, json.load(sys.stdin))
         elif args.command == "store-findings":
-            payload = json.load(sys.stdin)
-            result = store_findings(
-                connection, payload["entries"], now(), payload.get("repositoryId")
-            )
+            result = store_findings_payload(connection, json.load(sys.stdin), now)
+        elif args.command == "finding-import-receipt":
+            result = read_receipt(connection, json.load(sys.stdin)) or {}
+        elif args.command == "embedding-chunks":
+            result = embedding_chunks(connection, json.load(sys.stdin))
         elif args.command == "find-potential-duplicates":
             result = find_potential_duplicates(connection, args.finding_id, args.repository_id)
         elif args.command == "store-dedupe-groups":

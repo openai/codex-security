@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { Tiktoken } from "js-tiktoken/lite";
@@ -10,6 +11,7 @@ import {
   OpenAiFindingEmbedder,
 } from "../src/server/embeddings.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 
 const example = (
   JSON.parse(
@@ -26,6 +28,114 @@ function vector(axis = 0): number[] {
   values[axis] = 1;
   return values;
 }
+
+test("resumes paid embedding batches from SQLite after a later batch fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "embedding-checkpoints-"));
+  const environment = {
+    ...process.env,
+    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+  };
+  try {
+    const firstStore = new SqliteFindingsStore(environment);
+    await firstStore.initialize();
+    const findings = Array.from({ length: 40 }, (_, index) => ({
+      ...example,
+      title: `Finding ${index}`,
+      summary: " evidence".repeat(8000),
+    }));
+    let calls = 0;
+    const provider = async (_url: string, init: RequestInit) => {
+      const input: number[][] = JSON.parse(String(init.body)).input;
+      if (++calls === 2) return new Response("Unavailable", { status: 503 });
+      return Response.json({
+        model: EMBEDDING_MODEL,
+        data: input.map((_, index) => ({ index, embedding: vector() })),
+      });
+    };
+    await expect(
+      new OpenAiFindingEmbedder(
+        "synthetic",
+        provider,
+        undefined,
+        firstStore,
+      ).embed(findings),
+    ).rejects.toThrow("HTTP 503");
+    expect(
+      (await firstStore.list({ limit: 100, offset: 0 })).findings,
+    ).toHaveLength(0);
+    const nextStore = new SqliteFindingsStore(environment);
+    const result = await new OpenAiFindingEmbedder(
+      "synthetic",
+      provider,
+      undefined,
+      nextStore,
+    ).embed(findings);
+    expect(result).toHaveLength(40);
+    expect(calls).toBe(3);
+    expect(result.every((item) => item.vector[0] === 1)).toBe(true);
+    await new OpenAiFindingEmbedder(
+      "synthetic",
+      provider,
+      undefined,
+      nextStore,
+    ).embed(findings);
+    expect(calls).toBe(3);
+    await new OpenAiFindingEmbedder(
+      "synthetic",
+      provider,
+      "http://other-provider.test/embeddings",
+      nextStore,
+    ).embed([example]);
+    expect(calls).toBe(4);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("does not checkpoint part of an invalid provider response", async () => {
+  const root = await mkdtemp(join(tmpdir(), "embedding-invalid-checkpoint-"));
+  const environment = {
+    ...process.env,
+    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+  };
+  const findings = [example, { ...example, title: "Another finding" }];
+  let valid = false;
+  const requests: number[] = [];
+  const provider = async (_url: string, init: RequestInit) => {
+    const input: number[][] = JSON.parse(String(init.body)).input;
+    requests.push(input.length);
+    return Response.json({
+      model: EMBEDDING_MODEL,
+      data: input.map((_, index) => ({
+        index,
+        embedding:
+          valid || index === 0 ? vector() : Array(EMBEDDING_DIMENSIONS).fill(0),
+      })),
+    });
+  };
+  try {
+    await expect(
+      new OpenAiFindingEmbedder(
+        "synthetic",
+        provider,
+        undefined,
+        new SqliteFindingsStore(environment),
+      ).embed(findings),
+    ).rejects.toThrow("invalid vectors");
+    valid = true;
+    expect(
+      await new OpenAiFindingEmbedder(
+        "synthetic",
+        provider,
+        undefined,
+        new SqliteFindingsStore(environment),
+      ).embed(findings),
+    ).toHaveLength(2);
+    expect(requests).toEqual([2, 2]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("uses the configured embedding model and preserves response indexes", async () => {
   const findings = [

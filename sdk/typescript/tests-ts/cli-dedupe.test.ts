@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
+import { CodexSecurityError } from "../src/errors.js";
 import { main } from "../src/cli.js";
+import { deduplicateScanDirectoryInternal } from "../src/deduplication/scan.js";
+import { FindingWorkflow } from "../src/finding-workflow.js";
+import { runWorkbench } from "../src/runtime.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { workflowFixture } from "./support/workflow-fixture.js";
 
 const args = [
   "dedupe",
@@ -60,6 +66,261 @@ test("dedupe resolves a workflow's pinned scan and passes the workflow ID to the
     deduplicationStatus: "completed",
   });
 });
+
+test.each([false, true])(
+  "dedupe exposes the accepted publication receipt and warning (json=%j)",
+  async (json) => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    const result = {
+      scanId: "scan-example",
+      uniqueFindingIds: ["finding-example"],
+      duplicateGroups: [],
+      deduplicationStatus: "completed" as const,
+      publication: {
+        scanId: "scan-example",
+        repositoryId: "repository-example",
+        findingIds: ["finding-example"],
+        findingCount: 1,
+        warnings: [
+          "The server accepted the upload; keep this receipt because its checkpoint failed.",
+        ],
+      },
+    };
+    deps.deduplicateScan = async () => result;
+    expect(
+      await main(
+        args.filter((arg) => json || arg !== "--json"),
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    if (json) expect(JSON.parse(stdout.text())).toEqual(result);
+    else {
+      expect(stdout.text()).toContain("publication:");
+      expect(stdout.text()).toContain("repository-example");
+      expect(stdout.text()).toContain("finding-example");
+    }
+    expect(stderr.text()).toContain(result.publication.warnings[0]!);
+  },
+);
+
+test.each([false, true])(
+  "dedupe returns a failed receipt envelope without hiding the review error (json=%j)",
+  async (json) => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    const failure = new CodexSecurityError("Review disconnected");
+    failure.publication = {
+      scanId: "scan-example",
+      repositoryId: "repository-example",
+      findingIds: ["finding-example"],
+      findingCount: 1,
+      warnings: ["The server accepted the upload; its checkpoint failed."],
+    };
+    deps.deduplicateScan = async () => {
+      throw failure;
+    };
+    expect(
+      await main(
+        args.filter((arg) => json || arg !== "--json"),
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    if (json)
+      expect(JSON.parse(stdout.text())).toEqual({
+        scanId: "scan-example",
+        deduplicationStatus: "failed",
+        publication: failure.publication,
+      });
+    else {
+      expect(stdout.text()).toContain("failed");
+      expect(stdout.text()).toContain("repository-example");
+      expect(stdout.text()).toContain("finding-example");
+    }
+    expect(stderr.text()).toContain("Review disconnected");
+    expect(stderr.text()).toContain(failure.publication.warnings![0]!);
+  },
+);
+
+test("dedupe retains the accepted receipt with a primitive SIGINT reason", async () => {
+  const signals = new FakeSignals();
+  const deps = dependencies();
+  deps.addSignalListener = (name, listener) => signals.add(name, listener);
+  deps.removeSignalListener = (name, listener) =>
+    signals.remove(name, listener);
+  const publication = {
+    scanId: "scan-example",
+    repositoryId: "repository-example",
+    findingIds: ["finding-example"],
+    findingCount: 1,
+    warnings: ["The server accepted the upload; its checkpoint failed."],
+  };
+  deps.deduplicateScan = async (_scanId, options, dependencies) => {
+    await dependencies?.onPublication?.(publication);
+    signals.emit("SIGINT");
+    options.signal!.throwIfAborted();
+    throw new Error("Cancellation must throw");
+  };
+  const stdout = capture();
+  const stderr = capture();
+  expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(130);
+  expect(JSON.parse(stdout.text())).toEqual({
+    scanId: "scan-example",
+    deduplicationStatus: "failed",
+    publication,
+  });
+  expect(stderr.text()).toContain("Deduplication canceled");
+  expect(stderr.text()).toContain(publication.warnings[0]!);
+  expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+  expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+});
+
+test.each([
+  ["SIGINT", 130, true],
+  ["SIGTERM", 143, false],
+] as const)(
+  "cached dedupe retains the accepted receipt and cancellation after %s",
+  async (signal, expectedCode, json) => {
+    await using fixture = await workflowFixture();
+    const { scanDir, repository, environment, document } = fixture;
+    const workflowId = "cached-publication-cancellation";
+    const findingIds = document.findings.map((finding) => finding.findingId);
+    const signals = new FakeSignals();
+    let failCompletion = true;
+    let cancelCompletion = false;
+    let searches = 0;
+    const keys: (string | null)[] = [];
+    const execute = async (args: string[], input?: string) => {
+      const request = JSON.parse(input!);
+      if (
+        failCompletion &&
+        request.action === "complete" &&
+        request.stage === "publish"
+      ) {
+        if (cancelCompletion) signals.emit(signal);
+        throw new Error("publication checkpoint unavailable");
+      }
+      return runWorkbench(
+        {
+          environment,
+          pluginRoot: PLUGIN_ROOT,
+          python: Bun.which("python3") ?? Bun.which("python")!,
+        },
+        args,
+        input,
+      );
+    };
+    const sdkDependencies = {
+      environment,
+      runWorkbench: execute,
+      fetch: async (url: URL, init: RequestInit) => {
+        if (url.pathname === "/v1/bulk/findings") {
+          keys.push(new Headers(init.headers).get("Idempotency-Key"));
+          return Response.json(findingIds, { status: 201 });
+        }
+        expect(url.pathname).toEndWith("/potential-duplicates");
+        searches++;
+        return Response.json({
+          finding: document.findings[0],
+          potentialDuplicates: [],
+        });
+      },
+    };
+    const options = {
+      workflowId,
+      findingsUrl: "http://synthetic.test",
+      repository,
+    };
+    const { publication, ...completed } =
+      await deduplicateScanDirectoryInternal(scanDir, options, sdkDependencies);
+    expect(publication?.warnings).toEqual([
+      expect.stringContaining("publication checkpoint unavailable"),
+    ]);
+    expect(completed.deduplicationStatus).toBe("completed");
+    expect(searches).toBe(findingIds.length);
+
+    const deps = dependencies({ environment });
+    deps.runWorkbench = execute;
+    deps.addSignalListener = (name, listener) => signals.add(name, listener);
+    deps.removeSignalListener = (name, listener) =>
+      signals.remove(name, listener);
+    let caught: unknown;
+    deps.deduplicateScan = async (_scanId, options, internal) => {
+      try {
+        return await deduplicateScanDirectoryInternal(
+          scanDir,
+          { ...options, repository },
+          { ...internal, ...sdkDependencies },
+        );
+      } catch (error) {
+        caught = error;
+        throw error;
+      }
+    };
+    const command = [
+      "dedupe",
+      "--scan",
+      document.scanId,
+      "--workflow-id",
+      workflowId,
+      "--findings-url",
+      options.findingsUrl,
+      ...(json ? ["--json"] : []),
+    ];
+    const stdout = capture();
+    const stderr = capture();
+    cancelCompletion = true;
+    expect(await main(command, stdout.stream, stderr.stream, deps)).toBe(
+      expectedCode,
+    );
+    expect(caught).toBe(signal);
+    if (json) {
+      expect(JSON.parse(stdout.text())).toEqual({
+        scanId: document.scanId,
+        deduplicationStatus: "failed",
+        publication,
+      });
+    } else {
+      expect(stdout.text()).toContain("failed");
+      expect(stdout.text()).toContain(publication!.repositoryId);
+      for (const id of findingIds) expect(stdout.text()).toContain(id);
+    }
+    expect(stderr.text()).toContain("Deduplication canceled");
+    expect(stderr.text()).toContain("publication checkpoint unavailable");
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    const workflow = new FindingWorkflow(workflowId, environment);
+    expect((await workflow.get())!.stages.dedupe).toMatchObject({
+      status: "completed",
+      result: completed,
+    });
+    expect(searches).toBe(findingIds.length);
+
+    failCompletion = false;
+    const retried = capture();
+    const retryErrors = capture();
+    expect(
+      await main(
+        [...command.filter((arg) => arg !== "--json"), "--json"],
+        retried.stream,
+        retryErrors.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(retried.text())).toEqual(completed);
+    expect(retryErrors.text()).toBe("");
+    expect((await workflow.get())!.stages.publish.status).toBe("completed");
+    expect(searches).toBe(findingIds.length);
+    expect(keys).toHaveLength(3);
+    expect(new Set(keys).size).toBe(1);
+  },
+);
 
 test.each([false, true])(
   "dedupe passes the scan selector, URL, and all-repository scope %j to the SDK",

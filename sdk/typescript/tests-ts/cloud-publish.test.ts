@@ -1,16 +1,19 @@
 import { createHash } from "node:crypto";
+import * as fileSystem from "node:fs/promises";
 import {
   chmod,
   cp,
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   publishFindingsCsvToCloud,
   publishScanToCloud,
@@ -36,6 +39,167 @@ const receipt = {
   finding_ids: ["finding-1"],
   finding_count: 1,
 };
+
+test("reuses a saved Cloud acceptance receipt for the same account and payload", async () => {
+  const { scan, environment } = await fixture();
+  let calls = 0;
+  const dependencies = {
+    environment,
+    fetch: async () => {
+      calls++;
+      return Response.json(receipt);
+    },
+  };
+  const result = await publishScanToCloud(scan, dependencies);
+  expect(await publishScanToCloud(scan, dependencies)).toEqual(result);
+  expect(calls).toBe(1);
+});
+test.each([true, false])(
+  "a disappearing Cloud attempt requires a durable acceptance receipt (%j)",
+  async (accepted) => {
+    const { scan, environment } = await fixture();
+    const directory = join(
+      environment.CODEX_SECURITY_STATE_DIR,
+      "publications",
+      "cloud",
+    );
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const response = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const runtime = {
+      environment,
+      fetch: async () => {
+        calls++;
+        entered();
+        await response;
+        return Response.json(receipt);
+      },
+    };
+    const first = publishScanToCloud(scan, runtime);
+    await started;
+    const readDirectory = fileSystem.readdir;
+    const listing = spyOn(fileSystem, "readdir").mockImplementation((async (
+      ...args: Parameters<typeof fileSystem.readdir>
+    ) => {
+      const entries = await readDirectory(...args);
+      if (args[0] === directory) {
+        if (accepted) {
+          release();
+          await first;
+        } else {
+          for (const name of entries as unknown as string[])
+            if (name.endsWith(".attempt.json")) await rm(join(directory, name));
+        }
+      }
+      return entries;
+    }) as typeof fileSystem.readdir);
+    try {
+      const retry = publishScanToCloud(scan, runtime);
+      if (accepted) expect(await retry).toEqual(await first);
+      else await expect(retry).rejects.toMatchObject({ code: "ENOENT" });
+      expect(calls).toBe(1);
+    } finally {
+      listing.mockRestore();
+      release();
+      await first;
+    }
+  },
+);
+
+test("reuses a saved CSV publication despite a new import timestamp", async () => {
+  const { environment } = await fixture();
+  const path = await csvFixture();
+  let calls = 0;
+  const dependencies = {
+    environment,
+    fetch: async () => {
+      calls++;
+      return Response.json(receipt);
+    },
+  };
+  const result = await publishFindingsCsvToCloud(path, dependencies);
+  expect(await publishFindingsCsvToCloud(path, dependencies)).toEqual(result);
+  expect(calls).toBe(1);
+});
+
+test("CSV receipts follow converter version while reusing each version's result", async () => {
+  const { environment } = await fixture();
+  const path = await csvFixture();
+  const script = `
+    import { mock } from "bun:test";
+    mock.module(${JSON.stringify(fileURLToPath(new URL("../src/version.ts", import.meta.url)))}, () => ({ VERSION: process.env.TEST_CONVERTER_VERSION }));
+    const { publishFindingsCsvToCloud } = await import(${JSON.stringify(new URL("../src/cloud-publish.ts", import.meta.url).href)});
+    let calls = 0;
+    const options = {
+      environment: process.env,
+      fetch: async () => {
+        calls++;
+        return Response.json(${JSON.stringify(receipt)});
+      },
+    };
+    const expected = await publishFindingsCsvToCloud(process.env.TEST_CSV_PATH, { ...options, dryRun: true });
+    const first = await publishFindingsCsvToCloud(process.env.TEST_CSV_PATH, options);
+    const second = await publishFindingsCsvToCloud(process.env.TEST_CSV_PATH, options);
+    console.log(JSON.stringify({ expected: expected.scanId, first: first.scanId, second: second.scanId, calls }));
+  `;
+  const scans: string[] = [];
+  for (const version of ["0.0.0-previous", "0.0.0-current"]) {
+    const child = Bun.spawn([process.execPath, "--eval", script], {
+      env: {
+        ...process.env,
+        ...environment,
+        TEST_CSV_PATH: path,
+        TEST_CONVERTER_VERSION: version,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, output, error] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code, error).toBe(0);
+    const result = JSON.parse(output);
+    expect(result.first).toBe(result.expected);
+    expect(result.second).toBe(result.expected);
+    expect(result.calls).toBe(1);
+    scans.push(result.first);
+  }
+  expect(scans[0]).not.toBe(scans[1]);
+});
+
+test("retains an unconfirmed Cloud attempt after a lost response", async () => {
+  const { scan, environment } = await fixture();
+  await expect(
+    publishScanToCloud(scan, {
+      environment,
+      fetch: async () => {
+        throw new Error("connection closed");
+      },
+    }),
+  ).rejects.toThrow("not confirmed");
+  const directory = join(
+    environment["CODEX_SECURITY_STATE_DIR"]!,
+    "publications",
+    "cloud",
+  );
+  const files = await readdir(directory);
+  expect(files).toHaveLength(1);
+  expect(
+    JSON.parse(await readFile(join(directory, files[0]!), "utf8")),
+  ).toMatchObject({
+    status: "unconfirmed",
+    error: expect.stringContaining("not confirmed"),
+  });
+});
+
 const csvHeader = [
   "occurrence_id",
   "finding_id",

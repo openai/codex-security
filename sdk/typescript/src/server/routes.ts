@@ -85,7 +85,13 @@ export async function handleFindingsRequest(
       json(
         response,
         201,
-        await service.insert(input.findings, input.repositoryId),
+        await service.insert(
+          input.findings,
+          input.repositoryId,
+          typeof request.headers["idempotency-key"] === "string"
+            ? request.headers["idempotency-key"]
+            : undefined,
+        ),
       );
       return;
     }

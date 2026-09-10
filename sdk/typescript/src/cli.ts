@@ -67,7 +67,10 @@ import {
 } from "./api.js";
 import { accountStatus } from "./auth.js";
 import { loadContract } from "./contract.js";
-import { publishScanToCustom } from "./custom-publish.js";
+import {
+  publishScanToCustom,
+  type CustomPublicationResult,
+} from "./custom-publish.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import {
   classifyScanSeverityInternal,
@@ -2794,7 +2797,14 @@ export async function main(
               ? {}
               : { expectedScanId: selectedScans[0].scanId }),
           });
-          controller.signal.throwIfAborted();
+          if (options.dryRun) controller.signal.throwIfAborted();
+          else if (finishCancellation()) {
+            for (const warning of result.warnings ?? []) {
+              errorOutput.write(
+                `codex-security: ${diagnosticValue(safeErrorMessage(warning))}\n`,
+              );
+            }
+          }
           return { ...result };
         }
 
@@ -2990,6 +3000,13 @@ export async function main(
         dependencies.removeSignalListener("SIGTERM", onTerminate);
       }
     },
+  });
+  const publicationReceiptSchema = z.object({
+    scanId: z.string(),
+    repositoryId: z.string(),
+    findingIds: z.array(z.string()),
+    findingCount: z.number(),
+    warnings: z.array(z.string()).optional(),
   });
   const cli = Cli.create("codex-security", {
     description:
@@ -3684,15 +3701,24 @@ export async function main(
           ),
       }),
       output: z
-        .object({
-          scanId: z.string(),
-          uniqueFindingIds: z.array(z.string()),
-          duplicateGroups: z.array(z.array(z.string())),
-          deduplicationStatus: z.literal("completed"),
-        })
+        .discriminatedUnion("deduplicationStatus", [
+          z.object({
+            scanId: z.string(),
+            uniqueFindingIds: z.array(z.string()),
+            duplicateGroups: z.array(z.array(z.string())),
+            deduplicationStatus: z.literal("completed"),
+            publication: publicationReceiptSchema.optional(),
+          }),
+          z.object({
+            scanId: z.string(),
+            deduplicationStatus: z.literal("failed"),
+            publication: publicationReceiptSchema,
+          }),
+        ])
         .optional(),
       async run({ options }) {
         const controller = new AbortController();
+        let publication: CustomPublicationResult | undefined;
         const onInterrupt = () => controller.abort("SIGINT");
         const onTerminate = () => controller.abort("SIGTERM");
         dependencies.addSignalListener("SIGINT", onInterrupt);
@@ -3708,7 +3734,7 @@ export async function main(
             throw new CodexSecurityError(
               "Deduplication requires --scan or --workflow-id.",
             );
-          return await (
+          const result = await (
             dependencies.deduplicateScan ?? deduplicateScanInternal
           )(
             scanId,
@@ -3724,8 +3750,17 @@ export async function main(
               environment: dependencies.environment,
               currentDirectory: dependencies.currentDirectory,
               runWorkbench: dependencies.runWorkbench,
+              onPublication: (receipt) => {
+                publication = receipt;
+              },
             },
           );
+          for (const warning of result.publication?.warnings ?? []) {
+            errorOutput.write(
+              `codex-security: ${diagnosticValue(safeErrorMessage(warning))}\n`,
+            );
+          }
+          return result;
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
@@ -3736,6 +3771,22 @@ export async function main(
             }\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          publication =
+            (error instanceof CodexSecurityError
+              ? error.publication
+              : undefined) ?? publication;
+          if (publication?.warnings?.length) {
+            for (const warning of publication.warnings) {
+              errorOutput.write(
+                `codex-security: ${diagnosticValue(safeErrorMessage(warning))}\n`,
+              );
+            }
+            return {
+              scanId: publication.scanId,
+              deduplicationStatus: "failed" as const,
+              publication,
+            };
+          }
           return undefined;
         } finally {
           dependencies.removeSignalListener("SIGINT", onInterrupt);

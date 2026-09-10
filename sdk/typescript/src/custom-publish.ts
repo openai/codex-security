@@ -1,5 +1,5 @@
 import { loadContractWithScanDirectory } from "./contract.js";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, safeErrorMessage } from "./errors.js";
 import { FindingsClient, type FindingsRequest } from "./findings-client.js";
 import type { Finding } from "./models.js";
 import { bundledPluginRoot, type runWorkbench } from "./runtime.js";
@@ -27,6 +27,8 @@ export interface CustomPublicationResult {
   findingCount: number;
   dryRun?: true;
   findings?: Finding[];
+  /** The server accepted the upload, but local receipt persistence was not confirmed. */
+  warnings?: string[];
 }
 
 /** Publish complete, sealed findings to a findings API without changing scan artifacts. */
@@ -60,6 +62,7 @@ export async function publishScanToCustomInternal(
     );
   }
   const repositoryId = manifest.scan.target.targetId;
+  const publicationKey = `publish-${workflowDigest({ scanId: manifest.scan.id, contract, destination: workflowDestination(options.findingsUrl) })}`;
   const publish = async (): Promise<CustomPublicationResult> => {
     const findingIds = options.dryRun
       ? findings.findings.map((finding) => finding.findingId)
@@ -67,7 +70,7 @@ export async function publishScanToCustomInternal(
           options.findingsUrl,
           options.signal,
           dependencies.fetch,
-        ).publish(findings.findings, repositoryId);
+        ).publish(findings.findings, repositoryId, publicationKey);
     return {
       scanId: manifest.scan.id,
       repositoryId,
@@ -76,20 +79,38 @@ export async function publishScanToCustomInternal(
       ...(options.dryRun ? { dryRun: true, findings: findings.findings } : {}),
     };
   };
-  if (options.workflowId === undefined || options.dryRun)
-    return await publish();
+  if (options.dryRun) return await publish();
   const workflow = new FindingWorkflow(
-    options.workflowId,
+    options.workflowId ?? publicationKey,
     dependencies.environment,
     dependencies.runWorkbench,
   );
   await workflow.protectArtifacts(canonicalDirectory);
   await workflow.bind({
     scanId: manifest.scan.id,
-    scanDir: canonicalDirectory,
+    ...(options.workflowId === undefined
+      ? {}
+      : { scanDir: canonicalDirectory }),
     artifactDigest: workflowDigest(contract),
     destination: workflowDestination(options.findingsUrl),
   });
   await workflow.complete("scan", null);
-  return await workflow.run("publish", publish);
+  const stage = (await workflow.begin("publish")).stages.publish;
+  if (stage.status === "completed")
+    return stage.result as CustomPublicationResult;
+  let result: CustomPublicationResult;
+  try {
+    result = await publish();
+  } catch (error) {
+    await workflow.fail("publish", error);
+    throw error;
+  }
+  try {
+    await workflow.complete("publish", result);
+  } catch (error) {
+    result.warnings = [
+      `The findings server accepted the upload, but the local publication receipt could not be confirmed: ${safeErrorMessage(error)}. Keep this receipt; repeating publication may resend the accepted findings.`,
+    ];
+  }
+  return result;
 }

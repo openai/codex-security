@@ -375,6 +375,8 @@ def parse_args(description: str) -> argparse.Namespace:
     severity = subparsers.add_parser("read-severity-classification")
     severity.add_argument("--scan-id", required=True)
     subparsers.add_parser("store-findings")
+    subparsers.add_parser("embedding-chunks")
+    subparsers.add_parser("finding-import-receipt")
     subparsers.add_parser("store-dedupe-groups")
     dedupe_groups = subparsers.add_parser("list-dedupe-groups")
     dedupe_groups.add_argument("--finding-id", required=True)

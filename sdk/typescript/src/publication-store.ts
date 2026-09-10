@@ -12,11 +12,14 @@ import {
   runWorkbench,
 } from "./runtime.js";
 
+type StoredPublicationIssue = PublishedScanIssue & { attemptId?: string };
+
 export async function inspectPublicationStore(
   publication: PreparedScanPublication,
   environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
-): Promise<PublishedScanIssue[]> {
+  all = false,
+): Promise<StoredPublicationIssue[]> {
   const result = await runPublicationWorkbench(
     "inspect-linear-publication",
     publication,
@@ -24,7 +27,7 @@ export async function inspectPublicationStore(
     undefined,
     signal,
   );
-  const recorded = result["recorded"];
+  const recorded = result[all ? "publications" : "recorded"];
   if (
     !matchesPublication(result, publication) ||
     result["findingCount"] !==
@@ -39,16 +42,23 @@ export async function inspectPublicationStore(
       issue.occurrenceId,
     ]),
   );
-  const found = new Map<string, PublishedScanIssue>();
+  const found = new Map<string, StoredPublicationIssue>();
   for (const value of recorded) {
-    const issue = readPublicationRecord(value);
+    const issue = readPublicationRecord(value, all);
+    const key = all ? issue.issueIdentifier : issue.findingId;
     if (
       expected.get(issue.findingId) !== issue.occurrenceId ||
-      found.has(issue.findingId)
+      found.has(key)
     ) {
       throw invalidPublicationRecords();
     }
-    found.set(issue.findingId, issue);
+    found.set(key, issue);
+  }
+  if (all) {
+    const selected = new Set(
+      publication.issues.map((issue) => issue.findingId),
+    );
+    return [...found.values()].filter((issue) => selected.has(issue.findingId));
   }
   return publication.issues.flatMap(({ findingId }) => {
     const issue = found.get(findingId);
@@ -80,12 +90,15 @@ export async function recordPublishedIssues(
   publication: PreparedScanPublication,
   issues: readonly PublishedScanIssue[],
   environment: NodeJS.ProcessEnv,
+  attemptId?: string,
 ): Promise<PublishedScanIssue[]> {
   const result = await runPublicationWorkbench(
     "record-linear-publications",
     publication,
     environment,
     issues,
+    undefined,
+    attemptId,
   );
   const created = result["created"];
   if (
@@ -130,6 +143,7 @@ async function runPublicationWorkbench(
   environment: NodeJS.ProcessEnv,
   issues?: readonly PublishedScanIssue[],
   signal?: AbortSignal,
+  attemptId?: string,
 ): Promise<Record<string, unknown>> {
   signal?.throwIfAborted();
   const stateDirectory = codexSecurityStateDirectory(environment);
@@ -174,6 +188,7 @@ async function runPublicationWorkbench(
         destination: publication.destination,
         findings,
         ...(issues === undefined ? {} : { publications: issues }),
+        ...(attemptId === undefined ? {} : { attemptId }),
       }),
       { encoding: "utf8", flag: "wx", mode: 0o600 },
     );
@@ -211,14 +226,20 @@ function matchesPublication(
   );
 }
 
-function readPublicationRecord(value: unknown): PublishedScanIssue {
+function readPublicationRecord(
+  value: unknown,
+  includeAttempt = false,
+): StoredPublicationIssue {
   if (
     !isRecord(value) ||
     typeof value["findingId"] !== "string" ||
     typeof value["occurrenceId"] !== "string" ||
     typeof value["issueIdentifier"] !== "string" ||
     !value["issueIdentifier"].trim() ||
-    (value["url"] !== undefined && typeof value["url"] !== "string")
+    (value["url"] !== undefined && typeof value["url"] !== "string") ||
+    (includeAttempt &&
+      value["attemptId"] !== undefined &&
+      (typeof value["attemptId"] !== "string" || !value["attemptId"].trim()))
   ) {
     throw invalidPublicationRecords();
   }
@@ -227,6 +248,9 @@ function readPublicationRecord(value: unknown): PublishedScanIssue {
     occurrenceId: value["occurrenceId"],
     issueIdentifier: value["issueIdentifier"],
     ...(typeof value["url"] === "string" ? { url: value["url"] } : {}),
+    ...(includeAttempt && typeof value["attemptId"] === "string"
+      ? { attemptId: value["attemptId"] }
+      : {}),
   };
 }
 

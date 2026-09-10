@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { expect, test } from "bun:test";
 import type { JsonObject } from "../src/config.js";
+import { CodexSecurityError, DeduplicationReviewError } from "../src/errors.js";
+import type { CustomPublicationResult } from "../src/custom-publish.js";
 import { publishScanToCustomInternal } from "../src/custom-publish.js";
 import {
   deduplicateScanDirectoryInternal,
@@ -10,11 +12,274 @@ import {
 } from "../src/deduplication/scan.js";
 import type { DeduplicationReviewer } from "../src/deduplication/deduplication-reviewer.js";
 import type { ScanManifest } from "../src/models.js";
+import { FindingWorkflow } from "../src/finding-workflow.js";
+import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { scriptedWorkbench } from "./support/workbench-fakes.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
 
 type Step = Parameters<typeof scriptedWorkbench>[0][number];
+
+test.each(["before-commit", "after-commit"])(
+  "dedupe returns current publication recovery information outside its saved result (%s)",
+  async (failure) => {
+    await using fixture = await workflowFixture();
+    const { scanDir, repository, environment, document } = fixture;
+    const manifest = JSON.parse(
+      await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
+    ) as ScanManifest;
+    const id = "publication-recovery";
+    const ids = document.findings.map((finding) => finding.findingId);
+    const expected: DeduplicateScanResult = {
+      scanId: document.scanId,
+      uniqueFindingIds: ids,
+      duplicateGroups: [],
+      deduplicationStatus: "completed",
+    };
+    const publication = {
+      scanId: document.scanId,
+      repositoryId: manifest.scan.target.targetId,
+      findingIds: ids,
+      findingCount: ids.length,
+      warnings: [expect.stringContaining("publication checkpoint unavailable")],
+    };
+    let failCompletion = true;
+    let searches = 0;
+    const keys: (string | null)[] = [];
+    const execute = (args: string[], input?: string) =>
+      runWorkbench(
+        {
+          environment,
+          pluginRoot: PLUGIN_ROOT,
+          python: Bun.which("python3") ?? Bun.which("python")!,
+        },
+        args,
+        input,
+      );
+    const dependencies = {
+      environment,
+      runWorkbench: async (args: string[], input?: string) => {
+        const request = JSON.parse(input!);
+        if (
+          failCompletion &&
+          request.action === "complete" &&
+          request.stage === "publish"
+        ) {
+          failCompletion = false;
+          if (failure === "after-commit") await execute(args, input);
+          throw new Error("publication checkpoint unavailable");
+        }
+        return execute(args, input);
+      },
+      fetch: async (url: URL, init: RequestInit) => {
+        if (url.pathname === "/v1/bulk/findings") {
+          keys.push(new Headers(init.headers).get("Idempotency-Key"));
+          return Response.json(ids, { status: 201 });
+        }
+        expect(url.pathname).toEndWith("/potential-duplicates");
+        searches++;
+        return Response.json({
+          finding: document.findings[0],
+          potentialDuplicates: [],
+        });
+      },
+      reviewer: {
+        async screen() {
+          throw new Error("No review for an empty neighborhood");
+        },
+        async reviewPair() {
+          throw new Error("No pair to review");
+        },
+      },
+    };
+    const options = {
+      workflowId: id,
+      findingsUrl: "http://synthetic.test",
+      repository,
+    };
+    const first = await deduplicateScanDirectoryInternal(
+      scanDir,
+      options,
+      dependencies,
+    );
+    expect(first).toEqual({ ...expected, publication });
+    expect(keys).toHaveLength(1);
+    expect(searches).toBe(ids.length);
+    const workflow = new FindingWorkflow(id, environment);
+    const state = (await workflow.get())!;
+    expect(state.stages.publish.status).toBe(
+      failure === "before-commit" ? "running" : "completed",
+    );
+    expect(state.stages.dedupe).toMatchObject({
+      status: "completed",
+      result: expected,
+    });
+    expect(state.stages.dedupe.result).toEqual(expected);
+    if (failure === "before-commit") {
+      failCompletion = true;
+      expect(
+        await deduplicateScanDirectoryInternal(scanDir, options, dependencies),
+      ).toEqual({ ...expected, publication });
+      expect(keys).toHaveLength(2);
+      expect(searches).toBe(ids.length);
+      expect((await workflow.get())!.stages.dedupe.result).toEqual(expected);
+    }
+    for (let retry = 0; retry < 2; retry++) {
+      expect(
+        await deduplicateScanDirectoryInternal(scanDir, options, dependencies),
+      ).toEqual(expected);
+      expect(keys).toHaveLength(failure === "before-commit" ? 3 : 1);
+      expect(searches).toBe(ids.length);
+    }
+    expect(new Set(keys).size).toBe(1);
+    expect((await workflow.get())!.stages.publish.status).toBe("completed");
+  },
+);
+
+test.each(["native", "transport", "cancellation"])(
+  "dedupe retains publication recovery when a later review fails (%s)",
+  async (failure) => {
+    await using fixture = await workflowFixture();
+    const { scanDir, repository, environment, document } = fixture;
+    const id = "publication-review-failure";
+    const controller = new AbortController();
+    const original =
+      failure === "native"
+        ? new DeduplicationReviewError({
+            stage: "screening",
+            model: "synthetic-model",
+            category: "transport",
+            attempts: 1,
+            reason: "Review disconnected",
+          })
+        : failure === "transport"
+          ? new Error("Review disconnected")
+          : "SIGINT";
+    let failCompletion = true;
+    let failReview = true;
+    let uploads = 0;
+    let reviews = 0;
+    const observed: CustomPublicationResult[] = [];
+    const execute = (args: string[], input?: string) =>
+      runWorkbench(
+        {
+          environment,
+          pluginRoot: PLUGIN_ROOT,
+          python: Bun.which("python3") ?? Bun.which("python")!,
+        },
+        args,
+        input,
+      );
+    const dependencies = {
+      environment,
+      runWorkbench: async (args: string[], input?: string) => {
+        const request = JSON.parse(input!);
+        const result = await execute(args, input);
+        if (
+          failCompletion &&
+          request.action === "complete" &&
+          request.stage === "publish"
+        ) {
+          failCompletion = false;
+          throw new Error("publication checkpoint unavailable");
+        }
+        return result;
+      },
+      onPublication: (receipt: CustomPublicationResult) => {
+        observed.push(receipt);
+        // Both kinds of observer failure must leave the actual review failure intact.
+        if (failure === "native") throw new Error("Observer unavailable");
+        return Promise.reject(new Error("Observer unavailable"));
+      },
+      fetch: async (url: URL) => {
+        if (url.pathname === "/v1/bulk/findings") {
+          uploads++;
+          return Response.json(
+            document.findings.map((finding) => finding.findingId),
+            { status: 201 },
+          );
+        }
+        expect(url.pathname).toEndWith("/potential-duplicates");
+        return Response.json({
+          finding: document.findings[0],
+          potentialDuplicates: [
+            { ...document.findings[0], findingId: "neighbor-example" },
+          ],
+        });
+      },
+      reviewer: {
+        async screen() {
+          reviews++;
+          if (failReview) {
+            failReview = false;
+            if (failure === "cancellation") controller.abort(original);
+            throw original;
+          }
+          return {
+            decisions: {
+              "pair-1": {
+                decision: "DISTINCT" as const,
+                rationale: "Different cause",
+              },
+            },
+          };
+        },
+        async reviewPair(): Promise<never> {
+          throw new Error("No nominated pair");
+        },
+      },
+    };
+    const options = {
+      workflowId: id,
+      findingsUrl: "http://synthetic.test",
+      repository,
+    };
+    let caught: unknown;
+    try {
+      await deduplicateScanDirectoryInternal(
+        scanDir,
+        { ...options, signal: controller.signal },
+        dependencies,
+      );
+    } catch (error) {
+      caught = error;
+    }
+    if (failure === "cancellation") expect(caught).toBe(original);
+    else {
+      expect(caught).toBeInstanceOf(CodexSecurityError);
+      if (failure === "native") {
+        expect(caught).toBe(original);
+        expect((caught as DeduplicationReviewError).metadata).toEqual(
+          (original as DeduplicationReviewError).metadata,
+        );
+      } else expect((caught as Error).cause).toBe(original);
+      expect((caught as CodexSecurityError).publication).toEqual(observed[0]);
+    }
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toMatchObject({
+      scanId: document.scanId,
+      findingIds: document.findings.map((finding) => finding.findingId),
+      warnings: [expect.stringContaining("publication checkpoint unavailable")],
+    });
+    const workflow = new FindingWorkflow(id, environment);
+    expect((await workflow.get())!.stages.dedupe.status).toBe("failed");
+    const corrected = await deduplicateScanDirectoryInternal(
+      scanDir,
+      options,
+      dependencies,
+    );
+    expect(corrected.publication).toBeUndefined();
+    expect(corrected.deduplicationStatus).toBe("completed");
+    expect((await workflow.get())!.stages.dedupe.result).toEqual(corrected);
+    expect(uploads).toBe(1);
+    const completedReviews = reviews;
+    expect(
+      await deduplicateScanDirectoryInternal(scanDir, options, dependencies),
+    ).toEqual(corrected);
+    expect(reviews).toBe(completedReviews);
+    expect(observed).toHaveLength(1);
+  },
+);
 
 function publicationBinding(
   id: string,

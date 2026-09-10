@@ -1,3 +1,4 @@
+import type { CustomPublicationResult } from "./custom-publish.js";
 import { formatUsd, type ScanCost } from "./cost-model.js";
 
 /** Returns the original error message without altering its contents. */
@@ -25,6 +26,8 @@ export function safeErrorMessage(error: unknown): string {
 
 /** Base error for Codex Security SDK failures. */
 export class CodexSecurityError extends Error {
+  /** Accepted upload receipt when a later operation failed before local recovery. */
+  public publication?: CustomPublicationResult;
   public constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = new.target.name;

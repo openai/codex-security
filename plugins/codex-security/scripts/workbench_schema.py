@@ -898,6 +898,22 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        43,
+        "retain completed embedding chunks",
+        """
+        ALTER TABLE finding_publications ADD COLUMN attempt_id TEXT;
+        CREATE TABLE finding_embedding_chunks (
+            cache_key TEXT PRIMARY KEY,
+            vector_json TEXT NOT NULL
+        );
+        CREATE TABLE finding_import_receipts (
+            idempotency_key TEXT PRIMARY KEY,
+            request_digest TEXT NOT NULL,
+            finding_ids_json TEXT NOT NULL
+        );
+        """,
+    ),
 )
 
 

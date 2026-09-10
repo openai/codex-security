@@ -1,4 +1,5 @@
 import type { Finding } from "../models.js";
+import { workflowDigest } from "../finding-workflow.js";
 import type { DashboardQuery } from "./dashboard-types.js";
 import type { FindingSearchScope } from "../finding-retrieval.js";
 import type { FindingEmbedder } from "./embeddings.js";
@@ -13,7 +14,22 @@ export class FindingsService {
   async insert(
     findings: readonly Finding[],
     repositoryId?: string,
+    idempotencyKey?: string,
   ): Promise<string[]> {
+    const receipt =
+      idempotencyKey === undefined || this.store.importReceipt === undefined
+        ? undefined
+        : {
+            key: idempotencyKey,
+            digest: workflowDigest({ findings, repositoryId }),
+          };
+    if (receipt !== undefined) {
+      const saved = await this.store.importReceipt!(
+        receipt.key,
+        receipt.digest,
+      );
+      if (saved !== undefined) return saved;
+    }
     const embeddings = await this.embeddings.embed(findings);
     return await this.store.insert(
       findings.map((finding, index) => ({
@@ -21,6 +37,7 @@ export class FindingsService {
         embedding: embeddings[index]!,
       })),
       repositoryId,
+      receipt,
     );
   }
 

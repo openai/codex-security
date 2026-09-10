@@ -10,10 +10,12 @@ import {
   mkdtemp,
   open,
   readFile,
+  readdir,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { join, win32 } from "node:path";
+import { basename, dirname, join, win32 } from "node:path";
 import {
   InternalLinearError,
   NetworkLinearError,
@@ -44,6 +46,7 @@ import {
 import {
   collectPublicationEvents,
   hasExpectedPublicationArguments,
+  isCanonicalUuid,
   MISSING_PUBLICATION_IDENTIFIER_ERROR,
   publicationClaimAliases,
   resolveClaims,
@@ -275,10 +278,18 @@ export async function publishScanInternal(
   const environment = dependencies.environment ?? process.env;
   const linearApiKey = publicationApiKey(options, environment);
 
-  const preparedScan = await (dependencies.prepare ?? prepareScanPublication)(
-    scanDirectory,
-    { ...options, environment },
-  );
+  const uploadedAt = new Date().toISOString();
+  const prepare = (
+    timestamp = uploadedAt,
+    findingIds = options.findingIds,
+  ): Promise<PreparedScanPublication> =>
+    (dependencies.prepare ?? prepareScanPublication)(scanDirectory, {
+      ...options,
+      environment,
+      uploadedAt: timestamp,
+      findingIds,
+    });
+  const preparedScan = await prepare(uploadedAt);
   let prepared = preparedScan;
   options.signal?.throwIfAborted();
   const result: PublishScanResult = {
@@ -294,6 +305,16 @@ export async function publishScanInternal(
     },
   };
   if (options.skipExisting) {
+    if (!options.dryRun) {
+      await recoverPublicationHandoffs(
+        preparedScan,
+        environment,
+        dependencies.recordPublishedIssues ?? recordPublishedIssues,
+        prepare,
+        dependencies.inspectPublicationStore ?? inspectPublicationStore,
+        options.signal,
+      );
+    }
     result.skipped = await (
       dependencies.inspectPublicationStore ?? inspectPublicationStore
     )(preparedScan, environment, options.signal);
@@ -301,6 +322,12 @@ export async function publishScanInternal(
     const recorded = new Set(result.skipped.map((issue) => issue.findingId));
     prepared = {
       ...preparedScan,
+      sourceFindings:
+        preparedScan.sourceFindings ??
+        preparedScan.issues.map(({ findingId, occurrenceId }) => ({
+          findingId,
+          occurrenceId,
+        })),
       issues: preparedScan.issues.filter(
         (issue) => !recorded.has(issue.findingId),
       ),
@@ -348,7 +375,22 @@ export async function publishScanInternal(
       ? (dependencies.resolveCodex ?? resolveCodexCommand)(environment)
       : undefined;
   options.signal?.throwIfAborted();
-  const handoff = await createPublicationHandoff(prepared, environment);
+  const previousIssueIdentifiers = (
+    await (dependencies.inspectPublicationStore ?? inspectPublicationStore)(
+      preparedScan,
+      environment,
+      options.signal,
+      true,
+    )
+  ).map((issue) => issue.issueIdentifier);
+  options.signal?.throwIfAborted();
+  const handoff = await createPublicationHandoff(
+    prepared,
+    environment,
+    linearClient === undefined ? "connected-app" : "linear-api",
+    uploadedAt,
+    previousIssueIdentifiers,
+  );
   const progressObserver = options.onProgress;
   const completedFindings = new Set<string>();
   reportPublicationProgress(progressObserver, {
@@ -356,6 +398,11 @@ export async function publishScanInternal(
     scanId: prepared.scanId,
     total: prepared.issues.length,
   });
+  if (options.signal?.aborted) {
+    await rm(handoff.directory, { recursive: true, force: true });
+    await rm(publicationRecoveryPath(handoff.directory), { force: true });
+    options.signal.throwIfAborted();
+  }
   let invocation: PublicationCodexResult | undefined;
   if (linearClient !== undefined) {
     await publishLinearApiIssues(
@@ -367,6 +414,17 @@ export async function publishScanInternal(
       options.signal,
     );
   } else {
+    await writePublicationRecovery(handoff.directory, {
+      publication: prepared,
+      transport: "connected-app",
+      previousIssueIdentifiers,
+      submitted: true,
+    });
+    if (options.signal?.aborted) {
+      await rm(handoff.directory, { recursive: true, force: true });
+      await rm(publicationRecoveryPath(handoff.directory), { force: true });
+      options.signal.throwIfAborted();
+    }
     invocation = await (dependencies.runCodex ?? runPublicationCodex)(
       command!,
       [
@@ -409,6 +467,9 @@ export async function publishScanInternal(
         await rm(handoff.directory, { recursive: true, force: true }).catch(
           () => undefined,
         );
+        await rm(publicationRecoveryPath(handoff.directory), {
+          force: true,
+        }).catch(() => undefined);
       }
       throw error;
     });
@@ -466,7 +527,7 @@ export async function publishScanInternal(
       });
     }
   }
-  const recoveryMessage = `The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`;
+  const recoveryMessage = `The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues. The verified recovery receipt is at ${publicationRecoveryPath(handoff.directory)}.`;
   const connectorEvents = evidence.flatMap((item) =>
     item.source === "event" ? [item.rawLine] : [],
   );
@@ -498,17 +559,34 @@ export async function publishScanInternal(
       );
     }
   }
+  const recoveryReceipt: PublicationRecoveryReceipt = {
+    publication: prepared,
+    transport: linearClient === undefined ? "connected-app" : "linear-api",
+    previousIssueIdentifiers,
+    submitted: true,
+    outcome: handoffResults,
+    events: connectorEvents,
+  };
+  try {
+    await writePublicationRecovery(handoff.directory, recoveryReceipt);
+  } catch (error) {
+    result.warnings = [
+      ...(result.warnings ?? []),
+      `Could not retain verified publication results: ${safeErrorMessage(error)}. ${recoveryMessage}`,
+    ];
+    await preserveConnectorEvents();
+  }
   let persistenceFailure: { cause: unknown; detail: string } | undefined;
   if (handoffResults.created.length > 0) {
     try {
-      await preserveVerifiedHandoff(
-        handoff.file,
-        prepared,
-        handoffResults.created,
-      );
       result.created = await (
         dependencies.recordPublishedIssues ?? recordPublishedIssues
-      )(preparedScan, handoffResults.created, environment);
+      )(
+        preparedScan,
+        handoffResults.created,
+        environment,
+        basename(handoff.directory),
+      );
     } catch (cause) {
       persistenceFailure = { cause, detail: errorMessage(cause) };
     }
@@ -552,9 +630,17 @@ export async function publishScanInternal(
     }
     throw new CodexSecurityError(`${reason}. ${recoveryDetails}`, { cause });
   }
-  await rm(handoff.directory, { recursive: true, force: true }).catch(
-    () => undefined,
-  );
+  try {
+    await writePublicationRecovery(handoff.directory, {
+      ...recoveryReceipt,
+      recovered: true,
+    });
+    await rm(handoff.directory, { recursive: true, force: true });
+    // A concurrent recovery may already have enumerated this directory. Retain
+    // the completed host receipt so disappearance still has durable proof.
+  } catch {
+    // Partial cleanup must retain the host receipt for the remaining handoff.
+  }
   try {
     await saveReceipt(result, environment);
   } catch (error) {
@@ -771,6 +857,23 @@ async function publishLinearApiIssues(
   for (let index = 0; index < publication.issues.length; index += 20) {
     if (signal?.aborted) break;
     const batch = publication.issues.slice(index, index + 20);
+    await appendFile(
+      join(dirname(handoffFile), "started-batches.jsonl"),
+      JSON.stringify({ findingIds: batch.map((issue) => issue.findingId) }) +
+        "\n",
+      { mode: 0o600 },
+    );
+    if (signal?.aborted) {
+      await appendFile(
+        join(dirname(handoffFile), "started-batches.jsonl"),
+        JSON.stringify({
+          findingIds: batch.map((issue) => issue.findingId),
+          notSubmitted: true,
+        }) + "\n",
+        { mode: 0o600 },
+      );
+      break;
+    }
     const settled = await Promise.allSettled(
       batch.map(async (issue) => {
         const arguments_ = linearPublicationArguments(
@@ -916,6 +1019,9 @@ function publicationPrompt(
 async function createPublicationHandoff(
   publication: PreparedScanPublication,
   environment: NodeJS.ProcessEnv,
+  transport: "connected-app" | "linear-api",
+  uploadedAt: string,
+  previousIssueIdentifiers: string[],
 ): Promise<{ directory: string; file: string; publicationFile: string }> {
   const root = join(
     codexSecurityStateDirectory(environment),
@@ -937,17 +1043,500 @@ async function createPublicationHandoff(
     { length: Math.ceil(issues.length / 20) },
     (_, index) => issues.slice(index * 20, index * 20 + 20),
   );
+  await writePublicationRecovery(directory, {
+    publication,
+    transport,
+    previousIssueIdentifiers,
+  });
   await writeFile(file, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
   await writeFile(
     publicationFile,
     JSON.stringify({
       scanId: publication.scanId,
       destination: publication.destination,
+      transport,
+      uploadedAt,
       batches,
     }),
     { encoding: "utf8", flag: "wx", mode: 0o600 },
   );
   return { directory, file, publicationFile };
+}
+
+async function recoverPublicationHandoffs(
+  publication: PreparedScanPublication,
+  environment: NodeJS.ProcessEnv,
+  record: typeof recordPublishedIssues,
+  prepare: (
+    uploadedAt?: string,
+    findingIds?: readonly string[],
+  ) => Promise<PreparedScanPublication>,
+  inspect: typeof inspectPublicationStore,
+  signal?: AbortSignal,
+): Promise<void> {
+  const root = join(
+    codexSecurityStateDirectory(environment),
+    "publications",
+    "linear",
+    "handoffs",
+  );
+  const directories = await readdir(root, { withFileTypes: true }).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    },
+  );
+  const prefix = `${createHash("sha256").update(publication.scanId).digest("hex")}-`;
+  const attempts = new Set(
+    directories
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
+      .map((entry) => entry.name),
+  );
+  // Host receipts remain authoritative if the publisher removes its writable cwd.
+  const receipts = await readdir(dirname(root), { withFileTypes: true }).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    },
+  );
+  for (const entry of receipts) {
+    if (
+      entry.isFile() &&
+      entry.name.startsWith(prefix) &&
+      entry.name.endsWith(".json") &&
+      // Public result receipts use UUID suffixes.
+      !isCanonicalUuid(entry.name.slice(prefix.length, -".json".length))
+    )
+      attempts.add(entry.name.slice(0, -".json".length));
+  }
+  for (const attempt of attempts) {
+    signal?.throwIfAborted();
+    const directory = join(root, attempt);
+    const file = join(directory, "issues.jsonl");
+    const files = await readdir(directory).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      },
+    );
+    const receipt = await readFile(
+      publicationRecoveryPath(directory),
+      "utf8",
+    ).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    const checkpoint =
+      receipt === undefined
+        ? undefined
+        : (JSON.parse(receipt) as PublicationRecoveryReceipt);
+    if (files === undefined && checkpoint === undefined) {
+      throw new CodexSecurityError(
+        `Retained Linear publication outcome is unknown because its handoff and host receipt are missing. Reconcile ${directory} before retrying; no new issues were created.`,
+      );
+    }
+    let saved: {
+      scanId: string;
+      destination: LinearPublicationDestination;
+      uploadedAt?: string;
+      transport?: "connected-app" | "linear-api";
+      batches: {
+        findingId: string;
+        occurrenceId: string;
+        arguments: unknown;
+      }[][];
+    };
+    try {
+      saved =
+        checkpoint === undefined
+          ? (JSON.parse(
+              await readFile(join(directory, "publication.json"), "utf8"),
+            ) as typeof saved)
+          : {
+              scanId: checkpoint.publication.scanId,
+              destination: checkpoint.publication.destination,
+              transport: checkpoint.transport,
+              batches: [
+                checkpoint.publication.issues.map((issue) => ({
+                  findingId: issue.findingId,
+                  occurrenceId: issue.occurrenceId,
+                  arguments: linearPublicationArguments(
+                    checkpoint.publication.destination,
+                    issue,
+                  ),
+                })),
+              ],
+            };
+    } catch (error) {
+      if (
+        !(error instanceof SyntaxError) &&
+        (error as NodeJS.ErrnoException).code !== "ENOENT"
+      )
+        throw error;
+      const evidenceFiles = (files ?? []).filter(
+        (name) =>
+          name === "issues.jsonl" ||
+          name === "verified-issues.jsonl" ||
+          name === "started-batches.jsonl" ||
+          (name.startsWith("events-") && name.endsWith(".jsonl")),
+      );
+      const contents = await Promise.all(
+        evidenceFiles.map((name) => readFile(join(directory, name), "utf8")),
+      );
+      // Setup completes before any provider call. Preserve incomplete directories
+      // without blocking recovery when they contain no mutation evidence.
+      if (contents.every((content) => content.trim() === "")) continue;
+      throw new CodexSecurityError(
+        `Retained Linear publication setup is incomplete. Reconcile ${directory} before retrying.`,
+      );
+    }
+    if (
+      saved.scanId !== publication.scanId ||
+      saved.destination.type !== publication.destination.type ||
+      saved.destination.teamId !== publication.destination.teamId ||
+      saved.destination.projectId !== publication.destination.projectId
+    )
+      continue;
+    if (checkpoint?.recovered) continue;
+    const requests = saved.batches.flat();
+    if (requests.length === 0) {
+      throw new CodexSecurityError(
+        `Retained Linear publication has an empty plan. Reconcile ${file} before retrying.`,
+      );
+    }
+    const source = publication.sourceFindings ?? publication.issues;
+    const persisted = await inspect(
+      {
+        ...publication,
+        issues: source.map((issue) => ({
+          ...issue,
+          title: "",
+          description: "",
+        })),
+      },
+      environment,
+      signal,
+      true,
+    );
+    let previous: PreparedScanPublication;
+    if (checkpoint !== undefined) {
+      previous = checkpoint.publication;
+      const source = new Map(
+        (publication.sourceFindings ?? publication.issues).map(
+          ({ findingId, occurrenceId }) => [findingId, occurrenceId],
+        ),
+      );
+      const savedSource = previous.sourceFindings ?? previous.issues;
+      if (
+        previous.scanDirectory !== publication.scanDirectory ||
+        savedSource.length !== source.size ||
+        savedSource.some(
+          ({ findingId, occurrenceId }) =>
+            source.get(findingId) !== occurrenceId,
+        ) ||
+        previous.issues.some(
+          ({ findingId, occurrenceId }) =>
+            source.get(findingId) !== occurrenceId,
+        )
+      ) {
+        throw new CodexSecurityError(
+          `Retained Linear publication inputs differ from this scan. Reconcile ${file} before retrying.`,
+        );
+      }
+    } else {
+      // Older releases appended verified confirmations to the model's handoff.
+      // Existing SQLite mappings remain authoritative when today's classification
+      // no longer includes that original selection.
+      const recorded = new Map(
+        persisted.map((issue) => [issue.findingId, issue]),
+      );
+      const selected = new Map(
+        publication.issues.map((issue) => [
+          issue.findingId,
+          issue.occurrenceId,
+        ]),
+      );
+      if (
+        requests.some(
+          (request) =>
+            selected.get(request.findingId) !== request.occurrenceId &&
+            recorded.get(request.findingId)?.occurrenceId !==
+              request.occurrenceId,
+        )
+      ) {
+        throw new CodexSecurityError(
+          `Retained legacy Linear publication includes findings outside this selection without recorded mappings. Reconcile ${file} before retrying.`,
+        );
+      }
+      const pending = requests.filter(
+        (request) => !recorded.has(request.findingId),
+      );
+      let refreshed: PreparedScanPublication | undefined;
+      if (pending.length > 0) {
+        const firstArguments = requests[0]?.arguments;
+        const legacyTimestamp =
+          isRecord(firstArguments) &&
+          typeof firstArguments["description"] === "string"
+            ? firstArguments["description"].match(
+                /^\*\*Uploaded:\*\* ([^\n]+)\n\n### Affected locations$/mu,
+              )?.[1]
+            : undefined;
+        refreshed = await prepare(
+          saved.uploadedAt ?? legacyTimestamp,
+          pending.map((request) => request.findingId),
+        );
+      }
+      previous = {
+        ...(refreshed ?? publication),
+        sourceFindings: source,
+        issues: [
+          ...requests
+            .filter((request) => recorded.has(request.findingId))
+            .map((request) => {
+              const { title, description, priority } =
+                request.arguments as PreparedPublicationIssue;
+              return {
+                findingId: request.findingId,
+                occurrenceId: request.occurrenceId,
+                title,
+                description,
+                ...(priority === undefined ? {} : { priority }),
+              };
+            }),
+          ...(refreshed?.issues ?? []),
+        ],
+      };
+      const byFinding = new Map(
+        previous.issues.map((issue) => [issue.findingId, issue]),
+      );
+      previous.issues = source.flatMap(({ findingId }) => {
+        const issue = byFinding.get(findingId);
+        return issue === undefined ? [] : [issue];
+      });
+    }
+    const issues = requests.map((request) =>
+      previous.issues.find(
+        (issue) =>
+          issue.findingId === request.findingId &&
+          issue.occurrenceId === request.occurrenceId &&
+          hasExpectedPublicationArguments(previous, issue, request.arguments),
+      ),
+    );
+    if (issues.some((issue) => issue === undefined)) {
+      throw new CodexSecurityError(
+        `Retained Linear publication inputs differ from this request. Reconcile ${file} before retrying.`,
+      );
+    }
+    const original = {
+      ...previous,
+      issues: issues as PreparedPublicationIssue[],
+    };
+    const baseline = new Set(checkpoint?.previousIssueIdentifiers ?? []);
+    const attemptMappings = persisted
+      .filter(
+        (issue) =>
+          !baseline.has(issue.issueIdentifier) &&
+          (issue.attemptId === undefined || issue.attemptId === attempt),
+      )
+      .map(({ attemptId: _attempt, ...issue }) => issue);
+    const confirmed = new Map(
+      attemptMappings.map((issue) => [issue.findingId, issue]),
+    );
+    const restore = (checkpoint?.outcome?.created ?? []).filter(
+      (issue) =>
+        confirmed.get(issue.findingId)?.issueIdentifier !==
+        issue.issueIdentifier,
+    );
+    if (restore.length > 0) {
+      for (const issue of await record(previous, restore, environment, attempt))
+        confirmed.set(issue.findingId, issue);
+    }
+    // The model may write its handoff, but it cannot supply native event proof.
+    // Keep the host-captured events with its receipt, outside the publisher cwd.
+    let events = checkpoint?.events;
+    if (events === undefined) {
+      events = [];
+      for (const log of await readdir(dirname(root))) {
+        if (log.startsWith(`${attempt}-events-`) && log.endsWith(".jsonl")) {
+          events.push(await readFile(join(dirname(root), log), "utf8"));
+        }
+      }
+    }
+    const evidence: PublicationEvidence[] = [
+      ...(await collectPublicationHandoffEvidence(file, original)),
+      ...collectPublicationEvents(
+        events.join("\n"),
+        original,
+        "The prior publication was interrupted.",
+      ),
+    ];
+    if (checkpoint === undefined) {
+      // Legacy handoffs have no pre-attempt snapshot. An older SQLite mapping
+      // confirms this attempt only when its own acknowledgement names that ID.
+      confirmed.clear();
+      for (const issue of attemptMappings) {
+        if (
+          evidence.some(
+            (item) =>
+              item.ownerFindingId === issue.findingId &&
+              item.resolution.state === "resolved" &&
+              item.resolution.issueIdentifier === issue.issueIdentifier &&
+              (item.source === "handoff"
+                ? item.status === "success"
+                : item.status === "completed" && item.argumentsValid),
+          )
+        )
+          confirmed.set(issue.findingId, issue);
+      }
+    }
+    // A previously published issue does not confirm a distinct later mutation.
+    // Prefer this attempt's acknowledged identity; saved SDK outcomes still
+    // take precedence over subsequent edits to the model's handoff.
+    const acknowledged = reconcilePublicationEvidence(
+      original,
+      evidence,
+      "The prior publication was interrupted.",
+    ).created;
+    for (const issue of acknowledged) {
+      if (
+        confirmed.get(issue.findingId)?.issueIdentifier !==
+          issue.issueIdentifier &&
+        !checkpoint?.outcome?.created.some(
+          (saved) => saved.findingId === issue.findingId,
+        )
+      )
+        confirmed.delete(issue.findingId);
+    }
+    const knownOutcomes = new Set(
+      knownPublicationOutcomes(
+        evidence,
+        checkpoint?.transport === "linear-api",
+      ),
+    );
+    let started: Set<string> | undefined =
+      checkpoint !== undefined && !checkpoint.submitted ? new Set() : undefined;
+    if (checkpoint?.transport === "linear-api") {
+      const journal = await readFile(
+        join(directory, "started-batches.jsonl"),
+        "utf8",
+      ).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      });
+      started = new Set();
+      for (const line of journal
+        .split(/\r?\n/u)
+        .filter((line) => line.trim())) {
+        const batch = JSON.parse(line) as {
+          findingIds: string[];
+          notSubmitted?: boolean;
+        };
+        for (const findingId of batch.findingIds) {
+          if (batch.notSubmitted) started.delete(findingId);
+          else started.add(findingId);
+        }
+      }
+    }
+    const independentlyConfirmed = new Set(
+      [...acknowledged, ...(checkpoint?.outcome?.created ?? [])].map(
+        (issue) => issue.issueIdentifier,
+      ),
+    );
+    const unassigned = new Set(
+      persisted
+        .filter((issue) => issue.attemptId === undefined)
+        .map((issue) => issue.issueIdentifier),
+    );
+    const indexed = indexPublicationEvidence(evidence);
+    for (const issue of original.issues) {
+      const confirmation = confirmed.get(issue.findingId);
+      if (
+        confirmation === undefined ||
+        !unassigned.has(confirmation.issueIdentifier) ||
+        independentlyConfirmed.has(confirmation.issueIdentifier)
+      )
+        continue;
+      const outcome = reconcileFindingEvidence(
+        issue,
+        indexed.byOwner.get(issue.findingId),
+      );
+      // A manual mapping can resolve unknown work, but cannot turn a known
+      // rejection or an unsubmitted request into this attempt's success.
+      if (
+        (started !== undefined && !started.has(issue.findingId)) ||
+        (!outcome.indeterminate && knownOutcomes.has(issue.findingId))
+      )
+        confirmed.delete(issue.findingId);
+    }
+    // Re-read unresolved handoffs so operator corrections can finish recovery.
+    // SQLite and saved SDK confirmations remain authoritative for known issues.
+    const recovered = reconcilePublicationEvidence(
+      original,
+      evidence,
+      "The prior publication was interrupted.",
+      [...confirmed.values()],
+    );
+    const newlyConfirmed = recovered.created.filter(
+      (issue) =>
+        confirmed.get(issue.findingId)?.issueIdentifier !==
+        issue.issueIdentifier,
+    );
+    if (newlyConfirmed.length > 0)
+      await record(previous, newlyConfirmed, environment, attempt);
+    const missing = original.issues.some(
+      (issue) =>
+        (started === undefined || started.has(issue.findingId)) &&
+        !knownOutcomes.has(issue.findingId) &&
+        !recovered.created.some(
+          (created) => created.findingId === issue.findingId,
+        ),
+    );
+    if (recovered.indeterminate || missing) {
+      throw new CodexSecurityError(
+        `Recovered ${recovered.created.length} Linear issue mappings, but the remaining publication outcome is unknown. Check Linear and reconcile ${file} before retrying; no new issues were created.`,
+      );
+    }
+    const manual = recovered.created.filter(
+      (issue) =>
+        !independentlyConfirmed.has(issue.issueIdentifier) &&
+        persisted.some(
+          (saved) =>
+            saved.issueIdentifier === issue.issueIdentifier &&
+            saved.attemptId === undefined,
+        ),
+    );
+    if (manual.length > 0) {
+      // Claim a manual confirmation once, under the existing SQLite write
+      // transaction. Re-read because another recovery may have claimed it first.
+      await record(previous, manual, environment, attempt);
+      const claimed = await inspect(previous, environment, signal, true);
+      if (
+        manual.some(
+          (issue) =>
+            !claimed.some(
+              (saved) =>
+                saved.findingId === issue.findingId &&
+                saved.occurrenceId === issue.occurrenceId &&
+                saved.issueIdentifier === issue.issueIdentifier &&
+                saved.attemptId === attempt,
+            ),
+        )
+      ) {
+        throw new CodexSecurityError(
+          `Retained Linear publication outcome is unknown because its manual confirmation belongs to another attempt. Reconcile ${file} before retrying; no new issues were created.`,
+        );
+      }
+    }
+    await writePublicationRecovery(directory, {
+      publication: original,
+      transport: checkpoint?.transport ?? "connected-app",
+      previousIssueIdentifiers: checkpoint?.previousIssueIdentifiers ?? [],
+      submitted: true,
+      outcome: recovered,
+      events,
+      recovered: true,
+    });
+  }
 }
 
 async function collectPublicationHandoffEvidence(
@@ -1127,12 +1716,26 @@ function reconcilePublicationEvidence(
   publication: PreparedScanPublication,
   evidence: readonly PublicationEvidence[],
   failureMessage: string,
+  confirmed: readonly PublishedScanIssue[] = [],
 ): ReconciledPublication {
   const indexed = indexPublicationEvidence(evidence);
-  const outcomes = publication.issues.map((issue) =>
-    reconcileFindingEvidence(issue, indexed.byOwner.get(issue.findingId)),
-  );
-  let indeterminate = outcomes.some((outcome) => outcome.indeterminate);
+  const known = new Map(confirmed.map((issue) => [issue.findingId, issue]));
+  const outcomes: FindingReconciliation[] = publication.issues.map((issue) => {
+    const created = known.get(issue.findingId);
+    const bucket = indexed.byOwner.get(issue.findingId);
+    return created === undefined ||
+      (bucket?.completed.length ?? 0) + (bucket?.rejected.length ?? 0) > 1
+      ? reconcileFindingEvidence(issue, bucket)
+      : { issue, created, indeterminate: false };
+  });
+  let indeterminate =
+    outcomes.some((outcome) => outcome.indeterminate) ||
+    evidence.some(
+      (item) =>
+        item.source === "event" &&
+        !item.argumentsValid &&
+        (item.status === "completed" || item.resolution.claims.length > 0),
+    );
 
   const collidingOwners = new Set<string>();
   for (const reservation of indexed.claimLedger.values()) {
@@ -1145,7 +1748,11 @@ function reconcilePublicationEvidence(
     }
   }
   for (const outcome of outcomes) {
-    if (!collidingOwners.has(outcome.issue.findingId)) continue;
+    if (
+      !collidingOwners.has(outcome.issue.findingId) ||
+      known.has(outcome.issue.findingId)
+    )
+      continue;
     outcome.created = undefined;
     outcome.error =
       "Codex wrote a Linear publication that reused or relabeled a claim across incompatible publication evidence.";
@@ -1427,74 +2034,50 @@ function corroboratesRelabeledEntity(
   );
 }
 
-async function preserveVerifiedHandoff(
-  file: string,
-  publication: PreparedScanPublication,
-  issues: readonly PublishedScanIssue[],
-): Promise<void> {
-  let current: string;
-  try {
-    current = await readFile(file, "utf8");
-  } catch {
-    current = "";
-  }
-  const planned = new Map(
-    publication.issues.map((issue) => [issue.findingId, issue]),
-  );
-  const verified = new Map(issues.map((issue) => [issue.findingId, issue]));
-  const recorded = new Set<string>();
-  for (const line of current.split(/\r?\n/)) {
-    if (line.trim().length === 0) continue;
-    try {
-      const record = JSON.parse(line) as unknown;
-      if (!isRecord(record) || typeof record["findingId"] !== "string")
-        continue;
-      const expected = planned.get(record["findingId"]);
-      const saved = verified.get(record["findingId"]);
-      const resolution = resolveTopLevelPublicationClaims(record);
-      if (
-        expected !== undefined &&
-        saved !== undefined &&
-        record["scanId"] === publication.scanId &&
-        record["occurrenceId"] === expected.occurrenceId &&
-        resolution.state === "resolved" &&
-        resolution.issueIdentifier === saved.issueIdentifier &&
-        !Object.hasOwn(record, "error") &&
-        hasExpectedPublicationArguments(
-          publication,
-          expected,
-          record["arguments"],
-        )
-      ) {
-        recorded.add(record["findingId"]);
-      }
-    } catch {
-      // Preserve malformed original lines without losing verified mappings.
-    }
-  }
+interface PublicationRecoveryReceipt {
+  publication: PreparedScanPublication;
+  transport: "connected-app" | "linear-api";
+  previousIssueIdentifiers: string[];
+  submitted?: true;
+  recovered?: true;
+  outcome?: ReconciledPublication;
+  events?: string[];
+}
 
-  const records = issues
-    .filter((issue) => !recorded.has(issue.findingId))
-    .map((issue) => {
-      const expected = planned.get(issue.findingId)!;
-      return JSON.stringify({
-        scanId: publication.scanId,
-        findingId: issue.findingId,
-        occurrenceId: issue.occurrenceId,
-        issueIdentifier: issue.issueIdentifier,
-        ...(issue.url === undefined ? {} : { url: issue.url }),
-        arguments: linearPublicationArguments(
-          publication.destination,
-          expected,
-        ),
-      });
+function publicationRecoveryPath(directory: string): string {
+  // The host's receipt stays outside the connected publisher's writable cwd.
+  return join(dirname(dirname(directory)), `${basename(directory)}.json`);
+}
+
+async function writePublicationRecovery(
+  directory: string,
+  receipt: PublicationRecoveryReceipt,
+): Promise<void> {
+  const file = publicationRecoveryPath(directory);
+  const temporary = `${file}-${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify(receipt), {
+      flag: "wx",
+      mode: 0o600,
     });
-  if (records.length === 0) return;
-  const prefix = current.length === 0 || current.endsWith("\n") ? "" : "\n";
-  await appendFile(file, `${prefix}${records.join("\n")}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+    await rename(temporary, file);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
+function knownPublicationOutcomes(
+  evidence: PublicationEvidence[],
+  api: boolean,
+): string[] {
+  return evidence.flatMap((item) =>
+    item.ownerFindingId &&
+    (item.source === "event"
+      ? item.argumentsValid
+      : item.status === "success" || (api && item.status === "failure"))
+      ? [item.ownerFindingId]
+      : [],
+  );
 }
 
 function codexFailureMessage(stderr: string, exitCode: number): string {
@@ -1709,7 +2292,10 @@ async function writePublicationEvents(
   directory: string,
   events: readonly string[],
 ): Promise<string> {
-  const file = join(directory, `events-${randomUUID()}.jsonl`);
+  const file = join(
+    dirname(dirname(directory)),
+    `${basename(directory)}-events-${randomUUID()}.jsonl`,
+  );
   const handle = await open(file, "wx", 0o600);
   try {
     await handle.writeFile(`${events.join("\n")}\n`, "utf8");

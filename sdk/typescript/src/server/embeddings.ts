@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Tiktoken } from "js-tiktoken/lite";
 import cl100kBase from "js-tiktoken/ranks/cl100k_base";
 import type { Finding } from "../models.js";
@@ -12,6 +13,13 @@ const MAX_REQUEST_INPUTS = 2048;
 
 export interface FindingEmbedder {
   embed(findings: readonly Finding[]): Promise<FindingEmbedding[]>;
+}
+
+export interface EmbeddingCheckpointStore {
+  getEmbeddingChunks(keys: readonly string[]): Promise<(number[] | null)[]>;
+  saveEmbeddingChunks(
+    entries: readonly { key: string; vector: number[] }[],
+  ): Promise<void>;
 }
 
 interface Chunk {
@@ -32,6 +40,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
       init: RequestInit,
     ) => Promise<Response> = fetch,
     private readonly url: string = "https://api.openai.com/v1/embeddings",
+    private readonly checkpoints?: EmbeddingCheckpointStore,
   ) {}
 
   async embed(findings: readonly Finding[]): Promise<FindingEmbedding[]> {
@@ -81,6 +90,32 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
     chunks: Chunk[],
     vectors: number[][],
   ): Promise<void> {
+    const keys = chunks.map(({ tokens }) =>
+      createHash("sha256")
+        .update(
+          JSON.stringify({
+            version: 1,
+            url: this.url,
+            model: EMBEDDING_MODEL,
+            dimensions: EMBEDDING_DIMENSIONS,
+            tokens,
+          }),
+        )
+        .digest("hex"),
+    );
+    const cached = await this.checkpoints?.getEmbeddingChunks(keys);
+    const pending: Chunk[] = [];
+    const pendingKeys: string[] = [];
+    for (const [index, chunk] of chunks.entries()) {
+      const vector = cached?.[index];
+      if (vector != null) this.accumulate(chunk, vector, vectors);
+      else {
+        pending.push(chunk);
+        pendingKeys.push(keys[index]!);
+      }
+    }
+    if (pending.length === 0) return;
+    chunks = pending;
     let response: Response;
     try {
       const apiKey =
@@ -126,6 +161,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
       throw invalidEmbeddingResponse();
     }
     const seen = new Set<number>();
+    const entries: { key: string; vector: number[] }[] = [];
     for (const item of payload.data) {
       const index: unknown = item?.index;
       const embedding: unknown = item?.embedding;
@@ -144,13 +180,27 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
       ) {
         throw invalidEmbeddingResponse();
       }
+      const norm = Math.hypot(...embedding);
+      if (norm === 0 || !Number.isFinite(norm))
+        throw invalidEmbeddingResponse();
       seen.add(index);
-      const chunk = chunks[index]!;
-      const vector = vectors[chunk.findingIndex]!;
-      for (let dimension = 0; dimension < vector.length; dimension++) {
-        vector[dimension] =
-          vector[dimension]! + embedding[dimension]! * chunk.tokens.length;
-      }
+      entries.push({ key: pendingKeys[index]!, vector: embedding as number[] });
+    }
+    // Commit only a fully validated provider response, before another paid batch.
+    await this.checkpoints?.saveEmbeddingChunks(entries);
+    for (const item of payload.data)
+      this.accumulate(chunks[item.index]!, item.embedding, vectors);
+  }
+
+  private accumulate(
+    chunk: Chunk,
+    embedding: number[],
+    vectors: number[][],
+  ): void {
+    const vector = vectors[chunk.findingIndex]!;
+    for (let dimension = 0; dimension < vector.length; dimension++) {
+      vector[dimension] =
+        vector[dimension]! + embedding[dimension]! * chunk.tokens.length;
     }
   }
 }

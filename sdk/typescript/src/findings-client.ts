@@ -43,11 +43,16 @@ export class FindingsClient {
   async publish(
     findings: readonly Finding[],
     repositoryId: string,
+    idempotencyKey?: string,
   ): Promise<string[]> {
-    const receipt = await this.post("v1/bulk/findings", {
-      findings,
-      repositoryId,
-    });
+    const receipt = await this.post(
+      "v1/bulk/findings",
+      {
+        findings,
+        repositoryId,
+      },
+      idempotencyKey,
+    );
     const expected = new Set(findings.map((finding) => finding.findingId));
     if (
       !Array.isArray(receipt) ||
@@ -71,10 +76,19 @@ export class FindingsClient {
     return new URL(path, this.url.endsWith("/") ? this.url : `${this.url}/`);
   }
 
-  private async post(path: string, body: unknown): Promise<unknown> {
+  private async post(
+    path: string,
+    body: unknown,
+    idempotencyKey?: string,
+  ): Promise<unknown> {
     const response = await this.request(this.endpoint(path), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(idempotencyKey === undefined
+          ? {}
+          : { "Idempotency-Key": idempotencyKey }),
+      },
       body: JSON.stringify(body),
       signal: this.signal,
     });

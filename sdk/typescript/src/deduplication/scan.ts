@@ -1,3 +1,4 @@
+import { CodexSecurityError, safeErrorMessage } from "../errors.js";
 import { loadContractWithScanDirectory } from "../contract.js";
 import {
   bundledPluginRoot,
@@ -25,7 +26,10 @@ import {
   workflowDestination,
   workflowDigest,
 } from "../finding-workflow.js";
-import { publishScanToCustomInternal } from "../custom-publish.js";
+import {
+  publishScanToCustomInternal,
+  type CustomPublicationResult,
+} from "../custom-publish.js";
 import {
   CheckpointedReviewRunner,
   reviewSettingsDigest,
@@ -52,6 +56,8 @@ export interface DeduplicateScanDirectoryOptions
 
 export interface DeduplicateScanResult extends DeduplicationResult {
   scanId: string;
+  /** Accepted upload receipt when this call could not confirm its local checkpoint. */
+  publication?: CustomPublicationResult;
 }
 
 /** Review a saved scan against embedding candidates and persist accepted duplicate groups. */
@@ -75,6 +81,10 @@ type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
   reviewer?: DeduplicationReviewer;
   reviewRunner?: Pick<CodexReviewRunner, "run">;
   fetch?: FindingsRequest;
+  /** Retain current-call recovery output even when cancellation throws a primitive. */
+  onPublication?: (
+    publication: CustomPublicationResult,
+  ) => void | Promise<void>;
 };
 
 /** @internal */
@@ -181,6 +191,7 @@ async function deduplicateResolvedScan(
             : (_options, args, input) =>
                 dependencies.runWorkbench!(args, input),
         );
+  let publication: CustomPublicationResult | undefined;
   if (workflow) {
     await workflow.protectArtifacts(scanDirectory);
     await workflow.bind({
@@ -192,7 +203,7 @@ async function deduplicateResolvedScan(
       scope,
     });
     await workflow.complete("scan", null);
-    await publishScanToCustomInternal(
+    publication = await publishScanToCustomInternal(
       scanDirectory,
       {
         findingsUrl: options.findingsUrl,
@@ -210,6 +221,15 @@ async function deduplicateResolvedScan(
                 dependencies.runWorkbench!(args, input),
       },
     );
+    if (publication.warnings?.length) {
+      try {
+        void Promise.resolve(dependencies.onPublication?.(publication)).catch(
+          () => undefined,
+        );
+      } catch {
+        // Optional recovery output must not stop deduplication.
+      }
+    }
   }
   const dedupe = async (): Promise<DeduplicateScanResult> => {
     const saved = (await workflow?.get())?.stages.dedupe;
@@ -253,5 +273,20 @@ async function deduplicateResolvedScan(
     await client.storeDedupeGroups(result.duplicateGroups);
     return result;
   };
-  return workflow ? await workflow.run("dedupe", dedupe) : await dedupe();
+  try {
+    const result = workflow
+      ? await workflow.run("dedupe", dedupe)
+      : await dedupe();
+    options.signal?.throwIfAborted();
+    // Publication recovery describes this call, not the cached review result.
+    return publication?.warnings?.length ? { ...result, publication } : result;
+  } catch (error) {
+    if (!publication?.warnings?.length || options.signal?.aborted) throw error;
+    const failure =
+      error instanceof CodexSecurityError
+        ? error
+        : new CodexSecurityError(safeErrorMessage(error), { cause: error });
+    failure.publication = publication;
+    throw failure;
+  }
 }

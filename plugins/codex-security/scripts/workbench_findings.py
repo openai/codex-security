@@ -8,6 +8,7 @@ import json
 import math
 import sqlite3
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -15,15 +16,60 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_finding_index import upsert_finding
 
 
+def embedding_chunks(connection: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    if payload["action"] == "get":
+        return {
+            "vectors": [
+                json.loads(row["vector_json"]) if row is not None else None
+                for key in payload["keys"]
+                for row in [
+                    connection.execute(
+                        "SELECT vector_json FROM finding_embedding_chunks WHERE cache_key = ?",
+                        (key,),
+                    ).fetchone()
+                ]
+            ]
+        }
+    if payload["action"] != "put":
+        raise SystemExit("Unknown embedding checkpoint action.")
+    with connection:
+        connection.executemany(
+            "INSERT INTO finding_embedding_chunks (cache_key, vector_json) VALUES (?, ?) "
+            "ON CONFLICT(cache_key) DO NOTHING",
+            (
+                (entry["key"], json.dumps(entry["vector"], allow_nan=False))
+                for entry in payload["entries"]
+            ),
+        )
+    return {}
+
+
+def store_findings_payload(
+    connection: sqlite3.Connection, payload: dict[str, Any], now: Callable[[], str]
+) -> dict[str, Any]:
+    return store_findings(
+        connection,
+        payload["entries"],
+        now(),
+        payload.get("repositoryId"),
+        payload.get("receipt"),
+    )
+
+
 def store_findings(
     connection: sqlite3.Connection,
     entries: list[dict[str, Any]],
     timestamp: str,
     repository_id: str | None = None,
+    receipt: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     try:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
+            if receipt is not None:
+                saved = read_receipt(connection, receipt)
+                if saved is not None:
+                    return saved
             for entry in entries:
                 finding = entry["finding"]
                 embedding = entry["embedding"]
@@ -54,9 +100,31 @@ def store_findings(
                         json.dumps(embedding["vector"], allow_nan=False),
                     ),
                 )
+            if receipt is not None:
+                connection.execute(
+                    "INSERT INTO finding_import_receipts "
+                    "(idempotency_key, request_digest, finding_ids_json) VALUES (?, ?, ?)",
+                    (
+                        receipt["key"],
+                        receipt["digest"],
+                        json.dumps([entry["finding"]["findingId"] for entry in entries]),
+                    ),
+                )
     except sqlite3.IntegrityError:
         return {"error": "finding_conflict"}
     return {"findingIds": [entry["finding"]["findingId"] for entry in entries]}
+
+
+def read_receipt(connection: sqlite3.Connection, receipt: dict[str, str]) -> dict[str, Any] | None:
+    row = connection.execute(
+        "SELECT request_digest, finding_ids_json FROM finding_import_receipts WHERE idempotency_key = ?",
+        (receipt["key"],),
+    ).fetchone()
+    if row is None:
+        return None
+    if row["request_digest"] != receipt["digest"]:
+        return {"error": "finding_conflict"}
+    return {"findingIds": json.loads(row["finding_ids_json"])}
 
 
 def list_stored_findings(
