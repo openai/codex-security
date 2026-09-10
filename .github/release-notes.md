@@ -30,6 +30,7 @@
 - detect a Linear URL contradiction over plain HTTP ([#867](https://github.com/openai/codex-security/pull/867))
 - pipeline dedupe with configurable concurrency ([#852](https://github.com/openai/codex-security/pull/852))
 - disable reasoning summaries by default for Bedrock ([#869](https://github.com/openai/codex-security/pull/869))
+- reuse scan authentication for patch and validation ([#871](https://github.com/openai/codex-security/pull/871))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

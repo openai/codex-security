@@ -36,6 +36,8 @@ import {
 } from "smol-toml";
 import { z } from "incur";
 import {
+  CODEX_AUTH_CONFIG_KEYS,
+  NO_CREDENTIALS_MESSAGE,
   accountStatus,
   configuredCodexHome,
   CodexLoginHandle,
@@ -2848,11 +2850,7 @@ export class CodexSecurity {
         !commandAuth &&
         authentication.method !== "aws_credentials"
       ) {
-        throw new AuthenticationRequiredError(
-          "No credentials were found. Run 'codex-security login', use " +
-            "'codex-security login --device-auth' on a remote or headless machine, or set " +
-            "OPENAI_API_KEY or CODEX_API_KEY for CI.",
-        );
+        throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
       }
       if (!commandAuth)
         authentication = await runtimeScanAuthentication(
@@ -4294,7 +4292,8 @@ export function formatEnvironmentVariableRemovalGuidance(
   return `remove ${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]} from the environment`;
 }
 
-async function runtimeScanAuthentication(
+/** @internal */
+export async function runtimeScanAuthentication(
   environment: ProcessEnvironment,
   codexHome: string,
   auth: ScanAuthMode = "auto",
@@ -4614,11 +4613,7 @@ function sharedCredentialCodexConfig(
     approval_policy: scanApprovalPolicy(config),
     features: { plugins: true },
   };
-  for (const key of [
-    "cli_auth_credentials_store",
-    "forced_login_method",
-    "forced_chatgpt_workspace_id",
-  ]) {
+  for (const key of CODEX_AUTH_CONFIG_KEYS) {
     if (Object.hasOwn(config, key)) shared[key] = structuredClone(config[key]!);
   }
   const modelProvider = scanModelProvider(config);

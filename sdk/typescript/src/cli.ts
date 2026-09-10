@@ -57,13 +57,21 @@ import {
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
+  runtimeScanAuthentication,
+  selectedScanEnvironment,
   type DeepScanOptions,
   type ScanAuthMode,
   type ScanAuthentication,
   type ScanOptions,
   type ScanPreflight,
 } from "./api.js";
-import { accountStatus } from "./auth.js";
+import {
+  accountStatus,
+  CODEX_AUTH_CONFIG_KEYS,
+  NO_CREDENTIALS_MESSAGE,
+  configuredCodexHome,
+  readCodexHomeConfig,
+} from "./auth.js";
 import { loadContract } from "./contract.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
@@ -92,9 +100,14 @@ import {
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
+  hasCommandAuth,
+  inlineToml,
+  modelProviderConfigOverride,
+  resolveCommandAuthConfig,
   mergedCodexConfig,
   scanModelConfiguration,
   scanModelProvider,
+  writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
   type JsonObject,
@@ -104,6 +117,7 @@ import { formatUsd, type ScanCost } from "./cost.js";
 import { formatScanCostTokens, formatTokenUsage } from "./cost-model.js";
 import {
   CodexSecurityError,
+  AuthenticationRequiredError,
   ConfigurationError,
   InvalidTargetError,
   OutputDirectoryError,
@@ -144,6 +158,8 @@ import type { ScanResult } from "./result.js";
 import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
+  acquireCodexSecurityCredentialHomeLock,
+  requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
@@ -198,6 +214,7 @@ import {
 import {
   abortable,
   DiffTarget,
+  enclosingGitWorktreeRoots,
   type ScanMode,
   type ScanTarget,
 } from "./targets.js";
@@ -1075,6 +1092,10 @@ type SkillThreadSource = Extract<
 >;
 
 interface SkillCommandOutput {
+  readonly directory?: string;
+  readonly auth?: ScanAuthMode;
+  readonly modelProvider?: string;
+  readonly providerConfiguration?: JsonObject;
   readonly command: "validate" | "patch" | "verify-fix";
   readonly stdout: Writable;
   readonly stderr: Writable;
@@ -1106,6 +1127,7 @@ const findingVerificationSchema = z.object({
 type FindingVerification = z.infer<typeof findingVerificationSchema>;
 
 interface SkillRunOptions {
+  readonly auth?: ScanAuthMode;
   safetyIdentifier?: string;
   directory?: string;
   findings?: readonly Finding[];
@@ -1133,6 +1155,8 @@ interface SelectedFindings {
 }
 
 interface PatchRiskRequest {
+  readonly auth?: ScanAuthMode;
+  readonly environment?: NodeJS.ProcessEnv;
   repository: string;
   base: string;
   files?: readonly string[];
@@ -1389,157 +1413,327 @@ export async function runCodexSkillCommand(
   processEnvironment: NodeJS.ProcessEnv = process.env,
   input?: string,
 ): Promise<number> {
-  const configuredHome =
-    process.platform === "win32"
-      ? environmentValue(processEnvironment, "CODEX_HOME")
-      : processEnvironment["CODEX_HOME"];
-  const environment = { ...processEnvironment };
-  for (const name of Object.keys(environment)) {
-    if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
-  }
-  if (configuredHome?.trim()) {
-    environment["CODEX_HOME"] = resolve(
-      expandHome(configuredHome, processEnvironment),
-    );
-  }
-  const invocation = spawn(executablePathForSpawn(command.command), [...args], {
-    env: environment,
-    cwd: output?.appServer?.directory ?? parse(process.execPath).root,
-    stdio:
-      output === undefined
-        ? input === undefined
-          ? "inherit"
-          : ["pipe", "inherit", "inherit"]
-        : [
-            output.appServer !== undefined || input !== undefined
-              ? "pipe"
-              : "ignore",
-            "pipe",
-            "pipe",
-          ],
-    windowsHide: true,
-  });
-  if (input !== undefined) {
-    invocation.stdin?.on("error", () => {});
-    invocation.stdin?.end(input);
-  }
-  let requestedSignal: SignalName | null = null;
-  let forcedTermination: ReturnType<typeof setTimeout> | undefined;
-  let forceStatusCompletion: (() => void) | null = null;
-  let forceCaptureCompletion: (() => void) | null = null;
-  let invocationStatus: Promise<number> | undefined;
-  const requestTermination = (signal: SignalName): void => {
-    requestedSignal = signal;
-    invocation.kill(signal);
-    if (forcedTermination !== undefined) return;
-    forcedTermination = setTimeout(() => {
-      forcedTermination = undefined;
-      if (invocation.exitCode === null && invocation.signalCode === null) {
-        invocation.kill("SIGKILL");
+  let releaseCredentialHome: (() => Promise<void>) | undefined;
+  try {
+    let apiKey: string | undefined;
+    let authentication: ScanAuthentication | null = null;
+    let modelProvider: string | undefined;
+    // runSkill selects auth; other process callers supply their own environment.
+    if (output?.auth !== undefined) {
+      const config =
+        output.modelProvider !== undefined
+          ? {
+              model_provider: output.modelProvider,
+              ...(output.providerConfiguration === undefined
+                ? {}
+                : {
+                    model_providers: {
+                      [output.modelProvider]: output.providerConfiguration,
+                    },
+                  }),
+            }
+          : output.appServer === undefined
+            ? {}
+            : await readCodexHomeConfig(processEnvironment);
+      const provider = scanModelProvider(config);
+      const providerConfiguration =
+        typeof provider === "string"
+          ? (
+              config["model_providers"] as
+                | Record<string, JsonObject>
+                | undefined
+            )?.[provider]
+          : undefined;
+      const requiresOpenAiAuth =
+        provider === undefined ||
+        provider === "openai" ||
+        providerConfiguration?.["requires_openai_auth"] === true;
+      modelProvider = output.modelProvider;
+      let credentialConfig: JsonObject | undefined;
+      authentication = scanAuthentication(
+        processEnvironment,
+        output.auth,
+        provider,
+        hasCommandAuth(config),
+      );
+      if (
+        authentication.method === "stored_credentials" &&
+        isExternalModelProvider(provider)
+      ) {
+        const externalProvider = EXTERNAL_CODEX_PROVIDERS[provider];
+        throw new AuthenticationRequiredError(
+          `Set ${externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
+        );
       }
-      forceCaptureCompletion?.();
+      let selected = selectedScanEnvironment(
+        processEnvironment,
+        authentication.method === "command" ? "chatgpt" : output.auth,
+        provider,
+      );
+      if (
+        authentication.method === "stored_credentials" &&
+        requiresOpenAiAuth
+      ) {
+        const directory = await realpath(
+          output.directory ?? output.appServer?.directory ?? process.cwd(),
+        );
+        const protectedRoots = [
+          directory,
+          ...(await enclosingGitWorktreeRoots(directory)),
+        ];
+        const codexHome = await prepareCodexSecurityCredentialHome(
+          selected,
+          (path) =>
+            requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
+        );
+        releaseCredentialHome =
+          await acquireCodexSecurityCredentialHomeLock(codexHome);
+        let credentialsAvailable: boolean;
+        const ambientConfig = await readCodexHomeConfig(selected);
+        credentialConfig = await readCodexHomeConfig({
+          ...selected,
+          CODEX_HOME: codexHome,
+        });
+        // Let native Codex apply the ambient home's project-trust decisions.
+        for (const key of [
+          ...CODEX_AUTH_CONFIG_KEYS,
+          "projects",
+          "project_root_markers",
+        ]) {
+          const value = ambientConfig[key];
+          if (value === undefined) delete credentialConfig[key];
+          else credentialConfig[key] = value;
+        }
+        if (typeof provider === "string")
+          credentialConfig["model_provider"] = provider;
+        else delete credentialConfig["model_provider"];
+        delete credentialConfig["profile"];
+        if (typeof provider !== "string" || providerConfiguration === undefined)
+          delete credentialConfig["model_providers"];
+        else
+          credentialConfig["model_providers"] = {
+            [provider]: providerConfiguration,
+          };
+        await writeCodexConfig(
+          join(codexHome, "config.toml"),
+          credentialConfig,
+        );
+        credentialsAvailable = await initialCredentialsAvailable(
+          selected,
+          configuredCodexHome(selected),
+          codexHome,
+        );
+        selected = {
+          ...selected,
+          CODEX_HOME: codexHome,
+          CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(selected),
+        };
+        if (
+          !credentialsAvailable &&
+          !(await accountStatus(command, selected)).authenticated
+        ) {
+          throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
+        }
+        authentication = await runtimeScanAuthentication(
+          selected,
+          codexHome,
+          output.auth,
+          provider,
+        );
+      } else if (authentication.method === "api_key" && requiresOpenAiAuth) {
+        apiKey = environmentValue(selected, authentication.source)?.trim();
+        // Match the SDK's key selection for native and nested plugin workers.
+        selected = {
+          ...selectedScanEnvironment(selected, "chatgpt"),
+          CODEX_API_KEY: apiKey,
+        };
+        if (output.appServer !== undefined) {
+          args = [
+            ...args,
+            "--config",
+            'cli_auth_credentials_store="ephemeral"',
+          ];
+        }
+      }
+      if (output.appServer === undefined) {
+        const authConfig =
+          credentialConfig ?? (await readCodexHomeConfig(selected));
+        args = [
+          ...args,
+          ...CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
+            authConfig[key] === undefined
+              ? []
+              : ["--config", `${key}=${inlineToml(authConfig[key])}`],
+          ),
+        ];
+      }
+      if (output.appServer === undefined) await releaseCredentialHome?.();
+      processEnvironment = selected;
+    }
+    const configuredHome =
+      process.platform === "win32"
+        ? environmentValue(processEnvironment, "CODEX_HOME")
+        : processEnvironment["CODEX_HOME"];
+    const environment = { ...processEnvironment };
+    for (const name of Object.keys(environment)) {
+      if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
+    }
+    if (configuredHome?.trim()) {
+      environment["CODEX_HOME"] = resolve(
+        expandHome(configuredHome, processEnvironment),
+      );
+    }
+    const invocation = spawn(
+      executablePathForSpawn(command.command),
+      [...args],
+      {
+        env: environment,
+        cwd: output?.appServer?.directory ?? parse(process.execPath).root,
+        stdio:
+          output === undefined
+            ? input === undefined
+              ? "inherit"
+              : ["pipe", "inherit", "inherit"]
+            : [
+                output.appServer !== undefined || input !== undefined
+                  ? "pipe"
+                  : "ignore",
+                "pipe",
+                "pipe",
+              ],
+        windowsHide: true,
+      },
+    );
+    if (input !== undefined) {
+      invocation.stdin?.on("error", () => {});
+      invocation.stdin?.end(input);
+    }
+    let requestedSignal: SignalName | null = null;
+    let forcedTermination: ReturnType<typeof setTimeout> | undefined;
+    let forceStatusCompletion: (() => void) | null = null;
+    let forceCaptureCompletion: (() => void) | null = null;
+    let invocationStatus: Promise<number> | undefined;
+    const requestTermination = (signal: SignalName): void => {
+      requestedSignal = signal;
+      invocation.kill(signal);
+      if (forcedTermination !== undefined) return;
+      forcedTermination = setTimeout(() => {
+        forcedTermination = undefined;
+        if (invocation.exitCode === null && invocation.signalCode === null) {
+          invocation.kill("SIGKILL");
+        }
+        forceCaptureCompletion?.();
+        invocation.stdout?.destroy();
+        invocation.stderr?.destroy();
+        forceStatusCompletion?.();
+      }, CHILD_TERMINATION_GRACE_MS);
+    };
+    const onInterrupt = (): void => {
+      requestTermination("SIGINT");
+    };
+    const onTerminate = (): void => {
+      requestTermination("SIGTERM");
+    };
+    process.on("SIGINT", onInterrupt);
+    process.on("SIGTERM", onTerminate);
+    try {
+      let diagnostic = "";
+      invocation.stderr?.on("data", (chunk: Buffer) => {
+        diagnostic = `${diagnostic}${chunk.toString("utf8")}`.slice(
+          -64 * 1_024,
+        );
+      });
+      const captured =
+        output === undefined || invocation.stdout === null
+          ? Promise.resolve(undefined)
+          : Promise.race([
+              readSkillCommandOutput(
+                invocation.stdout,
+                output.appServer === undefined
+                  ? undefined
+                  : {
+                      apiKey,
+                      modelProvider,
+                      onThreadStarted: releaseCredentialHome,
+                      directory: output.appServer.directory,
+                      prompt: output.appServer.prompt,
+                      threadSource: output.appServer.threadSource,
+                      input: invocation.stdin!,
+                      sandbox: output.appServer.sandbox,
+                      onEvent: output.appServer.onEvent,
+                    },
+              ),
+              new Promise<undefined>((resolve) => {
+                forceCaptureCompletion = () => resolve(undefined);
+              }),
+            ]);
+      invocationStatus = new Promise<number>((resolve, reject) => {
+        let completed = false;
+        const complete = (
+          code: number | null,
+          signal: NodeJS.Signals | null,
+        ): void => {
+          if (completed) return;
+          completed = true;
+          forceStatusCompletion = null;
+          resolve(
+            requestedSignal === "SIGINT" || signal === "SIGINT"
+              ? 130
+              : requestedSignal === "SIGTERM" || signal === "SIGTERM"
+                ? 143
+                : code ?? 1,
+          );
+        };
+        forceStatusCompletion = () => complete(null, null);
+        invocation.once("error", (error) => {
+          if (completed) return;
+          completed = true;
+          forceStatusCompletion = null;
+          reject(error);
+        });
+        invocation.once(output === undefined ? "exit" : "close", complete);
+      });
+      let [status, events] = await Promise.all([invocationStatus, captured]);
+      if (status === 0 && output?.appServer !== undefined && events?.error) {
+        status = 1;
+      }
+      if (output === undefined || status === 130 || status === 143)
+        return status;
+      if (status !== 0) {
+        await writeCliOutput(
+          output.stderr,
+          `codex-security: ${skillCommandFailure(output.command, status, events?.error ?? diagnostic, authentication)}\n`,
+        );
+        return status;
+      }
+      if (
+        (output.appServer !== undefined && events?.completed !== true) ||
+        events?.message === undefined ||
+        events.message.trim().length === 0
+      ) {
+        await writeCliOutput(
+          output.stderr,
+          `codex-security: Codex did not return a completed ${output.command} response.\n`,
+        );
+        return 2;
+      }
+      await writeCliOutput(output.stdout, `${events.message.trimEnd()}\n`);
+      return status;
+    } catch (error) {
       invocation.stdout?.destroy();
       invocation.stderr?.destroy();
-      forceStatusCompletion?.();
-    }, CHILD_TERMINATION_GRACE_MS);
-  };
-  const onInterrupt = (): void => {
-    requestTermination("SIGINT");
-  };
-  const onTerminate = (): void => {
-    requestTermination("SIGTERM");
-  };
-  process.on("SIGINT", onInterrupt);
-  process.on("SIGTERM", onTerminate);
-  try {
-    let diagnostic = "";
-    invocation.stderr?.on("data", (chunk: Buffer) => {
-      diagnostic = `${diagnostic}${chunk.toString("utf8")}`.slice(-64 * 1_024);
-    });
-    const captured =
-      output === undefined || invocation.stdout === null
-        ? Promise.resolve(undefined)
-        : Promise.race([
-            readSkillCommandOutput(
-              invocation.stdout,
-              output.appServer === undefined
-                ? undefined
-                : {
-                    directory: output.appServer.directory,
-                    prompt: output.appServer.prompt,
-                    threadSource: output.appServer.threadSource,
-                    input: invocation.stdin!,
-                    sandbox: output.appServer.sandbox,
-                    onEvent: output.appServer.onEvent,
-                  },
-            ),
-            new Promise<undefined>((resolve) => {
-              forceCaptureCompletion = () => resolve(undefined);
-            }),
-          ]);
-    invocationStatus = new Promise<number>((resolve, reject) => {
-      let completed = false;
-      const complete = (
-        code: number | null,
-        signal: NodeJS.Signals | null,
-      ): void => {
-        if (completed) return;
-        completed = true;
-        forceStatusCompletion = null;
-        resolve(
-          requestedSignal === "SIGINT" || signal === "SIGINT"
-            ? 130
-            : requestedSignal === "SIGTERM" || signal === "SIGTERM"
-              ? 143
-              : code ?? 1,
-        );
-      };
-      forceStatusCompletion = () => complete(null, null);
-      invocation.once("error", (error) => {
-        if (completed) return;
-        completed = true;
-        forceStatusCompletion = null;
-        reject(error);
-      });
-      invocation.once(output === undefined ? "exit" : "close", complete);
-    });
-    let [status, events] = await Promise.all([invocationStatus, captured]);
-    if (status === 0 && output?.appServer !== undefined && events?.error) {
-      status = 1;
+      requestTermination("SIGTERM");
+      await invocationStatus?.catch(() => undefined);
+      throw error;
+    } finally {
+      if (forcedTermination !== undefined) clearTimeout(forcedTermination);
+      forceStatusCompletion = null;
+      forceCaptureCompletion = null;
+      process.off("SIGINT", onInterrupt);
+      process.off("SIGTERM", onTerminate);
     }
-    if (output === undefined || status === 130 || status === 143) return status;
-    if (status !== 0) {
-      await writeCliOutput(
-        output.stderr,
-        `codex-security: ${skillCommandFailure(output.command, status, events?.error ?? diagnostic)}\n`,
-      );
-      return status;
-    }
-    if (
-      (output.appServer !== undefined && events?.completed !== true) ||
-      events?.message === undefined ||
-      events.message.trim().length === 0
-    ) {
-      await writeCliOutput(
-        output.stderr,
-        `codex-security: Codex did not return a completed ${output.command} response.\n`,
-      );
-      return 2;
-    }
-    await writeCliOutput(output.stdout, `${events.message.trimEnd()}\n`);
-    return status;
-  } catch (error) {
-    invocation.stdout?.destroy();
-    invocation.stderr?.destroy();
-    requestTermination("SIGTERM");
-    await invocationStatus?.catch(() => undefined);
-    throw error;
   } finally {
-    if (forcedTermination !== undefined) clearTimeout(forcedTermination);
-    forceStatusCompletion = null;
-    forceCaptureCompletion = null;
-    process.off("SIGINT", onInterrupt);
-    process.off("SIGTERM", onTerminate);
+    await releaseCredentialHome?.();
   }
 }
 
@@ -4377,6 +4571,10 @@ export async function main(
           .describe("Finding text or a file containing findings."),
       }),
       options: z.object({
+        auth: z
+          .enum(SCAN_AUTH_MODES)
+          .default("auto")
+          .describe("Credential source: auto, chatgpt, or api-key."),
         effort: effortOption(),
         codex: z
           .array(optionValue("--codex"))
@@ -4395,6 +4593,7 @@ export async function main(
             output,
             errorOutput,
             dependencies,
+            { auth: options.auth },
           );
         } catch (error) {
           exitCode = 2;
@@ -4415,6 +4614,10 @@ export async function main(
           .describe("Finding text, a file, or a saved finding identifier."),
       }),
       options: z.object({
+        auth: z
+          .enum(SCAN_AUTH_MODES)
+          .default("auto")
+          .describe("Credential source: auto, chatgpt, or api-key."),
         effort: effortOption(),
         scan: optionValue("--scan")
           .optional()
@@ -4555,6 +4758,7 @@ export async function main(
                   ...(selected === undefined
                     ? {}
                     : { findings: selected.findings }),
+                  auth: options.auth,
                   verificationIds: identifiers,
                   environment,
                   onEvent: progress.observe.bind(progress),
@@ -4631,6 +4835,10 @@ export async function main(
           .describe("Issue text or a file containing issues."),
       }),
       options: z.object({
+        auth: z
+          .enum(SCAN_AUTH_MODES)
+          .default("auto")
+          .describe("Credential source: auto, chatgpt, or api-key."),
         effort: effortOption(),
         scan: optionValue("--scan")
           .optional()
@@ -4680,6 +4888,7 @@ export async function main(
               options.linearFilter !== undefined ||
               options.linearApiKey !== undefined ||
               options.effort !== undefined ||
+              options.auth !== "auto" ||
               options.codex.length > 0
             ) {
               throw new CodexSecurityError(
@@ -4736,6 +4945,7 @@ export async function main(
               options.effort,
               errorOutput,
               dependencies,
+              { auth: options.auth },
             );
             exitCode = patchExitCode(patches);
             let patchRisk: PatchRiskAssessment | undefined;
@@ -4749,6 +4959,7 @@ export async function main(
                     files,
                     codexOverrides: options.codex,
                     effort: options.effort,
+                    auth: options.auth,
                   },
                   errorOutput,
                   dependencies,
@@ -4836,7 +5047,7 @@ export async function main(
             output,
             errorOutput,
             dependencies,
-            { environment },
+            { environment, auth: options.auth },
           );
           if (patchBase !== undefined && exitCode === 0) {
             const files = await changedPatchFiles(
@@ -4848,10 +5059,12 @@ export async function main(
               ? await runPatchRiskAssessment(
                   {
                     repository,
+                    environment,
                     base: patchBase,
                     files,
                     codexOverrides: options.codex,
                     effort: options.effort,
+                    auth: options.auth,
                   },
                   errorOutput,
                   dependencies,
@@ -6409,6 +6622,8 @@ async function assessPatchRisk(
       dependencies,
       {
         directory: request.repository,
+        auth: request.auth,
+        environment: request.environment,
         patchArtifact: {
           path: patchPath,
           repository: basename(resolve(request.repository)),
@@ -6738,12 +6953,21 @@ async function runSkill(
       ...(options.provider === undefined
         ? []
         : ["--config", `model_provider=${JSON.stringify(options.provider)}`]),
-      ...Object.entries(options.providerConfiguration ?? {}).flatMap(
-        ([key, value]) => [
-          "--config",
-          `model_providers.${options.provider}.${key}=${JSON.stringify(value)}`,
-        ],
-      ),
+      ...(options.provider === undefined ||
+      options.providerConfiguration === undefined
+        ? []
+        : modelProviderConfigOverride(
+            resolveCommandAuthConfig(
+              {
+                model_providers: {
+                  [options.provider]: options.providerConfiguration,
+                },
+              },
+              configuredCodexHome(
+                options.environment ?? dependencies.environment,
+              ),
+            ),
+          ).flatMap((value) => ["--config", value])),
       "--config",
       verify || assess
         ? 'approval_policy="on-request"'
@@ -6772,6 +6996,10 @@ async function runSkill(
     ],
     {
       command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
+      auth: options.auth ?? "auto",
+      directory,
+      modelProvider: options.provider,
+      providerConfiguration: options.providerConfiguration,
       stdout,
       stderr,
       ...(appServer
@@ -6788,7 +7016,7 @@ async function runSkill(
           }
         : {}),
     },
-    options.environment,
+    options.environment ?? dependencies.environment,
     appServer ? undefined : prompt,
   );
 }
@@ -6796,6 +7024,9 @@ async function runSkill(
 export async function readSkillCommandOutput(
   stream: AsyncIterable<Buffer | string>,
   appServer?: {
+    readonly apiKey?: string;
+    readonly modelProvider?: string;
+    readonly onThreadStarted?: () => Promise<void>;
     readonly directory?: string;
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
@@ -6827,6 +7058,9 @@ export async function readSkillCommandOutput(
       // Inherit the child process cwd and preserve the user's decision.
       params: {
         threadSource: appServer.threadSource,
+        ...(appServer.modelProvider === undefined
+          ? {}
+          : { modelProvider: appServer.modelProvider }),
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
         sandbox: appServer?.sandbox ?? "workspace-write",
@@ -6879,8 +7113,18 @@ export async function readSkillCommandOutput(
         } else if (value["error"] !== undefined) {
           error = (value["error"] as { message: string }).message;
           appServer.input.end();
-        } else if (value["id"] === 1) {
-          send({ method: "notifications/initialized" });
+        } else if (value["id"] === 1 || value["id"] === "login") {
+          if (value["id"] === 1) {
+            send({ method: "notifications/initialized" });
+            if (appServer.apiKey !== undefined) {
+              send({
+                id: "login",
+                method: "account/login/start",
+                params: { type: "apiKey", apiKey: appServer.apiKey },
+              });
+              continue;
+            }
+          }
           if (appServer.sandbox === "read-only") {
             if (appServer.directory === undefined) {
               error =
@@ -6959,6 +7203,7 @@ export async function readSkillCommandOutput(
                 },
           );
         } else if (value["id"] === 2) {
+          await appServer.onThreadStarted?.();
           threadId = (value["result"] as { thread: { id: string } }).thread.id;
           send({
             id: 3,
@@ -7051,13 +7296,14 @@ export function skillCommandFailure(
   command: "validate" | "patch" | "verify-fix",
   status: number,
   detail: string,
+  authentication: ScanAuthentication | null = null,
 ): string {
   if (
     /401|invalid.api.key|token.expired|unauthori[sz]ed|authorizationrequired/iu.test(
       detail,
     )
   ) {
-    return "Authentication failed. Run codex-security login or check the configured API key.";
+    return authenticationFailureMessage(authentication);
   }
   if (
     /403|model.not.found|model.*access|access.*model|permission/iu.test(detail)
@@ -7384,7 +7630,8 @@ async function executeScan(
   let effectiveModel = DEFAULT_SCAN_MODEL_CONFIGURATION.model;
   let effectiveReasoningEffort =
     DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
-  let providerOptions: SkillRunOptions = {};
+  let providerOptions: SkillRunOptions = { provider: "openai" };
+  let auth = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
@@ -7429,7 +7676,7 @@ async function executeScan(
     ) {
       patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
     }
-    const auth =
+    auth =
       !arguments_.dryRun && !arguments_.mock && interactive
         ? await chooseInteractiveAuthentication(
             {
@@ -7442,19 +7689,28 @@ async function executeScan(
             dependencies,
           )
         : arguments_.auth;
-    if (typeof provider === "string" && provider !== "openai") {
+    if (typeof provider === "string") {
       providerOptions = {
         provider,
-        providerConfiguration: (
-          effectiveConfiguration["model_providers"] as
-            | Record<string, JsonObject>
-            | undefined
-        )?.[provider],
+        providerConfiguration:
+          (
+            effectiveConfiguration["model_providers"] as
+              | Record<string, JsonObject>
+              | undefined
+          )?.[provider] ??
+          (isExternalModelProvider(provider)
+            ? EXTERNAL_CODEX_PROVIDERS[provider]
+            : undefined),
       };
     }
     selectedAuthentication = arguments_.mock
       ? null
-      : scanAuthentication(dependencies.environment, auth, provider);
+      : scanAuthentication(
+          dependencies.environment,
+          auth,
+          provider,
+          hasCommandAuth(effectiveConfiguration),
+        );
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
@@ -8009,17 +8265,6 @@ async function executeScan(
             patchSelection.occurrenceIds.includes(finding.occurrenceId)),
       ),
     };
-    const environment = { ...dependencies.environment };
-    if (selectedAuthentication?.method === "stored_credentials") {
-      for (const name of Object.keys(environment)) {
-        if (["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase())) {
-          delete environment[name];
-        }
-      }
-      environment["CODEX_HOME"] = codexSecurityCredentialHome(
-        dependencies.environment,
-      );
-    }
     try {
       patches = await runFindingPatches(
         selected,
@@ -8035,7 +8280,7 @@ async function executeScan(
         {
           ...providerOptions,
           safetyIdentifier: arguments_.safetyIdentifier,
-          environment,
+          auth,
           findingInstructions: patchSelection?.instructions,
         },
       );
@@ -8121,6 +8366,48 @@ function isLocalScanFailure(error: unknown): boolean {
   );
 }
 
+function authenticationFailureMessage(
+  authentication: ScanAuthentication | null,
+): string {
+  if (authentication?.method === "command") {
+    return "Native Codex command authentication failed. Check the configured provider auth command.";
+  }
+  if (authentication?.method === "aws_credentials") {
+    return (
+      `Authentication failed using AWS credentials from ${authentication.source}. ` +
+      "Check your Amazon Bedrock bearer token or AWS credential chain."
+    );
+  }
+  if (
+    authentication?.method === "stored_credentials" &&
+    authentication.credentialType === "api_key"
+  ) {
+    return (
+      "Authentication failed using a stored API key. " +
+      "Sign in again with 'codex-security login --with-api-key' or provide a valid API key."
+    );
+  }
+  if (authentication?.method === "api_key") {
+    const openAiKey =
+      authentication.source === "OPENAI_API_KEY" ||
+      authentication.source === "CODEX_API_KEY";
+    return (
+      `Authentication failed using ${authentication.source}. ` +
+      (openAiKey
+        ? "Retry with '--auth chatgpt' or provide a valid API key."
+        : `Provide a valid ${authentication.source} for the selected provider.`)
+    );
+  }
+  if (authentication?.method === "stored_credentials") {
+    return authentication.credentialType === "chatgpt"
+      ? "Authentication failed using stored ChatGPT credentials. " +
+          "Sign in again with 'codex-security login' or provide a valid API key."
+      : "Authentication failed using stored credentials. " +
+          "Check 'codex-security login status' and refresh the stored login or provide a valid API key.";
+  }
+  return "Authentication failed. Check the selected provider's credentials and retry.";
+}
+
 function scanFailureMessage(
   error: unknown,
   authentication: ScanAuthentication | null,
@@ -8153,20 +8440,7 @@ function scanFailureMessage(
   }
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
-      if (authentication?.method === "command") {
-        return "Native Codex command authentication failed. Check the configured provider auth command.";
-      }
-      if (authentication?.method === "aws_credentials") {
-        return (
-          `Authentication failed using AWS credentials from ${authentication.source}. ` +
-          "Check your Amazon Bedrock bearer token or AWS credential chain."
-        );
-      }
-      return authentication?.method === "api_key"
-        ? `Authentication failed using ${authentication.source}. ` +
-            "Retry with '--auth chatgpt' or provide a valid API key."
-        : "Authentication failed using stored ChatGPT credentials. " +
-            "Sign in again with 'codex-security login' or provide a valid API key.";
+      return authenticationFailureMessage(authentication);
     case "forbidden":
       if (authentication?.method === "command") {
         return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
