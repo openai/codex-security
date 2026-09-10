@@ -219,6 +219,15 @@ credentials, and the default AWS credential chain. Set `AWS_REGION` and choose
 a Bedrock model with `--model`; OpenAI models such as `openai.gpt-5.6-luna`
 support `--max-cost`.
 
+Bedrock scans, including Deep Scan workers, default to
+`model_reasoning_summary = "none"` because some Bedrock models reject
+`reasoning.summary`. This leaves reasoning effort unchanged. Explicit summary
+settings in `--codex` overrides or the selected Codex profile take precedence.
+For standard scans on older CLI versions, append
+`--codex 'model_reasoning_summary="none"'` to your scan command if Bedrock
+reports that `reasoning.summary` is unsupported. Deep scans require a CLI
+version that forwards this setting to workers.
+
 On Windows, set the API key in PowerShell:
 
 ```powershell
@@ -657,7 +666,7 @@ approvals_reviewer = "auto_review"
 cli_auth_credentials_store = "auto"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
-model_reasoning_summary = "detailed"
+model_reasoning_summary = "detailed" # "none" for amazon-bedrock
 show_raw_agent_reasoning = true
 
 [features]
@@ -1693,14 +1702,32 @@ change scan artifacts.
 codex-security dedupe --scan SCAN_ID --findings-url http://127.0.0.1:3000 --json
 ```
 
+Deduplication runs up to 8 jobs concurrently by default. Set `--concurrency N`
+to choose a positive integer, or `--concurrency 1` for serial execution. The SDK
+equivalent is `concurrency: N`. Candidate neighborhoods are fetched first, with
+the same concurrency limit. Luna screenings and ready Sol pair reviews then use
+two queues sharing one worker pool, with at most 8 jobs running in total by
+default. Each available worker takes a ready job as soon as its current job
+finishes; it does not wait for a batch to finish.
+
+A Sol pair review becomes ready once every Luna screening covering that pair
+has finished and none voted `DISTINCT`. It can run while unrelated Luna
+screenings continue. Results are combined in input order so completion timing
+does not change the groups.
+
+If a job fails after its retries, queued jobs stop and already running jobs
+finish before the command reports the failure. No groups are posted from an
+incomplete review. To retain completed reviews across runs, use a
+`--workflow-id` as described below.
+
 The default scope is the saved scan's repository, identified by
 `scan.target.targetId` in its manifest. Add `--all-repositories` to search the
 entire stored corpus explicitly; the flag defaults to false. The SDK has the
 equivalent optional `allRepositories: true` setting. This narrows the previous
 preview's implicit all-repository behavior.
 
-Both `--scan` and `--findings-url` are required, with no implicit scan or service
-URL. As with `publish scan --scan`, the selector accepts a full ID, unique
+Provide `--findings-url` and either `--scan` or `--workflow-id`, with no implicit
+scan or service URL. As with `publish scan --scan`, the scan selector accepts a full ID, unique
 prefix, or `latest` for the current repository. The saved scan must be complete
 and its sealed artifacts must be available.
 
@@ -1709,6 +1736,7 @@ import { deduplicateScan } from "@openai/codex-security";
 
 const result = await deduplicateScan("scan_example_001", {
   findingsUrl: "http://127.0.0.1:3000",
+  // concurrency: 8, // Shared worker limit for Luna and Sol; use 1 for serial.
   // allRepositories: true, // Omit to search only this scan's repository.
   // signal: controller.signal,
 });
@@ -1724,6 +1752,7 @@ import { deduplicateScanDirectory } from "@openai/codex-security";
 const result = await deduplicateScanDirectory("/path/to/completed-scan", {
   repository: "/path/to/repository",
   findingsUrl: "http://127.0.0.1:3000",
+  // concurrency: 8,
   // expectedScanId: "scan_example_001",
   // allRepositories: true,
   // signal: controller.signal,
@@ -1806,8 +1835,9 @@ scan. Existing output-directory and archive safeguards still apply to scan retri
 
 Publication and dedupe can use the workflow ID in place of `--scan`; an explicit
 scan selector must identify that same scan. A workflow can also begin at custom
-publication of a completed scan. Dedupe still requires local scan history to locate
-the approved source checkout. For a workflow, dedupe first completes publication
+publication of a completed scan. The CLI and `deduplicateScan` require local scan
+history to locate the approved source checkout; `deduplicateScanDirectory` uses
+the supplied repository. For a workflow, dedupe first completes publication
 if its receipt is missing. `--all-repositories` retains its existing default of
 false. Changing a workflow's scan, destination, or bound scope is an error: choose
 a different workflow ID. Use one coordinating process per workflow.
@@ -1827,6 +1857,12 @@ A completed `dedupe --workflow-id` returns its saved result without repeating
 reviews or group writes. A publication whose acknowledgement was lost is retried
 using the service's existing idempotent upsert.
 
+Concurrent jobs save their validated reviews independently. Resuming with the
+same workflow ID reuses completed reviews and retries unfinished jobs. The
+concurrency setting is not part of a review's checkpoint identity, so it is safe
+to change `--concurrency` when resuming. Cancellation stops active reviews and
+leaves their completed checkpoints available for the next run.
+
 Each validated screening and pair review is checkpointed locally,
 including DISTINCT decisions. Screening checkpoints retain pair recommendations
 and rationales under host-assigned pair slots bound to the original records.
@@ -1836,8 +1872,17 @@ must satisfy the Finding schema and preserve the canonical finding ID. Validatio
 still happens through `review_validator.submit_decisions`; invalid submissions
 are corrected in the same review conversation. A completed turn without an
 accepted submission receives one corrective turn in that same conversation.
-Transport, model, cancellation, and accepted `submit_error` failures are terminal.
-Invalid or unfinished reviews are not cached.
+If formatting remains invalid, the job retries in a fresh review session.
+Explicit transient Codex failures and unexpected process exits also retry, with
+at most three fresh sessions per review. Transient findings-service failures, including
+rate limits and network errors, receive up to three request attempts. Retries use
+exponential backoff with jitter; HTTP retries honor `Retry-After`. Waiting to retry
+occupies the job's concurrency slot.
+
+Cancellation, authentication or configuration errors, permanent HTTP errors, and
+required-source-access blockers are not retried. Exhausted retries fail deduplication;
+invalid or unfinished reviews are not cached. Completed checkpoints remain
+available when the workflow resumes.
 
 Checkpoints bind to the exact original records and ordering, approved source path,
 Git revision and current file contents (including ignored files), repository scope,
@@ -1861,12 +1906,15 @@ use another workflow ID for a fresh review rather than changing that saved resul
 1. For each distinct finding ID in the scan, request
    `/v1/finding/{id}/potential-duplicates` with the selected repository or
    explicit all-repository scope. Use the complete stored anchor and
-   candidates returned by that request.
+   candidates returned by that request. Fetch all neighborhoods before starting
+   reviews so every pair's screening dependencies are known.
 2. Screen each nonempty neighborhood with `gpt-5.6-luna` at `xhigh` reasoning
    effort. The review covers every anchor-neighbor pair; nominations between
    neighbors are rejected.
 3. Independently review each nominated pair once with `gpt-5.6-sol` at `high`
-   reasoning effort. Only accepted pairs contribute to duplicate groups.
+   reasoning effort after all Luna screenings covering that pair finish without
+   a `DISTINCT` decision. Luna and ready Sol jobs share the configured worker
+   pool and can run together. Only accepted pairs contribute to duplicate groups.
 4. Group accepted duplicate pairs transitively unless a Luna or Sol `DISTINCT`
    decision contradicts the resulting component. Contradicted components are
    split deterministically, preferring legal subgroups that preserve more

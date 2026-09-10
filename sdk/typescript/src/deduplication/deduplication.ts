@@ -1,10 +1,65 @@
 import type { Finding } from "../models.js";
 import type { FindingNeighborhood } from "../finding-retrieval.js";
+import { CodexSecurityError } from "../errors.js";
 import {
   pairKey,
   screeningPairSlot,
   type DeduplicationReviewer,
 } from "./deduplication-reviewer.js";
+
+export const DEFAULT_DEDUPE_CONCURRENCY = 8;
+
+export function deduplicationConcurrency(
+  concurrency = DEFAULT_DEDUPE_CONCURRENCY,
+): number {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1)
+    throw new CodexSecurityError(
+      "concurrency must be a positive safe integer.",
+    );
+  return concurrency;
+}
+
+type Job = () => Promise<void>;
+
+async function runQueued(
+  pending: Job[],
+  ready: Job[],
+  concurrency: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  let failure: { error: unknown } | undefined;
+  await new Promise<void>((resolve) => {
+    let running = 0;
+    async function run(job: Job): Promise<void> {
+      try {
+        await job();
+      } catch (error) {
+        failure ??= { error };
+      } finally {
+        running--;
+        pump();
+      }
+    }
+    function pump(): void {
+      while (
+        failure === undefined &&
+        !signal?.aborted &&
+        running < concurrency
+      ) {
+        const job = ready.shift() ?? pending.shift();
+        if (job === undefined) break;
+        running++;
+        void run(job);
+      }
+      // An active producer can still enqueue work. After failure, drain active
+      // jobs so successful reviews can finish saving their checkpoints.
+      if (running === 0) resolve();
+    }
+    pump();
+  });
+  signal?.throwIfAborted();
+  if (failure !== undefined) throw failure.error;
+}
 
 export interface DeduplicationResult {
   uniqueFindingIds: string[];
@@ -179,47 +234,96 @@ export class FindingDeduplicator {
     },
     private readonly reviewer: DeduplicationReviewer,
     private readonly signal?: AbortSignal,
+    private readonly concurrency = DEFAULT_DEDUPE_CONCURRENCY,
   ) {}
 
   async run(findingIds: readonly string[]): Promise<DeduplicationResult> {
     this.signal?.throwIfAborted();
+    const concurrency = deduplicationConcurrency(this.concurrency);
     const ids = [...new Set(findingIds)];
     const findings = new Map<string, Finding>();
-    const nominated = new Map<string, [string, string]>();
-    const rejected = new Map<string, [string, string]>();
-    for (const id of ids) {
+    const neighborhoods = new Array<Finding[]>(ids.length);
+    await runQueued(
+      ids.map((id, index) => async () => {
+        const result = await this.candidates.potentialDuplicates(id);
+        this.signal?.throwIfAborted();
+        neighborhoods[index] = [result.finding, ...result.potentialDuplicates];
+      }),
+      [],
+      concurrency,
+      this.signal,
+    );
+    const pairs = new Map<
+      string,
+      {
+        ids: [string, string];
+        remaining: number;
+        rejected: boolean;
+        decision?: "SAME" | "DISTINCT";
+      }
+    >();
+    // Freeze records, insertion order, and the last nominating anchor's pair
+    // orientation before reviews run, preserving grouping and checkpoint inputs.
+    for (const neighborhood of neighborhoods) {
       this.signal?.throwIfAborted();
-      const result = await this.candidates.potentialDuplicates(id);
-      const neighborhood = [result.finding, ...result.potentialDuplicates];
       for (const finding of neighborhood)
         findings.set(finding.findingId, finding);
-      if (neighborhood.length < 2) continue;
-      const screening = await this.reviewer.screen(neighborhood);
-      for (let index = 0; index < neighborhood.length - 1; index++) {
-        const decision = screening.decisions[screeningPairSlot(index)]!;
+      for (const neighbor of neighborhood.slice(1)) {
         const pair: [string, string] = [
           neighborhood[0]!.findingId,
-          neighborhood[index + 1]!.findingId,
+          neighbor.findingId,
         ];
         const key = pairKey(pair);
-        if (decision.decision === "SAME") {
-          if (!rejected.has(key)) nominated.set(key, pair);
+        const state = pairs.get(key);
+        if (state === undefined) {
+          pairs.set(key, { ids: pair, remaining: 1, rejected: false });
         } else {
-          rejected.set(key, pair);
-          nominated.delete(key);
+          state.ids = pair;
+          state.remaining++;
         }
       }
     }
 
+    const ready: Job[] = [];
+    const pending = neighborhoods
+      .filter((neighborhood) => neighborhood.length > 1)
+      .map((neighborhood) => async () => {
+        const screening = await this.reviewer.screen(neighborhood);
+        this.signal?.throwIfAborted();
+        for (let index = 0; index < neighborhood.length - 1; index++) {
+          const key = pairKey([
+            neighborhood[0]!.findingId,
+            neighborhood[index + 1]!.findingId,
+          ]);
+          const state = pairs.get(key)!;
+          if (
+            screening.decisions[screeningPairSlot(index)]!.decision ===
+            "DISTINCT"
+          )
+            state.rejected = true;
+          state.remaining--;
+          // Wait for every screening of this pair: a later DISTINCT veto must
+          // prevent verification, including a verification that could fail.
+          if (state.remaining === 0 && !state.rejected) {
+            ready.push(async () => {
+              state.decision = (
+                await this.reviewer.reviewPair(
+                  state.ids.map((id) => findings.get(id)!),
+                )
+              ).decision;
+            });
+          }
+        }
+      });
+    await runQueued(pending, ready, concurrency, this.signal);
+
+    // Completion order must not change grouping ties.
     const supported: [string, string][] = [];
-    for (const pair of nominated.values()) {
+    const rejected: [string, string][] = [];
+    for (const state of pairs.values()) {
       this.signal?.throwIfAborted();
-      const originals = pair.map((id) => findings.get(id)!);
-      if ((await this.reviewer.reviewPair(originals)).decision === "SAME") {
-        supported.push(pair);
-      } else {
-        rejected.set(pairKey(pair), pair);
-      }
+      if (state.decision === "SAME") supported.push(state.ids);
+      else rejected.push(state.ids);
     }
 
     const adjacent = new Map<string, Set<string>>();
@@ -259,7 +363,7 @@ export class FindingDeduplicator {
       componentByFinding.get(id)?.members.push(id);
     for (const pair of supported)
       componentByFinding.get(pair[0])!.supported.push(pair);
-    for (const pair of rejected.values()) {
+    for (const pair of rejected) {
       const component = componentByFinding.get(pair[0]);
       if (component && component === componentByFinding.get(pair[1]))
         component.rejected.push(pair);

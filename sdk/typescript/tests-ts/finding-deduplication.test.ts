@@ -101,6 +101,423 @@ function screening(
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+test.each(["screening", "pair-review"])(
+  "%s fills each free slot immediately and preserves serial grouping",
+  async (stage) => {
+    const entries = [entry(1), entry(2), entry(3), entry(4)];
+    const neighbor = entry(5);
+    const ids = entries.map((finding) => finding.findingId);
+    const nominations = new Set(
+      ids.map((id) => pairKey([id, neighbor.findingId])),
+    );
+    const candidates = {
+      async potentialDuplicates(id: string) {
+        return {
+          finding: entries[ids.indexOf(id)]!,
+          potentialDuplicates: [neighbor],
+        };
+      },
+    };
+    const gates = entries.map(() => deferred<void>());
+    const started = entries.map(() => deferred<void>());
+    const starts: number[] = [];
+    const phases: string[] = [];
+    let active = 0;
+    let peak = 0;
+    const hold = async (findings: readonly Finding[]) => {
+      const index = ids.indexOf(findings[0]!.findingId);
+      starts.push(index);
+      peak = Math.max(peak, ++active);
+      started[index]!.resolve();
+      await gates[index]!.promise;
+      active--;
+    };
+    const reviewer: DeduplicationReviewer = {
+      async screen(findings) {
+        phases.push("screening");
+        if (stage === "screening") await hold(findings);
+        return screening(findings, nominations);
+      },
+      async reviewPair(findings) {
+        phases.push("pair-review");
+        if (stage === "pair-review") await hold(findings);
+        return same(findings);
+      },
+    };
+    const result = new FindingDeduplicator(
+      candidates,
+      reviewer,
+      undefined,
+      2,
+    ).run(ids);
+    await Promise.all([started[0]!.promise, started[1]!.promise]);
+    expect(starts).toEqual([0, 1]);
+    gates[1]!.resolve();
+    await started[2]!.promise;
+    expect(starts).toEqual([0, 1, 2]);
+    gates[2]!.resolve();
+    await started[3]!.promise;
+    gates[3]!.resolve();
+    gates[0]!.resolve();
+    const parallel = await result;
+    expect(peak).toBe(2);
+    expect(phases.filter((phase) => phase === "screening")).toHaveLength(4);
+    expect(phases.filter((phase) => phase === "pair-review")).toHaveLength(4);
+    expect(parallel).toEqual(
+      await new FindingDeduplicator(candidates, reviewer, undefined, 1).run(
+        ids,
+      ),
+    );
+  },
+);
+
+test("ready pairs take free slots before pending screenings and share the concurrency cap", async () => {
+  const entries = [entry(1), entry(2), entry(3)];
+  const neighbor = entry(4);
+  const ids = entries.map((finding) => finding.findingId);
+  const nominations = new Set(
+    ids.map((id) => pairKey([id, neighbor.findingId])),
+  );
+  const screeningGates = entries.map(() => deferred<void>());
+  const screeningStarts = entries.map(() => deferred<void>());
+  const pairGates = entries.map(() => deferred<void>());
+  const pairStarts = entries.map(() => deferred<void>());
+  const events: string[] = [];
+  let active = 0;
+  let peak = 0;
+  const hold = async (index: number, stage: "screen" | "pair") => {
+    events.push(`${stage}:${index}`);
+    peak = Math.max(peak, ++active);
+    (stage === "screen" ? screeningStarts : pairStarts)[index]!.resolve();
+    await (stage === "screen" ? screeningGates : pairGates)[index]!.promise;
+    active--;
+  };
+  const result = new FindingDeduplicator(
+    {
+      async potentialDuplicates(id) {
+        return {
+          finding: entries[ids.indexOf(id)]!,
+          potentialDuplicates: [neighbor],
+        };
+      },
+    },
+    {
+      async screen(findings) {
+        await hold(ids.indexOf(findings[0]!.findingId), "screen");
+        return screening(findings, nominations);
+      },
+      async reviewPair(findings) {
+        await hold(ids.indexOf(findings[0]!.findingId), "pair");
+        return same(findings);
+      },
+    },
+    undefined,
+    2,
+  ).run(ids);
+  try {
+    await Promise.all(
+      screeningStarts.slice(0, 2).map((start) => start.promise),
+    );
+    screeningGates[0]!.resolve();
+    await pairStarts[0]!.promise;
+    expect(events).toEqual(["screen:0", "screen:1", "pair:0"]);
+    expect(active).toBe(2);
+    pairGates[0]!.resolve();
+    await screeningStarts[2]!.promise;
+    screeningGates[1]!.resolve();
+    await pairStarts[1]!.promise;
+    expect(active).toBe(2);
+    pairGates[1]!.resolve();
+    screeningGates[2]!.resolve();
+    await pairStarts[2]!.promise;
+    pairGates[2]!.resolve();
+    expect((await result).duplicateGroups).toEqual([
+      [...ids, neighbor.findingId],
+    ]);
+    expect(peak).toBe(2);
+    expect(events).toEqual([
+      "screen:0",
+      "screen:1",
+      "pair:0",
+      "screen:2",
+      "pair:1",
+      "pair:2",
+    ]);
+  } finally {
+    for (const gate of [...screeningGates, ...pairGates]) gate.resolve();
+    await result.catch(() => undefined);
+  }
+});
+
+test("a pair waits for its delayed reciprocal screening and honors a DISTINCT veto", async () => {
+  const entries = [entry(1), entry(2)];
+  const ids = entries.map((finding) => finding.findingId);
+  const gates = entries.map(() => deferred<void>());
+  const started = entries.map(() => deferred<void>());
+  const finished = deferred<void>();
+  const reviewed: string[] = [];
+  const result = new FindingDeduplicator(
+    candidates(entries),
+    {
+      async screen(findings) {
+        const index = ids.indexOf(findings[0]!.findingId);
+        started[index]!.resolve();
+        await gates[index]!.promise;
+        if (index === 0) finished.resolve();
+        return screening(
+          findings,
+          index === 0 ? new Set([pairKey(ids)]) : new Set(),
+        );
+      },
+      async reviewPair(findings) {
+        reviewed.push(pairKey(findings.map((finding) => finding.findingId)));
+        return same(findings);
+      },
+    },
+    undefined,
+    2,
+  ).run(ids);
+  try {
+    await Promise.all(started.map((start) => start.promise));
+    gates[0]!.resolve();
+    await finished.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reviewed).toEqual([]);
+    gates[1]!.resolve();
+    expect(await result).toEqual({
+      uniqueFindingIds: ids,
+      duplicateGroups: [],
+      deduplicationStatus: "completed",
+    });
+    expect(reviewed).toEqual([]);
+  } finally {
+    for (const gate of gates) gate.resolve();
+    await result.catch(() => undefined);
+  }
+});
+
+test("reverse completion preserves pair orientation and the final input-order finding records", async () => {
+  const entries = [entry(1), entry(2), entry(3)];
+  const ids = entries.map((finding) => finding.findingId);
+  const finalA = {
+    ...entry(1),
+    title: "Final candidate record",
+    severity: { ...entry(1).severity, level: "critical" as const },
+  };
+  const finalB = { ...entry(2), title: "Later anchor record" };
+  const neighborhoods = [
+    { finding: entries[0]!, potentialDuplicates: [entries[1]!] },
+    {
+      finding: finalB,
+      potentialDuplicates: [
+        { ...entries[0]!, title: "Intermediate candidate record" },
+      ],
+    },
+    { finding: entries[2]!, potentialDuplicates: [finalA] },
+  ];
+  const lookupStarts = entries.map(() => deferred<void>());
+  const lookupGates = entries.map(() => deferred<void>());
+  const screenStarts = entries.map(() => deferred<void>());
+  const screenGates = entries.map(() => deferred<void>());
+  const pairStarted = deferred<void>();
+  const reviewed: Finding[][] = [];
+  const result = new FindingDeduplicator(
+    {
+      async potentialDuplicates(id) {
+        const index = ids.indexOf(id);
+        lookupStarts[index]!.resolve();
+        await lookupGates[index]!.promise;
+        return neighborhoods[index]!;
+      },
+    },
+    {
+      async screen(findings) {
+        const index = ids.indexOf(findings[0]!.findingId);
+        screenStarts[index]!.resolve();
+        await screenGates[index]!.promise;
+        return screening(findings, new Set([pairKey(ids.slice(0, 2))]));
+      },
+      async reviewPair(findings) {
+        reviewed.push([...findings]);
+        pairStarted.resolve();
+        return same(findings);
+      },
+    },
+    undefined,
+    3,
+  ).run(ids);
+  try {
+    await Promise.all(lookupStarts.map((start) => start.promise));
+    for (const gate of [...lookupGates].reverse()) {
+      gate.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await Promise.all(screenStarts.map((start) => start.promise));
+    screenGates[1]!.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reviewed).toEqual([]);
+    screenGates[0]!.resolve();
+    await pairStarted.promise;
+    expect(reviewed).toEqual([[finalB, finalA]]);
+    screenGates[2]!.resolve();
+    expect(await result).toEqual({
+      uniqueFindingIds: [ids[0]!, ids[2]!],
+      duplicateGroups: [ids.slice(0, 2)],
+      deduplicationStatus: "completed",
+    });
+  } finally {
+    for (const gate of [...lookupGates, ...screenGates]) gate.resolve();
+    await result.catch(() => undefined);
+  }
+});
+
+test.each(["screen", "pair", "cancel"])(
+  "%s failure drains mixed active reviews and stops both pending queues",
+  async (failureStage) => {
+    const entries = [entry(1), entry(2), entry(3)];
+    const neighbors = [entry(4), entry(5)];
+    const ids = entries.map((finding) => finding.findingId);
+    const starts: string[] = [];
+    const completed: string[] = [];
+    const screenGate = deferred<void>();
+    const pairGate = deferred<void>();
+    const pairStarted = deferred<void>();
+    const controller = new AbortController();
+    const failure = new Error("Synthetic mixed-stage failure");
+    const result = new FindingDeduplicator(
+      {
+        async potentialDuplicates(id) {
+          return {
+            finding: entries[ids.indexOf(id)]!,
+            potentialDuplicates: neighbors,
+          };
+        },
+      },
+      {
+        async screen(findings) {
+          const index = ids.indexOf(findings[0]!.findingId);
+          starts.push(`screen:${index}`);
+          if (index === 1) await screenGate.promise;
+          completed.push(`screen:${index}`);
+          return screening(
+            findings,
+            new Set(
+              neighbors.map((neighbor) =>
+                pairKey([findings[0]!.findingId, neighbor.findingId]),
+              ),
+            ),
+          );
+        },
+        async reviewPair(findings) {
+          starts.push("pair");
+          pairStarted.resolve();
+          await pairGate.promise;
+          completed.push("pair");
+          return same(findings);
+        },
+      },
+      controller.signal,
+      2,
+    ).run(ids);
+    let settled = false;
+    const observed = result.catch((error: unknown) => {
+      settled = true;
+      return error;
+    });
+    try {
+      await pairStarted.promise;
+      expect(starts).toEqual(["screen:0", "screen:1", "pair"]);
+      if (failureStage === "screen") screenGate.reject(failure);
+      else if (failureStage === "pair") pairGate.reject(failure);
+      else controller.abort(failure);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      screenGate.resolve();
+      pairGate.resolve();
+      expect(await observed).toBe(failure);
+      expect(starts).toEqual(["screen:0", "screen:1", "pair"]);
+      expect(completed).toContain("screen:0");
+      if (failureStage !== "screen") expect(completed).toContain("screen:1");
+      if (failureStage !== "pair") expect(completed).toContain("pair");
+    } finally {
+      screenGate.resolve();
+      pairGate.resolve();
+      await observed;
+    }
+  },
+);
+
+test("terminal failure drains started reviews without starting queued jobs", async () => {
+  const entries = [entry(1), entry(2), entry(3)];
+  const gates = entries.map(() => deferred<void>());
+  const started = entries.map(() => deferred<void>());
+  const calls: string[] = [];
+  const failure = new Error("Synthetic review failure");
+  const result = new FindingDeduplicator(
+    candidates(entries),
+    {
+      async screen(findings) {
+        const index = entries.findIndex(
+          (entry) => entry.findingId === findings[0]!.findingId,
+        );
+        calls.push(findings[0]!.findingId);
+        started[index]!.resolve();
+        await gates[index]!.promise;
+        return screening(findings, new Set());
+      },
+      async reviewPair() {
+        throw new Error("Pair review must not start after screening failure");
+      },
+    },
+    undefined,
+    2,
+  ).run(entries.map((entry) => entry.findingId));
+  let settled = false;
+  const observed = result.catch((error: unknown) => {
+    settled = true;
+    return error;
+  });
+  await Promise.all([started[0]!.promise, started[1]!.promise]);
+  gates[0]!.reject(failure);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(settled).toBe(false);
+  gates[1]!.resolve();
+  expect(await observed).toBe(failure);
+  expect(calls).toEqual(entries.slice(0, 2).map((entry) => entry.findingId));
+});
+
+test("SDK rejects invalid concurrency before reading scan artifacts or history", async () => {
+  for (const concurrency of [
+    0,
+    -1,
+    1.5,
+    NaN,
+    Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    const options = { findingsUrl: "http://synthetic.test", concurrency };
+    await expect(deduplicateScanInternal("synthetic", options)).rejects.toThrow(
+      "concurrency must be a positive safe integer",
+    );
+    await expect(
+      deduplicateScanDirectoryInternal("unused", {
+        ...options,
+        repository: "unused",
+      }),
+    ).rejects.toThrow("concurrency must be a positive safe integer");
+  }
+});
+
 test("reviews nominated pairs once and groups non-conflicting accepted pairs by severity", async () => {
   const entries = [entry(1), entry(2), entry(3), entry(4)];
   entries[1]!.severity.level = "critical";
@@ -139,15 +556,8 @@ test("reviews nominated pairs once and groups non-conflicting accepted pairs by 
   });
   expect(new Set(reviewedPairs)).toEqual(nominations);
   expect(reviewedPairs).toHaveLength(3);
-  expect(phases).toEqual([
-    "screen",
-    "screen",
-    "screen",
-    "screen",
-    "pair",
-    "pair",
-    "pair",
-  ]);
+  expect(phases.filter((phase) => phase === "screen")).toHaveLength(4);
+  expect(phases.filter((phase) => phase === "pair")).toHaveLength(3);
 });
 
 test("groups accepted neighbors transitively without screening them as anchors", async () => {
