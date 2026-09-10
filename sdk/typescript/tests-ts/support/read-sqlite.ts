@@ -12,7 +12,15 @@ export function readSqliteRows<T>(path: string, sql: string): T[] {
       "-e",
       `import { DatabaseSync } from "node:sqlite";
        const database = new DatabaseSync(process.argv[1], { readOnly: true });
-       try { console.log(JSON.stringify(database.prepare(process.argv[2]).all())); }
+       try {
+         const statement = database.prepare(process.argv[2]);
+         statement.setReadBigInts(true);
+         console.log(JSON.stringify(statement.all(), (_key, value) => {
+           if (typeof value !== "bigint") return value;
+           const number = Number(value);
+           return Number.isSafeInteger(number) ? number : value.toString();
+         }));
+       }
        finally { database.close(); }`,
       path,
       sql,
