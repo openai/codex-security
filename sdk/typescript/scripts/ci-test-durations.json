@@ -4,7 +4,9 @@
     "https://github.com/openai/codex-security/actions/runs/33227512538",
     "https://github.com/openai/codex-security/actions/runs/33233690024",
     "https://github.com/openai/codex-security/actions/runs/34413841261",
-    "https://github.com/openai/codex-security/actions/runs/34413805838"
+    "https://github.com/openai/codex-security/actions/runs/34413805838",
+    "https://github.com/openai/codex-security/actions/runs/34424295798",
+    "https://github.com/openai/codex-security/actions/runs/34424259475"
   ],
   "unix": {
     "api-attribution-concurrency.test.ts": 0.372,
@@ -126,6 +128,7 @@
     "api-credentials.test.ts": 56.214,
     "api-environment.test.ts": 0.0,
     "api-events.test.ts": 2.999,
+    "api-policy.test.ts": 130.588,
     "api-post-scan.test.ts": 11.43,
     "api-preflight-config.test.ts": 1.84,
     "api-surface.test.ts": 0.482,
@@ -202,6 +205,7 @@
     "publish.test.ts": 7.768,
     "release-automation.test.ts": 41.22,
     "release-cut-workflow.test.ts": 0.0,
+    "release-pr.test.ts": 163.062,
     "repository-findings.test.ts": 0.277,
     "result.test.ts": 0.008,
     "runtime.test.ts": 156.153,
@@ -209,7 +213,7 @@
     "scan-activity.test.ts": 0.007,
     "scan-comparison.property.test.ts": 0.16,
     "scan-comparison.test.ts": 10.704,
-    "scan-continuation.test.ts": 306.394,
+    "scan-continuation.test.ts": 440.163,
     "scan-dashboard.test.ts": 0.061,
     "scan-history-renderer.test.ts": 0.005,
     "scan-logs.test.ts": 0.139,
