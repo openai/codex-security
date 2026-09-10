@@ -1252,6 +1252,36 @@ process.stdout.write(JSON.stringify({
     }
   });
 
+  test("keeps unknown credential failures neutral", () => {
+    for (const authentication of [
+      null,
+      { method: "stored_credentials", verified: false } as const,
+    ]) {
+      const message = skillCommandFailure(
+        "patch",
+        1,
+        "401 Unauthorized",
+        authentication,
+      );
+      expect(message).toContain("Authentication failed");
+      expect(message).not.toContain("ChatGPT");
+      expect(message).not.toContain("--auth chatgpt");
+    }
+  });
+
+  test.each(["FIREWORKS_API_KEY", "OPENROUTER_API_KEY"] as const)(
+    "external-provider failures recommend the selected key (%s)",
+    (source) => {
+      const message = skillCommandFailure("patch", 1, "401 Unauthorized", {
+        method: "api_key",
+        source,
+        verified: false,
+      });
+      expect(message).toContain(source);
+      expect(message).not.toContain("--auth chatgpt");
+    },
+  );
+
   test("forwards only completed skill output and redacts subprocess diagnostics", async () => {
     const cases = [
       {

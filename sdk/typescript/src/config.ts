@@ -216,7 +216,12 @@ export async function mergedCodexConfig(
       }
     }
   }
-  return deepMerge(cloneJson(DEFAULT_CODEX_CONFIG), overrides);
+  const defaults: JsonObject = cloneJson(DEFAULT_CODEX_CONFIG);
+  if (scanModelProvider(overrides) === "amazon-bedrock") {
+    // Bedrock models can reject reasoning.summary before the scan starts.
+    defaults["model_reasoning_summary"] = "none";
+  }
+  return deepMerge(defaults, overrides);
 }
 
 function normalizeLegacyWindowsSandboxOverride(overrides: JsonObject): void {
@@ -320,6 +325,11 @@ function validateOverrides(overrides: JsonObject): void {
     if (!isObject(profile)) {
       throw new ConfigurationError(
         `Codex override profile ${name} must be a TOML table.`,
+      );
+    }
+    if ("plugins" in profile || "marketplaces" in profile) {
+      throw new ConfigurationError(
+        `Codex Security owns plugin loading configuration in profile ${name}.`,
       );
     }
     const profileFeatures = profile["features"];

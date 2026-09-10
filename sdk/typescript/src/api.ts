@@ -36,6 +36,8 @@ import {
 } from "smol-toml";
 import { z } from "incur";
 import {
+  CODEX_AUTH_CONFIG_KEYS,
+  NO_CREDENTIALS_MESSAGE,
   accountStatus,
   configuredCodexHome,
   CodexLoginHandle,
@@ -75,6 +77,7 @@ import {
   DeepScanProgressTracker,
   type DeepScanProgress,
 } from "./deep-progress.js";
+import { findScanSession } from "./scan-logs.js";
 import {
   loadContract,
   readScanFile,
@@ -214,6 +217,7 @@ interface ScanEvent {
 
 interface CodexClientLike {
   startThread(options: ThreadOptions): CodexThreadLike;
+  resumeThread?(threadId: string, options: ThreadOptions): CodexThreadLike;
 }
 
 interface PreparedRuntime {
@@ -259,6 +263,8 @@ export interface DeepScanOptions {
 }
 
 export interface ScanOptions extends DeepScanOptions {
+  /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
+  resumeScanId?: string;
   /** Save synthetic Standard scan results without calling Codex or a model. */
   mock?: boolean;
   /** Opt into a durable scan -> custom publication -> dedupe workflow. */
@@ -1299,22 +1305,25 @@ export class CodexSecurity {
           scanOutputRoot === temporaryRoot ? "temporary" : "output",
         );
       }
-      scanDir = await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
-        requestedOutput ?? undefined,
-        basename(repo),
-        scanOutputRoot,
-        (path) => requireOutputOutsideRepository(protectedRoot, path),
-        options.archiveExisting,
-        (archiveDir) => {
-          archivedScanDir = archiveDir;
-          notifyObserver(
-            "onOutputArchived",
-            options.onOutputArchived,
-            options.onObserverError,
-            archiveDir,
-          );
-        },
-      );
+      scanDir =
+        options.resumeScanId !== undefined
+          ? requestedOutput!
+          : await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
+              requestedOutput ?? undefined,
+              basename(repo),
+              scanOutputRoot,
+              (path) => requireOutputOutsideRepository(protectedRoot, path),
+              options.archiveExisting,
+              (archiveDir) => {
+                archivedScanDir = archiveDir;
+                notifyObserver(
+                  "onOutputArchived",
+                  options.onOutputArchived,
+                  options.onObserverError,
+                  archiveDir,
+                );
+              },
+            );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
       notifyObserver(
@@ -1543,6 +1552,10 @@ export class CodexSecurity {
         options.maxCostUsd,
         deepScanOptions(options),
       );
+      if (options.safetyIdentifier !== undefined)
+        recipe["safetyIdentifier"] = options.safetyIdentifier;
+      if (options.postScanPrompt !== undefined)
+        recipe["postScanPrompt"] = options.postScanPrompt;
       if (options.validationPrompt !== undefined)
         recipe["validationMode"] = "custom";
       const workbenchOptions: WorkbenchCommandOptions = {
@@ -1559,32 +1572,76 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
-      const registration = await workbench(
-        workbenchOptions,
-        [
-          "register-cli-scan",
-          "--repository",
-          repo,
-          "--scan-dir",
-          scanDir,
-          "--registration-json-stdin",
-          ...(options.archiveExisting === true ? ["--archive-existing"] : []),
-          ...(archivedScanDir === null
-            ? []
-            : ["--archived-scan-dir", archivedScanDir]),
-          ...(options.parentScanId === undefined
-            ? []
-            : ["--parent-scan-id", options.parentScanId]),
-        ],
-        JSON.stringify({
-          recipe,
-          userContext: options.scanPrompt,
-          ...(options.workflowId === undefined
-            ? {}
-            : { workflowId: options.workflowId }),
-        }),
-      );
+      const registration =
+        options.resumeScanId !== undefined
+          ? await workbench(workbenchOptions, [
+              "get-cli-scan-resume",
+              "--scan-id",
+              options.resumeScanId,
+            ])
+          : await workbench(
+              workbenchOptions,
+              [
+                "register-cli-scan",
+                "--repository",
+                repo,
+                "--scan-dir",
+                scanDir,
+                "--registration-json-stdin",
+                ...(options.archiveExisting === true
+                  ? ["--archive-existing"]
+                  : []),
+                ...(archivedScanDir === null
+                  ? []
+                  : ["--archived-scan-dir", archivedScanDir]),
+                ...(options.parentScanId === undefined
+                  ? []
+                  : ["--parent-scan-id", options.parentScanId]),
+              ],
+              JSON.stringify({
+                recipe,
+                userContext: options.scanPrompt,
+                ...(options.workflowId === undefined
+                  ? {}
+                  : { workflowId: options.workflowId }),
+              }),
+            );
       const scanId = registration["scanId"];
+      const resumeThreadId =
+        options.resumeScanId === undefined
+          ? undefined
+          : registration["threadId"];
+      if (options.resumeScanId !== undefined) {
+        const savedRecipe = registration["recipe"];
+        if (
+          scanId !== options.resumeScanId ||
+          !isRecord(savedRecipe) ||
+          savedRecipe["repository"] !== repo ||
+          typeof resumeThreadId !== "string" ||
+          !resumeThreadId ||
+          JSON.stringify(savedRecipe["target"]) !==
+            JSON.stringify(recipe["target"])
+        ) {
+          throw new CodexSecurityError(
+            "The workbench returned mismatched scan resume context.",
+          );
+        }
+        const savedSession = await findScanSession(
+          runtime.codexHome,
+          resumeThreadId,
+        );
+        if (
+          savedSession === null ||
+          savedSession.workingDirectory !== scanDir
+        ) {
+          throw new CodexSecurityError(
+            `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
+          );
+        }
+        if (typeof registration["sealedProducerVersion"] === "string") {
+          expectation.pluginVersion = registration["sealedProducerVersion"];
+        }
+      }
       const targetId = registration["targetId"];
       const contract = registration["contract"];
       const contractTarget = isRecord(contract)
@@ -1697,7 +1754,10 @@ export class CodexSecurity {
         scanId,
         runtime.configPath !== undefined,
         knowledgeBase !== null,
-        options.scanPrompt,
+        options.resumeScanId !== undefined &&
+          typeof registration["userContext"] === "string"
+          ? registration["userContext"]
+          : options.scanPrompt,
         options.maxCostUsd !== undefined,
         discoveryPrompt,
       );
@@ -1732,7 +1792,14 @@ export class CodexSecurity {
         scopeFileCount === null
           ? basePrompt
           : `${basePrompt}\nThe SDK's current in-scope file-count estimate is ${scopeFileCount}; use it for scan progress unless exact scoped-source enumeration establishes a different total before review begins.`;
-      if (falsePositiveExamples.length > 0) {
+      if (options.resumeScanId !== undefined) {
+        prompt +=
+          "\nResume the existing Deep Scan through its coordinator. Preserve completed workers and saved artifacts; do not recreate the scan directory or restart completed analysis. If the coordinator already finished, continue with completion of this same scan.";
+      }
+      if (
+        falsePositiveExamples.length > 0 &&
+        options.resumeScanId === undefined
+      ) {
         const feedbackPath = join(
           scanDir,
           "artifacts",
@@ -1761,7 +1828,11 @@ export class CodexSecurity {
           : null;
       const runtimePaths = {
         PYTHON: python,
-        CODEX_SECURITY_STARTED_AT: new Date().toISOString(),
+        CODEX_SECURITY_STARTED_AT:
+          options.resumeScanId !== undefined &&
+          typeof registration["startedAt"] === "string"
+            ? registration["startedAt"]
+            : new Date().toISOString(),
         CODEX_SECURITY_REPOSITORY: repo,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: shellPluginRoot,
@@ -1797,12 +1868,27 @@ export class CodexSecurity {
         runtimePaths,
         options.auth,
       );
-      const thread = codex.startThread({
+      const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
         approvalPolicy,
-      });
+      };
+      let thread: CodexThreadLike;
+      if (typeof resumeThreadId === "string") {
+        if (codex.resumeThread === undefined) {
+          throw new CodexSecurityError(
+            "The configured Codex client does not support resuming sessions.",
+          );
+        }
+        thread = codex.resumeThread(resumeThreadId, threadOptions);
+        tracker.start(resumeThreadId);
+        if (budgetRecovery !== null) budgetRecovery.threadId = resumeThreadId;
+        await tracker.refresh().catch(reportTrackingError);
+        checkOpen();
+      } else {
+        thread = codex.startThread(threadOptions);
+      }
       const serializedPaths =
         normalized.kind === "paths" ? jsonForPrompt(normalized.paths) : null;
       checkOpen();
@@ -1835,6 +1921,14 @@ export class CodexSecurity {
         workbenchValidated: true,
         model,
         onThreadStarted: async (threadId) => {
+          if (resumeThreadId !== undefined) {
+            if (threadId !== resumeThreadId) {
+              throw new CodexSecurityError(
+                "Codex did not resume the original scan session.",
+              );
+            }
+            return;
+          }
           if (budgetRecovery !== null) budgetRecovery.threadId = threadId;
           tracker.start(threadId);
           try {
@@ -2235,7 +2329,9 @@ export class CodexSecurity {
           return result;
         } catch {}
       }
-      if (activeScan !== null) {
+      // A failed attachment must not turn a resumable coordinator into a terminal failure.
+      // Deep Scan orchestration persists its own terminal failures and cancellations.
+      if (activeScan !== null && options.resumeScanId === undefined) {
         if (
           options.validationPrompt !== undefined &&
           !customValidationComplete
@@ -2754,11 +2850,7 @@ export class CodexSecurity {
         !commandAuth &&
         authentication.method !== "aws_credentials"
       ) {
-        throw new AuthenticationRequiredError(
-          "No credentials were found. Run 'codex-security login', use " +
-            "'codex-security login --device-auth' on a remote or headless machine, or set " +
-            "OPENAI_API_KEY or CODEX_API_KEY for CI.",
-        );
+        throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
       }
       if (!commandAuth)
         authentication = await runtimeScanAuthentication(
@@ -3183,6 +3275,19 @@ export class CodexSecurity {
     protectedRoots?: readonly string[],
   ): Promise<LocalScanInputs> {
     if (
+      options.resumeScanId !== undefined &&
+      (options.mode !== "deep" ||
+        !options.outputDir ||
+        options.archiveExisting ||
+        options.parentScanId !== undefined ||
+        options.workflowId !== undefined ||
+        options.mock)
+    ) {
+      throw new CodexSecurityError(
+        "Resume requires the original Deep Scan output directory without archive, rerun, or workflow options.",
+      );
+    }
+    if (
       options.mock &&
       (options.mode === "deep" ||
         options.validationPrompt !== undefined ||
@@ -3245,7 +3350,7 @@ export class CodexSecurity {
     protectedRoots ??= [protectedRoot];
     const requestedOutput = await validateOutputDir(
       options.outputDir,
-      options.archiveExisting,
+      options.resumeScanId !== undefined || options.archiveExisting,
     );
     if (requestedOutput !== null) {
       requireOutputOutsideRepositories(protectedRoots, requestedOutput);
@@ -4187,7 +4292,8 @@ export function formatEnvironmentVariableRemovalGuidance(
   return `remove ${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]} from the environment`;
 }
 
-async function runtimeScanAuthentication(
+/** @internal */
+export async function runtimeScanAuthentication(
   environment: ProcessEnvironment,
   codexHome: string,
   auth: ScanAuthMode = "auto",
@@ -4507,11 +4613,7 @@ function sharedCredentialCodexConfig(
     approval_policy: scanApprovalPolicy(config),
     features: { plugins: true },
   };
-  for (const key of [
-    "cli_auth_credentials_store",
-    "forced_login_method",
-    "forced_chatgpt_workspace_id",
-  ]) {
+  for (const key of CODEX_AUTH_CONFIG_KEYS) {
     if (Object.hasOwn(config, key)) shared[key] = structuredClone(config[key]!);
   }
   const modelProvider = scanModelProvider(config);
@@ -4571,6 +4673,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     for (const key of [
       "model",
       "model_reasoning_effort",
+      "model_reasoning_summary",
       "model_provider",
       "service_tier",
     ]) {
@@ -4597,6 +4700,12 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     return result;
   };
   const result = executionConfig(config);
+  // Keep the effective summary even when preflight filters the profile name.
+  const reasoningSummary =
+    resolveCodexProfile(config)["model_reasoning_summary"];
+  if (safeString(reasoningSummary)) {
+    result["model_reasoning_summary"] = reasoningSummary;
+  }
   const selectedProfile = safeProfileName(config["profile"])
     ? config["profile"]
     : undefined;

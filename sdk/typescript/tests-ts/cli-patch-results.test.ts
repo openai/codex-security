@@ -47,6 +47,10 @@ async function repositoryFixture() {
         stderr.stream,
         dependencies({
           currentDirectory: directory,
+          environment: {
+            CODEX_HOME: join(directory, ".codex-home"),
+            CODEX_API_KEY: "sk-proj-SYNTHETIC_KEY",
+          },
           onRepositoryCommand: runRepositoryCommand,
           ...options,
         }),
@@ -70,7 +74,7 @@ const lines = require("node:readline").createInterface({ input: process.stdin })
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
-  if (request.method === "initialize") send({ id: request.id, result: {} });
+  if (request.method === "initialize" || request.method === "account/login/start") send({ id: request.id, result: {} });
   if (request.method === "thread/start") {
     assert.equal(request.params.sandbox, "workspace-write");
     send({ id: request.id, result: { thread: { id: "thread" }, sandbox: { type: "workspaceWrite" } } });
@@ -90,10 +94,15 @@ lines.on("line", (line) => {
     const outcome = await fixture.patch(
       ["Synthetic issue", "--external-sandbox"],
       {
-        onCodex: (_args, output) =>
-          runCodexSkillCommand(["-e", source], output, {
-            command: process.execPath,
-          }),
+        onCodex: (_args, output, environment) =>
+          runCodexSkillCommand(
+            ["-e", source],
+            output,
+            {
+              command: process.execPath,
+            },
+            environment,
+          ),
       },
     );
     expect(outcome.status).toBe(0);
@@ -242,7 +251,7 @@ const lines = require("node:readline").createInterface({ input: process.stdin })
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
-  if (request.method === "initialize") send({ id: request.id, result: {} });
+  if (request.method === "initialize" || request.method === "account/login/start") send({ id: request.id, result: {} });
   if (request.method === "thread/start") send({ id: request.id, result: { thread: { id: "thread" }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } } });
   if (request.method === "command/exec") {
     assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");
@@ -254,10 +263,15 @@ lines.on("line", (line) => {
       const outcome = await fixture.patch(
         ["Synthetic issue", "--full-output"],
         {
-          onCodex: (_args, output) =>
-            runCodexSkillCommand(["-e", source], output, {
-              command: process.execPath,
-            }),
+          onCodex: (_args, output, environment) =>
+            runCodexSkillCommand(
+              ["-e", source],
+              output,
+              {
+                command: process.execPath,
+              },
+              environment,
+            ),
         },
       );
       expect(outcome.status).toBe(2);

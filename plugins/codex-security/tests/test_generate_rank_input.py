@@ -671,6 +671,8 @@ def test_make_diff_rank_input_for_revision_range(tmp_path: Path) -> None:
 
     (repo / "src" / "alpha.py").write_text("alpha = 2", encoding="utf-8")
     (repo / "src" / "beta.py").write_text("beta = 1", encoding="utf-8")
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows" / "ci.yml").write_text("name: CI", encoding="utf-8")
     deleted_guard.unlink()
     (repo / "README.md").write_text("ignored", encoding="utf-8")
     git(repo, "add", ".")
@@ -693,6 +695,7 @@ def test_make_diff_rank_input_for_revision_range(tmp_path: Path) -> None:
 
     rows = read_jsonl(output)
     assert [row["path"] for row in rows] == [
+        ".github/workflows/ci.yml",
         "src/alpha.py",
         "src/beta.py",
         "src/deleted_guard.py",
@@ -799,6 +802,8 @@ def test_make_diff_rank_input_combines_staged_and_unstaged_patch(tmp_path: Path)
 
     (repo / "src" / "alpha.py").write_text("alpha = 2", encoding="utf-8")
     (repo / "src" / "beta.py").write_text("beta = 1", encoding="utf-8")
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows" / "ci.yaml").write_text("name: CI", encoding="utf-8")
     git(repo, "add", "src/beta.py")
     output = tmp_path / "patch.jsonl"
 
@@ -814,7 +819,11 @@ def test_make_diff_rank_input_combines_staged_and_unstaged_patch(tmp_path: Path)
         str(output),
     )
 
-    assert [row["path"] for row in read_jsonl(output)] == ["src/alpha.py", "src/beta.py"]
+    assert [row["path"] for row in read_jsonl(output)] == [
+        ".github/workflows/ci.yaml",
+        "src/alpha.py",
+        "src/beta.py",
+    ]
 
 
 @pytest.mark.parametrize("mode", ["repo", "explicit-file", "revisions", "local-patch"])

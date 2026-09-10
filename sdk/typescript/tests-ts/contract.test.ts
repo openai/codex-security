@@ -316,6 +316,28 @@ describe("canonical scan contract", () => {
       sameCheckedFileDevice(file, checked, opened, "linux", openReference),
     ).resolves.toBe(false);
     expect(inspected).toBe(windowsInspections);
+
+    device = referenceDevice = highDevice;
+    inode = referenceInode = identity.ino;
+    regular = referenceRegular = true;
+    await expect(
+      sameCheckedFileDevice(
+        file,
+        { path, metadata: identity },
+        { dev: highDevice, ino: identity.ino },
+        "win32",
+        openReference,
+      ),
+    ).resolves.toBe(true);
+    const largeInode = 2n ** 60n;
+    expect(Number(largeInode)).toBe(Number(largeInode + 1n));
+    await expect(
+      sameCheckedFileDevice(
+        file,
+        { path, metadata: { dev: identity.dev, ino: largeInode } },
+        { dev: identity.dev, ino: largeInode + 1n },
+      ),
+    ).resolves.toBe(false);
   });
 
   test("loads the unchanged plugin example with typed canonical names", async () => {
