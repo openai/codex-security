@@ -46,6 +46,7 @@ import {
 import {
   collectPublicationEvents,
   hasExpectedPublicationArguments,
+  isCanonicalUuid,
   MISSING_PUBLICATION_IDENTIFIER_ERROR,
   publicationClaimAliases,
   resolveClaims,
@@ -1079,18 +1080,38 @@ async function recoverPublicationHandoffs(
     "linear",
     "handoffs",
   );
-  let directories;
-  try {
-    directories = await readdir(root, { withFileTypes: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
+  const directories = await readdir(root, { withFileTypes: true }).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    },
+  );
   const prefix = `${createHash("sha256").update(publication.scanId).digest("hex")}-`;
-  for (const entry of directories) {
+  const attempts = new Set(
+    directories
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
+      .map((entry) => entry.name),
+  );
+  // Host receipts remain authoritative if the publisher removes its writable cwd.
+  const receipts = await readdir(dirname(root), { withFileTypes: true }).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    },
+  );
+  for (const entry of receipts) {
+    if (
+      entry.isFile() &&
+      entry.name.startsWith(prefix) &&
+      entry.name.endsWith(".json") &&
+      // Public result receipts use UUID suffixes.
+      !isCanonicalUuid(entry.name.slice(prefix.length, -".json".length))
+    )
+      attempts.add(entry.name.slice(0, -".json".length));
+  }
+  for (const attempt of attempts) {
     signal?.throwIfAborted();
-    if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
-    const directory = join(root, entry.name);
+    const directory = join(root, attempt);
     const file = join(directory, "issues.jsonl");
     const files = await readdir(directory).catch(
       (error: NodeJS.ErrnoException) => {
@@ -1315,7 +1336,7 @@ async function recoverPublicationHandoffs(
       .filter(
         (issue) =>
           !baseline.has(issue.issueIdentifier) &&
-          (issue.attemptId === undefined || issue.attemptId === entry.name),
+          (issue.attemptId === undefined || issue.attemptId === attempt),
       )
       .map(({ attemptId: _attempt, ...issue }) => issue);
     const confirmed = new Map(
@@ -1327,12 +1348,7 @@ async function recoverPublicationHandoffs(
         issue.issueIdentifier,
     );
     if (restore.length > 0) {
-      for (const issue of await record(
-        previous,
-        restore,
-        environment,
-        entry.name,
-      ))
+      for (const issue of await record(previous, restore, environment, attempt))
         confirmed.set(issue.findingId, issue);
     }
     // The model may write its handoff, but it cannot supply native event proof.
@@ -1341,7 +1357,7 @@ async function recoverPublicationHandoffs(
     if (events === undefined) {
       events = [];
       for (const log of await readdir(dirname(root))) {
-        if (log.startsWith(`${entry.name}-events-`) && log.endsWith(".jsonl")) {
+        if (log.startsWith(`${attempt}-events-`) && log.endsWith(".jsonl")) {
           events.push(await readFile(join(dirname(root), log), "utf8"));
         }
       }
@@ -1466,7 +1482,7 @@ async function recoverPublicationHandoffs(
         issue.issueIdentifier,
     );
     if (newlyConfirmed.length > 0)
-      await record(previous, newlyConfirmed, environment, entry.name);
+      await record(previous, newlyConfirmed, environment, attempt);
     const missing = original.issues.some(
       (issue) =>
         (started === undefined || started.has(issue.findingId)) &&
@@ -1492,7 +1508,7 @@ async function recoverPublicationHandoffs(
     if (manual.length > 0) {
       // Claim a manual confirmation once, under the existing SQLite write
       // transaction. Re-read because another recovery may have claimed it first.
-      await record(previous, manual, environment, entry.name);
+      await record(previous, manual, environment, attempt);
       const claimed = await inspect(previous, environment, signal, true);
       if (
         manual.some(
@@ -1502,7 +1518,7 @@ async function recoverPublicationHandoffs(
                 saved.findingId === issue.findingId &&
                 saved.occurrenceId === issue.occurrenceId &&
                 saved.issueIdentifier === issue.issueIdentifier &&
-                saved.attemptId === entry.name,
+                saved.attemptId === attempt,
             ),
         )
       ) {

@@ -411,6 +411,108 @@ describe("database-backed Linear publication integration", () => {
     },
   );
 
+  test.each(["unknown", "confirmed"])(
+    "retained host receipts recover after the publisher directory is removed (%s)",
+    async (mode) => {
+      const completed = await fixture(1);
+      const before = await artifactDigests(completed.scanDirectory);
+      let directory = "";
+      let launches = 0;
+      let records = 0;
+      const runtime: PublishScanDependencies = {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        recordPublishedIssues: async (...args) => {
+          if (++records === 1 && mode === "confirmed")
+            throw new Error("Synthetic database interruption");
+          return recordPublishedIssues(...args);
+        },
+        runCodex: async (_command, _args, prompt) => {
+          launches++;
+          const payload = await publicationPayload(prompt);
+          directory = dirname(payload.handoffFile);
+          await rm(directory, { recursive: true });
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              type: "item.completed",
+              item: {
+                type: "mcp_tool_call",
+                server: "codex_apps",
+                tool: "linear.save_issue",
+                arguments: payload.batches.flat()[0]!.arguments,
+                status: "completed",
+                result:
+                  mode === "unknown"
+                    ? { id: "33333333-3333-4333-8333-333333333333" }
+                    : { identifier: "EXAMPLE-1" },
+              },
+            }),
+          };
+        },
+      };
+      await expect(
+        publishScanInternal(completed.scanDirectory, OPTIONS, runtime),
+      ).rejects.toThrow(
+        mode === "unknown" ? "could not verify" : "Could not persist",
+      );
+      const receiptPath = join(
+        dirname(dirname(directory)),
+        `${basename(directory)}.json`,
+      );
+      const retained = await readFile(receiptPath, "utf8");
+      expect(Boolean(JSON.parse(retained).outcome.indeterminate)).toBe(
+        mode === "unknown",
+      );
+      expect(storedPublications(completed)).toHaveLength(0);
+      const retryOptions = { ...OPTIONS, skipExisting: true };
+      if (mode === "unknown") {
+        await expect(
+          publishScanInternal(completed.scanDirectory, retryOptions, runtime),
+        ).rejects.toThrow("outcome is unknown");
+        expect(launches).toBe(1);
+        expect(await readFile(receiptPath, "utf8")).toBe(retained);
+        // An operator can still resolve the retained attempt through existing SQLite history.
+        const prepared = await prepareScanPublication(completed.scanDirectory, {
+          ...OPTIONS,
+          environment: completed.environment,
+        });
+        const issue = prepared.issues[0]!;
+        await recordPublishedIssues(
+          prepared,
+          [
+            {
+              findingId: issue.findingId,
+              occurrenceId: issue.occurrenceId,
+              issueIdentifier: "EXAMPLE-1",
+            },
+          ],
+          completed.environment,
+        );
+      }
+      for (let retry = 0; retry < 2; retry++) {
+        const result = await publishScanInternal(
+          completed.scanDirectory,
+          retryOptions,
+          runtime,
+        );
+        expect(result.created).toEqual([]);
+        expect(result.skipped).toMatchObject([
+          { issueIdentifier: "EXAMPLE-1" },
+        ]);
+        expect(launches).toBe(1);
+      }
+      expect(
+        storedPublications(completed).map((row) => row.external_id),
+      ).toEqual(["EXAMPLE-1"]);
+      expect(JSON.parse(await readFile(receiptPath, "utf8")).recovered).toBe(
+        true,
+      );
+      expect(await artifactDigests(completed.scanDirectory)).toEqual(before);
+    },
+  );
+
   test.each(["completed", "unknown", "missing-receipt"])(
     "a disappearing Linear handoff requires its completed host receipt (%s)",
     async (mode) => {

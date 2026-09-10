@@ -299,7 +299,7 @@ function compareClaims(
   return left.value < right.value ? -1 : 1;
 }
 
-function isCanonicalUuid(value: string): boolean {
+export function isCanonicalUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
     value,
   );
