@@ -7636,11 +7636,15 @@ async function executeScan(
     if (typeof provider === "string") {
       providerOptions = {
         provider,
-        providerConfiguration: (
-          effectiveConfiguration["model_providers"] as
-            | Record<string, JsonObject>
-            | undefined
-        )?.[provider],
+        providerConfiguration:
+          (
+            effectiveConfiguration["model_providers"] as
+              | Record<string, JsonObject>
+              | undefined
+          )?.[provider] ??
+          (isExternalModelProvider(provider)
+            ? EXTERNAL_CODEX_PROVIDERS[provider]
+            : undefined),
       };
     }
     selectedAuthentication = arguments_.mock

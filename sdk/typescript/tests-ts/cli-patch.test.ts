@@ -685,35 +685,45 @@ describe("scan and patch workflow", () => {
     expect(attributed.exitCode).toBe(0);
     expect(invocation).toContain('safety_identifier="synthetic-user"');
 
-    const provider = await runWorkflow(
+    for (const selection of [
+      ["--provider", "fireworks"],
+      ["--codex", 'model_provider="fireworks"'],
       [
-        "scan",
-        "--patch",
-        "--provider",
-        "fireworks",
-        "--model",
-        "accounts/fireworks/models/example",
-        "--json",
+        "--codex",
+        'profile="synthetic"',
+        "--codex",
+        'profiles.synthetic.model_provider="fireworks"',
       ],
-      {
-        result,
-        environment: { FIREWORKS_API_KEY: "SYNTHETIC_FIREWORKS_KEY_123" },
-        onCodex: (args, output) => {
-          invocation = args;
-          completePatches(args, output);
-          return 0;
+    ]) {
+      const provider = await runWorkflow(
+        [
+          "scan",
+          "--patch",
+          ...selection,
+          "--model",
+          "accounts/fireworks/models/example",
+          "--json",
+        ],
+        {
+          result,
+          environment: { FIREWORKS_API_KEY: "SYNTHETIC_FIREWORKS_KEY_123" },
+          onCodex: (args, output) => {
+            invocation = args;
+            completePatches(args, output);
+            return 0;
+          },
         },
-      },
-    );
-    expect(provider.exitCode).toBe(0);
-    expect(invocation).toContain('model_provider="fireworks"');
-    expect(
-      invocation.some(
-        (argument) =>
-          argument.startsWith("model_providers=") &&
-          argument.includes('"env_key"="FIREWORKS_API_KEY"'),
-      ),
-    ).toBe(true);
+      );
+      expect(provider.exitCode).toBe(0);
+      expect(invocation).toContain('model_provider="fireworks"');
+      expect(
+        invocation.some(
+          (argument) =>
+            argument.startsWith("model_providers=") &&
+            argument.includes('"env_key"="FIREWORKS_API_KEY"'),
+        ),
+      ).toBe(true);
+    }
   });
 
   test("publishes only verified patch files and preserves unrelated staged changes", async () => {
