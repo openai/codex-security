@@ -37,6 +37,7 @@ import {
 import { z } from "incur";
 import {
   CODEX_AUTH_CONFIG_KEYS,
+  NO_CREDENTIALS_MESSAGE,
   accountStatus,
   configuredCodexHome,
   CodexLoginHandle,
@@ -2849,11 +2850,7 @@ export class CodexSecurity {
         !commandAuth &&
         authentication.method !== "aws_credentials"
       ) {
-        throw new AuthenticationRequiredError(
-          "No credentials were found. Run 'codex-security login', use " +
-            "'codex-security login --device-auth' on a remote or headless machine, or set " +
-            "OPENAI_API_KEY or CODEX_API_KEY for CI.",
-        );
+        throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
       }
       if (!commandAuth)
         authentication = await runtimeScanAuthentication(

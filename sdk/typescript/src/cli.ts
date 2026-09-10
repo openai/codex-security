@@ -67,6 +67,7 @@ import {
 import {
   accountStatus,
   CODEX_AUTH_CONFIG_KEYS,
+  NO_CREDENTIALS_MESSAGE,
   configuredCodexHome,
   readCodexHomeConfig,
 } from "./auth.js";
@@ -113,6 +114,7 @@ import { formatUsd, type ScanCost } from "./cost.js";
 import { formatScanCostTokens, formatTokenUsage } from "./cost-model.js";
 import {
   CodexSecurityError,
+  AuthenticationRequiredError,
   ConfigurationError,
   InvalidTargetError,
   OutputDirectoryError,
@@ -154,6 +156,7 @@ import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
+  requireOutputOutsideRepository,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
@@ -1084,6 +1087,7 @@ type SkillThreadSource = Extract<
 >;
 
 interface SkillCommandOutput {
+  readonly directory?: string;
   readonly auth?: ScanAuthMode;
   readonly modelProvider?: string;
   readonly providerConfiguration?: JsonObject;
@@ -1428,6 +1432,15 @@ export async function runCodexSkillCommand(
       provider,
       hasCommandAuth(config),
     );
+    if (
+      authentication.method === "stored_credentials" &&
+      isExternalModelProvider(provider)
+    ) {
+      const externalProvider = EXTERNAL_CODEX_PROVIDERS[provider];
+      throw new AuthenticationRequiredError(
+        `Set ${externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
+      );
+    }
     let selected = selectedScanEnvironment(
       processEnvironment,
       authentication.method === "command" ? "chatgpt" : output.auth,
@@ -1437,10 +1450,17 @@ export async function runCodexSkillCommand(
       authentication.method === "stored_credentials" &&
       (provider === undefined || provider === "openai")
     ) {
-      const codexHome = await prepareCodexSecurityCredentialHome(selected);
+      const directory = await realpath(
+        output.directory ?? output.appServer?.directory ?? process.cwd(),
+      );
+      const codexHome = await prepareCodexSecurityCredentialHome(
+        selected,
+        (path) => requireOutputOutsideRepository(directory, path, "runtime"),
+      );
       const release = await acquireCodexSecurityCredentialHomeLock(codexHome);
+      let credentialsAvailable: boolean;
       try {
-        await initialCredentialsAvailable(
+        credentialsAvailable = await initialCredentialsAvailable(
           selected,
           configuredCodexHome(selected),
           codexHome,
@@ -1453,6 +1473,12 @@ export async function runCodexSkillCommand(
         CODEX_HOME: codexHome,
         CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(selected),
       };
+      if (
+        !credentialsAvailable &&
+        !(await accountStatus(command, selected)).authenticated
+      ) {
+        throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
+      }
       if (output.appServer === undefined) {
         const credentialConfig = await readCodexHomeConfig(selected);
         args = [
@@ -6887,6 +6913,7 @@ async function runSkill(
     {
       command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
       auth: options.auth ?? "auto",
+      directory,
       modelProvider: options.provider,
       providerConfiguration: options.providerConfiguration,
       stdout,

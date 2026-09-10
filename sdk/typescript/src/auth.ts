@@ -296,6 +296,12 @@ export const CODEX_AUTH_CONFIG_KEYS = [
   "forced_chatgpt_workspace_id",
 ] as const;
 
+/** @internal Shared login recovery guidance for model commands. */
+export const NO_CREDENTIALS_MESSAGE =
+  "No credentials were found. Run 'codex-security login', use " +
+  "'codex-security login --device-auth' on a remote or headless machine, or set " +
+  "OPENAI_API_KEY or CODEX_API_KEY for CI.";
+
 function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
     /https?:\/\/[^\s<>"']+/g,

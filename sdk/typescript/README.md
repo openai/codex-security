@@ -229,8 +229,9 @@ npx @openai/codex-security scan C:\code\repository
 Login, logout, scans, validation, patching, and fix verification share a private
 credential home for stored OpenAI credentials:
 `$CODEX_SECURITY_STATE_DIR/codex-home`, or
-`$CODEX_HOME/state/plugins/codex-security/codex-home`. Codex uses the configured
-file or keyring storage and managed-device policies. If this home has no
+`$CODEX_HOME/state/plugins/codex-security/codex-home`. Keep this credential
+home outside the repository being inspected or modified. Codex uses the
+configured file or keyring storage and managed-device policies. If this home has no
 credentials, it imports an existing file-based Codex sign-in. Logout disables
 imports until you log in again.
 
