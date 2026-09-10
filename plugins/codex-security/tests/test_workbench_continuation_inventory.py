@@ -6,12 +6,18 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from workbench_test_support import initialize_git_repository, run_workbench, write_checkpoint
+from workbench_test_support import (
+    initialize_git_repository,
+    run_workbench,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 
 @pytest.mark.parametrize("changed", [False, True])
-def test_custom_continuation_preserves_reviewed_ignored_file_identity(
-    tmp_path: Path, changed: bool
+@pytest.mark.parametrize("reviewed", [False, True])
+def test_continuation_preserves_selected_ignored_file_identity(
+    tmp_path: Path, changed: bool, reviewed: bool
 ) -> None:
     repository = tmp_path / "repository"
     initialize_git_repository(repository)
@@ -50,19 +56,29 @@ def test_custom_continuation_preserves_reviewed_ignored_file_identity(
     root, parent = register("parent")
     snapshot = {
         "scanId": parent,
-        "complete": True,
+        "complete": reviewed,
         "scope": {"validationMode": "custom"},
         "findings": [],
         "coverage": {
-            "completeness": "complete",
+            "completeness": "complete" if reviewed else "partial",
             "surfaces": [],
             "explicitExclusions": [],
             "deferred": [],
-            "reviewedFiles": [source.name],
+            "reviewedFiles": [source.name] if reviewed else [],
         },
     }
+    if not reviewed:
+        contract = tmp_path / "contract"
+        contract.mkdir()
+        write_completed_contract(contract, parent, repository, relative_path=source.name)
+        finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+        finding["extensions"] = {"candidateId": "candidate-1"}
+        snapshot["findings"] = [finding]
+        snapshot["coverage"]["deferred"] = [
+            {"candidateId": "candidate-1", "reason": "Full-file review remains incomplete."}
+        ]
     paths = []
-    for validated in (False, True):
+    for validated in (False, True) if reviewed else (False,):
         if validated:
             # Custom validation accepts findings without repeating source-review credit.
             snapshot["coverage"]["reviewedFiles"] = []
@@ -79,7 +95,7 @@ def test_custom_continuation_preserves_reviewed_ignored_file_identity(
         )
     if changed:
         source.write_bytes(b"changed contents that have not been reviewed\n")
-    _, child = register("child", parent)
+    child_root, child = register("child", parent)
     if changed:
         rejected = run_workbench(
             state,
@@ -100,14 +116,20 @@ def test_custom_continuation_preserves_reviewed_ignored_file_identity(
                 "SELECT COUNT(*) FROM scan_checkpoints WHERE scan_id = ?", (child,)
             ).fetchone() == (0,)
         source.write_bytes(original)
-        _, child = register("restored-source-child", parent)
+        child_root, child = register("restored-source-child", parent)
     resumed = run_workbench(
         state, "continue-scan-checkpoint", "--scan-id", child, "--parent-scan-id", parent
     )
-    assert resumed["completionReady"] is True
-    assert resumed["checkpoint"]["reviewedFiles"] == [source.name]
-    assert resumed["checkpoint"]["remainingFiles"] == []
-    assert resumed["checkpoint"]["sources"][0]["customValidationComplete"] is True
+    assert resumed["completionReady"] is reviewed
+    assert resumed["checkpoint"]["reviewedFiles"] == ([source.name] if reviewed else [])
+    assert resumed["checkpoint"]["remainingFiles"] == ([] if reviewed else [source.name])
+    assert resumed["checkpoint"]["sources"][0]["customValidationComplete"] is reviewed
+    if not reviewed:
+        retained = json.loads((child_root / "findings.json").read_text())["findings"]
+        assert len(retained) == 1
+        assert retained[0]["codeEvidence"] == finding["codeEvidence"]
+        deferred = json.loads((child_root / "coverage.json").read_text())["deferred"]
+        assert [entry["candidateId"] for entry in deferred] == ["candidate-1"]
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         parent_digest = connection.execute(
             "SELECT content_sha256 FROM scan_review_files WHERE scan_id = ?", (parent,)
@@ -115,5 +137,5 @@ def test_custom_continuation_preserves_reviewed_ignored_file_identity(
         assert connection.execute(
             "SELECT content_sha256, reviewed_at IS NOT NULL FROM scan_review_files WHERE scan_id = ?",
             (child,),
-        ).fetchall() == [(parent_digest, 1)]
+        ).fetchall() == [(parent_digest, int(reviewed))]
     assert all(path.read_bytes() == contents for path, contents in paths)

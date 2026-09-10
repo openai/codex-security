@@ -847,7 +847,7 @@ def continue_checkpoint(db: Any, connection: sqlite3.Connection, args: Any) -> d
             "SELECT parent.relative_path FROM scan_review_files AS parent "
             "LEFT JOIN scan_review_files AS child ON child.scan_id = ? "
             "AND child.relative_path = parent.relative_path "
-            "WHERE parent.scan_id = ? AND parent.reviewed_at IS NOT NULL "
+            "WHERE parent.scan_id = ? "
             "AND (child.content_sha256 IS NULL OR child.content_sha256 != parent.content_sha256) "
             "LIMIT 1",
             (child["id"], parent["id"]),
