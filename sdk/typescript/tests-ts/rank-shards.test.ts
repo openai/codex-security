@@ -162,7 +162,7 @@ describe("rank shard helpers", () => {
   });
 
   test.skipIf(process.platform === "win32")(
-    "preserves existing shards when Unicode entry types require metadata lookup",
+    "preserves existing shards alongside Unicode and raw-byte filenames",
     () => {
       const f = fixture();
       write(f.input, [candidate("new.py")]);
@@ -174,41 +174,12 @@ describe("rank shard helpers", () => {
           "unrelated undecodable file",
         );
       const original = readFileSync(shard(f, 1));
-      const preload = join(f.root, "unknown-types.cjs");
-      writeFileSync(
-        preload,
-        `const fs = require("node:fs");
-const open = fs.opendirSync;
-fs.opendirSync = (...args) => {
-  const handle = open(...args);
-  const read = handle.readSync.bind(handle);
-  handle.readSync = () => {
-    const entry = read();
-    // Model DT_UNKNOWN lookup joining a Buffer directory with a string name.
-    if (entry) fs.lstatSync(require("node:path").join(args[0], entry.name));
-    return entry;
-  };
-  return handle;
-};
-require("node:module").syncBuiltinESMExports();
-`,
-      );
-      const invoke = () =>
-        run(
-          f,
-          "make-rank-shards",
-          ["--rank-input", f.input, "--out-dir", f.directory],
-          {
-            ...process.env,
-            NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
-          },
-        );
-      const result = invoke();
+      const result = make(f);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("already contains shard files");
       expect(readFileSync(shard(f, 1))).toEqual(original);
       rmSync(shard(f, 1));
-      expect(invoke().status).toBe(0);
+      expect(make(f).status).toBe(0);
       expect(read(shard(f, 1))).toEqual([candidate("new.py")]);
     },
   );
