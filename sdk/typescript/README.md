@@ -1234,8 +1234,11 @@ repository, including active or failed scans. If there are no saved scans, it se
 a general report. The report includes your description, version details, and the selected
 scan and session IDs. Add `--json` for structured output.
 
-Logs are off by default. `--include-logs` uploads Codex diagnostics and saved scan
-and worker activity. These can contain source code, prompts, findings, tool
+Logs are off by default. `--include-logs` uploads Codex diagnostics, saved scan and
+worker conversations, and retained worker attempt errors. Available worker
+diagnostics can be included even when the parent conversation is missing. If the
+scan diagnostic collector fails, feedback continues with the available Codex logs.
+These can contain source code, prompts, findings, tool
 output, and other sensitive data. Only include logs you can share with OpenAI.
 The command uses Codex's feedback service and respects `feedback.enabled = false`.
 

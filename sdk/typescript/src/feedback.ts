@@ -3,18 +3,19 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { readCodexHomeConfig } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
+import { collectFeedbackLogs } from "./feedback-logs.js";
 import {
   codexSecurityCredentialHome,
   executablePathForSpawn,
   resolveCodexCommand,
 } from "./runtime.js";
-import { readSavedScanLogs, type ScanLogSource } from "./scan-logs.js";
+import type { ScanLogSource } from "./scan-logs.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   CODEX_EXECUTABLE_VERSION,
@@ -40,6 +41,7 @@ type StartCodex = (
 export async function sendFeedback(
   options: FeedbackOptions,
   startCodex: StartCodex = spawn,
+  collectLogs: typeof collectFeedbackLogs = collectFeedbackLogs,
 ) {
   const { scan, environment, includeLogs } = options;
   options.signal?.throwIfAborted();
@@ -56,13 +58,29 @@ export async function sendFeedback(
   try {
     const extraLogFiles: string[] = [];
     if (includeLogs && scan !== undefined) {
-      const logs = await readSavedScanLogs(scan, codexHome);
-      directory = await mkdtemp(join(tmpdir(), "codex-security-feedback-"));
-      const path = join(directory, "scan-logs.json");
-      await writeFile(path, JSON.stringify(logs), { mode: 0o600 });
-      extraLogFiles.push(path);
+      try {
+        directory = await mkdtemp(join(tmpdir(), "codex-security-feedback-"));
+        const path = join(directory, "scan-logs.json");
+        if (
+          await collectLogs({
+            scanId: scan.scanId,
+            path,
+            environment,
+            workingDirectory: options.workingDirectory,
+            signal: options.signal,
+          })
+        ) {
+          extraLogFiles.push(path);
+        }
+      } catch {
+        options.signal?.throwIfAborted();
+        console.warn(
+          "Codex Security could not attach scan and worker diagnostics; sending feedback with available Codex logs.",
+        );
+      }
     }
 
+    options.signal?.throwIfAborted();
     const command = resolveCodexCommand(environment);
     const child = startCodex(
       executablePathForSpawn(command.command),

@@ -2679,7 +2679,7 @@ export function pythonUtf8Environment(
   return normalized;
 }
 
-function pluginHelperEnvironment(
+export function pluginHelperEnvironment(
   environment: ProcessEnvironment,
 ): ProcessEnvironment {
   return pythonUtf8Environment(
