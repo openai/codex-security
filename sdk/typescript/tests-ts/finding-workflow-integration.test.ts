@@ -1490,6 +1490,54 @@ test("API-key dedupe rechecks source behind a linked managed credential home", a
   expect(modelCalls).toBe(5);
 });
 
+test.each([false, true])(
+  "dedupe preserves sealed output behind a database link (existing=%j)",
+  async (existing) => {
+    const { environment, repository, scanDir, history } = await fixture();
+    await mkdir(environment.CODEX_SECURITY_STATE_DIR);
+    const database = join(scanDir, "preserved.sqlite3");
+    if (existing) {
+      execFileSync(await resolvePluginPython({ environment }), [
+        "-c",
+        "import sqlite3, sys; db = sqlite3.connect(sys.argv[1]); db.execute('CREATE TABLE preserved (value TEXT)'); db.execute(\"INSERT INTO preserved VALUES ('original')\"); db.commit(); db.close()",
+        database,
+      ]);
+    }
+    await symlink(
+      database,
+      join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      "file",
+    );
+    const before = await readdir(scanDir, { recursive: true });
+    const original = existing ? await readFile(database) : undefined;
+    let workbenchCalls = 0;
+    let requests = 0;
+    const error: unknown = await deduplicateScanDirectoryInternal(
+      scanDir,
+      { repository, findingsUrl: "http://synthetic.test" },
+      {
+        environment,
+        runWorkbench: async (args, input) => {
+          workbenchCalls++;
+          return await history(args, input);
+        },
+        fetch: async () => {
+          requests++;
+          throw new Error("Unexpected findings request");
+        },
+      },
+    ).catch((failure: unknown) => failure);
+    expect(await readdir(scanDir, { recursive: true })).toEqual(before);
+    if (original !== undefined)
+      expect(await readFile(database)).toEqual(original);
+    expect(workbenchCalls).toBe(0);
+    expect(requests).toBe(0);
+    expect((error as Error).message).toContain(
+      "outside the sealed scan artifacts",
+    );
+  },
+);
+
 test("dedupe refuses a linked lock directory before writing to sealed artifacts", async () => {
   const { environment, repository, scanDir, history } = await fixture();
   environment.CODEX_SECURITY_STATE_DIR = join(repository, "local-state");

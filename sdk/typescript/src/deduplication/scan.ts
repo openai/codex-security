@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { lstat } from "node:fs/promises";
+import { lstat, readlink } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { loadContractWithScanDirectory } from "../contract.js";
 import {
   bundledPluginRoot,
+  canonicalizeModelSafePath,
   codexSecurityStateDirectory,
   prepareCodexSecurityStateSubdirectory,
   resolvePluginPython,
@@ -202,6 +203,21 @@ async function deduplicateResolvedScan(
     );
   let workflow = makeWorkflow(options.workflowId ?? `dedupe_${randomUUID()}`);
   await workflow.protectArtifacts(scanDirectory);
+  let database = join(
+    codexSecurityStateDirectory(environment),
+    "workbench.sqlite3",
+  );
+  for (;;) {
+    database = await canonicalizeModelSafePath(database);
+    const metadata = await lstat(database).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!metadata?.isSymbolicLink()) break;
+    // A dangling database link still selects where SQLite creates its target.
+    database = resolve(dirname(database), await readlink(database));
+  }
+  await workflow.protectArtifacts(scanDirectory, database);
   const source =
     options.workflowId === undefined
       ? await workflow.sourceSnapshot(repositoryPath, options.signal)
