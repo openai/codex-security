@@ -272,6 +272,7 @@ const EXPORT_DEFAULT_OUTPUTS = {
 const VALUE_OPTIONS = new Set([
   "--port",
   "--workflow-id",
+  "--source-mcp",
   "--auth",
   "--safety-identifier",
   "--path",
@@ -3651,6 +3652,11 @@ export async function main(
       destructive: true,
       mcp: false,
       options: z.object({
+        sourceMcp: optionValue("--source-mcp")
+          .optional()
+          .describe(
+            "Require a configured Codex MCP server for source reads during dedupe.",
+          ),
         workflowId: optionValue("--workflow-id")
           .optional()
           .describe(
@@ -3702,6 +3708,9 @@ export async function main(
           )(
             scanId,
             {
+              ...(options.sourceMcp === undefined
+                ? {}
+                : { sourceMcp: options.sourceMcp }),
               findingsUrl: options.findingsUrl,
               ...(options.workflowId === undefined
                 ? {}

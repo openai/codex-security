@@ -1750,6 +1750,36 @@ has the highest reported severity; ties use finding ID. Results do not delete,
 merge, or change stored finding documents. Accepted groups are saved as durable
 associations in the service before `deduplicationStatus` becomes `completed`.
 
+### Source access during dedupe
+
+Add `--source-mcp NAME` to use a configured native Codex MCP server for source
+reads during dedupe. For example, configure Sourcegraph in your user
+`~/.codex/config.toml` (or `$CODEX_HOME/config.toml`):
+
+```toml
+[mcp_servers.sourcegraph]
+url = "https://sourcegraph.example.com/.api/mcp"
+env_http_headers = { Authorization = "SOURCEGRAPH_AUTHORIZATION" }
+```
+
+Set `SOURCEGRAPH_AUTHORIZATION` to the complete `token <access-token>` value
+through your usual secret manager, then run:
+
+```bash
+codex-security dedupe --scan SCAN_ID --findings-url http://localhost:3000 --source-mcp sourcegraph
+```
+
+The SDK option is `deduplicateScan(scanId, { findingsUrl, sourceMcp: "sourcegraph" })`.
+The selected server must be configured, authenticated, enabled, and available.
+Dedupe uses finding-cited revisions when supplied, with the local Git checkout's
+origin and revision as repository context. Sourcegraph's CLI is not bundled.
+
+This uses native Codex MCP transport and approval review. Credentials stay in
+the host environment and are excluded from model shell access. Use environment-backed
+HTTP authentication; OAuth credentials from another Codex home are not imported.
+Native resource reads retain Codex's existing behavior and the MCP server's
+repository permissions. Omitting the flag preserves existing dedupe source access.
+
 ### Stored duplicate groups
 
 `POST /v1/dedupe-groups` accepts a batch of explicitly reviewed member sets:

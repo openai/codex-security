@@ -720,7 +720,7 @@ async function resolveGitRef(
   }
 }
 
-async function gitOutput(
+export async function gitOutput(
   repository: string,
   args: readonly string[],
   signal?: AbortSignal,

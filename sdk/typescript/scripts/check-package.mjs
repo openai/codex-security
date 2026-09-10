@@ -222,6 +222,7 @@ const distFiles = new Set(
     "deduplication/deduplication-prompts",
     "deduplication/deduplication-reviewer",
     "deduplication/scan",
+    "deduplication/source-mcp",
     "saved-scan",
     "server/embeddings",
     "server/dashboard",

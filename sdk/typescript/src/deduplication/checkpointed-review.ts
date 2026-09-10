@@ -22,6 +22,7 @@ const REVIEW_CONTRACT_VERSION = 3;
 
 export async function reviewSettingsDigest(
   environment: NodeJS.ProcessEnv,
+  sourceMcp?: string,
 ): Promise<string> {
   const homes = new Set([
     expandHome(
@@ -42,6 +43,7 @@ export async function reviewSettingsDigest(
   );
   return workflowDigest({
     configs,
+    ...(sourceMcp === undefined ? {} : { sourceMcp }),
     command: resolveCodexCommand(environment),
     baseUrl: environment["OPENAI_BASE_URL"],
   });

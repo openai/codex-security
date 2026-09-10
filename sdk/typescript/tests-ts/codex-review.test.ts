@@ -1,4 +1,8 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  execFileSync,
+  spawn,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { existsSync } from "node:fs";
 import {
   mkdir,
@@ -13,6 +17,7 @@ import { join, relative, resolve, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
+import { resolveSourceMcp } from "../src/deduplication/source-mcp.js";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
@@ -50,6 +55,7 @@ const transportCases: {
   extraEnvironment?: Record<string, string>;
   windowsOnly?: boolean;
   commandAuth?: "direct" | "ambient";
+  sourceMcp?: boolean;
 }[] = [
   {
     scenario: "correction",
@@ -61,6 +67,7 @@ const transportCases: {
     name: "command auth with ambient API key and relative home",
     commandAuth: "ambient",
   },
+  { scenario: "correction", name: "source MCP", sourceMcp: true },
   { scenario: "retry-correction" },
   { scenario: "text-only-correction" },
   { scenario: "cancel-continuation" },
@@ -106,6 +113,7 @@ for (const {
   extraEnvironment,
   windowsOnly = false,
   commandAuth,
+  sourceMcp,
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
@@ -127,8 +135,41 @@ for (const {
         refresh_interval_ms: 1234,
         ...(commandAuth === "ambient" ? { cwd: modelHome } : {}),
       };
+      if (sourceMcp) {
+        execFileSync("git", ["init", "-q", checkout]);
+        execFileSync("git", [
+          "-C",
+          checkout,
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.com",
+          "commit",
+          "--allow-empty",
+          "-qm",
+          "source fixture",
+        ]);
+        execFileSync("git", [
+          "-C",
+          checkout,
+          "remote",
+          "add",
+          "origin",
+          "https://git.example.com/team/repo.git",
+        ]);
+      }
       const configuration = stringify({
-        mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        mcp_servers: {
+          synthetic: { command: "synthetic-unused-command" },
+          ...(sourceMcp
+            ? {
+                sourcegraph: {
+                  url: "https://source.example.com/.api/mcp",
+                  env_http_headers: { Authorization: "SOURCE_AUTH" },
+                },
+              }
+            : {}),
+        },
         ...(commandAuth
           ? {
               model_provider: "synthetic.provider",
@@ -162,6 +203,7 @@ for (const {
           CODEX_SECURITY_STATE_DIR: join(modelHome, "state"),
           [ghName]: ghConfig,
           ...extraEnvironment,
+          ...(sourceMcp ? { SOURCE_AUTH: "token synthetic-source-auth" } : {}),
         },
         (command, commandArgs, options) => {
           starts++;
@@ -172,6 +214,10 @@ for (const {
               : selected,
           );
           args = commandArgs;
+          if (sourceMcp)
+            expect(options.env!["SOURCE_AUTH"]).toBe(
+              "token synthetic-source-auth",
+            );
           directory = options.env!["CODEX_SQLITE_HOME"];
           expect(options.cwd).toBe(directory);
           expect(environmentEntry(options.env!, "CODEX_HOME")).toBe(modelHome);
@@ -192,6 +238,12 @@ for (const {
         },
         controller.signal,
         checkout,
+        sourceMcp
+          ? await resolveSourceMcp("sourcegraph", {
+              CODEX_HOME: modelHome,
+              SOURCE_AUTH: "token synthetic-source-auth",
+            })
+          : undefined,
       );
       let validations = 0;
       const checkpoints = checkpointWorkbench("blocked-review", {
@@ -335,6 +387,31 @@ for (const {
         expect(args).toContain('cli_auth_credentials_store="ephemeral"');
       }
       expect(args.join(" ")).not.toContain("synthetic-review-key");
+      if (sourceMcp) {
+        const transcriptText = await readFile(transcript, "utf8");
+        expect(transcriptText).not.toContain("token synthetic-source-auth");
+        const request = transcriptText
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+          .find((message) => message.method === "thread/start");
+        expect(request.params.config.mcp_servers.sourcegraph).toMatchObject({
+          required: true,
+          enabled: true,
+          default_tools_approval_mode: "prompt",
+        });
+        expect(request.params.approvalPolicy).toBe("on-request");
+        expect(request.params.approvalsReviewer).toBe("auto_review");
+        expect(
+          request.params.config.shell_environment_policy.exclude,
+        ).toContain("SOURCE_AUTH");
+        expect(request.params.developerInstructions).toContain(
+          "git.example.com/team/repo",
+        );
+        expect(request.params.developerInstructions).toContain(
+          "cited immutable revision",
+        );
+      }
       const permissions = args.find((argument) =>
         argument.startsWith("permissions.codex_security_review="),
       );

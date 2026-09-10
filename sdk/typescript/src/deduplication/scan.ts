@@ -30,9 +30,12 @@ import {
   CheckpointedReviewRunner,
   reviewSettingsDigest,
 } from "./checkpointed-review.js";
+import { resolveSourceMcp } from "./source-mcp.js";
 import { normalizeRepository } from "../targets.js";
 
 export interface DeduplicateScanOptions {
+  /** Require this configured Codex MCP server for source review. */
+  sourceMcp?: string;
   /** Resume the named local findings workflow, including custom publication. */
   workflowId?: string;
   /** Findings API base URL. The scan's findings must already be indexed there. */
@@ -152,6 +155,10 @@ async function deduplicateResolvedScan(
   bindRepository: boolean,
 ): Promise<DeduplicateScanResult> {
   const environment = dependencies.environment ?? process.env;
+  const source =
+    options.sourceMcp === undefined
+      ? undefined
+      : await resolveSourceMcp(options.sourceMcp, environment, options.signal);
   const { contract, scanDirectory } = await loadContractWithScanDirectory(
     selectedDirectory,
     {
@@ -224,6 +231,7 @@ async function deduplicateResolvedScan(
         undefined,
         options.signal,
         repositoryPath,
+        source,
       );
     const checkpoints = workflow
       ? new CheckpointedReviewRunner(
@@ -231,7 +239,7 @@ async function deduplicateResolvedScan(
           runner,
           await workflow.sourceSnapshot(repositoryPath),
           scope,
-          await reviewSettingsDigest(environment),
+          await reviewSettingsDigest(environment, options.sourceMcp),
         )
       : undefined;
     const deduplicator = new FindingDeduplicator(
