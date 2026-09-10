@@ -85,6 +85,8 @@ function worker(root: string): Record<string, boolean> {
     `${drive}\\rooted-\ud800`,
   );
   samePath(files.realpath(widePath(".")), cwd);
+  samePath(files.realpath(widePath("  "), false), cwd);
+  assert.throws(() => files.readFile(widePath(".")), { winerror: 5 });
   for (const name of ["NUL", "nUl", ".\\NUL", "x\\..\\NUL"])
     samePath(files.realpath(widePath(name)), "\\\\.\\NUL");
 
