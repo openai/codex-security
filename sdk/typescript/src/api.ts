@@ -4678,6 +4678,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     for (const key of [
       "model",
       "model_reasoning_effort",
+      "model_reasoning_summary",
       "model_provider",
       "service_tier",
     ]) {

@@ -73,6 +73,7 @@ const deniedWorkerPermissionProfile = {
 
 try {
   await testOpenAiCredentialsReachWorker();
+  await testWorkerReasoningSummaries();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
@@ -726,6 +727,69 @@ async function testOpenAiCredentialsReachWorker() {
       syncBuiltinESMExports();
       for (const [name, value] of Object.entries(previousEnvironment)) restoreEnv(name, value);
     }
+  }
+}
+
+async function testWorkerReasoningSummaries() {
+  const cases = [
+    ["", undefined],
+    ['model_reasoning_summary = "none"\n', "none"],
+    ['model_reasoning_summary = "auto"\n', "auto"],
+    ['model_reasoning_summary = "none"\nprofile = "selected"\n[profiles.selected]\nmodel_reasoning_summary = "concise"\n', "concise"],
+    ['model_reasoning_summary = "none"\nprofile = "selected"\n[profiles.selected]\nmodel = "fixture-model"\n[profiles.other]\nmodel_reasoning_summary = "detailed"\n', "none"]
+  ];
+  const saved = Object.fromEntries(
+    ["CODEX_CLI_PATH", "CODEX_SECURITY_CONFIG_PATH", "OPENAI_API_KEY", "CODEX_API_KEY"].map((name) => [name, process.env[name]])
+  );
+  const originalSpawn = childProcess.spawn;
+  try {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.CODEX_API_KEY;
+    for (const [configuration, expected] of cases) {
+      const fixture = await fakeCodexFixture(deniedWorkerPermissionProfile);
+      const configPath = path.join(fixture.root, "active scan config.toml");
+      const promptPath = path.join(fixture.root, "prompt.md");
+      await writeFile(configPath, configuration);
+      await writeFile(promptPath, "synthetic worker configuration fixture");
+      process.env.CODEX_CLI_PATH = process.execPath;
+      process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      childProcess.spawn = (command, args, options) => originalSpawn(
+        command,
+        command === process.execPath || command === path.toNamespacedPath(process.execPath)
+          ? [fixture.executablePath, ...args]
+          : args,
+        options
+      );
+      syncBuiltinESMExports();
+      const executor = new CodexSdkWorkerExecutor({
+        model: "fixture-model",
+        reasoningEffort: "xhigh",
+        parentSandbox: trustedParentSandboxWithDenials
+      });
+      // A running coordinator retains its settings if the source file changes.
+      for (const kind of ["discovery", "dedup"]) {
+        for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
+          await executor.run({
+            kind, promptPath, workingDirectory: fixture.root, subagents: 0,
+            resumeThreadId, signal: new AbortController().signal
+          });
+          const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+          if (expected === undefined) {
+            assert.equal(invocation.argv.some((arg) => arg.startsWith("model_reasoning_summary=")), false);
+          } else {
+            assert.equal(invocation.argv.includes(`model_reasoning_summary=${JSON.stringify(expected)}`), true);
+          }
+          assert.equal(invocation.argv.includes('model_reasoning_effort="xhigh"'), true);
+          assertReadOnlyWorkerPolicy(invocation.argv);
+          assertWorkerSubagentPolicy(invocation.argv, 0);
+          await writeFile(configPath, 'model_reasoning_summary = "detailed"\n');
+        }
+      }
+    }
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    for (const [name, value] of Object.entries(saved)) restoreEnv(name, value);
   }
 }
 
