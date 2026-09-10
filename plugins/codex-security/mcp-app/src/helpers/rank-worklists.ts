@@ -27,10 +27,7 @@ export function compare(left: string, right: string): number {
   return a.length - b.length;
 }
 
-export function loadRankRows(
-  path: string,
-  selection: boolean,
-): RankRow[] {
+export function loadRankRows(path: string, selection: boolean): RankRow[] {
   const contents = decodeUtf8(readFile(path));
   const lines = contents === "" ? [] : contents.split(/\r\n|[\r\n]/u);
   if (lines.at(-1) === "") lines.pop();

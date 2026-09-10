@@ -89,29 +89,17 @@ function discoverInputShards(directory: string): string[] {
   }
   if (!isDirectory)
     throw new Error(`Rank shard directory missing: ${directory}`);
-  const numbered = shardNames(directory, "input").map((name) => {
-    const match = /^rank-shard-([0-9]{4,})\.input\.jsonl$/u.exec(name);
-    if (!match || match[0] !== name)
-      throw new Error(`Rank input shard has invalid name: ${name}`);
-    return { name, number: BigInt(match[1]!) };
-  });
-  numbered.sort((left, right) =>
-    left.number === right.number
-      ? compare(left.name, right.name)
-      : left.number < right.number
-        ? -1
-        : 1,
-  );
-  const names = numbered.map(({ name }) => name);
+  const names = shardNames(directory, "input");
+  const actual = new Set(names);
   const expected = names.map(
     (_, index) =>
       `rank-shard-${String(index + 1).padStart(4, "0")}.input.jsonl`,
   );
-  if (names.some((name, index) => name !== expected[index]))
+  if (expected.some((name) => !actual.has(name)))
     throw new Error(
       `Rank input shards must use contiguous canonical names; expected=${pythonRepr(expected)}; actual=${pythonRepr(names)}`,
     );
-  return names.map((name) => childPath(directory, name));
+  return expected.map((name) => childPath(directory, name));
 }
 
 function validateShard(input: string, output: string): [RankRow[], RankRow[]] {

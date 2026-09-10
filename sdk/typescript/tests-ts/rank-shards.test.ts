@@ -360,9 +360,7 @@ describe("rank shard helpers", () => {
     const f = fixture();
     write(f.input, [candidate("a.py")]);
     expect(make(f).status).toBe(0);
-    expect(validate(f).stderr).toContain(
-      shard(f, 1, true),
-    );
+    expect(validate(f).stderr).toContain(shard(f, 1, true));
     write(shard(f, 2, true), []);
     expect(merge(f).stderr).toContain(
       "missing output shards ['rank-shard-0001.output.jsonl']; unexpected output shards ['rank-shard-0002.output.jsonl']",
@@ -393,15 +391,15 @@ describe("rank shard helpers", () => {
     expect(existsSync(f.output)).toBe(false);
   });
 
-  test("sorts shard numbers numerically above four digits before checking canonical names", () => {
+  test("rejects gaps in shard names above four digits", () => {
     const f = fixture();
     write(f.input, []);
     write(join(f.directory, "rank-shard-9999.input.jsonl"), []);
     write(join(f.directory, "rank-shard-10000.input.jsonl"), []);
     const result = merge(f);
-    expect(result.stderr).toContain(
-      "actual=['rank-shard-9999.input.jsonl', 'rank-shard-10000.input.jsonl']",
-    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("contiguous canonical names");
+    expect(existsSync(f.output)).toBe(false);
   });
 
   test.each([
@@ -422,7 +420,7 @@ describe("rank shard helpers", () => {
         expect(creation.status).toBe(1);
         expect(creation.stderr).toContain("already contains shard files");
         expect(result.status).toBe(1);
-        expect(result.stderr).toContain(`invalid name: ${name}`);
+        expect(result.stderr).toContain("contiguous canonical names");
       } else {
         expect(creation.status).toBe(0);
         expect(result.status).toBe(0);
