@@ -611,6 +611,12 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
               ...complete,
               error: new Error("Synthetic completion receipt failure"),
             },
+            {
+              request: { id, action: "get" },
+              response: {
+                workflow: { stages: { dedupe: { status: "running" } } },
+              },
+            },
           ]
         : []),
       {

@@ -152,7 +152,15 @@ export class FindingWorkflow {
     stage: WorkflowStage,
     result: unknown,
   ): Promise<WorkflowState> {
-    return (await this.command({ action: "complete", stage, result }))!;
+    try {
+      return (await this.command({ action: "complete", stage, result }))!;
+    } catch (error) {
+      if (stage === "dedupe") {
+        const saved = await this.get().catch(() => null);
+        if (saved?.stages.dedupe.status === "completed") return saved;
+      }
+      throw error;
+    }
   }
 
   async fail(stage: WorkflowStage, error: unknown): Promise<void> {

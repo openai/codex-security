@@ -386,6 +386,98 @@ test("dedupe requires both explicit inputs and reports SDK failures", async () =
   expect(stderr.text()).toContain("Finding has not been indexed");
 });
 
+test.each([
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+] as const)(
+  "dedupe preserves %s after its completion commits",
+  async (signal, expectedCode) => {
+    await using fixture = await workflowFixture();
+    const { scanDir, repository, environment, document } = fixture;
+    const signals = new FakeSignals();
+    let interrupt = true;
+    let operationId = "";
+    let requests = 0;
+    let caught: unknown;
+    const execute = async (args: readonly string[], input?: string) => {
+      const response = await runWorkbench(
+        {
+          environment,
+          pluginRoot: PLUGIN_ROOT,
+          python: Bun.which("python3") ?? Bun.which("python")!,
+        },
+        args,
+        input,
+      );
+      const request = input ? JSON.parse(input) : {};
+      if (
+        interrupt &&
+        request.action === "complete" &&
+        request.stage === "dedupe"
+      ) {
+        interrupt = false;
+        operationId = request.id;
+        signals.emit(signal);
+        throw signal;
+      }
+      return response;
+    };
+    const deps = dependencies({ environment });
+    deps.runWorkbench = execute;
+    deps.addSignalListener = (name, listener) => signals.add(name, listener);
+    deps.removeSignalListener = (name, listener) =>
+      signals.remove(name, listener);
+    deps.deduplicateScan = async (_scanId, options, internal) => {
+      try {
+        return await deduplicateScanDirectoryInternal(
+          scanDir,
+          { ...options, repository },
+          {
+            ...internal,
+            environment,
+            runWorkbench: execute,
+            fetch: async (url) => {
+              expect(url.pathname).toEndWith("/potential-duplicates");
+              requests++;
+              return Response.json({
+                finding: document.findings[0],
+                potentialDuplicates: [],
+              });
+            },
+          },
+        );
+      } catch (error) {
+        caught = error;
+        throw error;
+      }
+    };
+    const stdout = capture();
+    const stderr = capture();
+    expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(
+      expectedCode,
+    );
+    expect(caught).toBe(signal);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Deduplication canceled");
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    const saved = (await new FindingWorkflow(operationId, environment).get())!
+      .stages.dedupe;
+    expect(saved.status).toBe("completed");
+    const retried = capture();
+    expect(
+      await main(
+        [...args, "--workflow-id", operationId],
+        retried.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(retried.text())).toEqual(saved.result);
+    expect(requests).toBe(1);
+  },
+);
+
 test("dedupe forwards cancellation and removes signal handlers", async () => {
   for (const [signal, expectedCode] of [
     ["SIGINT", 130],

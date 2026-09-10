@@ -673,6 +673,106 @@ test.each([false, true])(
   },
 );
 
+test.each([false, true])(
+  "dedupe reconciles a lost completion response (committed=%s)",
+  async (committed) => {
+    const { environment, document, history } = await fixture();
+    const originals = [
+      document.findings[0]!,
+      { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
+    ];
+    const failure = new CodexSecurityError(
+      "Synthetic completion response failure",
+    );
+    let interrupt = true;
+    let operationId = "";
+    let lookups = 0;
+    let modelCalls = 0;
+    const bodies: string[] = [];
+    const dependencies = {
+      environment,
+      runWorkbench: async (args: readonly string[], input?: string) => {
+        const request = input ? JSON.parse(input) : {};
+        const completing =
+          request.action === "complete" && request.stage === "dedupe";
+        if (completing && interrupt) {
+          operationId = request.id;
+          if (committed) await history(args, input);
+          interrupt = false;
+          throw failure;
+        }
+        return await history(args, input);
+      },
+      reviewRunner: {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          modelCalls++;
+          return review.validate(
+            review.stage === "screening"
+              ? { decisions: { "pair-1": sameRecommendation } }
+              : merged(originals),
+          );
+        },
+      },
+      fetch: async (url: URL, init: RequestInit) => {
+        if (url.pathname.endsWith("/dedupe-groups")) {
+          bodies.push(init.body as string);
+          return Response.json([]);
+        }
+        expect(url.pathname).toContain("/potential-duplicates");
+        lookups++;
+        return Response.json({
+          finding: originals[0],
+          potentialDuplicates: originals.slice(1),
+        });
+      },
+    };
+    const options = { findingsUrl: "http://synthetic.test" };
+    const first = deduplicateScanInternal(
+      document.scanId,
+      options,
+      dependencies,
+    );
+    let result;
+    if (committed) result = await first;
+    else {
+      await expect(first).rejects.toBe(failure);
+      expect(failure.deduplicationRecovery?.pendingWrite).toBe(true);
+      result = await deduplicateScanInternal(
+        document.scanId,
+        options,
+        dependencies,
+      );
+    }
+    const workflow = new FindingWorkflow(operationId, environment);
+    expect((await workflow.get())!.stages.dedupe).toEqual({
+      status: "completed",
+      result,
+    });
+    expect(result.duplicateGroups).toEqual([
+      originals.map((finding) => finding.findingId),
+    ]);
+    expect(lookups).toBe(1);
+    expect(modelCalls).toBe(2);
+    expect(bodies).toHaveLength(committed ? 1 : 2);
+    expect(new Set(bodies).size).toBe(1);
+    await expect(
+      deduplicateScanInternal(
+        document.scanId,
+        { ...options, workflowId: operationId },
+        dependencies,
+      ),
+    ).resolves.toEqual(result);
+    expect(modelCalls).toBe(2);
+    // An explicitly repeated ordinary command still requests a fresh review after success.
+    await expect(
+      deduplicateScanInternal(document.scanId, options, dependencies),
+    ).resolves.toEqual(result);
+    expect(lookups).toBe(2);
+    expect(modelCalls).toBe(4);
+    expect(bodies).toHaveLength(committed ? 2 : 3);
+  },
+);
+
 test.each(["current", "legacy", "workflow-columns"])(
   "persists DISTINCT and complete SAME checkpoints across %s databases",
   async (version) => {
