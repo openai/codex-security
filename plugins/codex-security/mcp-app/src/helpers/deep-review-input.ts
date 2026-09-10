@@ -28,7 +28,6 @@ function compare(left: string, right: string): number {
 }
 
 function loadRows(path: string, selection: boolean): RankRow[] {
-  const label = selection ? "Rank output" : "Rank input";
   const contents = decodeUtf8(readFile(path));
   const lines = contents === "" ? [] : contents.split(/\r\n|[\r\n]/u);
   if (lines.at(-1) === "") lines.pop();
