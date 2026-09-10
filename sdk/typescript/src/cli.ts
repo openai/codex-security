@@ -1469,11 +1469,12 @@ export async function runCodexSkillCommand(
       !isExternalModelProvider(provider)
     ) {
       apiKey = environmentValue(selected, authentication.source)?.trim();
-      // Match the SDK's exec transport and keep app-server login in memory.
-      selected = selectedScanEnvironment(selected, "chatgpt");
-      if (output.appServer === undefined) {
-        selected = { ...selected, CODEX_API_KEY: apiKey };
-      } else {
+      // Match the SDK's key selection for native and nested plugin workers.
+      selected = {
+        ...selectedScanEnvironment(selected, "chatgpt"),
+        CODEX_API_KEY: apiKey,
+      };
+      if (output.appServer !== undefined) {
         args = [...args, "--config", 'cli_auth_credentials_store="ephemeral"'];
       }
     }

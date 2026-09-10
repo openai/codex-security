@@ -27,11 +27,12 @@ for await (const line of createInterface({ input: process.stdin })) {
   } else if (request.method === "thread/start") {
     assert.equal(loggedIn, Boolean(process.env.SYNTHETIC_EXPECTED_KEY));
     assert.equal(process.env.CODEX_HOME, process.env.SYNTHETIC_EXPECTED_HOME);
+    assert.equal(process.env.CODEX_API_KEY, process.env.SYNTHETIC_EXPECTED_KEY);
     assert.deepEqual(
       Object.keys(process.env).filter((key) =>
         ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(key.toUpperCase()),
       ),
-      [],
+      process.env.SYNTHETIC_EXPECTED_KEY ? ["CODEX_API_KEY"] : [],
     );
     send({ id: request.id, result: { thread: { id: "synthetic-thread" } } });
   } else if (request.method === "turn/start") {
