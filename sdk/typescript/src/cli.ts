@@ -156,7 +156,7 @@ import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
-  requireOutputOutsideRepository,
+  requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
@@ -211,6 +211,7 @@ import {
 import {
   abortable,
   DiffTarget,
+  enclosingGitWorktreeRoots,
   type ScanMode,
   type ScanTarget,
 } from "./targets.js";
@@ -1453,9 +1454,14 @@ export async function runCodexSkillCommand(
       const directory = await realpath(
         output.directory ?? output.appServer?.directory ?? process.cwd(),
       );
+      const protectedRoots = [
+        directory,
+        ...(await enclosingGitWorktreeRoots(directory)),
+      ];
       const codexHome = await prepareCodexSecurityCredentialHome(
         selected,
-        (path) => requireOutputOutsideRepository(directory, path, "runtime"),
+        (path) =>
+          requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
       );
       const release = await acquireCodexSecurityCredentialHomeLock(codexHome);
       let credentialsAvailable: boolean;
@@ -7603,7 +7609,7 @@ async function executeScan(
             dependencies,
           )
         : arguments_.auth;
-    if (typeof provider === "string" && provider !== "openai") {
+    if (typeof provider === "string") {
       providerOptions = {
         provider,
         providerConfiguration: (
@@ -7615,7 +7621,12 @@ async function executeScan(
     }
     selectedAuthentication = arguments_.mock
       ? null
-      : scanAuthentication(dependencies.environment, auth, provider);
+      : scanAuthentication(
+          dependencies.environment,
+          auth,
+          provider,
+          hasCommandAuth(effectiveConfiguration),
+        );
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,

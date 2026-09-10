@@ -1527,12 +1527,18 @@ if (basename(process.argv[1] ?? "") === "login" && process.argv[2] === "status")
     expect(existsSync(join(home, "auth.json"))).toBe(false);
   });
   test.each(["validate", "patch", "verify-fix"] as const)(
-    "%s keeps imported credentials outside the target, including directory aliases",
+    "%s keeps imported credentials outside enclosing worktrees, including subdirectories and aliases",
     async (command) => {
       const repository = join(stateDirectory, "repository");
       const ambientHome = join(stateDirectory, "ambient");
       const alias = join(stateDirectory, "repository-alias");
-      await mkdir(repository);
+      const component = join(repository, "component");
+      const nestedRepository = join(repository, "nested");
+      await mkdir(component, { recursive: true });
+      await mkdir(nestedRepository);
+      for (const root of [repository, nestedRepository]) {
+        expect(spawnSync("git", ["init", "--quiet", root]).status).toBe(0);
+      }
       await mkdir(ambientHome);
       await symlink(
         repository,
@@ -1547,7 +1553,13 @@ if (basename(process.argv[1] ?? "") === "login" && process.argv[2] === "status")
         }),
         { mode: 0o600 },
       );
-      for (const target of [repository, alias]) {
+      for (const target of [
+        repository,
+        alias,
+        component,
+        join(alias, "component"),
+        nestedRepository,
+      ]) {
         const stderr = capture();
         const status = await main(
           [command, "Synthetic issue", "--auth", "chatgpt"],

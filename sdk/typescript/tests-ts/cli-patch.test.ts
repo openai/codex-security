@@ -576,49 +576,53 @@ describe("scan and patch workflow", () => {
     });
   });
 
-  test("preserves command-provider authentication when patching after a scan", async () => {
-    const home = join(tmpdir(), "synthetic-auth-home");
-    let providerOverride: string | undefined;
-    const outcome = await runWorkflow(
-      [
-        "scan",
-        "--patch",
-        "--json",
-        "--codex",
-        'model_provider="synthetic.provider"',
-        "--codex",
-        'model_providers={"synthetic.provider"={name="Synthetic",auth={command="./synthetic-auth",args=["--json"]}}}',
-      ],
-      {
-        result: resultWithFindings(["high"]),
-        environment: {
-          CODEX_HOME: home,
-          CODEX_API_KEY: "SYNTHETIC_UNUSED_KEY",
+  test.each(["synthetic.provider", "openai"])(
+    "preserves %s command-provider authentication when patching after a scan",
+    async (provider) => {
+      const home = join(tmpdir(), "synthetic-auth-home");
+      let providerOverride: string | undefined;
+      const outcome = await runWorkflow(
+        [
+          "scan",
+          "--patch",
+          "--auth",
+          "api-key",
+          "--json",
+          "--codex",
+          `model_provider=${JSON.stringify(provider)}`,
+          "--codex",
+          `model_providers={${JSON.stringify(provider)}={name="Synthetic",auth={command="./synthetic-auth",args=["--json"]}}}`,
+        ],
+        {
+          result: resultWithFindings(["high"]),
+          environment: {
+            CODEX_HOME: home,
+          },
+          onCodex: (args, output) => {
+            providerOverride = args.find((arg) =>
+              arg.startsWith("model_providers="),
+            );
+            expect(output?.modelProvider).toBe(provider);
+            expect(output?.providerConfiguration?.["auth"]).toEqual({
+              command: "./synthetic-auth",
+              args: ["--json"],
+            });
+            completePatches(args, output);
+            return 0;
+          },
         },
-        onCodex: (args, output) => {
-          providerOverride = args.find((arg) =>
-            arg.startsWith("model_providers="),
-          );
-          expect(output?.modelProvider).toBe("synthetic.provider");
-          expect(output?.providerConfiguration?.["auth"]).toEqual({
-            command: "./synthetic-auth",
-            args: ["--json"],
-          });
-          completePatches(args, output);
-          return 0;
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(parseToml(providerOverride!)).toEqual({
+        model_providers: {
+          [provider]: {
+            name: "Synthetic",
+            auth: { command: "./synthetic-auth", args: ["--json"], cwd: home },
+          },
         },
-      },
-    );
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(parseToml(providerOverride!)).toEqual({
-      model_providers: {
-        "synthetic.provider": {
-          name: "Synthetic",
-          auth: { command: "./synthetic-auth", args: ["--json"], cwd: home },
-        },
-      },
-    });
-  });
+      });
+    },
+  );
 
   test("passes the scan model, provider, and selected authentication to patching", async () => {
     const result = resultWithFindings(["high"]);
