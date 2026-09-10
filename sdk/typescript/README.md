@@ -237,7 +237,9 @@ when running a command from a subdirectory. Codex carries
 `forced_chatgpt_workspace_id` from the ambient configuration into this home,
 including removing settings that are no longer present in the ambient configuration.
 Each command carries its selected provider into this home. Patching and fix
-verification hold the credential-home lock until the app-server thread is ready,
+verification also synchronize the ambient home's project-trust decisions and
+project-root markers, preserving which project configuration Codex loads.
+They hold the credential-home lock until the app-server thread is ready,
 then release it before model execution.
 Managed-device policies still apply. If this home has no credentials, it imports
 an existing file-based Codex sign-in. Logout disables
@@ -738,8 +740,8 @@ is also accepted; omitting the setting preserves the command's existing
 configuration and Codex defaults. Validation ignores user configuration.
 For stored OpenAI credentials, patching and verification read configuration
 from the shared credential home. API-key commands and custom providers that use their own credentials retain
-their ambient Codex configuration. Commands preserve project trust in the
-selected home; explicit `--codex` settings apply to the command and its
+their ambient Codex configuration. Patching and verification preserve project trust from the
+ambient home; explicit `--codex` settings apply to the command and its
 patch-risk assessment.
 
 This setting does not control explicitly configured OpenTelemetry log or trace

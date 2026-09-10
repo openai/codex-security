@@ -1595,52 +1595,65 @@ describe("skill authentication", () => {
     },
   );
 
-  test("checks native login status when there is no credential file", async () => {
-    const environment = {
-      CODEX_HOME: join(stateDirectory, "ambient"),
-      CODEX_SECURITY_STATE_DIR: stateDirectory,
-    };
-    const home = await prepareCodexSecurityCredentialHome(environment);
-    const preload = join(stateDirectory, "native-status.mjs");
-    const marker = join(home, "status-home");
-    await writeFile(
-      preload,
-      `
+  test.each(["ChatGPT", "an API key"])(
+    "checks native login status without a credential file (%s)",
+    async (credentialLabel) => {
+      const environment = {
+        CODEX_HOME: join(stateDirectory, "ambient"),
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      };
+      const home = await prepareCodexSecurityCredentialHome(environment);
+      const preload = join(stateDirectory, "native-status.mjs");
+      const marker = join(home, "status-home");
+      await writeFile(
+        preload,
+        `
 import { basename, join } from "node:path";
 import { writeFileSync } from "node:fs";
 if (basename(process.argv[1] ?? "") === "login" && process.argv[2] === "status") {
   writeFileSync(join(process.env.CODEX_HOME, "status-home"), process.env.CODEX_HOME);
-  console.log("Logged in using ChatGPT");
+  console.log(${JSON.stringify("Logged in using " + credentialLabel)});
   process.exit(0);
 }
 `,
-    );
-    const node = spawnSync("node", ["-p", "process.execPath"], {
-      encoding: "utf8",
-    });
-    expect(node.status, node.stderr).toBe(0);
-    expect(
-      await runCodexSkillCommand(
-        [
-          "-e",
-          'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}))',
-        ],
-        {
-          command: "validate",
-          auth: "chatgpt",
-          stdout: capture().stream,
-          stderr: capture().stream,
-        },
-        { command: node.stdout.trim() },
-        {
-          ...environment,
-          NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
-        },
-      ),
-    ).toBe(0);
-    expect(await readFile(marker, "utf8")).toBe(home);
-    expect(existsSync(join(home, "auth.json"))).toBe(false);
-  });
+      );
+      const node = spawnSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+      });
+      expect(node.status, node.stderr).toBe(0);
+      const stderr = capture();
+      const unauthorized = credentialLabel === "an API key";
+      expect(
+        await runCodexSkillCommand(
+          [
+            "-e",
+            unauthorized
+              ? 'console.error("401 Unauthorized"); process.exit(1)'
+              : 'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}))',
+          ],
+          {
+            command: "validate",
+            auth: "chatgpt",
+            stdout: capture().stream,
+            stderr: stderr.stream,
+          },
+          { command: node.stdout.trim() },
+          {
+            ...environment,
+            NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+          },
+        ),
+      ).toBe(unauthorized ? 1 : 0);
+      if (unauthorized) {
+        expect(stderr.text()).toContain(
+          "Authentication failed using stored credentials",
+        );
+        expect(stderr.text()).not.toContain("ChatGPT");
+      }
+      expect(await readFile(marker, "utf8")).toBe(home);
+      expect(existsSync(join(home, "auth.json"))).toBe(false);
+    },
+  );
   test.each(["validate", "patch", "verify-fix"] as const)(
     "%s keeps imported credentials outside enclosing worktrees, including subdirectories and aliases",
     async (command) => {

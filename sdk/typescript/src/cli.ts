@@ -1422,9 +1422,13 @@ export async function runCodexSkillCommand(
         output.modelProvider !== undefined
           ? {
               model_provider: output.modelProvider,
-              model_providers: {
-                [output.modelProvider]: output.providerConfiguration ?? {},
-              },
+              ...(output.providerConfiguration === undefined
+                ? {}
+                : {
+                    model_providers: {
+                      [output.modelProvider]: output.providerConfiguration,
+                    },
+                  }),
             }
           : output.appServer === undefined
             ? {}
@@ -1488,7 +1492,12 @@ export async function runCodexSkillCommand(
           ...selected,
           CODEX_HOME: codexHome,
         });
-        for (const key of CODEX_AUTH_CONFIG_KEYS) {
+        // Let native Codex apply the ambient home's project-trust decisions.
+        for (const key of [
+          ...CODEX_AUTH_CONFIG_KEYS,
+          "projects",
+          "project_root_markers",
+        ]) {
           const value = ambientConfig[key];
           if (value === undefined) delete credentialConfig[key];
           else credentialConfig[key] = value;
@@ -8367,11 +8376,25 @@ function authenticationFailureMessage(
       "Sign in again with 'codex-security login --with-api-key' or provide a valid API key."
     );
   }
-  return authentication?.method === "api_key"
-    ? `Authentication failed using ${authentication.source}. ` +
-        "Retry with '--auth chatgpt' or provide a valid API key."
-    : "Authentication failed using stored ChatGPT credentials. " +
-        "Sign in again with 'codex-security login' or provide a valid API key.";
+  if (authentication?.method === "api_key") {
+    const openAiKey =
+      authentication.source === "OPENAI_API_KEY" ||
+      authentication.source === "CODEX_API_KEY";
+    return (
+      `Authentication failed using ${authentication.source}. ` +
+      (openAiKey
+        ? "Retry with '--auth chatgpt' or provide a valid API key."
+        : `Provide a valid ${authentication.source} for the selected provider.`)
+    );
+  }
+  if (authentication?.method === "stored_credentials") {
+    return authentication.credentialType === "chatgpt"
+      ? "Authentication failed using stored ChatGPT credentials. " +
+          "Sign in again with 'codex-security login' or provide a valid API key."
+      : "Authentication failed using stored credentials. " +
+          "Check 'codex-security login status' and refresh the stored login or provide a valid API key.";
+  }
+  return "Authentication failed. Check the selected provider's credentials and retry.";
 }
 
 function scanFailureMessage(
