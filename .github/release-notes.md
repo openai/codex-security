@@ -29,6 +29,7 @@
 - pin native Rust formatting edition ([#863](https://github.com/openai/codex-security/pull/863))
 - detect a Linear URL contradiction over plain HTTP ([#867](https://github.com/openai/codex-security/pull/867))
 - pipeline dedupe with configurable concurrency ([#852](https://github.com/openai/codex-security/pull/852))
+- disable reasoning summaries by default for Bedrock ([#869](https://github.com/openai/codex-security/pull/869))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

@@ -40,6 +40,7 @@ async function testDeepScanStdioLifecycle() {
   const stateDir = path.join(fixtureRoot, "state");
   const scanRoot = path.join(fixtureRoot, "scans");
   const codexHome = path.join(fixtureRoot, "codex-home");
+  const runtimeConfigPath = path.join(fixtureRoot, "active-config.toml");
   const startLogPath = path.join(fixtureRoot, "fake-codex-started.jsonl");
   const exitLogPath = path.join(fixtureRoot, "fake-codex-exited.jsonl");
   const restartControlPath = path.join(fixtureRoot, "fake-codex-restart-control.txt");
@@ -77,6 +78,13 @@ async function testDeepScanStdioLifecycle() {
     ].join("\n")
   );
   await writeFakeCodex(fakeCodexPath);
+  await writeFile(runtimeConfigPath, [
+    'model_reasoning_summary = "detailed"',
+    'profile = "selected"',
+    '[profiles.selected]',
+    'model_reasoning_summary = "none"',
+    ''
+  ].join('\n'));
   await writePythonWrapper(pythonWrapperPath);
   await bundleServer(serverBundlePath);
 
@@ -86,6 +94,7 @@ async function testDeepScanStdioLifecycle() {
     CODEX_API_KEY: "",
     CODEX_CLI_PATH: fakeCodexPath,
     CODEX_HOME: codexHome,
+    CODEX_SECURITY_CONFIG_PATH: runtimeConfigPath,
     CODEX_SECURITY_SCAN_ROOT: scanRoot,
     CODEX_SECURITY_STATE_DIR: stateDir,
     PYTHON: pythonWrapperPath,
@@ -180,6 +189,7 @@ async function testDeepScanStdioLifecycle() {
     )), { code: "ENOENT" });
     assertFlagPair(startedWorker.argv, "--model", "gpt-5.5");
     assert.equal(startedWorker.argv.includes('model_reasoning_effort="xhigh"'), true);
+    assert.equal(startedWorker.argv.includes('model_reasoning_summary="none"'), true);
     assertReadOnlyWorkerInvocation(startedWorker.argv);
 
     // Discovery progress is admitted once the first complete Standard worker is active.
@@ -545,6 +555,9 @@ async function testDeepScanStdioLifecycle() {
         []
       );
       const executions = (await readJsonLines(startLogPath)).slice(restartStartIndex);
+      for (const execution of executions) {
+        assert.equal(execution.argv.includes('model_reasoning_summary="none"'), true);
+      }
       assert.equal(executions.filter((execution) => (
         discoveryPromptContext(execution.stdin).workerLabel === "discovery-0001"
       )).length, 1);

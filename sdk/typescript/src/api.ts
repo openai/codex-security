@@ -4678,6 +4678,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     for (const key of [
       "model",
       "model_reasoning_effort",
+      "model_reasoning_summary",
       "model_provider",
       "service_tier",
     ]) {
@@ -4704,6 +4705,12 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     return result;
   };
   const result = executionConfig(config);
+  // Keep the effective summary even when preflight filters the profile name.
+  const reasoningSummary =
+    resolveCodexProfile(config)["model_reasoning_summary"];
+  if (safeString(reasoningSummary)) {
+    result["model_reasoning_summary"] = reasoningSummary;
+  }
   const selectedProfile = safeProfileName(config["profile"])
     ? config["profile"]
     : undefined;

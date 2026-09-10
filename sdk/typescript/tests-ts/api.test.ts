@@ -47,6 +47,7 @@ import {
 import {
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
+  resolveCodexProfile,
   type JsonObject,
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
@@ -1478,6 +1479,10 @@ describe("CodexSecurity orchestration", () => {
       expect((codexOptions as CodexOptions | null)?.env).toMatchObject(
         credentials,
       );
+      expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
+        model_reasoning_summary: "none",
+        model_reasoning_effort: "xhigh",
+      });
       const configuration = JSON.parse(
         await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
       ) as { mcpServers: Record<string, { env_vars: string[] }> };
@@ -1604,6 +1609,10 @@ describe("CodexSecurity orchestration", () => {
       AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
       AWS_REGION: "us-east-2",
     });
+    expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
+      model_reasoning_summary: "none",
+      model_reasoning_effort: "xhigh",
+    });
     expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
       "OPENAI_API_KEY",
     );
@@ -1626,6 +1635,128 @@ describe("CodexSecurity orchestration", () => {
       },
     });
     await client.close();
+  });
+
+  test("isolates resolved Deep worker summaries across concurrent Bedrock scans", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const stateDirectory = join(root, "state");
+    await mkdir(repository);
+    const scenarios: [JsonObject, string][] = [
+      [{}, "none"],
+      [{ model_reasoning_summary: "auto" }, "auto"],
+      [
+        {
+          profile: "cloud",
+          profiles: { cloud: { model_reasoning_summary: "concise" } },
+        },
+        "concise",
+      ],
+      [
+        {
+          profile: "cloud.production",
+          profiles: {
+            "cloud.production": { model_reasoning_summary: "concise" },
+          },
+        },
+        "concise",
+      ],
+    ];
+    let started = 0;
+    let release!: () => void;
+    const allStarted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const configPaths = new Set<string>();
+    const manifest = JSON.parse(
+      await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
+    ) as {
+      mcpServers: Record<string, { env_vars: string[] }>;
+    };
+    const clients = await Promise.all(
+      scenarios.map(async ([overrides, expected], index) => {
+        const scanDir = join(root, `scan-${index}`);
+        await mkdir(scanDir, { mode: 0o700 });
+        return new TestClient(
+          {
+            pluginPath: PLUGIN_ROOT,
+            codexOverrides: {
+              model: "openai.gpt-5.6-luna",
+              model_provider: "amazon-bedrock",
+              ...overrides,
+            },
+          },
+          {
+            environment: {
+              CODEX_SECURITY_STATE_DIR: stateDirectory,
+              AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-key",
+              AWS_REGION: "us-east-2",
+            },
+            resolvePluginPython: async () => "/managed/python",
+            prepareOutputDir: async () => scanDir,
+            repositoryRevision: async () => "deadbeef",
+            createCodex: (options: CodexOptions) => ({
+              startThread: () => ({
+                id: null,
+                async runStreamed() {
+                  if (++started === scenarios.length) release();
+                  await allStarted;
+                  const mcpEnvironment = Object.fromEntries(
+                    Object.entries(options.env ?? {}).filter(([name]) =>
+                      manifest.mcpServers["codex-security"]!.env_vars.includes(
+                        name,
+                      ),
+                    ),
+                  );
+                  const configPath =
+                    mcpEnvironment["CODEX_SECURITY_CONFIG_PATH"];
+                  expect(typeof configPath).toBe("string");
+                  configPaths.add(configPath!);
+                  const config = parseToml(
+                    await readFile(configPath!, "utf8"),
+                  ) as JsonObject;
+                  expect(resolveCodexProfile(config)).toMatchObject({
+                    model_reasoning_summary: expected,
+                    model_reasoning_effort: "xhigh",
+                    model_provider: "amazon-bedrock",
+                  });
+                  expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
+                    "synthetic-bedrock-key",
+                  );
+                  const shared = parseToml(
+                    await readFile(
+                      join(options.env!["CODEX_HOME"]!, "config.toml"),
+                      "utf8",
+                    ),
+                  );
+                  expect(shared["model_reasoning_summary"]).toBeUndefined();
+                  throw new Error("worker context captured");
+                },
+              }),
+            }),
+          },
+        );
+      }),
+    );
+    try {
+      const results = await Promise.allSettled(
+        clients.map((client) =>
+          client.run(repository, { mode: "deep" }).finally(release),
+        ),
+      );
+      for (const result of results)
+        expect(result).toMatchObject({
+          status: "rejected",
+          reason: expect.objectContaining({
+            message: "worker context captured",
+          }),
+        });
+      expect(started).toBe(scenarios.length);
+      expect(configPaths.size).toBe(scenarios.length);
+    } finally {
+      release();
+      await Promise.all(clients.map((client) => client.close()));
+    }
   });
 
   test("does not accept Bedrock credentials for an OpenAI scan", async () => {
