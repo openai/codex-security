@@ -16,6 +16,7 @@ from workbench_target import directory_content_digest, git_output, git_revision
 WORKFLOW_BINDINGS = {
     "repositoryPath": "repository_path",
     "scanRequestDigest": "scan_request_digest",
+    "dedupeRequestDigest": "dedupe_request_digest",
     "scanId": "scan_id",
     "scanDir": "scan_dir",
     "artifactDigest": "artifact_digest",
@@ -48,6 +49,8 @@ def read_workflow(connection: sqlite3.Connection, workflow_id: str) -> dict[str,
         state["stages"][stage] = current
     if "dedupePendingWrite" in results:
         state["stages"]["dedupe"]["pendingWrite"] = results["dedupePendingWrite"]
+    if "dedupeFailureDetails" in results:
+        state["stages"]["dedupe"]["failureDetails"] = results["dedupeFailureDetails"]
     return state
 
 
@@ -68,6 +71,8 @@ def save_workflow(connection: sqlite3.Connection, state: dict[str, Any], timesta
             results[stage] = current["result"]
     if "pendingWrite" in state["stages"]["dedupe"]:
         results["dedupePendingWrite"] = state["stages"]["dedupe"]["pendingWrite"]
+    if "failureDetails" in state["stages"]["dedupe"]:
+        results["dedupeFailureDetails"] = state["stages"]["dedupe"]["failureDetails"]
     values.update(
         results_json=json.dumps(results, allow_nan=False),
         created_at=timestamp,
@@ -122,8 +127,94 @@ def finding_workflow(
         raise SystemExit("workflowId must be a nonempty string.")
     if payload["action"] == "get":
         return {"workflow": read_workflow(connection, workflow_id)}
+    if payload["action"] == "select-dedupe":
+        connection.execute("BEGIN IMMEDIATE")
+        with connection:
+            row = connection.execute(
+                "SELECT id FROM finding_workflows WHERE dedupe_request_digest = ? "
+                "AND dedupe_status != 'completed' ORDER BY created_at DESC LIMIT 1",
+                (payload["requestDigest"],),
+            ).fetchone()
+            if row:
+                return {"workflow": read_workflow(connection, row["id"])}
+            state = {
+                "id": workflow_id,
+                "stages": {stage: {"status": "pending"} for stage in WORKFLOW_STAGES},
+            }
+            bind_workflow(
+                state, {**payload["binding"], "dedupeRequestDigest": payload["requestDigest"]}
+            )
+            save_workflow(connection, state, timestamp)
+            return {"workflow": state}
+    if payload["action"] == "get-candidates":
+        # Keep the original object ordering used by existing review prompt hashes.
+        # The workbench's outer JSON serializer sorts object keys.
+        row = connection.execute(
+            "SELECT candidates_json FROM finding_workflow_candidates "
+            "WHERE workflow_id = ? AND finding_id = ?",
+            (workflow_id, payload["findingId"]),
+        ).fetchone()
+        return {"candidatesJson": row["candidates_json"] if row else None}
+    if payload["action"] == "save-candidates":
+        with connection:
+            connection.execute(
+                "INSERT INTO finding_workflow_candidates "
+                "(workflow_id, finding_id, candidates_json, created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(workflow_id, finding_id) DO NOTHING",
+                (
+                    workflow_id,
+                    payload["findingId"],
+                    json.dumps(payload["candidates"], allow_nan=False),
+                    timestamp,
+                ),
+            )
+        row = connection.execute(
+            "SELECT candidates_json FROM finding_workflow_candidates "
+            "WHERE workflow_id = ? AND finding_id = ?",
+            (workflow_id, payload["findingId"]),
+        ).fetchone()
+        return {"candidatesJson": row["candidates_json"]}
+    if payload["action"] == "dedupe-progress":
+        state = read_workflow(connection, workflow_id)
+        return {
+            "progress": {
+                "pendingWrite": bool(state and state["stages"]["dedupe"].get("pendingWrite")),
+                "candidateCount": connection.execute(
+                    "SELECT COUNT(*) FROM finding_workflow_candidates WHERE workflow_id = ?",
+                    (workflow_id,),
+                ).fetchone()[0],
+                "reviewCount": connection.execute(
+                    "SELECT COUNT(*) FROM finding_workflow_reviews WHERE workflow_id = ?",
+                    (workflow_id,),
+                ).fetchone()[0],
+            }
+        }
     if payload["action"] == "source":
         target = Path(payload["repository"]).resolve(strict=True)
+        excluded = ()
+        database_file = connection.execute("PRAGMA database_list").fetchone()[2]
+        if database_file:
+            database = Path(database_file)
+            physical_database = database.resolve()
+            lock_name = (
+                "dedupe-locks"
+                if physical_database.name == "workbench.sqlite3"
+                else f"{physical_database.name}.dedupe-locks"
+            )
+            # SQLite sidecars follow its reported pathname, even when the DB leaf is a symlink.
+            # Keep the source link and ordinary files under the state directory in the snapshot.
+            excluded = (physical_database, physical_database.parent / lock_name) + tuple(
+                Path(f"{database}{suffix}") for suffix in ("-wal", "-shm", "-journal")
+            )
+        if payload.get("credentialHome"):
+            credential_home = Path(payload["credentialHome"])
+            # Resolve the configured state root without following the managed leaf link.
+            state_root = credential_home.parent.resolve()
+            excluded += (
+                state_root / credential_home.name,
+                state_root / "dedupe",
+                state_root / "dedupe-locks",
+            )
         return {
             "source": {
                 "repository": str(target),
@@ -131,7 +222,9 @@ def finding_workflow(
                 "refsDigest": hashlib.sha256(
                     (git_output(target, "show-ref") or "").encode()
                 ).hexdigest(),
-                "content": directory_content_digest(target, include_ignored=True),
+                "content": directory_content_digest(
+                    target, excluded=excluded, include_ignored=True
+                ),
             }
         }
     if payload["action"] == "get-review":
@@ -196,6 +289,8 @@ def finding_workflow(
                     state["stages"][stage] = {"status": "completed", "result": payload["result"]}
                 elif action == "fail":
                     current.update(status="failed", error=payload["error"])
+                    if stage == "dedupe" and "details" in payload:
+                        current["failureDetails"] = payload["details"]
                 elif action == "prepare-dedupe":
                     current.update(result=payload["result"], pendingWrite=payload["pendingWrite"])
                 else:

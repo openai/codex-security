@@ -28,6 +28,8 @@ import {
 } from "../src/deduplication/scan.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import type { JsonObject } from "../src/config.js";
+import { runWorkbench, resolvePluginPython } from "../src/runtime.js";
+import { workflowFixture } from "./support/workflow-fixture.js";
 
 const document: FindingsDocument = JSON.parse(
   await readFile(
@@ -698,6 +700,12 @@ test("accepts complete canonical and merged reviews and rejects invalid assignme
 });
 
 test("resolves a saved scan and retrieves its IDs without uploading or modifying artifacts", async () => {
+  await using fixture = await workflowFixture();
+  const workbenchOptions = {
+    environment: fixture.environment,
+    pluginRoot: PLUGIN_ROOT,
+    python: await resolvePluginPython({ environment: fixture.environment }),
+  };
   const directory = await mkdtemp(join(tmpdir(), "dedupe-scan-"));
   try {
     await cp(join(PLUGIN_ROOT, "examples/completed-scan"), directory, {
@@ -716,8 +724,11 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
         requestedId,
         { findingsUrl: "http://synthetic.test/api", allRepositories },
         {
+          environment: fixture.environment,
           currentDirectory: () => directory,
-          runWorkbench: async (args): Promise<JsonObject> => {
+          runWorkbench: async (args, input): Promise<JsonObject> => {
+            if (args[0] === "finding-workflow")
+              return await runWorkbench(workbenchOptions, args, input);
             commands.push([...args]);
             return args[0] === "list-scans"
               ? { scans: [{ scanId: "scan_example_001" }] }
@@ -725,6 +736,7 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
                   scan: {
                     scanId: "scan_example_001",
                     scanDir: directory,
+                    targetPath: fixture.repository,
                     progress: { status: "complete" },
                   },
                 };
@@ -801,6 +813,12 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
 });
 
 test("deduplicates an explicit sealed scan directory without reading scan history", async () => {
+  await using fixture = await workflowFixture();
+  const workbenchOptions = {
+    environment: fixture.environment,
+    pluginRoot: PLUGIN_ROOT,
+    python: await resolvePluginPython({ environment: fixture.environment }),
+  };
   const directory = await mkdtemp(join(tmpdir(), "dedupe-directory-"));
   const repository = await mkdtemp(join(tmpdir(), "dedupe-repository-"));
   try {
@@ -819,7 +837,10 @@ test("deduplicates an explicit sealed scan directory without reading scan histor
         findingsUrl: "http://synthetic.test/api",
       },
       {
-        runWorkbench: async (args) => {
+        environment: fixture.environment,
+        runWorkbench: async (args, input) => {
+          if (args[0] === "finding-workflow")
+            return await runWorkbench(workbenchOptions, args, input);
           commands.push([...args]);
           throw new Error("Explicit scan directories must not read history");
         },
@@ -869,6 +890,24 @@ test("deduplicates an explicit sealed scan directory without reading scan histor
   }
 });
 
+test("candidate response validation preserves complete schema-valid findings", async () => {
+  const finding = entry(1);
+  const duplicate = entry(2);
+  for (const potentialDuplicates of [[], [duplicate]]) {
+    const neighborhood = { finding, potentialDuplicates };
+    const client = new FindingsClient(
+      "http://synthetic.test",
+      undefined,
+      async () => Response.json(neighborhood),
+    );
+    expect(
+      await client.potentialDuplicates(finding.findingId, {
+        allRepositories: true,
+      }),
+    ).toEqual(neighborhood);
+  }
+});
+
 test("lookup failures and cancellation never produce a completed uniqueness result", async () => {
   for (const status of [404, 502]) {
     const client = new FindingsClient(
@@ -898,6 +937,7 @@ test("lookup failures and cancellation never produce a completed uniqueness resu
 });
 
 test("writes accepted groups only after all reviews and fails on review or write-back errors", async () => {
+  await using fixture = await workflowFixture();
   const directory = await mkdtemp(join(tmpdir(), "dedupe-writeback-"));
   try {
     await cp(join(PLUGIN_ROOT, "examples/completed-scan"), directory, {
@@ -907,6 +947,15 @@ test("writes accepted groups only after all reviews and fails on review or write
     const findings = [document.findings[0]!, entry(2), entry(3)];
     const ids = findings.map((finding) => finding.findingId);
     for (const failure of ["none", "write", "review"]) {
+      const environment = {
+        ...fixture.environment,
+        CODEX_SECURITY_STATE_DIR: join(fixture.root, failure),
+      };
+      const workbenchOptions = {
+        environment,
+        pluginRoot: PLUGIN_ROOT,
+        python: await resolvePluginPython({ environment }),
+      };
       const phases: string[] = [];
       const controller = new AbortController();
       const result = deduplicateScanInternal(
@@ -916,13 +965,18 @@ test("writes accepted groups only after all reviews and fails on review or write
           signal: controller.signal,
         },
         {
-          runWorkbench: async () => ({
-            scan: {
-              scanId: "scan_example_001",
-              scanDir: directory,
-              progress: { status: "complete" },
-            },
-          }),
+          environment,
+          runWorkbench: async (args, input) =>
+            args[0] === "finding-workflow"
+              ? await runWorkbench(workbenchOptions, args, input)
+              : {
+                  scan: {
+                    scanId: "scan_example_001",
+                    scanDir: directory,
+                    targetPath: fixture.repository,
+                    progress: { status: "complete" },
+                  },
+                },
           fetch: async (url, options) => {
             expect(options.signal).toBe(controller.signal);
             if (options.method === "POST") {
@@ -991,4 +1045,143 @@ test("writes accepted groups only after all reviews and fails on review or write
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("candidate reads retry transient responses without retrying rejected requests or writes", async () => {
+  const delays: number[] = [];
+  let reads = 0;
+  let writes = 0;
+  const client = new FindingsClient(
+    "http://synthetic.test",
+    undefined,
+    async (_url, init) => {
+      if (init.method === "POST") {
+        writes++;
+        return new Response("", { status: 503 });
+      }
+      reads++;
+      return reads === 1
+        ? new Response("", { status: 429, headers: { "Retry-After": "2" } })
+        : reads === 2
+          ? new Response("", { status: 503 })
+          : Response.json({ finding: entry(1), potentialDuplicates: [] });
+    },
+    async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+  );
+  expect(
+    (
+      await client.potentialDuplicates(entry(1).findingId, {
+        allRepositories: true,
+      })
+    ).finding,
+  ).toEqual(entry(1));
+  expect(delays).toEqual([2000, 500]);
+  expect(reads).toBe(3);
+  await expect(
+    client.storeDedupeGroups([[entry(1).findingId, entry(2).findingId]]),
+  ).rejects.toThrow("HTTP 503");
+  expect(writes).toBe(1);
+  let rejected = 0;
+  await expect(
+    new FindingsClient(
+      "http://synthetic.test",
+      undefined,
+      async () => {
+        rejected++;
+        return new Response("", { status: 401 });
+      },
+      async () => {
+        throw new Error("Do not retry authentication failures");
+      },
+    ).potentialDuplicates(entry(1).findingId, { allRepositories: true }),
+  ).rejects.toThrow("HTTP 401");
+  expect(rejected).toBe(1);
+});
+
+test("candidate reads retry when a transient response body has errored", async () => {
+  let reads = 0;
+  const delays: number[] = [];
+  const client = new FindingsClient(
+    "http://synthetic.test",
+    undefined,
+    async () => {
+      reads++;
+      if (reads === 1) {
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error("Connection closed mid-body"));
+            },
+          }),
+          { status: 503 },
+        );
+      }
+      return Response.json({ finding: entry(1), potentialDuplicates: [] });
+    },
+    async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+  );
+  expect(
+    await client.potentialDuplicates(entry(1).findingId, {
+      allRepositories: true,
+    }),
+  ).toEqual({ finding: entry(1), potentialDuplicates: [] });
+  expect(reads).toBe(2);
+  expect(delays).toEqual([250]);
+});
+
+test("candidate reads preserve cancellation during failed response cleanup", async () => {
+  const controller = new AbortController();
+  const reason = new Error("Candidate lookup canceled");
+  let reads = 0;
+  let delays = 0;
+  const client = new FindingsClient(
+    "http://synthetic.test",
+    controller.signal,
+    async () => {
+      reads++;
+      return new Response(
+        new ReadableStream({
+          cancel() {
+            controller.abort(reason);
+            throw new Error("Response cleanup failed");
+          },
+        }),
+        { status: 503 },
+      );
+    },
+    async () => {
+      delays++;
+    },
+  );
+  await expect(
+    client.potentialDuplicates(entry(1).findingId, { allRepositories: true }),
+  ).rejects.toBe(reason);
+  expect(reads).toBe(1);
+  expect(delays).toBe(0);
+});
+
+test("candidate retry backoff preserves the original abort reason", async () => {
+  const controller = new AbortController();
+  const reason = new Error("Candidate lookup canceled during backoff");
+  let reads = 0;
+  const client = new FindingsClient(
+    "http://synthetic.test",
+    controller.signal,
+    async () => {
+      reads++;
+      setImmediate(() => controller.abort(reason));
+      return new Response(null, {
+        status: 503,
+        headers: { "Retry-After": "60" },
+      });
+    },
+  );
+  await expect(
+    client.potentialDuplicates(entry(1).findingId, { allRepositories: true }),
+  ).rejects.toBe(reason);
+  expect(reads).toBe(1);
 });

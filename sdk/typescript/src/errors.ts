@@ -28,10 +28,27 @@ export function safeErrorMessage(error: unknown): string {
 export class CodexSecurityError extends Error {
   /** Accepted upload receipt when a later operation failed before local recovery. */
   public publication?: CustomPublicationResult;
+  /** Committed deduplication work retained for a matching retry. */
+  public deduplicationRecovery?: DeduplicationRecovery;
   public constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = new.target.name;
   }
+}
+
+export interface DeduplicationRecovery {
+  scanId: string;
+  operationId: string;
+  workflowId?: string;
+  findingsUrl: string;
+  allRepositories: boolean;
+  phase: "publication" | "candidates" | "screening" | "pair-review" | "groups";
+  findingIds: string[];
+  candidateCount?: number;
+  reviewCount?: number;
+  findingCount: number;
+  pendingWrite: boolean;
+  diagnosticsPath?: string;
 }
 
 export type DeduplicationReviewStage = "screening" | "pair-review";
@@ -47,6 +64,7 @@ export interface DeduplicationReviewFailureMetadata {
   category: DeduplicationReviewFailureCategory;
   attempts: number;
   reason: string;
+  diagnosticsPath?: string;
 }
 
 export class DeduplicationReviewError extends CodexSecurityError {

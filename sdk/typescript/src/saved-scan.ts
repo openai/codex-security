@@ -8,7 +8,11 @@ export type SavedScan = JsonObject & { scanId: string; scanDir: string };
 
 export interface SavedScanDependencies {
   currentDirectory(): string;
-  runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
+  runWorkbench(
+    args: readonly string[],
+    input?: string,
+    signal?: AbortSignal,
+  ): Promise<JsonObject>;
 }
 
 export async function resolveWorkflowScan(

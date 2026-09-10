@@ -3,7 +3,8 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -18,6 +19,7 @@ import {
   codexSecurityStateDirectory,
   executablePathForSpawn,
   expandHome,
+  prepareCodexSecurityStateSubdirectory,
   resolveCodexCommand,
 } from "../runtime.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../thread-source.js";
@@ -72,7 +74,7 @@ type StartCodex = (
 interface Message {
   id?: string | number;
   method?: string;
-  error?: { message: string };
+  error?: { message: string; code?: number };
   result?: {
     thread?: { id: string; ephemeral: boolean; path: string | null };
     turn?: { id: string };
@@ -87,20 +89,31 @@ interface Message {
   };
 }
 
+interface ReviewSessionState {
+  attempts: number;
+  stderr: string;
+  threadId?: string;
+  turnId?: string;
+  rpcCode?: number;
+  processErrorCode?: string;
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+}
+
 export class CodexReviewRunner {
   constructor(
     private readonly environment: NodeJS.ProcessEnv = process.env,
     private readonly startCodex: StartCodex = spawn,
     private readonly signal?: AbortSignal,
     private readonly workingDirectory: string = process.cwd(),
+    private readonly diagnosticsDirectory?: string,
   ) {}
 
   async run<T>(review: CodexReview<T>): Promise<T> {
-    const state = { attempts: 1 };
+    const state: ReviewSessionState = { attempts: 1, stderr: "" };
     try {
       return await this.runSession(review, state);
     } catch (error) {
-      this.signal?.throwIfAborted();
       const category =
         error instanceof ReviewAttemptError ? error.category : "transport";
       const supportReason =
@@ -108,6 +121,36 @@ export class CodexReviewRunner {
           ? error.supportReason
           : "Codex review transport failed.";
       const displayReason = safeErrorMessage(error);
+      let diagnosticsPath: string | undefined;
+      if (this.diagnosticsDirectory !== undefined) {
+        try {
+          const directory = await prepareCodexSecurityStateSubdirectory(
+            this.diagnosticsDirectory,
+            this.environment,
+          );
+          const path = join(directory, `review-${randomUUID()}.json`);
+          await writeFile(
+            path,
+            JSON.stringify(
+              {
+                stage: review.stage,
+                model: review.model,
+                category,
+                reason: displayReason,
+                ...state,
+                stderr: safeErrorMessage(state.stderr),
+              },
+              null,
+              2,
+            ) + "\n",
+            { flag: "wx", mode: 0o600 },
+          );
+          diagnosticsPath = path;
+        } catch {
+          // Diagnostics are optional; preserve the original review failure.
+        }
+      }
+      this.signal?.throwIfAborted();
       throw new DeduplicationReviewError(
         {
           stage: review.stage,
@@ -115,6 +158,7 @@ export class CodexReviewRunner {
           category,
           attempts: state.attempts,
           reason: displayReason === "[redacted]" ? "[redacted]" : supportReason,
+          ...(diagnosticsPath === undefined ? {} : { diagnosticsPath }),
         },
         displayReason,
       );
@@ -123,7 +167,7 @@ export class CodexReviewRunner {
 
   private async runSession<T>(
     review: CodexReview<T>,
-    state: { attempts: number },
+    state: ReviewSessionState,
   ): Promise<T> {
     this.signal?.throwIfAborted();
     const workingDirectory = resolve(this.workingDirectory);
@@ -169,7 +213,11 @@ export class CodexReviewRunner {
           stateDatabase,
           `${stateDatabase}-wal`,
           `${stateDatabase}-shm`,
+          join(codexSecurityStateDirectory(this.environment), "dedupe"),
           directory,
+          ...(this.diagnosticsDirectory === undefined
+            ? []
+            : [this.diagnosticsDirectory]),
         ].map((path) => resolve(expandHome(path, environment))),
       );
       args.push(
@@ -198,11 +246,22 @@ export class CodexReviewRunner {
         },
       );
       const closed = new Promise<void>((resolve) =>
-        child.once("close", () => resolve()),
+        child.once("close", (code, signal) => {
+          state.exitCode = code;
+          state.signal = signal;
+          resolve();
+        }),
       );
-      child.once("error", () => undefined);
+      let processError: Error | undefined;
+      child.once("error", (error: NodeJS.ErrnoException) => {
+        processError = error;
+        state.processErrorCode = error.code;
+      });
       child.stdin.on("error", () => undefined);
-      child.stderr.resume();
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (text: string) => {
+        state.stderr += text;
+      });
       const send = (message: object) =>
         child.stdin.write(`${JSON.stringify(message)}\n`);
       const startThread = () =>
@@ -372,6 +431,7 @@ export class CodexReviewRunner {
               });
             }
           } else if (message.error !== undefined) {
+            state.rpcCode = message.error.code;
             throw new ReviewAttemptError(
               "transport",
               message.error?.message ?? "Codex rejected the review request",
@@ -396,15 +456,18 @@ export class CodexReviewRunner {
               );
             }
             threadId = thread.id;
+            state.threadId = thread.id;
             startTurn(review.prompt);
           } else if (message.id === 3 + state.attempts) {
             turnId = message.result?.turn?.id ?? turnId;
+            state.turnId = turnId;
           } else if (
             message.method === "turn/started" &&
             params !== undefined &&
             params.threadId === threadId
           ) {
             turnId = params?.turn?.id;
+            state.turnId = turnId;
           } else if (
             message.method === "turn/completed" &&
             params !== undefined &&
@@ -445,7 +508,9 @@ export class CodexReviewRunner {
             return accepted;
           }
         }
-        throw new Error("Codex exited before completing the review");
+        throw (
+          processError ?? new Error("Codex exited before completing the review")
+        );
       } finally {
         child.stdin.end();
         if (child.exitCode === null) child.kill();

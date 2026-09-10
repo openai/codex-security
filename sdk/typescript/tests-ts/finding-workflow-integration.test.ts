@@ -1,21 +1,34 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import type { JsonObject } from "../src/config.js";
-import { FindingWorkflow } from "../src/finding-workflow.js";
+import { FindingWorkflow, workflowDigest } from "../src/finding-workflow.js";
 import { publishScanToCustomInternal } from "../src/custom-publish.js";
-import { deduplicateScanInternal } from "../src/deduplication/scan.js";
+import {
+  deduplicateScanDirectoryInternal,
+  deduplicateScanInternal,
+} from "../src/deduplication/scan.js";
 import {
   resolvePluginPython,
+  codexSecurityCredentialHome,
   runCodexCommand,
   runWorkbench,
 } from "../src/runtime.js";
 import type { Finding, ScanManifest } from "../src/models.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
+import { comparisonEnvironment } from "../src/scan-comparison.js";
 import {
   CodexDeduplicationReviewer,
   screeningPairSlot,
@@ -23,6 +36,10 @@ import {
 } from "../src/deduplication/deduplication-reviewer.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
+import {
+  CodexSecurityError,
+  type DeduplicationRecovery,
+} from "../src/errors.js";
 
 const fixtures: Array<Awaited<ReturnType<typeof workflowFixture>>> = [];
 afterEach(async () => {
@@ -75,9 +92,10 @@ payload = json.load(sys.stdin)
 state = payload["state"]
 timestamp = "2026-08-01T00:00:00Z"
 with db:
+    db.execute("DROP TABLE finding_workflow_candidates")
     db.execute("DROP TABLE finding_workflow_reviews")
     db.execute("DROP TABLE finding_workflows")
-    db.execute("DELETE FROM schema_migrations WHERE version IN (38, 39)")
+    db.execute("DELETE FROM schema_migrations WHERE version IN (38, 39, 44)")
     for version, _, sql in MIGRATIONS:
         if version in (36, 37):
             for statement in sql_statements(sql):
@@ -569,6 +587,192 @@ test("replays an unacknowledged group write after migrating its workflow databas
   ).toEqual({ status: "completed", result });
 });
 
+test.each([false, true])(
+  "dedupe recovery reads group preparation after a lost response (committed=%s)",
+  async (committed) => {
+    const { environment, document, history } = await fixture();
+    const originals = [
+      document.findings[0]!,
+      { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
+    ];
+    const groups = [originals.map((finding) => finding.findingId)];
+    const failure = new CodexSecurityError(
+      "Synthetic preparation response failure",
+    );
+    let interrupt = true;
+    let lookups = 0;
+    let modelCalls = 0;
+    const bodies: string[] = [];
+    const dependencies = {
+      environment,
+      runWorkbench: async (args: readonly string[], input?: string) => {
+        const prepare = input && JSON.parse(input).action === "prepare-dedupe";
+        if (prepare && interrupt && !committed) {
+          interrupt = false;
+          throw failure;
+        }
+        const response = await history(args, input);
+        if (prepare && interrupt) {
+          interrupt = false;
+          throw failure;
+        }
+        return response;
+      },
+      reviewRunner: {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          modelCalls++;
+          return review.validate(
+            review.stage === "screening"
+              ? { decisions: { "pair-1": sameRecommendation } }
+              : merged(originals),
+          );
+        },
+      },
+      fetch: async (url: URL, init: RequestInit) => {
+        if (url.pathname.endsWith("/dedupe-groups")) {
+          bodies.push(init.body as string);
+          return Response.json([]);
+        }
+        expect(url.pathname).toContain("/potential-duplicates");
+        lookups++;
+        return Response.json({
+          finding: originals[0],
+          potentialDuplicates: originals.slice(1),
+        });
+      },
+    };
+    const options = { findingsUrl: "http://synthetic.test" };
+    await expect(
+      deduplicateScanInternal(document.scanId, options, dependencies),
+    ).rejects.toBe(failure);
+    expect(bodies).toHaveLength(0);
+    const recovery = failure.deduplicationRecovery!;
+    const workflow = new FindingWorkflow(recovery.operationId, environment);
+    const saved = (await workflow.get())!.stages.dedupe;
+    expect(saved.pendingWrite).toEqual(committed ? { groups } : undefined);
+    expect(recovery).toMatchObject({
+      phase: "groups",
+      candidateCount: 1,
+      reviewCount: 2,
+      pendingWrite: committed,
+    });
+    expect(saved.failureDetails).toMatchObject({ recovery });
+    const result = await deduplicateScanInternal(
+      document.scanId,
+      { ...options, workflowId: recovery.operationId },
+      dependencies,
+    );
+    expect(result.duplicateGroups).toEqual(groups);
+    expect(bodies.map((body) => JSON.parse(body))).toEqual([{ groups }]);
+    expect(lookups).toBe(1);
+    expect(modelCalls).toBe(2);
+    expect((await workflow.get())!.stages.dedupe).toEqual({
+      status: "completed",
+      result,
+    });
+  },
+);
+
+test.each([false, true])(
+  "dedupe reconciles a lost completion response (committed=%s)",
+  async (committed) => {
+    const { environment, document, history } = await fixture();
+    const originals = [
+      document.findings[0]!,
+      { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
+    ];
+    const failure = new CodexSecurityError(
+      "Synthetic completion response failure",
+    );
+    let interrupt = true;
+    let operationId = "";
+    let lookups = 0;
+    let modelCalls = 0;
+    const bodies: string[] = [];
+    const dependencies = {
+      environment,
+      runWorkbench: async (args: readonly string[], input?: string) => {
+        const request = input ? JSON.parse(input) : {};
+        const completing =
+          request.action === "complete" && request.stage === "dedupe";
+        if (completing && interrupt) {
+          operationId = request.id;
+          if (committed) await history(args, input);
+          interrupt = false;
+          throw failure;
+        }
+        return await history(args, input);
+      },
+      reviewRunner: {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          modelCalls++;
+          return review.validate(
+            review.stage === "screening"
+              ? { decisions: { "pair-1": sameRecommendation } }
+              : merged(originals),
+          );
+        },
+      },
+      fetch: async (url: URL, init: RequestInit) => {
+        if (url.pathname.endsWith("/dedupe-groups")) {
+          bodies.push(init.body as string);
+          return Response.json([]);
+        }
+        expect(url.pathname).toContain("/potential-duplicates");
+        lookups++;
+        return Response.json({
+          finding: originals[0],
+          potentialDuplicates: originals.slice(1),
+        });
+      },
+    };
+    const options = { findingsUrl: "http://synthetic.test" };
+    const first = deduplicateScanInternal(
+      document.scanId,
+      options,
+      dependencies,
+    );
+    let result;
+    if (committed) result = await first;
+    else {
+      await expect(first).rejects.toBe(failure);
+      expect(failure.deduplicationRecovery?.pendingWrite).toBe(true);
+      result = await deduplicateScanInternal(
+        document.scanId,
+        options,
+        dependencies,
+      );
+    }
+    const workflow = new FindingWorkflow(operationId, environment);
+    expect((await workflow.get())!.stages.dedupe).toEqual({
+      status: "completed",
+      result,
+    });
+    expect(result.duplicateGroups).toEqual([
+      originals.map((finding) => finding.findingId),
+    ]);
+    expect(lookups).toBe(1);
+    expect(modelCalls).toBe(2);
+    expect(bodies).toHaveLength(committed ? 1 : 2);
+    expect(new Set(bodies).size).toBe(1);
+    await expect(
+      deduplicateScanInternal(
+        document.scanId,
+        { ...options, workflowId: operationId },
+        dependencies,
+      ),
+    ).resolves.toEqual(result);
+    expect(modelCalls).toBe(2);
+    // An explicitly repeated ordinary command still requests a fresh review after success.
+    await expect(
+      deduplicateScanInternal(document.scanId, options, dependencies),
+    ).resolves.toEqual(result);
+    expect(lookups).toBe(2);
+    expect(modelCalls).toBe(4);
+    expect(bodies).toHaveLength(committed ? 2 : 3);
+  },
+);
+
 test.each(["current", "legacy", "workflow-columns"])(
   "persists DISTINCT and complete SAME checkpoints across %s databases",
   async (version) => {
@@ -768,3 +972,888 @@ test("source snapshots include revisions and ignored content without following d
   await writeFile(join(outside, "source.txt"), "changed outside source");
   expect(await workflow.sourceSnapshot(repository)).toEqual(replaced);
 });
+
+test.skipIf(process.platform === "win32")(
+  "ordinary dedupe snapshots ignored FIFOs and sockets while binding regular source content",
+  async () => {
+    const { environment, repository, document, history } = await fixture();
+    execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    await writeFile(join(repository, ".gitignore"), "runtime-*\n");
+    await writeFile(join(repository, "runtime-source.txt"), "original source");
+    execFileSync("mkfifo", [join(repository, "runtime-pipe")]);
+    const server = createServer();
+    server.listen(join(repository, "runtime-socket"));
+    await once(server, "listening");
+    try {
+      const workflow = new FindingWorkflow("runtime-snapshot", environment);
+      const original = await workflow.sourceSnapshot(repository);
+      expect(await workflow.sourceSnapshot(repository)).toEqual(original);
+      await writeFile(join(repository, "runtime-source.txt"), "changed source");
+      expect((await workflow.sourceSnapshot(repository))["content"]).not.toBe(
+        original["content"],
+      );
+      let lookups = 0;
+      const result = await deduplicateScanInternal(
+        document.scanId,
+        { findingsUrl: "http://synthetic.test" },
+        {
+          environment,
+          runWorkbench: history,
+          fetch: async (url) => {
+            if (url.pathname.endsWith("/dedupe-groups"))
+              return Response.json([]);
+            expect(url.pathname).toContain("/potential-duplicates");
+            lookups++;
+            return Response.json({
+              finding: document.findings[0],
+              potentialDuplicates: [],
+            });
+          },
+          reviewRunner: {
+            async run<T>(): Promise<T> {
+              throw new Error("No candidate pairs require a model review");
+            },
+          },
+        },
+      );
+      expect(lookups).toBe(1);
+      expect(result.uniqueFindingIds).toEqual([
+        document.findings[0]!.findingId,
+      ]);
+      expect(result.deduplicationStatus).toBe("completed");
+    } finally {
+      const closed = once(server, "close");
+      server.close();
+      await closed;
+    }
+  },
+);
+
+test("ordinary dedupe resumes saved candidates without publishing and starts fresh after completion", async () => {
+  const { environment, document, history } = await fixture();
+  const originals = [
+    document.findings[0]!,
+    ...[1, 2].map((index) => ({
+      ...structuredClone(document.findings[0]!),
+      findingId: `csf_${"f".repeat(23)}${index}`,
+    })),
+  ];
+  const options = { findingsUrl: "http://synthetic.test" };
+  let lookups = 0;
+  let modelCalls = 0;
+  let interrupt = true;
+  const fetch = async (url: URL) => {
+    if (url.pathname.endsWith("/dedupe-groups")) return Response.json([]);
+    expect(url.pathname).toContain("/potential-duplicates");
+    lookups++;
+    return Response.json({
+      finding: originals[0],
+      potentialDuplicates: originals.slice(1),
+    });
+  };
+  const reviewRunner = {
+    async run<T>(review: CodexReview<T>): Promise<T> {
+      modelCalls++;
+      if (interrupt && modelCalls === 3) {
+        interrupt = false;
+        throw new Error("Synthetic interrupted pair");
+      }
+      const findings = JSON.parse(
+        review.prompt.slice(review.prompt.lastIndexOf("\n\n") + 2),
+      ).findings as Finding[];
+      return review.validate(
+        review.stage === "screening"
+          ? {
+              decisions: Object.fromEntries(
+                findings
+                  .slice(1)
+                  .map((_value, index) => [
+                    screeningPairSlot(index),
+                    sameRecommendation,
+                  ]),
+              ),
+            }
+          : merged(findings),
+      );
+    },
+  };
+  const dependencies = {
+    environment,
+    runWorkbench: history,
+    reviewRunner,
+    fetch,
+  };
+  const failure = await deduplicateScanInternal(
+    document.scanId,
+    options,
+    dependencies,
+  ).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(CodexSecurityError);
+  const recovery = (failure as CodexSecurityError).deduplicationRecovery!;
+  expect(recovery).toMatchObject({
+    scanId: document.scanId,
+    phase: "pair-review",
+    candidateCount: 1,
+    reviewCount: 2,
+    pendingWrite: false,
+  });
+  expect(recovery.workflowId).toBeUndefined();
+  expect(
+    (await new FindingWorkflow(recovery.operationId, environment).get())?.stages
+      .dedupe.failureDetails,
+  ).toMatchObject({ recovery });
+  const result = await deduplicateScanInternal(document.scanId, options, {
+    ...dependencies,
+    fetch: async (url) => {
+      expect(url.pathname).toContain("/dedupe-groups");
+      return Response.json([]);
+    },
+  });
+  expect(result.duplicateGroups).toHaveLength(1);
+  expect(modelCalls).toBe(4);
+  expect(lookups).toBe(1);
+  expect(
+    await deduplicateScanInternal(
+      document.scanId,
+      { ...options, workflowId: recovery.operationId },
+      {
+        ...dependencies,
+        runWorkbench: async (args, input) => {
+          if (input) expect(JSON.parse(input).action).not.toBe("source");
+          return await history(args, input);
+        },
+        fetch: async () => {
+          throw new Error(
+            "A completed local operation must not publish when selected explicitly",
+          );
+        },
+      },
+    ),
+  ).toEqual(result);
+  originals.splice(1, 2, ...originals.slice(1).reverse());
+  await deduplicateScanInternal(document.scanId, options, dependencies);
+  expect(modelCalls).toBe(7);
+  expect(lookups).toBe(2);
+});
+
+test.each(["null-candidates", "missing-anchor", "missing-neighbor"])(
+  "dedupe retries corrected candidate responses in the saved operation (%s)",
+  async (malformed) => {
+    const { environment, document, history } = await fixture();
+    const originals = [
+      document.findings[0]!,
+      { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
+    ];
+    const candidates = {
+      finding: originals[0]!,
+      potentialDuplicates: [originals[1]!],
+    };
+    let lookups = 0;
+    let reviews = 0;
+    let writes = 0;
+    const dependencies = {
+      environment,
+      runWorkbench: history,
+      fetch: async (url: URL) => {
+        if (url.pathname.endsWith("/dedupe-groups")) {
+          writes++;
+          return Response.json([]);
+        }
+        expect(url.pathname).toContain("/potential-duplicates");
+        lookups++;
+        return Response.json(
+          lookups > 1
+            ? candidates
+            : malformed === "null-candidates"
+              ? { ...candidates, potentialDuplicates: null }
+              : malformed === "missing-anchor"
+                ? { potentialDuplicates: candidates.potentialDuplicates }
+                : { ...candidates, potentialDuplicates: [null] },
+        );
+      },
+      reviewRunner: {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          reviews++;
+          return review.validate(
+            review.stage === "screening"
+              ? { decisions: { "pair-1": sameRecommendation } }
+              : merged(originals),
+          );
+        },
+      },
+    };
+    const options = { findingsUrl: "http://synthetic.test" };
+    const failure = await deduplicateScanInternal(
+      document.scanId,
+      options,
+      dependencies,
+    ).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(CodexSecurityError);
+    expect(reviews).toBe(0);
+    expect(writes).toBe(0);
+    const operationId = (failure as CodexSecurityError).deduplicationRecovery!
+      .operationId;
+    const workflow = new FindingWorkflow(operationId, environment);
+    expect((await workflow.get())?.stages.dedupe.status).toBe("failed");
+
+    const result = await deduplicateScanInternal(
+      document.scanId,
+      options,
+      dependencies,
+    );
+    expect(result.duplicateGroups).toEqual([
+      originals.map((finding) => finding.findingId),
+    ]);
+    expect((await workflow.get())?.stages.dedupe).toEqual({
+      status: "completed",
+      result,
+    });
+    expect(
+      await workflow.candidateNeighborhood(originals[0]!.findingId),
+    ).toEqual(candidates);
+    expect(lookups).toBe(2);
+    expect(reviews).toBe(2);
+    expect(writes).toBe(1);
+  },
+);
+
+test("automatic dedupe invalidates saved reviews when effective home config changes", async () => {
+  const { environment, document, history } = await fixture();
+  const home = environment.CODEX_HOME;
+  await mkdir(home);
+  await writeFile(join(home, "config.toml"), 'model_provider = "original"\n');
+  environment.CODEX_HOME = ` ${home} `;
+  const original = document.findings[0]!;
+  const duplicate = {
+    ...structuredClone(original),
+    findingId: `csf_${"f".repeat(24)}`,
+  };
+  let lookups = 0;
+  let modelCalls = 0;
+  const dependencies = {
+    environment,
+    runWorkbench: history,
+    fetch: async (url: URL) => {
+      if (url.pathname.endsWith("/dedupe-groups")) return Response.json([]);
+      lookups++;
+      return Response.json({
+        finding: original,
+        potentialDuplicates: [duplicate],
+      });
+    },
+    reviewRunner: {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        modelCalls++;
+        if (modelCalls === 2) throw new Error("Synthetic interrupted pair");
+        const findings = JSON.parse(
+          review.prompt.slice(review.prompt.lastIndexOf("\n\n") + 2),
+        ).findings as Finding[];
+        return review.validate(
+          review.stage === "screening"
+            ? { decisions: { [screeningPairSlot(0)]: sameRecommendation } }
+            : merged(findings),
+        );
+      },
+    },
+  };
+  const options = { findingsUrl: "http://synthetic.test" };
+  await expect(
+    deduplicateScanInternal(document.scanId, options, dependencies),
+  ).rejects.toThrow("Synthetic interrupted pair");
+  expect(modelCalls).toBe(2);
+  await writeFile(join(home, "config.toml"), 'model_provider = "changed"\n');
+  const result = await deduplicateScanInternal(
+    document.scanId,
+    options,
+    dependencies,
+  );
+  expect(result.duplicateGroups).toHaveLength(1);
+  expect(lookups).toBe(2);
+  expect(modelCalls).toBe(4);
+});
+
+test("explicit directory dedupe resumes with repository-local state and still binds source edits", async () => {
+  const { environment, repository, scanDir, document, history } =
+    await fixture();
+  environment.CODEX_SECURITY_STATE_DIR = join(repository, "local-state");
+  await mkdir(environment.CODEX_SECURITY_STATE_DIR);
+  const sourcePath = join(environment.CODEX_SECURITY_STATE_DIR, "source.ts");
+  await writeFile(sourcePath, "export const source = 1;\n");
+  const original = document.findings[0]!;
+  const duplicate = {
+    ...structuredClone(original),
+    findingId: `csf_${"f".repeat(24)}`,
+  };
+  let modelCalls = 0;
+  let lookups = 0;
+  let writes = 0;
+  let changeSource = false;
+  const dependencies = {
+    environment,
+    runWorkbench: history,
+    fetch: async (url: URL, init: RequestInit) => {
+      if (url.pathname.endsWith("/dedupe-groups")) {
+        writes++;
+        expect(init.method).toBe("POST");
+        return Response.json([]);
+      }
+      lookups++;
+      expect(init.method).toBeUndefined();
+      return Response.json({
+        finding: original,
+        potentialDuplicates: [duplicate],
+      });
+    },
+    reviewRunner: {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        modelCalls++;
+        const diagnostics = join(
+          environment.CODEX_SECURITY_STATE_DIR,
+          "dedupe",
+          "synthetic-operation",
+        );
+        const credentialHome = codexSecurityCredentialHome(environment);
+        await mkdir(diagnostics, { recursive: true });
+        await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+        await writeFile(
+          join(diagnostics, "review.json"),
+          JSON.stringify({ attempt: modelCalls }),
+        );
+        await writeFile(
+          join(credentialHome, "history.jsonl"),
+          JSON.stringify({ attempt: modelCalls }),
+        );
+        if (modelCalls === 2) throw new Error("Synthetic interrupted pair");
+        if (changeSource)
+          await writeFile(sourcePath, "export const source = 2;\n");
+        const findings = JSON.parse(
+          review.prompt.slice(review.prompt.lastIndexOf("\n\n") + 2),
+        ).findings as Finding[];
+        return review.validate(
+          review.stage === "screening"
+            ? { decisions: { [screeningPairSlot(0)]: sameRecommendation } }
+            : merged(findings),
+        );
+      },
+    },
+  };
+  const options = { repository, findingsUrl: "http://synthetic.test" };
+  await expect(
+    deduplicateScanDirectoryInternal(scanDir, options, dependencies),
+  ).rejects.toThrow("Synthetic interrupted pair");
+  expect(modelCalls).toBe(2);
+  const result = await deduplicateScanDirectoryInternal(
+    scanDir,
+    options,
+    dependencies,
+  );
+  expect(result.duplicateGroups).toHaveLength(1);
+  expect(modelCalls).toBe(3);
+  expect(lookups).toBe(1);
+  expect(writes).toBe(1);
+  changeSource = true;
+  await expect(
+    deduplicateScanDirectoryInternal(scanDir, options, dependencies),
+  ).rejects.toThrow("Source changed during deduplication");
+  expect(modelCalls).toBe(4);
+  expect(lookups).toBe(2);
+  expect(writes).toBe(1);
+  changeSource = false;
+  await deduplicateScanDirectoryInternal(scanDir, options, dependencies);
+  expect(lookups).toBe(3);
+  expect(modelCalls).toBe(6);
+});
+
+test.each([false, true])(
+  "ordinary dedupe writes groups with a linked database and state alias %j",
+  async (linkedState) => {
+    const { root, environment, repository, document, history } =
+      await fixture();
+    const state = join(repository, "local-state");
+    await mkdir(state);
+    const database = join(repository, "external-workbench.sqlite3");
+    await writeFile(database, "");
+    await symlink(database, join(state, "workbench.sqlite3"), "file");
+    environment.CODEX_SECURITY_STATE_DIR = linkedState
+      ? join(root, "selected-state")
+      : state;
+    if (linkedState)
+      await symlink(state, environment.CODEX_SECURITY_STATE_DIR, "junction");
+    const sourcePath = join(repository, "source.ts");
+    await writeFile(sourcePath, "export const value = 1;\n");
+    const workflow = new FindingWorkflow("linked-database-probe", environment);
+    const before = await workflow.sourceSnapshot(repository);
+    const original = document.findings[0]!;
+    const duplicate = {
+      ...structuredClone(original),
+      findingId: `csf_${"f".repeat(24)}`,
+    };
+    let writes = 0;
+    let changeSource = false;
+    const dependencies = {
+      environment,
+      runWorkbench: history,
+      fetch: async (url: URL, init: RequestInit) => {
+        if (url.pathname.endsWith("/dedupe-groups")) {
+          expect(init.method).toBe("POST");
+          writes++;
+          return Response.json([]);
+        }
+        return Response.json({
+          finding: original,
+          potentialDuplicates: [duplicate],
+        });
+      },
+      reviewRunner: {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          if (changeSource)
+            await writeFile(sourcePath, "export const value = 2;\n");
+          const findings = JSON.parse(
+            review.prompt.slice(review.prompt.lastIndexOf("\n\n") + 2),
+          ).findings as Finding[];
+          return review.validate(
+            review.stage === "screening"
+              ? { decisions: { [screeningPairSlot(0)]: sameRecommendation } }
+              : merged(findings),
+          );
+        },
+      },
+    };
+    const options = { findingsUrl: "http://synthetic.test" };
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const result = await deduplicateScanInternal(
+        document.scanId,
+        options,
+        dependencies,
+      );
+      expect(result.duplicateGroups).toHaveLength(1);
+      expect(writes).toBe(attempt);
+      expect(await workflow.sourceSnapshot(repository)).toEqual(before);
+    }
+    changeSource = true;
+    await expect(
+      deduplicateScanInternal(document.scanId, options, dependencies),
+    ).rejects.toThrow("Source changed during deduplication");
+    expect(writes).toBe(2);
+  },
+);
+
+test("API-key dedupe rechecks source behind a linked managed credential home", async () => {
+  const { environment, repository, scanDir, document, history } =
+    await fixture();
+  environment.CODEX_SECURITY_STATE_DIR = join(repository, "local-state");
+  Object.assign(environment, { OPENAI_API_KEY: "synthetic-review-key" });
+  await mkdir(environment.CODEX_SECURITY_STATE_DIR);
+  const source = join(repository, "src");
+  await mkdir(source);
+  const sourceFile = join(source, "index.ts");
+  await writeFile(sourceFile, "export const value = 1;\n");
+  await symlink(source, codexSecurityCredentialHome(environment), "junction");
+  const original = document.findings[0]!;
+  let modelCalls = 0;
+  const dependencies = {
+    environment,
+    runWorkbench: history,
+    fetch: async () =>
+      Response.json({
+        finding: original,
+        potentialDuplicates: [
+          { ...structuredClone(original), findingId: `csf_${"f".repeat(24)}` },
+        ],
+      }),
+    reviewRunner: {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        const authenticated = await comparisonEnvironment(environment);
+        expect(authenticated["OPENAI_API_KEY"]).toBe("synthetic-review-key");
+        modelCalls++;
+        if (review.stage !== "screening")
+          throw new Error("Synthetic interrupted pair");
+        return review.validate({
+          decisions: { [screeningPairSlot(0)]: sameRecommendation },
+        });
+      },
+    },
+  };
+  const options = { repository, findingsUrl: "http://synthetic.test" };
+  await expect(
+    deduplicateScanDirectoryInternal(scanDir, options, dependencies),
+  ).rejects.toThrow("Synthetic interrupted pair");
+  expect(modelCalls).toBe(2);
+  await expect(
+    deduplicateScanDirectoryInternal(scanDir, options, dependencies),
+  ).rejects.toThrow("Synthetic interrupted pair");
+  expect(modelCalls).toBe(3);
+  await writeFile(sourceFile, "export const value = 2;\n");
+  await expect(
+    deduplicateScanDirectoryInternal(scanDir, options, dependencies),
+  ).rejects.toThrow("Synthetic interrupted pair");
+  expect(modelCalls).toBe(5);
+});
+
+test.each([false, true])(
+  "dedupe preserves sealed output behind a database link (existing=%j)",
+  async (existing) => {
+    const { environment, repository, scanDir, history } = await fixture();
+    await mkdir(environment.CODEX_SECURITY_STATE_DIR);
+    const database = join(scanDir, "preserved.sqlite3");
+    if (existing) {
+      execFileSync(await resolvePluginPython({ environment }), [
+        "-c",
+        "import sqlite3, sys; db = sqlite3.connect(sys.argv[1]); db.execute('CREATE TABLE preserved (value TEXT)'); db.execute(\"INSERT INTO preserved VALUES ('original')\"); db.commit(); db.close()",
+        database,
+      ]);
+    }
+    await symlink(
+      database,
+      join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      "file",
+    );
+    const before = await readdir(scanDir, { recursive: true });
+    const original = existing ? await readFile(database) : undefined;
+    let workbenchCalls = 0;
+    let requests = 0;
+    const error: unknown = await deduplicateScanDirectoryInternal(
+      scanDir,
+      { repository, findingsUrl: "http://synthetic.test" },
+      {
+        environment,
+        runWorkbench: async (args, input) => {
+          workbenchCalls++;
+          return await history(args, input);
+        },
+        fetch: async () => {
+          requests++;
+          throw new Error("Unexpected findings request");
+        },
+      },
+    ).catch((failure: unknown) => failure);
+    expect(await readdir(scanDir, { recursive: true })).toEqual(before);
+    if (original !== undefined)
+      expect(await readFile(database)).toEqual(original);
+    expect(workbenchCalls).toBe(0);
+    expect(requests).toBe(0);
+    expect((error as Error).message).toContain(
+      "outside the sealed scan artifacts",
+    );
+  },
+);
+
+test("dedupe refuses a linked lock directory before writing to sealed artifacts", async () => {
+  const { environment, repository, scanDir, history } = await fixture();
+  environment.CODEX_SECURITY_STATE_DIR = join(repository, "local-state");
+  await mkdir(environment.CODEX_SECURITY_STATE_DIR);
+  await symlink(
+    scanDir,
+    join(environment.CODEX_SECURITY_STATE_DIR, "dedupe-locks"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const before = await readdir(scanDir, { recursive: true });
+  let requests = 0;
+  const error: unknown = await deduplicateScanDirectoryInternal(
+    scanDir,
+    { repository, findingsUrl: "http://synthetic.test" },
+    {
+      environment,
+      runWorkbench: history,
+      fetch: async () => {
+        requests++;
+        throw new Error("Unexpected findings request");
+      },
+    },
+  ).catch((failure: unknown) => failure);
+  expect(await readdir(scanDir, { recursive: true })).toEqual(before);
+  expect(requests).toBe(0);
+  expect((error as Error).message).toContain(
+    "outside the sealed scan artifacts",
+  );
+});
+
+test("dedupe refuses a linked lock file before writing to sealed artifacts", async () => {
+  const { environment, repository, scanDir, history } = await fixture();
+  environment.CODEX_SECURITY_STATE_DIR = join(repository, "local-state");
+  const locks = join(environment.CODEX_SECURITY_STATE_DIR, "dedupe-locks");
+  await mkdir(locks, { recursive: true });
+  const workflowId = "synthetic-linked-lock";
+  const lockPath = join(locks, `${workflowDigest(workflowId)}.sqlite3`);
+  await symlink(join(scanDir, "unexpected-lock.sqlite3"), lockPath, "file");
+  const before = await readdir(scanDir, { recursive: true });
+  let requests = 0;
+  const options = {
+    repository,
+    findingsUrl: "http://synthetic.test",
+    workflowId,
+  };
+  const dependencies = {
+    environment,
+    runWorkbench: history,
+    fetch: async () => {
+      requests++;
+      throw new Error("Synthetic findings lookup failure");
+    },
+  };
+  const error: unknown = await deduplicateScanDirectoryInternal(
+    scanDir,
+    options,
+    dependencies,
+  ).catch((failure: unknown) => failure);
+  expect(await readdir(scanDir, { recursive: true })).toEqual(before);
+  expect(requests).toBe(0);
+  expect((error as Error).message).toContain("linked lock file");
+
+  await rm(lockPath);
+  await expect(
+    deduplicateScanDirectoryInternal(scanDir, options, dependencies),
+  ).rejects.toThrow("Synthetic findings lookup failure");
+  expect(requests).toBe(1);
+  expect(await readdir(scanDir, { recursive: true })).toEqual(before);
+});
+
+test.each(["initial", "per-review", "final"])(
+  "dedupe forwards cancellation to its %s source snapshot",
+  async (phase) => {
+    const { environment, document, history } = await fixture();
+    const controller = new AbortController();
+    const stopped = new Error("Synthetic source snapshot cancellation");
+    let snapshots = 0;
+    let reads = 0;
+    let modelCalls = 0;
+    await expect(
+      deduplicateScanInternal(
+        document.scanId,
+        { findingsUrl: "http://synthetic.test", signal: controller.signal },
+        {
+          environment,
+          runWorkbench: async (args, input, signal) => {
+            if (input && JSON.parse(input).action === "source") {
+              snapshots++;
+              expect(signal).toBe(controller.signal);
+              if (snapshots === (phase === "initial" ? 1 : 2)) {
+                controller.abort(stopped);
+                signal!.throwIfAborted();
+              }
+            } else expect(signal).toBeUndefined();
+            return await history(args, input);
+          },
+          fetch: async (url) => {
+            expect(url.pathname).toContain("/potential-duplicates");
+            reads++;
+            return Response.json({
+              finding: document.findings[0],
+              potentialDuplicates:
+                phase === "per-review"
+                  ? [
+                      {
+                        ...document.findings[0],
+                        findingId: `csf_${"f".repeat(24)}`,
+                      },
+                    ]
+                  : [],
+            });
+          },
+          reviewRunner: {
+            async run<T>(review: CodexReview<T>): Promise<T> {
+              modelCalls++;
+              return review.validate({
+                decisions: {
+                  "pair-1": {
+                    decision: "DISTINCT",
+                    rationale: "Synthetic independent corrections.",
+                  },
+                },
+              });
+            },
+          },
+        },
+      ),
+    ).rejects.toBe(stopped);
+    expect(snapshots).toBe(phase === "initial" ? 1 : 2);
+    expect(reads).toBe(phase === "initial" ? 0 : 1);
+    expect(modelCalls).toBe(phase === "per-review" ? 1 : 0);
+  },
+);
+
+test.each(["candidates", "screening"])(
+  "dedupe preserves abort reasons and durable recovery during %s",
+  async (phase) => {
+    const { environment, document, history } = await fixture();
+    const controller = new AbortController();
+    let recovery: DeduplicationRecovery | undefined;
+    const failure = await deduplicateScanInternal(
+      document.scanId,
+      { findingsUrl: "http://synthetic.test", signal: controller.signal },
+      {
+        environment,
+        runWorkbench: history,
+        fetch: async () => {
+          if (phase === "candidates") {
+            controller.abort();
+            controller.signal.throwIfAborted();
+          }
+          return Response.json({
+            finding: document.findings[0],
+            potentialDuplicates: [
+              { ...document.findings[0], findingId: `csf_${"f".repeat(24)}` },
+            ],
+          });
+        },
+        reviewRunner: {
+          async run<T>(): Promise<T> {
+            controller.abort("SIGINT");
+            controller.signal.throwIfAborted();
+            throw new Error("Cancellation must throw");
+          },
+        },
+        onRecovery: (saved) => {
+          recovery = saved;
+          const observerFailure = new Error(
+            "Synthetic recovery observer failure",
+          );
+          if (phase === "candidates") throw observerFailure;
+          return Promise.reject(observerFailure);
+        },
+      },
+    ).catch((error: unknown) => error);
+    expect(failure).toBe(controller.signal.reason);
+    if (phase === "candidates")
+      expect(failure).toHaveProperty("name", "AbortError");
+    else expect(failure).toBe("SIGINT");
+    expect(recovery).toMatchObject({
+      phase,
+      candidateCount: phase === "candidates" ? 0 : 1,
+      reviewCount: 0,
+      pendingWrite: false,
+    });
+    expect(
+      (await new FindingWorkflow(recovery!.operationId, environment).get())
+        ?.stages.dedupe,
+    ).toMatchObject({ status: "failed", failureDetails: { recovery } });
+  },
+);
+
+test("dedupe stops before reviewing candidates it cannot checkpoint", async () => {
+  const { environment, document, history } = await fixture();
+  let modelCalls = 0;
+  await expect(
+    deduplicateScanInternal(
+      document.scanId,
+      { findingsUrl: "http://synthetic.test" },
+      {
+        environment,
+        runWorkbench: async (args, input) => {
+          if (input && JSON.parse(input).action === "save-candidates")
+            throw new Error("Synthetic checkpoint disk failure");
+          return await history(args, input);
+        },
+        fetch: async () =>
+          Response.json({
+            finding: document.findings[0],
+            potentialDuplicates: [
+              { ...document.findings[0], findingId: `csf_${"f".repeat(24)}` },
+            ],
+          }),
+        reviewRunner: {
+          async run<T>(): Promise<T> {
+            modelCalls++;
+            throw new Error("Uncommitted candidates must not be reviewed");
+          },
+        },
+      },
+    ),
+  ).rejects.toThrow("Synthetic checkpoint disk failure");
+  expect(modelCalls).toBe(0);
+});
+
+test.each([false, true])(
+  "a live dedupe owner blocks duplicate work and process death releases its saved reviews (shared database: %j)",
+  async (sharedDatabase) => {
+    const { root, environment, document, history, scanDir, repository } =
+      await fixture();
+    const originals = [
+      document.findings[0]!,
+      { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
+    ];
+    const options = { findingsUrl: "http://synthetic.test" };
+    const script = `import { deduplicateScanDirectoryInternal } from ${JSON.stringify(new URL("../src/deduplication/scan.ts", import.meta.url).href)};
+await deduplicateScanDirectoryInternal(${JSON.stringify(scanDir)}, { repository: ${JSON.stringify(repository)}, ...${JSON.stringify(options)} }, {
+  environment: ${JSON.stringify(environment)},
+  fetch: async () => Response.json({ finding: ${JSON.stringify(originals[0])}, potentialDuplicates: ${JSON.stringify(originals.slice(1))} }),
+  reviewRunner: { run: async (review) => {
+    if (review.stage === "screening") return review.validate({ decisions: { "pair-1": ${JSON.stringify(sameRecommendation)} } });
+    process.stdout.write("ready\\n");
+    await new Promise((resolve) => {
+      process.stdin.once("end", resolve);
+      process.stdin.resume();
+    });
+  } },
+});`;
+    const child = spawn(process.execPath, ["--eval", script], {
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const closed = once(child, "close");
+    let output = "";
+    let errors = "";
+    child.stderr.on("data", (chunk) => {
+      errors += String(chunk);
+    });
+    const ready = new Promise<void>((resolve, reject) => {
+      child.stdout.on("data", (chunk) => {
+        output += String(chunk);
+        if (output.includes("ready\n")) resolve();
+      });
+      child.once("close", () =>
+        reject(
+          new Error(errors || "Dedupe process exited before its checkpoint"),
+        ),
+      );
+      child.once("error", reject);
+    });
+    try {
+      await ready;
+      if (sharedDatabase) {
+        const state = join(root, "other-state");
+        await mkdir(state);
+        await symlink(
+          join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+          join(state, "workbench.sqlite3"),
+          "file",
+        );
+        environment.CODEX_SECURITY_STATE_DIR = state;
+      }
+      await expect(
+        deduplicateScanInternal(document.scanId, options, {
+          environment,
+          runWorkbench: history,
+          fetch: async () => {
+            throw new Error("The live owner must prevent remote calls");
+          },
+          reviewRunner: {
+            async run() {
+              throw new Error("The live owner must prevent duplicate reviews");
+            },
+          },
+        }),
+      ).rejects.toThrow("already running");
+    } finally {
+      child.kill("SIGKILL");
+      await closed;
+    }
+    let modelCalls = 0;
+    await deduplicateScanInternal(document.scanId, options, {
+      environment,
+      runWorkbench: history,
+      fetch: async (url) => {
+        expect(url.pathname).toContain("/dedupe-groups");
+        return Response.json([]);
+      },
+      reviewRunner: {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          expect(review.stage).toBe("pair-review");
+          modelCalls++;
+          return review.validate(merged(originals));
+        },
+      },
+    });
+    expect(modelCalls).toBe(1);
+  },
+);

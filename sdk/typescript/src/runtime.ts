@@ -204,6 +204,35 @@ export function codexSecurityCredentialHome(
   return join(codexSecurityStateDirectory(environment), "codex-home");
 }
 
+export async function prepareCodexSecurityStateSubdirectory(
+  path: string,
+  environment: ProcessEnvironment = process.env,
+): Promise<string> {
+  const configuredRoot = codexSecurityStateDirectory(environment);
+  const child = relative(configuredRoot, path);
+  if (isAbsolute(child) || child === ".." || child.startsWith(`..${sep}`)) {
+    throw new OutputDirectoryError(
+      "Managed output must remain inside the configured state directory.",
+    );
+  }
+  let directory = await canonicalizeModelSafePath(configuredRoot);
+  requireModelSafeOutputDir(resolve(directory, child));
+  for (const component of child.split(sep)) {
+    directory = join(directory, component);
+    const metadata = await lstat(directory).catch((error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT") return undefined;
+      throw error;
+    });
+    if (metadata?.isSymbolicLink()) {
+      throw new OutputDirectoryError(
+        "Managed output must not follow a linked state directory.",
+      );
+    }
+  }
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  return directory;
+}
+
 export async function prepareCodexSecurityCredentialHome(
   environment: ProcessEnvironment = process.env,
   validateLocation?: (path: string) => void,

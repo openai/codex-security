@@ -4,12 +4,14 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, relative, resolve, win32 } from "node:path";
+import { isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
@@ -17,9 +19,15 @@ import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { checkpointWorkbench } from "./support/workbench-fakes.js";
-import { resolveCodexCommand } from "../src/runtime.js";
+import {
+  codexSecurityCredentialHome,
+  codexSecurityStateDirectory,
+  resolveCodexCommand,
+} from "../src/runtime.js";
 import { environmentEntry } from "../src/scan-comparison.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { workflowFixture } from "./support/workflow-fixture.js";
+import { DeduplicationReviewError } from "../src/errors.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
@@ -43,6 +51,228 @@ const failureReasons: Record<string, string> = {
   exit: "Codex exited before completing the review",
 };
 
+test("managed state rejects links even when Windows path comparison considers their names equal", async () => {
+  const name =
+    "managed state rejects links even when Windows path comparison considers their names equal";
+  if (runTestInSubprocess(import.meta.path, name)) return;
+  await using saved = await workflowFixture();
+  const state = saved.environment.CODEX_SECURITY_STATE_DIR;
+  const target = join(state, "alternate");
+  const linked = join(state, "dedupe");
+  await mkdir(target, { recursive: true });
+  await symlink(
+    target,
+    linked,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const paths = { ...(await import("node:path")) };
+  // Reproduce case-sensitive Windows directory names without requiring a
+  // privileged volume setting on the host running this real link fixture.
+  mock.module("node:path", () => ({
+    ...paths,
+    relative: (from: string, to: string) =>
+      from === linked && to === target
+        ? paths.win32.relative("C:\\state\\dedupe", "C:\\state\\DEDUPE")
+        : paths.relative(from, to),
+  }));
+  const { prepareCodexSecurityStateSubdirectory } = await import(
+    "../src/runtime.js"
+  );
+  await expect(
+    prepareCodexSecurityStateSubdirectory(linked, saved.environment),
+  ).rejects.toThrow("linked state directory");
+  expect(await readdir(target)).toEqual([]);
+});
+
+test.each(["dedupe", "operation", "managed-sibling", "configured-root"])(
+  "native failure diagnostics honor the configured root without following a linked managed directory (%s)",
+  async (linked) => {
+    await using saved = await workflowFixture();
+    const { root, scanDir, repository, environment } = saved;
+    await mkdir(environment.CODEX_HOME);
+    await writeFile(
+      join(environment.CODEX_HOME, "config.toml"),
+      '[mcp_servers.synthetic]\ncommand="unused"\n',
+    );
+    environment.CODEX_SECURITY_STATE_DIR = join(repository, "local-state");
+    const state = environment.CODEX_SECURITY_STATE_DIR;
+    const actualState = join(root, "actual-state");
+    await mkdir(actualState);
+    const diagnostics = join(state, "dedupe", "operation");
+    const link =
+      linked === "configured-root"
+        ? state
+        : linked === "dedupe"
+          ? join(state, "dedupe")
+          : diagnostics;
+    if (linked !== "configured-root") {
+      await mkdir(linked === "dedupe" ? state : join(state, "dedupe"), {
+        recursive: true,
+      });
+    }
+    const target =
+      linked === "managed-sibling" ? join(state, "codex-home") : scanDir;
+    if (linked === "managed-sibling") await mkdir(target);
+    await symlink(
+      linked === "configured-root" ? actualState : target,
+      link,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const before = await readdir(target, { recursive: true });
+    const runner = new CodexReviewRunner(
+      { ...environment, OPENAI_API_KEY: "synthetic-review-key" },
+      (_command, _args, options) =>
+        spawn(
+          process.execPath,
+          [fixture, "exit", join(root, "messages.jsonl"), repository],
+          options,
+        ),
+      undefined,
+      repository,
+      diagnostics,
+    );
+    const error: unknown = await runner
+      .run({
+        stage: "pair-review",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        prompt: "Synthetic review",
+        schema: {},
+        validate(value) {
+          return value;
+        },
+      })
+      .catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(DeduplicationReviewError);
+    expect((error as Error).message).toContain(failureReasons["exit"]!);
+    expect(await readdir(target, { recursive: true })).toEqual(before);
+    const path = (error as DeduplicationReviewError).metadata.diagnosticsPath;
+    if (linked === "configured-root") {
+      expect(typeof path).toBe("string");
+      expect(await readFile(path!, "utf8")).toContain(
+        "Synthetic native process failure",
+      );
+    } else {
+      expect(path).toBeUndefined();
+    }
+  },
+);
+
+test.each(["api-key", "stored-default-state"])(
+  "later reviews cannot read retained diagnostics from another operation (%s)",
+  async (authentication) => {
+    const name = `later reviews cannot read retained diagnostics from another operation (${authentication})`;
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const comparison = { ...(await import("../src/scan-comparison.js")) };
+    mock.module("../src/scan-comparison.js", () => ({
+      ...comparison,
+      comparisonEnvironment: (environment: NodeJS.ProcessEnv) =>
+        comparison.comparisonEnvironment(environment, async () => ({
+          authenticated: true,
+          details: "Synthetic stored sign-in",
+        })),
+    }));
+    const root = await mkdtemp(join(tmpdir(), "codex-review-diagnostics-"));
+    const home = join(root, "home");
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      TEMP: process.env["TEMP"],
+      TMP: process.env["TMP"],
+      CODEX_HOME: home,
+      ...(authentication === "api-key"
+        ? {
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+            OPENAI_API_KEY: "synthetic-review-key",
+          }
+        : {}),
+    };
+    const state = codexSecurityStateDirectory(environment);
+    const credentialHome = codexSecurityCredentialHome(environment);
+    const checkout = join(root, "repository");
+    const policies: Record<string, string>[] = [];
+    const diagnostics: string[] = [];
+    try {
+      await Promise.all([mkdir(home), mkdir(checkout)]);
+      await writeFile(
+        join(home, "config.toml"),
+        '[mcp_servers.synthetic]\ncommand="unused"\n',
+      );
+      if (authentication === "stored-default-state") {
+        await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+        await writeFile(
+          join(credentialHome, "config.toml"),
+          '[mcp_servers.synthetic]\ncommand="unused"\n',
+        );
+      }
+      for (const operation of ["first", "second"]) {
+        const runner = new CodexReviewRunner(
+          environment,
+          (_command, args, options) => {
+            expect(options.env?.["CODEX_HOME"]).toBe(
+              authentication === "api-key" ? home : credentialHome,
+            );
+            const config = parse(
+              args.find((arg) =>
+                arg.startsWith("permissions.codex_security_review="),
+              )!,
+            );
+            policies.push(
+              (
+                config["permissions"] as {
+                  codex_security_review: { filesystem: Record<string, string> };
+                }
+              ).codex_security_review.filesystem,
+            );
+            return spawn(
+              process.execPath,
+              [fixture, "exit", join(root, `${operation}.jsonl`), checkout],
+              options,
+            );
+          },
+          undefined,
+          checkout,
+          join(state, "dedupe", operation),
+        );
+        const error: unknown = await runner
+          .run({
+            stage: "pair-review",
+            model: "gpt-5.6-sol",
+            effort: "high",
+            prompt: "Synthetic review",
+            schema: {},
+            validate: (value) => value,
+          })
+          .catch((failure: unknown) => failure);
+        expect(error).toBeInstanceOf(DeduplicationReviewError);
+        const path = (error as DeduplicationReviewError).metadata
+          .diagnosticsPath!;
+        expect(await readFile(path, "utf8")).toContain(
+          "Synthetic native process failure",
+        );
+        diagnostics.push(path);
+      }
+      for (const path of diagnostics) {
+        const denied = Object.entries(policies[1]!).some(
+          ([root, permission]) => {
+            const within = relative(root, path);
+            return (
+              permission === "deny" &&
+              (within === "" ||
+                (!isAbsolute(within) &&
+                  within !== ".." &&
+                  !within.startsWith(`..${sep}`)))
+            );
+          },
+        );
+        expect(denied).toBe(true);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
 const transportCases: {
   scenario: string;
   name?: string;
@@ -50,7 +280,25 @@ const transportCases: {
   extraEnvironment?: Record<string, string>;
   windowsOnly?: boolean;
   commandAuth?: "direct" | "ambient";
+  retainDiagnostics?: boolean;
+  diagnosticsWritable?: boolean;
 }[] = [
+  {
+    scenario: "exit",
+    name: "diagnostic write failure preserves native failure",
+    retainDiagnostics: true,
+    diagnosticsWritable: false,
+  },
+  {
+    scenario: "exit",
+    name: "retained native process diagnostics",
+    retainDiagnostics: true,
+  },
+  {
+    scenario: "credential-error",
+    name: "credential-safe retained diagnostics",
+    retainDiagnostics: true,
+  },
   {
     scenario: "correction",
     name: "command auth without an API key",
@@ -106,6 +354,8 @@ for (const {
   extraEnvironment,
   windowsOnly = false,
   commandAuth,
+  retainDiagnostics = false,
+  diagnosticsWritable = true,
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
@@ -145,6 +395,8 @@ for (const {
       });
       await writeFile(join(modelHome, "config.toml"), configuration);
       await mkdir(join(modelHome, "state", "codex-home"), { recursive: true });
+      if (retainDiagnostics && !diagnosticsWritable)
+        await writeFile(join(modelHome, "state", "config.toml"), configuration);
       const [homeName, keyName, ghName] = environmentNames;
       const runner = new CodexReviewRunner(
         {
@@ -192,6 +444,14 @@ for (const {
         },
         controller.signal,
         checkout,
+        retainDiagnostics
+          ? join(
+              modelHome,
+              "state",
+              diagnosticsWritable ? "diagnostics" : "config.toml",
+              "reviews",
+            )
+          : undefined,
       );
       let validations = 0;
       const checkpoints = checkpointWorkbench("blocked-review", {
@@ -304,7 +564,36 @@ for (const {
                       : scenario === "request-error"
                         ? "Codex rejected the review request."
                         : "Codex review transport failed.",
+          ...(retainDiagnostics && diagnosticsWritable
+            ? { diagnosticsPath: expect.any(String) }
+            : {}),
         });
+        if (retainDiagnostics && diagnosticsWritable) {
+          const diagnosticsPath = (
+            reviewFailure.metadata as { diagnosticsPath?: string }
+          ).diagnosticsPath!;
+          const saved = await readFile(diagnosticsPath, "utf8");
+          expect(saved).not.toContain("synthetic-review-key");
+          const details = JSON.parse(saved);
+          expect(details).toMatchObject({
+            stage: "pair-review",
+            model: "gpt-5.6-sol",
+            attempts: 1,
+          });
+          if (scenario === "exit")
+            expect(details).toMatchObject({
+              threadId: "review-thread",
+              turnId: "review-turn-1",
+              exitCode: 1,
+              stderr: "Synthetic native process failure\n",
+            });
+          else
+            expect(details).toMatchObject({
+              reason: "[redacted]",
+              rpcCode: -32000,
+              stderr: "[redacted]",
+            });
+        }
         const supportBundle = JSON.stringify(reviewFailure.metadata);
         expect(supportBundle).not.toContain("synthetic-review-key");
         expect(supportBundle).not.toContain(checkout);

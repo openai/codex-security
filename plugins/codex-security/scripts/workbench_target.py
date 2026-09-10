@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -488,12 +489,64 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     return sorted({str(path): path for path in paths}.values(), key=str)
 
 
-def source_directory_snapshot_paths(target: Path) -> list[Path]:
+def snapshot_exclusion_filter(target: Path, excluded: tuple[Path, ...]) -> Callable[[Path], bool]:
+    entries = []
+    for path in excluded:
+        # Follow parent aliases, but preserve a managed symlink or junction leaf.
+        entry = path.parent.resolve() / path.name
+        for depth, ancestor in enumerate((entry, *entry.parents)):
+            try:
+                inside = (
+                    os.path.samestat(ancestor.lstat(), target.lstat())
+                    if depth == 0
+                    else ancestor.samefile(target)
+                )
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if inside:
+                entries.append((entry, depth))
+                break
+    matched: dict[tuple[str, str], bool] = {}
+    parents: dict[tuple[str, str], bool] = {}
+
+    def excludes(path: Path) -> bool:
+        relative = path.relative_to(target)
+        for entry, depth in entries:
+            if len(relative.parts) < depth:
+                continue
+            prefix = target.joinpath(*relative.parts[:depth])
+            parent_key = (str(prefix.parent), str(entry.parent))
+            if parent_key not in parents:
+                try:
+                    parents[parent_key] = parent_key[0] == parent_key[1] or prefix.parent.samefile(
+                        entry.parent
+                    )
+                except (FileNotFoundError, NotADirectoryError):
+                    parents[parent_key] = False
+            if not parents[parent_key]:
+                continue
+            key = (str(prefix), str(entry))
+            if key not in matched:
+                try:
+                    matched[key] = str(prefix) == str(entry) or os.path.samestat(
+                        prefix.lstat(), entry.lstat()
+                    )
+                except (FileNotFoundError, NotADirectoryError):
+                    matched[key] = False
+            if matched[key]:
+                return True
+        return False
+
+    return excludes
+
+
+def source_directory_snapshot_paths(target: Path, excluded: tuple[Path, ...] = ()) -> list[Path]:
     paths: list[Path] = []
+    excludes = snapshot_exclusion_filter(target, excluded)
     pending = [target]
     while pending:
         for path in pending.pop().iterdir():
-            if path.name == ".git":
+            if path.name == ".git" or excludes(path):
                 continue
             paths.append(path)
             metadata = path.lstat()
@@ -509,14 +562,9 @@ def source_directory_snapshot_paths(target: Path) -> list[Path]:
 def directory_content_digest(
     target: Path, *, excluded: tuple[Path, ...] = (), include_ignored: bool = False
 ) -> str:
-    excluded_relative = []
-    for path in excluded:
-        try:
-            excluded_relative.append(path.relative_to(target))
-        except ValueError:
-            continue
+    excludes = snapshot_exclusion_filter(target, excluded)
     paths = (
-        source_directory_snapshot_paths(target)
+        source_directory_snapshot_paths(target, excluded)
         if include_ignored
         else git_directory_snapshot_paths(target)
     )
@@ -526,10 +574,7 @@ def directory_content_digest(
     update_digest_field(digest, b"format", b"codex-security-directory/v1")
     for path in paths:
         relative_path = path.relative_to(target)
-        if any(
-            relative_path == excluded_path or excluded_path in relative_path.parents
-            for excluded_path in excluded_relative
-        ):
+        if not include_ignored and excludes(path):
             continue
         try:
             metadata = path.lstat()
@@ -558,6 +603,10 @@ def directory_content_digest(
             update_digest_field(digest, b"kind", b"file")
             update_digest_field(digest, b"size", str(content_size).encode())
             update_digest_field(digest, b"content-sha256", content_digest.digest())
+        elif include_ignored and stat.S_ISFIFO(metadata.st_mode):
+            update_digest_field(digest, b"kind", b"fifo")
+        elif include_ignored and stat.S_ISSOCK(metadata.st_mode):
+            update_digest_field(digest, b"kind", b"socket")
         else:
             raise SystemExit(f"Unsupported local file type: {relative_path}")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"

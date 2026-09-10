@@ -1,8 +1,13 @@
-import { CodexSecurityError, safeErrorMessage } from "../errors.js";
+import { randomUUID } from "node:crypto";
+import { lstat, readlink } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { basename, dirname, join, resolve } from "node:path";
 import { loadContractWithScanDirectory } from "../contract.js";
 import {
   bundledPluginRoot,
+  canonicalizeModelSafePath,
   codexSecurityStateDirectory,
+  prepareCodexSecurityStateSubdirectory,
   resolvePluginPython,
   runWorkbench,
 } from "../runtime.js";
@@ -35,6 +40,12 @@ import {
   reviewSettingsDigest,
 } from "./checkpointed-review.js";
 import { normalizeRepository } from "../targets.js";
+import {
+  CodexSecurityError,
+  DeduplicationReviewError,
+  safeErrorMessage,
+  type DeduplicationRecovery,
+} from "../errors.js";
 
 export interface DeduplicateScanOptions {
   /** Resume the named local findings workflow, including custom publication. */
@@ -85,6 +96,7 @@ type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
   onPublication?: (
     publication: CustomPublicationResult,
   ) => void | Promise<void>;
+  onRecovery?: (recovery: DeduplicationRecovery) => void | Promise<void>;
 };
 
 /** @internal */
@@ -180,113 +192,299 @@ async function deduplicateResolvedScan(
     options.allRepositories === true
       ? { allRepositories: true }
       : { repositoryId: contract.manifest.scan.target.targetId };
-  const workflow =
+  const makeWorkflow = (id: string) =>
+    new FindingWorkflow(
+      id,
+      environment,
+      dependencies.runWorkbench === undefined
+        ? undefined
+        : (workbenchOptions, args, input) =>
+            dependencies.runWorkbench!(args, input, workbenchOptions.signal),
+    );
+  let workflow = makeWorkflow(options.workflowId ?? `dedupe_${randomUUID()}`);
+  await workflow.protectArtifacts(scanDirectory);
+  let database = join(
+    codexSecurityStateDirectory(environment),
+    "workbench.sqlite3",
+  );
+  for (;;) {
+    database = await canonicalizeModelSafePath(database);
+    const metadata = await lstat(database).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!metadata?.isSymbolicLink()) break;
+    // A dangling database link still selects where SQLite creates its target.
+    database = resolve(dirname(database), await readlink(database));
+  }
+  await workflow.protectArtifacts(scanDirectory, database);
+  const source =
     options.workflowId === undefined
-      ? undefined
-      : new FindingWorkflow(
-          options.workflowId,
-          environment,
-          dependencies.runWorkbench === undefined
-            ? undefined
-            : (_options, args, input) =>
-                dependencies.runWorkbench!(args, input),
-        );
-  let publication: CustomPublicationResult | undefined;
-  if (workflow) {
-    await workflow.protectArtifacts(scanDirectory);
-    await workflow.bind({
-      ...(bindRepository ? { repositoryPath } : {}),
-      scanId,
-      scanDir: scanDirectory,
-      artifactDigest: workflowDigest(contract),
-      destination: workflowDestination(options.findingsUrl),
-      scope,
+      ? await workflow.sourceSnapshot(repositoryPath, options.signal)
+      : undefined;
+  const settingsDigest =
+    options.workflowId === undefined
+      ? await reviewSettingsDigest(environment)
+      : undefined;
+  const binding = {
+    ...(bindRepository || options.workflowId === undefined
+      ? { repositoryPath }
+      : {}),
+    scanId,
+    scanDir: scanDirectory,
+    artifactDigest: workflowDigest(contract),
+    destination: workflowDestination(options.findingsUrl),
+    scope,
+  };
+  const requestDigest = workflowDigest({ binding, source, settingsDigest });
+  if (options.workflowId === undefined) {
+    const selected = await workflow.selectDedupe(requestDigest, binding);
+    workflow = makeWorkflow(selected.id);
+  }
+  const operationKey = workflowDigest(workflow.id);
+  const lockDirectory = join(
+    dirname(database),
+    basename(database) === "workbench.sqlite3"
+      ? "dedupe-locks"
+      : `${basename(database)}.dedupe-locks`,
+  );
+  await workflow.protectArtifacts(
+    scanDirectory,
+    join(lockDirectory, `${operationKey}.sqlite3`),
+  );
+  const release = await acquireDedupeLock(
+    environment,
+    lockDirectory,
+    operationKey,
+  );
+  try {
+    const state = await workflow.bind({
+      ...binding,
+      ...(options.workflowId === undefined
+        ? { dedupeRequestDigest: requestDigest }
+        : {}),
     });
     await workflow.complete("scan", null);
-    publication = await publishScanToCustomInternal(
-      scanDirectory,
-      {
-        findingsUrl: options.findingsUrl,
-        workflowId: options.workflowId,
-        expectedScanId: scanId,
-        signal: options.signal,
-      },
-      {
-        environment,
-        fetch: dependencies.fetch,
-        runWorkbench:
-          dependencies.runWorkbench === undefined
-            ? undefined
-            : (_options, args, input) =>
-                dependencies.runWorkbench!(args, input),
-      },
-    );
-    if (publication.warnings?.length) {
+    const recovery: DeduplicationRecovery = {
+      scanId,
+      operationId: workflow.id,
+      ...(options.workflowId === undefined
+        ? {}
+        : { workflowId: options.workflowId }),
+      findingsUrl: workflowDestination(options.findingsUrl),
+      allRepositories: options.allRepositories === true,
+      phase: "publication",
+      findingIds: [],
+      findingCount: contract.findings.findings.length,
+      pendingWrite: false,
+    };
+    let publication: CustomPublicationResult | undefined;
+    try {
+      if (
+        options.workflowId !== undefined &&
+        state.dedupeRequestDigest === undefined
+      ) {
+        publication = await publishScanToCustomInternal(
+          scanDirectory,
+          {
+            findingsUrl: options.findingsUrl,
+            workflowId: options.workflowId,
+            expectedScanId: scanId,
+            signal: options.signal,
+          },
+          {
+            environment,
+            fetch: dependencies.fetch,
+            runWorkbench:
+              dependencies.runWorkbench === undefined
+                ? undefined
+                : (_options, args, input) =>
+                    dependencies.runWorkbench!(args, input),
+          },
+        );
+        if (publication.warnings?.length) {
+          try {
+            void Promise.resolve(
+              dependencies.onPublication?.(publication),
+            ).catch(() => undefined);
+          } catch {
+            // Optional recovery output must not stop deduplication.
+          }
+        }
+      }
+      const dedupe = async (): Promise<DeduplicateScanResult> => {
+        const saved = (await workflow.get())?.stages.dedupe;
+        if (saved?.pendingWrite) {
+          recovery.phase = "groups";
+          recovery.pendingWrite = true;
+          await client.storeDedupeGroups(saved.pendingWrite.groups);
+          recovery.pendingWrite = false;
+          return saved.result as DeduplicateScanResult;
+        }
+        let diagnosticsDirectory: string | undefined;
+        if (dependencies.reviewRunner === undefined) {
+          diagnosticsDirectory = join(
+            codexSecurityStateDirectory(environment),
+            "dedupe",
+            operationKey,
+          );
+          try {
+            await workflow.protectArtifacts(
+              scanDirectory,
+              diagnosticsDirectory,
+            );
+          } catch {
+            // Optional diagnostics must not block the review or alter its error.
+            diagnosticsDirectory = undefined;
+          }
+        }
+        const runner =
+          dependencies.reviewRunner ??
+          new CodexReviewRunner(
+            environment,
+            undefined,
+            options.signal,
+            repositoryPath,
+            diagnosticsDirectory,
+          );
+        const checkpoints = new CheckpointedReviewRunner(
+          workflow,
+          runner,
+          source ??
+            (await workflow.sourceSnapshot(repositoryPath, options.signal)),
+          scope,
+          settingsDigest ?? (await reviewSettingsDigest(environment)),
+          options.signal,
+        );
+        const reviewer =
+          dependencies.reviewer ?? new CodexDeduplicationReviewer(checkpoints);
+        const deduplicator = new FindingDeduplicator(
+          {
+            potentialDuplicates: async (findingId) => {
+              recovery.phase = "candidates";
+              recovery.findingIds = [findingId];
+              const saved = await workflow.candidateNeighborhood(findingId);
+              if (saved !== null) return saved;
+              const candidates = await client.potentialDuplicates(
+                findingId,
+                scope,
+              );
+              return await workflow.saveCandidateNeighborhood(
+                findingId,
+                candidates,
+              );
+            },
+          },
+          {
+            screen: async (findings) => {
+              recovery.phase = "screening";
+              recovery.findingIds = findings.map(
+                (finding) => finding.findingId,
+              );
+              return await reviewer.screen(findings);
+            },
+            reviewPair: async (findings) => {
+              recovery.phase = "pair-review";
+              recovery.findingIds = findings.map(
+                (finding) => finding.findingId,
+              );
+              return await reviewer.reviewPair(findings);
+            },
+          },
+          options.signal,
+        );
+        const reviewed = await deduplicator.run(
+          contract.findings.findings.map((finding) => finding.findingId),
+        );
+        await checkpoints.assertSourceUnchanged(options.signal);
+        options.signal?.throwIfAborted();
+        const result: DeduplicateScanResult = { scanId, ...reviewed };
+        recovery.phase = "groups";
+        recovery.findingIds = [];
+        await workflow.prepareDedupe(result, {
+          groups: result.duplicateGroups,
+        });
+        recovery.pendingWrite = true;
+        await client.storeDedupeGroups(result.duplicateGroups);
+        recovery.pendingWrite = false;
+        return result;
+      };
+      const result = await workflow.run("dedupe", dedupe);
+      options.signal?.throwIfAborted();
+      // Publication recovery describes this call, not the cached review result.
+      return publication?.warnings?.length
+        ? { ...result, publication }
+        : result;
+    } catch (error) {
+      const failure =
+        error instanceof CodexSecurityError
+          ? error
+          : new CodexSecurityError(safeErrorMessage(error), { cause: error });
+      Object.assign(
+        recovery,
+        await workflow.dedupeProgress().catch(() => ({})),
+      );
+      if (
+        error instanceof DeduplicationReviewError &&
+        error.metadata.diagnosticsPath
+      )
+        recovery.diagnosticsPath = error.metadata.diagnosticsPath;
+      failure.deduplicationRecovery = recovery;
+      if (publication?.warnings?.length) failure.publication = publication;
+      await workflow.fail("dedupe", failure);
       try {
-        void Promise.resolve(dependencies.onPublication?.(publication)).catch(
+        void Promise.resolve(dependencies.onRecovery?.(recovery)).catch(
           () => undefined,
         );
       } catch {
-        // Optional recovery output must not stop deduplication.
+        // Recovery output must not replace the original failure.
       }
+      if (options.signal?.aborted) throw error;
+      throw failure;
     }
+  } finally {
+    await release();
   }
-  const dedupe = async (): Promise<DeduplicateScanResult> => {
-    const saved = (await workflow?.get())?.stages.dedupe;
-    if (saved?.pendingWrite) {
-      await client.storeDedupeGroups(saved.pendingWrite.groups);
-      return saved.result as DeduplicateScanResult;
-    }
-    const runner =
-      dependencies.reviewRunner ??
-      new CodexReviewRunner(
-        environment,
-        undefined,
-        options.signal,
-        repositoryPath,
-      );
-    const checkpoints = workflow
-      ? new CheckpointedReviewRunner(
-          workflow,
-          runner,
-          await workflow.sourceSnapshot(repositoryPath),
-          scope,
-          await reviewSettingsDigest(environment),
-        )
-      : undefined;
-    const deduplicator = new FindingDeduplicator(
-      {
-        potentialDuplicates: (findingId) =>
-          client.potentialDuplicates(findingId, scope),
-      },
-      dependencies.reviewer ??
-        new CodexDeduplicationReviewer(checkpoints ?? runner),
-      options.signal,
+}
+
+async function acquireDedupeLock(
+  environment: NodeJS.ProcessEnv,
+  lockDirectory: string,
+  key: string,
+): Promise<() => Promise<void>> {
+  const directory = await prepareCodexSecurityStateSubdirectory(lockDirectory, {
+    ...environment,
+    CODEX_SECURITY_STATE_DIR: dirname(lockDirectory),
+  });
+  const lockPath = join(directory, `${key}.sqlite3`);
+  const metadata = await lstat(lockPath).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (metadata?.isSymbolicLink())
+    throw new CodexSecurityError(
+      "Deduplication must not follow a linked lock file.",
     );
-    const reviewed = await deduplicator.run(
-      contract.findings.findings.map((finding) => finding.findingId),
-    );
-    await checkpoints?.assertSourceUnchanged();
-    options.signal?.throwIfAborted();
-    const result: DeduplicateScanResult = { scanId, ...reviewed };
-    await workflow?.prepareDedupe(result, { groups: result.duplicateGroups });
-    await client.storeDedupeGroups(result.duplicateGroups);
-    return result;
-  };
+  type Database = { exec(sql: string): void; close(): void };
+  type Constructor = new (path: string) => Database;
+  const require = createRequire(import.meta.url);
+  const Database = process.versions["bun"]
+    ? (require("bun:sqlite") as { Database: Constructor }).Database
+    : (require("node:sqlite") as { DatabaseSync: Constructor }).DatabaseSync;
+  const database = new Database(lockPath);
   try {
-    const result = workflow
-      ? await workflow.run("dedupe", dedupe)
-      : await dedupe();
-    options.signal?.throwIfAborted();
-    // Publication recovery describes this call, not the cached review result.
-    return publication?.warnings?.length ? { ...result, publication } : result;
+    // The process owns this transaction until it finishes or dies. A paused
+    // process retains its lock; no time-based lease can start duplicate reviews.
+    database.exec("BEGIN IMMEDIATE");
   } catch (error) {
-    if (!publication?.warnings?.length || options.signal?.aborted) throw error;
-    const failure =
-      error instanceof CodexSecurityError
-        ? error
-        : new CodexSecurityError(safeErrorMessage(error), { cause: error });
-    failure.publication = publication;
-    throw failure;
+    database.close();
+    if ((error as Error).message.includes("locked"))
+      throw new CodexSecurityError(
+        "Deduplication for these inputs is already running. Wait for it to finish before retrying.",
+      );
+    throw error;
   }
+  return async () => {
+    database.close();
+  };
 }

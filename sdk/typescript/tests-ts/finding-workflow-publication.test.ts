@@ -203,7 +203,7 @@ test.each(["native", "transport", "cancellation"])(
         return Response.json({
           finding: document.findings[0],
           potentialDuplicates: [
-            { ...document.findings[0], findingId: "neighbor-example" },
+            { ...document.findings[0], findingId: `csf_${"f".repeat(24)}` },
           ],
         });
       },
@@ -298,6 +298,7 @@ function publicationBinding(
           destination: "http://synthetic.test/",
         },
       },
+      response: { workflow: {} },
     },
     { request: { id, action: "complete", stage: "scan", result: null } },
   ];
@@ -343,6 +344,7 @@ test("deduplicates an external scan through its bound workflow without reading s
           scope: { allRepositories: true },
         },
       },
+      response: { workflow: {} },
     },
     { request: { id, action: "complete", stage: "scan", result: null } },
     { request: { id, action: "bind", binding } },
@@ -373,6 +375,28 @@ test("deduplicates an external scan through its bound workflow without reading s
       response: { workflow: { stages: { dedupe: { status: "running" } } } },
     },
     { request: { id, action: "source", repository }, response: { source } },
+    {
+      request: {
+        id,
+        action: "get-candidates",
+        findingId: document.findings[0]!.findingId,
+      },
+      response: { candidatesJson: null },
+    },
+    {
+      request: {
+        id,
+        action: "save-candidates",
+        findingId: document.findings[0]!.findingId,
+        candidates: { finding: document.findings[0], potentialDuplicates: [] },
+      },
+      response: {
+        candidatesJson: JSON.stringify({
+          finding: document.findings[0],
+          potentialDuplicates: [],
+        }),
+      },
+    },
     { request: { id, action: "source", repository }, response: { source } },
     {
       request: {
@@ -540,6 +564,31 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
         response: { workflow: { stages: { dedupe: { status: "running" } } } },
       },
       { request: { id, action: "source", repository }, response: { source } },
+      {
+        request: {
+          id,
+          action: "get-candidates",
+          findingId: originals[0]!.findingId,
+        },
+        response: { candidatesJson: null },
+      },
+      {
+        request: {
+          id,
+          action: "save-candidates",
+          findingId: originals[0]!.findingId,
+          candidates: {
+            finding: originals[0],
+            potentialDuplicates: [originals[1]],
+          },
+        },
+        response: {
+          candidatesJson: JSON.stringify({
+            finding: originals[0],
+            potentialDuplicates: [originals[1]],
+          }),
+        },
+      },
       { request: { id, action: "source", repository }, response: { source } },
       {
         request: {
@@ -562,6 +611,12 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
               ...complete,
               error: new Error("Synthetic completion receipt failure"),
             },
+            {
+              request: { id, action: "get" },
+              response: {
+                workflow: { stages: { dedupe: { status: "running" } } },
+              },
+            },
           ]
         : []),
       {
@@ -570,6 +625,27 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
           action: "fail",
           stage: "dedupe",
           error: expect.any(String),
+        },
+      },
+      {
+        request: { id, action: "dedupe-progress" },
+        response: { progress: { candidateCount: 1, reviewCount: 0 } },
+      },
+      {
+        request: {
+          id,
+          action: "fail",
+          stage: "dedupe",
+          error: expect.any(String),
+          details: {
+            recovery: {
+              operationId: id,
+              scanId: document.scanId,
+              phase: "groups",
+              candidateCount: 1,
+              reviewCount: 0,
+            },
+          },
         },
       },
       ...prefix,

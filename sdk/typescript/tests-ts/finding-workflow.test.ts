@@ -22,6 +22,81 @@ const distinct: DuplicateDecision = {
   rationale: "Independent corrections are required.",
 };
 
+test("source snapshot cancellation does not cancel durable workflow writes", async () => {
+  await using fixture = await workflowFixture();
+  const controller = new AbortController();
+  const stopped = new Error("Synthetic source snapshot cancellation");
+  let saved = false;
+  const workflow = new FindingWorkflow(
+    "cancellable-source",
+    fixture.environment,
+    async (options, _args, input) => {
+      const payload = JSON.parse(input!);
+      if (payload.action === "source") {
+        expect(options.signal).toBe(controller.signal);
+        controller.abort(stopped);
+        options.signal!.throwIfAborted();
+      }
+      expect(payload.action).toBe("save-review");
+      expect(options.signal).toBeUndefined();
+      saved = true;
+      return {};
+    },
+  );
+  await expect(
+    workflow.sourceSnapshot(fixture.repository, controller.signal),
+  ).rejects.toThrow(stopped.message);
+  await workflow.saveReview("completed-review", {}, distinct);
+  expect(saved).toBe(true);
+});
+
+test("an accepted review remains reusable when cancellation arrives during its checkpoint write", async () => {
+  await using fixture = await workflowFixture();
+  const controller = new AbortController();
+  const store = checkpointWorkbench("cancel-during-write", {
+    repository: fixture.repository,
+    content: "synthetic-content",
+  });
+  const workflow = new FindingWorkflow(
+    "cancel-during-write",
+    fixture.environment,
+    async (options, args, input) => {
+      const action = JSON.parse(input!).action;
+      if (action === "source") expect(options.signal).toBe(controller.signal);
+      else expect(options.signal).toBeUndefined();
+      if (action === "save-review") controller.abort("SIGINT");
+      return await store.run(options, args, input);
+    },
+  );
+  let modelCalls = 0;
+  const runner = new CheckpointedReviewRunner(
+    workflow,
+    {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        modelCalls++;
+        return review.validate(distinct);
+      },
+    },
+    store.source,
+    { allRepositories: true },
+    undefined,
+    controller.signal,
+  );
+  const review: CodexReview<DuplicateDecision> = {
+    stage: "pair-review",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    prompt: "Synthetic pair review",
+    schema: {},
+    validate: () => distinct,
+  };
+  expect(await runner.run(review)).toEqual(distinct);
+  expect(controller.signal.aborted).toBe(true);
+  expect(await runner.run(review)).toEqual(distinct);
+  expect(modelCalls).toBe(1);
+  expect(store.saved).toHaveLength(1);
+});
+
 test.each([
   "finding",
   "source",

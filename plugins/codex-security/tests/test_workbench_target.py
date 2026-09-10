@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import runpy
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, cast
 
 import pytest
@@ -83,6 +83,92 @@ def test_directory_content_digest_uses_git_file_set(tmp_path: Path) -> None:
     (ignored_cache / "build-output").write_text("ignored runtime data\n")
 
     assert directory_content_digest(target) == original_digest
+
+
+@pytest.mark.parametrize("include_ignored", [False, True])
+def test_snapshot_exclusions_preserve_case_distinct_source_entries(
+    tmp_path: Path, include_ignored: bool
+) -> None:
+    class WindowsEqualityPath(type(Path())):
+        # Exercise Windows equality with actual case-sensitive filesystem entries.
+        def __hash__(self):
+            return hash(PureWindowsPath(str(self)))
+
+        def __eq__(self, other):
+            return PureWindowsPath(str(self)) == PureWindowsPath(str(other))
+
+    target = WindowsEqualityPath(tmp_path / "target")
+    initialize_unborn_git_repository(target)
+    managed = target / "state" / "dedupe"
+    source = target / "state" / "Dedupe"
+    managed.mkdir(parents=True)
+    if source.exists():
+        pytest.skip("The fixture filesystem does not support case-distinct directories")
+    source.mkdir()
+    assert managed == source
+    assert not managed.samefile(source)
+    generated = managed / "review.json"
+    generated.write_text('{"saved":1}\n')
+    code = source / "index.ts"
+    code.write_text("export const value = 1;\n")
+
+    def snapshot():
+        return WORKBENCH_TARGET["directory_content_digest"](
+            target, excluded=(managed,), include_ignored=include_ignored
+        )
+
+    original = snapshot()
+    generated.write_text('{"saved":2}\n')
+    (managed / "new-review.json").write_text('{"saved":3}\n')
+    assert snapshot() == original
+    code.write_text("export const value = 2;\n")
+    assert snapshot() != original
+
+
+@pytest.mark.parametrize("include_ignored", [False, True])
+def test_snapshot_exclusions_follow_case_aliases_of_the_repository(
+    tmp_path: Path, include_ignored: bool
+) -> None:
+    target = tmp_path / "Repo"
+    initialize_unborn_git_repository(target)
+    alias = tmp_path / "repo"
+    if not alias.exists():
+        alias.symlink_to(target, target_is_directory=True)
+    assert target.samefile(alias)
+
+    class CaseAliasPath(type(Path())):
+        # A case-insensitive POSIX filesystem preserves lexical case in resolve()
+        # and relative_to(). A real directory alias supplies the same file identity
+        # when this fixture runs on a case-sensitive filesystem.
+        def resolve(self, strict=False):
+            super().resolve(strict=strict)
+            return self.absolute()
+
+        def relative_to(self, other, **kwargs):
+            return PurePosixPath(self.as_posix()).relative_to(
+                PurePosixPath(Path(other).as_posix()), **kwargs
+            )
+
+    managed = target / "state" / "dedupe"
+    managed.mkdir(parents=True)
+    generated = managed / "review.json"
+    generated.write_text('{"saved":1}\n')
+    source = target / "index.ts"
+    source.write_text("export const value = 1;\n")
+    excluded = CaseAliasPath(alias / "state" / "dedupe")
+    assert managed.samefile(excluded)
+
+    def snapshot():
+        return WORKBENCH_TARGET["directory_content_digest"](
+            target, excluded=(excluded,), include_ignored=include_ignored
+        )
+
+    original = snapshot()
+    generated.write_text('{"saved":2}\n')
+    (managed / "new-review.json").write_text('{"saved":3}\n')
+    assert snapshot() == original
+    source.write_text("export const value = 2;\n")
+    assert snapshot() != original
 
 
 @pytest.mark.parametrize("content_digest", [directory_content_digest, worktree_content_digest])

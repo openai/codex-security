@@ -79,6 +79,7 @@ export {
   ScanInterruptedError,
 } from "./errors.js";
 export type {
+  DeduplicationRecovery,
   DeduplicationReviewFailureCategory,
   DeduplicationReviewFailureMetadata,
   DeduplicationReviewStage,

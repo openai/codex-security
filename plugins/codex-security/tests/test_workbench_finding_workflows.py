@@ -14,6 +14,143 @@ def workflow(api, connection, action, *, workflow_id="synthetic-workflow", **pay
     )
 
 
+@pytest.mark.parametrize("linked_state", [False, True])
+@pytest.mark.parametrize("linked_home", [False, True])
+def test_source_snapshot_excludes_generated_home_without_following_its_leaf_link(
+    workbench_api, workbench_db, tmp_path, linked_state, linked_home
+):
+    repository = tmp_path / "repository"
+    source = repository / "src"
+    source.mkdir(parents=True)
+    source_file = source / "index.ts"
+    source_file.write_text("export const value = 1;\n")
+    state = repository / "local-state"
+    state.mkdir()
+    credential_home = state / "codex-home"
+    if linked_home:
+        credential_home.symlink_to(source, target_is_directory=True)
+    else:
+        credential_home.mkdir()
+    selected_state = state
+    if linked_state:
+        selected_state = tmp_path / "configured-state"
+        selected_state.symlink_to(state, target_is_directory=True)
+
+    def snapshot():
+        return workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(repository),
+            credentialHome=str(selected_state / "codex-home"),
+        )["source"]
+
+    original = snapshot()
+    if not linked_home:
+        (credential_home / "history.jsonl").write_text('{"generated":true}\n')
+        assert snapshot() == original
+    source_file.write_text("export const value = 2;\n")
+    changed = snapshot()
+    assert changed["content"] != original["content"]
+    (state / "ordinary-source.ts").write_text("export const local = 1;\n")
+    assert snapshot()["content"] != changed["content"]
+
+
+@pytest.mark.parametrize("database_name", ["workbench.sqlite3", "external.sqlite3"])
+def test_source_snapshot_separates_linked_database_storage_from_managed_directories(
+    workbench_api, tmp_path, database_name
+):
+    repository = tmp_path / "repository"
+    state = repository / "local-state"
+    state.mkdir(parents=True)
+    storage = repository / "database-storage"
+    storage.mkdir()
+    database = storage / database_name
+    selected_database = state / "workbench.sqlite3"
+    selected_database.symlink_to(database)
+    with sqlite3.connect(selected_database) as connection:
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("CREATE TABLE sample (value INTEGER)")
+
+        def snapshot():
+            return workflow(
+                workbench_api,
+                connection,
+                "source",
+                repository=str(repository),
+                credentialHome=str(state / "codex-home"),
+            )["source"]
+
+        original = snapshot()
+        with connection:
+            connection.execute("INSERT INTO sample VALUES (1)")
+        assert snapshot() == original
+        for name in ("dedupe", "dedupe-locks"):
+            directory = state / name
+            directory.mkdir()
+            (directory / "generated").write_text("managed output")
+            assert snapshot() == original
+        locks = storage / (
+            "dedupe-locks"
+            if database_name == "workbench.sqlite3"
+            else f"{database_name}.dedupe-locks"
+        )
+        locks.mkdir()
+        (locks / "operation.sqlite3").write_text("managed lock")
+        assert snapshot() == original
+        ordinary = storage / "dedupe"
+        ordinary.mkdir()
+        (ordinary / "source.ts").write_text("export const source = 1;\n")
+        assert snapshot()["content"] != original["content"]
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_source_snapshot_uses_sqlite_reported_sidecar_paths(workbench_api, tmp_path, suffix):
+    repository = tmp_path / "repository"
+    state = repository / "local-state"
+    state.mkdir(parents=True)
+    database = repository / "physical.sqlite3"
+    selected_database = state / "workbench.sqlite3"
+    selected_database.symlink_to(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE sample (value INTEGER)")
+        connection.commit()
+
+        class ReportedPathConnection:
+            def execute(self, statement):
+                assert statement == "PRAGMA database_list"
+                # The Windows VFS reports the opened pathname without resolving its leaf link.
+                return connection.execute("SELECT 0, 'main', ?", (str(selected_database),))
+
+        def snapshot():
+            return workflow(
+                workbench_api,
+                ReportedPathConnection(),
+                "source",
+                repository=str(repository),
+                credentialHome=str(state / "codex-home"),
+            )["source"]
+
+        original = snapshot()
+        with connection:
+            connection.execute("INSERT INTO sample VALUES (1)")
+        assert snapshot() == original
+        sidecar = state / f"workbench.sqlite3{suffix}"
+        sidecar.write_bytes(b"SQLite sidecar before write")
+        assert snapshot() == original
+        sidecar.write_bytes(b"SQLite sidecar after write")
+        assert snapshot() == original
+        source = state / "ordinary.ts"
+        source.write_text("export const source = 1;\n")
+        assert snapshot()["content"] != original["content"]
+        source.unlink()
+        alias = tmp_path / "database-alias.sqlite3"
+        alias.symlink_to(database)
+        selected_database.unlink()
+        selected_database.symlink_to(alias)
+        assert snapshot()["content"] != original["content"]
+
+
 @pytest.mark.parametrize("stage", ["scan", "publish", "dedupe"])
 def test_failed_stages_resume_and_completed_results_are_immutable(
     workbench_api, workbench_db, stage
@@ -83,8 +220,10 @@ def test_bindings_and_workflow_identities_remain_separate(
 def test_pending_publication_payload_survives_failure_until_completion(
     workbench_api, workbench_db, result
 ):
+    assert not workflow(workbench_api, workbench_db, "dedupe-progress")["progress"]["pendingWrite"]
     workflow(workbench_api, workbench_db, "bind", binding={})
     workflow(workbench_api, workbench_db, "begin", stage="dedupe")
+    assert not workflow(workbench_api, workbench_db, "dedupe-progress")["progress"]["pendingWrite"]
     pending = {"groups": result["duplicateGroups"]}
     prepared = workflow(
         workbench_api,
@@ -100,6 +239,7 @@ def test_pending_publication_payload_survives_failure_until_completion(
         "pendingWrite": pending,
     }
     workflow(workbench_api, workbench_db, "fail", stage="dedupe", error="Lost acknowledgement")
+    assert workflow(workbench_api, workbench_db, "dedupe-progress")["progress"]["pendingWrite"]
     resumed = workflow(workbench_api, workbench_db, "begin", stage="dedupe")["workflow"]["stages"][
         "dedupe"
     ]
@@ -107,6 +247,7 @@ def test_pending_publication_payload_survives_failure_until_completion(
     assert resumed["pendingWrite"] == pending
     completed = workflow(workbench_api, workbench_db, "complete", stage="dedupe", result=result)
     assert completed["workflow"]["stages"]["dedupe"] == {"status": "completed", "result": result}
+    assert not workflow(workbench_api, workbench_db, "dedupe-progress")["progress"]["pendingWrite"]
 
 
 def test_review_checkpoints_keep_the_first_valid_result_and_enforce_workflow_ownership(

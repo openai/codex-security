@@ -1,14 +1,13 @@
 import type { JsonObject } from "../config.js";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { configuredCodexHome } from "../auth.js";
 import { CodexSecurityError } from "../errors.js";
 import type { FindingSearchScope } from "../finding-retrieval.js";
 import { FindingWorkflow, workflowDigest } from "../finding-workflow.js";
 import { CODEX_EXECUTABLE_VERSION } from "../version.js";
 import {
   codexSecurityCredentialHome,
-  expandHome,
   resolveCodexCommand,
 } from "../runtime.js";
 import type { CodexReview, CodexReviewRunner } from "./codex-review.js";
@@ -24,10 +23,7 @@ export async function reviewSettingsDigest(
   environment: NodeJS.ProcessEnv,
 ): Promise<string> {
   const homes = new Set([
-    expandHome(
-      environment["CODEX_HOME"] ?? join(homedir(), ".codex"),
-      environment,
-    ),
+    configuredCodexHome(environment),
     codexSecurityCredentialHome(environment),
   ]);
   const configs = await Promise.all(
@@ -54,11 +50,13 @@ export class CheckpointedReviewRunner {
     private readonly source: JsonObject,
     private readonly scope: FindingSearchScope,
     private readonly settingsDigest?: string,
+    private readonly signal?: AbortSignal,
   ) {}
 
-  async assertSourceUnchanged(): Promise<void> {
+  async assertSourceUnchanged(signal = this.signal): Promise<void> {
     const current = await this.workflow.sourceSnapshot(
       this.source["repository"] as string,
+      signal,
     );
     if (workflowDigest(current) !== workflowDigest(this.source))
       throw new CodexSecurityError(

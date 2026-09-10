@@ -117,6 +117,7 @@ import {
   safeErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
+  type DeduplicationRecovery,
 } from "./errors.js";
 import {
   GITHUB_ALERT_STATES,
@@ -3723,6 +3724,7 @@ export async function main(
         const onTerminate = () => controller.abort("SIGTERM");
         dependencies.addSignalListener("SIGINT", onInterrupt);
         dependencies.addSignalListener("SIGTERM", onTerminate);
+        let recovery: DeduplicationRecovery | undefined;
         try {
           const scanId =
             options.scan ??
@@ -3753,6 +3755,9 @@ export async function main(
               onPublication: (receipt) => {
                 publication = receipt;
               },
+              onRecovery: (saved) => {
+                recovery = saved;
+              },
             },
           );
           for (const warning of result.publication?.warnings ?? []) {
@@ -3766,10 +3771,57 @@ export async function main(
           errorOutput.write(
             `codex-security: ${
               signal === "SIGINT" || signal === "SIGTERM"
-                ? "Deduplication canceled. Findings are unchanged."
+                ? "Deduplication canceled. Saved checkpoints are retained."
                 : safeErrorMessage(error)
             }\n`,
           );
+          const saved =
+            (error instanceof CodexSecurityError
+              ? error.deduplicationRecovery
+              : undefined) ?? recovery;
+          if (saved) {
+            errorOutput.write(
+              `Operation: ${saved.operationId}. Stopped during ${saved.phase}${saved.findingIds.length ? ` for ${saved.findingIds.join(", ")}` : ""}.\n`,
+            );
+            if (
+              saved.reviewCount !== undefined &&
+              saved.candidateCount !== undefined
+            )
+              errorOutput.write(
+                `Saved ${saved.reviewCount} validated reviews and ${saved.candidateCount}/${saved.findingCount} candidate neighborhoods.\n`,
+              );
+            if (saved.pendingWrite)
+              errorOutput.write(
+                "The final group write is saved; its acknowledgement is not confirmed. Retry replays the saved groups.\n",
+              );
+            if (saved.diagnosticsPath)
+              errorOutput.write(
+                `Review diagnostics: ${saved.diagnosticsPath}\n`,
+              );
+            const retry = [
+              "codex-security",
+              "dedupe",
+              "--scan",
+              saved.scanId,
+              ...(saved.operationId.startsWith("-")
+                ? [`--workflow-id=${saved.operationId}`]
+                : ["--workflow-id", saved.operationId]),
+              "--findings-url",
+              saved.findingsUrl,
+              ...(saved.allRepositories ? ["--all-repositories"] : []),
+            ]
+              .map((argument) =>
+                /^[A-Za-z0-9_./:@=-]+$/u.test(argument) &&
+                !argument.startsWith("=") &&
+                !(process.platform === "win32" && argument.startsWith("@"))
+                  ? argument
+                  : `'${process.platform === "win32" ? argument.replace(/['\u2018-\u201b]/gu, "$&$&") : argument.replaceAll("'", "'\\''")}'`,
+              )
+              .join(" ");
+            errorOutput.write(
+              `Resume${process.platform === "win32" ? " (PowerShell)" : ""}: ${safeErrorMessage(retry)}\n`,
+            );
+          }
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           publication =
             (error instanceof CodexSecurityError

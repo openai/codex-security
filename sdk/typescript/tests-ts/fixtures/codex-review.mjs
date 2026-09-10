@@ -40,6 +40,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     send({ id: message.id, result: { type: "apiKey" } });
   } else if (message.method === "thread/start") {
     if (["request-error", "credential-error"].includes(scenario)) {
+      if (scenario === "credential-error")
+        process.stderr.write("Bearer synthetic-review-key\n");
       send({
         id: message.id,
         error: {
@@ -109,7 +111,10 @@ for await (const line of createInterface({ input: process.stdin })) {
         },
       });
     }
-    if (scenario === "exit") process.exit(1);
+    if (scenario === "exit") {
+      process.stderr.write("Synthetic native process failure\n");
+      process.exit(1);
+    }
     if (scenario === "invalid-json") {
       process.stdout.write("Synthetic private response data\n");
     } else if (
