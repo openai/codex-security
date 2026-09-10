@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   realpath,
+  readFile,
   rm,
   stat,
   symlink,
@@ -12,8 +13,9 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { main } from "../src/cli.js";
+import { main, runCodexSkillCommand } from "../src/cli.js";
 import { CodexSecurityError, type ScanOptions } from "../src/index.js";
 import {
   codexSecurityCredentialAllowsAmbientImport,
@@ -46,6 +48,7 @@ function dependencies(
   return cliDependencies({
     ...options,
     environment: {
+      CODEX_HOME: join(stateDirectory, "ambient"),
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       ...options.environment,
     },
@@ -1154,5 +1157,265 @@ describe("CLI authentication", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("skill authentication", () => {
+  test.each(["validate", "patch", "verify-fix"])(
+    "%s advertises scan auth modes",
+    async (command) => {
+      const stdout = capture();
+      expect(
+        await main(
+          [command, "--schema", "--format", "json"],
+          stdout.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text()).options.properties.auth).toMatchObject({
+        enum: ["auto", "chatgpt", "api-key"],
+        default: "auto",
+      });
+      const help = capture();
+      expect(
+        await main(
+          [command, "--help"],
+          help.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(help.text()).toContain("--auth");
+    },
+  );
+
+  test.each(["validate", "patch", "verify-fix"] as const)(
+    "%s reads the login credential home",
+    async (command) => {
+      const environment = {
+        CODEX_HOME: join(stateDirectory, "ambient"),
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      };
+      const credentialHome =
+        await prepareCodexSecurityCredentialHome(environment);
+      await writeFile(
+        join(credentialHome, "auth.json"),
+        JSON.stringify({
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
+        }),
+        { mode: 0o600 },
+      );
+      const stdout = capture();
+      const stderr = capture();
+      const script = `console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({home:process.env.CODEX_HOME,state:process.env.CODEX_SECURITY_STATE_DIR})}}))`;
+      expect(
+        await runCodexSkillCommand(
+          ["-e", script],
+          {
+            command,
+            auth: "auto",
+            stdout: stdout.stream,
+            stderr: stderr.stream,
+          },
+          { command: process.execPath },
+          environment,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual({
+        home: credentialHome,
+        state: stateDirectory,
+      });
+    },
+  );
+
+  test.each(["validate", "patch", "verify-fix"])(
+    "%s rejects missing explicit API-key authentication before launch",
+    async (command) => {
+      const stderr = capture();
+      expect(
+        await main(
+          [command, "Synthetic issue", "--auth", "api-key"],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            onCodex: (_args, output, environment, input) =>
+              runCodexSkillCommand(
+                ["-e", 'throw new Error("must not launch")'],
+                output,
+                { command: process.execPath },
+                environment,
+                input,
+              ),
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(
+        "API-key authentication requires OPENAI_API_KEY or CODEX_API_KEY",
+      );
+    },
+  );
+  test.each([
+    ["auto", false],
+    ["chatgpt", false],
+    ["api-key", false],
+    ["api-key", true],
+  ] as const)(
+    "patch uses %s auth without replacing a saved login (login failure: %s)",
+    async (auth, loginFailure) => {
+      const ambientHome = join(stateDirectory, "ambient");
+      await mkdir(ambientHome);
+      const credentialHome = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      });
+      const stored = JSON.stringify({
+        auth_mode: "apikey",
+        OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
+      });
+      await writeFile(join(credentialHome, "auth.json"), stored, {
+        mode: 0o600,
+      });
+      await writeFile(join(ambientHome, "auth.json"), stored, { mode: 0o600 });
+      const requestLog = join(stateDirectory, "requests.jsonl");
+      const stderr = capture();
+      const stdout = capture();
+      const environment = {
+        CODEX_HOME: ambientHome,
+        OpenAI_API_KEY: "  SYNTHETIC_OPENAI_KEY  ",
+        CODEX_API_KEY: "SYNTHETIC_CODEX_KEY",
+        SYNTHETIC_REQUEST_LOG: requestLog,
+        ...(loginFailure ? { SYNTHETIC_LOGIN_FAILURE: "1" } : {}),
+        SYNTHETIC_EXPECTED_HOME:
+          auth === "chatgpt" ? credentialHome : ambientHome,
+        ...(auth === "chatgpt"
+          ? {}
+          : { SYNTHETIC_EXPECTED_KEY: "SYNTHETIC_OPENAI_KEY" }),
+      };
+      expect(
+        await main(
+          ["patch", "Synthetic issue", "--auth", auth],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            environment,
+            currentDirectory: stateDirectory,
+            onCodex: (args, output, environment, input) =>
+              runCodexSkillCommand(
+                [
+                  fileURLToPath(
+                    new URL("./fixtures/skill-auth.mjs", import.meta.url),
+                  ),
+                  ...args,
+                ],
+                output,
+                { command: process.execPath },
+                environment,
+                input,
+              ),
+          }),
+        ),
+      ).toBe(loginFailure ? 1 : 0);
+      expect(stdout.text()).toBe(
+        loginFailure ? "" : "Synthetic patch complete\n",
+      );
+      if (loginFailure)
+        expect(stderr.text()).toContain(
+          "Authentication failed using OPENAI_API_KEY",
+        );
+      else expect(stderr.text()).toBe("");
+      const methods = (await readFile(requestLog, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line).method);
+      expect(methods).toEqual([
+        "initialize",
+        "notifications/initialized",
+        ...(auth === "chatgpt" ? [] : ["account/login/start"]),
+        ...(loginFailure ? [] : ["thread/start", "turn/start"]),
+      ]);
+      expect(await readFile(join(credentialHome, "auth.json"), "utf8")).toBe(
+        stored,
+      );
+      expect(await readFile(join(ambientHome, "auth.json"), "utf8")).toBe(
+        stored,
+      );
+    },
+  );
+
+  test("imports an ambient login once and respects logout", async () => {
+    const ambientHome = join(stateDirectory, "ambient");
+    const environment = {
+      CODEX_HOME: ambientHome,
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+    };
+    await mkdir(ambientHome);
+    const credentialHome =
+      await prepareCodexSecurityCredentialHome(environment);
+    const stored = JSON.stringify({
+      auth_mode: "apikey",
+      OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
+    });
+    await writeFile(join(ambientHome, "auth.json"), stored, { mode: 0o600 });
+    const run = () =>
+      runCodexSkillCommand(
+        [
+          "-e",
+          'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}))',
+        ],
+        {
+          command: "validate",
+          auth: "auto",
+          stdout: capture().stream,
+          stderr: capture().stream,
+        },
+        { command: process.execPath },
+        environment,
+      );
+    expect(await run()).toBe(0);
+    expect(await readFile(join(credentialHome, "auth.json"), "utf8")).toBe(
+      stored,
+    );
+    await rm(join(credentialHome, "auth.json"));
+    await setCodexSecurityCredentialLogout(credentialHome, true);
+    expect(await run()).toBe(0);
+    expect(existsSync(join(credentialHome, "auth.json"))).toBe(false);
+  });
+  test("validation honors the shared credential storage and login restrictions", async () => {
+    const environment = {
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+      CODEX_HOME: join(stateDirectory, "ambient"),
+    };
+    const home = await prepareCodexSecurityCredentialHome(environment);
+    await writeFile(
+      join(home, "config.toml"),
+      [
+        'cli_auth_credentials_store = "keyring"',
+        'forced_login_method = "chatgpt"',
+        'forced_chatgpt_workspace_id = "synthetic-workspace"',
+        'model = "unrelated-model"',
+      ].join("\n"),
+    );
+    const stdout = capture();
+    const source =
+      'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify(process.argv)}}))';
+    expect(
+      await runCodexSkillCommand(
+        ["-e", source, "--"],
+        {
+          command: "validate",
+          auth: "auto",
+          stdout: stdout.stream,
+          stderr: capture().stream,
+        },
+        { command: process.execPath },
+        environment,
+      ),
+    ).toBe(0);
+    const args = JSON.parse(stdout.text());
+    expect(args).toContain('cli_auth_credentials_store="keyring"');
+    expect(args).toContain('forced_login_method="chatgpt"');
+    expect(args).toContain('forced_chatgpt_workspace_id="synthetic-workspace"');
+    expect(args).not.toContain('model="unrelated-model"');
   });
 });

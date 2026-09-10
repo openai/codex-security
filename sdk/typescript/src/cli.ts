@@ -57,13 +57,19 @@ import {
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
+  selectedScanEnvironment,
   type DeepScanOptions,
   type ScanAuthMode,
   type ScanAuthentication,
   type ScanOptions,
   type ScanPreflight,
 } from "./api.js";
-import { accountStatus } from "./auth.js";
+import {
+  accountStatus,
+  CODEX_AUTH_CONFIG_KEYS,
+  configuredCodexHome,
+  readCodexHomeConfig,
+} from "./auth.js";
 import { loadContract } from "./contract.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
@@ -91,6 +97,10 @@ import {
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
+  hasCommandAuth,
+  inlineToml,
+  modelProviderConfigOverride,
+  resolveCommandAuthConfig,
   mergedCodexConfig,
   scanModelConfiguration,
   scanModelProvider,
@@ -143,6 +153,7 @@ import type { ScanResult } from "./result.js";
 import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
+  acquireCodexSecurityCredentialHomeLock,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
@@ -1073,6 +1084,9 @@ type SkillThreadSource = Extract<
 >;
 
 interface SkillCommandOutput {
+  readonly auth?: ScanAuthMode;
+  readonly modelProvider?: string;
+  readonly providerConfiguration?: JsonObject;
   readonly command: "validate" | "patch" | "verify-fix";
   readonly stdout: Writable;
   readonly stderr: Writable;
@@ -1104,6 +1118,7 @@ const findingVerificationSchema = z.object({
 type FindingVerification = z.infer<typeof findingVerificationSchema>;
 
 interface SkillRunOptions {
+  readonly auth?: ScanAuthMode;
   safetyIdentifier?: string;
   directory?: string;
   findings?: readonly Finding[];
@@ -1131,6 +1146,8 @@ interface SelectedFindings {
 }
 
 interface PatchRiskRequest {
+  readonly auth?: ScanAuthMode;
+  readonly environment?: NodeJS.ProcessEnv;
   repository: string;
   base: string;
   files?: readonly string[];
@@ -1387,6 +1404,81 @@ export async function runCodexSkillCommand(
   processEnvironment: NodeJS.ProcessEnv = process.env,
   input?: string,
 ): Promise<number> {
+  let apiKey: string | undefined;
+  let authentication: ScanAuthentication | null = null;
+  let modelProvider: string | undefined;
+  // runSkill selects auth; other process callers supply their own environment.
+  if (output?.auth !== undefined) {
+    const config =
+      output.modelProvider !== undefined
+        ? {
+            model_provider: output.modelProvider,
+            model_providers: {
+              [output.modelProvider]: output.providerConfiguration ?? {},
+            },
+          }
+        : output.appServer === undefined
+          ? {}
+          : await readCodexHomeConfig(processEnvironment);
+    const provider = scanModelProvider(config);
+    modelProvider = typeof provider === "string" ? provider : "openai";
+    authentication = scanAuthentication(
+      processEnvironment,
+      output.auth,
+      provider,
+      hasCommandAuth(config),
+    );
+    let selected = selectedScanEnvironment(
+      processEnvironment,
+      authentication.method === "command" ? "chatgpt" : output.auth,
+      provider,
+    );
+    if (
+      authentication.method === "stored_credentials" &&
+      (provider === undefined || provider === "openai")
+    ) {
+      const codexHome = await prepareCodexSecurityCredentialHome(selected);
+      const release = await acquireCodexSecurityCredentialHomeLock(codexHome);
+      try {
+        await initialCredentialsAvailable(
+          selected,
+          configuredCodexHome(selected),
+          codexHome,
+        );
+      } finally {
+        await release();
+      }
+      selected = {
+        ...selected,
+        CODEX_HOME: codexHome,
+        CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(selected),
+      };
+      if (output.appServer === undefined) {
+        const credentialConfig = await readCodexHomeConfig(selected);
+        args = [
+          ...args,
+          ...CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
+            credentialConfig[key] === undefined
+              ? []
+              : ["--config", `${key}=${inlineToml(credentialConfig[key])}`],
+          ),
+        ];
+      }
+    } else if (
+      authentication.method === "api_key" &&
+      !isExternalModelProvider(provider)
+    ) {
+      apiKey = environmentValue(selected, authentication.source)?.trim();
+      // Match the SDK's exec transport and keep app-server login in memory.
+      selected = selectedScanEnvironment(selected, "chatgpt");
+      if (output.appServer === undefined) {
+        selected = { ...selected, CODEX_API_KEY: apiKey };
+      } else {
+        args = [...args, "--config", 'cli_auth_credentials_store="ephemeral"'];
+      }
+    }
+    processEnvironment = selected;
+  }
   const configuredHome =
     process.platform === "win32"
       ? environmentValue(processEnvironment, "CODEX_HOME")
@@ -1463,6 +1555,8 @@ export async function runCodexSkillCommand(
               output.appServer === undefined
                 ? undefined
                 : {
+                    apiKey,
+                    modelProvider,
                     directory: output.appServer.directory,
                     prompt: output.appServer.prompt,
                     threadSource: output.appServer.threadSource,
@@ -1509,7 +1603,7 @@ export async function runCodexSkillCommand(
     if (status !== 0) {
       await writeCliOutput(
         output.stderr,
-        `codex-security: ${skillCommandFailure(output.command, status, events?.error ?? diagnostic)}\n`,
+        `codex-security: ${skillCommandFailure(output.command, status, events?.error ?? diagnostic, authentication)}\n`,
       );
       return status;
     }
@@ -4366,6 +4460,10 @@ export async function main(
           .describe("Finding text or a file containing findings."),
       }),
       options: z.object({
+        auth: z
+          .enum(SCAN_AUTH_MODES)
+          .default("auto")
+          .describe("Credential source: auto, chatgpt, or api-key."),
         effort: effortOption(),
         codex: z
           .array(optionValue("--codex"))
@@ -4384,6 +4482,7 @@ export async function main(
             output,
             errorOutput,
             dependencies,
+            { auth: options.auth },
           );
         } catch (error) {
           exitCode = 2;
@@ -4404,6 +4503,10 @@ export async function main(
           .describe("Finding text, a file, or a saved finding identifier."),
       }),
       options: z.object({
+        auth: z
+          .enum(SCAN_AUTH_MODES)
+          .default("auto")
+          .describe("Credential source: auto, chatgpt, or api-key."),
         effort: effortOption(),
         scan: optionValue("--scan")
           .optional()
@@ -4544,6 +4647,7 @@ export async function main(
                   ...(selected === undefined
                     ? {}
                     : { findings: selected.findings }),
+                  auth: options.auth,
                   verificationIds: identifiers,
                   environment,
                   onEvent: progress.observe.bind(progress),
@@ -4620,6 +4724,10 @@ export async function main(
           .describe("Issue text or a file containing issues."),
       }),
       options: z.object({
+        auth: z
+          .enum(SCAN_AUTH_MODES)
+          .default("auto")
+          .describe("Credential source: auto, chatgpt, or api-key."),
         effort: effortOption(),
         scan: optionValue("--scan")
           .optional()
@@ -4669,6 +4777,7 @@ export async function main(
               options.linearFilter !== undefined ||
               options.linearApiKey !== undefined ||
               options.effort !== undefined ||
+              options.auth !== "auto" ||
               options.codex.length > 0
             ) {
               throw new CodexSecurityError(
@@ -4725,6 +4834,7 @@ export async function main(
               options.effort,
               errorOutput,
               dependencies,
+              { auth: options.auth },
             );
             exitCode = patchExitCode(patches);
             let patchRisk: PatchRiskAssessment | undefined;
@@ -4738,6 +4848,7 @@ export async function main(
                     files,
                     codexOverrides: options.codex,
                     effort: options.effort,
+                    auth: options.auth,
                   },
                   errorOutput,
                   dependencies,
@@ -4825,7 +4936,7 @@ export async function main(
             output,
             errorOutput,
             dependencies,
-            { environment },
+            { environment, auth: options.auth },
           );
           if (patchBase !== undefined && exitCode === 0) {
             const files = await changedPatchFiles(
@@ -4837,10 +4948,12 @@ export async function main(
               ? await runPatchRiskAssessment(
                   {
                     repository,
+                    environment,
                     base: patchBase,
                     files,
                     codexOverrides: options.codex,
                     effort: options.effort,
+                    auth: options.auth,
                   },
                   errorOutput,
                   dependencies,
@@ -6398,6 +6511,8 @@ async function assessPatchRisk(
       dependencies,
       {
         directory: request.repository,
+        auth: request.auth,
+        environment: request.environment,
         patchArtifact: {
           path: patchPath,
           repository: basename(resolve(request.repository)),
@@ -6727,12 +6842,21 @@ async function runSkill(
       ...(options.provider === undefined
         ? []
         : ["--config", `model_provider=${JSON.stringify(options.provider)}`]),
-      ...Object.entries(options.providerConfiguration ?? {}).flatMap(
-        ([key, value]) => [
-          "--config",
-          `model_providers.${options.provider}.${key}=${JSON.stringify(value)}`,
-        ],
-      ),
+      ...(options.provider === undefined ||
+      options.providerConfiguration === undefined
+        ? []
+        : modelProviderConfigOverride(
+            resolveCommandAuthConfig(
+              {
+                model_providers: {
+                  [options.provider]: options.providerConfiguration,
+                },
+              },
+              configuredCodexHome(
+                options.environment ?? dependencies.environment,
+              ),
+            ),
+          ).flatMap((value) => ["--config", value])),
       "--config",
       verify || assess
         ? 'approval_policy="on-request"'
@@ -6761,6 +6885,9 @@ async function runSkill(
     ],
     {
       command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
+      auth: options.auth ?? "auto",
+      modelProvider: options.provider,
+      providerConfiguration: options.providerConfiguration,
       stdout,
       stderr,
       ...(appServer
@@ -6777,7 +6904,7 @@ async function runSkill(
           }
         : {}),
     },
-    options.environment,
+    options.environment ?? dependencies.environment,
     appServer ? undefined : prompt,
   );
 }
@@ -6785,6 +6912,8 @@ async function runSkill(
 export async function readSkillCommandOutput(
   stream: AsyncIterable<Buffer | string>,
   appServer?: {
+    readonly apiKey?: string;
+    readonly modelProvider?: string;
     readonly directory?: string;
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
@@ -6816,6 +6945,9 @@ export async function readSkillCommandOutput(
       // Inherit the child process cwd and preserve the user's decision.
       params: {
         threadSource: appServer.threadSource,
+        ...(appServer.modelProvider === undefined
+          ? {}
+          : { modelProvider: appServer.modelProvider }),
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
         sandbox: appServer?.sandbox ?? "workspace-write",
@@ -6868,8 +7000,18 @@ export async function readSkillCommandOutput(
         } else if (value["error"] !== undefined) {
           error = (value["error"] as { message: string }).message;
           appServer.input.end();
-        } else if (value["id"] === 1) {
-          send({ method: "notifications/initialized" });
+        } else if (value["id"] === 1 || value["id"] === "login") {
+          if (value["id"] === 1) {
+            send({ method: "notifications/initialized" });
+            if (appServer.apiKey !== undefined) {
+              send({
+                id: "login",
+                method: "account/login/start",
+                params: { type: "apiKey", apiKey: appServer.apiKey },
+              });
+              continue;
+            }
+          }
           if (appServer.sandbox === "read-only") {
             if (appServer.directory === undefined) {
               error =
@@ -7040,13 +7182,14 @@ export function skillCommandFailure(
   command: "validate" | "patch" | "verify-fix",
   status: number,
   detail: string,
+  authentication: ScanAuthentication | null = null,
 ): string {
   if (
     /401|invalid.api.key|token.expired|unauthori[sz]ed|authorizationrequired/iu.test(
       detail,
     )
   ) {
-    return "Authentication failed. Run codex-security login or check the configured API key.";
+    return authenticationFailureMessage(authentication);
   }
   if (
     /403|model.not.found|model.*access|access.*model|permission/iu.test(detail)
@@ -7373,7 +7516,8 @@ async function executeScan(
   let effectiveModel = DEFAULT_SCAN_MODEL_CONFIGURATION.model;
   let effectiveReasoningEffort =
     DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
-  let providerOptions: SkillRunOptions = {};
+  let providerOptions: SkillRunOptions = { provider: "openai" };
+  let auth = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
@@ -7418,7 +7562,7 @@ async function executeScan(
     ) {
       patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
     }
-    const auth =
+    auth =
       !arguments_.dryRun && !arguments_.mock && interactive
         ? await chooseInteractiveAuthentication(
             {
@@ -7998,17 +8142,6 @@ async function executeScan(
             patchSelection.occurrenceIds.includes(finding.occurrenceId)),
       ),
     };
-    const environment = { ...dependencies.environment };
-    if (selectedAuthentication?.method === "stored_credentials") {
-      for (const name of Object.keys(environment)) {
-        if (["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase())) {
-          delete environment[name];
-        }
-      }
-      environment["CODEX_HOME"] = codexSecurityCredentialHome(
-        dependencies.environment,
-      );
-    }
     try {
       patches = await runFindingPatches(
         selected,
@@ -8024,7 +8157,7 @@ async function executeScan(
         {
           ...providerOptions,
           safetyIdentifier: arguments_.safetyIdentifier,
-          environment,
+          auth,
           findingInstructions: patchSelection?.instructions,
         },
       );
@@ -8110,6 +8243,25 @@ function isLocalScanFailure(error: unknown): boolean {
   );
 }
 
+function authenticationFailureMessage(
+  authentication: ScanAuthentication | null,
+): string {
+  if (authentication?.method === "command") {
+    return "Native Codex command authentication failed. Check the configured provider auth command.";
+  }
+  if (authentication?.method === "aws_credentials") {
+    return (
+      `Authentication failed using AWS credentials from ${authentication.source}. ` +
+      "Check your Amazon Bedrock bearer token or AWS credential chain."
+    );
+  }
+  return authentication?.method === "api_key"
+    ? `Authentication failed using ${authentication.source}. ` +
+        "Retry with '--auth chatgpt' or provide a valid API key."
+    : "Authentication failed using stored ChatGPT credentials. " +
+        "Sign in again with 'codex-security login' or provide a valid API key.";
+}
+
 function scanFailureMessage(
   error: unknown,
   authentication: ScanAuthentication | null,
@@ -8142,20 +8294,7 @@ function scanFailureMessage(
   }
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
-      if (authentication?.method === "command") {
-        return "Native Codex command authentication failed. Check the configured provider auth command.";
-      }
-      if (authentication?.method === "aws_credentials") {
-        return (
-          `Authentication failed using AWS credentials from ${authentication.source}. ` +
-          "Check your Amazon Bedrock bearer token or AWS credential chain."
-        );
-      }
-      return authentication?.method === "api_key"
-        ? `Authentication failed using ${authentication.source}. ` +
-            "Retry with '--auth chatgpt' or provide a valid API key."
-        : "Authentication failed using stored ChatGPT credentials. " +
-            "Sign in again with 'codex-security login' or provide a valid API key.";
+      return authenticationFailureMessage(authentication);
     case "forbidden":
       if (authentication?.method === "command") {
         return "The configured Codex provider denied access. Check the command credentials and provider permissions.";

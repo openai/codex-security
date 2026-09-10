@@ -186,7 +186,7 @@ For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To save a key, pass it on stdin
 printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
 ```
 
-Environment API keys apply to the current scan; only `login --with-api-key`
+Environment API keys apply to the current command; only `login --with-api-key`
 saves them. Pass Codex access tokens on stdin to `login --with-access-token`.
 Access-token environment variables are not scan API keys.
 
@@ -226,7 +226,8 @@ $env:OPENAI_API_KEY = "<your-api-key>"
 npx @openai/codex-security scan C:\code\repository
 ```
 
-Login, logout, and scans share a private credential home:
+Login, logout, scans, validation, patching, and fix verification share a private
+credential home for stored OpenAI credentials:
 `$CODEX_SECURITY_STATE_DIR/codex-home`, or
 `$CODEX_HOME/state/plugins/codex-security/codex-home`. Codex uses the configured
 file or keyring storage and managed-device policies. If this home has no
@@ -255,11 +256,23 @@ npx @openai/codex-security scan . --auth chatgpt
 npx @openai/codex-security scan . --auth api-key
 ```
 
+`--auth` also works with `validate`, `patch`, and `verify-fix`. These commands
+use the same stored login as `scan`, including a sign-in created with
+`codex-security login --device-auth`:
+
+```bash
+npx @openai/codex-security patch OCCURRENCE_ID --auth chatgpt
+npx @openai/codex-security verify-fix OCCURRENCE_ID --auth api-key
+```
+
 `--auth chatgpt` ignores environment API keys. `--auth api-key` requires
-`OPENAI_API_KEY` or `CODEX_API_KEY`. The default is `--auth auto`; unset both
-variables to default to ChatGPT. The SDK uses the same `auth` option on `run`
-and `preflight`. Codex may still need ChatGPT credentials to load
-workspace-managed policies when using an API key.
+`OPENAI_API_KEY` or `CODEX_API_KEY`. The default is `--auth auto`; noninteractive
+commands prefer `OPENAI_API_KEY`, then `CODEX_API_KEY`, then stored credentials.
+Patch follow-up assessment uses the same selection, and `scan --patch` keeps
+the scan's choice. Environment API keys do not replace the saved login.
+The SDK uses the same `auth` option on `run`, `validate`, and `preflight`.
+Codex may still need ChatGPT credentials to load workspace-managed policies
+when using an API key.
 
 Some cybersecurity requests and protected findings require Trusted Access for
 Cyber approval. Apply or check your access at
@@ -696,7 +709,7 @@ or `features.plugins` are rejected, including in profiles. Multi-agent v2 must
 stay enabled: `agents.max_threads` and
 `features.multi_agent_v2.enabled=false` are rejected.
 
-`validate`, `patch`, and `verify-fix` accept `--effort` and the `model`,
+`validate`, `patch`, and `verify-fix` accept `--auth`, `--effort`, and the `model`,
 `model_reasoning_effort`, and `analytics.enabled` keys in `--codex`, but no
 other runtime overrides.
 
@@ -713,9 +726,12 @@ The same setting works for `scan` and `bulk-scan`. An explicit setting is
 preserved when `scan --patch` starts remediation and when
 `patch --assess-patch-risk` starts its follow-up assessment. Boolean `true`
 is also accepted; omitting the setting preserves the command's existing
-configuration and Codex defaults. Validation continues to ignore user
-configuration, while patching and verification retain their existing ambient
-configuration and project-trust behavior.
+configuration and Codex defaults. Validation ignores user configuration.
+For stored OpenAI credentials, patching and verification read configuration
+from the shared credential home. API-key and custom-provider commands retain
+their ambient Codex configuration. Commands preserve project trust in the
+selected home; explicit `--codex` settings apply to the command and its
+patch-risk assessment.
 
 This setting does not control explicitly configured OpenTelemetry log or trace
 exporters, authentication, integrations, or CLI update checks.

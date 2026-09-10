@@ -36,6 +36,7 @@ import {
 } from "smol-toml";
 import { z } from "incur";
 import {
+  CODEX_AUTH_CONFIG_KEYS,
   accountStatus,
   configuredCodexHome,
   CodexLoginHandle,
@@ -4614,11 +4615,7 @@ function sharedCredentialCodexConfig(
     approval_policy: scanApprovalPolicy(config),
     features: { plugins: true },
   };
-  for (const key of [
-    "cli_auth_credentials_store",
-    "forced_login_method",
-    "forced_chatgpt_workspace_id",
-  ]) {
+  for (const key of CODEX_AUTH_CONFIG_KEYS) {
     if (Object.hasOwn(config, key)) shared[key] = structuredClone(config[key]!);
   }
   const modelProvider = scanModelProvider(config);

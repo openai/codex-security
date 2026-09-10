@@ -1,3 +1,4 @@
+import { parse as parseToml } from "smol-toml";
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -141,6 +142,8 @@ describe("scan and patch workflow", () => {
       const outcome = await runWorkflow(
         [
           "patch",
+          "--auth",
+          "chatgpt",
           "--scan",
           "scan-1",
           "--json",
@@ -149,11 +152,17 @@ describe("scan and patch workflow", () => {
         {
           result,
           onWorkbench: () => savedScan(result),
+          onCodex: (args, output) => {
+            expect(output?.auth).toBe("chatgpt");
+            completePatches(args, output);
+            return 0;
+          },
         },
         {
           configure: (current) => {
             Object.assign(current, {
-              assessPatchRisk: async () => {
+              assessPatchRisk: async (request: { auth?: string }) => {
+                expect(request.auth).toBe("chatgpt");
                 assessments += 1;
                 return patchRiskAssessment();
               },
@@ -567,10 +576,54 @@ describe("scan and patch workflow", () => {
     });
   });
 
+  test("preserves command-provider authentication when patching after a scan", async () => {
+    const home = join(tmpdir(), "synthetic-auth-home");
+    let providerOverride: string | undefined;
+    const outcome = await runWorkflow(
+      [
+        "scan",
+        "--patch",
+        "--json",
+        "--codex",
+        'model_provider="synthetic.provider"',
+        "--codex",
+        'model_providers={"synthetic.provider"={name="Synthetic",auth={command="./synthetic-auth",args=["--json"]}}}',
+      ],
+      {
+        result: resultWithFindings(["high"]),
+        environment: {
+          CODEX_HOME: home,
+          CODEX_API_KEY: "SYNTHETIC_UNUSED_KEY",
+        },
+        onCodex: (args, output) => {
+          providerOverride = args.find((arg) =>
+            arg.startsWith("model_providers="),
+          );
+          expect(output?.modelProvider).toBe("synthetic.provider");
+          expect(output?.providerConfiguration?.["auth"]).toEqual({
+            command: "./synthetic-auth",
+            args: ["--json"],
+          });
+          completePatches(args, output);
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(parseToml(providerOverride!)).toEqual({
+      model_providers: {
+        "synthetic.provider": {
+          name: "Synthetic",
+          auth: { command: "./synthetic-auth", args: ["--json"], cwd: home },
+        },
+      },
+    });
+  });
+
   test("passes the scan model, provider, and selected authentication to patching", async () => {
     const result = resultWithFindings(["high"]);
     let invocation: readonly string[] = [];
-    let environment: NodeJS.ProcessEnv | undefined;
+    let authentication: string | undefined;
     const chatgpt = await runWorkflow(
       [
         "scan",
@@ -591,7 +644,10 @@ describe("scan and patch workflow", () => {
         },
         onCodex: (args, output, selectedEnvironment) => {
           invocation = args;
-          environment = selectedEnvironment;
+          authentication = output?.auth;
+          expect(selectedEnvironment?.["CODEX_SECURITY_STATE_DIR"]).toBe(
+            STATE_DIRECTORY,
+          );
           completePatches(args, output);
           return 0;
         },
@@ -600,11 +656,7 @@ describe("scan and patch workflow", () => {
     expect(chatgpt.exitCode).toBe(0);
     expect(invocation).toContain('model="gpt-5.6-terra"');
     expect(invocation).toContain('model_reasoning_effort="high"');
-    expect(environment).not.toHaveProperty("OPENAI_API_KEY");
-    expect(environment).toHaveProperty(
-      "CODEX_HOME",
-      join(STATE_DIRECTORY, "codex-home"),
-    );
+    expect(authentication).toBe("chatgpt");
 
     const attributed = await runWorkflow(
       [
@@ -651,9 +703,13 @@ describe("scan and patch workflow", () => {
     );
     expect(provider.exitCode).toBe(0);
     expect(invocation).toContain('model_provider="fireworks"');
-    expect(invocation).toContain(
-      'model_providers.fireworks.env_key="FIREWORKS_API_KEY"',
-    );
+    expect(
+      invocation.some(
+        (argument) =>
+          argument.startsWith("model_providers=") &&
+          argument.includes('"env_key"="FIREWORKS_API_KEY"'),
+      ),
+    ).toBe(true);
   });
 
   test("publishes only verified patch files and preserves unrelated staged changes", async () => {

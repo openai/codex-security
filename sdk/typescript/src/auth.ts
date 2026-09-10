@@ -289,6 +289,13 @@ export async function logout(
   }
 }
 
+/** @internal Authentication settings shared by login and model commands. */
+export const CODEX_AUTH_CONFIG_KEYS = [
+  "cli_auth_credentials_store",
+  "forced_login_method",
+  "forced_chatgpt_workspace_id",
+] as const;
+
 function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
     /https?:\/\/[^\s<>"']+/g,
