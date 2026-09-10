@@ -1334,6 +1334,13 @@ def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]
     return db.scan_context(connection, scan_id)
 
 
+def save_artifact(args: Any) -> dict[str, Any]:
+    """Publish stdin bytes under the MCP-selected temporary or standalone root."""
+    root = Path(args.artifact_root)
+    write_scan_local_bytes(root, args.artifact_path, sys.stdin.buffer.read())
+    return {"path": str(root / args.artifact_path)}
+
+
 def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     """Publish supplemental bytes under the same lock as finalization and recovery."""
     scan_id = db.require_uuid(args.scan_id, "scan-id")
@@ -1368,7 +1375,7 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             }
         ):
             raise SystemExit("Use the typed scan tools for canonical artifacts and checkpoints.")
-        write_scan_local_bytes(scan_dir, output, Path(args.source_path).read_bytes())
+        write_scan_local_bytes(scan_dir, output, sys.stdin.buffer.read())
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 

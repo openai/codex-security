@@ -274,8 +274,11 @@ def parse_args(description: str) -> argparse.Namespace:
     save_scan_artifact = subparsers.add_parser("save-scan-artifact")
     save_scan_artifact.add_argument("--scan-id", required=True)
     save_scan_artifact.add_argument("--artifact-path", required=True)
-    save_scan_artifact.add_argument("--source-path", required=True)
     save_scan_artifact.add_argument("--claim-token")
+
+    save_artifact = subparsers.add_parser("save-artifact")
+    save_artifact.add_argument("--artifact-root", required=True)
+    save_artifact.add_argument("--artifact-path", required=True)
 
     mark_handoff_delivered = subparsers.add_parser("mark-handoff-delivered")
     mark_handoff_delivered.add_argument("--scan-id", required=True)

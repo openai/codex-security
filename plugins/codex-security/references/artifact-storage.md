@@ -22,6 +22,8 @@ Select `storage` explicitly:
 - `persistent`: retained documents/evidence under the authoritative scan directory or standalone collection. The default root is `$CODEX_SECURITY_STATE_DIR/scans`, or `$CODEX_HOME/state/plugins/codex-security/scans` when no state override is set; `CODEX_HOME` defaults to `~/.codex`. The existing `CODEX_SECURITY_SCAN_ROOT` override still takes precedence for plugin-created output. If the default workbench state is unwritable, retained artifacts follow its temporary fallback state's `scans` directory and can be removed by OS temporary-directory cleanup. Preserve an existing scan's saved path, including older temporary paths.
 - `temporary`: disposable staging and execution output in a context-specific OS temporary directory. It is not part of the completed result and must not be referenced from canonical findings or coverage. It can disappear independently of retained files.
 
+Relative storage overrides resolve from the plugin directory, matching the workbench, regardless of the MCP launch directory.
+
 Omit `path`, `content` and `sourcePath` to prepare the selected directory. Use the returned `directory`; never construct or guess the physical path. A save with a file requires `path` plus exactly one of `content` or `sourcePath`.
 
 Example for a running scan:

@@ -3440,6 +3440,9 @@ def main() -> None:
         result = inspect_setup(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
+    if args.command == "save-artifact":
+        print(json.dumps(saved_results.save_artifact(args)))
+        return
     if args.command == "read-severity-classification":
         result = severity.read_classification(database_path(), args.scan_id)
         print(json.dumps(result, allow_nan=False, sort_keys=True))

@@ -1,13 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import * as z from "zod/v4";
 import {
-  artifactDestination,
   readArtifactBytes,
   requireArtifactRoot,
-  replaceArtifactBytes,
   type ArtifactContext
 } from "./artifact-io.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
@@ -36,18 +34,18 @@ export const readArtifactInputSchema = z.object({
 export type ArtifactLocation = z.infer<typeof saveArtifactInputSchema>;
 
 /** Keep plugin defaults aligned with the SDK without changing SDK-owned outputs. */
-export function persistentScanRoot(environment: NodeJS.ProcessEnv = process.env): string {
+export function persistentScanRoot(pluginRoot: string, environment: NodeJS.ProcessEnv = process.env): string {
   const configured = environment.CODEX_SECURITY_SCAN_ROOT?.trim();
-  if (configured) return expandHome(configured);
+  if (configured) return expandHome(configured, pluginRoot);
   const state = environment.CODEX_SECURITY_STATE_DIR?.trim();
-  return join(state ? expandHome(state) : join(
-    expandHome(environment.CODEX_HOME?.trim() || join(homedir(), ".codex")),
+  return join(state ? expandHome(state, pluginRoot) : join(
+    expandHome(environment.CODEX_HOME?.trim() || join(homedir(), ".codex"), pluginRoot),
     "state", "plugins", "codex-security"
   ), "scans");
 }
 
-function expandHome(value: string): string {
-  return resolve(value === "~" ? homedir()
+function expandHome(value: string, base: string): string {
+  return resolve(base, value === "~" ? homedir()
     : /^~[/\\]/.test(value) ? join(homedir(), value.slice(2)) : value);
 }
 
@@ -56,7 +54,7 @@ export async function standaloneArtifactContext(
   targetPath: string,
   runWorkbench: RunArtifactWorkbench,
   create: boolean,
-  scanRoot = persistentScanRoot()
+  scanRoot: string
 ): Promise<ArtifactContext> {
   const target = await runWorkbench(["inspect-target", "--target-path", targetPath]);
   if (typeof target.targetPath !== "string") throw new Error("Missing artifact target.");
@@ -138,22 +136,17 @@ export async function saveCodexSecurityArtifact(
   } else {
     bytes = Buffer.from(input.content!, "utf8");
   }
-  const destination = await artifactDestination(selected, parts, "Saved artifact");
+  const destination = join(selected.root, ...parts);
   if (input.storage === "persistent" && context.scanId) {
-    const scratch = await storageContext(context, "temporary", true);
-    const staged = await artifactDestination(scratch, [randomUUID() + ".tmp"], "Artifact publication");
-    try {
-      await replaceArtifactBytes(staged, bytes);
-      await runWorkbench([
-        "save-scan-artifact", "--scan-id", context.scanId,
-        "--artifact-path", parts.join("/"), "--source-path", staged,
-        ...(context.handoffClaimToken ? ["--claim-token", context.handoffClaimToken] : [])
-      ]);
-    } finally {
-      await fs.rm(staged, { force: true });
-    }
+    await runWorkbench([
+      "save-scan-artifact", "--scan-id", context.scanId,
+      "--artifact-path", parts.join("/"),
+      ...(context.handoffClaimToken ? ["--claim-token", context.handoffClaimToken] : [])
+    ], bytes);
   } else {
-    await replaceArtifactBytes(destination, bytes);
+    await runWorkbench([
+      "save-artifact", "--artifact-root", selected.root, "--artifact-path", parts.join("/")
+    ], bytes);
   }
   return {
     storage: input.storage,

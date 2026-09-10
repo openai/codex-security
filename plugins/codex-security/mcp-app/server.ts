@@ -37,7 +37,7 @@ const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
 const CONFIGURED_WORKBENCH_STATE_DIR = process.env.CODEX_SECURITY_STATE_DIR?.trim();
 const PLUGIN_ROOT = resolve(__dirname, "..");
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
-const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set(["inspect-target", "inspect-setup"]);
+const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set(["inspect-target", "inspect-setup", "save-artifact"]);
 
 type JsonObject = Record<string, unknown>;
 
@@ -81,14 +81,14 @@ const daybreakEntitlementContextSchema = z.object({
 });
 
 async function scanRoot(): Promise<string> {
-  if (CONFIGURED_SCAN_ROOT) return persistentScanRoot();
+  if (CONFIGURED_SCAN_ROOT) return persistentScanRoot(PLUGIN_ROOT);
   if (!CONFIGURED_WORKBENCH_STATE_DIR && !persistentWorkbenchStateSucceeded && !fallbackWorkbenchStateDir) {
     // Select the workbench state before choosing its default artifact directory.
     await runWorkbench(["list-scans", "--limit", "1"]);
   }
   return fallbackWorkbenchStateDir
     ? join(await fallbackWorkbenchStateDir, "scans")
-    : persistentScanRoot();
+    : persistentScanRoot(PLUGIN_ROOT);
 }
 
 interface WorkspaceState extends JsonObject {
@@ -1625,7 +1625,7 @@ function logDeepScanEvent(event: {
 
 async function runWorkbench(
   args: string[],
-  input?: string
+  input?: string | Buffer
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
@@ -1648,7 +1648,7 @@ async function runWorkbench(
 async function executeWorkbenchWithStateSelection(
   pythonCommand: string,
   args: string[],
-  input?: string
+  input?: string | Buffer
 ): Promise<JsonObject> {
   if (WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "")) {
     return await executeWorkbench(pythonCommand, args, undefined, input);
@@ -1700,7 +1700,7 @@ async function executeWorkbench(
   pythonCommand: string,
   args: string[],
   stateDir?: string,
-  input?: string
+  input?: string | Buffer
 ): Promise<JsonObject> {
   const userContextIndex = args.indexOf("--user-context");
   const userContext = userContextIndex === -1 ? undefined : args[userContextIndex + 1];

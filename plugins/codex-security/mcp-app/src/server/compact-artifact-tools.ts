@@ -43,7 +43,7 @@ import {
 import {
   readArtifactInputSchema, readCodexSecurityArtifact,
   saveArtifactInputSchema, saveCodexSecurityArtifact,
-  standaloneArtifactContext, type ArtifactLocation
+  persistentScanRoot, standaloneArtifactContext, type ArtifactLocation
 } from "../artifact-storage.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -284,7 +284,8 @@ async function supplementalContext(
   }
   if (input.scanId !== undefined) return scanContext({ ...input, scanId: input.scanId }, options, write, requestContext);
   if (input.handoffClaimToken !== undefined) throw new Error("A handoff claim requires a scanId.");
-  return standaloneArtifactContext(input.targetPath!, options.runWorkbench, write, await options.resolveScanRoot?.());
+  const root = await options.resolveScanRoot?.() ?? persistentScanRoot(options.pluginRoot);
+  return standaloneArtifactContext(input.targetPath!, options.runWorkbench, write, root);
 }
 
 /** Expose only the operations appropriate to the inherited worker phase. */
