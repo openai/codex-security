@@ -23,6 +23,7 @@
 - reject owned plugin keys inside Codex profiles ([#861](https://github.com/openai/codex-security/pull/861))
 - include CommonJS and TypeScript module extensions in scan inventories ([#859](https://github.com/openai/codex-security/pull/859))
 - include workflow files in diff inventories ([#820](https://github.com/openai/codex-security/pull/820))
+- accept a UTF-8 byte order mark in imported findings JSON ([#856](https://github.com/openai/codex-security/pull/856))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
