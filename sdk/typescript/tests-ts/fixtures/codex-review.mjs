@@ -3,6 +3,32 @@ import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const [scenario, transcript, checkout] = process.argv.slice(2);
+const turnFailures = {
+  "failed-turn": {
+    message: "Rate limit exceeded",
+    codexErrorInfo: "usageLimitExceeded",
+  },
+  "server-error": {
+    message: "Provider temporarily unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "connection-error": {
+    message: "Provider stream disconnected",
+    codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+  },
+  "unauthorized-turn": {
+    message: "Authentication required",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 401 } },
+  },
+  "bad-request-turn": {
+    message: "Invalid model configuration",
+    codexErrorInfo: "badRequest",
+  },
+  "unknown-turn": {
+    message: "Unknown model failure",
+    codexErrorInfo: "other",
+  },
+};
 let turns = 0;
 let turnId;
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -199,11 +225,10 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(message.result.success, true);
     if (scenario === "accepted-no-replay") {
       submit("late-submission", { decision: "UNKNOWN" });
-    } else if (scenario === "failed-turn") {
+    } else if (turnFailures[scenario]) {
       process.stderr.write("Synthetic provider failure with private details\n");
       complete("failed", {
-        message: "Rate limit exceeded",
-        codexErrorInfo: "usageLimitExceeded",
+        ...turnFailures[scenario],
         additionalDetails: "Synthetic private response data",
       });
     } else complete();

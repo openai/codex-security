@@ -28,6 +28,7 @@
 - drop canonical document size limits that do not exist ([#868](https://github.com/openai/codex-security/pull/868))
 - pin native Rust formatting edition ([#863](https://github.com/openai/codex-security/pull/863))
 - detect a Linear URL contradiction over plain HTTP ([#867](https://github.com/openai/codex-security/pull/867))
+- pipeline dedupe with configurable concurrency ([#852](https://github.com/openai/codex-security/pull/852))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
