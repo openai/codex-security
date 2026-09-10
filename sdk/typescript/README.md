@@ -233,7 +233,8 @@ credential home for stored OpenAI credentials:
 home outside the target directory and every enclosing Git worktree, including
 when running a command from a subdirectory. Codex carries
 `cli_auth_credentials_store`, `forced_login_method`, and
-`forced_chatgpt_workspace_id` from the ambient configuration into this home.
+`forced_chatgpt_workspace_id` from the ambient configuration into this home,
+including removing settings that are no longer present in the ambient configuration.
 Managed-device policies still apply. If this home has no credentials, it imports
 an existing file-based Codex sign-in. Logout disables
 imports until you log in again.

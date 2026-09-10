@@ -4292,7 +4292,8 @@ export function formatEnvironmentVariableRemovalGuidance(
   return `remove ${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]} from the environment`;
 }
 
-async function runtimeScanAuthentication(
+/** @internal */
+export async function runtimeScanAuthentication(
   environment: ProcessEnvironment,
   codexHome: string,
   auth: ScanAuthMode = "auto",

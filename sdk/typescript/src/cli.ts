@@ -57,6 +57,7 @@ import {
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
+  runtimeScanAuthentication,
   selectedScanEnvironment,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -1475,7 +1476,8 @@ export async function runCodexSkillCommand(
         });
         for (const key of CODEX_AUTH_CONFIG_KEYS) {
           const value = ambientConfig[key];
-          if (value !== undefined) credentialConfig[key] = value;
+          if (value === undefined) delete credentialConfig[key];
+          else credentialConfig[key] = value;
         }
         await writeCodexConfig(
           join(codexHome, "config.toml"),
@@ -1500,9 +1502,15 @@ export async function runCodexSkillCommand(
       ) {
         throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
       }
+      authentication = await runtimeScanAuthentication(
+        selected,
+        codexHome,
+        output.auth,
+        provider,
+      );
     } else if (
       authentication.method === "api_key" &&
-      !isExternalModelProvider(provider)
+      (provider === undefined || provider === "openai")
     ) {
       apiKey = environmentValue(selected, authentication.source)?.trim();
       // Match the SDK's key selection for native and nested plugin workers.
@@ -8308,6 +8316,15 @@ function authenticationFailureMessage(
     return (
       `Authentication failed using AWS credentials from ${authentication.source}. ` +
       "Check your Amazon Bedrock bearer token or AWS credential chain."
+    );
+  }
+  if (
+    authentication?.method === "stored_credentials" &&
+    authentication.credentialType === "api_key"
+  ) {
+    return (
+      "Authentication failed using a stored API key. " +
+      "Sign in again with 'codex-security login --with-api-key' or provide a valid API key."
     );
   }
   return authentication?.method === "api_key"

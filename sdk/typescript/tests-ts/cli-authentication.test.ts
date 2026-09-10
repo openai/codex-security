@@ -1259,13 +1259,16 @@ describe("skill authentication", () => {
     },
   );
   test.each([
-    ["auto", false],
-    ["chatgpt", false],
-    ["api-key", false],
-    ["api-key", true],
+    ["auto", false, undefined],
+    ["chatgpt", false, undefined],
+    ["chatgpt", true, undefined],
+    ["api-key", false, undefined],
+    ["api-key", true, undefined],
+    ["auto", false, "synthetic"],
+    ["api-key", false, "synthetic"],
   ] as const)(
-    "patch uses %s auth without replacing a saved login (login failure: %s)",
-    async (auth, loginFailure) => {
+    "patch uses %s auth without replacing a saved login (failure: %s, provider: %s)",
+    async (auth, loginFailure, provider) => {
       const repository = join(stateDirectory, "repository");
       await mkdir(repository);
       const ambientHome = join(stateDirectory, "ambient");
@@ -1287,20 +1290,41 @@ describe("skill authentication", () => {
           'forced_login_method = "api"',
         );
       }
+      if (provider !== undefined) {
+        await writeFile(
+          join(ambientHome, "config.toml"),
+          [
+            'model_provider = "synthetic"',
+            "[model_providers.synthetic]",
+            'name = "Synthetic provider"',
+            'base_url = "https://example.com/v1"',
+            'env_key = "OPENAI_API_KEY"',
+            "requires_openai_auth = false",
+          ].join("\n"),
+        );
+      }
+      const usesSessionKey = auth !== "chatgpt" && provider === undefined;
       const requestLog = join(stateDirectory, "requests.jsonl");
       const stderr = capture();
       const stdout = capture();
       const environment = {
         CODEX_HOME: ambientHome,
-        OpenAI_API_KEY: "  SYNTHETIC_OPENAI_KEY  ",
-        CODEX_API_KEY: "SYNTHETIC_CODEX_KEY",
+        ...(provider === undefined
+          ? {
+              OpenAI_API_KEY: "  SYNTHETIC_OPENAI_KEY  ",
+              CODEX_API_KEY: "SYNTHETIC_CODEX_KEY",
+            }
+          : {
+              OPENAI_API_KEY: "SYNTHETIC_CUSTOM_KEY",
+              SYNTHETIC_EXPECTED_CUSTOM_KEY: "SYNTHETIC_CUSTOM_KEY",
+            }),
         SYNTHETIC_REQUEST_LOG: requestLog,
         ...(loginFailure ? { SYNTHETIC_LOGIN_FAILURE: "1" } : {}),
         SYNTHETIC_EXPECTED_HOME:
           auth === "chatgpt" ? credentialHome : ambientHome,
-        ...(auth === "chatgpt"
-          ? {}
-          : { SYNTHETIC_EXPECTED_KEY: "SYNTHETIC_OPENAI_KEY" }),
+        ...(usesSessionKey
+          ? { SYNTHETIC_EXPECTED_KEY: "SYNTHETIC_OPENAI_KEY" }
+          : {}),
       };
       expect(
         await main(
@@ -1331,7 +1355,9 @@ describe("skill authentication", () => {
       );
       if (loginFailure)
         expect(stderr.text()).toContain(
-          "Authentication failed using OPENAI_API_KEY",
+          auth === "chatgpt"
+            ? "Authentication failed using a stored API key"
+            : "Authentication failed using OPENAI_API_KEY",
         );
       else expect(stderr.text()).toBe("");
       const requests = (await readFile(requestLog, "utf8"))
@@ -1347,8 +1373,9 @@ describe("skill authentication", () => {
       expect(methods).toEqual([
         "initialize",
         "notifications/initialized",
-        ...(auth === "chatgpt" ? [] : ["account/login/start"]),
-        ...(loginFailure ? [] : ["thread/start", "turn/start"]),
+        ...(usesSessionKey ? ["account/login/start"] : []),
+        ...(loginFailure && usesSessionKey ? [] : ["thread/start"]),
+        ...(loginFailure ? [] : ["turn/start"]),
       ]);
       expect(await readFile(join(credentialHome, "auth.json"), "utf8")).toBe(
         stored,
@@ -1421,12 +1448,10 @@ describe("skill authentication", () => {
       const home = await prepareCodexSecurityCredentialHome(environment);
       const sourceHome =
         authSource === "shared" ? home : environment.CODEX_HOME;
-      await mkdir(sourceHome, { recursive: true });
-      if (authSource === "ambient") {
-        await writeFile(join(home, "config.toml"), 'model = "existing-model"');
-      }
+      await mkdir(environment.CODEX_HOME, { recursive: true });
+      await writeFile(join(home, "config.toml"), 'model = "existing-model"');
       await writeFile(
-        join(sourceHome, "config.toml"),
+        join(environment.CODEX_HOME, "config.toml"),
         [
           'cli_auth_credentials_store = "keyring"',
           'forced_login_method = "chatgpt"',
@@ -1442,23 +1467,26 @@ describe("skill authentication", () => {
         }),
         { mode: 0o600 },
       );
-      const stdout = capture();
-      const source =
-        'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({args:process.argv,home:process.env.CODEX_HOME})}}))';
-      expect(
-        await runCodexSkillCommand(
-          ["-e", source, "--"],
-          {
-            command: "validate",
-            auth,
-            stdout: stdout.stream,
-            stderr: capture().stream,
-          },
-          { command: process.execPath },
-          environment,
-        ),
-      ).toBe(0);
-      const { args, home: runtimeHome } = JSON.parse(stdout.text());
+      const run = async () => {
+        const stdout = capture();
+        const source =
+          'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({args:process.argv,home:process.env.CODEX_HOME})}}))';
+        expect(
+          await runCodexSkillCommand(
+            ["-e", source, "--"],
+            {
+              command: "validate",
+              auth,
+              stdout: stdout.stream,
+              stderr: capture().stream,
+            },
+            { command: process.execPath },
+            environment,
+          ),
+        ).toBe(0);
+        return JSON.parse(stdout.text());
+      };
+      const { args, home: runtimeHome } = await run();
       expect(runtimeHome).toBe(
         auth === "api-key" ? environment.CODEX_HOME : home,
       );
@@ -1474,10 +1502,17 @@ describe("skill authentication", () => {
         cli_auth_credentials_store: "keyring",
         forced_login_method: "chatgpt",
         forced_chatgpt_workspace_id: "synthetic-workspace",
-        model:
-          auth === "auto" && authSource === "ambient"
-            ? "existing-model"
-            : "unrelated-model",
+        model: auth === "auto" ? "existing-model" : "unrelated-model",
+      });
+      await writeFile(
+        join(environment.CODEX_HOME, "config.toml"),
+        'model = "unrelated-model"',
+      );
+      expect((await run()).args).toEqual([process.execPath]);
+      expect(
+        parseToml(await readFile(join(runtimeHome, "config.toml"), "utf8")),
+      ).toEqual({
+        model: auth === "auto" ? "existing-model" : "unrelated-model",
       });
     },
   );
