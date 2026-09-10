@@ -78,83 +78,8 @@ function compare(left: string, right: string): number {
   return a.length - b.length;
 }
 
-// JSON's numeric spelling matters: Python accepts 1 but rejects 1.0 as a line.
-class JsonFloat {
-  constructor(readonly source: string) {}
-}
-function parseJson(source: string): unknown {
-  const tokens =
-    source.match(
-      /"(?:\\[\s\S]|[^"\\])*"|[{}\[\]:,]|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null|-?Infinity|NaN|[^ \t\r\n]/gu,
-    ) ?? [];
-  let index = 0;
-  const take = () => tokens[index++];
-  function expect(token: string): void {
-    if (take() !== token) throw new Error(`expected ${token} in JSON`);
-  }
-  function value(): unknown {
-    const token = take();
-    if (token === "{") {
-      const row: Row = Object.create(null) as Row;
-      if (tokens[index] === "}") {
-        index++;
-        return row;
-      }
-      while (true) {
-        const key = take();
-        if (!key?.startsWith('"'))
-          throw new Error("expected a JSON property name");
-        expect(":");
-        row[JSON.parse(key) as string] = value();
-        if (tokens[index] === "}") {
-          index++;
-          return row;
-        }
-        expect(",");
-      }
-    }
-    if (token === "[") {
-      const values: unknown[] = [];
-      if (tokens[index] === "]") {
-        index++;
-        return values;
-      }
-      while (true) {
-        values.push(value());
-        if (tokens[index] === "]") {
-          index++;
-          return values;
-        }
-        expect(",");
-      }
-    }
-    if (token?.startsWith('"')) return JSON.parse(token) as string;
-    if (token === "true") return true;
-    if (token === "false") return false;
-    if (token === "null") return null;
-    if (token !== undefined && /^-?[0-9]+$/u.test(token)) return BigInt(token);
-    if (
-      token !== undefined &&
-      (/^-?(?:[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|Infinity)$/u.test(
-        token,
-      ) ||
-        token === "NaN")
-    )
-      return new JsonFloat(token);
-    throw new Error("expected a JSON value");
-  }
-  const result = value();
-  if (index !== tokens.length) throw new Error("extra data after JSON value");
-  return result;
-}
-
 function object(value: unknown): value is Row {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    !(value instanceof JsonFloat)
-  );
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function stableJson(value: unknown): string {
@@ -364,8 +289,8 @@ function cweIds(row: Row): string[] {
     .map((number) => `CWE-${number}`);
 }
 
-function positiveLine(value: unknown, field: string): bigint {
-  if (typeof value !== "bigint" || value < 1n)
+function positiveLine(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1)
     throw new Error(`${field}: expected a positive integer`);
   return value;
 }
@@ -411,14 +336,14 @@ function normalizeLocations(
       lineCounts.set(key, lines);
     }
     const count = lineCounts.get(key)!;
-    if (end > BigInt(count))
+    if (end > count)
       throw new Error(`line range ${start}-${end} exceeds ${name}:${count}`);
     if (typeof item.role !== "string" || !roles.includes(item.role))
       throw new Error(`role: unsupported value ${String(item.role)}`);
     const location = {
       path: name,
-      start_line: Number(start),
-      end_line: Number(end),
+      start_line: start,
+      end_line: end,
       role: item.role,
     };
     normalized.set(stableJson(location), location);
@@ -589,19 +514,7 @@ export function normalizeCandidatesCommand(
     const scopePath = paths("in-scope-files")[0]!;
     const inputs = [
       ...new Map(paths("input").map((path) => [pathKey(path), path])).values(),
-    ].sort((a, b) => {
-      const left = pathKey(a).split(sep),
-        right = pathKey(b).split(sep);
-      for (
-        let index = 0;
-        index < Math.min(left.length, right.length);
-        index++
-      ) {
-        const order = compare(left[index]!, right[index]!);
-        if (order !== 0) return order;
-      }
-      return left.length - right.length;
-    });
+    ].sort((a, b) => compare(pathKey(a), pathKey(b)));
     if (inputs.some((path) => pathKey(path) === pathKey(output)))
       throw new Error("--out: must not also be an input");
     if (pathKey(output) === pathKey(scopePath))
@@ -618,7 +531,7 @@ export function normalizeCandidatesCommand(
       for (const [index, line] of lines.entries()) {
         if (trim(line) === "") continue;
         try {
-          const row = parseJson(line);
+          const row: unknown = JSON.parse(line);
           if (!object(row)) throw new Error("expected a JSON object");
           rows.push(normalizeCandidate(row, root, scope, lineCounts));
         } catch (error) {
