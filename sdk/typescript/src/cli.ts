@@ -1426,7 +1426,7 @@ export async function runCodexSkillCommand(
           ? {}
           : await readCodexHomeConfig(processEnvironment);
     const provider = scanModelProvider(config);
-    modelProvider = typeof provider === "string" ? provider : "openai";
+    modelProvider = output.modelProvider;
     authentication = scanAuthentication(
       processEnvironment,
       output.auth,

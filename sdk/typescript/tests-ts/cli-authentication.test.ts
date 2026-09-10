@@ -1327,10 +1327,16 @@ describe("skill authentication", () => {
           "Authentication failed using OPENAI_API_KEY",
         );
       else expect(stderr.text()).toBe("");
-      const methods = (await readFile(requestLog, "utf8"))
+      const requests = (await readFile(requestLog, "utf8"))
         .trim()
         .split("\n")
-        .map((line) => JSON.parse(line).method);
+        .map((line) => JSON.parse(line));
+      const methods = requests.map((request) => request.method);
+      if (!loginFailure) {
+        expect(
+          requests.find((request) => request.method === "thread/start").params,
+        ).not.toHaveProperty("modelProvider");
+      }
       expect(methods).toEqual([
         "initialize",
         "notifications/initialized",
