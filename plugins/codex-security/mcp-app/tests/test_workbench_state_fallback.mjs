@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,6 +41,66 @@ async function testWorkbenchStateFallback() {
   });
 
   try {
+    if (process.getuid?.() !== 0) {
+      for (const firstOperation of ["scan", "standalone"]) {
+        const codexHome = path.join(fixtureRoot, `default-${firstOperation}-home`);
+        const defaultState = path.join(codexHome, "state", "plugins", "codex-security");
+        await mkdir(defaultState, { recursive: true });
+        await chmod(defaultState, 0o500);
+        const server = startServer(serverBundlePath, childEnvironment({
+          CODEX_HOME: codexHome,
+          CODEX_SECURITY_SCAN_ROOT: undefined,
+          CODEX_SECURITY_STATE_DIR: undefined,
+          PYTHON: realPython
+        }));
+        let fallbackState;
+        try {
+          await initialize(server, 1);
+          const standaloneInput = {
+            targetPath, storage: "persistent", path: "threat_model.md", content: "retained context\n"
+          };
+          if (firstOperation === "standalone") {
+            assertNoError(await server.request(2, "tools/call", {
+              name: "save_codex_security_artifact", arguments: standaloneInput
+            }));
+          }
+          const started = await server.request(3, "tools/call", {
+            name: "start_codex_security_standard_scan",
+            arguments: { targetPath },
+            _meta: { "openai/threadId": "default-state-fallback" }
+          });
+          assertNoError(started);
+          const { scanId, scanDir, handoffClaimToken } = started.result.structuredContent;
+          fallbackState = path.dirname(path.dirname(path.dirname(scanDir)));
+          assert.ok(fallbackState.startsWith(path.join(await realpath(tmpdir()), "codex-security-state-")));
+          assert.equal((await stat(path.join(fallbackState, "workbench.sqlite3"))).isFile(), true);
+          const standalone = await server.request(4, "tools/call", {
+            name: "save_codex_security_artifact", arguments: standaloneInput
+          });
+          assertNoError(standalone);
+          assert.ok(standalone.result.structuredContent.path.startsWith(path.join(fallbackState, "scans") + path.sep));
+          assert.equal(await readFile(standalone.result.structuredContent.path, "utf8"), standaloneInput.content);
+          const location = { scanId, handoffClaimToken, storage: "persistent", path: "artifacts/proof.txt" };
+          const saved = await server.request(5, "tools/call", {
+            name: "save_codex_security_artifact", arguments: { ...location, content: "exact café bytes\n" }
+          });
+          assertNoError(saved);
+          assert.ok(saved.result.structuredContent.path.startsWith(scanDir + path.sep));
+          const read = await server.request(6, "tools/call", {
+            name: "read_codex_security_artifact", arguments: location
+          });
+          assertNoError(read);
+          assert.equal(read.result.structuredContent.content, "exact café bytes\n");
+          assert.equal(server.stderrEvents().filter((event) => event.event === "state_fallback_pinned").length, 1);
+          assert.equal(await pathExists(path.join(defaultState, "scans")), false);
+        } finally {
+          await server.stop();
+          await chmod(defaultState, 0o700);
+          if (fallbackState) await rm(fallbackState, { recursive: true, force: true });
+        }
+      }
+    }
+
     const scanRoot = path.join(fixtureRoot, "fallback-scans");
     await mkdir(scanRoot, { recursive: true });
     const fallbackServer = startServer(serverBundlePath, childEnvironment({

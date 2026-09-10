@@ -55,15 +55,16 @@ function expandHome(value: string): string {
 export async function standaloneArtifactContext(
   targetPath: string,
   runWorkbench: RunArtifactWorkbench,
-  create: boolean
+  create: boolean,
+  scanRoot = persistentScanRoot()
 ): Promise<ArtifactContext> {
   const target = await runWorkbench(["inspect-target", "--target-path", targetPath]);
   if (typeof target.targetPath !== "string") throw new Error("Missing artifact target.");
   const repoRoot = await fs.realpath(target.targetPath);
   const name = basename(repoRoot).replace(/[^a-zA-Z0-9._-]+/g, "-") || "repository";
   const identity = createHash("sha256").update(repoRoot).digest("hex");
-  const root = join(persistentScanRoot(), name, `artifacts-${identity}`);
-  const existingRoot = await fs.realpath(persistentScanRoot()).catch(() => persistentScanRoot());
+  const root = join(scanRoot, name, `artifacts-${identity}`);
+  const existingRoot = await fs.realpath(scanRoot).catch(() => scanRoot);
   if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
     throw new Error("Artifact storage must be outside the target repository.");
   }

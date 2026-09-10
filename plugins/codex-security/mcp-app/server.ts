@@ -80,8 +80,15 @@ const daybreakEntitlementContextSchema = z.object({
   })
 });
 
-function scanRoot(): Promise<string> {
-  return Promise.resolve(persistentScanRoot());
+async function scanRoot(): Promise<string> {
+  if (CONFIGURED_SCAN_ROOT) return persistentScanRoot();
+  if (!CONFIGURED_WORKBENCH_STATE_DIR && !persistentWorkbenchStateSucceeded && !fallbackWorkbenchStateDir) {
+    // Select the workbench state before choosing its default artifact directory.
+    await runWorkbench(["list-scans", "--limit", "1"]);
+  }
+  return fallbackWorkbenchStateDir
+    ? join(await fallbackWorkbenchStateDir, "scans")
+    : persistentScanRoot();
 }
 
 interface WorkspaceState extends JsonObject {
@@ -1313,6 +1320,7 @@ export function createCodexSecurityServer(): McpServer {
   registerCompactArtifactTools(server, {
     runWorkbench,
     pluginRoot: PLUGIN_ROOT,
+    resolveScanRoot: scanRoot,
     resolveHandoffClaimToken: (scanId, requestContext) => {
       const claim = authenticatedArtifactClaims.get(scanId);
       return claim && claim.threadId === threadIdFromExtra(requestContext)

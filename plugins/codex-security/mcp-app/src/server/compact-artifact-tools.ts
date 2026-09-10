@@ -51,6 +51,7 @@ type JsonRecord = Record<string, unknown>;
 export interface CompactArtifactToolOptions {
   runWorkbench: RunArtifactWorkbench;
   pluginRoot: string;
+  resolveScanRoot?: () => Promise<string>;
   resolveHandoffClaimToken?: (
     scanId: string,
     requestContext: unknown
@@ -283,7 +284,7 @@ async function supplementalContext(
   }
   if (input.scanId !== undefined) return scanContext({ ...input, scanId: input.scanId }, options, write, requestContext);
   if (input.handoffClaimToken !== undefined) throw new Error("A handoff claim requires a scanId.");
-  return standaloneArtifactContext(input.targetPath!, options.runWorkbench, write);
+  return standaloneArtifactContext(input.targetPath!, options.runWorkbench, write, await options.resolveScanRoot?.());
 }
 
 /** Expose only the operations appropriate to the inherited worker phase. */
