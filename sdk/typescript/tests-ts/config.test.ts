@@ -748,6 +748,16 @@ describe("Codex configuration", () => {
         },
       }),
     ).rejects.toThrow("owns plugin loading configuration");
+    for (const owned of ["plugins", "marketplaces"] as const) {
+      await expect(
+        mergedCodexConfig({
+          codexOverrides: {
+            profile: "disabled",
+            profiles: { disabled: { [owned]: {} } },
+          },
+        }),
+      ).rejects.toThrow("owns plugin loading configuration");
+    }
     await expect(
       mergedCodexConfig({
         codexOverrides: {

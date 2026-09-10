@@ -171,16 +171,18 @@ describe("Linear publication claim resolution", () => {
       ),
     ],
     [
-      "equivalent Linear URL spellings",
+      "equivalent Linear URL spellings retain HTTPS",
       {
         identifier,
         url,
         structured_content: { url: `${url}/` },
+        structuredContent: { url: url.replace("https:", "http:") },
         issue: { url: `${url}/synthetic-title/` },
       },
       resolved(
         [
           { kind: "identifier", value: identifier },
+          { kind: "url", value: url.replace("https:", "http:") },
           { kind: "url", value: url },
           { kind: "url", value: `${url}/` },
           { kind: "url", value: `${url}/synthetic-title/` },
@@ -219,6 +221,23 @@ describe("Linear publication claim resolution", () => {
         claims: [
           { kind: "identifier", value: "SYNTH-502" },
           { kind: "url", value: url },
+        ],
+      },
+    ],
+    [
+      "plain HTTP URL and human key contradiction",
+      {
+        issueIdentifier: "SYNTH-502",
+        url: `http://linear.app/example/issue/${identifier}`,
+      },
+      {
+        state: "conflicting",
+        claims: [
+          { kind: "identifier", value: "SYNTH-502" },
+          {
+            kind: "url",
+            value: `http://linear.app/example/issue/${identifier}`,
+          },
         ],
       },
     ],

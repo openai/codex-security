@@ -116,7 +116,9 @@ export async function parseImportedFindings(
 
   let payload: unknown;
   try {
-    payload = JSON.parse(source);
+    // Exported findings files often start with a UTF-8 byte order mark, which
+    // the CSV parser already skips.
+    payload = JSON.parse(source.replace(/^\uFEFF/u, ""));
   } catch (error) {
     throw new CodexSecurityError("Findings JSON could not be parsed.", {
       cause: error,

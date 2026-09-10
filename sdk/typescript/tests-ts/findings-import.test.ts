@@ -8,6 +8,14 @@ import {
 import type { Finding, FindingsDocument } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
+const BYTE_ORDER_MARK = "\uFEFF";
+const CSV_SOURCE =
+  "occurrence_id,finding_id,title,summary,severity,confidence,status," +
+  "close_reason,note,remediation,path,start_line,end_line\r\n" +
+  "occ_000000000000000000000001,csf_000000000000000000000001," +
+  "Reported CSV import issue,Reported summary,high,high,open,,," +
+  "Validate archive entry destinations.,src/extract.ts,41,44\r\n";
+
 async function sourceDocument(): Promise<FindingsDocument> {
   return JSON.parse(
     await readFile(
@@ -35,6 +43,24 @@ describe("findings import formats", () => {
     expect(
       await parseImportedFindings('{"findings":[]}', "json", PLUGIN_ROOT),
     ).toEqual([]);
+  });
+
+  test("accepts a UTF-8 byte order mark in either import format", async () => {
+    const document = await sourceDocument();
+    expect(
+      await parseImportedFindings(
+        `${BYTE_ORDER_MARK}${JSON.stringify(document)}`,
+        "json",
+        PLUGIN_ROOT,
+      ),
+    ).toEqual(document.findings);
+    const csv = await parseImportedFindings(
+      `${BYTE_ORDER_MARK}${CSV_SOURCE}`,
+      "csv",
+      PLUGIN_ROOT,
+    );
+    expect(csv).toHaveLength(1);
+    expect(csv[0]!.title).toBe("Reported CSV import issue");
   });
 
   test("binds separate source occurrences and retains source metadata without following report paths", async () => {
