@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { buildSync } from "esbuild";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { PatternCase } from "./support/python-regex-fixture";
+import { runCommand } from "./support/shell";
 
 const directory = realpathSync(mkdtempSync(join(tmpdir(), "python-pattern-")));
 const fixture = join(directory, "fixture.cjs"),
@@ -25,10 +25,9 @@ beforeAll(() =>
   }),
 );
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
-function run(cases: PatternCase[]): Record<string, unknown>[] {
-  const child = spawnSync(node, [fixture], {
+async function run(cases: PatternCase[]): Promise<Record<string, unknown>[]> {
+  const child = await runCommand(node, [fixture], {
     input: JSON.stringify(cases),
-    encoding: "utf8",
     timeout: 15000,
     env: {
       ...process.env,
@@ -45,8 +44,8 @@ const patterns = (values: string[]) =>
 const unlimited = 4294967295,
   widthLimit = "18446744073709551616";
 
-test("retains capture identity, scoped flags and conditional references in typed IR", () => {
-  expect(patterns(["(?P<word>é+)(?i:(?P=word))(?(word)a|b)"])).toEqual([
+test("retains capture identity, scoped flags and conditional references in typed IR", async () => {
+  expect(await patterns(["(?P<word>é+)(?i:(?P=word))(?(word)a|b)"])).toEqual([
     {
       nodes: [
         [
@@ -63,7 +62,7 @@ test("retains capture identity, scoped flags and conditional references in typed
       warnings: [],
     },
   ]);
-  const scoped = patterns([
+  const scoped = await patterns([
     "(?ai)a",
     "(?a:(?u:\\w+))",
     "(?P<__proto__>a)(?P=__proto__)",
@@ -80,8 +79,8 @@ test("retains capture identity, scoped flags and conditional references in typed
   expect(scoped[2]!["groupNames"]).toEqual([["__proto__", 1]]);
 });
 
-test("preserves character-set optimizations without merging separate repeat operands", () => {
-  const results = patterns([
+test("preserves character-set optimizations without merging separate repeat operands", async () => {
+  const results = await patterns([
     "ab|ac|ad",
     "[^a]",
     "[a-a]",
@@ -121,8 +120,8 @@ test("preserves character-set optimizations without merging separate repeat oper
   ]);
 });
 
-test("tracks atomic and possessive widths, including original repeat bounds and saturation", () => {
-  const results = patterns([
+test("tracks atomic and possessive widths, including original repeat bounds and saturation", async () => {
+  const results = await patterns([
     "a{100001}+(b|c)?",
     "(?>(a|ab))b",
     "(a?){2,4}+",
@@ -167,12 +166,12 @@ test("tracks atomic and possessive widths, including original repeat bounds and 
       ],
     ],
   ]);
-  expect(patterns(["a{4294967295}"])).toEqual([
+  expect(await patterns(["a{4294967295}"])).toEqual([
     { type: "OverflowError", message: "the repetition number is too large" },
   ]);
 });
 
-test("resolves Unicode 15 identifiers, canonical names, aliases and algorithmic names", () => {
+test("resolves Unicode 15 identifiers, canonical names, aliases and algorithmic names", async () => {
   const names = [
     "LF",
     "BOM",
@@ -183,7 +182,7 @@ test("resolves Unicode 15 identifiers, canonical names, aliases and algorithmic 
     "CJK UNIFIED IDEOGRAPH-323AF",
   ];
   expect(
-    patterns(names.map((name) => `\\N{${name}}`)).map(
+    (await patterns(names.map((name) => `\\N{${name}}`))).map(
       (result) => result["nodes"],
     ),
   ).toEqual(
@@ -191,13 +190,13 @@ test("resolves Unicode 15 identifiers, canonical names, aliases and algorithmic 
       ["LITERAL", code],
     ]),
   );
-  const groups = patterns(["(?P<é>a)(?P=é)", "(?P<K>a)", "(?P<𰀀>a)"]);
+  const groups = await patterns(["(?P<é>a)(?P=é)", "(?P<K>a)", "(?P<𰀀>a)"]);
   expect(groups.map((result) => result["groupNames"])).toEqual([
     [["é", 1]],
     [["K", 1]],
     [["𰀀", 1]],
   ]);
-  const invalid = patterns([
+  const invalid = await patterns([
     "\\N{hangul syllable ga}",
     "\\N{CJK UNIFIED IDEOGRAPH-4e00}",
     "\\N{CJK UNIFIED IDEOGRAPH-FA0E}",
@@ -209,10 +208,10 @@ test("resolves Unicode 15 identifiers, canonical names, aliases and algorithmic 
   );
 });
 
-test("keeps parser width analysis separate from fixed-width lookbehind validation", () => {
+test("keeps parser width analysis separate from fixed-width lookbehind validation", async () => {
   const pattern = "a(?<=a|ab)b";
-  expect(patterns([pattern])[0]!["width"]).toEqual(["2", "2"]);
-  expect(run([{ pattern, validateLookbehind: true }])).toEqual([
+  expect((await patterns([pattern]))[0]!["width"]).toEqual(["2", "2"]);
+  expect(await run([{ pattern, validateLookbehind: true }])).toEqual([
     {
       type: "error",
       message: "look-behind requires fixed-width pattern",
@@ -223,13 +222,15 @@ test("keeps parser width analysis separate from fixed-width lookbehind validatio
     },
   ]);
   expect(
-    run([
-      { pattern: "(?<=(?:a{4294967294}){2})", validateLookbehind: true },
-    ])[0]!["msg"],
+    (
+      await run([
+        { pattern: "(?<=(?:a{4294967294}){2})", validateLookbehind: true },
+      ])
+    )[0]!["msg"],
   ).toBe("looks too much behind");
-  const boundary = run([
-    { pattern: "(?<=\\B)(a)(?<=\\1)", validateLookbehind: true },
-  ])[0]!;
+  const boundary = (
+    await run([{ pattern: "(?<=\\B)(a)(?<=\\1)", validateLookbehind: true }])
+  )[0]!;
   expect(boundary["width"]).toEqual(["1", "1"]);
   expect(boundary["nodes"]).toEqual([
     ["ASSERT", [-1, [["AT", "AT_NON_BOUNDARY"]]]],
@@ -238,7 +239,7 @@ test("keeps parser width analysis separate from fixed-width lookbehind validatio
   ]);
 });
 
-test("reports Python error positions in code points and preserves syntax warning messages", () => {
+test("reports Python error positions in code points and preserves syntax warning messages", async () => {
   const rows = [
     ["😀(", "missing ), unterminated subpattern at position 1", 1],
     [
@@ -262,12 +263,12 @@ test("reports Python error positions in code points and preserves syntax warning
     ],
     ["[\\d-z]", "bad character range \\d-z at position 1", 1],
   ] as const;
-  const results = patterns(rows.map(([pattern]) => pattern));
+  const results = await patterns(rows.map(([pattern]) => pattern));
   expect(results.map(({ type, message, pos }) => [type, message, pos])).toEqual(
     rows.map(([, message, pos]) => ["error", message, pos]),
   );
   expect(
-    patterns(["[[]", "[a&&b]"]).map((result) => result["warnings"]),
+    (await patterns(["[[]", "[a&&b]"])).map((result) => result["warnings"]),
   ).toEqual([
     ["Possible nested set at position 1"],
     ["Possible set intersection at position 2"],

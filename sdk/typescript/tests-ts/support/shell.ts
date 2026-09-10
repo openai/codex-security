@@ -20,6 +20,7 @@ export function runCommand(
     cwd?: string;
     env?: NodeJS.ProcessEnv;
     input?: string;
+    maxBuffer?: number;
     timeout: number;
   },
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {

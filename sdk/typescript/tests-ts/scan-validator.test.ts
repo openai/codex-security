@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
@@ -17,6 +16,7 @@ import { buildSync } from "esbuild";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root";
 import type { Request, Response } from "./support/scan-validator-fixture";
+import { runCommand } from "./support/shell";
 
 type Table = Record<string, unknown>;
 const directory = realpathSync(mkdtempSync(join(tmpdir(), "scan-validator-")));
@@ -50,11 +50,11 @@ beforeAll(() =>
   }),
 );
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
-function run(requests: Request[]): Response[] {
-  const child = spawnSync(node, [fixture], {
+async function run(requests: Request[]): Promise<Response[]> {
+  const child = await runCommand(node, [fixture], {
     cwd: directory,
     input: JSON.stringify(requests),
-    encoding: "utf8",
+    timeout: 0,
     env,
     maxBuffer: Infinity,
   });
@@ -63,9 +63,9 @@ function run(requests: Request[]): Response[] {
   return JSON.parse(child.stdout) as Response[];
 }
 function cli(command: string, ...args: string[]) {
-  return spawnSync(node, [helper, command, ...args], {
+  return runCommand(node, [helper, command, ...args], {
     cwd: directory,
-    encoding: "utf8",
+    timeout: 0,
     env,
     maxBuffer: Infinity,
   });
@@ -100,10 +100,10 @@ function value(response: Response): Table {
   return JSON.parse(response.value!) as Table;
 }
 
-test("validates the shipped example and prints a sorted receipt without changing files", () => {
+test("validates the shipped example and prints a sorted receipt without changing files", async () => {
   const root = seed(),
     before = snapshot(root);
-  const result = value(run([{ operation: "validate", root }])[0]!);
+  const result = value((await run([{ operation: "validate", root }]))[0]!);
   expect((result["manifest"] as Table)["scan"]).toEqual(
     load(root, "scan-manifest.json")["scan"],
   );
@@ -117,7 +117,7 @@ test("validates the shipped example and prints a sorted receipt without changing
     scanDir: root,
     status: "valid",
   };
-  const child = cli("validate-scan-contract", "--scan-dir", root);
+  const child = await cli("validate-scan-contract", "--scan-dir", root);
   expect(child.status, child.stderr).toBe(0);
   expect(child.stdout.replaceAll("\r\n", "\n")).toBe(
     JSON.stringify(expected)
@@ -126,7 +126,7 @@ test("validates the shipped example and prints a sorted receipt without changing
   );
   expect(child.stderr).toBe("");
   expect(snapshot(root)).toEqual(before);
-  const tracked = cli(
+  const tracked = await cli(
     "validate-tracking-source",
     join(PLUGIN_ROOT, "examples/completed-scan"),
   );
@@ -136,7 +136,7 @@ test("validates the shipped example and prints a sorted receipt without changing
   );
 });
 
-test("legacy nested evidence references are validated without changing the original findings", () => {
+test("legacy nested evidence references are validated without changing the original findings", async () => {
   const root = seed(),
     findings = load(root, "findings.json");
   (findings["findings"] as Table[])[0]!["attackPath"] = {
@@ -144,24 +144,24 @@ test("legacy nested evidence references are validated without changing the origi
   };
   rewrite(root, "findings.json", findings);
   const before = snapshot(root),
-    result = value(run([{ operation: "validate", root }])[0]!);
+    result = value((await run([{ operation: "validate", root }]))[0]!);
   expect(result["findings"]).toEqual(findings);
   expect(snapshot(root)).toEqual(before);
 });
 
-test("accepts a canonical document beyond the previous 16 MiB limit", () => {
+test("accepts a canonical document beyond the previous 16 MiB limit", async () => {
   const root = seed(),
     manifest = load(root, "scan-manifest.json");
   manifest["metadata"] = "x".repeat(16 * 1024 * 1024);
   rewrite(root, "scan-manifest.json", manifest);
   const before = digest(readFileSync(join(root, "scan-manifest.json")));
   expect(
-    value(run([{ operation: "summary", root }])[0]!)["metadataLength"],
+    value((await run([{ operation: "summary", root }]))[0]!)["metadataLength"],
   ).toBe(16 * 1024 * 1024);
   expect(digest(readFileSync(join(root, "scan-manifest.json")))).toBe(before);
 });
 
-test("rejects unsafe sealed extensions while retaining the scan bytes", () => {
+test("rejects unsafe sealed extensions while retaining the scan bytes", async () => {
   for (const [unsafe, reason] of [
     [1e20, "unsafe integer-valued JSON numbers"],
     ["bad-\ud800", "well-formed Unicode"],
@@ -171,14 +171,14 @@ test("rejects unsafe sealed extensions while retaining the scan bytes", () => {
     (findings["findings"] as Table[])[0]!["extensions"] = { unsafe };
     rewrite(root, "findings.json", findings);
     const before = snapshot(root),
-      response = run([{ operation: "validate", root }])[0]!;
+      response = (await run([{ operation: "validate", root }]))[0]!;
     expect(response.kind).toBe("ContractError");
     expect(response.error).toContain(reason);
     expect(snapshot(root)).toEqual(before);
   }
 });
 
-test("manifest checks precede artifact reads, and the report is required after canonical validation", () => {
+test("manifest checks precede artifact reads, and the report is required after canonical validation", async () => {
   const root = seed(),
     manifest = load(root, "scan-manifest.json"),
     scan = manifest["scan"] as Table;
@@ -186,31 +186,31 @@ test("manifest checks precede artifact reads, and the report is required after c
   delete scan["artifacts"];
   rewrite(root, "scan-manifest.json", manifest);
   rmSync(join(root, "findings.json"));
-  expect(run([{ operation: "validate", root }])[0]!.error).toBe(
+  expect((await run([{ operation: "validate", root }]))[0]!.error).toBe(
     "manifest.scan.sealedAt: expected a non-empty string",
   );
   const missingReport = seed();
   rmSync(join(missingReport, "report.md"));
   expect(
-    run([{ operation: "validate", root: missingReport }])[0]!.error,
+    (await run([{ operation: "validate", root: missingReport }]))[0]!.error,
   ).toContain("report.md");
   const findings = load(missingReport, "findings.json");
   (findings["findings"] as Table[])[0]!["findingId"] = "wrong";
   rewrite(missingReport, "findings.json", findings);
   expect(
-    run([{ operation: "validate", root: missingReport }])[0]!.error,
+    (await run([{ operation: "validate", root: missingReport }]))[0]!.error,
   ).toContain("findingId");
 });
 
-test("tracking rejects changed seals, invalid JSON, invalid coverage and noncanonical records", () => {
+test("tracking rejects changed seals, invalid JSON, invalid coverage and noncanonical records", async () => {
   const tampered = seed();
   writeFileSync(
     join(tampered, "findings.json"),
     readFileSync(join(tampered, "findings.json"), "utf8") + "\n",
   );
-  expect(run([{ operation: "tracking", root: tampered }])[0]!.error).toContain(
-    "sealed artifact changed",
-  );
+  expect(
+    (await run([{ operation: "tracking", root: tampered }]))[0]!.error,
+  ).toContain("sealed artifact changed");
   const invalidJson = seed(),
     manifest = load(invalidJson, "scan-manifest.json"),
     bytes = Buffer.from("{invalid json\n");
@@ -220,21 +220,21 @@ test("tracking rejects changed seals, invalid JSON, invalid coverage and noncano
       artifact["sha256"] = digest(bytes);
   rewrite(invalidJson, "scan-manifest.json", manifest);
   expect(
-    run([{ operation: "tracking", root: invalidJson }])[0]!.error,
+    (await run([{ operation: "tracking", root: invalidJson }]))[0]!.error,
   ).toContain("findings.json: invalid JSON");
   const invalidCoverage = seed(),
     coverage = load(invalidCoverage, "coverage.json");
   coverage["scanId"] = "wrong-scan-id";
   rewrite(invalidCoverage, "coverage.json", coverage);
   expect(
-    run([{ operation: "tracking", root: invalidCoverage }])[0]!.error,
+    (await run([{ operation: "tracking", root: invalidCoverage }]))[0]!.error,
   ).toBe("coverage.scanId: must match manifest scan id");
   const noncanonical = seed(),
     badManifest = load(noncanonical, "scan-manifest.json");
   ((badManifest["scan"] as Table)["artifacts"] as Table[])[0]!["path"] =
     "./findings.json";
   rewrite(noncanonical, "scan-manifest.json", badManifest);
-  const child = cli("validate-tracking-source", noncanonical);
+  const child = await cli("validate-tracking-source", noncanonical);
   expect(child.status).toBe(2);
   expect(child.stdout).toBe("");
   expect(child.stderr).toContain("tracking source preflight failed:");
@@ -242,11 +242,11 @@ test("tracking rejects changed seals, invalid JSON, invalid coverage and noncano
   const reportOnly = mkdtempSync(join(directory, "report-only-"));
   writeFileSync(join(reportOnly, "report.html"), "<html></html>");
   expect(
-    run([{ operation: "tracking", root: reportOnly }])[0]!.error,
+    (await run([{ operation: "tracking", root: reportOnly }]))[0]!.error,
   ).toContain("scan-manifest.json");
 });
 
-test("tracking lists a full batch and selects exactly one canonical id or fingerprint", () => {
+test("tracking lists a full batch and selects exactly one canonical id or fingerprint", async () => {
   const root = seed(),
     manifest = load(root, "scan-manifest.json"),
     findings = load(root, "findings.json");
@@ -260,23 +260,25 @@ test("tracking lists a full batch and selects exactly one canonical id or finger
     rows.push(sibling);
   }
   const identified = value(
-    run([
-      {
-        operation: "identities",
-        root,
-        source: JSON.stringify({ manifest, findings }),
-      },
-    ])[0]!,
+    (
+      await run([
+        {
+          operation: "identities",
+          root,
+          source: JSON.stringify({ manifest, findings }),
+        },
+      ])
+    )[0]!,
   );
   rewrite(root, "findings.json", identified["findings"]);
   const all = JSON.parse(
-    run([{ operation: "tracking", root }])[0]!.value!,
+    (await run([{ operation: "tracking", root }]))[0]!.value!,
   ) as Table[];
   const ids = all.map((finding) => finding["findingId"] as string),
     last = all.at(-1)!;
   expect(ids).toHaveLength(25);
   expect(new Set(ids).size).toBe(25);
-  const selected = run([
+  const selected = await run([
     { operation: "tracking", root, selector: { findingId: ids.at(-1)! } },
     {
       operation: "tracking",
@@ -300,10 +302,10 @@ test("tracking lists a full batch and selects exactly one canonical id or finger
   expect(selected[3]!.error).toBe(
     "use only one of --finding-id or --fingerprint",
   );
-  const listed = cli("validate-tracking-source", root);
+  const listed = await cli("validate-tracking-source", root);
   expect(listed.status, listed.stderr).toBe(0);
   expect(listed.stdout.replaceAll("\r\n", "\n")).toBe(ids.join("\n") + "\n");
-  const child = cli(
+  const child = await cli(
     "validate-tracking-source",
     root,
     "--finding-id",
@@ -314,19 +316,19 @@ test("tracking lists a full batch and selects exactly one canonical id or finger
   expect(child.stderr).toBe("");
 });
 
-test("the finalizer and validator commands run consecutively without Python", () => {
+test("the finalizer and validator commands run consecutively without Python", async () => {
   const root = seed();
   rmSync(join(root, "report.md"));
-  const finalized = cli("finalize-scan-contract", "--scan-dir", root);
+  const finalized = await cli("finalize-scan-contract", "--scan-dir", root);
   expect(finalized.status, finalized.stderr).toBe(0);
   expect(finalized.stderr).toBe("");
-  const child = cli("validate-scan-contract", "--scan-dir", root);
+  const child = await cli("validate-scan-contract", "--scan-dir", root);
   expect(child.status, child.stderr).toBe(0);
   expect(JSON.parse(child.stdout)["status"]).toBe("valid");
   expect(child.stderr).toBe("");
 });
 
-test("helper arguments retain abbreviations, duplicate values, end markers and selector conflicts", () => {
+test("helper arguments retain abbreviations, duplicate values, end markers and selector conflicts", async () => {
   const root = seed(),
     id = "csf_852f90d6e1177502ff113d4a";
   const finding = (load(root, "findings.json")["findings"] as Table[])[0]!;
@@ -336,14 +338,15 @@ test("helper arguments retain abbreviations, duplicate values, end markers and s
     ["--fingerp", "missing", "--fingerp", fingerprint, root],
     ["--", root],
   ]) {
-    const child = cli("validate-tracking-source", ...args);
+    const child = await cli("validate-tracking-source", ...args);
     expect(child.status, child.stderr).toBe(0);
     expect(child.stdout.replaceAll("\r\n", "\n")).toBe(id + "\n");
   }
   expect(
-    cli("validate-scan-contract", "--scan", "missing", "--scan", root).status,
+    (await cli("validate-scan-contract", "--scan", "missing", "--scan", root))
+      .status,
   ).toBe(0);
-  const conflict = cli(
+  const conflict = await cli(
     "validate-tracking-source",
     root,
     "--finding-id",
@@ -356,26 +359,26 @@ test("helper arguments retain abbreviations, duplicate values, end markers and s
   expect(conflict.stderr).toContain(
     "argument --fingerprint: not allowed with argument --finding-id",
   );
-  expect(cli("validate-tracking-source", "--help", "--finding-id").status).toBe(
-    0,
-  );
-  expect(cli("validate-tracking-source", "--finding-id").stderr).toContain(
-    "argument --finding-id: expected one argument",
-  );
-  expect(cli("validate-tracking-source", "--unknown").stderr).toContain(
+  expect(
+    (await cli("validate-tracking-source", "--help", "--finding-id")).status,
+  ).toBe(0);
+  expect(
+    (await cli("validate-tracking-source", "--finding-id")).stderr,
+  ).toContain("argument --finding-id: expected one argument");
+  expect((await cli("validate-tracking-source", "--unknown")).stderr).toContain(
     "the following arguments are required: scan_dir",
   );
-  expect(cli("validate-scan-contract").stderr).toContain(
+  expect((await cli("validate-scan-contract")).stderr).toContain(
     "the following arguments are required: --scan-dir",
   );
-  expect(cli("validate-scan-contract", "--scan-dir", "-h x").stderr).toContain(
-    "argument --scan-dir: expected one argument",
-  );
+  expect(
+    (await cli("validate-scan-contract", "--scan-dir", "-h x")).stderr,
+  ).toContain("argument --scan-dir: expected one argument");
   for (const command of [
     "validate-scan-contract",
     "validate-tracking-source",
   ]) {
-    const child = cli(command, "--help");
+    const child = await cli(command, "--help");
     expect(child.status).toBe(0);
     expect(child.stdout).toContain(`--helper ${command}`);
     expect(child.stderr).toBe("");
@@ -384,23 +387,25 @@ test("helper arguments retain abbreviations, duplicate values, end markers and s
 
 test.skipIf(process.platform === "win32")(
   "scan aliases resolve before validation and the launcher preserves home expansion",
-  () => {
+  async () => {
     const root = seed(),
       alias = join(directory, "scan-alias");
     symlinkSync(root, alias, "dir");
     expect(
-      value(run([{ operation: "receipt", root: alias }])[0]!)["scanDir"],
+      value((await run([{ operation: "receipt", root: alias }]))[0]!)[
+        "scanDir"
+      ],
     ).toBe(root);
     const home = join(directory, "home");
     mkdirSync(home);
     symlinkSync(root, join(home, "scan"), "dir");
-    const child = spawnSync(
+    const child = await runCommand(
       join(PLUGIN_ROOT, "scripts/launch_codex_security_mcp"),
       ["--helper", "validate-scan-contract", "--scan-dir", "~/scan"],
       {
         cwd: directory,
         env: { ...env, HOME: home, CODEX_MCP_NODE_PATH: node },
-        encoding: "utf8",
+        timeout: 0,
       },
     );
     expect(child.status, child.stderr).toBe(0);
@@ -413,12 +418,14 @@ test.skipIf(process.platform === "win32")(
       join(directory, "absolute-link"),
     );
     expect(
-      cli("validate-scan-contract", "--scan-dir", "relative-link").stderr,
+      (await cli("validate-scan-contract", "--scan-dir", "relative-link"))
+        .stderr,
     ).toBe(
       "scan contract validation failed: [Errno 2] No such file or directory: 'relative-target/missing'\n",
     );
     expect(
-      cli("validate-scan-contract", "--scan-dir", "absolute-link").stderr,
+      (await cli("validate-scan-contract", "--scan-dir", "absolute-link"))
+        .stderr,
     ).toBe(
       `scan contract validation failed: [Errno 2] No such file or directory: '${join(directory, "relative-target/missing")}'\n`,
     );

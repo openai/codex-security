@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +7,7 @@ import { buildSync } from "esbuild";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root";
 import type { JsonCase } from "./support/scan-contract-json-fixture";
+import { runCommand } from "./support/shell";
 
 const directory = realpathSync(
   mkdtempSync(join(tmpdir(), "scan-contract-json-")),
@@ -35,10 +35,9 @@ beforeAll(() =>
   }),
 );
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
-function run(cases: JsonCase[]): unknown[] {
-  const child = spawnSync(node, [fixture], {
+async function run(cases: JsonCase[]): Promise<unknown[]> {
+  const child = await runCommand(node, [fixture], {
     input: JSON.stringify({ root: join(directory, String(next++)), cases }),
-    encoding: "utf8",
     timeout: 15000,
     maxBuffer: Infinity,
     env: {
@@ -57,9 +56,9 @@ const digest = (value: string) => ({
   sha256: createHash("sha256").update(value).digest("hex"),
 });
 
-test("loads contract JSON with original numeric representation and rejects overwritten nonfinite values", () => {
+test("loads contract JSON with original numeric representation and rejects overwritten nonfinite values", async () => {
   expect(
-    run([
+    await run([
       { operation: "loads", source: '{"10":1,"2":-0.0,"é":1e-7,"10":3}' },
       { operation: "loads", source: '{"value":NaN,"value":1}' },
       { operation: "loads", source: '{"value":Infinity}' },
@@ -81,9 +80,9 @@ test("loads contract JSON with original numeric representation and rejects overw
   ]);
 });
 
-test("preserves UTF encodings, BOM rules, surrogatepass and precise decoding errors", () => {
+test("preserves UTF encodings, BOM rules, surrogatepass and precise decoding errors", async () => {
   expect(
-    run([
+    await run([
       { operation: "loads", hex: "fffe7b002200780022003a0031007d00" },
       { operation: "loads", hex: "0000feff0000007b0000007d" },
       { operation: "loads", hex: "22eda08022" },
@@ -160,7 +159,7 @@ test("preserves UTF encodings, BOM rules, surrogatepass and precise decoding err
   ]);
 });
 
-test("rejects unsafe JSON numbers and strings without exposing property names", () => {
+test("rejects unsafe JSON numbers and strings without exposing property names", async () => {
   const sources = [
     '{"private-key":9007199254740992}',
     '{"private-key":9007199254740992.0}',
@@ -170,7 +169,9 @@ test("rejects unsafe JSON numbers and strings without exposing property names", 
     "[0,9007199254740992]",
   ];
   expect(
-    run(sources.map((source) => ({ operation: "contractBytes", source }))),
+    await run(
+      sources.map((source) => ({ operation: "contractBytes", source })),
+    ),
   ).toEqual([
     error(
       "document.<property>: unsafe integer-valued JSON numbers are not supported",
@@ -184,7 +185,7 @@ test("rejects unsafe JSON numbers and strings without exposing property names", 
     error("document[1]: unsafe integer-valued JSON numbers are not supported"),
   ]);
   expect(
-    run([
+    await run([
       {
         operation: "validate",
         source: '{"\\ud800":"\\udfff"}',
@@ -199,9 +200,9 @@ test("rejects unsafe JSON numbers and strings without exposing property names", 
   ).toEqual([null, null, null]);
 });
 
-test("keeps schema-file and scan-local validation order, raw bytes and newline behavior", () => {
+test("keeps schema-file and scan-local validation order, raw bytes and newline behavior", async () => {
   const raw = '{\r\n "note":"é", "note":"kept", "surrogate":"\\ud800"\r\n}\r\n';
-  const results = run([
+  const results = await run([
     { operation: "read", source: "[9007199254740992]" },
     { operation: "scanRead", source: "[9007199254740992]" },
     { operation: "read", source: '{"note":"\\ud800"}' },
@@ -238,13 +239,13 @@ test("keeps schema-file and scan-local validation order, raw bytes and newline b
   });
 });
 
-test("writes exact canonical bytes and validates before opening or replacing output", () => {
+test("writes exact canonical bytes and validates before opening or replacing output", async () => {
   const source = '{"😀":1,"\ue000":2,"z":-0.0,"a":[1.0,"é"]}';
   const canonical =
     '{\n  "a": [\n    1.0,\n    "\\u00e9"\n  ],\n  "z": -0.0,\n  "\\ue000": 2,\n  "\\ud83d\\ude00": 1\n}\n';
   const unchanged = Buffer.from("previous contents").toString("hex");
   expect(
-    run([
+    await run([
       { operation: "contractBytes", source },
       { operation: "write", source, relative: "exports/result.json" },
       {
@@ -270,9 +271,9 @@ test("writes exact canonical bytes and validates before opening or replacing out
   ]);
 });
 
-test("accepts formerly limited document sizes and nesting and retains the original integer parser boundary", () => {
+test("accepts formerly limited document sizes and nesting and retains the original integer parser boundary", async () => {
   const size = 4 * 1024 * 1024;
-  const results = run([
+  const results = await run([
     { operation: "read", size, summarize: true },
     { operation: "scanReadBytes", size: 16 * 1024 * 1024, summarize: true },
     {
