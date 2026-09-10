@@ -82,7 +82,7 @@ export function windowsFileSystem(native: WindowsBinding) {
       access,
       flags.FILE_SHARE_READ | flags.FILE_SHARE_WRITE | flags.FILE_SHARE_DELETE,
       disposition,
-      flags.FILE_FLAG_BACKUP_SEMANTICS |
+      (access === flags.GENERIC_READ ? 0 : flags.FILE_FLAG_BACKUP_SEMANTICS) |
         (follow ? 0 : flags.FILE_FLAG_OPEN_REPARSE_POINT),
     );
     check(result.error, path);
@@ -131,6 +131,10 @@ export function windowsFileSystem(native: WindowsBinding) {
     }
     if (win32.normalize(pathText(path)).toLowerCase() === "nul")
       return widePath("\\\\.\\NUL");
+    if (!win32.isAbsolute(pathText(path)))
+      path = widePath(
+        windowsJoin(pathText(absolute(widePath("."))), pathText(path)),
+      );
     const normalized = normalize(path);
     const seen = new Set<string>();
     let initialError: number | undefined;

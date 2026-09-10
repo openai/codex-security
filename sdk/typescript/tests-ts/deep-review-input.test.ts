@@ -315,8 +315,13 @@ describe("deep-review worklists", () => {
   });
   test("reports missing input and preserves argument parsing status", () => {
     const f = fixture();
-    expect(run(f, false).stderr).toContain(`Rank input missing: ${f.input}`);
-    expect(run(f, true).stderr).toContain(`Rank output missing: ${f.input}`);
+    writeFileSync(f.output, "previous output\n");
+    for (const selection of [false, true]) {
+      const result = run(f, selection);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(f.input);
+      expect(readFileSync(f.output, "utf8")).toBe("previous output\n");
+    }
     write(f.input, [ranked("a.py")]);
     expect(run(f, true, ["--top-percent=20"]).status).toBe(0);
     expect(run(f, true, ["--top-p", "20"]).status).toBe(0);

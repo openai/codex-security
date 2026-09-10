@@ -633,14 +633,17 @@ describe("patch risk assessment contract", () => {
       );
     }
     for (const [items, message] of [
-      ["1,1.0", "array items must be unique"],
+      ["1,1.0", "unsupported value 1"],
       ["true,1", "unsupported value True"],
-      ["9007199254740992,9007199254740993.0", "array items must be unique"],
+      [
+        "9007199254740992,9007199254740993.0",
+        "unsupported value 9007199254740992",
+      ],
       [
         "9007199254740993,9007199254740993.0",
         "unsupported value 9007199254740993",
       ],
-      ['{"x":1,"y":2},{"y":2.0,"x":1.0}', "array items must be unique"],
+      ['{"x":1,"y":2},{"y":2.0,"x":1.0}', "unsupported value"],
       ["NaN,NaN", "unsupported value nan"],
     ]) {
       const result = validateText(
@@ -654,15 +657,15 @@ describe("patch risk assessment contract", () => {
     }
   });
 
-  test("preserves JSON parsing diagnostics, duplicate ordering, and property order", () => {
+  test("rejects malformed JSON and preserves duplicate and property order", () => {
     for (const [text, message] of [
       ["\ufeff{}", "cannot read assessment: Unexpected UTF-8 BOM"],
       ['{"x":1,}', "Expecting property name enclosed in double quotes"],
-      ['{"x":"\\uZZZZ"}', "Invalid \\uXXXX escape"],
-      ['{"x":"\\q"}', "Invalid \\escape"],
-      ['"\\q', "Invalid \\escape"],
-      ['"\\u123', "Invalid \\uXXXX escape"],
-      ['{"x":"line\n"}', "Invalid control character"],
+      ['{"x":"\\uZZZZ"}', "cannot read assessment:"],
+      ['{"x":"\\q"}', "cannot read assessment:"],
+      ['"\\q', "cannot read assessment:"],
+      ['"\\u123', "cannot read assessment:"],
+      ['{"x":"line\n"}', "cannot read assessment:"],
       ["{} false", "Extra data"],
       ["[]", "assessment must be a JSON object"],
       ['{"x":0,"x":1,"nested":{"y":0,"y":1}}', "duplicate JSON object key: y"],

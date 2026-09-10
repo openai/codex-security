@@ -115,9 +115,9 @@ function discoverInputShards(directory: string): string[] {
 }
 
 function validateShard(input: string, output: string): [RankRow[], RankRow[]] {
-  const inputs = loadRankRows(input, false, "Rank input shard");
+  const inputs = loadRankRows(input, false);
   requireUniquePaths(inputs, `Rank input shard ${basename(input)}`);
-  const outputs = loadRankRows(output, true, "Rank output shard");
+  const outputs = loadRankRows(output, true);
   requireUniquePaths(outputs, `Rank output shard ${basename(output)}`);
   const expected = new Map(inputs.map((row) => [row.path, row.area]));
   const actual = new Set(outputs.map((row) => row.path));

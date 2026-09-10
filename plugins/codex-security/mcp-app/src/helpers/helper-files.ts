@@ -1,6 +1,5 @@
 import {
   closeSync,
-  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -15,25 +14,6 @@ export function readFile(path: string | number): Buffer {
   return process.platform === "win32"
     ? windowsFileSystem(windowsBinding()).readFile(widePath(path))
     : readFileSync(encodePosixPath(path));
-}
-
-export function exists(path: string): boolean {
-  if (process.platform !== "win32") return existsSync(encodePosixPath(path));
-  try {
-    windowsFileSystem(windowsBinding()).stat(widePath(path));
-    return true;
-  } catch (error) {
-    const { code, winerror } = error as NodeJS.ErrnoException & {
-      winerror?: number;
-    };
-    if (
-      ["ENOENT", "ENOTDIR", "ELOOP"].includes(code ?? "") ||
-      winerror === 21 ||
-      winerror === 123
-    )
-      return false;
-    throw error;
-  }
 }
 
 export function mkdir(path: string): void {

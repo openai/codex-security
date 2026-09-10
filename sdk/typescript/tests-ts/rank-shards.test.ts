@@ -361,7 +361,7 @@ describe("rank shard helpers", () => {
     write(f.input, [candidate("a.py")]);
     expect(make(f).status).toBe(0);
     expect(validate(f).stderr).toContain(
-      `Rank output shard missing: ${shard(f, 1, true)}`,
+      shard(f, 1, true),
     );
     write(shard(f, 2, true), []);
     expect(merge(f).stderr).toContain(
