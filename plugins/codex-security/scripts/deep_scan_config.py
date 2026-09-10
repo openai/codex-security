@@ -27,6 +27,8 @@ CONFIG_KEYS = {
     "stop_after_consecutive_errors",
     "max_discovery_runs",
     "max_time_hours",
+    "discovery_model",
+    "discovery_reasoning_effort",
 }
 
 
@@ -41,7 +43,7 @@ def config_path() -> Path:
     return codex_home() / "codex-security" / "config.toml"
 
 
-def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | float]:
+def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | float | str]:
     if isinstance(available_parallelism, bool) or available_parallelism < 1:
         raise SystemExit("Available parallelism must be a positive integer.")
     path = config_path()
@@ -76,7 +78,7 @@ def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | floa
         "deep_scan.stop_after_no_new",
         minimum=1,
     )
-    return {
+    resolved_config: dict[str, int | float | str] = {
         "workers": resolved_workers,
         "subagents": require_integer(
             configured.get("subagents", DEFAULT_SUBAGENTS),
@@ -99,6 +101,15 @@ def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | floa
             "deep_scan.max_time_hours",
         ),
     }
+    if "discovery_model" in configured:
+        resolved_config["discoveryModel"] = require_nonempty_string(
+            configured["discovery_model"], "deep_scan.discovery_model"
+        )
+    if "discovery_reasoning_effort" in configured:
+        resolved_config["discoveryReasoningEffort"] = require_nonempty_string(
+            configured["discovery_reasoning_effort"], "deep_scan.discovery_reasoning_effort"
+        )
+    return resolved_config
 
 
 def require_integer(value: object, label: str, *, minimum: int) -> int:
@@ -124,6 +135,12 @@ def require_positive_number(value: object, label: str) -> int | float:
     if not finite or value <= 0 or value > MAX_TIME_HOURS:
         raise SystemExit(f"{label} must be a positive finite number no greater than 96.")
     return value
+
+
+def require_nonempty_string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(f"{label} must be a non-empty string.")
+    return value.strip()
 
 
 def main() -> None:

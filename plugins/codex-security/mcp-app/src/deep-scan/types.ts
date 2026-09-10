@@ -28,6 +28,8 @@ export interface DeepScanConfig {
   stopAfterConsecutiveErrors: number;
   maxDiscoveryRuns: number;
   maxTimeHours?: number;
+  discoveryModel?: string;
+  discoveryReasoningEffort?: string;
 }
 
 export interface DeepScanCanonicalArtifacts {

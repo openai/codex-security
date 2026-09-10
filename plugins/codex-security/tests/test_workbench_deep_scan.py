@@ -279,7 +279,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         return claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (42,)
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -1341,6 +1341,8 @@ def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) 
         "stop_after_no_new = 4\n"
         "max_discovery_runs = 12\n"
         "max_time_hours = 2.5\n"
+        'discovery_model = "gpt-5.6-luna"\n'
+        'discovery_reasoning_effort = "xhigh"\n'
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -1359,6 +1361,8 @@ def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) 
         "stopAfterConsecutiveErrors": 3,
         "maxDiscoveryRuns": 12,
         "maxTimeHours": 2.5,
+        "discoveryModel": "gpt-5.6-luna",
+        "discoveryReasoningEffort": "xhigh",
     }
     assert deep_scan["workers"] == []
     scan_id = str(deep_scan["scanId"])
@@ -1368,7 +1372,9 @@ def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) 
     assert scan["progress"]["coverage"]["filesTotal"] == 1
     assert deep_scan["canonicalArtifacts"] is None
 
-    config_path.write_text("[deep_scan]\nworkers = 1\nmax_time_hours = 8\n")
+    config_path.write_text(
+        '[deep_scan]\nworkers = 1\nmax_time_hours = 8\ndiscovery_model = "gpt-5.6-sol"\n'
+    )
     second = begin_target_scan(state_dir, codex_home, target, scan_root)
     assert second["startDisposition"] == "joined"
     assert second["deepScan"]["scanId"] == deep_scan["scanId"]
@@ -1379,6 +1385,9 @@ def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) 
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM deep_scan_runs").fetchone() == (1,)
         assert connection.execute("SELECT max_time_hours FROM deep_scan_runs").fetchone() == (2.5,)
+        assert connection.execute(
+            "SELECT discovery_model, discovery_reasoning_effort FROM deep_scan_runs"
+        ).fetchone() == ("gpt-5.6-luna", "xhigh")
         assert (
             connection.execute(
                 """

@@ -22,6 +22,7 @@ await testTerminalProtocol();
 testCanonicalNullAndPartialParsing();
 testRunErrorParsing();
 testConfiguredMaximumDurationParsing();
+testDiscoveryModelSettingsParsing();
 await testWriteSerializationAndRecovery();
 await testBeginUsesTheWriteQueue();
 await testHeartbeatBypassesBlockedWriteQueue();
@@ -754,6 +755,25 @@ function idempotentPersistenceScenarios() {
   }];
 }
 
+function testDiscoveryModelSettingsParsing() {
+  const configured = parseDeepScan(stateResult(randomUUID(), {
+    deepScan: {
+      config: {
+        discoveryModel: "gpt-5.6-luna",
+        discoveryReasoningEffort: "xhigh"
+      }
+    }
+  }));
+  assert.equal(configured.config.discoveryModel, "gpt-5.6-luna");
+  assert.equal(configured.config.discoveryReasoningEffort, "xhigh");
+
+  const legacy = parseDeepScan(stateResult(randomUUID(), {
+    deepScan: { config: { discoveryModel: null, discoveryReasoningEffort: null } }
+  }));
+  assert.equal(Object.hasOwn(legacy.config, "discoveryModel"), false);
+  assert.equal(Object.hasOwn(legacy.config, "discoveryReasoningEffort"), false);
+}
+
 function testInvalidPersistedConfig() {
   assert.throws(
     () => parseDeepScan(stateResult(randomUUID(), {
@@ -780,6 +800,21 @@ function testInvalidPersistedConfig() {
       })),
       /invalid deepScan\.config\.maxTimeHours/,
       `invalid configured duration ${String(maxTimeHours)} must be rejected`
+    );
+  }
+  for (const [field, value] of [
+    ["discoveryModel", ""],
+    ["discoveryModel", "   "],
+    ["discoveryModel", 5],
+    ["discoveryReasoningEffort", ""],
+    ["discoveryReasoningEffort", "   "],
+    ["discoveryReasoningEffort", 5]
+  ]) {
+    assert.throws(
+      () => parseDeepScan(stateResult(randomUUID(), {
+        deepScan: { config: { [field]: value } }
+      })),
+      new RegExp(`invalid deepScan\\.config\\.${field}`)
     );
   }
 }

@@ -562,6 +562,14 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
     configValue.stopAfterNoNew,
     "deepScan.config.stopAfterNoNew"
   );
+  const discoveryModel = optionalConfiguredString(
+    configValue.discoveryModel,
+    "deepScan.config.discoveryModel"
+  );
+  const discoveryReasoningEffort = optionalConfiguredString(
+    configValue.discoveryReasoningEffort,
+    "deepScan.config.discoveryReasoningEffort"
+  );
   const config: DeepScanConfig = {
     workers: positiveInteger(configValue.workers, "deepScan.config.workers"),
     subagents: nonNegativeInteger(configValue.subagents, "deepScan.config.subagents"),
@@ -574,6 +582,8 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
       configValue.maxDiscoveryRuns,
       "deepScan.config.maxDiscoveryRuns"
     ),
+    ...(discoveryModel === undefined ? {} : { discoveryModel }),
+    ...(discoveryReasoningEffort === undefined ? {} : { discoveryReasoningEffort }),
     ...(configValue.maxTimeHours === undefined
       ? {}
       : {
@@ -744,6 +754,14 @@ function requiredString(value: unknown, field: string): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+function optionalConfiguredString(value: unknown, field: string): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Codex Security workbench returned invalid ${field}.`);
+  }
+  return value;
 }
 
 function positiveInteger(value: unknown, field: string): number {

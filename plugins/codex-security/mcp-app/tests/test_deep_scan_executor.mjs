@@ -79,10 +79,13 @@ try {
     await testWorkerLaunchesWithoutGlobalCodex();
     await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
     await testSdkInvocationAndThreadCapture();
+    await testDiscoveryModelOverridesDoNotAffectReducer();
+    await testPartialDiscoveryOverridesPreserveParentSettings();
     await testBedrockCredentialsReachWorker();
     await testArtifactServerUsesExtendedStartupTimeout();
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
+    await testSdkResumesDiscoveryWithRoleOverride();
     await testRetryNotificationDoesNotInterruptTurn();
     await testSandboxNamespaceDiagnosticIsSanitized();
     await testOwnedArtifactToolFailureDiagnosticIsSanitized();
@@ -671,6 +674,77 @@ async function testSdkInvocationAndThreadCapture() {
   }
 }
 
+async function testDiscoveryModelOverridesDoNotAffectReducer() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    const workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    await writeFile(promptPath, "fixture role-specific worker prompt\n");
+    const executor = new CodexSdkWorkerExecutor({
+      model: "gpt-6-astra",
+      reasoningEffort: "high",
+      discovery: { model: "gpt-5.6-luna", reasoningEffort: "xhigh" },
+      parentSandbox: trustedParentSandbox
+    });
+
+    for (const [kind, model, effort] of [
+      ["discovery", "gpt-5.6-luna", "xhigh"],
+      ["dedup", "gpt-6-astra", "high"]
+    ]) {
+      await executor.run({
+        kind,
+        promptPath,
+        workingDirectory,
+        subagents: 0,
+        signal: new AbortController().signal
+      });
+      const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+      assertFlagPair(invocation.argv, "--model", model);
+      assert.equal(invocation.argv.includes(`model_reasoning_effort="${effort}"`), true);
+      assertReadOnlyWorkerPolicy(invocation.argv);
+    }
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
+async function testPartialDiscoveryOverridesPreserveParentSettings() {
+  for (const [discovery, model, effort] of [
+    [{ model: "gpt-5.6-luna" }, "gpt-5.6-luna", "high"],
+    [{ reasoningEffort: "xhigh" }, "gpt-6-astra", "xhigh"]
+  ]) {
+    const fixture = await fakeCodexFixture();
+    const previousPath = process.env.CODEX_CLI_PATH;
+    process.env.CODEX_CLI_PATH = fixture.executablePath;
+    try {
+      const promptPath = path.join(fixture.root, "prompt.md");
+      const workingDirectory = path.join(fixture.root, "artifacts");
+      await mkdir(workingDirectory);
+      await writeFile(promptPath, "fixture partially overridden worker prompt\n");
+      await new CodexSdkWorkerExecutor({
+        model: "gpt-6-astra",
+        reasoningEffort: "high",
+        discovery,
+        parentSandbox: trustedParentSandbox
+      }).run({
+        kind: "discovery",
+        promptPath,
+        workingDirectory,
+        subagents: 0,
+        signal: new AbortController().signal
+      });
+      const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+      assertFlagPair(invocation.argv, "--model", model);
+      assert.equal(invocation.argv.includes(`model_reasoning_effort="${effort}"`), true);
+    } finally {
+      restoreEnv("CODEX_CLI_PATH", previousPath);
+    }
+  }
+}
+
 async function testBedrockCredentialsReachWorker() {
   const fixture = await fakeCodexFixture();
   const mcpConfig = JSON.parse(
@@ -822,6 +896,42 @@ async function testSdkResumesExistingThread() {
     assertReadOnlyWorkerPolicy(invocation.argv);
     assertWorkerSubagentPolicy(invocation.argv, 3);
     assert.equal(invocation.stdin, "continue the existing worker\n");
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
+async function testSdkResumesDiscoveryWithRoleOverride() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    const workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    await writeFile(promptPath, "original discovery worker prompt\n");
+    const result = await new CodexSdkWorkerExecutor({
+      model: "gpt-6-astra",
+      reasoningEffort: "high",
+      discovery: { model: "gpt-5.6-luna", reasoningEffort: "xhigh" },
+      parentSandbox: trustedReadOnlyParentSandbox
+    }).run({
+      kind: "discovery",
+      promptPath,
+      workingDirectory,
+      subagents: 0,
+      signal: new AbortController().signal,
+      resumeThreadId: "fixture-existing-thread",
+      continuationPrompt: "continue the existing discovery worker\n"
+    });
+    assert.equal(result.threadId, "fixture-existing-thread");
+    const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+    const resumeIndex = invocation.argv.indexOf("resume");
+    assert.notEqual(resumeIndex, -1);
+    assert.equal(invocation.argv[resumeIndex + 1], "fixture-existing-thread");
+    assertFlagPair(invocation.argv, "--model", "gpt-5.6-luna");
+    assert.equal(invocation.argv.includes('model_reasoning_effort="xhigh"'), true);
+    assertReadOnlyWorkerPolicy(invocation.argv);
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
   }

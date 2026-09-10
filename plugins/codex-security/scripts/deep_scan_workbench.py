@@ -467,6 +467,16 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
             "stopAfterConsecutiveErrors": run["stop_after_consecutive_errors"],
             "maxDiscoveryRuns": run["max_discovery_runs"],
             "maxTimeHours": run["max_time_hours"],
+            **(
+                {"discoveryModel": run["discovery_model"]}
+                if run["discovery_model"] is not None
+                else {}
+            ),
+            **(
+                {"discoveryReasoningEffort": run["discovery_reasoning_effort"]}
+                if run["discovery_reasoning_effort"] is not None
+                else {}
+            ),
         },
         "dispatchedCount": run["discovery_runs_dispatched"],
         "completionSequence": run["completion_sequence"],
@@ -556,7 +566,7 @@ def deep_scan_result(
     return result
 
 
-def effective_deep_scan_config(args: argparse.Namespace) -> dict[str, int | float]:
+def effective_deep_scan_config(args: argparse.Namespace) -> dict[str, int | float | str]:
     available_parallelism = args.available_parallelism or os.cpu_count() or 1
     return resolve_deep_scan_config(available_parallelism)
 
@@ -564,7 +574,7 @@ def effective_deep_scan_config(args: argparse.Namespace) -> dict[str, int | floa
 def ensure_deep_scan_run(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
-    config: dict[str, int | float],
+    config: dict[str, int | float | str],
     workflow_version: str,
     timestamp: str,
 ) -> sqlite3.Row:
@@ -582,9 +592,9 @@ def ensure_deep_scan_run(
         INSERT INTO deep_scan_runs (
             scan_id, schema_version, workflow_version, status, phase,
             workers, subagents, stop_after_no_new, stop_after_consecutive_errors,
-            max_discovery_runs, max_time_hours,
+            max_discovery_runs, max_time_hours, discovery_model, discovery_reasoning_effort,
             created_at, updated_at
-        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan["id"],
@@ -595,6 +605,8 @@ def ensure_deep_scan_run(
             config["stopAfterConsecutiveErrors"],
             config["maxDiscoveryRuns"],
             config["maxTimeHours"],
+            config.get("discoveryModel"),
+            config.get("discoveryReasoningEffort"),
             timestamp,
             timestamp,
         ),

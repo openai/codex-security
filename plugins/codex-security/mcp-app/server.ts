@@ -741,6 +741,10 @@ export function createCodexSecurityServer(): McpServer {
           store: deepScanStore,
           executor: new CodexSdkWorkerExecutor({
             ...modelSettings,
+            discovery: {
+              model: begun.run.config.discoveryModel,
+              reasoningEffort: begun.run.config.discoveryReasoningEffort
+            },
             parentSandbox,
             artifactContext: {
               pluginRoot: PLUGIN_ROOT,

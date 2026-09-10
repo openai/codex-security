@@ -867,6 +867,14 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        42,
+        "persist deep scan discovery model settings",
+        """
+        ALTER TABLE deep_scan_runs ADD COLUMN discovery_model TEXT;
+        ALTER TABLE deep_scan_runs ADD COLUMN discovery_reasoning_effort TEXT;
+        """,
+    ),
 )
 
 

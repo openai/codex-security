@@ -23,6 +23,10 @@ import type {
 export interface CodexSdkWorkerModelSettings {
   model?: string;
   reasoningEffort?: string;
+  discovery?: {
+    model?: string;
+    reasoningEffort?: string;
+  };
   artifactContext?: CodexSdkWorkerArtifactContext;
   parentSandbox?: DeepWorkerParentSandbox;
 }
@@ -67,14 +71,21 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         env: childEnv,
         signal: request.signal
       });
+      const modelSettings = request.kind === "discovery"
+        ? {
+          model: this.modelSettings.discovery?.model ?? this.modelSettings.model,
+          reasoningEffort: this.modelSettings.discovery?.reasoningEffort
+            ?? this.modelSettings.reasoningEffort
+        }
+        : this.modelSettings;
       const prompt = await fs.readFile(request.promptPath, "utf8");
       const codex = new Codex({
         codexPathOverride: executablePathForSpawn(codexPath),
         env: childEnv,
         config: {
           // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
-          ...(this.modelSettings.reasoningEffort
-            ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
+          ...(modelSettings.reasoningEffort
+            ? { model_reasoning_effort: modelSettings.reasoningEffort }
             : {}),
           mcp_servers: {
             // Discovery workers use the bundled skills and artifacts, not the parent workbench MCP.
@@ -89,7 +100,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         configOverrides
       });
       const threadOptions = {
-        ...(this.modelSettings.model ? { model: this.modelSettings.model } : {}),
+        ...(modelSettings.model ? { model: modelSettings.model } : {}),
         threadSource: "security_scan",
         approvalPolicy: "never",
         skipGitRepoCheck: true,

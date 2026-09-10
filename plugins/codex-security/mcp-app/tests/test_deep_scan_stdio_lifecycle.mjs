@@ -65,14 +65,17 @@ async function testDeepScanStdioLifecycle() {
   await mkdir(path.join(codexHome, "codex-security"), { recursive: true });
   await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
   await writeFile(path.join(failedTargetPath, "fixture.py"), "print('failure fixture')\n");
+  const deepScanConfigPath = path.join(codexHome, "codex-security", "config.toml");
   await writeFile(
-    path.join(codexHome, "codex-security", "config.toml"),
+    deepScanConfigPath,
     [
       "[deep_scan]",
       "workers = 1",
       "subagents = 0",
       "stop_after_no_new = 1",
       "max_discovery_runs = 2",
+      'discovery_model = "gpt-5.6-luna"',
+      'discovery_reasoning_effort = "high"',
       ""
     ].join("\n")
   );
@@ -175,8 +178,10 @@ async function testDeepScanStdioLifecycle() {
       "02_discovery",
       "in_scope_files.txt"
     )), { code: "ENOENT" });
-    assertFlagPair(startedWorker.argv, "--model", "gpt-5.5");
-    assert.equal(startedWorker.argv.includes('model_reasoning_effort="xhigh"'), true);
+    assert.equal(startedState.config.discoveryModel, "gpt-5.6-luna");
+    assert.equal(startedState.config.discoveryReasoningEffort, "high");
+    assertFlagPair(startedWorker.argv, "--model", "gpt-5.6-luna");
+    assert.equal(startedWorker.argv.includes('model_reasoning_effort="high"'), true);
     assertReadOnlyWorkerInvocation(startedWorker.argv);
 
     // Discovery progress is admitted once the first complete Standard worker is active.
@@ -310,6 +315,14 @@ async function testDeepScanStdioLifecycle() {
     assert.equal((await readJsonLines(startLogPath)).length, 1);
 
     const failureThreadId = "deep-scan-stdio-failure-thread";
+    await writeFile(deepScanConfigPath, [
+      "[deep_scan]",
+      "workers = 1",
+      "subagents = 0",
+      "stop_after_no_new = 1",
+      "max_discovery_runs = 2",
+      ""
+    ].join("\n"));
     server.sendRequest(20, "tools/call", toolCall(
       "start_codex_security_deep_scan",
       { targetPath: failedTargetPath, scope: ".", userContext: "stdio failure fixture" },
