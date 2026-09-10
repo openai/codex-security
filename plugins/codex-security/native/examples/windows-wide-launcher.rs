@@ -517,7 +517,9 @@ fn main() -> std::io::Result<()> {
         let malformed = shard_command("merge-rank-outputs", &merge_args)?;
         if malformed.status.code() != Some(1)
             || !String::from_utf8_lossy(&malformed.stderr)
-                .contains("Rank input shard has invalid name: rank-shard-\\udfff.input.jsonl")
+                .contains("Rank input shards must use contiguous canonical names")
+            || !String::from_utf8_lossy(&malformed.stderr)
+                .contains("rank-shard-\\udfff.input.jsonl")
             || fs::read(&merged)? != output_rows.concat().as_bytes()
             || fs::read(&shard_sentinel)? != b"replacement shard sentinel"
             || fs::read(&merge_sentinel)? != b"replacement merge sentinel"
