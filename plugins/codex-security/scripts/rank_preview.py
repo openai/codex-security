@@ -17,10 +17,12 @@ TEXT_CODE_EXTENSIONS = {
     ".c",
     ".cc",
     ".cfg",
+    ".cjs",
     ".clj",
     ".cpp",
     ".cs",
     ".css",
+    ".cts",
     ".cue",
     ".cxx",
     ".dart",
@@ -41,6 +43,7 @@ TEXT_CODE_EXTENSIONS = {
     ".lua",
     ".mjs",
     ".mm",
+    ".mts",
     ".php",
     ".proto",
     ".ps1",
@@ -62,7 +65,7 @@ TEXT_CODE_EXTENSIONS = {
     ".yml",
 }
 
-JAVASCRIPT_EXTENSIONS = {".js", ".jsx", ".mjs", ".ts", ".tsx", ".vue"}
+JAVASCRIPT_EXTENSIONS = {".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx", ".vue"}
 JAVA_LIKE_EXTENSIONS = {".c", ".cc", ".cpp", ".cs", ".cxx", ".h", ".hpp", ".java", ".mm"}
 BRACE_LANGUAGE_EXTENSIONS = {
     *JAVASCRIPT_EXTENSIONS,

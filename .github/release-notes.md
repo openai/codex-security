@@ -21,6 +21,7 @@
 - improve scan usage and cost reports ([#853](https://github.com/openai/codex-security/pull/853))
 - recover interrupted Deep Scans and bulk campaigns ([#835](https://github.com/openai/codex-security/pull/835))
 - reject owned plugin keys inside Codex profiles ([#861](https://github.com/openai/codex-security/pull/861))
+- include CommonJS and TypeScript module extensions in scan inventories ([#859](https://github.com/openai/codex-security/pull/859))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

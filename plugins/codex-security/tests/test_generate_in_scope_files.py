@@ -380,6 +380,44 @@ def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path) -
     ]
 
 
+def test_diff_inventory_keeps_every_javascript_module_extension(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+
+    for name in (
+        "app/loader.cjs",
+        "app/loader.mjs",
+        "app/loader.js",
+        "app/types.cts",
+        "app/types.mts",
+        "app/types.ts",
+    ):
+        write_file(repository, name, b"export const handler = 1;\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "change")
+    head = git(repository, "rev-parse", "HEAD")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(
+        repository,
+        ".",
+        output,
+        arguments=["--diff-base", base, "--diff-head", head],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "app/loader.cjs",
+        "app/loader.js",
+        "app/loader.mjs",
+        "app/types.cts",
+        "app/types.mts",
+        "app/types.ts",
+    ]
+
+
 def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     git(repository, "add", ".")
