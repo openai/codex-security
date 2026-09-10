@@ -1462,8 +1462,6 @@ def isolate_checkpoint_worker(
             return
         deep_scan_path(scan, str(directory), "Saved Deep evidence", kind="directory")
         for current, directories, filenames in os.walk(directory, followlinks=False):
-            if current_output and Path(current) == directory:
-                directories[:] = [name for name in directories if name != "checkpoints"]
             for name in directories:
                 deep_scan_path(
                     scan, str(Path(current) / name), "Saved Deep evidence", kind="directory"
@@ -1481,6 +1479,8 @@ def isolate_checkpoint_worker(
     copy_file(prompt, replacement / prompt.name)
     copy_tree(prompt.parent / "prompts", replacement / "prompts")
     copy_tree(output.parent / "attempts", replacement / "attempts")
+    # Retain raw snapshots as evidence; only receipt-backed checkpoints below
+    # establish the replacement's accepted head and reviewed-file credit.
     copy_tree(output, replacement_output, current_output=True)
     for receipt in receipts:
         checkpoint = Path(receipt["checkpoint_path"])
