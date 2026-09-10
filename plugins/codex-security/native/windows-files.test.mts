@@ -43,14 +43,12 @@ for (const [input, absolute] of [
   ["C:\\file\\", "C:\\file\\"],
 ] as const) {
   test(`ordinary realpath uses native absolute resolution: ${JSON.stringify(input)}`, () => {
-    let absoluteCalls = 0;
     const native = {
       windowsAbsolutePath(path: Buffer) {
-        if (absoluteCalls++ === 0) {
-          assert.equal(pathText(path), input);
-          return { error: 0, value: widePath(absolute) };
-        }
-        return { error: 0, value: path };
+        return {
+          error: 0,
+          value: widePath(win32.resolve("C:\\parent\\child", pathText(path))),
+        };
       },
       openWindowsFile(path: Buffer) {
         const root = win32.parse(absolute).root;
@@ -65,6 +63,57 @@ for (const [input, absolute] of [
     );
   });
 }
+
+for (const share of ["\\\\server\\share", "//server/share"]) {
+  test(`realpath resolves the UNC share root from a directory on that share: ${share}`, () => {
+    const native = {
+      windowsAbsolutePath(path: Buffer) {
+        return {
+          error: 0,
+          value: widePath(
+            win32.resolve("\\\\server\\share\\nested", pathText(path)),
+          ),
+        };
+      },
+      openWindowsFile(path: Buffer) {
+        assert.equal(pathText(path), "\\\\?\\UNC\\server\\share\\");
+        throw opened;
+      },
+    } as unknown as WindowsBinding;
+    assert.throws(
+      () => windowsFileSystem(native).realpath(widePath(share)),
+      (error) => error === opened,
+    );
+  });
+}
+
+test("non-strict realpath resolves a whitespace-only relative path from cwd", () => {
+  const native = {
+    windowsAbsolutePath(path: Buffer) {
+      return pathText(path).trim() === ""
+        ? { error: 123, value: Buffer.alloc(0) }
+        : {
+            error: 0,
+            value: widePath(
+              win32.resolve("C:\\work", pathText(path).replace(/ +$/u, "")),
+            ),
+          };
+    },
+    windowsReadLink: () => ({ error: 2, value: Buffer.alloc(0) }),
+    openWindowsFile(path: Buffer) {
+      return pathText(path) === "\\\\?\\C:\\work"
+        ? {
+            error: 0,
+            handle: { finalPath: () => ({ error: 0, path }), close: () => 0 },
+          }
+        : { error: 2, handle: null };
+    },
+  } as unknown as WindowsBinding;
+  assert.equal(
+    pathText(windowsFileSystem(native).realpath(widePath("  "), false)),
+    "C:\\work",
+  );
+});
 
 for (const target of ["missing.", "missing "]) {
   for (const siblingExists of [true, false]) {

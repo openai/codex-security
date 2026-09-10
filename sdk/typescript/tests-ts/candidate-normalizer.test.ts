@@ -322,12 +322,29 @@ describe("built candidate normalizer", () => {
     }
   });
 
-  test("rejects noninteger numeric spellings, malformed rows, and invalid UTF-8 atomically", () => {
+  test.each(["1.0", "1e0"])(
+    "normalizes integral line spelling %s",
+    (spelling) => {
+      const f = fixture();
+      const input = join(f.root, "raw.jsonl");
+      const row = JSON.stringify(candidate([location("app/routes.py", 1)]));
+      write(input, row + "\n");
+      expect(invoke(f, [input]).status).toBe(0);
+      const expected = readFileSync(f.output);
+      write(
+        input,
+        row.replace('"start_line":1', `"start_line":${spelling}`) + "\n",
+      );
+      expect(invoke(f, [input]).status).toBe(0);
+      expect(readFileSync(f.output)).toEqual(expected);
+    },
+  );
+
+  test("rejects invalid line values, malformed rows, and invalid UTF-8 atomically", () => {
     const f = fixture();
     const input = join(f.root, "raw.jsonl");
     for (const number of [
-      "1.0",
-      "1e0",
+      "1.5",
       "true",
       "0",
       "-1",
@@ -346,9 +363,7 @@ describe("built candidate normalizer", () => {
       write(f.output, "previous output\n");
       const result = invoke(f, [input]);
       expect(result.status).toBe(2);
-      expect(result.stderr).toContain(
-        "start_line: expected a positive integer",
-      );
+      expect(result.stderr).toContain("row 1:");
       expect(readFileSync(f.output, "utf8")).toBe("previous output\n");
     }
     const prefix = Buffer.from(
