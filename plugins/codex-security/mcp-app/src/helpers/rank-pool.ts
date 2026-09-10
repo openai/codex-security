@@ -266,10 +266,6 @@ function validateWorker(
   if (slot > BigInt(workers.length))
     throw new Error(`--slot must be at most ${workers.length}`);
   const worker = workers[Number(slot) - 1]!;
-  if (BigInt(worker.slot) !== slot)
-    throw new Error(
-      `${plan}: worker assignment for slot ${slot} is inconsistent`,
-    );
   let rows = 0;
   const digest = createHash("sha256");
   for (const [index, name] of worker.input_shards.entries()) {
