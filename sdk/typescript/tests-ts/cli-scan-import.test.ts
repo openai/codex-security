@@ -276,36 +276,33 @@ describe("scan import", () => {
     });
   });
 
-  test("rejects custom validation when rerunning an imported scan", async () => {
-    const { deps, calls } = importDependencies();
-    deps.runWorkbench = async () => ({
-      recipe: {
-        import: {
-          format: "csv",
-          sourcePath: resolve("retained", "source.csv"),
+  test.each(["--validation-prompt-file", "--scan-prompt-file"])(
+    "rejects %s when rerunning an imported scan",
+    async (option) => {
+      const { deps, calls } = importDependencies();
+      deps.runWorkbench = async () => ({
+        recipe: {
+          import: {
+            format: "csv",
+            sourcePath: resolve("retained", "source.csv"),
+          },
         },
-      },
-    });
-    const stderr = capture();
-    expect(
-      await main(
-        [
-          "scans",
-          "rerun",
-          "previous-scan",
-          "--validation-prompt-file",
-          "workflow.md",
-        ],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
-    expect(stderr.text()).toContain(
-      "--validation-prompt-file is not supported when rerunning an imported scan",
-    );
-    expect(calls).toHaveLength(0);
-  });
+      });
+      const stderr = capture();
+      expect(
+        await main(
+          ["scans", "rerun", "previous-scan", option, "workflow.md"],
+          capture().stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(
+        `${option} is not supported when rerunning an imported scan`,
+      );
+      expect(calls).toHaveLength(0);
+    },
+  );
 
   test("reports import errors without leaving signal handlers", async () => {
     const signals = new FakeSignals();
