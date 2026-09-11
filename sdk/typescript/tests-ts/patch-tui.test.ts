@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { cleanup, render } from "ink-testing-library";
 import { act, createElement } from "react";
 import type { Finding, SeverityLevel } from "../src/index.js";
@@ -80,15 +81,17 @@ function findings(severities: readonly SeverityLevel[]): Finding[] {
   return result.findings.findings;
 }
 
-async function settle(): Promise<void> {
-  const environment = globalThis as typeof globalThis & {
-    IS_REACT_ACT_ENVIRONMENT?: boolean;
-  };
+async function press(
+  app: ReturnType<typeof render>,
+  input: string,
+): Promise<void> {
+  const environment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
   const previous = environment.IS_REACT_ACT_ENVIRONMENT;
   environment.IS_REACT_ACT_ENVIRONMENT = true;
   try {
     await act(async () => {
-      await new Promise<void>((resolve) => setTimeout(resolve, 60));
+      app.stdin.write(input);
+      await nextTurn();
     });
   } finally {
     if (previous === undefined) delete environment.IS_REACT_ACT_ENVIRONMENT;
@@ -113,7 +116,7 @@ describe("interactive patch finding browser", () => {
     expect(app.lastFrame()).toContain("PATCH INSTRUCTIONS");
     expect(app.lastFrame()).toContain("Add instructions for this finding.");
     expect(app.lastFrame()).toContain(
-      "[ ] Create draft GitHub pull request after patching",
+      "[ ] Create draft pull request or merge request after patching",
     );
     expect(app.lastFrame()).toContain("3/3 selected");
     expect(app.lastFrame()).toContain("SUMMARY");
@@ -124,11 +127,9 @@ describe("interactive patch finding browser", () => {
     expect(app.lastFrame()).not.toContain('"rationale"');
 
     const frames = [app.lastFrame() ?? ""];
-    app.stdin.write("\t");
-    await settle();
+    await press(app, "\t");
     for (let page = 0; page < 12; page += 1) {
-      app.stdin.write("\u001B[6~");
-      await settle();
+      await press(app, "\u001B[6~");
       frames.push(app.lastFrame() ?? "");
     }
 
@@ -212,8 +213,7 @@ describe("interactive patch finding browser", () => {
 
       const frames = [app.lastFrame() ?? ""];
       for (let page = 0; page < 12; page += 1) {
-        app.stdin.write("\u001B[6~");
-        await settle();
+        await press(app, "\u001B[6~");
         frames.push(app.lastFrame() ?? "");
       }
       const reviewed = frames.join("\n");
@@ -246,18 +246,15 @@ describe("interactive patch finding browser", () => {
       }),
     );
 
-    app.stdin.write("2");
-    await settle();
+    await press(app, "2");
     expect(app.lastFrame()).toContain("1/3 selected");
     expect(app.lastFrame()).toContain("high and above");
 
-    app.stdin.write("\u001B[B ");
-    await settle();
+    await press(app, "\u001B[B ");
     expect(app.lastFrame()).toContain("2/3 selected");
     expect(app.lastFrame()).toContain("custom");
 
-    app.stdin.write("\r");
-    await settle();
+    await press(app, "\r");
     expect(selected).toEqual([
       { severity: "medium", occurrenceIds: ["occ_1", "occ_2"] },
     ]);
@@ -274,36 +271,27 @@ describe("interactive patch finding browser", () => {
       }),
     );
 
-    app.stdin.write("i");
-    await settle();
+    await press(app, "i");
     expect(app.lastFrame()).toContain("Enter save");
 
-    app.stdin.write("Use the shared 2FA helper, not a new dependency.");
-    await settle();
+    await press(app, "Use the shared 2FA helper, not a new dependency.");
     expect(app.lastFrame()).toContain("Use the shared 2FA helper");
     expect(app.lastFrame()).toContain("2/2 selected");
 
-    app.stdin.write("\r");
-    await settle();
+    await press(app, "\r");
     expect(app.lastFrame()).toContain("PATCH INSTRUCTIONS");
     expect(app.lastFrame()).toContain("Use the shared 2FA helper");
     expect(app.lastFrame()).toContain("✎");
     expect(app.lastFrame()?.match(/PATCH INSTRUCTIONS/gu)).toHaveLength(1);
 
-    app.stdin.write("\u001B[B");
-    await settle();
-    app.stdin.write("i");
-    await settle();
-    app.stdin.write("Keep the existing middleware.");
-    await settle();
-    app.stdin.write("\r");
-    await settle();
+    await press(app, "\u001B[B");
+    await press(app, "i");
+    await press(app, "Keep the existing middleware.");
+    await press(app, "\r");
     expect(app.lastFrame()).toContain("Keep the existing middleware.");
 
-    app.stdin.write(" ");
-    await settle();
-    app.stdin.write("\r");
-    await settle();
+    await press(app, " ");
+    await press(app, "\r");
 
     expect(selected).toEqual([
       {
@@ -328,15 +316,13 @@ describe("interactive patch finding browser", () => {
     );
 
     expect(app.lastFrame()).toContain(
-      "[ ] Create draft GitHub pull request after patching",
+      "[ ] Create draft pull request or merge request after patching",
     );
-    app.stdin.write("r");
-    await settle();
+    await press(app, "r");
     expect(app.lastFrame()).toContain(
-      "[✓] Create draft GitHub pull request after patching",
+      "[✓] Create draft pull request or merge request after patching",
     );
-    app.stdin.write("\r");
-    await settle();
+    await press(app, "\r");
 
     expect(selected).toEqual([
       {
@@ -358,25 +344,17 @@ describe("interactive patch finding browser", () => {
       }),
     );
 
-    app.stdin.write("i");
-    await settle();
-    app.stdin.write("Discard this guidance.");
-    await settle();
-    app.stdin.write("\u001B");
-    await settle();
+    await press(app, "i");
+    await press(app, "Discard this guidance.");
+    await press(app, "\u001B");
     expect(selected).toEqual([]);
     expect(app.lastFrame()).not.toContain("Discard this guidance.");
 
-    app.stdin.write("i");
-    await settle();
-    app.stdin.write("x");
-    await settle();
-    app.stdin.write("\u007F");
-    await settle();
-    app.stdin.write("\r");
-    await settle();
-    app.stdin.write("\r");
-    await settle();
+    await press(app, "i");
+    await press(app, "x");
+    await press(app, "\u007F");
+    await press(app, "\r");
+    await press(app, "\r");
 
     expect(selected).toEqual([{ severity: "high", occurrenceIds: ["occ_1"] }]);
   });
@@ -393,12 +371,10 @@ describe("interactive patch finding browser", () => {
         }),
       );
       if (input === "\r") {
-        app.stdin.write("n");
-        await settle();
+        await press(app, "n");
         expect(app.lastFrame()).toContain("0/1 selected");
       }
-      app.stdin.write(input);
-      await settle();
+      await press(app, input);
       expect(selected).toEqual([null]);
       app.unmount();
     }

@@ -6,10 +6,7 @@ import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import {
-  initialCredentialsAvailable,
-  selectedScanEnvironment,
-} from "../src/api.js";
+import { initialCredentialsAvailable } from "../src/api.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
@@ -150,7 +147,10 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(scanDir, { mode: 0o700 });
     await writeFile(join(ambientHome, "auth.json"), "{}\n");
     const interpreter =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+      process.env["PYTHON"] ??
+      Bun.which("python") ??
+      Bun.which("py") ??
+      Bun.which("python3");
     expect(interpreter).not.toBeNull();
     let capturedConfigPath: string | undefined;
     let capturedCodexHome: string | undefined;
@@ -661,7 +661,7 @@ process.exit(process.exitCode ?? 0);
       { pluginPath: PLUGIN_ROOT },
       {
         environment: {
-          ...selectedScanEnvironment(process.env, "chatgpt"),
+          PATH: process.env["PATH"],
           NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
           CODEX_HOME: ambientHome,
           CODEX_SECURITY_STATE_DIR: stateDir,

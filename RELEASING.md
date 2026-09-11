@@ -28,18 +28,20 @@ feat(sdk)!: remove the legacy result field
 
 The title controls the generated release category:
 
-| Title             | Release category |
-| ----------------- | ---------------- |
-| Any type with `!` | Breaking changes |
-| `feat`            | Features         |
-| `fix`             | Fixes            |
-| `docs`            | Documentation    |
-| `release`, `test` | Excluded         |
-| Any other type    | Other changes    |
+| Title                               | Release category |
+| ----------------------------------- | ---------------- |
+| Any type with `!`                   | Breaking changes |
+| `feat`                              | Features         |
+| `fix`                               | Fixes            |
+| `docs`                              | Documentation    |
+| `chore(release)`, `release`, `test` | Excluded         |
+| Any other type                      | Other changes    |
 
-Use `release` and `test` only for changes that do not affect package users. A
-maintainer can apply `skip-release-notes` to exclude another internal change.
-That manual label takes precedence over the title category.
+Use `chore(release)` for release preparation and `test` for test-only changes.
+The legacy `release` type remains supported. Use these only for changes that
+do not affect package users. A maintainer can apply `skip-release-notes` to
+exclude another internal change. That manual label takes precedence over the
+title category.
 
 ## Version policy before 1.0
 
@@ -62,45 +64,49 @@ Review this policy before enabling automation for `1.x`.
 It defaults to a read-only preview. It does not merge, tag, publish, or change
 the existing publication gates.
 
-The updater keeps one draft proposal on `release/next-<base-version>` and
-recomputes its version from all changes since the current package version
-first reached `main`. Squash-merge release PRs, as required by this
+The updater opens one ready-for-review proposal on `release/next-<base-version>`
+once a change reaches `main` after the current package version. It recomputes
+the proposal's version from all changes since that package version first
+reached `main`. Squash-merge release PRs, as required by this
 repository's enabled merge method, so the whole proposal lands as one
-release boundary commit. A later breaking change changes the version on the
-same PR. Each update incorporates the latest `main` and appends a commit;
-the updater never force-pushes. A concurrent commit causes it to reread and
+release boundary commit. Generated PR titles and commit subjects use
+`chore(release): X.Y.Z`, matching the proposed package version. Confirm the
+squash commit subject uses the current PR title when merging. A later breaking
+change updates the version and title on the same PR. Each update incorporates
+the latest `main` and appends a commit; the updater never force-pushes.
+A concurrent commit causes it to reread and
 retry. It requests Codex review when the proposal files change. Updates that
 only incorporate `main` keep CI current without repeating the same proposal
 review. New suggestions for human-owned notes still appear in a comment.
-Before marking the proposal ready, check CI and request a final Codex review
+Before merging the proposal, check CI and request a final Codex review
 if the last review targets an older head.
 
 If a run reports that GitHub has not exposed the updated PR head, manually
 rerun the updater with **dry_run** disabled after the PR catches up. This
 allows any deferred review request or note suggestions to be posted. Verify
-review on the current head before marking the proposal ready.
+review on the current head before merging the proposal.
 
-When the release version merges, the next draft can open immediately, even
-while publication is still running. Until another change reaches `main`,
-that draft leaves the package version unchanged. Do not mark an empty draft
-ready or merge it. Publication of the previous version still has to complete
-and pass the verification steps below.
+When the release version merges, the updater waits for another change to
+reach `main` before opening the next proposal. An empty release cycle returns
+`action: "unchanged"` without creating a branch or PR. Publication of the
+previous version still has to complete and pass the verification steps below.
 
-The updater leaves another open `release:` PR targeting `main`, including a
-manually prepared release, untouched and does not open a duplicate. Finish
-or close that PR before enabling the new flow. Closing an automated proposal
+The updater leaves another open `chore(release):` or legacy `release:` PR
+targeting `main`, including a manually prepared release, untouched and does not
+open a duplicate. Finish or close that PR before enabling the new flow.
+Closing an automated proposal
 pauses its cycle; reopen it to resume. Retargeting it away from `main` also
-pauses updates; restore its `main` base before resuming. Marking the proposal
-ready pauses updates, preserving the reviewed version and notes. To resume,
-convert it back to a draft and rerun the updater. Do this before merging if
-`main` has advanced, then review the updated proposal. The updater rechecks
-these conditions before advancing the branch. Changes to other files on the
-release branch, or to package fields other than the version, also pause the
+pauses updates; restore its `main` base before resuming. Both ready proposals
+and existing drafts receive updates. Existing drafts can be marked ready
+without pausing the updater. Review the current head before merging if
+`main` has advanced. The updater rechecks pause conditions before advancing
+the branch. Changes to other files on the release branch, or to package
+fields other than the version, also pause the
 updater so those edits cannot be lost. These intentional pauses return
 `action: "held"` and leave the workflow successful. Preserve or merge the
 additional changes, then rerun the updater to resume.
 
-### Editing the draft notes
+### Editing the release notes
 
 The committed `.github/release-notes.md` is authoritative. The updater
 drafts highlights from merged titles and lists marked breaking changes for
@@ -140,15 +146,25 @@ writes. Its JSON output includes the proposed files and any reason the
 updater would pause. After the workflow is on `main`, use its **Run workflow**
 form with **dry_run** enabled to test the hosted read-only path.
 
-To test writes, configure a GitHub App installed on this repository
-with **Contents: write** and **Pull requests: write**, set the
-`RELEASE_APP_CLIENT_ID` repository variable and `RELEASE_APP_PRIVATE_KEY`
-secret, then manually dispatch the workflow with **dry_run** disabled.
-This permits a single write run while automatic updates remain disabled.
-Review the resulting draft, its hosted CI, and the Codex review request.
-The workflow requests an App token scoped to this repository so CI on the
-bot's PR does not need the approval required for PR events created by
-`GITHUB_TOKEN`. See [GitHub's token documentation](https://docs.github.com/en/actions/concepts/security/github_token).
+To test writes, enable **Allow GitHub Actions to create and approve pull requests**
+under the repository's **Settings → Actions → General → Workflow permissions**,
+then manually dispatch the workflow with **dry_run** disabled. This permits a
+single write run while automatic updates remain disabled. The workflow uses
+the repository's `GITHUB_TOKEN` with **Contents: write** and **Pull requests: write**
+by default; no separate App credentials are required. Preview runs use a separate
+job with read-only permissions for both scopes.
+
+Review the resulting PR and select **Approve workflows to run** in its merge
+box to start hosted CI. GitHub requires this approval for PRs created or updated
+with `GITHUB_TOKEN`. Check the Codex review on the current head as well, and
+request it manually if the automated request has not started a review.
+
+For CI to start without this approval, optionally configure a GitHub App
+installed on this repository with **Contents: write** and **Pull requests: write**.
+Set the `RELEASE_APP_CLIENT_ID` repository variable and `RELEASE_APP_PRIVATE_KEY`
+secret. When the Client ID is configured, write runs request an App token scoped
+to this repository; a missing or invalid private key fails the run. Previews
+always use `GITHUB_TOKEN`. See [GitHub's token documentation](https://docs.github.com/en/actions/concepts/security/github_token).
 
 After the manual write run is verified, set the `RELEASE_PR_ENABLED`
 repository variable to `true` to allow updates after pushes to `main`.
@@ -167,7 +183,7 @@ Generated PRs leave the disclosure attestations unchecked for maintainer review.
    compatibility work, link relevant public documentation, and leave the
    pull-request inventory to the generated section.
 4. Open a pull request with a strict Conventional Commit title such as
-   `release: bump Codex Security to 0.2.0`.
+   `chore(release): 0.2.0`.
 5. Run the checks required by the changed files and record the results in the
    pull request. Do not merge until required CI, review, and public disclosure
    checks pass on the current commit.

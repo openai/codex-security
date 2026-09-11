@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import { constants, type BigIntStats, type Stats } from "node:fs";
 import {
   lstat,
   open,
@@ -1155,8 +1155,8 @@ async function openCheckedScanFile(
 
 export async function sameCheckedFileDevice(
   file: FileHandle,
-  checked: CheckedScanFile,
-  opened: Stats,
+  checked: { path: string; metadata: Pick<Stats | BigIntStats, "dev" | "ino"> },
+  opened: Pick<Stats | BigIntStats, "dev" | "ino">,
   platform: NodeJS.Platform = process.platform,
   openReference: (path: string, flags: number) => Promise<FileHandle> = open,
 ): Promise<boolean> {

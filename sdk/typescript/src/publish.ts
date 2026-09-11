@@ -39,6 +39,7 @@ import {
   type LinearPublicationDestination,
   type PreparedPublicationIssue,
   type PreparedScanPublication,
+  type PrepareScanPublicationOptions,
 } from "./publication.js";
 import {
   collectPublicationEvents,
@@ -64,6 +65,8 @@ import {
 } from "./runtime.js";
 
 export interface PublishScanOptions {
+  findingIds?: PrepareScanPublicationOptions["findingIds"];
+  classification?: PrepareScanPublicationOptions["classification"];
   expectedScanId?: string;
   destination: "linear";
   teamId: string;
@@ -134,6 +137,8 @@ export type CheckScanPublicationOptions = Pick<
   | "linearApiKey"
   | "assigneeId"
   | "signal"
+  | "findingIds"
+  | "classification"
 >;
 
 export interface CheckScanPublicationResult {
@@ -272,7 +277,7 @@ export async function publishScanInternal(
 
   const preparedScan = await (dependencies.prepare ?? prepareScanPublication)(
     scanDirectory,
-    options,
+    { ...options, environment },
   );
   let prepared = preparedScan;
   options.signal?.throwIfAborted();
@@ -586,7 +591,7 @@ export async function checkScanPublicationInternal(
   const linearApiKey = publicationApiKey(options, environment);
   const prepared = await (dependencies.prepare ?? prepareScanPublication)(
     scanDirectory,
-    options,
+    { ...options, environment },
   );
   options.signal?.throwIfAborted();
   const recorded = await (

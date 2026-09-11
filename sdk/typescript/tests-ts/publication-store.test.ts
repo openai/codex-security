@@ -249,6 +249,7 @@ describe("read-only publication history", () => {
       destination: "linear" as const,
       teamId: "team-example",
       projectId: "project-example",
+      environment: fixture.environment,
     };
     const original = await prepareScanPublication(scanDirectory, options);
     seedPublicationScan(fixture, original);

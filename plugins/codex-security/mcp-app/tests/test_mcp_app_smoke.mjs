@@ -88,6 +88,7 @@ assert.deepEqual(
     "PYTHON",
     "PYTHONUTF8",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
+    "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SECURITY_SCAN_ROOT",
     "CODEX_SECURITY_STATE_DIR",
@@ -1080,6 +1081,336 @@ try {
   );
   assert.deepEqual(initialized.result.capabilities.extensions["com.openai"], {});
   assert.deepEqual(initialized.result.capabilities.logging, {});
+
+  const trustedAccessToolList = await requestAndWait(9600, "tools/list");
+  assertNoError(trustedAccessToolList);
+  const trustedAccessTool = trustedAccessToolList.result.tools.find(
+    (tool) => tool.name === "get_codex_security_daybreak_access",
+  );
+  assert.ok(trustedAccessTool, "Expected the plugin-owned Daybreak access tool.");
+  assert.doesNotMatch(
+    JSON.stringify({
+      name: trustedAccessTool.name,
+      title: trustedAccessTool.title,
+      description: trustedAccessTool.description,
+    }),
+    /\btac(?:[123])?\b/i,
+  );
+  assert.deepEqual(trustedAccessTool.inputSchema.properties, {});
+  assert.deepEqual(trustedAccessTool.inputSchema.required ?? [], []);
+  assert.deepEqual(trustedAccessTool._meta.ui.visibility, ["model"]);
+  assert.deepEqual(trustedAccessTool._meta["openai/requestedEntitlements"], [
+    "cyber_trusted_access",
+  ]);
+  assert.equal(trustedAccessTool.annotations.readOnlyHint, true);
+  assert.equal(trustedAccessTool.annotations.destructiveHint, false);
+  assert.equal(trustedAccessTool.annotations.openWorldHint, false);
+
+  const unknownTrustedAccess = await requestAndWait(9601, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+  });
+  assertNoError(unknownTrustedAccess);
+  assert.equal(unknownTrustedAccess.result._meta, undefined);
+  assert.deepEqual(
+    {
+      ...unknownTrustedAccess.result.structuredContent,
+      checkedAt: undefined,
+    },
+    {
+      schemaVersion: 1,
+      status: "unknown",
+      programs: [],
+      checkedAt: undefined,
+      stale: false,
+    },
+  );
+  assert.ok(
+    Number.isFinite(
+      Date.parse(unknownTrustedAccess.result.structuredContent.checkedAt),
+    ),
+  );
+
+  const grantedTrustedAccess = {
+    schemaVersion: 1,
+    status: "granted",
+    grants: [
+      { level: "tac1", source: "user" },
+      { level: "tac3", source: "current_account" },
+      { level: "tac2", source: "user" },
+      { level: "tac1", source: "project" },
+      { level: "government", source: "current_account" },
+    ],
+    checkedAt: "2026-07-13T12:00:00.000Z",
+    stale: false,
+  };
+  const grantedDaybreakAccess = {
+    schemaVersion: 1,
+    status: "granted",
+    programs: ["Daybreak Blue", "Daybreak Red"],
+    checkedAt: "2026-07-13T12:00:00.000Z",
+    stale: false,
+  };
+  const hostedTrustedAccess = await requestAndWait(9602, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-trusted-access-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: grantedTrustedAccess,
+        },
+      },
+    },
+  });
+  assertNoError(hostedTrustedAccess);
+  assert.equal(hostedTrustedAccess.result._meta, undefined);
+  assert.deepEqual(
+    hostedTrustedAccess.result.structuredContent,
+    grantedDaybreakAccess,
+  );
+  assert.doesNotMatch(JSON.stringify(hostedTrustedAccess.result), /\btac(?:[123])?\b/i);
+  assert.match(hostedTrustedAccess.result.content[0].text, /Daybreak Blue/);
+  assert.match(hostedTrustedAccess.result.content[0].text, /Daybreak Red/);
+
+  const invalidGrantPairs = [
+    { level: "tac2", source: "project" },
+    { level: "tac2", source: "current_account" },
+    { level: "tac3", source: "user" },
+    { level: "tac3", source: "project" },
+    { level: "government", source: "user" },
+    { level: "government", source: "project" },
+  ];
+  for (const [index, invalidGrant] of invalidGrantPairs.entries()) {
+    const response = await requestAndWait(9620 + index, "tools/call", {
+      name: "get_codex_security_daybreak_access",
+      arguments: {},
+      _meta: {
+        threadId: "fixture-invalid-grant-thread",
+        "openai/entitlementContext": {
+          schemaVersion: 1,
+          entitlements: {
+            cyber_trusted_access: {
+              ...grantedTrustedAccess,
+              grants: [{ level: "tac1", source: "user" }, invalidGrant],
+            },
+          },
+        },
+      },
+    });
+    assertNoError(response);
+    assert.equal(response.result.structuredContent.status, "unknown");
+    assert.deepEqual(response.result.structuredContent.programs, []);
+  }
+
+  const staleGrantedAccess = await requestAndWait(9626, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-stale-granted-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: { ...grantedTrustedAccess, stale: true },
+        },
+      },
+    },
+  });
+  assertNoError(staleGrantedAccess);
+  assert.deepEqual(staleGrantedAccess.result.structuredContent, {
+    schemaVersion: 1,
+    status: "unknown",
+    programs: [],
+    checkedAt: grantedTrustedAccess.checkedAt,
+    stale: true,
+  });
+  assert.match(staleGrantedAccess.result.content[0].text, /protected results may not be displayable/);
+
+  const untrustedReplay = await requestAndWait(9603, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: { threadId: "fixture-trusted-access-thread" },
+  });
+  assertNoError(untrustedReplay);
+  assert.equal(untrustedReplay.result._meta, undefined);
+  assert.equal(untrustedReplay.result.structuredContent.status, "unknown");
+
+  const deniedTrustedAccess = {
+    schemaVersion: 1,
+    status: "not_granted",
+    grants: [],
+    checkedAt: "2026-07-13T12:01:00.000Z",
+    stale: false,
+    enrollmentUrl: "https://chatgpt.com/cyber",
+  };
+  const refreshedTrustedAccess = await requestAndWait(9604, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-trusted-access-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: deniedTrustedAccess,
+        },
+      },
+    },
+  });
+  assertNoError(refreshedTrustedAccess);
+  assert.equal(refreshedTrustedAccess.result._meta, undefined);
+  assert.deepEqual(
+    refreshedTrustedAccess.result.structuredContent,
+    {
+      schemaVersion: 1,
+      status: "not_granted",
+      programs: [],
+      checkedAt: "2026-07-13T12:01:00.000Z",
+      stale: false,
+      enrollmentUrl: "https://chatgpt.com/cyber",
+    },
+  );
+  assert.doesNotMatch(JSON.stringify(refreshedTrustedAccess.result), /\btac(?:[123])?\b/i);
+
+  const timestampedTrustedAccess = await requestAndWait(9608, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-timestamped-trusted-access-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: {
+            schemaVersion: 1,
+            status: "granted",
+            grants: [{ level: "tac2", source: "user" }],
+            stale: false,
+          },
+        },
+      },
+    },
+  });
+  assertNoError(timestampedTrustedAccess);
+  assert.equal(timestampedTrustedAccess.result.structuredContent.status, "granted");
+  assert.deepEqual(timestampedTrustedAccess.result.structuredContent.programs, [
+    "Daybreak Blue",
+  ]);
+  assert.ok(
+    Number.isFinite(
+      Date.parse(timestampedTrustedAccess.result.structuredContent.checkedAt),
+    ),
+  );
+
+  const unownedTrustedAccess = await requestAndWait(9605, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      "openai/threadId": "fixture-spoofed-missing-canonical-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: grantedTrustedAccess,
+        },
+      },
+    },
+  });
+  assertNoError(unownedTrustedAccess);
+  assert.equal(unownedTrustedAccess.result.structuredContent.status, "unknown");
+
+  const malformedTrustedAccess = await requestAndWait(9606, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-malformed-trusted-access-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: {
+            ...grantedTrustedAccess,
+            grants: [],
+          },
+        },
+      },
+    },
+  });
+  assertNoError(malformedTrustedAccess);
+  assert.equal(malformedTrustedAccess.result.structuredContent.status, "unknown");
+
+  const argumentTrustedAccess = await requestAndWait(9607, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: grantedTrustedAccess,
+        },
+      },
+    },
+    _meta: { threadId: "fixture-argument-trusted-access-thread" },
+  });
+  assert.equal(argumentTrustedAccess.result.isError, true);
+
+  const replayedTrustedAccess = await requestAndWait(9609, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: { threadId: "fixture-trusted-access-thread" },
+  });
+  assertNoError(replayedTrustedAccess);
+  assert.equal(replayedTrustedAccess.result.structuredContent.status, "unknown");
+
+  const spoofedThreadTrustedAccess = await requestAndWait(9610, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-trusted-access-owner",
+      "openai/threadId": "fixture-spoofed-trusted-access-owner",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: grantedTrustedAccess,
+        },
+      },
+    },
+  });
+  assertNoError(spoofedThreadTrustedAccess);
+  assert.deepEqual(
+    spoofedThreadTrustedAccess.result.structuredContent,
+    grantedDaybreakAccess,
+  );
+  const canonicalThreadTrustedAccess = await requestAndWait(9611, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: { threadId: "fixture-trusted-access-owner" },
+  });
+  assertNoError(canonicalThreadTrustedAccess);
+  assert.equal(canonicalThreadTrustedAccess.result.structuredContent.status, "unknown");
+
+  const isolatedHostedTrustedAccess = await requestAndWait(9612, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-isolated-trusted-access-owner",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: grantedTrustedAccess,
+        },
+      },
+    },
+  });
+  assertNoError(isolatedHostedTrustedAccess);
+  assert.deepEqual(
+    isolatedHostedTrustedAccess.result.structuredContent,
+    grantedDaybreakAccess,
+  );
+  const isolatedOtherTrustedAccess = await requestAndWait(9613, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: { threadId: "fixture-isolated-trusted-access-other" },
+  });
+  assertNoError(isolatedOtherTrustedAccess);
+  assert.equal(isolatedOtherTrustedAccess.result.structuredContent.status, "unknown");
+
   await assertBundledNodeLauncher();
   await assertBundledPythonRuntime();
   await assertMissingPythonError();

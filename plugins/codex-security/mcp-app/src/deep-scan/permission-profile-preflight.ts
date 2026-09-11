@@ -23,6 +23,8 @@ export interface DeepScanPermissionProfilePreflightOptions {
    * Omit it to retain Node's default child-process environment inheritance.
    */
   readonly env?: Readonly<Record<string, string>>;
+  /** Check native authentication before using an otherwise ignored OPENAI_API_KEY. */
+  readonly allowOpenAiApiKeyFallback?: boolean;
   /** The injected profile before app-server expands omitted options to null. */
   readonly expectedProfile: Readonly<Record<string, unknown>>;
   readonly signal: AbortSignal;
@@ -52,7 +54,7 @@ type PendingRequest = {
  */
 export async function preflightDeepScanWorkerPermissionProfile(
   options: DeepScanPermissionProfilePreflightOptions
-): Promise<void> {
+): Promise<{ useOpenAiApiKey: boolean }> {
   validateOptions(options);
   if (options.signal.aborted) throw abortError(options.signal.reason);
 
@@ -69,6 +71,18 @@ export async function preflightDeepScanWorkerPermissionProfile(
       ? undefined
       : await client.readConfigRequirementsForClassification();
     verifyPreflightResult(options, configResponse, catalogEntry, requirementsResponse);
+    if (
+      !options.allowOpenAiApiKeyFallback
+      || record(configResponse.config)?.forced_login_method === "chatgpt"
+    ) {
+      return { useOpenAiApiKey: false };
+    }
+    // Reuse Codex's selected credential store and provider, including keyring
+    // and command-backed providers, instead of interpreting auth.json here.
+    const account = await client.request("account/read", { refreshToken: false });
+    return {
+      useOpenAiApiKey: account.requiresOpenaiAuth === true && account.account === null
+    };
   } finally {
     await client.close();
   }

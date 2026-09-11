@@ -86,7 +86,9 @@ for (const surface of ["CLI", "SDK"] as const) {
             },
           });
         operations = {
-          status: () => run(["login", "status"]),
+          status: async () => {
+            expect([0, 1]).toContain(await run(["login", "status"]));
+          },
           logout: async () => {
             expect(await run(["logout"])).toBe(0);
           },
@@ -143,4 +145,55 @@ for (const surface of ["CLI", "SDK"] as const) {
       }
     });
   }
+}
+
+for (const operation of ["account", "logout"] as const) {
+  const name = `SDK close cancels ${operation} waiting for the credential-home lock`;
+  test(name, async () => {
+    if (runTestInSubprocess(import.meta.filename, name)) return;
+
+    const root = await fs.realpath(
+      await fs.mkdtemp(join(tmpdir(), "codex-security-auth-cancel-")),
+    );
+    const environment = {
+      CODEX_HOME: join(root, "ambient"),
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const runtime = { ...(await import("../src/runtime.js")) };
+    const home = await runtime.prepareCodexSecurityCredentialHome(environment);
+    const release = await runtime.acquireCodexSecurityCredentialHomeLock(home);
+    const waiting = Promise.withResolvers<void>();
+    mock.module("../src/runtime.js", () => ({
+      ...runtime,
+      acquireCodexSecurityCredentialHomeLock: (
+        ...args: Parameters<
+          typeof runtime.acquireCodexSecurityCredentialHomeLock
+        >
+      ) => {
+        waiting.resolve();
+        return runtime.acquireCodexSecurityCredentialHomeLock(...args);
+      },
+    }));
+    const { TestClient } = await import("./support/api-client.js");
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        resolveCodexCommand: () => {
+          throw new Error("Must not invoke Codex while waiting for the lock");
+        },
+      },
+    );
+    const pending = client[operation]();
+    const outcome = pending.catch((error: unknown) => error);
+    try {
+      await Promise.race([waiting.promise, pending]);
+      await client.close();
+      expect(await outcome).toMatchObject({ name: "AbortError" });
+    } finally {
+      await release();
+      await client.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 }

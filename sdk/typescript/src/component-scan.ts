@@ -23,6 +23,7 @@ import { safeErrorMessage } from "./errors.js";
 import type { CoverageCompleteness, Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
 import type { ScanActivity } from "./scan-activity.js";
+import type { ScanSettings } from "./scan-settings.js";
 import type { ScanProgress, ScanWorkerStatus } from "./worker-progress.js";
 import {
   matchScanFindings,
@@ -39,14 +40,7 @@ export interface ComponentScanOptions {
   planOnly?: boolean;
   workers?: number;
   config?: CodexSecurityConfig;
-  scanOptions?: Pick<
-    ScanOptions,
-    | "auth"
-    | "knowledgeBasePaths"
-    | "scanPrompt"
-    | "postScanPrompt"
-    | "maxCostUsd"
-  >;
+  scanOptions?: Omit<ScanSettings, "target" | "outputDir">;
   signal?: AbortSignal;
   createSecurity?: (
     config: CodexSecurityConfig,
@@ -120,6 +114,7 @@ export interface ComponentScanResult {
   findingCount?: number;
   sourceFindingCount?: number;
   deduplication?: ComponentDeduplicationSummary;
+  policyFailed?: boolean;
 }
 
 export async function runComponentScans(
@@ -222,7 +217,7 @@ export async function runComponentScans(
             const result = await security.run(repository, {
               ...options.scanOptions,
               ...observers,
-              mode: "standard",
+              mode: options.scanOptions?.mode ?? "standard",
               target: receipt.paths,
               outputDir: receipt.outputDir,
               signal: options.signal,
@@ -276,6 +271,7 @@ export async function runComponentScans(
       : join(output, "retry-components.json");
   if (retryPlanPath !== undefined)
     await writeJson(retryPlanPath, { components: retryComponents });
+  const failureSeverity = options.scanOptions?.failureSeverity;
   const summary = {
     ...base,
     completed: receipts.filter(({ status }) => status === "completed").length,
@@ -291,6 +287,13 @@ export async function runComponentScans(
       0,
     ),
     deduplication,
+    ...(failureSeverity === undefined
+      ? {}
+      : {
+          policyFailed: [...results.values()].some((result) =>
+            result.hasFindingsAtOrAbove(failureSeverity),
+          ),
+        }),
   };
   await writeJson(summary.findingsPath, {
     documentType: "codex-security.component-findings",

@@ -513,7 +513,7 @@ describe("GitHub request transport", () => {
     },
   );
 
-  test("creates and updates a draft through serialized requests, including a concurrent commit conflict", async () => {
+  test("creates and updates a release PR through serialized requests, including a concurrent commit conflict", async () => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
     let conflicts = 0;
@@ -632,6 +632,46 @@ describe("GitHub request transport", () => {
 });
 
 describe("release workflow controls", () => {
+  const { permissions, jobs } = Bun.YAML.parse(workflow) as {
+    permissions: Record<string, string>;
+    jobs: Record<
+      string,
+      {
+        if: string;
+        permissions?: Record<string, string>;
+        env: { RELEASE_PR_DRY_RUN: string };
+        steps: { id?: string; if?: string }[];
+      }
+    >;
+  };
+
+  test.each([
+    { dryRun: "false", clientId: "", createsAppToken: false },
+    { dryRun: "false", clientId: "synthetic-app-id", createsAppToken: true },
+    { dryRun: "true", clientId: "", createsAppToken: false },
+    { dryRun: "true", clientId: "synthetic-app-id", createsAppToken: false },
+  ])(
+    "selects authentication for dry_run=$dryRun with client ID '$clientId'",
+    ({ dryRun, clientId, createsAppToken }) => {
+      const job = Object.values(jobs).find(
+        ({ env }) => env.RELEASE_PR_DRY_RUN === dryRun,
+      )!;
+      const appToken = job.steps.find((step) => step.id === "app-token");
+      const evaluate = new Function(
+        "vars",
+        `return (${appToken?.if ?? "false"});`,
+      );
+      expect(evaluate({ RELEASE_APP_CLIENT_ID: clientId })).toBe(
+        createsAppToken,
+      );
+      const access = dryRun === "true" ? "read" : "write";
+      expect(job.permissions ?? permissions).toEqual({
+        contents: access,
+        "pull-requests": access,
+      });
+    },
+  );
+
   test.each([
     { event: "push", enabled: undefined, dryRun: undefined, expected: true },
     { event: "push", enabled: "false", dryRun: undefined, expected: true },
@@ -669,22 +709,26 @@ describe("release workflow controls", () => {
   ])(
     "selects preview mode for $event with enabled=$enabled and dry_run=$dryRun",
     ({ event, enabled, dryRun, expected }) => {
-      const expression = workflow.match(
-        /RELEASE_PR_DRY_RUN: \$\{\{ (.+) \}\}/u,
-      )![1]!;
-      const evaluate = new Function(
-        "github",
-        "inputs",
-        "vars",
-        `return (${expression});`,
-      );
-      expect(
-        evaluate(
-          { event_name: event },
+      const selectedJobs = Object.values(jobs).filter((job) => {
+        const evaluate = new Function(
+          "github",
+          "inputs",
+          "vars",
+          `return (${job.if});`,
+        );
+        return evaluate(
+          {
+            event_name: event,
+            repository: "openai/codex-security",
+            ref: "refs/heads/main",
+          },
           { dry_run: dryRun },
           { RELEASE_PR_ENABLED: enabled },
-        ),
-      ).toBe(expected);
+        );
+      });
+      expect(selectedJobs.map((job) => job.env.RELEASE_PR_DRY_RUN)).toEqual([
+        String(expected),
+      ]);
     },
   );
 });
@@ -711,7 +755,7 @@ describe("pre-1.0 release policy", () => {
     change("fix: correct behavior", 1, {
       labels: ["breaking-change", "skip-release-notes"],
     }),
-  ])("uses a minor for a breaking change: $title", (breaking) => {
+  ])("uses a minor for a breaking change (%#): $title", (breaking) => {
     expect(
       nextReleaseVersion("0.1.23", [change("fix: first fix"), breaking]),
     ).toBe("0.2.0");
@@ -737,6 +781,28 @@ describe("pre-1.0 release policy", () => {
     expect(() =>
       nextReleaseVersion("1.0.0", [change("feat: add behavior")]),
     ).toThrow("policy");
+  });
+
+  test("excludes release preparation while preserving visible and breaking changes", () => {
+    const plan = createReleasePlan(
+      history([
+        change("chore(release): 0.1.24", 1),
+        change("release: prepare legacy release", 2),
+        change("test: extend coverage", 3),
+        change("chore(deps): update dependencies", 4),
+        change("docs(release): explain publishing", 5),
+        change("chore(release)!: require migration", 6),
+      ]),
+    );
+    expect(plan.version).toBe("0.2.0");
+    expect(plan.title).toBe("chore(release): 0.2.0");
+    expect(plan.generated.highlights).not.toContain("0.1.24");
+    expect(plan.generated.highlights).not.toContain("prepare legacy release");
+    expect(plan.generated.highlights).not.toContain("extend coverage");
+    expect(plan.generated.highlights).toContain("update dependencies");
+    expect(plan.generated.highlights).toContain("explain publishing");
+    expect(plan.generated.highlights).toContain("require migration");
+    expect(plan.generated.upgrades).toContain("require migration");
   });
 
   test.each([
@@ -906,7 +972,21 @@ describe("human note ownership", () => {
 });
 
 describe("rolling release reconciliation", () => {
-  test("previews without writes and then creates one draft, refreshes it, and reuses its branch", async () => {
+  test.each([true, false])(
+    "leaves an empty release cycle unchanged with dryRun=%p",
+    async (dryRun) => {
+      const fixture = new Fixture();
+      const result = await fixture.run(dryRun);
+      expect(result.action).toBe("unchanged");
+      expect(result.plan.changes).toHaveLength(0);
+      expect(result.pull).toBeUndefined();
+      expect(fixture.head(result.plan.branch)).toBeNull();
+      expect(fixture.github.writes).toHaveLength(0);
+      expect(fixture.github.pulls).toHaveLength(0);
+    },
+  );
+
+  test("previews without writes and then creates one ready PR, refreshes it, and reuses its branch", async () => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature", {
       "plugins/codex-security/skills/example/SKILL.md":
@@ -915,6 +995,7 @@ describe("rolling release reconciliation", () => {
     const preview = await fixture.run(true);
     expect(preview.action).toBe("would-create");
     expect(preview.plan.version).toBe("0.1.24");
+    expect(preview.plan.title).toBe("chore(release): 0.1.24");
     expect(fixture.github.writes).toHaveLength(0);
     const first = await fixture.run();
     expect(first.action).toBe("created");
@@ -922,7 +1003,11 @@ describe("rolling release reconciliation", () => {
     const pull = fixture.github.pulls.find(
       (candidate) => candidate.number === first.pull,
     )!;
-    expect(pull.draft).toBe(true);
+    expect(pull.draft).toBe(false);
+    expect(pull.title).toBe("chore(release): 0.1.24");
+    expect(
+      fixture.git("show", "-s", "--format=%s", first.headSha!).trim(),
+    ).toBe("chore(release): 0.1.24");
     expect(pull.body).toContain("- [ ]");
     pull.body += "\nMaintainer review and test results.\n";
     const humanBody = pull.body;
@@ -933,6 +1018,10 @@ describe("rolling release reconciliation", () => {
     expect(second.action).toBe("updated");
     expect(second.pull).toBe(first.pull);
     expect(second.plan.version).toBe("0.2.0");
+    expect(pull.title).toBe("chore(release): 0.2.0");
+    expect(
+      fixture.git("show", "-s", "--format=%s", second.headSha!).trim(),
+    ).toBe("chore(release): 0.2.0");
     expect(second.plan.branch).toBe(first.plan.branch);
     expect(pull.body).toBe(humanBody);
     expect(
@@ -953,6 +1042,33 @@ describe("rolling release reconciliation", () => {
     const writes = fixture.github.writes.length;
     expect((await fixture.run()).action).toBe("unchanged");
     expect(fixture.github.writes).toHaveLength(writes);
+  });
+
+  test("retitles an existing release PR without changing an up-to-date branch", async () => {
+    const fixture = new Fixture();
+    fixture.merge("fix: initial fix");
+    const first = await fixture.run();
+    const pull = fixture.github.pulls.find(
+      (candidate) => candidate.number === first.pull,
+    )!;
+    pull.title = "release: prepare the next Codex Security release";
+    const body = pull.body;
+    const writes = fixture.github.writes.length;
+    const preview = await fixture.run(true);
+    expect(preview.action).toBe("would-update");
+    expect(fixture.github.writes).toHaveLength(writes);
+    const updated = await fixture.run();
+    expect(updated.action).toBe("updated");
+    expect(updated.headSha).toBe(first.headSha);
+    expect(pull.title).toBe("chore(release): 0.1.24");
+    expect(pull.body).toBe(body);
+    expect(fixture.github.writes.slice(writes)).toEqual([
+      {
+        method: "PATCH",
+        path: `pulls/${pull.number}`,
+        body: { title: "chore(release): 0.1.24" },
+      },
+    ]);
   });
 
   test("incorporates main-only changes without another proposal review or repeated commits", async () => {
@@ -1124,7 +1240,7 @@ describe("rolling release reconciliation", () => {
     ).toHaveLength(1);
   });
 
-  test.each(["closed", "retargeted", "ready"])(
+  test.each(["closed", "retargeted"])(
     "does not request review after a PR is %s during its final checks",
     async (change) => {
       const fixture = new Fixture();
@@ -1145,23 +1261,20 @@ describe("rolling release reconciliation", () => {
           ++reads === 1
         ) {
           if (change === "closed") pull.state = "closed";
-          else if (change === "retargeted") pull.base.ref = "maintenance";
-          else pull.draft = false;
+          else pull.base.ref = "maintenance";
         }
         return result;
       };
       const held = await fixture.run();
       expect(held.action).toBe("held");
-      expect(held.reason).toContain(
-        change === "ready" ? "draft" : "closed or retargeted",
-      );
+      expect(held.reason).toContain("closed or retargeted");
       expect(fixture.github.comments.get(pull.number)).toHaveLength(
         commentCount,
       );
     },
   );
 
-  test("opens the next empty draft after repeated updates are squash-merged, without waiting for publication", async () => {
+  test("waits for a new change after a release is squash-merged before opening the next ready PR", async () => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
     const first = await fixture.run();
@@ -1174,45 +1287,55 @@ describe("rolling release reconciliation", () => {
     fixture.merge(updated.plan.title, updated.plan.files);
     pull.state = "closed";
     pull.merged_at = "2026-01-01T00:00:00Z";
+    const writes = fixture.github.writes.length;
     const second = await fixture.run();
-    expect(second.pull).not.toBe(first.pull);
+    expect(second.action).toBe("unchanged");
+    expect(second.pull).toBeUndefined();
     expect(second.plan.branch).not.toBe(first.plan.branch);
     expect(second.plan.baseVersion).toBe("0.1.24");
     expect(second.plan.version).toBe("0.1.24");
     expect(second.plan.changes).toHaveLength(0);
-    expect(fixture.repo.readFile(second.headSha!, packagePath)).toBe(
-      packageText("0.1.24"),
-    );
+    expect(fixture.head(second.plan.branch)).toBeNull();
+    expect(fixture.github.writes).toHaveLength(writes);
     fixture.merge("feat: next feature");
     const third = await fixture.run();
-    expect(third.pull).toBe(second.pull);
+    expect(third.action).toBe("created");
+    expect(third.pull).not.toBe(first.pull);
+    expect(third.plan.branch).toBe(second.plan.branch);
     expect(third.plan.version).toBe("0.1.25");
+    expect(
+      fixture.github.pulls.find((candidate) => candidate.number === third.pull)
+        ?.draft,
+    ).toBe(false);
   });
 
-  test("does not touch another release PR or recreate an intentionally closed proposal", async () => {
-    const fixture = new Fixture();
-    fixture.merge("feat: initial feature");
-    const manual = fixture.github.addPull(
-      "manual-release",
-      "release: prepare a release",
-      fixture.head()!,
-    );
-    const held = await fixture.run();
-    expect(held.action).toBe("held");
-    expect(held.reason).toContain(`#${manual.number}`);
-    expect(fixture.github.writes).toHaveLength(0);
-    manual.state = "closed";
-    const created = await fixture.run();
-    const pull = fixture.github.pulls.find(
-      (candidate) => candidate.number === created.pull,
-    )!;
-    pull.state = "closed";
-    const writes = fixture.github.writes.length;
-    expect((await fixture.run()).action).toBe("held");
-    expect(fixture.github.writes).toHaveLength(writes);
-    pull.state = "open";
-    expect((await fixture.run()).pull).toBe(pull.number);
-  });
+  test.each(["chore(release): 0.1.24", "release: prepare a release"])(
+    "does not touch another %s PR or recreate an intentionally closed proposal",
+    async (title) => {
+      const fixture = new Fixture();
+      fixture.merge("feat: initial feature");
+      const manual = fixture.github.addPull(
+        "manual-release",
+        title,
+        fixture.head()!,
+      );
+      const held = await fixture.run();
+      expect(held.action).toBe("held");
+      expect(held.reason).toContain(`#${manual.number}`);
+      expect(fixture.github.writes).toHaveLength(0);
+      manual.state = "closed";
+      const created = await fixture.run();
+      const pull = fixture.github.pulls.find(
+        (candidate) => candidate.number === created.pull,
+      )!;
+      pull.state = "closed";
+      const writes = fixture.github.writes.length;
+      expect((await fixture.run()).action).toBe("held");
+      expect(fixture.github.writes).toHaveLength(writes);
+      pull.state = "open";
+      expect((await fixture.run()).pull).toBe(pull.number);
+    },
+  );
 
   test("does not create a duplicate when a manual release PR opens during preparation", async () => {
     const fixture = new Fixture();
@@ -1248,7 +1371,7 @@ describe("rolling release reconciliation", () => {
   test.each([
     { "sdk/typescript/src/example.ts": "Human implementation changes.\n" },
     { [packagePath]: packageText("0.1.24", { example: "1.0.0" }) },
-  ])("pauses instead of losing unrelated human edits", async (files) => {
+  ])("pauses instead of losing unrelated human edits (%#)", async (files) => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
     const first = await fixture.run();
@@ -1422,35 +1545,32 @@ describe("release proposal pauses", () => {
     ).toHaveLength(1);
   });
 
-  test("keeps a ready release proposal frozen until it returns to draft", async () => {
-    const fixture = new Fixture();
-    fixture.merge("feat: initial feature");
-    const first = await fixture.run();
-    const pull = fixture.github.pulls.find(
-      (candidate) => candidate.number === first.pull,
-    )!;
-    pull.draft = false;
-    pull.body += "\nMaintainer completed the final review.\n";
-    const reviewedBody = pull.body;
-    const reviewedTitle = pull.title;
-    const reviewedHead = fixture.head(first.plan.branch);
-    fixture.merge("feat!: later breaking change");
-    const writes = fixture.github.writes.length;
-    const held = await fixture.run();
-    expect(held.action).toBe("held");
-    expect(held.reason).toContain("draft");
-    expect(fixture.head(first.plan.branch)).toBe(reviewedHead);
-    expect(fixture.github.writes).toHaveLength(writes);
-    expect(pull.title).toBe(reviewedTitle);
-    expect(pull.body).toBe(reviewedBody);
-    pull.draft = true;
-    const resumed = await fixture.run();
-    expect(resumed.action).toBe("updated");
-    expect(resumed.pull).toBe(first.pull);
-    expect(resumed.plan.version).toBe("0.2.0");
-  });
+  test.each([false, true])(
+    "updates an existing proposal with draft=%p",
+    async (draft) => {
+      const fixture = new Fixture();
+      fixture.merge("feat: initial feature");
+      const first = await fixture.run();
+      const pull = fixture.github.pulls.find(
+        (candidate) => candidate.number === first.pull,
+      )!;
+      pull.draft = draft;
+      pull.body += "\nMaintainer review notes.\n";
+      const reviewedBody = pull.body;
+      const reviewedHead = fixture.head(first.plan.branch);
+      fixture.merge("feat!: later breaking change");
+      const updated = await fixture.run();
+      expect(updated.action).toBe("updated");
+      expect(updated.pull).toBe(first.pull);
+      expect(updated.plan.version).toBe("0.2.0");
+      expect(fixture.head(first.plan.branch)).not.toBe(reviewedHead);
+      expect(pull.title).toBe(updated.plan.title);
+      expect(pull.body).toBe(reviewedBody);
+      expect(pull.draft).toBe(draft);
+    },
+  );
 
-  test("does not advance a proposal marked ready during preparation", async () => {
+  test("does not advance a proposal closed during preparation", async () => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
     const first = await fixture.run();
@@ -1459,7 +1579,7 @@ describe("release proposal pauses", () => {
     )!;
     fixture.merge("fix: later fix");
     fixture.github.afterCommit = () => {
-      pull.draft = false;
+      pull.state = "closed";
     };
     const held = await fixture.run();
     expect(held.action).toBe("held");

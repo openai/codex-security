@@ -8,8 +8,8 @@ from typing import Any
 import yaml
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-CODEX_SECURITY_ACCESS_APP_NAME = "codex-security-access"
-CODEX_SECURITY_ACCESS_CONNECTOR_ID = "connector_openai_codex_security_access"
+LEGACY_CODEX_SECURITY_ACCESS_APP_NAME = "codex-security-access"
+LEGACY_CODEX_SECURITY_ACCESS_CONNECTOR_ID = "connector_openai_codex_security_access"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -104,16 +104,14 @@ def test_plugin_manifest_references_existing_assets_and_skills() -> None:
         assert (PLUGIN_ROOT / relative_path).is_file(), relative_path
 
 
-def test_codex_security_access_app_contract() -> None:
+def test_daybreak_access_uses_plugin_mcp() -> None:
     apps = read_json(PLUGIN_ROOT / ".app.json")["apps"]
     mcp_servers = read_json(PLUGIN_ROOT / ".mcp.json")["mcpServers"]
 
-    assert apps[CODEX_SECURITY_ACCESS_APP_NAME] == {
-        "id": CODEX_SECURITY_ACCESS_CONNECTOR_ID,
-        "category": "Security",
-        "required": False,
-    }
-    assert CODEX_SECURITY_ACCESS_APP_NAME not in mcp_servers
+    assert LEGACY_CODEX_SECURITY_ACCESS_APP_NAME not in apps
+    assert all(app["id"] != LEGACY_CODEX_SECURITY_ACCESS_CONNECTOR_ID for app in apps.values())
+    assert "codex-security" in mcp_servers
+    assert LEGACY_CODEX_SECURITY_ACCESS_APP_NAME not in mcp_servers
 
 
 def test_deep_scan_config_override_is_forwarded_to_mcp_server() -> None:

@@ -12,6 +12,7 @@ import {
 import { CodexReviewRunner } from "./codex-review.js";
 import {
   FindingDeduplicator,
+  deduplicationConcurrency,
   type DeduplicationResult,
 } from "./deduplication.js";
 import {
@@ -39,6 +40,8 @@ export interface DeduplicateScanOptions {
   findingsUrl: string;
   /** Search all repositories instead of the scan's targetId. Defaults to false. */
   allRepositories?: boolean;
+  /** Shared concurrency limit for deduplication jobs. Defaults to 8. */
+  concurrency?: number;
   signal?: AbortSignal;
 }
 
@@ -84,6 +87,7 @@ export async function deduplicateScanDirectoryInternal(
   dependencies: DeduplicateScanDependencies = {},
 ): Promise<DeduplicateScanResult> {
   options.signal?.throwIfAborted();
+  deduplicationConcurrency(options.concurrency);
   const repository = await normalizeRepository(
     options.repository,
     options.signal,
@@ -106,6 +110,7 @@ export async function deduplicateScanInternal(
   dependencies: DeduplicateScanDependencies = {},
 ): Promise<DeduplicateScanResult> {
   options.signal?.throwIfAborted();
+  deduplicationConcurrency(options.concurrency);
   const environment = dependencies.environment ?? process.env;
   const pluginRoot = await bundledPluginRoot();
   const scan = await resolveCompletedScan(scanId, {
@@ -242,6 +247,7 @@ async function deduplicateResolvedScan(
       dependencies.reviewer ??
         new CodexDeduplicationReviewer(checkpoints ?? runner),
       options.signal,
+      options.concurrency,
     );
     const reviewed = await deduplicator.run(
       contract.findings.findings.map((finding) => finding.findingId),

@@ -10,7 +10,7 @@ A sealed terminal bundle contains these files under `<scan_dir>`:
 - `findings.json`: semantic finding records retained when the scan reached its terminal outcome
 - `coverage.json`: structured coverage summary with detailed receipt references
 
-Canonical UTF-8 document sizes are bounded consistently by the producer and SDK: `scan-manifest.json` is limited to 16 MiB, `findings.json` to 128 MiB, and `coverage.json` to 32 MiB. Finalization rejects oversized inputs or generated documents before sealing or changing scan outputs. Keep detailed evidence in scan-local artifacts and reference it from the canonical summaries.
+Keep detailed evidence in scan-local artifacts and reference it from the canonical summaries.
 
 Optional structured finding details used by rich consumers are documented in `finding-detail-fields.md`. They remain part of each semantic finding record, not a projection parsed from a readable report.
 
@@ -28,11 +28,11 @@ A sealed manifest records the terminal timestamp and hashes for the canonical do
 
 `scan.status` records why the bundle was sealed:
 
-| Status | Meaning |
-| --- | --- |
-| `completed` | The requested scan reached normal completion. |
-| `failed` | The scan stopped after an unrecoverable failure; retained artifacts may be partial. |
-| `canceled` | The scan stopped after an explicit cancellation; retained artifacts may be partial. |
+| Status        | Meaning                                                                                                         |
+| ------------- | --------------------------------------------------------------------------------------------------------------- |
+| `completed`   | The requested scan reached normal completion.                                                                   |
+| `failed`      | The scan stopped after an unrecoverable failure; retained artifacts may be partial.                             |
+| `canceled`    | The scan stopped after an explicit cancellation; retained artifacts may be partial.                             |
 | `interrupted` | The scan stopped before normal completion because execution was interrupted; retained artifacts may be partial. |
 
 Only `completed` supports a completed-scan conclusion. For every stopped outcome, consumers must preserve retained findings and coverage while treating absence of findings as inconclusive.
@@ -56,12 +56,12 @@ For a workbench-backed scan, use the recorded target contract instead of inferri
 A clean Git checkout has `allowedKinds: ["git_revision"]`: use its recorded revision and omit `snapshotDigest`.
 A dirty checkout has `allowedKinds: ["git_worktree"]`: copy `requiredSnapshotDigest` exactly.
 
-| Kind | Required snapshot fields |
-| --- | --- |
-| `git_revision` | `revision` |
-| `git_worktree` | `revision` when available and `snapshotDigest` |
-| `git_diff` | `snapshotDigest`; include `baseRevision` and `headRevision` when available |
-| `directory_snapshot` | `snapshotDigest` |
+| Kind                 | Required snapshot fields                                                   |
+| -------------------- | -------------------------------------------------------------------------- |
+| `git_revision`       | `revision`                                                                 |
+| `git_worktree`       | `revision` when available and `snapshotDigest`                             |
+| `git_diff`           | `snapshotDigest`; include `baseRevision` and `headRevision` when available |
+| `directory_snapshot` | `snapshotDigest`                                                           |
 
 `targetId` identifies the stable repository or workspace. Prefer a digest of a sanitized canonical absolute remote URL when one exists. Otherwise use a digest of a stable local workspace identity. Never persist remote URL credentials, query parameters, fragments, or tokens.
 
@@ -122,39 +122,39 @@ For Standard and diff scans, record:
 
 `mode` records the requested scan workflow:
 
-| Mode | Meaning |
-| --- | --- |
-| `repository` | Repository-wide scan |
-| `scoped_path` | Scan limited to explicitly requested paths |
-| `diff` | Git-backed change-set scan when no more specific mode applies |
-| `commit` | Commit compared with its resolved baseline |
-| `branch_diff` | Branch or pull-request change set compared with its baseline |
-| `working_tree` | Staged or unstaged local changes |
-| `deep_repository` | Exhaustive repeated repository-wide scan |
+| Mode              | Meaning                                                       |
+| ----------------- | ------------------------------------------------------------- |
+| `repository`      | Repository-wide scan                                          |
+| `scoped_path`     | Scan limited to explicitly requested paths                    |
+| `diff`            | Git-backed change-set scan when no more specific mode applies |
+| `commit`          | Commit compared with its resolved baseline                    |
+| `branch_diff`     | Branch or pull-request change set compared with its baseline  |
+| `working_tree`    | Staged or unstaged local changes                              |
+| `deep_repository` | Exhaustive repeated repository-wide scan                      |
 
 `inventoryStrategy` records how the producer enumerated the reviewed content, independently of the requested scan workflow:
 
 For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repeated discovery is workflow metadata, not a different inventory strategy.
 
-| Inventory strategy | Meaning |
-| --- | --- |
-| `repository` | Repository-wide tracked source-like file inventory |
-| `scoped_path` | Repository inventory constrained to requested paths |
-| `diff` | Files selected from the reviewed Git change set |
-| `directory` | Deterministic non-Git directory inventory |
-| `custom` | Producer-defined inventory described by detailed receipts |
+| Inventory strategy | Meaning                                                   |
+| ------------------ | --------------------------------------------------------- |
+| `repository`       | Repository-wide tracked source-like file inventory        |
+| `scoped_path`      | Repository inventory constrained to requested paths       |
+| `diff`             | Files selected from the reviewed Git change set           |
+| `directory`        | Deterministic non-Git directory inventory                 |
+| `custom`           | Producer-defined inventory described by detailed receipts |
 
 For Standard and diff scans, use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
 
 Map detailed ledger closure into completed surface summaries in this order:
 
-| Completed surface condition | Disposition |
-| --- | --- |
-| At least one `reportable` row | `reported` |
-| Otherwise, at least one `deferred` row | `needs_follow_up` |
-| Otherwise, at least one `suppressed` row | `rejected` |
-| Otherwise, an applicable surface was checked and no candidate survived | `no_issue_found` |
-| Otherwise, the surface is not applicable | `not_applicable` |
+| Completed surface condition                                            | Disposition       |
+| ---------------------------------------------------------------------- | ----------------- |
+| At least one `reportable` row                                          | `reported`        |
+| Otherwise, at least one `deferred` row                                 | `needs_follow_up` |
+| Otherwise, at least one `suppressed` row                               | `rejected`        |
+| Otherwise, an applicable surface was checked and no candidate survived | `no_issue_found`  |
+| Otherwise, the surface is not applicable                               | `not_applicable`  |
 
 Record each explicit exclusion with a `pattern` and `reason`. Record each deferred unit with a stable `id`, a `reason`, and optional `paths` or `surfaceIds`.
 
