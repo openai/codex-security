@@ -16,6 +16,10 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
+def reject_non_finite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON number {value!r} is not supported")
+
+
 def require_uuid(value: str, label: str) -> str:
     try:
         return str(uuid.UUID(value))

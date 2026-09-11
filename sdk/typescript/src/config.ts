@@ -158,7 +158,8 @@ export function modelProviderConfigOverride(config: JsonObject): string[] {
     : [`model_providers=${inlineToml(config["model_providers"])}`];
 }
 
-function inlineToml(value: JsonValue): string {
+/** @internal Serialize one Codex CLI override value without flattening its keys. */
+export function inlineToml(value: JsonValue): string {
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
   if (isObject(value)) {
     return `{${Object.entries(value)
@@ -191,6 +192,16 @@ function selectedScanProfile(
   return isObject(configuredProfile) ? configuredProfile : undefined;
 }
 
+export function resolveCodexProfile(config: JsonObject): JsonObject {
+  const resolved = deepMerge(
+    cloneJson(config),
+    selectedScanProfile(config) ?? {},
+  );
+  delete resolved["profile"];
+  delete resolved["profiles"];
+  return resolved;
+}
+
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
 ): Promise<JsonObject> {
@@ -210,7 +221,12 @@ export async function mergedCodexConfig(
       }
     }
   }
-  return deepMerge(cloneJson(DEFAULT_CODEX_CONFIG), overrides);
+  const defaults: JsonObject = cloneJson(DEFAULT_CODEX_CONFIG);
+  if (scanModelProvider(overrides) === "amazon-bedrock") {
+    // Bedrock models can reject reasoning.summary before the scan starts.
+    defaults["model_reasoning_summary"] = "none";
+  }
+  return deepMerge(defaults, overrides);
 }
 
 function normalizeLegacyWindowsSandboxOverride(overrides: JsonObject): void {
@@ -314,6 +330,11 @@ function validateOverrides(overrides: JsonObject): void {
     if (!isObject(profile)) {
       throw new ConfigurationError(
         `Codex override profile ${name} must be a TOML table.`,
+      );
+    }
+    if ("plugins" in profile || "marketplaces" in profile) {
+      throw new ConfigurationError(
+        `Codex Security owns plugin loading configuration in profile ${name}.`,
       );
     }
     const profileFeatures = profile["features"];

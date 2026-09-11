@@ -333,14 +333,13 @@ function readReleaseBranch(repo, mainSha, headSha) {
 
 function initialPullBody(template) {
   const sections = {
-    Summary:
-      "Keep a draft release proposal current with changes merged into main.",
+    Summary: "Keep a release proposal current with changes merged into main.",
     Changes:
       "Update the package version and draft release notes. The version header and PR title are maintained by automation. Edit the marked note sections in `.github/release-notes.md`; edited or deleted sections become human-owned. New suggestions appear in subsequent bot comments. The PR description is never regenerated.",
     Testing:
-      "The updater does not run package tests. Check required CI and Codex review on the current head before marking this draft ready. Request a final Codex review if the last review targets an older head. Record any additional checks here.",
+      "The updater does not run package tests. Check required CI and Codex review on the current head before merging. Request a final Codex review if the last review targets an older head. Record any additional checks here.",
     "Risk and rollout":
-      "This PR does not merge itself. Merging a nonempty proposal starts the existing CI and protected release process. An empty proposal leaves the package version unchanged. Review migration details and complete the public disclosure review before merging.",
+      "Merging this PR starts the existing CI and protected release process. Review migration details and complete the public disclosure review before merging.",
   };
   let body = template;
   for (const [heading, content] of Object.entries(sections)) {
@@ -390,9 +389,6 @@ function pullHoldReason(pull, branch) {
     pull.base.ref !== "main"
   ) {
     return "The release PR was closed or retargeted during the update. Review it before continuing.";
-  }
-  if (!pull.draft) {
-    return `Release PR #${pull.number} is ready for review. Convert it back to a draft to resume automatic updates.`;
   }
   return null;
 }
@@ -456,7 +452,7 @@ async function ensurePullRequest(
       title: plan.title,
       head: plan.branch,
       base: "main",
-      draft: true,
+      draft: false,
       body: initialPullBody(template),
     });
   }
@@ -546,6 +542,14 @@ export async function reconcileReleasePullRequest({
     if (holdReason) return { action: "held", reason: holdReason, dryRun, plan };
     if (pull && !headSha)
       throw new Error("The open release PR has no branch head.");
+    if (plan.changes.length === 0)
+      return {
+        action: "unchanged",
+        reason:
+          "No changes have reached main since the current release version.",
+        dryRun,
+        plan,
+      };
     const changed =
       !headSha ||
       previous.mergeBase !== mainSha ||

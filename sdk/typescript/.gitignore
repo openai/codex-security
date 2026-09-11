@@ -6,3 +6,4 @@
 /.stryker-tmp/
 /private_release/dist/
 /*.tsbuildinfo
+/scripts/compare-test-reports.mjs

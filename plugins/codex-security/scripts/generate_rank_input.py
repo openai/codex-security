@@ -293,6 +293,13 @@ def path_is_excluded(path: Path) -> bool:
     return path.name.endswith((".min.js", ".map"))
 
 
+def path_is_diff_excluded(path: Path) -> bool:
+    """Apply repository exclusions while retaining changed workflow files."""
+    if path.parts[:2] == (".github", "workflows"):
+        return False
+    return path_is_excluded(path)
+
+
 def windows_stream_component(path: Path) -> str | None:
     """Return the first NTFS alternate-data-stream component."""
 
@@ -683,7 +690,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     changed = [
         (path, status)
         for path, status in git_changed_paths(repo, args.base, args.head, args.mode)
-        if not path_is_excluded(path.relative_to(repo))
+        if not path_is_diff_excluded(path.relative_to(repo))
         and path.suffix.lower() in TEXT_CODE_EXTENSIONS
     ]
     revision_paths = [

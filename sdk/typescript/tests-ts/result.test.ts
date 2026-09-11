@@ -127,7 +127,7 @@ describe("ScanResult", () => {
       },
     });
 
-    expect(result.cost?.estimatedUsd).toBe(0.00625);
+    expect(result.cost?.estimatedUsd).toBe(0.00488);
     expect(result.toJSON()["cost"]).toEqual(result.cost);
   });
 

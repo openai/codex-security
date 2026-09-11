@@ -630,7 +630,7 @@ process.exit(process.exitCode ?? 0);
       { pluginPath: PLUGIN_ROOT },
       {
         environment: {
-          ...process.env,
+          PATH: process.env["PATH"],
           NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
           CODEX_HOME: ambientHome,
           CODEX_SECURITY_STATE_DIR: stateDir,

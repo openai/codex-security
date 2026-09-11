@@ -331,12 +331,19 @@ the project file again. Complete saved deep settings do not use the current lega
 file; older partial recipes continue using applicable defaults for missing values.
 
 Recipes do not snapshot source or context contents. Reruns use the current checkout
-and current context files. Additional scan instructions are not retained: a new
-recipe records that requirement, and `scans rerun` refuses to omit them silently.
+and current context files. Reruns require replacement scan instructions when the
+original scan used them: a new recipe records that requirement, and `scans rerun`
+refuses to omit them silently.
 Use `scans rerun [SCAN_ID] --scan-prompt-file FILE` to supply them again. A required
 replacement must not be empty. The file resolves from the invocation directory.
 Custom validation keeps its existing `scans rerun --validation-prompt-file FILE`
 requirement.
+
+`scans resume SCAN_ID` and eligible `bulk-scan --recover` attempts continue the
+original session with its saved instructions, authentication choice, and deep
+settings. They do not reload the project file or require replacement instructions.
+Bulk recovery still checks the selected configuration against the campaign manifest
+and applies its severity policy to recovered findings.
 
 Workflow identity records explicitly requested deep settings, not ambient values
 or shipped defaults, so changing those defaults does not prevent resumption.

@@ -395,13 +395,49 @@ try {
     "Installed npm package does not match the complete bundled-plugin contract.",
   );
 
+  const libc =
+    process.platform === "linux"
+      ? process.report.getReport().header.glibcVersionRuntime === undefined
+        ? "-musl"
+        : "-gnu"
+      : "";
+  const nativeLibrary = join(
+    installedRoot,
+    "_bundled_plugin",
+    "mcp",
+    "native",
+    `${process.platform}-${process.arch}${libc}`,
+    process.platform === "win32" ? "windows.node" : "unix.node",
+  );
+  run(
+    process.execPath,
+    [
+      "--input-type=commonjs",
+      "--eval",
+      "require(process.argv[1])",
+      nativeLibrary,
+    ],
+    { cwd: consumer, env: { ...process.env, PATH: "" } },
+  );
+
   run(
     process.execPath,
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "loadProjectConfig", "resolveProjectConfig"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");
-       const assert = await import("node:assert/strict");
+      `const sdk = await import(${JSON.stringify(packageManifest.name)});
+      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff", "loadProjectConfig", "resolveProjectConfig"]) {
+        if (typeof sdk[name] !== "function") {
+          throw new Error("The installed package does not export " + name + ".");
+        }
+      }
+      if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function") {
+        throw new Error("The installed package does not export generatePolicy.");
+      }
+      const result = await sdk.matchScanFindings({ before: [], after: [] });
+      if (result.matches.length !== 0 || result.uncertain.length !== 0) {
+        throw new Error("Empty finding comparison did not return an empty result.");
+      }       const assert = await import("node:assert/strict");
        const { writeFile } = await import("node:fs/promises");
        const input = { scan: { mode: "deep", deep: { subagents_per_worker: 0 } }, policy: { fail_on_severity: "high" } };
        await writeFile("scan.json", JSON.stringify(input));
@@ -502,6 +538,42 @@ try {
   assert.match(help, /Usage: codex-security\b/u);
   assert.match(help, /\bpublish\b/u);
   assert.match(help, /\bdedupe\b/u);
+  assert.match(help, /\bpolicy\b/u);
+  const policyHelp = run(process.execPath, [launcher, "policy", "--help"], {
+    cwd: consumer,
+    capture: true,
+  });
+  assert.match(policyHelp, /SECURITY\.md/u);
+  const policyTarget = join(consumer, "policy-target");
+  await mkdir(policyTarget);
+  const policyPreflight = JSON.parse(
+    run(
+      process.execPath,
+      [
+        launcher,
+        "policy",
+        policyTarget,
+        "--auth",
+        "chatgpt",
+        "--dry-run",
+        "--json",
+      ],
+      {
+        cwd: consumer,
+        capture: true,
+        env: {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: join(consumer, "policy-state"),
+        },
+      },
+    ),
+  );
+  assert.equal(
+    policyPreflight.targetPath,
+    join(await realpath(policyTarget), "SECURITY.md"),
+  );
+  assert.equal(policyPreflight.dryRun, true);
+  assert.deepEqual(await readdir(policyTarget), []);
 
   const starterPath = join(consumer, "codex-security.yaml");
   const starter = JSON.parse(

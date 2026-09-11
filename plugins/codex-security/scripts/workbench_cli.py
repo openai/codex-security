@@ -167,6 +167,10 @@ def parse_args(description: str) -> argparse.Namespace:
     get_scan_recipe = subparsers.add_parser("get-scan-recipe")
     get_scan_recipe.add_argument("--scan-id", required=True)
 
+    get_cli_scan_resume = subparsers.add_parser("get-cli-scan-resume")
+    get_cli_scan_resume.add_argument("--scan-id", required=True)
+    get_cli_scan_resume.add_argument("--allow-unavailable", action="store_true")
+
     compare_scans = subparsers.add_parser("compare-scans")
     compare_scans.add_argument("--before-scan-id", required=True)
     compare_scans.add_argument("--after-scan-id", required=True)

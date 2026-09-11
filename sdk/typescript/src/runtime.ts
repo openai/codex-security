@@ -337,6 +337,33 @@ export async function requirePrivateCredentialHome(
     secureWindowsHome?: (path: string) => Promise<void>;
   } = {},
 ): Promise<void> {
+  await requirePrivateDirectory(metadata, path, "credential home", options);
+}
+
+export async function requirePrivatePolicyOutputDirectory(
+  path: string,
+  options: {
+    platform?: NodeJS.Platform;
+    secureWindowsHome?: (path: string) => Promise<void>;
+  } = {},
+): Promise<void> {
+  await requirePrivateDirectory(
+    await lstat(path),
+    path,
+    "policy output directory",
+    options,
+  );
+}
+
+async function requirePrivateDirectory(
+  metadata: Pick<Stats, "mode" | "uid">,
+  path: string,
+  description: string,
+  options: {
+    platform?: NodeJS.Platform;
+    secureWindowsHome?: (path: string) => Promise<void>;
+  },
+): Promise<void> {
   if ((options.platform ?? process.platform) !== "win32") {
     requirePrivateOutputDirectory(metadata, path);
     return;
@@ -347,7 +374,7 @@ export async function requirePrivateCredentialHome(
   } catch (error) {
     const detail = windowsCredentialAclFailure(error);
     throw new OutputDirectoryError(
-      `Unable to create a private Windows credential home: ${path}${detail}`,
+      `Unable to create a private Windows ${description}: ${path}${detail}`,
       { cause: error },
     );
   }
@@ -1511,7 +1538,7 @@ export function requireOutputOutsideRepositories(
 
 export async function preparePersistentOutputRoot(
   stateDirectory: string,
-  category: "scans" | "policies" | "validations",
+  category: "scans" | "policies" | "validations" | "imports",
   repositoryName: string,
 ): Promise<string> {
   requireModelSafeOutputDir(stateDirectory);
@@ -1522,7 +1549,7 @@ export async function preparePersistentOutputRoot(
     await mkdir(root, { recursive: true, mode: 0o700 });
     if (!(await lstat(root)).isDirectory()) {
       throw new OutputDirectoryError(
-        `Persistent ${category === "scans" ? "scan" : category === "policies" ? "policy" : "validation"} output must use real directories: ${root}`,
+        `Persistent ${category === "scans" ? "scan" : category === "policies" ? "policy" : category === "imports" ? "import" : "validation"} output must use real directories: ${root}`,
       );
     }
   }

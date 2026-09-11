@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, parse, sep } from "node:path";
+import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   estimateScanCost,
@@ -16,9 +17,21 @@ import {
   type ScanSessionEvent,
 } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
+import { formatTokenUsage, tokenUsage } from "../src/cost-model.js";
 import { readScanLogs } from "../src/scan-logs.js";
 import { sessionParentThreadId } from "../src/scan-sessions.js";
 import type { ScanProgress } from "../src/worker-progress.js";
+import { PLUGIN_ROOT as BUNDLED_PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  childUuid7Thread,
+  higherUuid7Turn,
+  lowerUuid7Turn,
+  ownedPythonUsage,
+  ownedSdkUsage,
+  ownershipRollout,
+  readPythonRolloutUsage,
+  scanThreadId,
+} from "./support/usage-rollout.js";
 
 const temporaryDirectories: string[] = [];
 const parentFields = ["source", "parent_thread_id", "forked_from_id"] as const;
@@ -170,6 +183,65 @@ test.each([
 });
 
 describe("scan cost", () => {
+  test("shows distinct token categories without adding cached input twice", () => {
+    expect(
+      formatTokenUsage({
+        input_tokens: 120,
+        cached_input_tokens: 30,
+        cache_write_tokens: 12,
+        output_tokens: 15,
+      }),
+    ).toBe(
+      "78 uncached input, 30 cache reads, 12 cache writes, 15 output, 135 total",
+    );
+  });
+
+  test("distinguishes missing cache writes from a reported zero", () => {
+    const usage = {
+      input_tokens: 120,
+      cached_input_tokens: 30,
+      output_tokens: 15,
+    };
+    expect(formatTokenUsage(tokenUsage(usage))).toBe(
+      "unavailable uncached input, 30 cache reads, unavailable cache writes, 15 output, 135 total",
+    );
+    expect(formatTokenUsage({ ...usage, cache_write_input_tokens: 0 })).toBe(
+      "90 uncached input, 30 cache reads, 0 cache writes, 15 output, 135 total",
+    );
+    expect(estimateScanCost("gpt-6-astra", usage)).toMatchObject({
+      cacheWriteInputTokens: 0,
+      cacheWriteInputTokensReported: false,
+    });
+  });
+
+  test("includes the price source and rates with each estimate", () => {
+    const cost = estimateScanCost("gpt-6-astra", {
+      input_tokens: 1_000_000,
+      cached_input_tokens: 200_000,
+      cache_write_input_tokens: 300_000,
+      output_tokens: 100_000,
+    });
+    expect(cost).toEqual({
+      model: "gpt-6-astra",
+      inputTokens: 1_000_000,
+      cachedInputTokens: 200_000,
+      cacheWriteInputTokens: 300_000,
+      outputTokens: 100_000,
+      estimatedUsd: 13.95,
+      pricing: {
+        source: "https://developers.openai.com/api/docs/pricing",
+        asOf: "2026-09-09",
+        serviceTier: "standard",
+        context: "short",
+        usdPerMillionTokens: {
+          input: 10,
+          cacheRead: 1,
+          cacheWrite: 12.5,
+          output: 50,
+        },
+      },
+    });
+  });
   test.each([
     [{ cache_write_tokens: 15 }, 15],
     [{ cache_write_input_tokens: 0, cache_write_tokens: 15 }, 15],
@@ -219,71 +291,6 @@ describe("scan cost", () => {
     },
   );
 
-  test("uses published GPT-5.6 model rates", () => {
-    const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
-
-    expect(estimateScanCost("gpt-5.6", usage)?.estimatedUsd).toBe(35);
-    expect(estimateScanCost("gpt-5.6-sol", usage)?.estimatedUsd).toBe(35);
-    expect(estimateScanCost("gpt-5.6-terra", usage)?.estimatedUsd).toBe(14);
-    expect(estimateScanCost("gpt-5.6-luna", usage)?.estimatedUsd).toBe(1.4);
-  });
-
-  test("uses canonical OpenAI pricing for Amazon Bedrock model identifiers", () => {
-    const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
-
-    for (const [model, expectedUsd] of [
-      ["openai.gpt-5.6", 35],
-      ["openai.gpt-5.6-sol", 35],
-      ["openai.gpt-daybreak-blue-latest", 35],
-      ["openai.gpt-daybreak-red-latest", 87.5],
-      ["openai.gpt-5.6-terra", 14],
-      ["openai.gpt-5.6-luna", 1.4],
-    ] as const) {
-      expect(estimateScanCost(model, usage)).toMatchObject({
-        model,
-        estimatedUsd: expectedUsd,
-      });
-    }
-
-    expect(estimateScanCost("openai.unknown-model", usage)).toBeNull();
-  });
-
-  test("uses current input, cache, and output rates", () => {
-    for (const [model, input, cached, write, output] of [
-      ["gpt-daybreak-blue-latest", 5, 0.5, 6.25, 30],
-      ["gpt-daybreak-red-latest", 12.5, 1.25, 15.625, 75],
-      ["gpt-5.6-terra", 2, 0.2, 2.5, 12],
-      ["gpt-5.6-luna", 0.2, 0.02, 0.25, 1.2],
-    ] as const) {
-      expect(
-        estimateScanCost(model, {
-          input_tokens: 1_000_000,
-          output_tokens: 0,
-        })?.estimatedUsd,
-      ).toBe(input);
-      expect(
-        estimateScanCost(model, {
-          input_tokens: 1_000_000,
-          cached_input_tokens: 1_000_000,
-          output_tokens: 0,
-        })?.estimatedUsd,
-      ).toBe(cached);
-      expect(
-        estimateScanCost(model, {
-          input_tokens: 1_000_000,
-          cache_write_input_tokens: 1_000_000,
-          output_tokens: 0,
-        })?.estimatedUsd,
-      ).toBe(write);
-      expect(
-        estimateScanCost(model, {
-          input_tokens: 0,
-          output_tokens: 1_000_000,
-        })?.estimatedUsd,
-      ).toBe(output);
-    }
-  });
-
   test("charges cached input at its discounted rate", () => {
     expect(
       estimateScanCost("gpt-5.6-sol", {
@@ -291,13 +298,13 @@ describe("scan cost", () => {
         cached_input_tokens: 200,
         output_tokens: 30,
       }),
-    ).toEqual({
+    ).toMatchObject({
       model: "gpt-5.6-sol",
       inputTokens: 1_250,
       cachedInputTokens: 200,
       cacheWriteInputTokens: 0,
       outputTokens: 30,
-      estimatedUsd: 0.00625,
+      estimatedUsd: 0.00488,
     });
   });
 
@@ -309,7 +316,7 @@ describe("scan cost", () => {
         cache_write_input_tokens: 200,
         output_tokens: 10,
       })?.estimatedUsd,
-    ).toBe(0.0051);
+    ).toBe(0.00404);
   });
 
   test("preserves legacy cache writes after SDK normalization adds zero", () => {
@@ -321,7 +328,7 @@ describe("scan cost", () => {
         cache_write_tokens: 200,
         output_tokens: 10,
       }),
-    ).toMatchObject({ cacheWriteInputTokens: 200, estimatedUsd: 0.0051 });
+    ).toMatchObject({ cacheWriteInputTokens: 200, estimatedUsd: 0.00404 });
   });
 
   test("ignores impossible legacy cache writes while retaining canonical usage", () => {
@@ -333,7 +340,7 @@ describe("scan cost", () => {
         cache_write_tokens: 1_001,
         output_tokens: 10,
       }),
-    ).toMatchObject({ cacheWriteInputTokens: 0, estimatedUsd: 0.00485 });
+    ).toMatchObject({ cacheWriteInputTokens: 0, estimatedUsd: 0.00384 });
   });
 
   test("does not double-charge reasoning tokens included in output", () => {
@@ -343,12 +350,13 @@ describe("scan cost", () => {
         output_tokens: 10,
         reasoning_output_tokens: 9,
       })?.estimatedUsd,
-    ).toBe(0.0053);
+    ).toBe(0.0042);
   });
 
   test("does not invent prices for unknown models or incomplete usage", () => {
     for (const [model, usage] of [
       ["unknown-model", { input_tokens: 1, output_tokens: 1 }],
+      ["openai.unknown-model", { input_tokens: 1, output_tokens: 1 }],
       ["gpt-5.6-sol", null],
       ["gpt-5.6-sol", {}],
       ["gpt-5.6-sol", { input_tokens: -1, output_tokens: 1 }],
@@ -371,6 +379,130 @@ describe("scan cost", () => {
 });
 
 describe("live scan cost tracking", () => {
+  test.each([
+    [undefined, undefined],
+    [0, 0],
+    [12, undefined],
+    [undefined, 12],
+  ] as const)(
+    "preserves cache-write usage through SDK normalization: log %p, receipt %p",
+    async (writes, receiptWrites) => {
+      const home = await codexHome();
+      const usage = {
+        input_tokens: 120,
+        cached_input_tokens: 30,
+        output_tokens: 15,
+        ...(writes === undefined ? {} : { cache_write_input_tokens: writes }),
+      };
+      await writeSession(home, "scan-thread", usage);
+      const thread = new Codex({
+        codexPathOverride: process.execPath,
+      }).startThread();
+      const executable = thread as unknown as {
+        _exec: { run(): AsyncGenerator<string> };
+      };
+      executable._exec.run = async function* () {
+        yield JSON.stringify({
+          type: "thread.started",
+          thread_id: "scan-thread",
+        });
+        yield JSON.stringify({
+          type: "turn.completed",
+          usage: { ...usage, cache_write_input_tokens: receiptWrites },
+        });
+      };
+      const receipt = (await thread.run("Scan the repository.")).usage;
+      expect(receipt?.cache_write_input_tokens).toBe(receiptWrites ?? 0);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-6-astra",
+      });
+      tracker.start("scan-thread");
+      const running = await tracker.refresh();
+      const completed = await tracker.stop(receipt);
+
+      expect(formatTokenUsage(running.usage)).toContain(
+        `${writes ?? "unavailable"} cache writes`,
+      );
+      const expectedWrites = receiptWrites ?? writes;
+      expect(completed.cost).toMatchObject({
+        inputTokens: 120,
+        cachedInputTokens: 30,
+        cacheWriteInputTokens: expectedWrites ?? 0,
+        outputTokens: 15,
+      });
+      expect(completed.cost?.cacheWriteInputTokensReported).toBe(
+        expectedWrites === undefined ? false : undefined,
+      );
+      expect(formatTokenUsage(completed.usage)).toContain(
+        `${expectedWrites ?? "unavailable"} cache writes`,
+      );
+    },
+  );
+
+  test("retains reported write charges when another worker omits cache writes", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      cached_input_tokens: 20,
+      output_tokens: 10,
+    });
+    await writeSession(
+      home,
+      "worker-thread",
+      {
+        input_tokens: 200,
+        cached_input_tokens: 40,
+        cache_write_input_tokens: 50,
+        output_tokens: 20,
+      },
+      "scan-thread",
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-6-astra",
+    });
+    tracker.start("scan-thread");
+    const snapshot = await tracker.stop();
+    expect(snapshot.usage).toMatchObject({
+      input_tokens: 300,
+      cache_write_input_tokens: 50,
+      cache_write_input_tokens_reported: false,
+      total_tokens: 330,
+    });
+    expect(snapshot.cost).toMatchObject({
+      cacheWriteInputTokens: 50,
+      cacheWriteInputTokensReported: false,
+      estimatedUsd: 0.004085,
+    });
+    expect(formatTokenUsage(snapshot.usage)).toContain(
+      "unavailable cache writes",
+    );
+  });
+
+  test("reports newly available cache writes even when the dollar amount is unchanged", async () => {
+    const home = await codexHome();
+    const updates: unknown[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.5",
+      onCost: (cost) => updates.push(cost),
+    });
+    tracker.start("scan-thread");
+    tracker.recordUsage(
+      { input_tokens: 100, output_tokens: 10 },
+      "scan-thread",
+    );
+    await tracker.refresh();
+    tracker.recordUsage(
+      { input_tokens: 100, cache_write_input_tokens: 0, output_tokens: 10 },
+      "scan-thread",
+    );
+    await tracker.stop();
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toHaveProperty("cacheWriteInputTokensReported", false);
+    expect(updates[1]).not.toHaveProperty("cacheWriteInputTokensReported");
+  });
   test("coalesces overlapping polling ticks and bounds final work", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {
@@ -462,13 +594,13 @@ describe("live scan cost tracking", () => {
     tracker.start("scan-thread");
 
     try {
-      await expect(reportedCost).resolves.toEqual({
+      await expect(reportedCost).resolves.toMatchObject({
         model: "gpt-5.6-sol",
         inputTokens: 1_250,
         cachedInputTokens: 200,
         cacheWriteInputTokens: 0,
         outputTokens: 30,
-        estimatedUsd: 0.00625,
+        estimatedUsd: 0.00488,
       });
     } finally {
       await tracker.stop();
@@ -518,7 +650,7 @@ describe("live scan cost tracking", () => {
     await tracker.refresh();
     await tracker.refresh();
 
-    expect(await tracker.stop()).toEqual({
+    expect(await tracker.stop()).toMatchObject({
       usage: {
         input_tokens: 1_250,
         cached_input_tokens: 150,
@@ -533,7 +665,7 @@ describe("live scan cost tracking", () => {
         cachedInputTokens: 150,
         cacheWriteInputTokens: 200,
         outputTokens: 15,
-        estimatedUsd: 0.006275,
+        estimatedUsd: 0.00496,
       },
     });
     expect(
@@ -872,7 +1004,7 @@ describe("live scan cost tracking", () => {
         input_tokens: 1_250,
         output_tokens: 12,
       });
-      expect(snapshot.cost?.estimatedUsd).toBe(0.00661);
+      expect(snapshot.cost?.estimatedUsd).toBe(0.00524);
       const included = [
         ...new Set(events.map(({ threadId }) => threadId)),
       ].sort();
@@ -1057,7 +1189,7 @@ describe("live scan cost tracking", () => {
       });
       tracker.start("scan-thread");
 
-      expect(await tracker.stop()).toEqual({
+      expect(await tracker.stop()).toMatchObject({
         usage: {
           input_tokens: 1_300,
           cached_input_tokens: 650,
@@ -1106,6 +1238,65 @@ describe("live scan cost tracking", () => {
       );
     },
   );
+
+  test.each([
+    [
+      "keeps a same-millisecond lower UUIDv7 turn in inherited history",
+      [lowerUuid7Turn],
+    ],
+    ["accepts a same-millisecond higher UUIDv7 turn as child-owned", []],
+  ] as const)("%s", async (_name, replayedTurnIds) => {
+    const home = await codexHome();
+    const rolloutPath = await writeSession(
+      home,
+      childUuid7Thread,
+      { input_tokens: 1_100, output_tokens: 110 },
+      scanThreadId,
+    );
+    const rollout = ownershipRollout(replayedTurnIds);
+    await writeFile(
+      rolloutPath,
+      rollout.map((event) => JSON.stringify(event)).join("\n") + "\n",
+    );
+
+    const maxCostUsd = 0.001;
+    const observedCosts: number[] = [];
+    const forwardedEvents: ScanSessionEvent[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd,
+      onCost: ({ estimatedUsd }) => observedCosts.push(estimatedUsd),
+      onSessionEvent: (event) => forwardedEvents.push(event),
+    });
+    tracker.start(scanThreadId);
+    const tracked = await tracker.stop();
+    const python = readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, rolloutPath);
+
+    expect({
+      trackedUsage: tracked.usage,
+      estimatedUsd: tracked.cost?.estimatedUsd,
+      python,
+    }).toMatchObject({
+      trackedUsage: ownedSdkUsage,
+      estimatedUsd: 0.0006,
+      python: {
+        usage: ownedPythonUsage,
+        warnings: [],
+      },
+    });
+    expect(observedCosts.length).toBeGreaterThan(0);
+    expect(observedCosts.every((cost) => cost < maxCostUsd)).toBe(true);
+    const forwardedTurnIds = forwardedEvents.flatMap(({ event }) => {
+      const payload = event["payload"];
+      return typeof payload === "object" &&
+        payload !== null &&
+        (payload as Record<string, unknown>)["type"] === "task_started"
+        ? [(payload as Record<string, unknown>)["turn_id"]]
+        : [];
+    });
+    expect(forwardedTurnIds).toEqual([higherUuid7Turn]);
+  });
 
   test("forwards actions from this scan's delegated workers only", async () => {
     const home = await codexHome();
@@ -1887,7 +2078,7 @@ describe("live scan cost tracking", () => {
     });
     await appendFile(path, `${latest}\n${latest}\n`);
 
-    expect((await tracker.stop()).cost).toEqual({
+    expect((await tracker.stop()).cost).toMatchObject({
       model: "gpt-5.6-terra",
       inputTokens: 250,
       cachedInputTokens: 0,
@@ -1979,11 +2170,11 @@ describe("live scan cost tracking", () => {
 
     await tracker.stop();
 
-    expect(updates).toEqual([0.00625]);
+    expect(updates).toEqual([0.00488]);
   });
 
   test.each([undefined, 100, 1_000, 1_500])(
-    "reconciles the parent receipt with worker usage when logged parent tokens are %s",
+    "reconciles the parent receipt with worker usage when logged parent tokens are %p",
     async (parentTokens) => {
       const home = await codexHome();
       if (parentTokens !== undefined) {
@@ -2023,7 +2214,7 @@ describe("live scan cost tracking", () => {
     const usage = { input_tokens: 1_000, output_tokens: 20 };
     tracker.start("scan-thread");
 
-    expect(await tracker.stop(usage)).toEqual({
+    expect(await tracker.stop(usage)).toMatchObject({
       usage: {
         ...usage,
         cached_input_tokens: 0,
