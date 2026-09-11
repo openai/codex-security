@@ -461,9 +461,16 @@ test("forwards scan events with their component identity without letting observe
   }
 });
 
-test.each(["dashboard", "headless", "ci"])(
-  "CLI component presentation: %s",
-  async (presentation) => {
+test.each([
+  ["dashboard", []],
+  ["headless", []],
+  ["ci", []],
+  ["dashboard", ["--show-cost"]],
+  ["headless", ["--show-cost"]],
+  ["ci", ["--max-cost", "20"]],
+] as const)(
+  "CLI component presentation: %s, flags: %j",
+  async (presentation, costFlags) => {
     const paths = await fixture();
     const stdout = capture();
     const stderr = capture(true);
@@ -477,6 +484,7 @@ test.each(["dashboard", "headless", "ci"])(
         "--output-dir",
         paths.outputDir,
         ...(presentation === "headless" ? ["--headless"] : []),
+        ...costFlags,
         "--json",
       ],
       stdout.stream,
@@ -516,6 +524,9 @@ test.each(["dashboard", "headless", "ci"])(
       presentation === "dashboard",
     );
     expect(stderr.text()).toContain("Report:");
+    expect(stderr.text().includes("$0.00123")).toBe(costFlags.length > 0);
+    if (costFlags.length === 0)
+      expect(stderr.text()).not.toMatch(/\bCOST\b|\bCost:/u);
     if (presentation === "dashboard") {
       expect(stderr.text()).toContain("validating findings");
       expect(stderr.text().indexOf("\u001B[?1049l")).toBeLessThan(
@@ -527,7 +538,7 @@ test.each(["dashboard", "headless", "ci"])(
         "apps/api validating findings | Files: 2/2",
       );
       expect(stderr.text()).toContain(
-        "apps/api | Tokens: 90 uncached input, 10 cache reads, 0 cache writes, 20 output, 120 total | Cost: $0.00123",
+        "apps/api | Tokens: 90 uncached input, 10 cache reads, 0 cache writes, 20 output, 120 total",
       );
     }
     expect(
