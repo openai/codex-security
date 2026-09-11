@@ -105,7 +105,7 @@ describe("TypeScript package skeleton", () => {
     const { jobs } = await workflow("node-ci.yml");
     expect(jobs["test"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest", "macos-latest"],
-      shard: [1, 2, 3],
+      shard: [1, 2],
     });
     expect(jobs["compatibility"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest"],
@@ -113,7 +113,7 @@ describe("TypeScript package skeleton", () => {
       include: [{ os: "macos-latest", node: "22.13.0" }],
     });
     expect(jobs["windows-test"]?.strategy?.matrix).toEqual({
-      shard: [1, 2, 3, 4, 5, 6, 7],
+      shard: [1, 2, 3, 4, 5, 6],
     });
     expect(jobs["windows-verify"]?.strategy?.matrix["node"]).toEqual([
       "22.13.0",
@@ -162,7 +162,7 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
-        run: "node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7",
+        run: "node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/6",
       }),
     );
   });
