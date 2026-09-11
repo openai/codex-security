@@ -16,6 +16,8 @@
 - update setuptools requirement from \>=64.0 to \>=84.0.0 in /plugins/codex-security ([#889](https://github.com/openai/codex-security/pull/889))
 - bump SocketDev/action from 1.3.0 to 1.3.2 ([#884](https://github.com/openai/codex-security/pull/884))
 - bump ruff from 0.16.1 to 0.16.6 in /plugins/codex-security ([#887](https://github.com/openai/codex-security/pull/887))
+- bump typescript from 6.0.3 to 7.0.2 in /plugins/codex-security/mcp-app ([#894](https://github.com/openai/codex-security/pull/894))
+- bump pytest from 9.0.3 to 9.1.1 in /plugins/codex-security ([#885](https://github.com/openai/codex-security/pull/885))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
