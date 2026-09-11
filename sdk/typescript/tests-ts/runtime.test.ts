@@ -1683,7 +1683,7 @@ describe("plugin runtime preparation", () => {
     const originalStat = fsPromises.stat;
     const firstExactIdentity = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
     const inspectMarketplaces = spyOn(fsPromises, "stat").mockImplementation(
-      async (path, options) => {
+      async (path, options = undefined) => {
         const stats = await originalStat(path, options as never);
         const value = String(path);
         if (value !== marketplace && value !== differentSource) {
