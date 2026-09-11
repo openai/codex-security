@@ -526,6 +526,28 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       );
     }
 
+    const mergedCandidates = ["candidate-query-a", "candidate-query-b"].map((candidateId) => ({
+      candidateId,
+      evidence: `Saved source evidence for ${candidateId}`
+    }));
+    requireSuccessfulTool(await call("record_codex_security_scan_draft", {
+      scanId,
+      handoffClaimToken,
+      complete: false,
+      findings: [],
+      coverage: {
+        completeness: "partial",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: mergedCandidates.map((candidate) => ({
+          candidateId: candidate.candidateId,
+          reason: "Parent validation is pending.",
+          candidate
+        }))
+      }
+    }), `${runtimeLabel}: save candidates before merging them`);
+    finding.provenance.mergedCandidateIds = mergedCandidates.map((candidate) => candidate.candidateId);
+
     const drafted = requireSuccessfulTool(await call(
       "record_codex_security_scan_draft",
       {
@@ -539,6 +561,8 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
+      coverageCompleteness: "partial",
+      deferredCount: coverage.deferred.length,
       operation: "replace",
       status: "draft_written"
     });
@@ -561,7 +585,10 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
     assert.equal(results.findings.findings.length, 1);
     assert.equal(results.findings.findings[0].ruleId, finding.ruleId);
     assert.deepEqual(results.findings.findings[0].taxonomy, finding.taxonomy);
-    assert.deepEqual(results.findings.findings[0].provenance, finding.provenance);
+    assert.deepEqual(results.findings.findings[0].provenance, {
+      ...finding.provenance,
+      originalCandidates: mergedCandidates
+    });
     assert.equal(results.findings.findings[0].remediation, finding.remediation);
     assert.deepEqual(results.findings.findings[0].remediationTests, finding.remediationTests);
     assert.deepEqual(results.findings.findings[0].preventiveControls, finding.preventiveControls);
@@ -1092,6 +1119,8 @@ async function testDiscoveryWorkerToolList(bundle) {
       scanId,
       findingCount: 0,
       surfaceCount: 0,
+      coverageCompleteness: "complete",
+      deferredCount: 0,
       operation: "replace",
       status: "draft_written"
     });

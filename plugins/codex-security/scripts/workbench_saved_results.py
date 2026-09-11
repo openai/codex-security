@@ -453,6 +453,16 @@ def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
             )
 
 
+def _finding_candidate_ids(finding: dict[str, Any]) -> list[str]:
+    provenance = finding.get("provenance")
+    merged = provenance.get("mergedCandidateIds", []) if isinstance(provenance, dict) else []
+    return [
+        value
+        for value in [finding_candidate_id(finding), *(merged if isinstance(merged, list) else [])]
+        if isinstance(value, str) and value.strip()
+    ]
+
+
 def merge_saved_results(
     scan_dir: Path,
     scan_id: str,
@@ -721,12 +731,9 @@ def merge_saved_results(
     resolved: dict[tuple[str | None, str], str] = {}
     for owner, draft in current_drafts:
         for finding in draft["findings"]:
-            if (
-                isinstance(finding, dict)
-                and valid_finding(finding)
-                and (candidate_id := finding_candidate_id(finding))
-            ):
-                resolved.setdefault((owner, candidate_id), "reported")
+            if isinstance(finding, dict) and valid_finding(finding):
+                for candidate_id in _finding_candidate_ids(finding):
+                    resolved.setdefault((owner, candidate_id), "reported")
         for field in ("surfaces", "explicitExclusions"):
             items = draft["coverage"].get(field, [])
             for item in items if isinstance(items, list) else []:
@@ -984,9 +991,35 @@ def merge_saved_results(
                             history.append(copy.deepcopy(finding))
                 if (
                     isinstance(item, dict)
-                    and (worker_id, item.get("candidateId")) in resolved
+                    and (worker_id, item.get("candidateId", item.get("id"))) in resolved
                     and (field == "deferred" or item.get("disposition") == "needs_follow_up")
                 ):
+                    if relative == "parent":
+                        output.remove(item)
+                    candidate_id = item.get("candidateId", item.get("id"))
+                    for finding in findings:
+                        if candidate_id in _finding_candidate_ids(finding) and (
+                            worker_id is None
+                            or finding.get("provenance", {}).get("workerId") == worker_id
+                        ):
+                            if "candidate" in item:
+                                originals = finding["provenance"].setdefault(
+                                    "originalCandidates", []
+                                )
+                                if item["candidate"] not in originals:
+                                    originals.append(copy.deepcopy(item["candidate"]))
+                            break
+                    else:
+                        for surface in coverage.get("surfaces", []):
+                            if (
+                                isinstance(surface, dict)
+                                and surface.get("candidateId") == candidate_id
+                                and surface.get("disposition") in {"rejected", "not_applicable"}
+                            ):
+                                for key in ("candidate", "finding"):
+                                    if key in item:
+                                        surface.setdefault(key, copy.deepcopy(item[key]))
+                                break
                     continue
                 if isinstance(item, dict) and "id" not in item:
                     semantic_item = dict(item)

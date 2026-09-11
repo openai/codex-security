@@ -574,6 +574,14 @@
         "provenance": {
           "type": "object",
           "properties": {
+            "candidateId": {
+              "$ref": "#/$defs/text",
+              "description": "Stable original candidate ID. Preserve it through validation."
+            },
+            "mergedCandidateIds": {
+              "$ref": "#/$defs/textList",
+              "description": "Original IDs of other candidates merged into this finding. Each ID explicitly closes that candidate and retains its saved evidence."
+            },
             "sourceFindingIds": {
               "type": "array",
               "items": { "$ref": "#/$defs/text" },
@@ -680,6 +688,10 @@
         "id": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+        },
+        "candidateId": {
+          "$ref": "#/$defs/text",
+          "description": "Original candidate ID closed by a rejected or not_applicable disposition. Record source-backed counterevidence in notes."
         },
         "label": {
           "$ref": "#/$defs/text",
