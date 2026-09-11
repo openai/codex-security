@@ -1,9 +1,12 @@
 name: test-quality
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/test-quality.yml
+  workflow_call:
+    inputs:
+      native-artifacts-ready:
+        description: Use the native artifacts already built by the caller in this run.
+        type: boolean
+        default: false
   workflow_dispatch:
   schedule:
     - cron: "23 9 * * 1"
@@ -12,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: test-quality-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -20,7 +23,13 @@ env:
   CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
 
 jobs:
+  native:
+    if: ${{ !inputs.native-artifacts-ready }}
+    uses: ./.github/workflows/native-artifacts.yml
+
   runner:
+    needs: native
+    if: ${{ !cancelled() && (inputs.native-artifacts-ready || needs.native.result == 'success') }}
     name: ${{ matrix.os }} / ${{ matrix.mode }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -63,6 +72,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "22.13.0"
@@ -113,6 +124,18 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: package.json
+          cache: true
+          cache_dependency_path: sdk/typescript/pnpm-lock.yaml
+      - name: Install comparison dependencies
+        run: pnpm --dir sdk/typescript install --frozen-lockfile
+      - name: Compile CI scripts
+        run: pnpm --dir sdk/typescript run build:ci
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: runner-*
@@ -124,10 +147,10 @@ jobs:
           comparison_status=0
           for os in ubuntu-latest windows-latest; do
             for mode in isolated parallel; do
-              python3 sdk/typescript/scripts/compare-test-reports.py "reports/runner-$os-baseline.xml" "reports/runner-$os-$mode.xml" >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
+              node sdk/typescript/scripts/compare-test-reports.mjs "reports/runner-$os-baseline.xml" "reports/runner-$os-$mode.xml" >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
             done
           done
-          python3 sdk/typescript/scripts/compare-test-reports.py reports/runner-windows-latest-baseline.xml 'reports/runner-windows-latest-shard-*.xml' >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
+          node sdk/typescript/scripts/compare-test-reports.mjs reports/runner-windows-latest-baseline.xml 'reports/runner-windows-latest-shard-*.xml' >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
           exit "$comparison_status"
 
   mutation:

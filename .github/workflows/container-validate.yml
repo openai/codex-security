@@ -1,0 +1,220 @@
+name: container-validate
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'openai/codex-security'
+    name: validate-linux-${{ matrix.architecture }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build native customer image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: .
+          load: true
+          platforms: linux/${{ matrix.architecture }}
+          push: false
+          tags: codex-security:release-candidate
+          cache-from: type=gha,scope=codex-security-${{ matrix.architecture }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=codex-security-{0}', matrix.architecture) || '' }}
+
+      - name: Verify native image
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_architecture="$(docker image inspect --format '{{.Architecture}}' codex-security:release-candidate)"
+          if [[ "$actual_architecture" != "$EXPECTED_ARCHITECTURE" ]]; then
+            echo "Expected a native $EXPECTED_ARCHITECTURE image; found $actual_architecture." >&2
+            exit 1
+          fi
+          docker run --rm codex-security:release-candidate --version
+          docker run --rm codex-security:release-candidate bulk-scan --help
+          docker run --rm codex-security:release-candidate info --json
+          [[ "$(docker run --rm --entrypoint id codex-security:release-candidate -u)" == 10001 ]]
+
+      - name: Verify host-aware AppArmor sandbox selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /bin/sh codex-security:release-candidate -ec '
+            command_directory="$(mktemp -d)"
+            trap '\''rm -rf "$command_directory"'\'' EXIT
+            printf "%s\\n" "#!/bin/sh" '\''printf "%s\\n" "$@"'\'' > "$command_directory/codex-security"
+            chmod 755 "$command_directory/codex-security"
+
+            actual="$(
+              PATH="$command_directory:$PATH" \
+                /usr/local/bin/codex-security-entrypoint \
+                bulk-scan /input/repositories.csv --output-dir /output
+            )"
+            restricted_user_namespaces=
+            if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+              IFS= read -r restricted_user_namespaces \
+                < /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
+            fi
+
+            apparmor_profile=
+            if [ -r /proc/self/attr/current ]; then
+              IFS= read -r apparmor_profile < /proc/self/attr/current || true
+            fi
+
+            if [ "$restricted_user_namespaces" = 1 ] &&
+              [ "$apparmor_profile" != "codex-security-container (enforce)" ]; then
+              printf "%s\\n" "$actual" | grep -Fxq features.use_legacy_landlock=true
+            elif printf "%s\\n" "$actual" | grep -Fxq features.use_legacy_landlock=true; then
+              printf "%s\\n" "Landlock must not be forced when the preferred sandbox is available." >&2
+              exit 1
+            fi
+          '
+
+      - name: Verify hardened Codex command sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          command=(
+            docker run --rm
+            --cap-drop ALL
+            --security-opt no-new-privileges
+            --security-opt "seccomp=$GITHUB_WORKSPACE/docker/codex-security-seccomp.json"
+            --entrypoint node
+            codex-security:release-candidate
+            /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js
+          )
+
+          if output="$("${command[@]}" sandbox /usr/bin/true 2>&1)"; then
+            printf '%s\n' "$output"
+          elif grep -Eq 'bwrap: (Failed to make / slave: Permission denied|loopback: Failed RTM_NEW(ADDR|LINK): Operation not permitted|setting up uid map: Permission denied|No permissions to create a new namespace)' <<< "$output"; then
+            echo '::notice::This Docker host blocks nested Bubblewrap namespaces; verifying the supported Landlock fallback.'
+            "${command[@]}" sandbox --enable use_legacy_landlock /usr/bin/true
+          else
+            printf 'The hardened Codex sandbox failed unexpectedly:\n%s\n' "$output" >&2
+            exit 1
+          fi
+
+      - name: Verify host-scoped Git credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --entrypoint /bin/sh \
+            --env GH_TOKEN=SYNTHETIC_GITHUB_TOKEN \
+            codex-security:release-candidate \
+            -ec 'actual="$(printf "protocol=https\nhost=github.com\n\n" | /usr/local/bin/codex-security-git-credential get)"; test "$actual" = "$(printf "username=x-access-token\npassword=SYNTHETIC_GITHUB_TOKEN")"; test -z "$(printf "protocol=https\nhost=untrusted.example\n\n" | /usr/local/bin/codex-security-git-credential get)"'
+
+      - name: Verify hardened customer Compose configuration
+        env:
+          CODEX_SECURITY_IMAGE: codex-security:release-candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results state
+          chmod 700 results state
+          printf 'id,repository,revision\n' > repositories.csv
+          CODEX_SECURITY_USER="$(id -u):$(id -g)"
+          export CODEX_SECURITY_USER
+          docker compose config --quiet
+          docker compose run --rm codex-security --version
+          if output="$(docker compose run --rm codex-security 2>&1)"; then
+            echo 'An empty repository CSV must not start a security scan.' >&2
+            exit 1
+          else
+            status=$?
+          fi
+          if [[ "$status" -ne 2 ]] || ! grep -Fq 'Multiscan CSV must contain at least one repository.' <<< "$output"; then
+            printf 'Unexpected empty-repository scan behavior:\n%s\n' "$output" >&2
+            exit 1
+          fi
+
+      - name: Verify optional hardened AppArmor Compose override
+        env:
+          CODEX_SECURITY_IMAGE: codex-security:release-candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          CODEX_SECURITY_USER="$(id -u):$(id -g)"
+          export CODEX_SECURITY_USER
+          compose=(docker compose -f compose.yaml -f compose.apparmor.yaml)
+
+          "${compose[@]}" config --format json |
+            jq --exit-status '
+              .services["codex-security"].security_opt as $options |
+              ($options | index("apparmor=codex-security-container")) != null and
+              ($options | index("no-new-privileges:true")) != null and
+              any($options[]; startswith("seccomp="))
+            ' > /dev/null
+
+          if ! docker info --format '{{json .SecurityOptions}}' |
+            grep -Fq '"name=apparmor"'; then
+            echo '::notice::This Docker host does not expose AppArmor; the default customer workflow remains available.'
+            exit 0
+          fi
+
+          sudo install -m 0644 docker/codex-security.apparmor \
+            /etc/apparmor.d/codex-security-container
+          sudo apparmor_parser -r -W /etc/apparmor.d/codex-security-container
+          sudo grep -Fxq 'codex-security-container (enforce)' \
+            /sys/kernel/security/apparmor/profiles
+
+          # The single-quoted program is evaluated inside the customer container.
+          # shellcheck disable=SC2016
+          "${compose[@]}" run --rm --entrypoint /bin/sh codex-security -ec '
+            test "$(cat /proc/self/attr/current)" = "codex-security-container (enforce)"
+            command_directory="$(mktemp -d)"
+            trap '\''rm -rf "$command_directory"'\'' EXIT
+            printf "%s\\n" "#!/bin/sh" '\''printf "%s\\n" "$@"'\'' \
+              > "$command_directory/codex-security"
+            chmod 755 "$command_directory/codex-security"
+            actual="$(
+              PATH="$command_directory:$PATH" \
+                /usr/local/bin/codex-security-entrypoint \
+                bulk-scan /input/repositories.csv --output-dir /output
+            )"
+            if printf "%s\\n" "$actual" |
+              grep -Fxq features.use_legacy_landlock=true; then
+              printf "%s\\n" "The AppArmor profile must retain the preferred Codex sandbox." >&2
+              exit 1
+            fi
+          '
+
+          "${compose[@]}" run --rm --entrypoint node codex-security \
+            /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js \
+            sandbox /usr/bin/true
+
+      - name: Set up Bun for findings service verification
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Verify findings API and persistent storage through consumer Compose
+        env:
+          IMAGE: codex-security:release-candidate
+        run: bun sdk/typescript/scripts/smoke-findings-service.ts "$IMAGE"

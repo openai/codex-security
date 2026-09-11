@@ -3,6 +3,7 @@ import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
+import type { JsonObject } from "./config.js";
 import {
   isScanArtifactDirectory,
   sessionParentThreadId,
@@ -17,6 +18,37 @@ interface ScanLogOptions {
   completedAt?: string | null;
 }
 
+export type ScanLogSource = JsonObject & {
+  scanId: string;
+  continuationThreadId?: string;
+  mode?: string;
+  scanDir?: string;
+  progress?: { status?: string; updatedAt?: string };
+};
+
+export function readSavedScanLogs(scan: ScanLogSource, codexHome: string) {
+  const threadId = scan.continuationThreadId;
+  if (!threadId) {
+    throw new CodexSecurityError(
+      `No session is associated with scan ${scan.scanId}.`,
+    );
+  }
+  return readScanLogs({
+    scanId: scan.scanId,
+    threadId,
+    codexHome,
+    scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
+    completedAt:
+      scan.progress?.status === "running"
+        ? null
+        : scan.progress?.status === "complete" ||
+            scan.progress?.status === "failed" ||
+            scan.progress?.status === "canceled"
+          ? scan.progress.updatedAt ?? ""
+          : "",
+  });
+}
+
 interface SessionLog {
   threadId: string;
   parentThreadId: string | null;
@@ -25,9 +57,8 @@ interface SessionLog {
   path: string;
 }
 
-export async function readScanLogs(options: ScanLogOptions) {
-  const logs = new Map<string, SessionLog>();
-  for await (const path of sessionFiles(join(options.codexHome, "sessions"))) {
+async function* scanSessions(codexHome: string): AsyncGenerator<SessionLog> {
+  for await (const path of sessionFiles(join(codexHome, "sessions"))) {
     for await (const first of sessionEvents(path)) {
       if (first["type"] !== "session_meta" || !isRecord(first["payload"])) {
         break;
@@ -35,16 +66,33 @@ export async function readScanLogs(options: ScanLogOptions) {
       const metadata = first["payload"];
       const threadId = metadata["id"];
       if (typeof threadId !== "string") break;
-      logs.set(threadId, {
+      yield {
         threadId,
         parentThreadId: sessionParentThreadId(metadata),
         startedAt: sessionStartedAt(metadata["timestamp"]),
         workingDirectory:
           typeof metadata["cwd"] === "string" ? metadata["cwd"] : null,
         path,
-      });
+      };
       break;
     }
+  }
+}
+
+export async function findScanSession(
+  codexHome: string,
+  threadId: string,
+): Promise<SessionLog | null> {
+  for await (const session of scanSessions(codexHome)) {
+    if (session.threadId === threadId) return session;
+  }
+  return null;
+}
+
+export async function readScanLogs(options: ScanLogOptions) {
+  const logs = new Map<string, SessionLog>();
+  for await (const session of scanSessions(options.codexHome)) {
+    logs.set(session.threadId, session);
   }
 
   const root = logs.get(options.threadId);

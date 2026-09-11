@@ -79,10 +79,7 @@ export function scanModelConfiguration(
   config: Readonly<JsonObject>,
 ): ScanModelConfiguration {
   const selectedProfile = selectedScanProfile(config);
-  const model =
-    selectedProfile !== undefined && Object.hasOwn(selectedProfile, "model")
-      ? selectedProfile["model"]
-      : config["model"];
+  const model = scanModel(config);
   if (typeof model !== "string" || model.trim().length === 0) {
     throw new ConfigurationError(
       "The configured Codex model must be a nonempty string.",
@@ -102,6 +99,14 @@ export function scanModelConfiguration(
     );
   }
   return { model, reasoningEffort };
+}
+
+export function scanModel(config: Readonly<JsonObject>): unknown {
+  const selectedProfile = selectedScanProfile(config);
+  return selectedProfile !== undefined &&
+    Object.hasOwn(selectedProfile, "model")
+    ? selectedProfile["model"]
+    : config["model"];
 }
 
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {
@@ -153,7 +158,8 @@ export function modelProviderConfigOverride(config: JsonObject): string[] {
     : [`model_providers=${inlineToml(config["model_providers"])}`];
 }
 
-function inlineToml(value: JsonValue): string {
+/** @internal Serialize one Codex CLI override value without flattening its keys. */
+export function inlineToml(value: JsonValue): string {
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
   if (isObject(value)) {
     return `{${Object.entries(value)
@@ -186,6 +192,16 @@ function selectedScanProfile(
   return isObject(configuredProfile) ? configuredProfile : undefined;
 }
 
+export function resolveCodexProfile(config: JsonObject): JsonObject {
+  const resolved = deepMerge(
+    cloneJson(config),
+    selectedScanProfile(config) ?? {},
+  );
+  delete resolved["profile"];
+  delete resolved["profiles"];
+  return resolved;
+}
+
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
 ): Promise<JsonObject> {
@@ -205,7 +221,12 @@ export async function mergedCodexConfig(
       }
     }
   }
-  return deepMerge(cloneJson(DEFAULT_CODEX_CONFIG), overrides);
+  const defaults: JsonObject = cloneJson(DEFAULT_CODEX_CONFIG);
+  if (scanModelProvider(overrides) === "amazon-bedrock") {
+    // Bedrock models can reject reasoning.summary before the scan starts.
+    defaults["model_reasoning_summary"] = "none";
+  }
+  return deepMerge(defaults, overrides);
 }
 
 function normalizeLegacyWindowsSandboxOverride(overrides: JsonObject): void {
@@ -311,6 +332,11 @@ function validateOverrides(overrides: JsonObject): void {
         `Codex override profile ${name} must be a TOML table.`,
       );
     }
+    if ("plugins" in profile || "marketplaces" in profile) {
+      throw new ConfigurationError(
+        `Codex Security owns plugin loading configuration in profile ${name}.`,
+      );
+    }
     const profileFeatures = profile["features"];
     if (profileFeatures !== undefined && !isObject(profileFeatures)) {
       throw new ConfigurationError(
@@ -387,6 +413,15 @@ function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
       );
     }
   }
+}
+
+export function mergeCodexOverrides(
+  base: JsonObject,
+  overrides: JsonObject,
+): JsonObject {
+  validateOverrideKeys(base);
+  validateOverrideKeys(overrides);
+  return deepMerge(cloneJson(base), overrides);
 }
 
 /** @internal */

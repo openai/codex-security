@@ -161,7 +161,7 @@ export class CodexDeduplicationReviewer implements DeduplicationReviewer {
     return await this.runner.run({
       stage: "pair-review",
       model: "gpt-5.6-sol",
-      effort: "xhigh",
+      effort: "high",
       prompt: pairReviewPrompt(findings),
       schema: {
         type: "object",

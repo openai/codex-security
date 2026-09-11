@@ -2,6 +2,7 @@ import { accessSync, constants as fsConstants, existsSync, promises as fs, readd
 import { createRequire } from "node:module";
 import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { Codex } from "@openai/codex-sdk";
+import { parse as parseToml } from "smol-toml";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
   classifyCodexWorkerError,
@@ -38,6 +39,8 @@ export interface CodexSdkWorkerArtifactContext {
 }
 
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
+  private runtimeReasoningSummary?: Promise<string | undefined>;
+
   constructor(private readonly modelSettings: CodexSdkWorkerModelSettings = {}) {}
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
@@ -52,26 +55,37 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const configOverrides = workerPermissionProfileConfigOverrides(workerProfile);
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
+      // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
+      const reasoningSummary = await (this.runtimeReasoningSummary ??= workerReasoningSummary(childEnv));
+      const openAiApiKey = environmentVariable(childEnv, "OPENAI_API_KEY", process.platform)?.trim();
+      const codexApiKey = environmentVariable(childEnv, "CODEX_API_KEY", process.platform)?.trim();
       const codexPath = resolveCodexPath(
         childEnv,
         process.platform,
         process.arch,
         originalCwd
       );
-      await preflightDeepScanWorkerPermissionProfile({
+      const { useOpenAiApiKey } = await preflightDeepScanWorkerPermissionProfile({
         codexPath,
         cwd: request.workingDirectory,
         profileId: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
         configOverrides,
         expectedProfile: workerProfile,
         env: childEnv,
+        allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
         signal: request.signal
       });
       const prompt = await fs.readFile(request.promptPath, "utf8");
       const codex = new Codex({
         codexPathOverride: executablePathForSpawn(codexPath),
         env: childEnv,
+        // Codex exec reads CODEX_API_KEY; the SDK maps apiKey to that variable.
+        // Keep native credentials unless the worker has no configured account.
+        ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
         config: {
+          ...(reasoningSummary === undefined
+            ? {}
+            : { model_reasoning_summary: reasoningSummary }),
           // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
           ...(this.modelSettings.reasoningEffort
             ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
@@ -367,6 +381,20 @@ function appendUniqueDiagnostic(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+async function workerReasoningSummary(environment: Record<string, string>): Promise<string | undefined> {
+  const configPath = environmentVariable(environment, "CODEX_SECURITY_CONFIG_PATH", process.platform);
+  if (!configPath) return undefined;
+  const config = parseToml(await fs.readFile(configPath, "utf8"));
+  const profiles = config.profiles;
+  const profile = typeof config.profile === "string" && isRecord(profiles)
+    ? profiles[config.profile]
+    : undefined;
+  const summary = isRecord(profile) && profile.model_reasoning_summary !== undefined
+    ? profile.model_reasoning_summary
+    : config.model_reasoning_summary;
+  return typeof summary === "string" ? summary : undefined;
 }
 
 async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {

@@ -301,6 +301,8 @@ describe("scan history renderer", () => {
           unavailableScans: 2,
           matchedPairs: 0,
           findingMatches: 0,
+          relatedPairs: 2,
+          uncertainPairs: 1,
         },
         "match-all",
       ),
@@ -311,6 +313,8 @@ describe("scan history renderer", () => {
       "5 scans",
       "0 comparisons",
       "0 root-cause matches",
+      "2 related pairs recorded",
+      "1 uncertain pair",
       "2 scans unavailable",
     ]) {
       expect(output).toContain(expected);

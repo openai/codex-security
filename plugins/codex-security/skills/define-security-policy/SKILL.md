@@ -12,15 +12,15 @@ A useful `SECURITY.md` tells Codex Security what matters in a repository: the sy
 Confirm the repository or component the user wants to cover. Inventory policy paths, including hidden directories, before reading them:
 
 ```bash
-<python_command> <plugin_dir>/scripts/resolve_security_md.py --repo <repo_root> --list
+<plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --list
 ```
 
-The command runs on Windows, macOS, and Linux. It emits a sorted JSON array of repository-relative policy paths, escapes control characters unambiguously, includes linked policies without following directory links, and prunes Git metadata. Resolve each candidate within the repository and check the resolved regular file's byte size. Do not pass policies larger than 1 MiB to the resolver; report them so the user can decide how to proceed. The resolver enforces the same limit for regular files and repository-local symbolic links.
+On Windows, use `launch_codex_security_mcp.cmd` with the same arguments. The launcher reuses the plugin's configured or bundled Node runtime. It emits a sorted JSON array of repository-relative policy paths, escapes control characters unambiguously, includes linked policies without following directory links, and prunes Git metadata. Resolve each candidate within the repository and check the resolved regular file's byte size. Do not pass policies larger than 1 MiB to the resolver; report them so the user can decide how to proceed. The resolver enforces the same limit for regular files and repository-local symbolic links.
 
 Read `../../references/security-guidance.md`, then resolve the policy chain for the file or directory being reviewed:
 
 ```bash
-<python_command> <plugin_dir>/scripts/resolve_security_md.py --repo <repo_root> --scope <file_or_directory> --out -
+<plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --scope <file_or_directory> --out -
 ```
 
 `<plugin_dir>` is the Codex Security plugin root containing `.codex-plugin/plugin.json`, not the target repository or this skill directory.

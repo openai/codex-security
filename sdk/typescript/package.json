@@ -1,6 +1,6 @@
 {
   "name": "@openai/codex-security",
-  "version": "0.1.25",
+  "version": "0.1.27",
   "description": "TypeScript SDK and CLI for Codex Security",
   "license": "Apache-2.0",
   "author": "OpenAI",
@@ -27,7 +27,8 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
-    }
+    },
+    "./schemas/project-config.schema.json": "./schemas/project-config.schema.json"
   },
   "bin": {
     "codex-security": "./bin/codex-security.mjs"
@@ -35,6 +36,7 @@
   "files": [
     "bin",
     "dist",
+    "schemas",
     "_bundled_plugin",
     "LICENSE",
     "README.md"
@@ -48,11 +50,13 @@
   "scripts": {
     "audit:prod": "pnpm audit --prod --audit-level high",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "node --run clean && tsc -p tsconfig.build.json && node scripts/build-dashboard.mjs",
+    "build": "node --run clean && node scripts/generate-deep-defaults.mjs && tsc -p tsconfig.build.json && node scripts/generate-project-config-schema.mjs && node scripts/build-dashboard.mjs",
+    "build:ci": "tsc -p tsconfig.ci.json",
+    "build:examples": "tsc -p tsconfig.examples.json",
     "build:plugin": "node scripts/build-plugin.mjs",
     "check:plugin-source": "node scripts/check-plugin-source.mjs",
     "check:package": "node scripts/check-package.mjs",
-    "format": "prettier --check --ignore-path .gitignore --ignore-path .prettierignore \"**/*.{cjs,mjs,js,ts,tsx,json,md}\"",
+    "format": "prettier --check --ignore-path .gitignore --ignore-path .prettierignore \"**/*.{cjs,mjs,js,ts,mts,tsx,json,md}\" \"../../.github/scripts/*.mts\" \"../../examples/custom-validation/*.{mts,md}\" \"../../plugins/codex-security/native/*.{mts,md}\"",
     "generate:models": "node scripts/generate-models.cjs",
     "generate:models:check": "node scripts/generate-models.cjs --check",
     "lint": "tsc --noEmit",
@@ -63,18 +67,18 @@
     "test:mcp": "node --run build:plugin && pnpm --dir ../../plugins/codex-security/mcp-app run test:mcp",
     "test:mutation": "stryker run",
     "test:package": "node scripts/smoke-package.mjs",
-    "types": "pnpm run generate:models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
+    "types": "node scripts/generate-deep-defaults.mjs --check && node scripts/generate-project-config-schema.mjs --check && pnpm run generate:models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
   },
   "dependencies": {
     "@inquirer/prompts": "8.3.0",
     "@linear/sdk": "89.0.0",
     "@octokit/core": "7.0.6",
-    "@openai/codex": "0.151.0",
-    "@openai/codex-sdk": "0.151.0",
+    "@openai/codex": "0.154.0",
+    "@openai/codex-sdk": "0.154.0",
     "ajv": "8.20.0",
     "extract-zip": "2.0.1",
     "fast-uri": "3.1.6",
-    "fflate": "0.8.2",
+    "fflate": "0.8.3",
     "incur": "0.4.13",
     "ink": "6.8.0",
     "js-tiktoken": "1.0.21",
@@ -82,7 +86,9 @@
     "pdfjs-dist": "6.2.108",
     "react": "19.2.4",
     "semver": "7.8.5",
-    "smol-toml": "1.6.1"
+    "smol-toml": "1.7.1",
+    "yaml": "2.9.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@openai/apps-sdk-ui": "0.2.2",
@@ -98,9 +104,11 @@
     "fast-check": "4.9.0",
     "ink-testing-library": "4.0.0",
     "json-schema-to-typescript": "15.0.4",
+    "minimatch": "10.2.6",
     "postcss": "8.5.23",
     "prettier": "3.2.5",
     "react-dom": "19.2.4",
+    "saxes": "6.0.0",
     "tailwindcss": "4.3.3",
     "typescript": "5.7.3"
   }

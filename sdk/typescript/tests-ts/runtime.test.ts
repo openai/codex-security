@@ -77,6 +77,7 @@ import {
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
+  requirePrivatePolicyOutputDirectory,
   requireSecureCredentialHome,
   requireSecureOutputAncestry,
   requireTrustedOutputAncestor,
@@ -86,6 +87,12 @@ import {
 } from "../src/runtime.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import {
+  lowerUuid7Turn,
+  ownedPythonUsage,
+  ownershipRollout,
+  readPythonRolloutUsage,
+} from "./support/usage-rollout.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
@@ -1969,6 +1976,7 @@ describe("plugin runtime preparation", () => {
     "0.1.79",
     "0.1.92",
     "0.1.93",
+    "0.1.94",
   ])(
     "upgrades a cached %s plugin and restores with the SDK-owned helper",
     async (previousVersion) => {
@@ -1985,6 +1993,10 @@ describe("plugin runtime preparation", () => {
       await copyFile(
         join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
         join(previous, "scripts", "workbench_target.py"),
+      );
+      await writeFile(
+        join(previous, "scripts", "workbench_scan_usage.py"),
+        "raise RuntimeError('stale collector must be replaced')\n",
       );
       const home = join(root, "home");
       const unrelatedProject = join(root, "unrelated-project");
@@ -2030,6 +2042,7 @@ describe("plugin runtime preparation", () => {
           "workbench_target.py",
           "finalize_scan_contract.py",
           "workbench_scan_history.py",
+          "workbench_scan_usage.py",
         ]) {
           expect(await readFile(join(pluginRoot, "scripts", script))).toEqual(
             await readFile(join(PLUGIN_ROOT, "scripts", script)),
@@ -2082,6 +2095,20 @@ describe("plugin runtime preparation", () => {
       await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
       await restorer.restore(artifact, expected);
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
+
+      const rolloutPath = join(root, "cached-rollout.jsonl");
+      await writeFile(
+        rolloutPath,
+        ownershipRollout([lowerUuid7Turn])
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+      expect(
+        readPythonRolloutUsage(upgraded.installedRoot, rolloutPath),
+      ).toEqual({
+        usage: ownedPythonUsage,
+        warnings: [],
+      });
     },
   );
 
@@ -2864,29 +2891,41 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(true);
   });
 
-  test("requires a real private-ACL operation for Windows credential homes", async () => {
+  test("requires a real private-ACL operation for Windows private directories", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
     await mkdir(home);
     const metadata = await lstat(home);
     const secured: string[] = [];
 
-    await requirePrivateCredentialHome(metadata, home, {
-      platform: "win32",
-      secureWindowsHome: async (path) => {
-        secured.push(path);
-      },
-    });
-
-    expect(secured).toEqual([home]);
-    await expect(
-      requirePrivateCredentialHome(metadata, home, {
+    for (const [description, secure] of [
+      [
+        "credential home",
+        (options: Parameters<typeof requirePrivatePolicyOutputDirectory>[1]) =>
+          requirePrivateCredentialHome(metadata, home, options),
+      ],
+      [
+        "policy output directory",
+        (options: Parameters<typeof requirePrivatePolicyOutputDirectory>[1]) =>
+          requirePrivatePolicyOutputDirectory(home, options),
+      ],
+    ] as const) {
+      await secure({
         platform: "win32",
-        secureWindowsHome: async () => {
-          throw new Error("ACL could not be secured");
+        secureWindowsHome: async (path) => {
+          secured.push(path);
         },
-      }),
-    ).rejects.toThrow("private Windows credential home");
+      });
+      await expect(
+        secure({
+          platform: "win32",
+          secureWindowsHome: async () => {
+            throw new Error("ACL could not be secured");
+          },
+        }),
+      ).rejects.toThrow(`private Windows ${description}`);
+    }
+    expect(secured).toEqual([home, home]);
   });
 
   test.each(["created", "removed"] as const)(
@@ -3914,6 +3953,82 @@ describe("runtime directories and plugin Python boundary", () => {
       }),
     ).rejects.toThrow("private Windows credential home");
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "makes policy output private before files inherit its Windows ACL",
+    async () => {
+      const root = await temporaryDirectory();
+      const output = join(root, "policy");
+      await mkdir(output);
+      const systemDirectory = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+      );
+      const user = spawnSync(
+        join(systemDirectory, "whoami.exe"),
+        ["/user", "/fo", "csv", "/nh"],
+        { encoding: "utf8", windowsHide: true },
+      );
+      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(user.stdout)?.[1];
+      expect(sid).toBeDefined();
+      const grant = spawnSync(
+        join(systemDirectory, "icacls.exe"),
+        [output, "/grant", "*S-1-1-0:(OI)(CI)R"],
+        { encoding: "utf8", windowsHide: true },
+      );
+      expect(grant.status, grant.stderr).toBe(0);
+      await requirePrivatePolicyOutputDirectory(output);
+      const draft = join(output, "THREAT_MODEL.md");
+      await writeFile(draft, "Synthetic private draft\n");
+      const descriptor = spawnSync(
+        join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          [
+            "$ErrorActionPreference = 'Stop'",
+            "$sddl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+            "$localAdministrator = Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl 'O:LAG:SYD:(A;;GA;;;SY)' | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
+            "Microsoft.PowerShell.Utility\\ConvertTo-Json -InputObject @($sddl, $localAdministrator) -Compress",
+          ].join("; "),
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+              ),
+            ),
+            CODEX_SECURITY_TEST_ACL_PATH: draft,
+            PSModulePath: join(
+              systemDirectory,
+              "WindowsPowerShell",
+              "v1.0",
+              "Modules",
+            ),
+          },
+          windowsHide: true,
+        },
+      );
+      expect(descriptor.status, descriptor.stderr).toBe(0);
+      const [sddl, localAdministrator] = JSON.parse(descriptor.stdout) as [
+        string,
+        string,
+      ];
+      expect(
+        inspectWindowsCredentialAcl(sddl, sid!, {
+          scope: "file",
+          resolvedAliases: { LA: localAdministrator },
+        }),
+      ).toMatchObject({
+        grantsCurrentUserAccess: true,
+        untrustedPrincipals: [],
+      });
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "rejects Windows credential-home junctions even if their targets disappear",

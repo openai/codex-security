@@ -1,19 +1,33 @@
 import {
   CodexSecurity,
   DiffTarget,
+  classifySeverity,
+  classifyScanSeverity,
+  classifyScanDirectorySeverity,
   deduplicateScan,
   estimateScanCost,
+  loadProjectConfig,
+  matchScanFindings,
   planComponents,
   publishScanToCustom,
+  publishScan,
   runComponentScans,
+  resolveProjectConfig,
   type ComponentScanOptions,
   type DeduplicateScanResult,
   type CustomPublicationResult,
   type Finding,
+  type ProjectConfigInput,
+  type SeverityClassification,
+  type ScanSeverityClassification,
   type ScanCost,
+  type ScanComparisonInput,
+  type ScanComparisonOptions,
+  type ScanComparisonResult,
   type ScanOptions,
   type ScanProgress,
   type ScanResult,
+  type ScanSettings,
   type ValidationOptions,
   type ValidationResult,
 } from "@openai/codex-security";
@@ -22,6 +36,38 @@ import {
   SqliteFindingsStore,
   startFindingsServer,
 } from "@openai/codex-security/server";
+
+export async function classify(
+  findings: Finding[],
+  scanId: string,
+  scanDirectory: string,
+  signal: AbortSignal,
+): Promise<SeverityClassification> {
+  const classification = await classifySeverity(findings, {
+    rubricPath: "policy.md",
+    knowledgeBasePaths: ["context.md"],
+    reasoningEffort: "high",
+    signal,
+  });
+  const saved: ScanSeverityClassification = await classifyScanSeverity(scanId, {
+    signal,
+  });
+  await classifyScanDirectorySeverity(scanDirectory, {
+    expectedScanId: saved.scanId,
+    reprocess: true,
+    findingIds: findings.map(({ findingId }) => findingId),
+    signal,
+  });
+  await publishScan(scanDirectory, {
+    destination: "linear",
+    teamId: "example-team",
+    classification,
+    findingIds: classification.assessments.map(({ findingId }) => findingId),
+    dryRun: true,
+    signal,
+  });
+  return classification;
+}
 
 export async function findingsServer(getApiKey: () => Promise<string>) {
   return await startFindingsServer({
@@ -76,6 +122,35 @@ export async function scan(repository: string): Promise<ScanResult> {
   }
 }
 
+export function configuredScanOptions(
+  input: ProjectConfigInput = {
+    scan: {
+      mode: "deep",
+      scope: { paths: ["src"] },
+      deep: { subagents_per_worker: 0, stop_after_consecutive_errors: 2 },
+    },
+    limits: { max_cost_usd_per_scan: 5 },
+    policy: { fail_on_severity: "high" },
+  },
+): ScanSettings {
+  return resolveProjectConfig(input).options;
+}
+
+export async function scanFromFile(repository: string, file: string) {
+  const { config, options } = await loadProjectConfig(file);
+  await using client = new CodexSecurity(config);
+  const result = await client.run(repository, {
+    ...options,
+    postScanPromptFile: "follow-up.md",
+  });
+  return {
+    result,
+    failed:
+      options.failureSeverity !== undefined &&
+      result.hasFindingsAtOrAbove(options.failureSeverity),
+  };
+}
+
 export const cost: ScanCost | null = estimateScanCost("gpt-5.6-sol", {
   input_tokens: 10,
   output_tokens: 2,
@@ -101,6 +176,35 @@ export async function validate(
 
 // @ts-expect-error The dependency-injection constructor is internal.
 new CodexSecurity({}, undefined as never, undefined as never);
+
+const comparisonInput: ScanComparisonInput = {
+  before: [],
+  after: [],
+  knownFindingGroups: [["finding-a", "finding-b"]],
+};
+const comparisonOptions: ScanComparisonOptions = {
+  environment: { CODEX_SECURITY_STATE_DIR: "." },
+  model: "synthetic-model",
+  reasoningEffort: "max",
+  signal: new AbortController().signal,
+  workingDirectory: ".",
+  onProgress: ({ phase }) => {
+    void phase;
+  },
+};
+const comparisonResult: Promise<ScanComparisonResult> = matchScanFindings(
+  comparisonInput,
+  comparisonOptions,
+);
+void comparisonResult;
+
+// @ts-expect-error Historical matching policy is internal.
+matchScanFindings(comparisonInput, { allowHistoricalUncertainty: true });
+const codex = {
+  startThread: () => ({ run: async () => ({ finalResponse: "{}" }) }),
+};
+// @ts-expect-error Codex injection is internal.
+matchScanFindings(comparisonInput, { codex });
 
 export async function scanComponents(repository: string, outputDir: string) {
   const plan = await planComponents(repository);
