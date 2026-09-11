@@ -381,6 +381,10 @@ const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
   .describe("Inference provider for scans.");
+const SHOW_COST_OPTION = z
+  .boolean()
+  .default(false)
+  .describe("Show estimated USD cost; always shown when a cost limit is set.");
 const CREATE_PR_OPTION = z
   .boolean()
   .default(false)
@@ -960,6 +964,7 @@ interface ScanArguments extends ResolvedScanSettings {
   patch?: boolean;
   patchSeverity?: FailureSeverity;
   createPr?: boolean;
+  showCost?: boolean;
   headless?: boolean;
   dryRun: boolean;
   parentScanId?: string;
@@ -2112,6 +2117,7 @@ export async function main(
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
       }),
       options: z.object({
+        showCost: SHOW_COST_OPTION,
         verbose: z
           .boolean()
           .default(false)
@@ -2154,6 +2160,7 @@ export async function main(
           // Resume uses the installed engine with the saved recipe and checkpoints.
           scanArguments.expectedPluginVersion = undefined;
           scanArguments.verbose = options.verbose;
+          scanArguments.showCost = options.showCost;
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
@@ -2188,6 +2195,7 @@ export async function main(
           .describe("Saved scan identifier (default: latest completed scan)."),
       }),
       options: z.object({
+        showCost: SHOW_COST_OPTION,
         scanPromptFile: optionValue("--scan-prompt-file")
           .optional()
           .describe(
@@ -2281,6 +2289,7 @@ export async function main(
             dependencies.currentDirectory(),
           );
           scanArguments.verbose = options.verbose;
+          scanArguments.showCost = options.showCost;
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
@@ -3440,6 +3449,7 @@ export async function main(
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
             "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
           ),
+          showCost: SHOW_COST_OPTION,
           headless: z
             .boolean()
             .default(false)
@@ -3573,6 +3583,7 @@ export async function main(
               patch: options.patch,
               patchSeverity: options.patchSeverity,
               createPr: options.createPr,
+              showCost: options.showCost,
               headless: options.headless,
               dryRun: options.dryRun,
               mock: options.mock,
@@ -3956,6 +3967,7 @@ export async function main(
             .describe(
               "Stop each component scan if estimated USD cost exceeds AMOUNT.",
             ),
+          showCost: SHOW_COST_OPTION,
           pluginPath: optionValue("--plugin-path")
             .optional()
             .describe(PLUGIN_PATH_DESCRIPTION),
@@ -4058,6 +4070,7 @@ export async function main(
               model: scanModelConfiguration(await mergedCodexConfig(config)),
               mode: settings.mode,
               maxCostUsd: settings.maxCostUsd,
+              showCost: options.showCost,
               clock: dependencies,
               color: dependencies.environment["NO_COLOR"] === undefined,
               sanitize: safeErrorMessage,
@@ -4101,7 +4114,11 @@ export async function main(
                     const componentName =
                       componentNames.get(event.componentId) ??
                       event.componentId;
-                    const line = componentScanEventLine(componentName, event);
+                    const line = componentScanEventLine(
+                      componentName,
+                      event,
+                      options.showCost || settings.maxCostUsd !== undefined,
+                    );
                     if (line !== null) errorOutput.write(line);
                   }
                 : (event) => dashboard?.recordComponentEvent(event),
@@ -7643,6 +7660,7 @@ async function executeScan(
   let fileProgress: ScanProgress | null = null;
   let runningCost: Readonly<ScanCost> | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
+  const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
   const targetWarnings: string[] = [];
   const configuredLogLevel =
@@ -7837,6 +7855,7 @@ async function executeScan(
       dashboard = new ScanDashboard(errorOutput, {
         repository,
         mode: arguments_.mode,
+        showCost,
         model: scanModelConfiguration(await mergedCodexConfig(config)),
         ...(arguments_.maxCostUsd === undefined
           ? {}
@@ -7869,7 +7888,8 @@ async function executeScan(
       }
       if (runningCost !== null) {
         details.push(`Tokens: ${formatScanCostTokens(runningCost)}`);
-        details.push(`Cost: ${formatUsd(runningCost.estimatedUsd)}`);
+        if (showCost)
+          details.push(`Cost: ${formatUsd(runningCost.estimatedUsd)}`);
       }
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
     };
@@ -7914,7 +7934,7 @@ async function executeScan(
         maxCostUsd = limit;
         diagnostic("cost.updated", {
           model: cost.model,
-          estimated_usd: cost.estimatedUsd,
+          estimated_usd: showCost ? cost.estimatedUsd : undefined,
           input_tokens: cost.inputTokens,
           cached_input_tokens: cost.cachedInputTokens,
           cache_write_input_tokens: cost.cacheWriteInputTokens,
@@ -7929,7 +7949,7 @@ async function executeScan(
         progress?.stopTimer();
         if (maxCostUsd === undefined) {
           progress?.stage(
-            `Tokens: ${formatScanCostTokens(cost)}. Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
+            `Tokens: ${formatScanCostTokens(cost)}.${showCost ? ` Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.` : ""}`,
           );
         } else {
           progress?.stage(
@@ -8285,6 +8305,7 @@ async function executeScan(
     progress?.interactive === true &&
       dependencies.environment["NO_COLOR"] === undefined &&
       dependencies.environment["TERM"] !== "dumb",
+    showCost,
     deepScanStop,
   );
   const completedScan = (exitCode: number): ScanOutcome => {
@@ -8292,7 +8313,7 @@ async function executeScan(
       coverage: result.coverage.completeness,
       findings: findings.length,
       scan_id: result.manifest.scan.id,
-      estimated_usd: result.cost?.estimatedUsd,
+      estimated_usd: showCost ? result.cost?.estimatedUsd : undefined,
       exit_code: exitCode,
     });
     progress?.stopTimer();
@@ -8661,6 +8682,7 @@ function printScanSummary(
   progress: Progress | null,
   errorOutput: Writable,
   color: boolean,
+  showCost: boolean,
   deepScanStop?: DeepScanStop,
 ): void {
   const paint = (value: string, code: number | string): string =>
@@ -8722,11 +8744,13 @@ function printScanSummary(
   if (tokenSummary !== null) {
     errorOutput.write(`  ${paint("TOKENS", 1)}    ${tokenSummary}\n`);
   }
-  const costSummary =
-    result.cost === null
-      ? "unavailable (model pricing or usage missing)"
-      : `${formatUsd(result.cost.estimatedUsd)} (standard, short context)`;
-  errorOutput.write(`  ${paint("COST", 1)}      ${costSummary}\n`);
+  if (showCost) {
+    const costSummary =
+      result.cost === null
+        ? "unavailable (model pricing or usage missing)"
+        : `${formatUsd(result.cost.estimatedUsd)} (standard, short context)`;
+    errorOutput.write(`  ${paint("COST", 1)}      ${costSummary}\n`);
+  }
   errorOutput.write(
     `  ${paint("RESULTS", 1)}   ${errorMessage(result.scanDir)}\n`,
   );
@@ -8738,6 +8762,7 @@ function printScanSummary(
 function componentScanEventLine(
   componentName: string,
   event: ComponentScanEvent,
+  showCost: boolean,
 ): string | null {
   if (event.type === "progress") {
     const progress = event.value;
@@ -8745,7 +8770,7 @@ function componentScanEventLine(
   }
   if (event.type !== "cost") return null;
   const cost = event.value;
-  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)} | Cost: ${formatUsd(cost.estimatedUsd)}\n`;
+  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)}${showCost ? ` | Cost: ${formatUsd(cost.estimatedUsd)}` : ""}\n`;
 }
 
 function protectedRootErrorMessage(
