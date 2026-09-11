@@ -1627,10 +1627,30 @@ npx @openai/codex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
 npx @openai/codex-security patch --linear-issue SEC-123 --assess-patch-risk --create-pr
 ```
 
-`--scan latest` selects the current repository's latest scan. Saved-finding
-patch commands support `--json`; literal-text and file inputs don't. Change
+`--scan latest` selects the current repository's latest scan. Patch commands
+support `--json`, including literal-text and file inputs. Change
 the model with `--codex 'model="gpt-5.6-sol"'` or effort with `--effort high`.
 Each finding gets its own saved Codex desktop task.
+
+Before patching, the CLI runs a command with the task's sandbox policy. If the
+sandbox cannot start, the command exits with a nonzero status and reports
+`SANDBOX_UNAVAILABLE`. JSON errors include `ok: false`. A completed model response
+with no repository changes fails with `NO_PATCH_APPLIED`. Results report `applied`,
+`filesChanged`, and `files`; existing local changes do not count as patch changes.
+These fields report file changes, not proof that the security issue is fixed.
+Saved findings still require a verified result from the patch task.
+
+For a controlled container that provides its own isolation, explicitly opt in:
+
+```bash
+npx @openai/codex-security patch "Security issue" --external-sandbox --json
+```
+
+`--external-sandbox` defaults to false. It uses Codex's external-sandbox policy
+and prints a warning: Codex does not enforce filesystem or network isolation for
+the patch task. The container must enforce those boundaries. The CLI never
+falls back to this mode automatically. Optional patch-risk assessment still uses
+its read-only Codex sandbox.
 
 `scan --patch` patches after a complete scan. `--patch-severity` defaults to
 `low`; `high` selects high and critical findings. Use the interactive browser

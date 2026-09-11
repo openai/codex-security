@@ -120,7 +120,11 @@ describe("CLI skill commands", () => {
           "\\\\server\\share\\issue.txt",
         ]);
         expect(stdout.text()).toBe("");
-        expect(stderr.text()).toBe("");
+        expect(stderr.text()).toBe(
+          command === "patch"
+            ? "codex-security: Patch command exited with status 7.\n"
+            : "",
+        );
 
         const help = capture();
         expect(
@@ -787,7 +791,9 @@ describe("CLI skill commands", () => {
       ).toBe(0);
       expect(invocation).toContain('model="gpt-5.6-custom"');
       expect(invocation).toContain('model_reasoning_effort="high"');
-      expect(stderr.text()).toBe("");
+      expect(stderr.text()).toBe(
+        command === "patch" ? "Patch applied. Files changed: 1.\n" : "",
+      );
     }
 
     const longLiteral =
@@ -948,7 +954,9 @@ describe("CLI skill commands", () => {
       ).toBe(0);
       expect(invocation).toContain('model="gpt-5.6-terra"');
       expect(invocation).toContain('model_reasoning_effort="max"');
-      expect(stderr.text()).toBe("");
+      expect(stderr.text()).toBe(
+        command === "patch" ? "Patch applied. Files changed: 1.\n" : "",
+      );
 
       for (const [options, message] of [
         [
@@ -1343,7 +1351,11 @@ lines.on("line", (line) => {
   } else if (request.method === "thread/start") {
     assert.equal(process.cwd(), ${JSON.stringify(process.cwd())});
     assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write" });
-    send({ id: 2, result: { thread: { id: "parent", source: "vscode", ephemeral: false } } });
+    send({ id: 2, result: { thread: { id: "parent", source: "vscode", ephemeral: false }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } } });
+  } else if (request.method === "command/exec") {
+    assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");
+    assert.deepEqual(request.params.command, [process.execPath, "-e", ""]);
+    send({ id: request.id, result: { exitCode: 0, stdout: "", stderr: "" } });
   } else if (request.method === "turn/start") {
     assert.equal(request.params.threadId, "parent");
     assert.equal(request.params.input[0].text, "Fix the synthetic finding");
@@ -1507,6 +1519,7 @@ lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "initialize") send({ id: 1, result: {} });
   if (request.method === "thread/start") send({ id: 2, result: { thread: { id: "parent" } } });
+  if (request.method === "command/exec") send({ id: request.id, result: { exitCode: 0 } });
   if (request.method === "turn/start") process.stdout.write(${JSON.stringify(events.map((event) => JSON.stringify(event)).join("\n") + "\n")}, () => process.exit(0));
 });
 `;

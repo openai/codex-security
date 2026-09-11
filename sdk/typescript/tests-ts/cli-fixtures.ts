@@ -271,7 +271,7 @@ export function dependencies(
         args,
         repository,
         commandOptions,
-      )) ?? "",
+      )) ?? (args.includes("--name-only") ? "src/finding-1.ts\0" : ""),
     ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
     ...(options.linearClient === undefined
       ? {}

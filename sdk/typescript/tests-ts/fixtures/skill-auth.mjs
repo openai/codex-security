@@ -78,8 +78,24 @@ for await (const line of createInterface({ input: process.stdin })) {
         error: { code: -32000, message: "Unauthorized" },
       });
     } else {
-      send({ id: request.id, result: { thread: { id: "synthetic-thread" } } });
+      send({
+        id: request.id,
+        result: {
+          thread: { id: "synthetic-thread" },
+          sandbox: { type: "workspaceWrite" },
+        },
+      });
     }
+  } else if (request.method === "command/exec") {
+    if (process.env.SYNTHETIC_CHECK_STARTUP_LOCK) {
+      assert.equal(
+        existsSync(join(process.env.CODEX_HOME, ".codex-security-scan.lock")),
+        false,
+      );
+    }
+    assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");
+    assert.deepEqual(request.params.command, [process.execPath, "-e", ""]);
+    send({ id: request.id, result: { exitCode: 0 } });
   } else if (request.method === "turn/start") {
     if (process.env.SYNTHETIC_CHECK_STARTUP_LOCK) {
       assert.equal(

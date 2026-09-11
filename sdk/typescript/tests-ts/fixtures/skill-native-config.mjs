@@ -14,7 +14,9 @@ await Promise.all([
   (async () => {
     for await (const line of createInterface({ input: process.stdin })) {
       const request = JSON.parse(line);
-      if (request.method === "turn/start") {
+      if (request.method === "command/exec") {
+        send({ id: request.id, result: { exitCode: 0 } });
+      } else if (request.method === "turn/start") {
         turnRequest = request;
         child.stdin.write(
           JSON.stringify({
