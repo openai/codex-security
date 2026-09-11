@@ -25,7 +25,7 @@ Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in 
 
 ## Shared Notes
 
-Keep shared notes in `<artifacts_dir>/message-board/`, one Markdown file per author. Retain them with the scan artifacts for later iterations. Each Deep scan worker uses its own output directory.
+Keep shared Markdown notes in `<artifacts_dir>/message-board/`. Retain them with the scan artifacts for later iterations. Each Deep scan worker uses its own output directory.
 
 ## Threat Model (Phase 1) Paths
 
