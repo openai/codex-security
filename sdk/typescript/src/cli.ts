@@ -2224,8 +2224,12 @@ export async function main(
               options.validationPromptFile !== undefined ||
               options.scanPromptFile !== undefined
             ) {
+              const option =
+                options.validationPromptFile !== undefined
+                  ? "--validation-prompt-file"
+                  : "--scan-prompt-file";
               throw new CodexSecurityError(
-                "Prompt files are not supported when rerunning an imported scan; imports do not perform security analysis.",
+                `${option} is not supported when rerunning an imported scan; imports do not perform security analysis.`,
               );
             }
             const imported = recipe["import"];
