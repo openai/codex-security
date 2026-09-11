@@ -38,6 +38,7 @@ import {
   CodexLoginHandle,
   loginApiKey as persistApiKey,
   logout as codexLogout,
+  withCredentialHomeLock,
   type AccountStatus,
 } from "./auth.js";
 import {
@@ -2478,20 +2479,16 @@ export class CodexSecurity {
       const ambientHome =
         environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
         join(homedir(), ".codex");
-      const releaseCredentialHome =
-        await acquireCodexSecurityCredentialHomeLock(
-          authentication.codexHome,
-          this.#abortController.signal,
-        );
-      try {
-        await initialCredentialsAvailable(
-          this.#dependencies.environment,
-          ambientHome,
-          authentication.codexHome,
-        );
-      } finally {
-        await releaseCredentialHome();
-      }
+      await withCredentialHomeLock(
+        authentication.codexHome,
+        () =>
+          initialCredentialsAvailable(
+            this.#dependencies.environment,
+            ambientHome,
+            authentication.codexHome,
+          ),
+        this.#abortController.signal,
+      );
       return await accountStatus(
         this.#codexCommand(),
         authentication.environment,
@@ -2504,29 +2501,26 @@ export class CodexSecurity {
     await this.#trackOperation(async () => {
       const authentication = await this.#authentication();
       this.#requireOpen();
-      const releaseCredentialHome =
-        await acquireCodexSecurityCredentialHomeLock(
-          authentication.codexHome,
-          this.#abortController.signal,
-        );
-      try {
-        await codexLogout(
-          this.#codexCommand(),
-          authentication.environment,
-          this.#abortController.signal,
-        );
-        if (
-          this.#runtime === null ||
-          this.#runtime.persistentCredentialHome === true
-        ) {
-          await setCodexSecurityCredentialLogout(
-            authentication.codexHome,
-            true,
+      await withCredentialHomeLock(
+        authentication.codexHome,
+        async () => {
+          await codexLogout(
+            this.#codexCommand(),
+            authentication.environment,
+            this.#abortController.signal,
           );
-        }
-      } finally {
-        await releaseCredentialHome();
-      }
+          if (
+            this.#runtime === null ||
+            this.#runtime.persistentCredentialHome === true
+          ) {
+            await setCodexSecurityCredentialLogout(
+              authentication.codexHome,
+              true,
+            );
+          }
+        },
+        this.#abortController.signal,
+      );
       if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
       this.#runtimeCredentialSource = null;
       this.#requireOpen();

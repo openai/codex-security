@@ -71,7 +71,6 @@ describe("CLI authentication", () => {
       const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
-      deps.prepareAuthenticationHome = prepareCodexSecurityCredentialHome;
       let forwarded: readonly string[] | undefined;
       deps.createSecurity = () => {
         throw new Error("must not initialize Codex Security");
@@ -112,6 +111,9 @@ describe("CLI authentication", () => {
       expect(forwarded).toEqual([...argv]);
       expect(environment?.["CODEX_HOME"]).toBe(expectedHome);
       expect(environment?.["CODEX_SECURITY_STATE_DIR"]).toBe(stateDirectory);
+      expect(
+        await codexSecurityCredentialAllowsAmbientImport(expectedHome),
+      ).toBe(argv[0] !== "logout");
     }
   });
 
@@ -134,7 +136,6 @@ describe("CLI authentication", () => {
           const deps = dependencies({
             environment: { CODEX_SECURITY_STATE_DIR: linkedState },
           });
-          deps.prepareAuthenticationHome = prepareCodexSecurityCredentialHome;
           let forwardedHome: string | undefined;
           deps.runCodex = async (_args, _output, environment) => {
             forwardedHome = environment?.["CODEX_HOME"];
@@ -154,7 +155,6 @@ describe("CLI authentication", () => {
         const deps = dependencies({
           environment: { CODEX_SECURITY_STATE_DIR: linkedState },
         });
-        deps.prepareAuthenticationHome = prepareCodexSecurityCredentialHome;
         deps.runCodex = async () => 0;
         expect(await main(["login"], stdout.stream, stderr.stream, deps)).toBe(
           0,
@@ -1113,6 +1113,10 @@ describe("CLI authentication", () => {
       } finally {
         await chmod(authPath, 0o600);
       }
+      deps.runCodex = async () => 0;
+      expect(
+        await main(["login", "status"], capture().stream, stderr.stream, deps),
+      ).toBe(0);
     },
   );
 

@@ -7,6 +7,7 @@ import { parse } from "smol-toml";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError, PluginBootstrapError } from "./errors.js";
 import {
+  acquireCodexSecurityCredentialHomeLock,
   executablePathForSpawn,
   expandHome,
   runCodexCommand,
@@ -71,6 +72,22 @@ export interface LoginResult {
 export interface AccountStatus {
   authenticated: boolean;
   details: string;
+}
+
+export async function withCredentialHomeLock<T>(
+  codexHome: string,
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const release = await acquireCodexSecurityCredentialHomeLock(
+    codexHome,
+    signal,
+  );
+  try {
+    return await operation();
+  } finally {
+    await release();
+  }
 }
 
 export class CodexLoginHandle {

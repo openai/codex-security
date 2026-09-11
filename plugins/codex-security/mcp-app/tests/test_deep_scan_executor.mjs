@@ -685,8 +685,8 @@ async function testOpenAiCredentialsReachWorker() {
     { openai: "synthetic-openai-key", accountResult: { account: { type: "apiKey" }, requiresOpenaiAuth: true } },
     { openai: "synthetic-openai-key", accountResult: storedAccount },
     { resumeThreadId: "fixture-resume", accountResult: storedAccount },
-    { kind: "reducer", accountResult: storedAccount },
-    { kind: "reducer", resumeThreadId: "fixture-resume", accountResult: storedAccount },
+    { kind: "dedup", accountResult: storedAccount },
+    { kind: "dedup", resumeThreadId: "fixture-resume", accountResult: storedAccount },
     { openai: "synthetic-provider-key", accountResult: { account: null, requiresOpenaiAuth: false } },
     {},
     { openai: " " }

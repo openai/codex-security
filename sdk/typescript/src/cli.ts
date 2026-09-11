@@ -68,6 +68,7 @@ import {
   NO_CREDENTIALS_MESSAGE,
   configuredCodexHome,
   readCodexHomeConfig,
+  withCredentialHomeLock,
 } from "./auth.js";
 import { loadContract } from "./contract.js";
 import { publishScanToCustom } from "./custom-publish.js";
@@ -1082,9 +1083,6 @@ interface CliDependencies {
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
-  prepareAuthenticationHome?: (
-    environment: NodeJS.ProcessEnv,
-  ) => Promise<string>;
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
@@ -1148,7 +1146,6 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
     createSecurityInternal(config, { surface: "cli" }),
   environment: process.env,
-  prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
   hasStoredChatGPTSignIn: async (signal) => {
@@ -5112,33 +5109,21 @@ export async function main(
           .describe("Read an access token from stdin."),
       }),
       async run({ args, options }) {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
-        if (
-          args.action === "status" &&
-          existsSync(credentialHome) &&
-          scanAuthentication(dependencies.environment).method !== "api_key"
-        ) {
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          dependencies.environment,
+        );
+        const authentication = scanAuthentication(dependencies.environment);
+        if (args.action === "status" && authentication.method !== "api_key") {
           const ambientHome =
             environmentValue(dependencies.environment, "CODEX_HOME") ??
             join(homedir(), ".codex");
-          const releaseCredentialHome =
-            await acquireCodexSecurityCredentialHomeLock(credentialHome);
-          try {
-            await initialCredentialsAvailable(
+          await withCredentialHomeLock(credentialHome, () =>
+            initialCredentialsAvailable(
               dependencies.environment,
               ambientHome,
               credentialHome,
-            );
-          } finally {
-            await releaseCredentialHome();
-          }
+            ),
+          );
         }
         const authenticationEnvironment = {
           ...dependencies.environment,
@@ -5155,15 +5140,10 @@ export async function main(
           undefined,
           authenticationEnvironment,
         );
-        if (
-          args.action === undefined &&
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
+        if (args.action === undefined && exitCode === 0) {
           await setCodexSecurityCredentialLogout(credentialHome, false);
         }
         if (args.action === "status") {
-          const authentication = scanAuthentication(dependencies.environment);
           if (
             authentication.method === "api_key" &&
             (exitCode === 0 || exitCode === 1)
@@ -5177,7 +5157,6 @@ export async function main(
             );
           }
         } else if (exitCode === 0 && !options.withApiKey) {
-          const authentication = scanAuthentication(dependencies.environment);
           if (authentication.method === "api_key") {
             const configuredApiKeyVariables = Object.entries(
               dependencies.environment,
@@ -5210,35 +5189,23 @@ export async function main(
       destructive: true,
       mcp: false,
       async run() {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          dependencies.environment,
+        );
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
         };
-        const releaseCredentialHome =
-          await acquireCodexSecurityCredentialHomeLock(credentialHome);
-        try {
+        await withCredentialHomeLock(credentialHome, async () => {
           exitCode = await dependencies.runCodex(
             ["logout"],
             undefined,
             authenticationEnvironment,
           );
-          if (
-            exitCode === 0 &&
-            dependencies.prepareAuthenticationHome !== undefined
-          ) {
+          if (exitCode === 0) {
             await setCodexSecurityCredentialLogout(credentialHome, true);
           }
-        } finally {
-          await releaseCredentialHome();
-        }
+        });
       },
     })
     .command("serve", {

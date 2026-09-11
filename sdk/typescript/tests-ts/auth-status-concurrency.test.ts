@@ -75,8 +75,6 @@ for (const surface of ["CLI", "SDK"] as const) {
         const run = async (args: string[]): Promise<number> =>
           await main(args, capture().stream, capture().stream, {
             ...dependencies({ environment }),
-            prepareAuthenticationHome:
-              runtime.prepareCodexSecurityCredentialHome,
             runCodex: async (command) => {
               if (command[0] === "logout") {
                 await removeCredentials();
