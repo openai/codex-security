@@ -12,6 +12,7 @@
 - skip unavailable Daybreak access advisories ([#878](https://github.com/openai/codex-security/pull/878))
 - align Codex 0.154.0 and dependency cooldowns ([#755](https://github.com/openai/codex-security/pull/755))
 - bump docker/setup-buildx-action from 4.2.0 to 4.3.0 ([#891](https://github.com/openai/codex-security/pull/891))
+- bump actions/attest-build-provenance from 4.1.1 to 4.2.2 ([#886](https://github.com/openai/codex-security/pull/886))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
