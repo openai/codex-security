@@ -20,6 +20,7 @@
 - bump pytest from 9.0.3 to 9.1.1 in /plugins/codex-security ([#885](https://github.com/openai/codex-security/pull/885))
 - bump typescript from 5.7.3 to 7.0.2 in /sdk/typescript ([#898](https://github.com/openai/codex-security/pull/898))
 - simplify fast-uri dependency and update Ajv resolver ([#895](https://github.com/openai/codex-security/pull/895))
+- bump @linear/sdk from 89.0.0 to 93.0.1 in /sdk/typescript ([#896](https://github.com/openai/codex-security/pull/896))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
