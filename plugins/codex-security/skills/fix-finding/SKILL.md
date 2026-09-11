@@ -5,6 +5,8 @@ description: Use when the user explicitly asks to fix and verify a validated or 
 
 # Fix Finding
 
+Before choosing paths or saving retained output, read `../../references/artifact-storage.md` and follow its storage policy.
+
 ## Objective
 
 Turn a current security finding into a minimal, validated code change. If the code is already safe, prove that and report that no change was needed.

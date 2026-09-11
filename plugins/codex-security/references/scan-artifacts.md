@@ -2,15 +2,15 @@
 
 Use these shared path conventions for Codex Security scan workflows unless the user explicitly provides different input or output paths.
 
+Follow `artifact-storage.md` for storage selection, file authoring and shared threat-model cache rules.
+
 ## Base Paths
 
 - `plugin_dir=<codex-security plugin root>`
-- `repo_name=<basename of repo_root>`
 - `target_id=<stable scan target identity from references/scan-contract.md>`
-- `system_temp_dir=<platform temporary directory>`
-- `security_scans_dir=<system_temp_dir>/codex-security-scans/<repo_name>`
-- `scan_id=<commit>_<scan timestamp>`
-- `scan_dir=<security_scans_dir>/<scan_id>`
+- `scan_id=<scanId returned by the MCP scan context, or CODEX_SECURITY_SCAN_ID when provided>`
+- `scan_dir=<scanDir returned by the MCP scan context>`; when `CODEX_SECURITY_SCAN_DIR` is provided, use that existing SDK-owned directory. Never derive a scan directory from a repository name, revision, timestamp or temporary-directory formula.
+- For a standalone phase, use the `directory` returned by `save_codex_security_artifact` for the selected `targetPath` and `storage`, as described in `artifact-storage.md`.
 - `target_paths_file=<CODEX_SECURITY_TARGET_PATHS_FILE>` for SDK scoped-path scans; reference it as `"$CODEX_SECURITY_TARGET_PATHS_FILE"` in POSIX shells or `"$env:CODEX_SECURITY_TARGET_PATHS_FILE"` in PowerShell. This read-only scope input lives in the isolated Codex home outside the model-writable scan directory. Pass it directly to `make-repo-scope-input --scopes-file` and `bind-repo-scopes --scopes-file` before finalization, and do not print, evaluate, modify, or treat its contents as shell syntax.
 - `artifacts_dir=<scan_dir>/artifacts`
 - `context_dir=<artifacts_dir>/01_context`
@@ -19,22 +19,14 @@ Use these shared path conventions for Codex Security scan workflows unless the u
 - `reconciliation_dir=<artifacts_dir>/04_reconciliation`
 - `findings_dir=<artifacts_dir>/05_findings`
 
-The plugin resolves the platform temporary directory automatically. For a manual workflow, use the active process temporary directory (for example, `%TEMP%` on Windows or `$TMPDIR` when configured on Unix-like hosts) instead of hardcoding `/tmp`.
-
 Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts.
 
 ## Threat Model (Phase 1) Paths
 
 - Resolved SECURITY.md guidance: `<context_dir>/security_guidance.md`
-- Repository-scoped threat model: `<security_scans_dir>/threat_model.md`
+- Repository-scoped threat model: use the shared cache policy in `artifact-storage.md`.
 - Per-scan threat model copy: `<context_dir>/threat_model.md`
 - Later scan phases should treat `<context_dir>/threat_model.md` as the source of truth.
-- When a repository-scoped threat model already exists, copy it to `<context_dir>/threat_model.md` without alteration for auditability.
-
-End each repository-scoped threat model with these two lines:
-
-- `Repository: <target_id>`
-- `Version: <revision for an immutable Git tree; snapshot digest otherwise>`
 
 ## Finding Discovery (Phase 2) Paths
 

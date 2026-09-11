@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import hashlib
 import json
@@ -46,6 +47,9 @@ _PUBLISHED_OUTPUTS = (
 )
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
+)
+_RESERVED_ARTIFACT_PATHS = json.loads(
+    Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
 )
 
 
@@ -1332,6 +1336,49 @@ def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]
         if published:
             db.deep_scan.clear_deep_scan_publication_failure(connection, scan_id)
     return db.scan_context(connection, scan_id)
+
+
+def read_or_save_artifact(args: Any) -> dict[str, Any]:
+    """Read or publish supplemental bytes through verified filesystem handles."""
+    root = Path(args.artifact_root)
+    if args.command == "read-artifact":
+        descriptor = open_scan_local_file_descriptor(root, args.artifact_path, "Saved artifact")
+        with os.fdopen(descriptor, "rb") as source:
+            return {"content": base64.b64encode(source.read()).decode("ascii")}
+    write_scan_local_bytes(root, args.artifact_path, sys.stdin.buffer.read())
+    return {"path": str(root / args.artifact_path)}
+
+
+def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
+    """Publish supplemental bytes under the same lock as finalization and recovery."""
+    scan_id = db.require_uuid(args.scan_id, "scan-id")
+    with db.scan_completion_lock(scan_id):
+        scan = db.require_scan(connection, scan_id)
+        db.handoff.require_current_continuation(
+            scan,
+            args.claim_token,
+            error_message="Scan artifacts are owned by another continuation.",
+        )
+        if scan["status"] != "running" or scan["seal_manifest_digest"] is not None:
+            raise SystemExit("The scan stopped; its artifacts cannot be modified.")
+        scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+        manifest_path = db.artifact_path(scan_dir, "scan-manifest.json", required=False)
+        if manifest_path is not None:
+            manifest = db.read_json_object(manifest_path).get("scan", {})
+            if manifest.get("sealedAt") is not None or manifest.get("artifacts") is not None:
+                raise SystemExit("The scan is sealed; its artifacts cannot be modified.")
+        output = args.artifact_path
+        key = output.lower()
+        if not (
+            key.startswith(("artifacts/", "findings/", "hardening/"))
+            or key == "report_validation.md"
+        ) or any(
+            key == reserved or key.startswith(reserved + "/")
+            for reserved in _RESERVED_ARTIFACT_PATHS
+        ):
+            raise SystemExit("Use the typed scan tools for canonical artifacts and checkpoints.")
+        write_scan_local_bytes(scan_dir, output, sys.stdin.buffer.read())
+    return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:

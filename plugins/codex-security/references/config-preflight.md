@@ -2,6 +2,8 @@
 
 Codex Security Standard and diff scan skills should run the read-only helper before substantive scan work. Deep scans have no parent capability requirements and do not run this helper.
 
+The top-level parent reads `artifact-storage.md` once before preflight and follows its scan-ownership rules, including for terminal Diff scans.
+
 Load `desktop-config-preflight.md` only after the host explicitly identifies itself as the Codex desktop app.
 
 Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts. Before constructing the first helper command, inspect the current tool surface once and use that discovery result for both the runtime checks and `<verified-multi-agent-runtime-arguments>`. Do not omit active runtime facts from the first invocation and wait for an `incomplete` result before supplying them. The command is written on one line so it works in PowerShell, Command Prompt, and POSIX shells:

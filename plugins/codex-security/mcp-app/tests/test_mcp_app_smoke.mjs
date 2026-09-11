@@ -2414,11 +2414,11 @@ try {
   const initializedScanDir = startedWorkspace.results.scanDir;
   assert.equal(
     initializedScanDir.startsWith(
-      path.join(resolvedScanRoot, "codex-security-scans-"),
+      path.join(await realpath(stateDir), "scans") + path.sep,
     ),
     true,
   );
-  assert.equal(initializedScanDir.startsWith(`${stateDir}${path.sep}`), false);
+  assert.equal(initializedScanDir.startsWith(`${resolvedScanRoot}${path.sep}`), false);
   const scanId = startedWorkspace.results.scanId;
   assert.equal(startedWorkspace.results.progress.phase, "preflight");
   assert.equal(startedWorkspace.results.progress.status, "running");
