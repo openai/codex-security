@@ -25,7 +25,7 @@ Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in 
 
 ## Shared Audit Notes
 
-Shared notes live in `<artifacts_dir>/message-board/`, one Markdown file per author. Each Deep scan worker keeps its board in its own output directory. Keep concise discoveries, source pointers, and unresolved questions here; return full worker reports through their normal responses. Retain useful notes with the scan artifacts. On a later iteration, consult relevant notes and recheck their source pointers against the authorized current source.
+Keep shared notes in `<artifacts_dir>/message-board/`, one Markdown file per author. Retain them with the scan artifacts for later iterations. Each Deep scan worker uses its own output directory.
 
 ## Threat Model (Phase 1) Paths
 
