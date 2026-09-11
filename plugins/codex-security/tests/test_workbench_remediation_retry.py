@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from workbench_test_support import (
+    close_standard_review_receipts,
     create_saved_workspace,
     run_workbench,
     start_delivered_scan,
@@ -59,6 +60,7 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
+    close_standard_review_receipts(state_dir, scan_id)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
 

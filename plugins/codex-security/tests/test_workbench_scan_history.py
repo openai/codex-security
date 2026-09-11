@@ -13,6 +13,7 @@ from typing import Any
 
 from test_workbench_db import HEAD_CHANGED_WARNING
 from workbench_test_support import (
+    close_standard_review_receipts,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     stable_target_id,
@@ -181,6 +182,7 @@ def create_cli_scan(
     completion = ["complete-scan", "--scan-id", launched["scanId"]]
     if cost is not None:
         completion.extend(("--cost-json", json.dumps(cost)))
+    close_standard_review_receipts(state_dir, launched["scanId"])
     run_workbench(state_dir, *completion)
     return launched
 
@@ -234,6 +236,9 @@ def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_pa
     repository = tmp_path / "repository"
     (repository / "src").mkdir(parents=True)
     (repository / "tests").mkdir()
+    (repository / "src" / "app.py").write_text("print('app')\n")
+    (repository / "tests" / "test_app.py").write_text("def test_app(): pass\n")
+    (repository / "outside.md").write_text("outside the requested paths\n")
     root = tmp_path / "results"
     first = create_cli_scan(state_dir, root, repository)
     rerun = create_cli_scan(
@@ -241,7 +246,7 @@ def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_pa
         root,
         repository,
         parent_scan_id=first["scanId"],
-        paths=["src", "tests"],
+        paths=["src", "src/app.py", "tests"],
     )
     failed = create_cli_scan(state_dir, root, repository, complete=False)
     run_workbench(state_dir, "fail-scan", "--scan-id", failed["scanId"], "--message", "interrupted")
@@ -251,7 +256,7 @@ def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_pa
     assert first["scanDir"].startswith(str(root))
     detail = run_workbench(state_dir, "get-scan", "--scan-id", rerun["scanId"])
     assert detail["parentScanId"] == first["scanId"]
-    assert detail["recipe"]["target"]["paths"] == ["src", "tests"]
+    assert detail["recipe"]["target"]["paths"] == ["src", "src/app.py", "tests"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute(
             "SELECT parent_scan_id FROM scans WHERE id = ?", (rerun["scanId"],)
@@ -322,6 +327,7 @@ def test_cli_scan_preserves_original_revision_when_head_moves(tmp_path: Path) ->
         target_revision=revision,
     )
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
+    close_standard_review_receipts(state_dir, launched["scanId"])
 
     readme.write_text("replacement source\n")
     subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)

@@ -564,18 +564,39 @@ def directory_content_digest(
 
 
 def directory_snapshot_regular_file_count(target: Path) -> int:
+    return len(directory_snapshot_regular_files(target))
+
+
+def directory_snapshot_regular_files(target: Path) -> list[Path]:
     paths = git_directory_snapshot_paths(target)
     if paths is None:
         paths = sorted(target.rglob("*"))
-    count = 0
+    files: list[Path] = []
     for path in paths:
         try:
             metadata = path.lstat()
         except OSError as exc:
             raise SystemExit(f"Could not inspect local file: {path.relative_to(target)}") from exc
         if stat.S_ISREG(metadata.st_mode):
-            count += 1
-    return count
+            files.append(path)
+    return files
+
+
+def regular_file_digest(path: Path) -> str:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise SystemExit(f"Could not inspect local file: {path}") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit(f"Expected a regular local file: {path}")
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise SystemExit(f"Could not read local file: {path}") from exc
+    return digest.hexdigest()
 
 
 def copy_directory_excluding(source: Path, destination: Path, excluded: tuple[Path, ...]) -> None:

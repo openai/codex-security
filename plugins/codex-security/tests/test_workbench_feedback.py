@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
+    close_standard_review_receipts,
     create_saved_workspace,
     run_workbench,
     stable_target_id,
@@ -58,6 +59,7 @@ def _complete_scan(
             for anchor in anchors
         ]
         findings_path.write_text(json.dumps(document))
+    close_standard_review_receipts(state_dir, scan_id)
     return run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
 
 

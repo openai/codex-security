@@ -60,6 +60,18 @@ assert.equal(prompt.includes("report.html"), false);
 assert.equal(prompt.includes("diffTarget"), false);
 assert.ok(prompt.includes("preflightChecks"));
 assert.ok(prompt.includes("ready"));
+for (const receiptInstruction of [
+  "reviewedFiles",
+  "reviewItemsTotal",
+  "reviewItemsCompleted",
+  "before leaving discovery"
+]) {
+  assert.ok(
+    prompt.includes(receiptInstruction),
+    `Standard handoff must include ${receiptInstruction}`
+  );
+}
+assert.ok(prompt.includes("Do not send reviewItemsTotal or reviewItemsCompleted"));
 for (const operation of [
   "prepare_codex_security_review_items",
   "list_codex_security_review_items",

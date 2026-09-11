@@ -867,6 +867,19 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        42,
+        "bind Standard review progress to per-file receipts",
+        """
+        CREATE TABLE standard_review_receipts (
+            scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+            relative_path TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+            closed_at TEXT,
+            PRIMARY KEY (scan_id, relative_path)
+        );
+        """,
+    ),
 )
 
 

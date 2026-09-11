@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    close_standard_review_receipts,
     create_saved_git_workspace,
     create_saved_workspace,
     initialize_git_repository,
@@ -589,6 +590,7 @@ def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
+    close_standard_review_receipts(state_dir, scan_id)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     assert completed["artifacts"]["sarifReport"] == str(scan_dir / "exports" / "results.sarif")
     sarif_path = scan_dir / "exports" / "results.sarif"
@@ -1129,6 +1131,7 @@ def test_primary_location_prefers_root_control_in_bounded_and_csv_results(
     ] + [{"path": "root.py", "startLine": 1, "role": "root_control"}]
     findings_path.write_text(json.dumps(document))
 
+    close_standard_review_receipts(state_dir, scan_id)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     assert len(completed["findings"][0]["locations"]) == 8
     assert completed["findings"][0]["locations"][0]["path"] == "root.py"

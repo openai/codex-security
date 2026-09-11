@@ -272,9 +272,11 @@ const progressSchema = {
     .describe("Current standard or diff scan preflight results. Project every helper results entry to capability, reason, severity, and status only. The server derives the item counts and visible block/warn attention items."),
   reportableFindingsCount: z.number().int().nonnegative().optional(),
   reviewItemsCompleted: z.number().int().nonnegative().optional()
-    .describe("Cumulative completed reviews or coverage surfaces in the current discovery pass. Increment only after the corresponding review is complete."),
+    .describe("Cumulative completed reviews or coverage surfaces in the current discovery pass. Standard scans reject this self-reported counter and derive it from reviewedFiles receipts."),
   reviewItemsTotal: z.number().int().nonnegative().optional()
-    .describe("Expected reviews or coverage surfaces in the current discovery pass. Increase it before assigning newly discovered work."),
+    .describe("Expected reviews or coverage surfaces in the current discovery pass. Standard scans reject this self-reported counter and use their authoritative in-scope inventory."),
+  reviewedFiles: z.array(z.string().min(1)).max(512).optional()
+    .describe("Standard scans only. Repository-relative files whose discovery review is complete. The workbench validates each path against the authoritative inventory, binds its content digest, and derives closedRows from distinct persisted receipts."),
   scanId: z.string().uuid(),
   ...continuationMutationClaimSchema
 };
@@ -1045,7 +1047,7 @@ export function createCodexSecurityServer(): McpServer {
     inputSchema: progressSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: modelActionMeta
-  }, async ({ scanId, deepReviewPass, phase, phaseItemsTotal, phaseItemsCompleted, phaseProgressUnit, preflightChecks, reviewItemsTotal, reviewItemsCompleted, reportableFindingsCount, handoffClaimToken }, extra) => {
+  }, async ({ scanId, deepReviewPass, phase, phaseItemsTotal, phaseItemsCompleted, phaseProgressUnit, preflightChecks, reviewedFiles, reviewItemsTotal, reviewItemsCompleted, reportableFindingsCount, handoffClaimToken }, extra) => {
     const modelSettings = codexModelSettingsFromExtra(extra);
     const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
     const scan = isJsonObject(current.scan) ? current.scan : undefined;
@@ -1098,6 +1100,7 @@ export function createCodexSecurityServer(): McpServer {
       ...optionalNumberArg("--phase-items-completed", derivedPhaseItemsCompleted),
       ...optionalArg("--phase-progress-unit", derivedPhaseProgressUnit),
       ...(serializedPreflightIssues ? ["--preflight-issues-json-stdin"] : []),
+      ...(reviewedFiles ?? []).flatMap((path) => ["--reviewed-file", path]),
       ...optionalNumberArg("--review-items-total", reviewItemsTotal),
       ...optionalNumberArg("--review-items-completed", reviewItemsCompleted),
       ...optionalNumberArg("--reportable-findings-count", reportableFindingsCount)
@@ -1106,7 +1109,7 @@ export function createCodexSecurityServer(): McpServer {
 
   server.registerTool("complete_codex_security_scan", {
     title: "Complete Codex Security Scan",
-    description: "Finalization only: validate and seal already-authored scan-manifest.json, findings.json, and coverage.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
+    description: "Finalization only: validate and seal already-authored scan-manifest.json, findings.json, and coverage.json, generate report.md, index findings, and mark the scan complete. For Standard scans, every in-scope file review receipt must be closed before completion. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
     inputSchema: completeScanSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: modelActionMeta

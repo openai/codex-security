@@ -711,6 +711,23 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(rejoinedAfterPreflight.result.structuredContent.startDisposition, "joined");
     assert.equal(rejoinedAfterPreflight.result.structuredContent.scan.progress.phase, "threat_model");
 
+    const reviewed = await headlessServer.requestAndWait(83, "tools/call", {
+      name: "update_codex_security_scan_progress",
+      arguments: {
+        scanId: result.scanId,
+        handoffClaimToken: result.handoffClaimToken,
+        phase: "discovery",
+        reviewedFiles: ["src/a.py"],
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    assertNoError(reviewed);
+    assert.deepEqual(reviewed.result.structuredContent.scan.progress.coverage, {
+      closedRows: 1,
+      filesTotal: 1,
+      worklistRows: 1,
+    });
+
     await writeCompletedContract(
       result.scanDir,
       result.scanId,
@@ -1814,11 +1831,15 @@ try {
   );
   assert.equal(
     progress.inputSchema.properties.reviewItemsCompleted.description,
-    "Cumulative completed reviews or coverage surfaces in the current discovery pass. Increment only after the corresponding review is complete.",
+    "Cumulative completed reviews or coverage surfaces in the current discovery pass. Standard scans reject this self-reported counter and derive it from reviewedFiles receipts.",
   );
   assert.equal(
     progress.inputSchema.properties.reviewItemsTotal.description,
-    "Expected reviews or coverage surfaces in the current discovery pass. Increase it before assigning newly discovered work.",
+    "Expected reviews or coverage surfaces in the current discovery pass. Standard scans reject this self-reported counter and use their authoritative in-scope inventory.",
+  );
+  assert.match(
+    progress.inputSchema.properties.reviewedFiles.description,
+    /content digest.*distinct persisted receipts/u,
   );
   assert.ok(complete);
   assert.ok(fail);
@@ -1943,6 +1964,7 @@ try {
     assert.ok(tool.inputSchema.properties.handoffClaimToken);
   }
   assert.match(complete.description, /Finalization only/);
+  assert.match(complete.description, /every in-scope file review receipt must be closed/);
   assert.match(
     complete.description,
     /does not create missing artifacts or run skipped phases/,
@@ -2768,7 +2790,26 @@ try {
   });
   assertNoError(updatedPhaseContext);
 
-  const updated = await requestAndWait(8, "tools/call", {
+  const partialReview = await requestAndWait(8, "tools/call", {
+    name: "update_codex_security_scan_progress",
+    arguments: {
+      scanId,
+      phase: "discovery",
+      phaseItemsTotal: 1,
+      phaseItemsCompleted: 0,
+      phaseProgressUnit: "review_receipts",
+      reportableFindingsCount: 1,
+      handoffClaimToken,
+    },
+  });
+  assertNoError(partialReview);
+  assert.deepEqual(partialReview.result.structuredContent.scan.progress.coverage, {
+    closedRows: 0,
+    filesTotal: 1,
+    worklistRows: 1,
+  });
+
+  const updated = await requestAndWait(8001, "tools/call", {
     name: "update_codex_security_scan_progress",
     arguments: {
       scanId,
@@ -2776,9 +2817,7 @@ try {
       phaseItemsTotal: 4,
       phaseItemsCompleted: 1,
       phaseProgressUnit: "candidate_findings",
-      reviewItemsTotal: 31,
-      reviewItemsCompleted: 22,
-      reportableFindingsCount: 1,
+      reviewedFiles: ["src/a.py"],
       handoffClaimToken,
     },
   });
@@ -2788,9 +2827,9 @@ try {
     nextPhaseUserContext,
   );
   assert.deepEqual(updated.result.structuredContent.scan.progress.coverage, {
-    closedRows: 22,
+    closedRows: 1,
     filesTotal: 1,
-    worklistRows: 31,
+    worklistRows: 1,
   });
   assert.deepEqual(
     updated.result.structuredContent.scan.progress.phaseProgress,
@@ -3632,6 +3671,16 @@ try {
     arguments: { claimToken: invalidScanClaimToken, scanId: invalidScanId },
   });
   assertNoError(invalidScanClaimed);
+  const invalidScanReviewed = await requestAndWait(94021, "tools/call", {
+    name: "update_codex_security_scan_progress",
+    arguments: {
+      handoffClaimToken: invalidScanClaimToken,
+      phase: "discovery",
+      reviewedFiles: ["src/a.py"],
+      scanId: invalidScanId,
+    },
+  });
+  assertNoError(invalidScanReviewed);
   const prematureCompletion = await requestAndWait(9403, "tools/call", {
     name: "complete_codex_security_scan",
     arguments: {

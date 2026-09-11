@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     SCRIPT,
+    close_standard_review_receipts,
     create_saved_git_workspace,
     create_saved_workspace,
     initialize_git_repository,
@@ -81,6 +82,7 @@ EXPECTED_TABLES = {
     "schema_migrations",
     "security_targets",
     "setup_preferences",
+    "standard_review_receipts",
     "triage_results",
     "workspaces",
 }
@@ -700,6 +702,7 @@ def test_completion_warns_after_plain_directory_changes(tmp_path: Path) -> None:
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target, relative_path="app.py")
+    close_standard_review_receipts(state_dir, scan_id)
     original_digest = started["results"]["contract"]["target"]["requiredSnapshotDigest"]
     source.write_text("version = 2\n")
 
@@ -732,6 +735,7 @@ def test_completion_warns_when_scanned_directory_becomes_unavailable(tmp_path: P
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target, relative_path="app.py")
+    close_standard_review_receipts(state_dir, scan_id)
     target.rename(tmp_path / "moved-target")
 
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
@@ -859,6 +863,10 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     target.mkdir()
+    (target / "src").mkdir()
+    (target / "src" / "extract.py").write_text("fixture\n")
+    for index in range(30):
+        (target / f"support-{index}.txt").write_text("fixture\n")
     saved = create_saved_workspace(state_dir, target)
     workspace_id = str(saved["id"])
     assert saved["userContext"] == "Pay attention to uploaded archives."
@@ -904,17 +912,18 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     assert delivered["results"]["handoffStatus"] == "delivered"
     assert delivered["results"]["handoffClaimedAt"] is None
 
+    reviewed_paths = ["src/extract.py", *(f"support-{index}.txt" for index in range(30))]
+    first_receipt_args = [
+        argument for path in reviewed_paths[:22] for argument in ("--reviewed-file", path)
+    ]
     updated = run_workbench(
         state_dir,
         "update-progress",
         "--scan-id",
         scan_id,
         "--phase",
-        "validation",
-        "--review-items-total",
-        "31",
-        "--review-items-completed",
-        "22",
+        "discovery",
+        *first_receipt_args,
         "--reportable-findings-count",
         "1",
         "--claim-token",
@@ -922,11 +931,25 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     )
     assert updated["scan"]["progress"]["coverage"] == {
         "closedRows": 22,
-        "filesTotal": 0,
+        "filesTotal": 31,
         "worklistRows": 31,
     }
     assert updated["scan"]["progress"]["candidates"] == {"reportable": 1}
 
+    final_receipt_args = [
+        argument for path in reviewed_paths[22:] for argument in ("--reviewed-file", path)
+    ]
+    run_workbench(
+        state_dir,
+        "update-progress",
+        "--scan-id",
+        scan_id,
+        "--phase",
+        "validation",
+        *final_receipt_args,
+        "--claim-token",
+        claim_token,
+    )
     write_completed_contract(scan_dir, scan_id, target)
     completed = run_workbench(
         state_dir, "complete-scan", "--scan-id", scan_id, "--claim-token", claim_token
@@ -1042,7 +1065,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (42,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -1128,6 +1151,7 @@ def test_completed_finding_triage_and_remediation_persist(
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
+    close_standard_review_receipts(state_dir, scan_id)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     scan_dir = Path(str(completed["scanDir"]))
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
@@ -1712,6 +1736,7 @@ def test_completed_scan_disables_remediation_after_checkout_revision_changes(
         target_kind="git_revision",
         target_revision=revision,
     )
+    close_standard_review_receipts(state_dir, scan_id)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     assert completed["remediationAvailable"] is True
 
@@ -1751,6 +1776,7 @@ def assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target, relative_path="source.txt")
+    close_standard_review_receipts(state_dir, scan_id)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -2049,6 +2075,7 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
         target_revision=revision,
         snapshot_digest=str(started["results"]["contract"]["target"]["requiredSnapshotDigest"]),
     )
+    close_standard_review_receipts(state_dir, scan_id)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     scan_dir = Path(str(completed["scanDir"]))
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
@@ -2303,6 +2330,7 @@ def test_finding_remediation_rejects_unversioned_directory_changes(tmp_path: Pat
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
+    close_standard_review_receipts(state_dir, scan_id)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     scan_dir = Path(str(completed["scanDir"]))
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
@@ -3854,7 +3882,7 @@ def test_workbench_rejects_progress_completed_above_total(tmp_path: Path) -> Non
         check=False,
     )
     assert failed["returncode"] != 0
-    assert "cannot exceed" in str(failed["stderr"])
+    assert "derived from per-file review receipts" in str(failed["stderr"])
 
 
 def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
@@ -3864,17 +3892,28 @@ def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
+    first = run_workbench(
+        state_dir,
+        "update-progress",
+        "--scan-id",
+        scan_id,
+        "--phase",
+        "discovery",
+        "--review-items-total",
+        "10",
+        "--review-items-completed",
+        "6",
+        check=False,
+    )
+    assert first["returncode"] != 0
+    assert "derived from per-file review receipts" in str(first["stderr"])
     run_workbench(
         state_dir,
         "update-progress",
         "--scan-id",
         scan_id,
         "--phase",
-        "validation",
-        "--review-items-total",
-        "10",
-        "--review-items-completed",
-        "6",
+        "discovery",
     )
 
     phase_failed = run_workbench(
@@ -3883,7 +3922,7 @@ def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
         "--scan-id",
         scan_id,
         "--phase",
-        "discovery",
+        "threat_model",
         check=False,
     )
     assert phase_failed["returncode"] != 0
@@ -3899,7 +3938,7 @@ def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
         check=False,
     )
     assert coverage_failed["returncode"] != 0
-    assert "cannot decrease" in str(coverage_failed["stderr"])
+    assert "derived from per-file review receipts" in str(coverage_failed["stderr"])
 
 
 def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None:
@@ -4107,6 +4146,7 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
         target_kind="git_revision",
         target_revision="wrong-revision",
     )
+    close_standard_review_receipts(state_dir, scan_id)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     manifest = json.loads(
@@ -4161,6 +4201,7 @@ def test_workbench_preserves_in_flight_git_scan_during_migration_normalization(
         target_kind="git_revision",
         target_revision=revision,
     )
+    close_standard_review_receipts(state_dir, scan_id)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
 
@@ -4184,6 +4225,7 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
         target_kind="git_revision",
         target_revision=revision,
     )
+    close_standard_review_receipts(state_dir, scan_id)
     failed = run_workbench(
         state_dir,
         "complete-scan",
@@ -4210,6 +4252,7 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
         target_revision=revision,
         snapshot_digest=snapshot_digest,
     )
+    close_standard_review_receipts(state_dir, scan_id)
     (target / "README.md").write_text(f"{dirty_content}changed during scan\n")
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"

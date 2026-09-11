@@ -418,6 +418,18 @@ describe("custom validation", () => {
                       );
                       expect(prompt).not.toContain("run `$validation` once");
                       expect(turnOptions.outputSchema).toBeUndefined();
+                      if (!diff) {
+                        expect(prompt).toContain("reviewedFiles");
+                        await workbench([
+                          "update-progress",
+                          "--scan-id",
+                          scanId,
+                          "--phase",
+                          "discovery",
+                          "--reviewed-file",
+                          "src/extract.py",
+                        ]);
+                      }
                       await draft(scanDir, scanId, count, diff);
                       expect(commands).not.toContain("prepare-scan-completion");
                       expect(commands).not.toContain("complete-scan");

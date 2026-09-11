@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from workbench_test_support import (
+    close_standard_review_receipts,
     create_saved_workspace,
     run_workbench,
     start_delivered_scan,
@@ -30,6 +31,7 @@ def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Pa
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
+    close_standard_review_receipts(state_dir, scan_id)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
 

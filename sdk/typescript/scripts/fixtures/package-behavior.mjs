@@ -79,6 +79,15 @@ async function writeCompletedScan(env) {
     join(directory, "scan-manifest.json"),
     `${JSON.stringify(manifest)}\n`,
   );
+  await runWorkbench({ python: env.PYTHON, pluginRoot, environment: env }, [
+    "update-progress",
+    "--scan-id",
+    env.CODEX_SECURITY_SCAN_ID,
+    "--phase",
+    "discovery",
+    "--reviewed-file",
+    "README.md",
+  ]);
 }
 
 const turns = [];
@@ -168,7 +177,13 @@ try {
   assert.equal(completed.manifest.scan.status, "completed");
   assert.equal(completed.threadId, "fixture-0");
   assert.equal(completed.findings.findings.length, 1);
-  assert.equal((await savedScan(0)).progress.status, "complete");
+  const saved = await savedScan(0);
+  assert.equal(saved.progress.status, "complete");
+  assert.deepEqual(saved.progress.coverage, {
+    closedRows: 1,
+    worklistRows: 1,
+    filesTotal: 1,
+  });
   assert.equal(finished.has(0), true);
 
   const controller = new AbortController();

@@ -11,6 +11,7 @@ from unittest import mock
 
 from workbench_test_support import (
     SCRIPT,
+    close_standard_review_receipts,
     create_saved_workspace,
     start_delivered_scan,
     write_completed_contract,
@@ -41,6 +42,7 @@ def test_workbench_completion_and_exports_use_windows_file_backend(tmp_path: Pat
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
+    close_standard_review_receipts(state_dir, scan_id)
     (scan_dir / "report.html").write_text("stale report")
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     finalizer = sys.modules[namespace["finalize_scan"].__module__]

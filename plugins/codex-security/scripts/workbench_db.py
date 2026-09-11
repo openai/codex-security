@@ -1475,6 +1475,7 @@ def complete_scan_locked(
         error_message="Scan completion is owned by another continuation.",
     )
     deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+    progress.require_closed_standard_review_receipts(connection, scan)
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
 
@@ -1694,13 +1695,17 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (
-        directory_snapshot_regular_file_count(repository)
-        if not paths
-        else sum(
-            1
-            if (repository / path).is_file()
-            else directory_snapshot_regular_file_count(repository / path)
-            for path in paths
+        0
+        if mode == "standard"
+        else (
+            directory_snapshot_regular_file_count(repository)
+            if not paths
+            else sum(
+                1
+                if (repository / path).is_file()
+                else directory_snapshot_regular_file_count(repository / path)
+                for path in paths
+            )
         )
     )
     parent_scan_id = (
@@ -1754,6 +1759,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             target_summary=None,
             scope_file_count=scope_file_count,
             timestamp=timestamp,
+            review_scopes=paths or ["."],
             handoff_status="delivered",
             scan_dir=scan_dir,
         )

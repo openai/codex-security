@@ -157,9 +157,26 @@ test("matches sealed scan history end to end without merging related findings", 
       coverage["scanId"] = scanId;
       await writeJson(join(scanDir, "coverage.json"), coverage);
       await writeFile(join(scanDir, "report.md"), "# Synthetic scan\n");
+      await expect(
+        workbench(["prepare-scan-completion", "--scan-id", scanId]),
+      ).rejects.toThrow(
+        "Standard scan per-file review receipts are incomplete",
+      );
+      await workbench([
+        "update-progress",
+        "--scan-id",
+        scanId,
+        "--phase",
+        "discovery",
+        "--reviewed-file",
+        "src/extract.py",
+      ]);
       const completed = await workbench(["complete-scan", "--scan-id", scanId]);
       expect(completed["scan"]).toMatchObject({
-        progress: { status: "complete" },
+        progress: {
+          status: "complete",
+          coverage: { closedRows: 1, filesTotal: 1, worklistRows: 1 },
+        },
         findingCount: names.length,
       });
       artifacts.push(

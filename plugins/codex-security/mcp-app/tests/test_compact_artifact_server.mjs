@@ -274,6 +274,20 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       scanId,
       handoffClaimToken
     }), `${runtimeLabel}: authenticate semantic-draft owner`);
+    const reviewed = requireSuccessfulTool(await call(
+      "update_codex_security_scan_progress",
+      {
+        scanId,
+        handoffClaimToken,
+        phase: "discovery",
+        reviewedFiles: ["src/fixture.py"]
+      }
+    ), `${runtimeLabel}: close the Standard review receipt`);
+    assert.deepEqual(reviewed.scan.progress.coverage, {
+      closedRows: 1,
+      filesTotal: 1,
+      worklistRows: 1
+    });
 
     for (const [name, arguments_] of [
       ["list_codex_security_review_items", { scanId, handoffClaimToken }],

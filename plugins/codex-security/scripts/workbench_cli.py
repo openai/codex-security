@@ -220,6 +220,12 @@ def parse_args(description: str) -> argparse.Namespace:
     preflight_issues.add_argument("--preflight-issues-json-stdin", action="store_true")
     update_progress.add_argument("--review-items-total", type=non_negative_int)
     update_progress.add_argument("--review-items-completed", type=non_negative_int)
+    update_progress.add_argument(
+        "--reviewed-file",
+        action="append",
+        default=[],
+        help="Repository-relative file reviewed during Standard discovery; repeat for each file.",
+    )
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")

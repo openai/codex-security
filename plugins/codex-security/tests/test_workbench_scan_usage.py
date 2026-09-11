@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
+    close_standard_review_receipts,
     create_saved_workspace,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
@@ -246,6 +247,7 @@ def _complete_scan(fixture: ScanFixture) -> dict[str, Any]:
         fixture.target,
         **options,
     )
+    close_standard_review_receipts(fixture.state_dir, fixture.scan_id)
     return run_workbench(
         fixture.state_dir,
         "complete-scan",
@@ -631,6 +633,7 @@ def test_completion_preserves_explicit_legacy_cost(tmp_path: Path) -> None:
     write_completed_contract(
         fixture.scan_dir, fixture.scan_id, fixture.target, relative_path="app.py"
     )
+    close_standard_review_receipts(fixture.state_dir, fixture.scan_id)
     completed = run_workbench(
         fixture.state_dir,
         "complete-scan",

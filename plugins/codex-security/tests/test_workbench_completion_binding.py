@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -9,7 +10,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import pytest
 from workbench_test_support import (
+    close_standard_review_receipts,
     create_saved_workspace,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
@@ -69,7 +72,9 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
     return state_dir, scan_id, scan_dir
 
 
-def register_cli_scan(state_dir: Path, target: Path, scan_dir: Path) -> dict[str, Any]:
+def register_cli_scan(
+    state_dir: Path, target: Path, scan_dir: Path, paths: list[str] | None = None
+) -> dict[str, Any]:
     scan_dir.mkdir(mode=0o700)
     return run_workbench(
         state_dir,
@@ -84,10 +89,174 @@ def register_cli_scan(state_dir: Path, target: Path, scan_dir: Path) -> dict[str
                 "config": {},
                 "mode": "standard",
                 "repository": str(target),
-                "target": {"kind": "repository", "paths": []},
+                "target": {"kind": "paths" if paths else "repository", "paths": paths or []},
             }
         ),
     )
+
+
+@pytest.mark.parametrize("mock", [False, True])
+def test_standard_mock_completion_requires_a_mock_launch_recipe(tmp_path: Path, mock: bool) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "example.py").write_text("example = 1\n")
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    registered = run_workbench(
+        state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(scan_dir),
+        "--recipe-json",
+        json.dumps(
+            {
+                "config": {},
+                "mode": "standard",
+                "repository": str(target),
+                "target": {"kind": "repository", "paths": []},
+                "mock": mock,
+            }
+        ),
+    )
+    scan_id = str(registered["scanId"])
+    write_completed_contract(scan_dir, scan_id, target)
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["extensions"] = {"mock": True}
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id, check=mock)
+    if mock:
+        assert result["scan"]["progress"]["status"] == "complete"
+        assert result["scan"]["progress"]["coverage"]["closedRows"] == 0
+    else:
+        assert result["returncode"] != 0
+        assert "per-file review receipts are incomplete" in str(result["stderr"])
+        assert "sealedAt" not in json.loads(manifest_path.read_text())["scan"]
+
+
+@pytest.mark.parametrize("completion_command", ["complete-scan", "prepare-scan-completion"])
+def test_standard_completion_rejects_open_review_receipts_before_sealing(
+    tmp_path: Path,
+    completion_command: str,
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    (target / "src").mkdir(parents=True)
+    (target / "src" / "extract.py").write_text("def extract():\n    pass\n")
+    saved = create_saved_workspace(state_dir, target)
+    started = start_delivered_scan(
+        state_dir,
+        "--workspace-id",
+        str(saved["id"]),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )
+    scan_id = str(started["results"]["scanId"])
+    scan_dir = Path(str(started["results"]["scanDir"]))
+    write_completed_contract(scan_dir, scan_id, target)
+    run_workbench(
+        state_dir,
+        "update-progress",
+        "--scan-id",
+        scan_id,
+        "--phase",
+        "discovery",
+    )
+
+    rejected = run_workbench(
+        state_dir,
+        completion_command,
+        "--scan-id",
+        scan_id,
+        check=False,
+    )
+
+    assert rejected["returncode"] != 0
+    assert "Standard scan per-file review receipts are incomplete" in str(rejected["stderr"])
+    pending = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert pending["progress"]["status"] == "running"
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    assert "sealedAt" not in manifest["scan"]
+    assert "artifacts" not in manifest["scan"]
+
+    forged = run_workbench(
+        state_dir,
+        "update-progress",
+        "--scan-id",
+        scan_id,
+        "--review-items-total",
+        "1",
+        "--review-items-completed",
+        "1",
+        check=False,
+    )
+    assert forged["returncode"] != 0
+    assert "per-file review receipts" in str(forged["stderr"])
+
+    run_workbench(
+        state_dir,
+        "update-progress",
+        "--scan-id",
+        scan_id,
+        "--reviewed-file",
+        "src/extract.py",
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        receipt = connection.execute(
+            """
+            SELECT relative_path, content_sha256, closed_at
+            FROM standard_review_receipts
+            WHERE scan_id = ?
+            """,
+            (scan_id,),
+        ).fetchone()
+    assert receipt is not None
+    assert receipt[0] == "src/extract.py"
+    assert receipt[1] == hashlib.sha256(b"def extract():\n    pass\n").hexdigest()
+    assert receipt[2] is not None
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["coverage"] == {
+        "closedRows": 1,
+        "filesTotal": 1,
+        "worklistRows": 1,
+    }
+
+
+@pytest.mark.parametrize("paths", [["src", "src/a.py", "ignored.txt"], ["src/a.py", "ignored.txt"]])
+def test_cli_standard_inventory_preserves_requested_files_and_deduplicates_paths(
+    tmp_path: Path, paths: list[str]
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    (target / "src").mkdir()
+    (target / "src" / "a.py").write_text("first = 1\n")
+    (target / "src" / "b.py").write_text("second = 2\n")
+    (target / ".gitignore").write_text("ignored.txt\n")
+    (target / "ignored.txt").write_text("explicitly requested\n")
+    registered = register_cli_scan(state_dir, target, tmp_path / "scan", paths)
+    scan_id = str(registered["scanId"])
+    expected = ["ignored.txt", "src/a.py"]
+    if "src" in paths:
+        expected.append("src/b.py")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT relative_path FROM standard_review_receipts WHERE scan_id = ? "
+            "ORDER BY relative_path",
+            (scan_id,),
+        ).fetchall() == [(path,) for path in expected]
+    close_standard_review_receipts(state_dir, scan_id)
+    scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["progress"]["coverage"] == {
+        "closedRows": len(expected),
+        "filesTotal": len(expected),
+        "worklistRows": len(expected),
+    }
 
 
 def test_cli_registration_returns_authoritative_target_contract(tmp_path: Path) -> None:
@@ -218,6 +387,7 @@ def test_cli_completion_accepts_sealed_clean_git_revision_without_snapshot_diges
     scan_dir = tmp_path / "scan"
     registered = register_cli_scan(state_dir, target, scan_dir)
     scan_id = str(registered["scanId"])
+    close_standard_review_receipts(state_dir, scan_id)
     write_completed_contract(
         scan_dir,
         scan_id,

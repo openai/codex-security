@@ -453,6 +453,18 @@ def test_standard_publication_preserves_deliberately_partial_coverage(
     workbench_api, workbench_db, publication_scan
 ):
     scan = publication_scan(mode="standard")
+    with workbench_db:
+        total, completed = workbench_api["progress"].record_standard_review_receipts(
+            workbench_db,
+            workbench_api["require_scan"](workbench_db, scan.scan_id),
+            ["subdir/extract.py"],
+            scan.timestamp,
+        )
+        workbench_db.execute(
+            "UPDATE scan_progress SET review_items_total = ?, review_items_completed = ? "
+            "WHERE scan_id = ?",
+            (total, completed, scan.scan_id),
+        )
     scan.coverage["completeness"] = "partial"
     scan.coverage["deferred"] = [{"id": "remaining-review", "reason": "Another surface remains."}]
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))

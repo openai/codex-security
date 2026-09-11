@@ -120,6 +120,46 @@ def start_delivered_scan(
     return started
 
 
+def close_standard_review_receipts(state_dir: Path, scan_id: str) -> None:
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        row = connection.execute(
+            """
+            SELECT scans.mode, scans.phase
+            FROM scans
+            WHERE scans.id = ?
+            """,
+            (scan_id,),
+        ).fetchone()
+        reviewed_files = [
+            receipt[0]
+            for receipt in connection.execute(
+                """
+                SELECT relative_path
+                FROM standard_review_receipts
+                WHERE scan_id = ?
+                ORDER BY relative_path
+                """,
+                (scan_id,),
+            )
+        ]
+    if row is None:
+        raise AssertionError(f"Unknown scan fixture: {scan_id}")
+    mode, phase = row
+    if mode != "standard":
+        return
+    reviewed_file_args = [
+        argument for path in reviewed_files for argument in ("--reviewed-file", path)
+    ]
+    run_workbench(
+        state_dir,
+        "update-progress",
+        "--scan-id",
+        scan_id,
+        *([] if phase == "discovery" else ["--phase", "discovery"]),
+        *reviewed_file_args,
+    )
+
+
 def initialize_git_repository(target: Path) -> str:
     target.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)

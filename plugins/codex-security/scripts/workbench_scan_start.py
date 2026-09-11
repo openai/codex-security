@@ -19,7 +19,9 @@ from finalize_scan_contract import write_scan_local_bytes
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
+    directory_snapshot_regular_files,
     git_revision,
+    regular_file_digest,
     worktree_content_digest,
 )
 from workbench_validation import optional_text, user_text
@@ -161,6 +163,7 @@ def insert_running_scan(
     target_summary: str | None,
     scope_file_count: int,
     timestamp: str,
+    review_scopes: list[str] | None = None,
     handoff_status: str = "pending",
     model: str | None = None,
     reasoning_effort: str | None = None,
@@ -211,14 +214,39 @@ def insert_running_scan(
             timestamp,
         ),
     )
+    if workspace["default_mode"] == "standard":
+        authoritative_scopes = review_scopes or [scope]
+        inventory = {
+            path.relative_to(target).as_posix(): regular_file_digest(path)
+            for review_scope in authoritative_scopes
+            for path in (
+                [target / review_scope]
+                if (target / review_scope).is_file()
+                else directory_snapshot_regular_files(target / review_scope)
+            )
+        }
+        scope_file_count = len(inventory)
+        connection.executemany(
+            """
+            INSERT INTO standard_review_receipts (
+                scan_id, relative_path, content_sha256, closed_at
+            ) VALUES (?, ?, ?, NULL)
+            """,
+            ((scan_id, relative_path, digest) for relative_path, digest in inventory.items()),
+        )
     connection.execute(
         """
         INSERT INTO scan_progress (
             scan_id, scope_file_count, review_items_total, review_items_completed,
             reportable_findings_count, updated_at
-        ) VALUES (?, ?, 0, 0, 0, ?)
+        ) VALUES (?, ?, ?, 0, 0, ?)
         """,
-        (scan_id, scope_file_count, timestamp),
+        (
+            scan_id,
+            scope_file_count,
+            scope_file_count if workspace["default_mode"] == "standard" else 0,
+            timestamp,
+        ),
     )
     connection.execute(
         "UPDATE workspaces SET active_scan_id = ?, updated_at = ? WHERE id = ?",

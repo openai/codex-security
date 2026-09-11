@@ -206,6 +206,18 @@ async function startDraftScan(
   );
   fixture.scanId = String(registration["scanId"]);
   fixture.registration = registration;
+  await workbench(fixture, [
+    "update-progress",
+    "--scan-id",
+    fixture.scanId,
+    "--phase",
+    "discovery",
+    "--reviewed-file",
+    "src/extract.py",
+    ...(repositoryKind === "nested"
+      ? ["--reviewed-file", "nested/source.py"]
+      : []),
+  ]);
 
   await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
     recursive: true,

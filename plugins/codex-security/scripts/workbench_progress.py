@@ -11,9 +11,109 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_workbench import require_current_coordinator
 from workbench.handoff import require_current_continuation
 from workbench_constants import PHASES
-from workbench_validation import optional_text, require_uuid, user_context_argument
+from workbench_target import regular_file_digest
+from workbench_validation import (
+    optional_text,
+    path_within_scope,
+    require_uuid,
+    user_context_argument,
+)
 
 MAX_PREFLIGHT_ISSUES = 32
+
+
+def require_closed_standard_review_receipts(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+) -> tuple[int, int]:
+    if scan["mode"] != "standard":
+        return (0, 0)
+    # Explicit mock launches perform no reviews; do not fabricate closed receipts.
+    if scan["recipe_json"] is not None and json.loads(scan["recipe_json"]).get("mock") is True:
+        return (0, 0)
+    rows = connection.execute(
+        """
+        SELECT relative_path, closed_at
+        FROM standard_review_receipts
+        WHERE scan_id = ?
+        """,
+        (scan["id"],),
+    ).fetchall()
+    progress = connection.execute(
+        "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?",
+        (scan["id"],),
+    ).fetchone()
+    if progress is None or len(rows) != progress["scope_file_count"]:
+        raise SystemExit(
+            "Standard scan per-file review inventory is unavailable or incomplete; "
+            "restart the scan to bind an authoritative inventory."
+        )
+    completed = sum(row["closed_at"] is not None for row in rows)
+    if completed == len(rows):
+        return (len(rows), completed)
+    raise SystemExit(
+        "Standard scan per-file review receipts are incomplete: "
+        f"recorded {completed} of {len(rows)} in-scope files. "
+        "Record each fully reviewed repository-relative file before leaving "
+        "discovery or completing the scan."
+    )
+
+
+def record_standard_review_receipts(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    reviewed_files: list[str],
+    timestamp: str,
+) -> tuple[int, int]:
+    target = Path(scan["target_path"]).resolve(strict=True)
+    for relative_path in reviewed_files:
+        if not relative_path or Path(relative_path).is_absolute():
+            raise SystemExit("Reviewed files must be repository-relative paths.")
+        normalized = Path(relative_path).as_posix()
+        if normalized != relative_path or not path_within_scope(relative_path, scan["scope"]):
+            raise SystemExit(
+                f"Reviewed file must be a canonical in-scope repository path: {relative_path}"
+            )
+        receipt = connection.execute(
+            """
+            SELECT content_sha256
+            FROM standard_review_receipts
+            WHERE scan_id = ? AND relative_path = ?
+            """,
+            (scan["id"], relative_path),
+        ).fetchone()
+        if receipt is None:
+            raise SystemExit(
+                f"Reviewed file is not in the authoritative scan scope: {relative_path}"
+            )
+        try:
+            path = (target / relative_path).resolve(strict=True)
+            path.relative_to(target)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(
+                f"Reviewed file no longer resolves inside the scan target: {relative_path}"
+            ) from exc
+        if regular_file_digest(path) != receipt["content_sha256"]:
+            raise SystemExit(
+                f"Reviewed file no longer matches the authoritative scan snapshot: {relative_path}"
+            )
+        connection.execute(
+            """
+            UPDATE standard_review_receipts
+            SET closed_at = ?
+            WHERE scan_id = ? AND relative_path = ?
+            """,
+            (timestamp, scan["id"], relative_path),
+        )
+    total, completed = connection.execute(
+        """
+        SELECT COUNT(*), COUNT(closed_at)
+        FROM standard_review_receipts
+        WHERE scan_id = ?
+        """,
+        (scan["id"],),
+    ).fetchone()
+    return (total, completed)
 
 
 def _javascript_string_length(value: str) -> int:
@@ -199,6 +299,15 @@ def update_progress(
         progress = connection.execute(
             "SELECT * FROM scan_progress WHERE scan_id = ?", (scan["id"],)
         ).fetchone()
+        if scan["mode"] == "standard" and (
+            args.review_items_total is not None or args.review_items_completed is not None
+        ):
+            raise SystemExit(
+                "Standard review progress is derived from per-file review receipts; "
+                "use --reviewed-file instead of review item counters."
+            )
+        if args.reviewed_file and scan["mode"] != "standard":
+            raise SystemExit("Only Standard scans can record per-file review receipts.")
         if args.phase is not None and PHASES.index(args.phase) < PHASES.index(scan["phase"]):
             raise SystemExit("Scan progress cannot move to an earlier phase.")
         next_phase = args.phase or scan["phase"]
@@ -235,6 +344,18 @@ def update_progress(
                 raise SystemExit("Phase progress unit cannot change within a phase.")
         updates: list[str] = []
         values: list[Any] = []
+        total = progress["review_items_total"]
+        completed = progress["review_items_completed"]
+        if args.reviewed_file:
+            if scan["phase"] != "discovery" and next_phase != "discovery":
+                raise SystemExit(
+                    "Standard per-file review receipts can only be recorded during discovery."
+                )
+            total, completed = record_standard_review_receipts(
+                connection, scan, args.reviewed_file, timestamp
+            )
+            updates.extend(["review_items_total = ?", "review_items_completed = ?"])
+            values.extend([total, completed])
         if next_phase == "preflight" and scan["mode"] != "deep":
             updates.extend(["preflight_checks_total = ?", "preflight_checks_completed = ?"])
             values.extend([phase_total, phase_completed])
@@ -269,14 +390,17 @@ def update_progress(
                 and args.review_items_completed < progress["review_items_completed"]
             ):
                 raise SystemExit("Completed review items cannot decrease within a review pass.")
-        total = args.review_items_total
-        if total is None:
-            total = progress["review_items_total"]
-        completed = args.review_items_completed
-        if completed is None:
-            completed = progress["review_items_completed"]
+        if scan["mode"] != "standard":
+            total = args.review_items_total if args.review_items_total is not None else total
+            completed = (
+                args.review_items_completed
+                if args.review_items_completed is not None
+                else completed
+            )
         if completed > total:
             raise SystemExit("Completed review items cannot exceed total review items.")
+        if PHASES.index(next_phase) > PHASES.index("discovery"):
+            require_closed_standard_review_receipts(connection, scan)
         updated = connection.execute(
             """
             UPDATE scans
