@@ -973,7 +973,7 @@ describe("human note ownership", () => {
 
 describe("rolling release reconciliation", () => {
   test.each([true, false])(
-    "leaves an empty release cycle unchanged with dryRun=%s",
+    "leaves an empty release cycle unchanged with dryRun=%p",
     async (dryRun) => {
       const fixture = new Fixture();
       const result = await fixture.run(dryRun);
@@ -1546,7 +1546,7 @@ describe("release proposal pauses", () => {
   });
 
   test.each([false, true])(
-    "updates an existing proposal with draft=%s",
+    "updates an existing proposal with draft=%p",
     async (draft) => {
       const fixture = new Fixture();
       fixture.merge("feat: initial feature");

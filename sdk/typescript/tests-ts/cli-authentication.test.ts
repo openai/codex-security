@@ -1268,7 +1268,7 @@ describe("skill authentication", () => {
     ["auto", false, "synthetic"],
     ["api-key", false, "synthetic"],
   ] as const)(
-    "patch uses %s auth without replacing a saved login (failure: %s, provider: %s)",
+    "patch uses %s auth without replacing a saved login (failure: %p, provider: %s)",
     async (auth, loginFailure, provider) => {
       const repository = join(stateDirectory, "repository");
       await mkdir(repository);
