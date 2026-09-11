@@ -18,6 +18,7 @@
 - bump ruff from 0.16.1 to 0.16.6 in /plugins/codex-security ([#887](https://github.com/openai/codex-security/pull/887))
 - bump typescript from 6.0.3 to 7.0.2 in /plugins/codex-security/mcp-app ([#894](https://github.com/openai/codex-security/pull/894))
 - bump pytest from 9.0.3 to 9.1.1 in /plugins/codex-security ([#885](https://github.com/openai/codex-security/pull/885))
+- bump typescript from 5.7.3 to 7.0.2 in /sdk/typescript ([#898](https://github.com/openai/codex-security/pull/898))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
