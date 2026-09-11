@@ -99,6 +99,48 @@ async function testWorkbenchStateFallback() {
           if (fallbackState) await rm(fallbackState, { recursive: true, force: true });
         }
       }
+
+      const readFirstHome = path.join(fixtureRoot, "read-first-home");
+      const readFirstDefaultState = path.join(readFirstHome, "state", "plugins", "codex-security");
+      const readFirstScanRoot = path.join(fixtureRoot, "read-first-scans");
+      await mkdir(readFirstDefaultState, { recursive: true });
+      await chmod(readFirstDefaultState, 0o500);
+      const readFirstEnvironment = childEnvironment({
+        CODEX_HOME: readFirstHome,
+        CODEX_SECURITY_SCAN_ROOT: readFirstScanRoot,
+        CODEX_SECURITY_STATE_DIR: undefined,
+        PYTHON: realPython
+      });
+      let readFirstServer = startServer(serverBundlePath, readFirstEnvironment);
+      try {
+        await initialize(readFirstServer, 1);
+        const artifact = { targetPath, storage: "persistent", path: "threat_model.md" };
+        const saved = await readFirstServer.request(2, "tools/call", {
+          name: "save_codex_security_artifact",
+          arguments: { ...artifact, content: "retained context\n" }
+        });
+        assertNoError(saved);
+        await readFirstServer.stop();
+        readFirstServer = startServer(serverBundlePath, readFirstEnvironment);
+        await initialize(readFirstServer, 1);
+        const read = await readFirstServer.request(2, "tools/call", {
+          name: "read_codex_security_artifact", arguments: artifact
+        });
+        assertNoError(read);
+        assert.equal(read.result.structuredContent.content, "retained context\n");
+        const fallbackStateDir = path.join(readFirstScanRoot, "workbench-state");
+        assert.equal(await pathExists(path.join(fallbackStateDir, "workbench.sqlite3")), false);
+        const started = await startPromptOnlyScan(readFirstServer, 3, targetPath);
+        assertNoError(started);
+        assert.ok(started.result.structuredContent.scan.scanDir.startsWith(await realpath(readFirstScanRoot) + path.sep));
+        assert.equal((await stat(path.join(fallbackStateDir, "workbench.sqlite3"))).isFile(), true);
+        assert.equal(await pathExists(path.join(readFirstDefaultState, "workbench.sqlite3")), false);
+        assert.equal(readFirstServer.stderrEvents().filter((event) => event.event === "state_fallback_pinned").length, 1);
+        assert.equal(await readFile(saved.result.structuredContent.path, "utf8"), "retained context\n");
+      } finally {
+        await readFirstServer.stop();
+        await chmod(readFirstDefaultState, 0o700);
+      }
     }
 
     const scanRoot = path.join(fixtureRoot, "fallback-scans");
