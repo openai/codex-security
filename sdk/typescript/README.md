@@ -1411,6 +1411,18 @@ and worker activity. These can contain source code, prompts, findings, tool
 output, and other sensitive data. Only include logs you can share with OpenAI.
 The command uses Codex's feedback service and respects `feedback.enabled = false`.
 
+For scans started through the Desktop plugin, run the command on the machine
+where the scan ran, using the same Codex home and Codex Security state directory.
+It searches active and archived sessions in both that Codex home and the CLI's
+managed home, and attaches available worker logs even if the parent log is missing.
+Earlier retries that started separate sessions may be missing when their session
+IDs are no longer recorded.
+
+Standard scans run inside an existing Codex conversation attach only the owner's
+saved session; they do not record which subagents belong to the scan. Deep Scans
+and scans launched by `codex-security` also attach their recorded execution
+threads and descendants, without following unrelated children of the owner.
+
 ### Scan history and reruns
 
 Commands default to the current repository. Select scans by full ID or a

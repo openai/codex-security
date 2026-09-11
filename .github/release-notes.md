@@ -8,6 +8,7 @@
 - keep parameterized JUnit names unique ([#877](https://github.com/openai/codex-security/pull/877))
 - accept large saved post-scan prompts ([#876](https://github.com/openai/codex-security/pull/876))
 - make cost display optional ([#881](https://github.com/openai/codex-security/pull/881))
+- collect Desktop and worker session logs ([#872](https://github.com/openai/codex-security/pull/872))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
