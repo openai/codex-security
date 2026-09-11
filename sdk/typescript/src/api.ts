@@ -304,8 +304,10 @@ export interface ScanOptions extends ScanSettings {
   signal?: AbortSignal;
 }
 
-export interface ValidationOptions
-  extends Pick<ScanOptions, "auth" | "outputDir" | "signal"> {
+export interface ValidationOptions extends Pick<
+  ScanOptions,
+  "auth" | "outputDir" | "signal"
+> {
   repositoryPath: string;
   /** Finding text or a JSON-serializable object. Strings are never file paths. */
   finding: string | object;
@@ -409,8 +411,10 @@ export interface ScanPreflight extends DeepScanOptions {
   deepScanSources?: DeepScanSources;
 }
 
-interface LocalScanInputs
-  extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
+interface LocalScanInputs extends Omit<
+  ScanPreflight,
+  "model" | "reasoningEffort" | "authentication"
+> {
   protectedRoot: string;
   protectedRoots: readonly string[];
   stateDirectory: string;
@@ -1288,8 +1292,8 @@ export class CodexSecurity {
       releaseCredentialHome = session.releaseCredentialHome;
       const deepScanConfigPath =
         mode === "deep"
-          ? runtime.deepScanConfigPath ??
-            join(runtimeHome, "codex-security", "config.toml")
+          ? (runtime.deepScanConfigPath ??
+            join(runtimeHome, "codex-security", "config.toml"))
           : undefined;
       if (
         deepScanConfigPath !== undefined &&
@@ -3058,8 +3062,7 @@ export class CodexSecurity {
     );
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
     let activeScan:
-      | { id: string; options: WorkbenchCommandOptions }
-      | undefined;
+      { id: string; options: WorkbenchCommandOptions } | undefined;
     let scanDir = "";
     try {
       const pluginRoot = await resolvePluginPath(
@@ -4332,8 +4335,7 @@ function notifyObserver<Arguments extends unknown[]>(
   observerName: ScanObserverName,
   observer: ((...args: Arguments) => void) | undefined,
   onObserverError:
-    | ((observer: ScanObserverName, error: unknown) => void)
-    | undefined,
+    ((observer: ScanObserverName, error: unknown) => void) | undefined,
   ...args: Arguments
 ): void {
   void Promise.resolve()
@@ -4782,7 +4784,7 @@ function bundledCodexSdkEnvironment(
   );
   const pathKey = pathKeys.includes("Path")
     ? "Path"
-    : pathKeys.at(-1) ?? "PATH";
+    : (pathKeys.at(-1) ?? "PATH");
   for (const key of pathKeys) {
     if (key !== pathKey) delete result[key];
   }

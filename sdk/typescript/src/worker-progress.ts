@@ -9,10 +9,7 @@ const WORKER_PHASES = new Set([
 ]);
 
 export type ScanWorkerPhase =
-  | "ranking"
-  | "file_review"
-  | "validation"
-  | "attack_path";
+  "ranking" | "file_review" | "validation" | "attack_path";
 
 export type ScanPhase =
   | "preflight"

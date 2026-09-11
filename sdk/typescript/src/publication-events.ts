@@ -43,8 +43,7 @@ export interface FailedCreateEvidence {
 }
 
 export type PublicationEventEvidence =
-  | CompletedCreateEvidence
-  | FailedCreateEvidence;
+  CompletedCreateEvidence | FailedCreateEvidence;
 
 export function collectPublicationEvents(
   output: string,

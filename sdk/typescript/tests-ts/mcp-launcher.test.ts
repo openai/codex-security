@@ -188,7 +188,7 @@ test.each(["server", "helper"] as const)(
         );
       }
       const result = spawnSync(
-        windows ? process.env["ComSpec"] ?? "cmd.exe" : launcher,
+        windows ? (process.env["ComSpec"] ?? "cmd.exe") : launcher,
         windows
           ? [
               "/d",

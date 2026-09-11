@@ -646,7 +646,7 @@ export class ScanDashboard {
           const clean = fitLine(
             typeof line !== "string" && this.#view === "details"
               ? text
-              : this.#options.sanitize?.(text) ?? text,
+              : (this.#options.sanitize?.(text) ?? text),
             width,
           );
           const colored =

@@ -20,11 +20,10 @@ export interface TurnResultMetadata {
   [key: string]: unknown;
 }
 
-export interface RepositoryFinding
-  extends Pick<
-    Finding,
-    "findingId" | "occurrenceId" | "title" | "summary" | "severity"
-  > {
+export interface RepositoryFinding extends Pick<
+  Finding,
+  "findingId" | "occurrenceId" | "title" | "summary" | "severity"
+> {
   scanId: string;
   targetId: string;
   status: "open" | "closed";

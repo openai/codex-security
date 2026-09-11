@@ -215,8 +215,8 @@ async function smokeNestedDeepScanWorker(installedRoot, consumer) {
   const windows = process.platform === "win32";
   const initialized = spawnSync(
     windows
-      ? process.env.ComSpec ??
-          join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe")
+      ? (process.env.ComSpec ??
+          join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe"))
       : mcpLauncher,
     windows
       ? ["/d", "/s", "/c", "call", `${mcpLauncher}.cmd`, "--stdio"]

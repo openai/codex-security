@@ -24,9 +24,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
 
   constructor(
     private readonly apiKey:
-      | string
-      | (() => string | Promise<string>)
-      | undefined,
+      string | (() => string | Promise<string>) | undefined,
     private readonly request: (
       url: string,
       init: RequestInit,
