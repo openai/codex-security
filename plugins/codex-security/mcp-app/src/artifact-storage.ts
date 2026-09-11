@@ -3,8 +3,8 @@ import { promises as fs } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import * as z from "zod/v4";
+import reservedArtifactPaths from "../../scripts/reserved_artifact_paths.json";
 import {
-  readArtifactBytes,
   requireArtifactRoot,
   type ArtifactContext
 } from "./artifact-io.js";
@@ -115,10 +115,7 @@ function supplementalPath(input: ArtifactLocation, context: ArtifactContext): st
   const path = parts.join("/").toLowerCase();
   const allowed = (parts.length > 1 && ["artifacts", "findings", "hardening"].includes(parts[0]!))
     || path === "report_validation.md" || (!context.scanId && path === "threat_model.md");
-  if (!allowed || path === "artifacts/deep_discovery" || path.startsWith("artifacts/deep_discovery/")
-    || path === "artifacts/02_discovery/candidate_ledger.jsonl"
-    || path === "artifacts/02_discovery/in_scope_files.txt"
-    || path === "artifacts/01_context/false_positive_feedback.json") {
+  if (!allowed || reservedArtifactPaths.some((reserved) => path === reserved || path.startsWith(reserved + "/"))) {
     throw new Error("Use the existing scan tools for canonical artifacts, ledgers and checkpoints.");
   }
   return parts;
@@ -147,7 +144,7 @@ export async function saveCodexSecurityArtifact(
     if (isAbsolute(source) || source === ".." || source.startsWith(".." + sep)) {
       throw new Error("Import source must be inside this artifact context's temporary directory.");
     }
-    bytes = await readArtifactBytes(scratch, components(source.split(sep).join("/")), "Artifact import");
+    bytes = await readArtifactBytes(scratch, components(source.split(sep).join("/")), runWorkbench);
   } else {
     bytes = Buffer.from(input.content!, "utf8");
   }
@@ -174,11 +171,12 @@ export async function saveCodexSecurityArtifact(
 
 export async function readCodexSecurityArtifact(
   context: ArtifactContext,
-  input: z.infer<typeof readArtifactInputSchema>
+  input: z.infer<typeof readArtifactInputSchema>,
+  runWorkbench: RunArtifactWorkbench
 ): Promise<Record<string, unknown>> {
   const parts = supplementalPath(input, context);
   const selected = await storageContext(context, input.storage, false);
-  const bytes = await readArtifactBytes(selected, parts, "Saved artifact");
+  const bytes = await readArtifactBytes(selected, parts, runWorkbench);
   return {
     storage: input.storage,
     directory: selected.root,
@@ -187,4 +185,16 @@ export async function readCodexSecurityArtifact(
     encoding: input.encoding,
     content: bytes.toString(input.encoding)
   };
+}
+
+async function readArtifactBytes(
+  context: ArtifactContext,
+  parts: string[],
+  runWorkbench: RunArtifactWorkbench
+): Promise<Buffer> {
+  const result = await runWorkbench([
+    "read-artifact", "--artifact-root", context.root, "--artifact-path", parts.join("/")
+  ]);
+  if (typeof result.content !== "string") throw new Error("Missing artifact content.");
+  return Buffer.from(result.content, "base64");
 }

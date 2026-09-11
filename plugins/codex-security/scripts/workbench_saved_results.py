@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import hashlib
 import json
@@ -46,6 +47,9 @@ _PUBLISHED_OUTPUTS = (
 )
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
+)
+_RESERVED_ARTIFACT_PATHS = json.loads(
+    Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
 )
 
 
@@ -1334,9 +1338,13 @@ def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]
     return db.scan_context(connection, scan_id)
 
 
-def save_artifact(args: Any) -> dict[str, Any]:
-    """Publish stdin bytes under the MCP-selected temporary or standalone root."""
+def read_or_save_artifact(args: Any) -> dict[str, Any]:
+    """Read or publish supplemental bytes through verified filesystem handles."""
     root = Path(args.artifact_root)
+    if args.command == "read-artifact":
+        descriptor = open_scan_local_file_descriptor(root, args.artifact_path, "Saved artifact")
+        with os.fdopen(descriptor, "rb") as source:
+            return {"content": base64.b64encode(source.read()).decode("ascii")}
     write_scan_local_bytes(root, args.artifact_path, sys.stdin.buffer.read())
     return {"path": str(root / args.artifact_path)}
 
@@ -1361,18 +1369,12 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 raise SystemExit("The scan is sealed; its artifacts cannot be modified.")
         output = args.artifact_path
         key = output.lower()
-        if (
-            not (
-                key.startswith(("artifacts/", "findings/", "hardening/"))
-                or key == "report_validation.md"
-            )
-            or key.startswith("artifacts/deep_discovery/")
-            or key
-            in {
-                "artifacts/02_discovery/candidate_ledger.jsonl",
-                "artifacts/02_discovery/in_scope_files.txt",
-                "artifacts/01_context/false_positive_feedback.json",
-            }
+        if not (
+            key.startswith(("artifacts/", "findings/", "hardening/"))
+            or key == "report_validation.md"
+        ) or any(
+            key == reserved or key.startswith(reserved + "/")
+            for reserved in _RESERVED_ARTIFACT_PATHS
         ):
             raise SystemExit("Use the typed scan tools for canonical artifacts and checkpoints.")
         write_scan_local_bytes(scan_dir, output, sys.stdin.buffer.read())

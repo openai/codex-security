@@ -121,6 +121,18 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
       `${runtimeLabel}: authenticate compact diff owner`
     );
 
+    for (const reserved of [
+      "artifacts/02_discovery/candidate_ledger.jsonl",
+      "artifacts/02_discovery/in_scope_files.txt",
+      "artifacts/01_context/false_positive_feedback.json"
+    ]) {
+      const rejected = await call("save_codex_security_artifact", {
+        scanId, handoffClaimToken, storage: "persistent",
+        path: `${reserved}/note.txt`, content: "must not block typed writers"
+      });
+      assert.equal(rejected.isError, true, `${runtimeLabel}: reject a canonical file used as a directory`);
+    }
+
     const inventory = requireSuccessfulTool(
       await call("prepare_codex_security_review_items", { scanId, handoffClaimToken }),
       `${runtimeLabel}: prepare exact compact diff inventory`

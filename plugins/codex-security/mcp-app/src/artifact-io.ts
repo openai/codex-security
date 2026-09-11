@@ -57,14 +57,6 @@ export async function readArtifactText(
   components: readonly string[],
   label: string
 ): Promise<string> {
-  return (await readArtifactBytes(context, components, label)).toString("utf8");
-}
-
-export async function readArtifactBytes(
-  context: ArtifactContext,
-  components: readonly string[],
-  label: string
-): Promise<Buffer> {
   validateArtifactComponents(components, label);
   const root = await requireArtifactRoot(context.root, label);
   let current = root;
@@ -89,7 +81,7 @@ export async function readArtifactBytes(
     throw new Error(label + ": the requested artifact escaped its bound context.");
   }
   try {
-    return await fs.readFile(canonical);
+    return await fs.readFile(canonical, "utf8");
   } catch {
     throw new Error(label + ": the requested artifact cannot be read.");
   }
@@ -228,17 +220,11 @@ export async function replaceArtifactText(
   path: string,
   content: string
 ): Promise<void> {
-  await replaceArtifactBytes(path, Buffer.from(content, "utf8"));
-}
-
-export async function replaceArtifactBytes(
-  path: string,
-  content: Uint8Array
-): Promise<void> {
   await withArtifactLock(path, async () => {
     const temporary = join(dirname(path), "." + randomUUID() + ".tmp");
     try {
       await fs.writeFile(temporary, content, {
+        encoding: "utf8",
         mode: 0o600,
         flag: "wx"
       });

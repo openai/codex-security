@@ -48,4 +48,9 @@ For standalone/legacy mutable ledgers, use the save tool to replace their comple
 
 For the shared repository threat model, use `targetPath: <repo_root>`, `storage: "persistent"`, `path: "threat_model.md"`. Read that collection's cached file only when the threat-model workflow allows cache reuse and its exact repository/version footer matches. Save the exact selected text into `artifacts/01_context/threat_model.md` with the running scan's `scanId`. Preserve the workflow's conditions that forbid reading or replacing the shared cache; the storage tool does not authorize a cache update.
 
+End each shared threat model with these two lines:
+
+- `Repository: <stable target identity from scan-contract.md>`
+- `Version: <revision for an immutable Git tree; snapshot digest otherwise>`
+
 Completed/sealed scan files cannot be edited through the save tool. For later write-ups or hardening requests, use the standalone target collection and link those returned files separately. Preserve the original result and its references. Temporary cleanup must not remove retained files or recovery checkpoints. The save tool publishes running-scan files under the same completion lock as finalization; surface a stopped/sealed-scan rejection and preserve existing output.

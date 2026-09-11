@@ -43,7 +43,7 @@ import {
 import {
   readArtifactInputSchema, readCodexSecurityArtifact,
   saveArtifactInputSchema, saveCodexSecurityArtifact,
-  persistentScanRoot, standaloneArtifactContext, type ArtifactLocation
+  standaloneArtifactContext, type ArtifactLocation
 } from "../artifact-storage.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -51,7 +51,7 @@ type JsonRecord = Record<string, unknown>;
 export interface CompactArtifactToolOptions {
   runWorkbench: RunArtifactWorkbench;
   pluginRoot: string;
-  resolveScanRoot?: () => Promise<string>;
+  resolveScanRoot: () => Promise<string>;
   resolveHandoffClaimToken?: (
     scanId: string,
     requestContext: unknown
@@ -268,7 +268,7 @@ export function registerCompactArtifactTools(
     readOnly: true,
     handler: async (value, requestContext) => {
       const input = readArtifactInputSchema.parse(value);
-      return readCodexSecurityArtifact(await supplementalContext(input, options, false, requestContext), input);
+      return readCodexSecurityArtifact(await supplementalContext(input, options, false, requestContext), input, options.runWorkbench);
     }
   });
 }
@@ -284,7 +284,7 @@ async function supplementalContext(
   }
   if (input.scanId !== undefined) return scanContext({ ...input, scanId: input.scanId }, options, write, requestContext);
   if (input.handoffClaimToken !== undefined) throw new Error("A handoff claim requires a scanId.");
-  const root = await options.resolveScanRoot?.() ?? persistentScanRoot(options.pluginRoot);
+  const root = await options.resolveScanRoot();
   return standaloneArtifactContext(input.targetPath!, options.runWorkbench, write, root, input.storage);
 }
 
