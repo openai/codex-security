@@ -23,7 +23,7 @@ The plugin resolves the platform temporary directory automatically. For a manual
 
 Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts.
 
-## Shared Audit Notes
+## Shared Notes
 
 Keep shared notes in `<artifacts_dir>/message-board/`, one Markdown file per author. Retain them with the scan artifacts for later iterations. Each Deep scan worker uses its own output directory.
 
