@@ -94,7 +94,7 @@
     "@stryker-mutator/core": "9.6.1",
     "@tailwindcss/postcss": "4.3.3",
     "@types/bun": "1.4.1",
-    "@types/node": "22.19.17",
+    "@types/node": "26.4.1",
     "@types/papaparse": "5.5.2",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",
