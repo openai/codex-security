@@ -13,6 +13,8 @@
 - align Codex 0.154.0 and dependency cooldowns ([#755](https://github.com/openai/codex-security/pull/755))
 - bump docker/setup-buildx-action from 4.2.0 to 4.3.0 ([#891](https://github.com/openai/codex-security/pull/891))
 - bump actions/attest-build-provenance from 4.1.1 to 4.2.2 ([#886](https://github.com/openai/codex-security/pull/886))
+- update setuptools requirement from \>=64.0 to \>=84.0.0 in /plugins/codex-security ([#889](https://github.com/openai/codex-security/pull/889))
+- bump SocketDev/action from 1.3.0 to 1.3.2 ([#884](https://github.com/openai/codex-security/pull/884))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
