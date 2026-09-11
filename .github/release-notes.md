@@ -15,6 +15,7 @@
 - bump actions/attest-build-provenance from 4.1.1 to 4.2.2 ([#886](https://github.com/openai/codex-security/pull/886))
 - update setuptools requirement from \>=64.0 to \>=84.0.0 in /plugins/codex-security ([#889](https://github.com/openai/codex-security/pull/889))
 - bump SocketDev/action from 1.3.0 to 1.3.2 ([#884](https://github.com/openai/codex-security/pull/884))
+- bump ruff from 0.16.1 to 0.16.6 in /plugins/codex-security ([#887](https://github.com/openai/codex-security/pull/887))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
