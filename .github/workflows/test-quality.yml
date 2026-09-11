@@ -32,7 +32,7 @@ jobs:
     if: ${{ !cancelled() && (inputs.native-artifacts-ready || needs.native.result == 'success') }}
     name: ${{ matrix.os }} / ${{ matrix.mode }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && (matrix.mode == 'baseline' || matrix.mode == 'isolated') && 45 || 30 }}
     env:
       CODEX_SECURITY_PROPERTY_SEED: ${{ github.event_name == 'pull_request' && 1 || github.run_number }}
     strategy:
