@@ -10,6 +10,7 @@
 - make cost display optional ([#881](https://github.com/openai/codex-security/pull/881))
 - collect Desktop and worker session logs ([#872](https://github.com/openai/codex-security/pull/872))
 - skip unavailable Daybreak access advisories ([#878](https://github.com/openai/codex-security/pull/878))
+- align Codex 0.154.0 and dependency cooldowns ([#755](https://github.com/openai/codex-security/pull/755))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

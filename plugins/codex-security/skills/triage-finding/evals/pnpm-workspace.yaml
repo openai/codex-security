@@ -1,24 +1,18 @@
 packages:
   - .
 minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - openai
+  - "@openai/*"
 trustLockfile: true
 
 overrides:
+  "@openai/codex-sdk": "$@openai/codex-sdk"
   "@opencode-ai/sdk": 1.14.33
 
-onlyBuiltDependencies:
-  - better-sqlite3
-
-ignoredBuiltDependencies:
-  - "@playwright/browser-chromium"
-  - "@swc/core"
-  - esbuild
-  - onnxruntime-node
-  - protobufjs
-  - sharp
 allowBuilds:
-  '@playwright/browser-chromium': false
-  '@swc/core': false
+  "@playwright/browser-chromium": false
+  "@swc/core": false
   better-sqlite3: true
   esbuild: false
   onnxruntime-node: false
