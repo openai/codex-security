@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import { promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -267,17 +267,42 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     });
   }
 
-  for (const variable of ["CODEX_SECURITY_SCAN_ROOT", "CODEX_SECURITY_STATE_DIR"]) {
+  for (const variable of ["CODEX_SECURITY_SCAN_ROOT", "CODEX_SECURITY_STATE_DIR", "CODEX_HOME"]) {
+    await test(`${variable} expands named-user paths for scans and standalone artifacts`, { skip: process.platform === "win32" }, async () => {
+      const account = userInfo();
+      const destination = path.join(fixture, `named-${variable}`);
+      const configured = `~${account.username}/${path.relative(account.homedir, destination)}`;
+      temporaryDirectories.push(path.resolve(pluginRoot, configured));
+      const state = variable === "CODEX_HOME"
+        ? path.join(destination, "state", "plugins", "codex-security")
+        : variable === "CODEX_SECURITY_STATE_DIR" ? destination : path.join(fixture, `named-state-${variable}`);
+      const expected = variable === "CODEX_SECURITY_SCAN_ROOT" ? destination : path.join(state, "scans");
+      const call = await connect({
+        CODEX_SECURITY_STATE_DIR: variable === "CODEX_HOME" ? undefined : state,
+        [variable]: configured
+      });
+      const { scanDir } = await call("start_codex_security_standard_scan", { targetPath: repository });
+      assert.ok(scanDir.startsWith(path.join(expected, "repository") + path.sep), scanDir);
+      assert.ok((await fs.stat(path.join(state, "workbench.sqlite3"))).isFile());
+      const location = { targetPath: repository, storage: "persistent", path: "threat_model.md" };
+      const saved = await call("save_codex_security_artifact", { ...location, content: "named-user root\n" });
+      assert.ok(saved.directory.startsWith(expected + path.sep), saved.directory);
+      assert.equal(await fs.readFile(saved.path, "utf8"), "named-user root\n");
+      assert.equal((await call("read_codex_security_artifact", location)).content, "named-user root\n");
+    });
+
     await test(`${variable} keeps the workbench base when MCP starts in another directory`, async () => {
       const relative = `.${path.basename(fixture)}-${variable}`;
       const destination = path.join(pluginRoot, relative);
       temporaryDirectories.push(destination);
       const call = await connect({
-        CODEX_SECURITY_STATE_DIR: path.join(fixture, `state-${variable}`),
+        CODEX_SECURITY_STATE_DIR: variable === "CODEX_HOME" ? undefined : path.join(fixture, `state-${variable}`),
         [variable]: relative
       });
       const { scanDir } = await call("start_codex_security_standard_scan", { targetPath: repository });
-      const expected = variable === "CODEX_SECURITY_SCAN_ROOT" ? destination : path.join(destination, "scans");
+      const expected = variable === "CODEX_SECURITY_SCAN_ROOT" ? destination
+        : variable === "CODEX_SECURITY_STATE_DIR" ? path.join(destination, "scans")
+        : path.join(destination, "state", "plugins", "codex-security", "scans");
       assert.ok(scanDir.startsWith(path.join(expected, "repository") + path.sep), scanDir);
       if (variable === "CODEX_SECURITY_STATE_DIR") assert.ok((await fs.stat(path.join(destination, "workbench.sqlite3"))).isFile());
       const saved = await call("save_codex_security_artifact", {

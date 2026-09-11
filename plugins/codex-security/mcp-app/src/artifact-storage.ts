@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import * as z from "zod/v4";
 import reservedArtifactPaths from "../../scripts/reserved_artifact_paths.json";
@@ -32,22 +32,6 @@ export const readArtifactInputSchema = z.object({
 }).strict();
 
 export type ArtifactLocation = z.infer<typeof saveArtifactInputSchema>;
-
-/** Keep plugin defaults aligned with the SDK without changing SDK-owned outputs. */
-export function persistentScanRoot(pluginRoot: string, environment: NodeJS.ProcessEnv = process.env): string {
-  const configured = environment.CODEX_SECURITY_SCAN_ROOT?.trim();
-  if (configured) return expandHome(configured, pluginRoot);
-  const state = environment.CODEX_SECURITY_STATE_DIR?.trim();
-  return join(state ? expandHome(state, pluginRoot) : join(
-    expandHome(environment.CODEX_HOME?.trim() || join(homedir(), ".codex"), pluginRoot),
-    "state", "plugins", "codex-security"
-  ), "scans");
-}
-
-function expandHome(value: string, base: string): string {
-  return resolve(base, value === "~" ? homedir()
-    : /^~[/\\]/.test(value) ? join(homedir(), value.slice(2)) : value);
-}
 
 /** Standalone phase documents share a target-bound collection, not a running scan. */
 export async function standaloneArtifactContext(

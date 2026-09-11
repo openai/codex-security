@@ -16,7 +16,6 @@ import {
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { createScanArtifactContext } from "./src/artifact-context.js";
-import { persistentScanRoot } from "./src/artifact-storage.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
 import {
   DeepScanCoordinatorRegistry,
@@ -38,6 +37,7 @@ const CONFIGURED_WORKBENCH_STATE_DIR = process.env.CODEX_SECURITY_STATE_DIR?.tri
 const PLUGIN_ROOT = resolve(__dirname, "..");
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
 const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
+  "resolve-scan-root",
   "inspect-target",
   "inspect-setup",
   "save-artifact",
@@ -86,14 +86,16 @@ const daybreakEntitlementContextSchema = z.object({
 });
 
 async function scanRoot(): Promise<string> {
-  if (CONFIGURED_SCAN_ROOT) return persistentScanRoot(PLUGIN_ROOT);
-  if (!CONFIGURED_WORKBENCH_STATE_DIR && !persistentWorkbenchStateSucceeded && !fallbackWorkbenchStateDir) {
+  if (!CONFIGURED_SCAN_ROOT && !CONFIGURED_WORKBENCH_STATE_DIR && !persistentWorkbenchStateSucceeded && !fallbackWorkbenchStateDir) {
     // Select the workbench state before choosing its default artifact directory.
     await runWorkbench(["list-scans", "--limit", "1"]);
   }
-  return fallbackWorkbenchStateDir
-    ? join(await fallbackWorkbenchStateDir, "scans")
-    : persistentScanRoot(PLUGIN_ROOT);
+  if (!CONFIGURED_SCAN_ROOT && fallbackWorkbenchStateDir) {
+    return join(await fallbackWorkbenchStateDir, "scans");
+  }
+  const result = await runWorkbench(["resolve-scan-root", ...optionalArg("--scan-root", CONFIGURED_SCAN_ROOT)]);
+  if (typeof result.scanRoot !== "string") throw new Error("Missing scan artifact root.");
+  return result.scanRoot;
 }
 
 interface WorkspaceState extends JsonObject {

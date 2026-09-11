@@ -34,6 +34,9 @@ def parse_args(description: str) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    resolve_scan_root = subparsers.add_parser("resolve-scan-root")
+    resolve_scan_root.add_argument("--scan-root")
+
     create_workspace = subparsers.add_parser("create-workspace")
     create_workspace.add_argument("--workspace-id", required=True)
     create_workspace.add_argument("--thread-id")

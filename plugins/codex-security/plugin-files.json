@@ -78,6 +78,7 @@
     "scripts/windows_scan_local_files.py",
     "scripts/workbench/__init__.py",
     "scripts/workbench/handoff.py",
+    "scripts/workbench/storage.py",
     "scripts/workbench_cli.py",
     "scripts/workbench_constants.py",
     "scripts/workbench_db.py",

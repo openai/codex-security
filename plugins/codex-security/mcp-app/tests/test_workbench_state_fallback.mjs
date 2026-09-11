@@ -14,7 +14,7 @@ if (process.platform !== "win32") {
 async function testWorkbenchStateFallback() {
   const mcpAppRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const pluginRoot = path.resolve(mcpAppRoot, "..");
-  const fixtureRoot = await mkdtemp(path.join(tmpdir(), "codex-security-state-fallback-"));
+  const fixtureRoot = await realpath(await mkdtemp(path.join(tmpdir(), "codex-security-state-fallback-")));
   const targetPath = path.join(fixtureRoot, "target");
   const fakePythonPath = path.join(fixtureRoot, "fake-python.mjs");
   const invocationLog = path.join(fixtureRoot, "python-invocations.jsonl");
@@ -304,6 +304,8 @@ async function writeFakePython(executablePath) {
     "#!/usr/bin/env node",
     'import { appendFileSync, readFileSync } from "node:fs";',
     'import { spawnSync } from "node:child_process";',
+    // Root resolution does not open SQLite and must bypass the injected database failure.
+    "if (process.argv[3] !== 'resolve-scan-root') {",
     "let priorInvocations = 0;",
     "try { priorInvocations = readFileSync(process.env.FAKE_PYTHON_LOG, 'utf8').split(/\\r?\\n/).filter(Boolean).length; } catch {}",
     "appendFileSync(process.env.FAKE_PYTHON_LOG, JSON.stringify({ stateDir: process.env.CODEX_SECURITY_STATE_DIR || null }) + '\\n');",
@@ -311,6 +313,7 @@ async function writeFakePython(executablePath) {
     "if (process.env.FAKE_PYTHON_ALWAYS_FAIL === '1' || (!process.env.CODEX_SECURITY_STATE_DIR && priorInvocations >= persistentSuccesses)) {",
     "  console.error(process.env.FAKE_PYTHON_FAILURE || 'sqlite3.OperationalError: unable to open database file');",
     "  process.exit(1);",
+    "}",
     "}",
     "const result = spawnSync(process.env.FAKE_REAL_PYTHON, process.argv.slice(2), { env: process.env, stdio: 'inherit' });",
     "process.exit(result.status ?? 1);",
