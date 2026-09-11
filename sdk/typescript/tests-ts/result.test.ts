@@ -3,11 +3,13 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ScanResult } from "../src/index.js";
+import { fakeResult } from "./cli-fixtures.js";
 import type {
   CoverageDocument,
   FindingsDocument,
   RepositoryFinding,
   ScanManifest,
+  SeverityLevel,
 } from "../src/index.js";
 
 const manifest = {
@@ -50,6 +52,31 @@ const coverage = {
 } satisfies CoverageDocument;
 
 describe("ScanResult", () => {
+  test.each([{ levels: [] }, { levels: ["high"] }] satisfies {
+    levels: SeverityLevel[];
+  }[])("rejects an unknown threshold with findings %j", ({ levels }) => {
+    expect(() =>
+      fakeResult([...levels]).hasFindingsAtOrAbove("hihg" as SeverityLevel),
+    ).toThrow("Unknown severity threshold");
+  });
+
+  test("evaluates a severity threshold without filtering findings or changing serialization", () => {
+    const result = fakeResult(["medium", "informational"]);
+    const serialized = result.toJSON();
+    expect(result.hasFindingsAtOrAbove("high")).toBe(false);
+    expect(result.hasFindingsAtOrAbove("medium")).toBe(true);
+    expect(result.hasFindingsAtOrAbove("low")).toBe(true);
+    expect(fakeResult(["informational"]).hasFindingsAtOrAbove("low")).toBe(
+      false,
+    );
+    expect(
+      fakeResult(["informational"]).hasFindingsAtOrAbove("informational"),
+    ).toBe(true);
+    expect(fakeResult([]).hasFindingsAtOrAbove("informational")).toBe(false);
+    expect(result.findings.findings).toHaveLength(2);
+    expect(result.toJSON()).toEqual(serialized);
+  });
+
   test("exposes canonical paths and machine serialization", () => {
     const repositoryFinding = {
       findingId: "finding",

@@ -4,6 +4,7 @@
 ## Highlights
 
 - use versioned conventional commit titles ([#879](https://github.com/openai/codex-security/pull/879))
+- share scan settings across the CLI and SDK ([#742](https://github.com/openai/codex-security/pull/742))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

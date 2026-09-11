@@ -5,8 +5,10 @@ import type {
   Finding,
   FindingsDocument,
   ScanManifest,
+  SeverityLevel,
 } from "./models.js";
 import { estimateScanCost, type ScanCost } from "./cost.js";
+import { meetsSeverity, severityThresholdRank } from "./scan-settings.js";
 
 export interface TurnResultMetadata {
   id?: string;
@@ -109,6 +111,13 @@ export class ScanResult {
 
   public get artifactsDir(): string {
     return join(this.scanDir, "artifacts");
+  }
+
+  public hasFindingsAtOrAbove(threshold: SeverityLevel): boolean {
+    severityThresholdRank(threshold);
+    return this.findings.findings.some((finding) =>
+      meetsSeverity(finding, threshold),
+    );
   }
 
   public toJSON(): Record<string, unknown> {

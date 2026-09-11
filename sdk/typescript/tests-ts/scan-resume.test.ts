@@ -29,7 +29,11 @@ afterEach(cleanup);
 async function interruptedScan(
   mode: "deep" | "standard" = "deep",
   bulk = false,
-  settings: Pick<ScanOptions, "safetyIdentifier" | "postScanPrompt"> = {},
+  settings: Pick<
+    ScanOptions,
+    "safetyIdentifier" | "postScanPrompt" | "auth"
+  > = {},
+  resolvedDeep = false,
 ) {
   const root = await temporaryDirectory();
   const repository = bulk
@@ -108,9 +112,24 @@ async function interruptedScan(
     mode,
     config: { model: "gpt-5.6-sol", approval_policy: "never" },
     pluginVersion: "0.1.0",
+    requiresScanPrompt: true,
     ...settings,
     ...(mode === "deep"
-      ? { deepScan: { workers: 2, maxDiscoveryRuns: 5 } }
+      ? {
+          deepScan: {
+            workers: 2,
+            maxDiscoveryRuns: 5,
+            ...(resolvedDeep
+              ? {
+                  subagents: 0,
+                  stopAfterNoNew: 6,
+                  stopAfterConsecutiveErrors: 2,
+                  maxTimeHours: 1.5,
+                }
+              : {}),
+          },
+          ...(resolvedDeep ? { deepScanResolved: true } : {}),
+        }
       : {}),
   };
   const registration = await command(
@@ -794,10 +813,20 @@ test.each([false, true])(
   "resume restores saved launch settings (bulk: %s)",
   async (bulk) => {
     const settings = {
+      auth: "api-key" as const,
       safetyIdentifier: "synthetic-original-user",
       postScanPrompt: "Run these exact saved post-scan instructions.\n",
     };
-    const f = await interruptedScan("deep", bulk, settings);
+    const f = await interruptedScan("deep", bulk, settings, true);
+    const ambientHome = join(f.root, "ambient-codex-home");
+    f.environment.CODEX_HOME = ambientHome;
+    const ambientDeepConfig = join(
+      ambientHome,
+      "codex-security",
+      "config.toml",
+    );
+    await mkdir(join(ambientHome, "codex-security"), { recursive: true });
+    await writeFile(ambientDeepConfig, "invalid ambient TOML [");
     const prompts: string[] = [];
     const stdout = capture();
     const stderr = capture();
@@ -817,6 +846,7 @@ test.each([false, true])(
           expect(options.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
             settings.safetyIdentifier,
           );
+          expect(options.apiKey).toBe("synthetic-resume-key");
           return {
             startThread() {
               throw new Error("Resume must use the original session.");
@@ -827,7 +857,19 @@ test.each([false, true])(
                 id: threadId,
                 async runStreamed(prompt) {
                   prompts.push(prompt as string);
-                  if (prompts.length === 1) await finishDiscovery(f);
+                  if (prompts.length === 1) {
+                    expect(prompt).toContain(
+                      "Keep the original scan instructions.",
+                    );
+                    const deep = await readFile(
+                      join(f.codexHome, "codex-security", "config.toml"),
+                      "utf8",
+                    );
+                    expect(deep).toContain("subagents = 0");
+                    expect(deep).toContain("stop_after_consecutive_errors = 2");
+                    expect(deep).toContain("max_time_hours = 1.5");
+                    await finishDiscovery(f);
+                  }
                   return { events: completedEvents(threadId) };
                 },
               };
