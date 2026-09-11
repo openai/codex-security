@@ -24,6 +24,7 @@
 - bump actions/checkout from 6.0.2 to 7.0.1 ([#890](https://github.com/openai/codex-security/pull/890))
 - bump actions/setup-node from 6.3.0 to 7.0.0 ([#888](https://github.com/openai/codex-security/pull/888))
 - bump @types/node from 22.19.17 to 26.4.1 in /sdk/typescript ([#897](https://github.com/openai/codex-security/pull/897))
+- bump @types/node from 25.9.1 to 26.4.1 in /plugins/codex-security/mcp-app ([#893](https://github.com/openai/codex-security/pull/893))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
