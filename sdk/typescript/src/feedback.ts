@@ -122,7 +122,15 @@ export async function sendFeedback(
             params: {
               classification: "bug",
               reason: options.reason,
-              threadId: scan?.continuationThreadId,
+              // Codex also collects this thread's descendants. Shared owners
+              // belong only in the explicit attachment, not in that subtree.
+              threadId:
+                !includeLogs ||
+                scan?.executionThreadIds?.includes(
+                  scan.continuationThreadId ?? "",
+                )
+                  ? scan?.continuationThreadId
+                  : undefined,
               includeLogs,
               extraLogFiles,
               tags: {

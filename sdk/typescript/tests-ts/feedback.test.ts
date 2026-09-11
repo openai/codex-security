@@ -70,7 +70,12 @@ async function setup() {
     options: {
       reason: "Scan stopped",
       includeLogs: true,
-      scan: { scanId: "scan-1", continuationThreadId: "thread-1" },
+      scan: {
+        scanId: "scan-1",
+        continuationThreadId: "thread-1",
+        threadIds: ["thread-1"],
+        executionThreadIds: ["thread-1"],
+      },
       environment,
       workingDirectory: directory,
     },
@@ -114,7 +119,7 @@ test("uploads selected scan and worker logs through Codex and removes temporary 
 });
 
 for (const missingParent of [false, true]) {
-  test(`uploads Desktop scan logs across both homes with parent ${missingParent ? "missing" : "available"}`, async () => {
+  test(`uploads only the selected Desktop scan logs with parent ${missingParent ? "missing" : "available"}`, async () => {
     const context = await setup();
     const archived = join(context.environment.CODEX_HOME, "archived_sessions");
     await mkdir(archived, { recursive: true });
@@ -132,12 +137,48 @@ for (const missingParent of [false, true]) {
         }),
       );
     }
+    for (const payload of [
+      {
+        id: "unrelated-before",
+        timestamp: "2026-09-10T09:00:00Z",
+        source: {
+          subagent: { thread_spawn: { parent_thread_id: "desktop-owner" } },
+        },
+      },
+      {
+        id: "unrelated-after",
+        timestamp: "2026-09-10T13:00:00Z",
+        parent_thread_id: "desktop-owner",
+      },
+      {
+        id: "unrelated-fork",
+        timestamp: "2026-09-10T11:30:00Z",
+        forked_from_id: "desktop-owner",
+      },
+      {
+        id: "unrelated-grandchild",
+        timestamp: "2026-09-10T11:45:00Z",
+        parent_thread_id: "unrelated-fork",
+      },
+    ]) {
+      await writeFile(
+        join(archived, `rollout-${payload.id}.jsonl`),
+        JSON.stringify({
+          type: "session_meta",
+          payload: { ...payload, cwd: join(context.directory, "other-repo") },
+        }),
+      );
+    }
     await sendFeedback(
       {
         ...context.options,
         scan: {
           scanId: "desktop-scan",
+          mode: "deep",
+          scanDir: join(context.directory, "scan"),
+          progress: { status: "complete", updatedAt: "2026-09-10T12:00:00Z" },
           threadIds: ["desktop-owner", "sdk-worker"],
+          executionThreadIds: ["sdk-worker"],
         },
       },
       context.startCodex,
@@ -155,6 +196,33 @@ for (const missingParent of [false, true]) {
       "worker-child",
     ]);
     expect(existsSync(attachments[0].path)).toBe(false);
+    context.expectClosed();
+  });
+}
+
+for (const recordedExecutionRoots of [false, true]) {
+  test(`does not infer standard scan workers from a Desktop continuation (${recordedExecutionRoots})`, async () => {
+    const context = await setup();
+    await sendFeedback(
+      {
+        ...context.options,
+        scan: {
+          scanId: "desktop-standard",
+          mode: "standard",
+          continuationThreadId: "thread-1",
+          threadIds: ["thread-1"],
+          ...(recordedExecutionRoots ? { executionThreadIds: [] } : {}),
+        },
+      },
+      context.startCodex,
+    );
+    const { requests, attachments } = await context.transcript();
+    expect(requests[2].params.threadId).toBeUndefined();
+    expect(
+      JSON.parse(attachments[0].content).sessions.map(
+        (session: { threadId: string }) => session.threadId,
+      ),
+    ).toEqual(["thread-1"]);
     context.expectClosed();
   });
 }

@@ -110,7 +110,11 @@ describe("saved scan logs", () => {
     ]);
 
     const result = await readSavedScanLogs(
-      { scanId: "scan-1", threadIds: ["desktop-owner", "worker", "worker"] },
+      {
+        scanId: "scan-1",
+        threadIds: ["desktop-owner", "worker", "worker"],
+        executionThreadIds: ["worker"],
+      },
       [desktop, cli, desktop],
       { allowMissingRoot: true },
     );
@@ -118,7 +122,6 @@ describe("saved scan logs", () => {
     expect(result.threadId).toBe("desktop-owner");
     expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual([
       "desktop-owner",
-      "owner-child",
       "worker",
       "worker-child",
     ]);
@@ -133,7 +136,7 @@ describe("saved scan logs", () => {
   });
 
   test.each([undefined, "missing-owner"])(
-    "feedback collects known worker roots and descendants of missing owners with continuation %s",
+    "feedback collects known worker descendants without the owner log with continuation %s",
     async (continuationThreadId) => {
       const home = await temporaryHome();
       await writeSession(home, "owner-child", [], "missing-owner");
@@ -146,6 +149,7 @@ describe("saved scan logs", () => {
         scanId: "scan-1",
         ...(continuationThreadId === undefined ? {} : { continuationThreadId }),
         threadIds: ["missing-owner", "worker"],
+        executionThreadIds: ["worker"],
       };
 
       const result = await readSavedScanLogs(scan, home, {
@@ -153,7 +157,6 @@ describe("saved scan logs", () => {
       });
       expect(result.threadId).toBe("missing-owner");
       expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual([
-        "owner-child",
         "worker",
         "worker-child",
       ]);
@@ -215,7 +218,11 @@ describe("saved scan logs", () => {
     );
     try {
       const result = await readSavedScanLogs(
-        { scanId: "scan-1", continuationThreadId: "parent" },
+        {
+          scanId: "scan-1",
+          continuationThreadId: "parent",
+          executionThreadIds: ["parent"],
+        },
         home,
         { allowMissingRoot: true },
       );

@@ -1246,6 +1246,11 @@ managed home, and attaches available worker logs even if the parent log is missi
 Earlier retries that started separate sessions may be missing when their session
 IDs are no longer recorded.
 
+Standard scans run inside an existing Codex conversation attach only the owner's
+saved session; they do not record which subagents belong to the scan. Deep Scans
+and scans launched by `codex-security` also attach their recorded execution
+threads and descendants, without following unrelated children of the owner.
+
 ### Scan history and reruns
 
 Commands default to the current repository. Select scans by full ID or a

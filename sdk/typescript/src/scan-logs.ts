@@ -14,6 +14,7 @@ interface ScanLogOptions {
   scanId: string;
   threadId?: string;
   threadIds?: readonly string[];
+  executionThreadIds?: readonly string[];
   codexHome: string | readonly string[];
   scanDirectory?: string;
   completedAt?: string | null;
@@ -24,6 +25,7 @@ export type ScanLogSource = JsonObject & {
   scanId: string;
   continuationThreadId?: string;
   threadIds?: string[];
+  executionThreadIds?: string[];
   mode?: string;
   scanDir?: string;
   progress?: { status?: string; updatedAt?: string };
@@ -44,6 +46,7 @@ export function readSavedScanLogs(
     scanId: scan.scanId,
     threadId: threadId ?? scan.threadIds?.[0],
     threadIds: scan.threadIds,
+    executionThreadIds: scan.executionThreadIds ?? [],
     codexHome,
     allowMissingRoot: options.allowMissingRoot,
     scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
@@ -123,18 +126,20 @@ export async function readScanLogs(options: ScanLogOptions) {
     );
   }
 
-  const sessions: SessionLog[] = [];
   const included = new Set([
     ...(options.threadId ? [options.threadId] : []),
     ...(options.threadIds ?? []),
+    ...(options.executionThreadIds ?? []),
   ]);
-  const pending = [...included];
+  // A Desktop owner can contain other work. Include its log without treating
+  // the whole conversation tree as part of this scan.
+  const traversed = new Set(options.executionThreadIds ?? included);
+  const pending = [...traversed];
   for (const parentId of pending) {
     const parent = logs.get(parentId);
-    if (parent !== undefined) sessions.push(parent);
     for (const session of logs.values()) {
       if (
-        !included.has(session.threadId) &&
+        !traversed.has(session.threadId) &&
         (session.parentThreadId === parentId ||
           (root !== undefined &&
             parent === root &&
@@ -142,9 +147,15 @@ export async function readScanLogs(options: ScanLogOptions) {
             belongsToScan(session, root, options)))
       ) {
         included.add(session.threadId);
+        traversed.add(session.threadId);
         pending.push(session.threadId);
       }
     }
+  }
+  const sessions: SessionLog[] = [];
+  for (const threadId of included) {
+    const session = logs.get(threadId);
+    if (session !== undefined) sessions.push(session);
   }
   const events: Record<string, unknown>[] = [];
   for (const session of sessions) {

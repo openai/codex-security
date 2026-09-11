@@ -13,6 +13,7 @@ from typing import Any
 
 from test_workbench_db import HEAD_CHANGED_WARNING
 from test_workbench_deep_scan import begin_target_scan
+from test_workbench_prompt_only_scan import start_headless_standard_scan, start_prompt_only_scan
 from workbench_test_support import (
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
@@ -282,9 +283,9 @@ def test_cli_scan_persists_its_continuation_thread(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
     scan = create_cli_scan(state_dir, tmp_path / "results", repository, complete=False)
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]["threadIds"] == []
-    )
+    initial = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert initial["threadIds"] == []
+    assert initial["executionThreadIds"] == []
 
     result = run_workbench(
         state_dir,
@@ -299,6 +300,22 @@ def test_cli_scan_persists_its_continuation_thread(tmp_path: Path) -> None:
     detail = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])
     assert detail["scan"]["continuationThreadId"] == "thread-1"
     assert detail["scan"]["threadIds"] == ["thread-1"]
+    assert detail["scan"]["executionThreadIds"] == ["thread-1"]
+
+
+def test_get_scan_keeps_desktop_standard_owners_out_of_execution_roots(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    for start_scan in (start_prompt_only_scan, start_headless_standard_scan):
+        repository = tmp_path / start_scan.__name__
+        repository.mkdir()
+        started = start_scan(
+            state_dir, repository, tmp_path / "results", thread_id="desktop-owner"
+        )["scan"]
+        detail = run_workbench(state_dir, "get-scan", "--scan-id", started["scanId"])["scan"]
+        assert detail["threadIds"] == ["desktop-owner"]
+        assert detail["executionThreadIds"] == []
+        if start_scan is start_headless_standard_scan:
+            assert detail["continuationThreadId"] == "desktop-owner"
 
 
 def test_get_scan_includes_desktop_deep_worker_threads_without_continuation(tmp_path: Path) -> None:
@@ -363,6 +380,23 @@ def test_get_scan_includes_desktop_deep_worker_threads_without_continuation(tmp_
         "setup-worker",
         "shared-worker",
     ]
+    assert detail["executionThreadIds"] == [
+        "canceled-worker",
+        "dedup-worker",
+        "desktop-workspace",
+        "failed-worker",
+        "setup-worker",
+        "shared-worker",
+    ]
+
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET continuation_thread_id = 'desktop-headless' WHERE id = ?",
+            (scan["scanId"],),
+        )
+    continued = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert continued["threadIds"] == ["desktop-headless", *detail["threadIds"]]
+    assert continued["executionThreadIds"] == detail["executionThreadIds"]
 
 
 def test_cli_scan_preserves_original_revision_when_head_moves(tmp_path: Path) -> None:

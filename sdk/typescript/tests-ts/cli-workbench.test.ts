@@ -336,6 +336,8 @@ describe("CLI workbench", () => {
             scan: {
               scanId: "scan-1",
               continuationThreadId: "thread-1",
+              threadIds: ["thread-1"],
+              executionThreadIds: ["thread-1"],
               mode: "deep",
               progress: {
                 status: "complete",
