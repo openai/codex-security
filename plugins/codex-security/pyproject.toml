@@ -18,7 +18,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-required-version = "==0.16.1"
+required-version = "==0.16.6"
 target-version = "py312"
 
 [tool.ruff.lint]
