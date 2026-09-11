@@ -428,9 +428,9 @@ export function createCodexSecurityServer(): McpServer {
       stale: snapshot.stale,
       ...(snapshot.enrollmentUrl ? { enrollmentUrl: snapshot.enrollmentUrl } : {})
     };
-    const warning = access.status === "granted"
-      ? ""
-      : " This check is advisory: a scan may run, but protected results may not be displayable.";
+    const warning = access.status === "not_granted"
+      ? " This check is advisory: a scan may run, but protected results may not be displayable."
+      : "";
     return {
       content: [{
         type: "text" as const,
