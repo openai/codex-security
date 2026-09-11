@@ -28,18 +28,39 @@ feat(sdk)!: remove the legacy result field
 
 The title controls the generated release category:
 
-| Title             | Release category |
-| ----------------- | ---------------- |
-| Any type with `!` | Breaking changes |
-| `feat`            | Features         |
-| `fix`             | Fixes            |
-| `docs`            | Documentation    |
-| `release`, `test` | Excluded         |
-| Any other type    | Other changes    |
+| Title                               | Release category |
+| ----------------------------------- | ---------------- |
+| Any type with `!`                   | Breaking changes |
+| `feat`                              | Features         |
+| `fix`                               | Fixes            |
+| `docs`                              | Documentation    |
+| `chore(release)`, `release`, `test` | Excluded         |
+| Any other type                      | Other changes    |
 
-Use `release` and `test` only for changes that do not affect package users. A
-maintainer can apply `skip-release-notes` to exclude another internal change.
-That manual label takes precedence over the title category.
+Use `chore(release)` for release preparation and `test` for test-only changes.
+The legacy `release` type remains supported. Use these only for changes that
+do not affect package users. A maintainer can apply `skip-release-notes` to
+exclude another internal change. That manual label takes precedence over the
+title category.
+
+## Dependency updates
+
+Dependabot checks npm packages, Python test dependencies, and GitHub Actions
+daily, including weekends. OpenAI dependencies have no release cooldown; other
+releases must be at least seven days old. Security updates do not wait for the
+version-update cooldown.
+Updates still require review and passing CI; nothing is merged automatically.
+
+Keep `@openai/codex` and `@openai/codex-sdk` on the same exact version across the
+TypeScript SDK, MCP app, and triage evals. Dependabot groups their updates across
+all three projects, and the SDK tests reject mismatched pins or multiple locked
+SDK versions. The evals override Promptfoo's transitive Codex SDK to the direct
+SDK dependency so it follows the same update.
+
+Each pnpm project applies the same seven-day age policy to newly resolved
+dependencies, including transitive packages, with `openai` and `@openai/*` exempt.
+Committed lockfiles remain installable. The existing Socket release checks remain
+in place.
 
 ## Version policy before 1.0
 
@@ -67,9 +88,12 @@ once a change reaches `main` after the current package version. It recomputes
 the proposal's version from all changes since that package version first
 reached `main`. Squash-merge release PRs, as required by this
 repository's enabled merge method, so the whole proposal lands as one
-release boundary commit. A later breaking change changes the version on the
-same PR. Each update incorporates the latest `main` and appends a commit;
-the updater never force-pushes. A concurrent commit causes it to reread and
+release boundary commit. Generated PR titles and commit subjects use
+`chore(release): X.Y.Z`, matching the proposed package version. Confirm the
+squash commit subject uses the current PR title when merging. A later breaking
+change updates the version and title on the same PR. Each update incorporates
+the latest `main` and appends a commit; the updater never force-pushes.
+A concurrent commit causes it to reread and
 retry. It requests Codex review when the proposal files change. Updates that
 only incorporate `main` keep CI current without repeating the same proposal
 review. New suggestions for human-owned notes still appear in a comment.
@@ -86,9 +110,10 @@ reach `main` before opening the next proposal. An empty release cycle returns
 `action: "unchanged"` without creating a branch or PR. Publication of the
 previous version still has to complete and pass the verification steps below.
 
-The updater leaves another open `release:` PR targeting `main`, including a
-manually prepared release, untouched and does not open a duplicate. Finish
-or close that PR before enabling the new flow. Closing an automated proposal
+The updater leaves another open `chore(release):` or legacy `release:` PR
+targeting `main`, including a manually prepared release, untouched and does not
+open a duplicate. Finish or close that PR before enabling the new flow.
+Closing an automated proposal
 pauses its cycle; reopen it to resume. Retargeting it away from `main` also
 pauses updates; restore its `main` base before resuming. Both ready proposals
 and existing drafts receive updates. Existing drafts can be marked ready
@@ -177,7 +202,7 @@ Generated PRs leave the disclosure attestations unchecked for maintainer review.
    compatibility work, link relevant public documentation, and leave the
    pull-request inventory to the generated section.
 4. Open a pull request with a strict Conventional Commit title such as
-   `release: bump Codex Security to 0.2.0`.
+   `chore(release): 0.2.0`.
 5. Run the checks required by the changed files and record the results in the
    pull request. Do not merge until required CI, review, and public disclosure
    checks pass on the current commit.

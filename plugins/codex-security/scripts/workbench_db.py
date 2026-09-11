@@ -149,7 +149,6 @@ from workbench_validation import (
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
 FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
-SCAN_RECIPE_MAX_BYTES = 256 * 1024
 
 
 def now() -> str:
@@ -1820,8 +1819,6 @@ def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace
 
 
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
-    if len(value.encode("utf-8")) > SCAN_RECIPE_MAX_BYTES:
-        raise SystemExit("Scan launch recipe must be no larger than 256 KiB.")
     try:
         recipe = json.loads(value, parse_constant=reject_non_finite_json)
     except (TypeError, UnicodeError, ValueError) as exc:
@@ -2849,6 +2846,8 @@ def scan_result(
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
+        "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
+        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
         "failureMessage": scan["failure_message"],
         "findings": [
             finding_result(connection, scan, row, related=relations.get(row["id"], []))

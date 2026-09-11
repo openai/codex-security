@@ -680,7 +680,6 @@ async function testOpenAiCredentialsReachWorker() {
     { openai: "  synthetic-openai-key  ", codex: " ", expected: "synthetic-openai-key" },
     { openai: "synthetic-openai-key", codex: "synthetic-selected-key", expected: "synthetic-selected-key" },
     { codex: "synthetic-selected-key", expected: "synthetic-selected-key" },
-    { openai: "synthetic-openai-key", resumeThreadId: "fixture-resume", expected: "synthetic-openai-key" },
     { openai: "synthetic-openai-key", accountResult: { account: { type: "apiKey" }, requiresOpenaiAuth: true } },
     { openai: "synthetic-openai-key", accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true } },
     { openai: "synthetic-provider-key", accountResult: { account: null, requiresOpenaiAuth: false } },
@@ -708,20 +707,28 @@ async function testOpenAiCredentialsReachWorker() {
       syncBuiltinESMExports();
       const promptPath = path.join(fixture.root, "prompt.md");
       await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH\n");
-      await new CodexSdkWorkerExecutor({ parentSandbox: trustedParentSandbox }).run({
-        kind: "discovery",
-        promptPath,
-        workingDirectory: fixture.root,
-        subagents: 0,
-        resumeThreadId: entry.resumeThreadId,
-        signal: new AbortController().signal
-      });
-      const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
-      assert.equal(invocation.openaiAuthentication.CODEX_API_KEY, entry.expected);
-      assert.equal(invocation.openaiAuthentication.OPENAI_API_KEY, entry.openai);
-      assert.equal(process.env.CODEX_API_KEY, entry.codex);
-      assert.equal(process.env.OPENAI_API_KEY, entry.openai);
-      assert.equal(invocation.argv.some((arg) => arg.includes("synthetic-")), false);
+      const executor = new CodexSdkWorkerExecutor({ parentSandbox: trustedParentSandbox });
+      for (const kind of ["discovery", "dedup"]) {
+        for (const resumeThreadId of [undefined, "fixture-resume"]) {
+          await executor.run({
+            kind,
+            promptPath,
+            workingDirectory: fixture.root,
+            subagents: 0,
+            resumeThreadId,
+            signal: new AbortController().signal
+          });
+          const preflight = JSON.parse(await readFile(fixture.preflightMarkerPath, "utf8"));
+          const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+          assert.equal(preflight.codexHome, fixture.root);
+          assert.equal(invocation.codexHome, fixture.root);
+          assert.equal(invocation.openaiAuthentication.CODEX_API_KEY, entry.expected);
+          assert.equal(invocation.openaiAuthentication.OPENAI_API_KEY, entry.openai);
+          assert.equal(process.env.CODEX_API_KEY, entry.codex);
+          assert.equal(process.env.OPENAI_API_KEY, entry.openai);
+          assert.equal(invocation.argv.some((arg) => arg.includes("synthetic-")), false);
+        }
+      }
     } finally {
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();
@@ -739,7 +746,7 @@ async function testWorkerReasoningSummaries() {
     ['model_reasoning_summary = "none"\nprofile = "selected"\n[profiles.selected]\nmodel = "fixture-model"\n[profiles.other]\nmodel_reasoning_summary = "detailed"\n', "none"]
   ];
   const saved = Object.fromEntries(
-    ["CODEX_CLI_PATH", "CODEX_SECURITY_CONFIG_PATH", "OPENAI_API_KEY", "CODEX_API_KEY"].map((name) => [name, process.env[name]])
+    ["CODEX_CLI_PATH", "CODEX_SECURITY_CONFIG_PATH", "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH", "OPENAI_API_KEY", "CODEX_API_KEY"].map((name) => [name, process.env[name]])
   );
   const originalSpawn = childProcess.spawn;
   try {
@@ -753,6 +760,7 @@ async function testWorkerReasoningSummaries() {
       await writeFile(promptPath, "synthetic worker configuration fixture");
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = path.join(fixture.root, "deep settings.toml");
       childProcess.spawn = (command, args, options) => originalSpawn(
         command,
         command === process.execPath || command === path.toNamespacedPath(process.execPath)
@@ -780,6 +788,8 @@ async function testWorkerReasoningSummaries() {
             assert.equal(invocation.argv.includes(`model_reasoning_summary=${JSON.stringify(expected)}`), true);
           }
           assert.equal(invocation.argv.includes('model_reasoning_effort="xhigh"'), true);
+          assert.equal(invocation.configPath, configPath);
+          assert.equal(invocation.deepConfigPath, process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH);
           assertReadOnlyWorkerPolicy(invocation.argv);
           assertWorkerSubagentPolicy(invocation.argv, 0);
           await writeFile(configPath, 'model_reasoning_summary = "detailed"\n');
@@ -1512,7 +1522,7 @@ async function fakeCodexFixture(
     "for await (const chunk of process.stdin) stdin += chunk;",
     "const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;",
     "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
-    "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
+    "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
     "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
     "if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }",
     "if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }",

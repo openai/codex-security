@@ -12,31 +12,43 @@ import {
 
 interface ScanLogOptions {
   scanId: string;
-  threadId: string;
-  codexHome: string;
+  threadId?: string;
+  threadIds?: readonly string[];
+  executionThreadIds?: readonly string[];
+  codexHome: string | readonly string[];
   scanDirectory?: string;
   completedAt?: string | null;
+  allowMissingRoot?: boolean;
 }
 
 export type ScanLogSource = JsonObject & {
   scanId: string;
   continuationThreadId?: string;
+  threadIds?: string[];
+  executionThreadIds?: string[];
   mode?: string;
   scanDir?: string;
   progress?: { status?: string; updatedAt?: string };
 };
 
-export function readSavedScanLogs(scan: ScanLogSource, codexHome: string) {
+export function readSavedScanLogs(
+  scan: ScanLogSource,
+  codexHome: string | readonly string[],
+  options: { allowMissingRoot?: boolean } = {},
+) {
   const threadId = scan.continuationThreadId;
-  if (!threadId) {
+  if (!threadId && !options.allowMissingRoot) {
     throw new CodexSecurityError(
       `No session is associated with scan ${scan.scanId}.`,
     );
   }
   return readScanLogs({
     scanId: scan.scanId,
-    threadId,
+    threadId: threadId ?? scan.threadIds?.[0],
+    threadIds: scan.threadIds,
+    executionThreadIds: scan.executionThreadIds ?? [],
     codexHome,
+    allowMissingRoot: options.allowMissingRoot,
     scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
     completedAt:
       scan.progress?.status === "running"
@@ -57,8 +69,11 @@ interface SessionLog {
   path: string;
 }
 
-async function* scanSessions(codexHome: string): AsyncGenerator<SessionLog> {
-  for await (const path of sessionFiles(join(codexHome, "sessions"))) {
+async function* scanSessions(
+  codexHome: string,
+  directory = "sessions",
+): AsyncGenerator<SessionLog> {
+  for await (const path of sessionFiles(join(codexHome, directory))) {
     for await (const first of sessionEvents(path)) {
       if (first["type"] !== "session_meta" || !isRecord(first["payload"])) {
         break;
@@ -91,32 +106,56 @@ export async function findScanSession(
 
 export async function readScanLogs(options: ScanLogOptions) {
   const logs = new Map<string, SessionLog>();
-  for await (const session of scanSessions(options.codexHome)) {
-    logs.set(session.threadId, session);
+  const homes = new Set(
+    typeof options.codexHome === "string"
+      ? [options.codexHome]
+      : options.codexHome,
+  );
+  for (const directory of ["sessions", "archived_sessions"]) {
+    for (const home of homes) {
+      for await (const session of scanSessions(home, directory)) {
+        if (!logs.has(session.threadId)) logs.set(session.threadId, session);
+      }
+    }
   }
 
-  const root = logs.get(options.threadId);
-  if (root === undefined) {
+  const root = options.threadId ? logs.get(options.threadId) : undefined;
+  if (root === undefined && !options.allowMissingRoot) {
     throw new CodexSecurityError(
       `No saved session logs are available for scan ${options.scanId}.`,
     );
   }
 
-  const sessions = [root];
-  const included = new Set([root.threadId]);
-  for (const parent of sessions) {
+  const included = new Set([
+    ...(options.threadId ? [options.threadId] : []),
+    ...(options.threadIds ?? []),
+    ...(options.executionThreadIds ?? []),
+  ]);
+  // A Desktop owner can contain other work. Include its log without treating
+  // the whole conversation tree as part of this scan.
+  const traversed = new Set(options.executionThreadIds ?? included);
+  const pending = [...traversed];
+  for (const parentId of pending) {
+    const parent = logs.get(parentId);
     for (const session of logs.values()) {
       if (
-        !included.has(session.threadId) &&
-        (session.parentThreadId === parent.threadId ||
-          (parent === root &&
+        !traversed.has(session.threadId) &&
+        (session.parentThreadId === parentId ||
+          (root !== undefined &&
+            parent === root &&
             session.parentThreadId === null &&
             belongsToScan(session, root, options)))
       ) {
         included.add(session.threadId);
-        sessions.push(session);
+        traversed.add(session.threadId);
+        pending.push(session.threadId);
       }
     }
+  }
+  const sessions: SessionLog[] = [];
+  for (const threadId of included) {
+    const session = logs.get(threadId);
+    if (session !== undefined) sessions.push(session);
   }
   const events: Record<string, unknown>[] = [];
   for (const session of sessions) {
@@ -145,7 +184,7 @@ export async function readScanLogs(options: ScanLogOptions) {
 
   return {
     scanId: options.scanId,
-    threadId: root.threadId,
+    threadId: options.threadId ?? null,
     sessions: sessions.map(({ threadId, parentThreadId, path }) => ({
       threadId,
       parentThreadId,
@@ -214,6 +253,8 @@ async function* sessionEvents(
         continue;
       }
     }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   } finally {
     lines.close();
     stream.destroy();

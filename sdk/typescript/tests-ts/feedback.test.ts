@@ -70,7 +70,12 @@ async function setup() {
     options: {
       reason: "Scan stopped",
       includeLogs: true,
-      scan: { scanId: "scan-1", continuationThreadId: "thread-1" },
+      scan: {
+        scanId: "scan-1",
+        continuationThreadId: "thread-1",
+        threadIds: ["thread-1"],
+        executionThreadIds: ["thread-1"],
+      },
       environment,
       workingDirectory: directory,
     },
@@ -112,6 +117,115 @@ test("uploads selected scan and worker logs through Codex and removes temporary 
   expect(existsSync(attachments[0].path)).toBe(false);
   context.expectClosed();
 });
+
+for (const missingParent of [false, true]) {
+  test(`uploads only the selected Desktop scan logs with parent ${missingParent ? "missing" : "available"}`, async () => {
+    const context = await setup();
+    const archived = join(context.environment.CODEX_HOME, "archived_sessions");
+    await mkdir(archived, { recursive: true });
+    const sessions: [string, string, string | null][] = [
+      [archived, "sdk-worker", null],
+      [join(context.home, "sessions"), "worker-child", "sdk-worker"],
+    ];
+    if (!missingParent) sessions.unshift([archived, "desktop-owner", null]);
+    for (const [directory, id, parent] of sessions) {
+      await writeFile(
+        join(directory, `rollout-${id}.jsonl`),
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id, parent_thread_id: parent },
+        }),
+      );
+    }
+    for (const payload of [
+      {
+        id: "unrelated-before",
+        timestamp: "2026-09-10T09:00:00Z",
+        source: {
+          subagent: { thread_spawn: { parent_thread_id: "desktop-owner" } },
+        },
+      },
+      {
+        id: "unrelated-after",
+        timestamp: "2026-09-10T13:00:00Z",
+        parent_thread_id: "desktop-owner",
+      },
+      {
+        id: "unrelated-fork",
+        timestamp: "2026-09-10T11:30:00Z",
+        forked_from_id: "desktop-owner",
+      },
+      {
+        id: "unrelated-grandchild",
+        timestamp: "2026-09-10T11:45:00Z",
+        parent_thread_id: "unrelated-fork",
+      },
+    ]) {
+      await writeFile(
+        join(archived, `rollout-${payload.id}.jsonl`),
+        JSON.stringify({
+          type: "session_meta",
+          payload: { ...payload, cwd: join(context.directory, "other-repo") },
+        }),
+      );
+    }
+    await sendFeedback(
+      {
+        ...context.options,
+        scan: {
+          scanId: "desktop-scan",
+          mode: "deep",
+          scanDir: join(context.directory, "scan"),
+          progress: { status: "complete", updatedAt: "2026-09-10T12:00:00Z" },
+          threadIds: ["desktop-owner", "sdk-worker"],
+          executionThreadIds: ["sdk-worker"],
+        },
+      },
+      context.startCodex,
+    );
+    const { requests, attachments } = await context.transcript();
+    expect(requests[2].params.tags.codex_security_scan_id).toBe("desktop-scan");
+    expect(attachments).toHaveLength(1);
+    expect(
+      JSON.parse(attachments[0].content).sessions.map(
+        (session: { threadId: string }) => session.threadId,
+      ),
+    ).toEqual([
+      ...(!missingParent ? ["desktop-owner"] : []),
+      "sdk-worker",
+      "worker-child",
+    ]);
+    expect(existsSync(attachments[0].path)).toBe(false);
+    context.expectClosed();
+  });
+}
+
+for (const recordedExecutionRoots of [false, true]) {
+  test(`does not infer standard scan workers from a Desktop continuation (${recordedExecutionRoots})`, async () => {
+    const context = await setup();
+    await sendFeedback(
+      {
+        ...context.options,
+        scan: {
+          scanId: "desktop-standard",
+          mode: "standard",
+          continuationThreadId: "thread-1",
+          threadIds: ["thread-1"],
+          ...(recordedExecutionRoots ? { executionThreadIds: [] } : {}),
+        },
+      },
+      context.startCodex,
+    );
+    const { requests, attachments } = await context.transcript();
+    expect(requests[2].params.threadId).toBeUndefined();
+    expect(
+      JSON.parse(attachments[0].content).sessions.map(
+        (session: { threadId: string }) => session.threadId,
+      ),
+    ).toEqual(["thread-1"]);
+    context.expectClosed();
+  });
+}
 
 test("without log opt-in, does not read or attach saved sessions", async () => {
   const context = await setup();
@@ -162,14 +276,19 @@ test("respects disabled feedback without starting Codex", async () => {
   ).rejects.toThrow("disabled by configuration");
 });
 
-test("reports missing session logs without sending an incomplete log report", async () => {
+test("sends feedback when saved session logs are unavailable", async () => {
   const context = await setup();
   await rm(join(context.home, "sessions"), { recursive: true });
-  await expect(
-    sendFeedback(context.options, () => {
-      throw new Error("Must not start Codex");
-    }),
-  ).rejects.toThrow("No saved session logs");
+  expect(await sendFeedback(context.options, context.startCodex)).toEqual({
+    feedbackId: "feedback-1",
+    scanId: "scan-1",
+    includedLogs: true,
+  });
+  const { requests, attachments } = await context.transcript();
+  expect(requests[2].params.includeLogs).toBe(true);
+  expect(requests[2].params.extraLogFiles).toEqual([]);
+  expect(attachments).toEqual([]);
+  context.expectClosed();
 });
 
 test("reports failure to start Codex", async () => {
