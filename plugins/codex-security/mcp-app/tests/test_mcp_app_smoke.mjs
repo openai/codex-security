@@ -1130,6 +1130,7 @@ try {
       Date.parse(unknownTrustedAccess.result.structuredContent.checkedAt),
     ),
   );
+  assert.doesNotMatch(unknownTrustedAccess.result.content[0].text, /protected results may not be displayable/);
 
   const grantedTrustedAccess = {
     schemaVersion: 1,
@@ -1225,7 +1226,7 @@ try {
     checkedAt: grantedTrustedAccess.checkedAt,
     stale: true,
   });
-  assert.match(staleGrantedAccess.result.content[0].text, /protected results may not be displayable/);
+  assert.doesNotMatch(staleGrantedAccess.result.content[0].text, /protected results may not be displayable/);
 
   const untrustedReplay = await requestAndWait(9603, "tools/call", {
     name: "get_codex_security_daybreak_access",
@@ -1271,6 +1272,7 @@ try {
     },
   );
   assert.doesNotMatch(JSON.stringify(refreshedTrustedAccess.result), /\btac(?:[123])?\b/i);
+  assert.match(refreshedTrustedAccess.result.content[0].text, /protected results may not be displayable/);
 
   const timestampedTrustedAccess = await requestAndWait(9608, "tools/call", {
     name: "get_codex_security_daybreak_access",
