@@ -925,12 +925,6 @@ Interactive scans show full-screen progress; CI, redirected output, and
 diagnostics to stderr. Add `--verbose` for diagnostics. Check logs for
 sensitive information before sharing them.
 
-Add `--show-cost` to display dollar estimates in scan progress and summaries;
-they are hidden by default. This also applies to `scan-components`,
-`scans resume`, and `scans rerun`. A cost limit always shows estimates,
-including configured and saved limits. Token counts, cost tracking, and
-saved/JSON data are unchanged.
-
 The token summary shows uncached input, cache reads, cache writes, output,
 and total tokens. Total tokens include all input plus output; cache reads and
 writes are subsets of input, not extra tokens. When cache-write usage is missing,
