@@ -551,12 +551,13 @@ export async function reconcileReleasePullRequest({
         dryRun,
         plan,
       };
-    const changed =
+    const branchChanged =
       !headSha ||
       previous.mergeBase !== mainSha ||
       Object.entries(plan.files).some(
         ([path, content]) => repo.readFile(headSha, path) !== content,
       );
+    const changed = branchChanged || pull?.title !== plan.title;
     if (dryRun)
       return {
         action: !pull ? "would-create" : changed ? "would-update" : "unchanged",
@@ -566,7 +567,7 @@ export async function reconcileReleasePullRequest({
 
     let commitSha = headSha;
     let currentPulls;
-    if (changed) {
+    if (branchChanged) {
       if ((await branchHead(github, "main")) !== mainSha) continue;
       const tree = await github.request("POST", "git/trees", {
         base_tree: repo.git("rev-parse", `${mainSha}^{tree}`).trim(),

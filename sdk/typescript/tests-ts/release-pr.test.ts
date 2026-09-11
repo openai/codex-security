@@ -1054,7 +1054,11 @@ describe("rolling release reconciliation", () => {
     pull.title = "release: prepare the next Codex Security release";
     const body = pull.body;
     const writes = fixture.github.writes.length;
+    const preview = await fixture.run(true);
+    expect(preview.action).toBe("would-update");
+    expect(fixture.github.writes).toHaveLength(writes);
     const updated = await fixture.run();
+    expect(updated.action).toBe("updated");
     expect(updated.headSha).toBe(first.headSha);
     expect(pull.title).toBe("chore(release): 0.1.24");
     expect(pull.body).toBe(body);
