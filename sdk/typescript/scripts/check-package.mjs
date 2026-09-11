@@ -49,7 +49,7 @@ function tar(args, encoding = "buffer") {
 
 let offset = 0;
 const archiveFiles = new Map();
-for (; offset + 512 <= archiveBytes.byteLength; ) {
+for (; offset + 512 <= archiveBytes.byteLength;) {
   const header = archiveBytes.subarray(offset, offset + 512);
   if (header.every((byte) => byte === 0)) {
     offset += 512;

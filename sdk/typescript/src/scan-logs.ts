@@ -56,7 +56,7 @@ export function readSavedScanLogs(
         : scan.progress?.status === "complete" ||
             scan.progress?.status === "failed" ||
             scan.progress?.status === "canceled"
-          ? scan.progress.updatedAt ?? ""
+          ? (scan.progress.updatedAt ?? "")
           : "",
   });
 }

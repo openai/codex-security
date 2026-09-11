@@ -1273,7 +1273,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         new Promise<number>((resolve, reject) => {
           invocation.once("error", reject);
           invocation.once("close", (code, signal) =>
-            resolve(signal === null ? code ?? 1 : 1),
+            resolve(signal === null ? (code ?? 1) : 1),
           );
         }),
         forwarded,
@@ -1348,8 +1348,7 @@ export async function runCodexSkillCommand(
         typeof provider === "string"
           ? (
               config["model_providers"] as
-                | Record<string, JsonObject>
-                | undefined
+                Record<string, JsonObject> | undefined
             )?.[provider]
           : undefined;
       const requiresOpenAiAuth =
@@ -1589,7 +1588,7 @@ export async function runCodexSkillCommand(
               ? 130
               : requestedSignal === "SIGTERM" || signal === "SIGTERM"
                 ? 143
-                : code ?? 1,
+                : (code ?? 1),
           );
         };
         forceStatusCompletion = () => complete(null, null);
@@ -2841,7 +2840,7 @@ export async function main(
 
         if (options.to === "cloud") {
           const seenDirectories = new Set<string>();
-          for (let index = 0; index < selectedScans.length; ) {
+          for (let index = 0; index < selectedScans.length;) {
             const selected = selectedScans[index]!;
             const canonical = await realpath(selected.scanDir).catch(
               () => selected.scanDir,
@@ -3132,6 +3131,7 @@ export async function main(
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
+      tools: { discovery: "direct" },
       instructions:
         "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
     },
@@ -7802,8 +7802,7 @@ async function executeScan(
         providerConfiguration:
           (
             effectiveConfiguration["model_providers"] as
-              | Record<string, JsonObject>
-              | undefined
+              Record<string, JsonObject> | undefined
           )?.[provider] ??
           (isExternalModelProvider(provider)
             ? EXTERNAL_CODEX_PROVIDERS[provider]
@@ -8335,7 +8334,7 @@ async function executeScan(
   }
 
   let patchThreshold = arguments_.patch
-    ? arguments_.patchSeverity ?? "low"
+    ? (arguments_.patchSeverity ?? "low")
     : undefined;
   let patchSelection: PatchSelection | null = null;
   if (
@@ -8710,7 +8709,7 @@ function printScanSummary(
     Number.isFinite(completed) &&
     completed >= started
       ? Math.floor((completed - started) / 1_000)
-      : progress?.elapsedSeconds ?? 0;
+      : (progress?.elapsedSeconds ?? 0);
   const duration =
     elapsed < 60
       ? `${elapsed}s`

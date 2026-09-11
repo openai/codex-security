@@ -7,8 +7,9 @@ minimumReleaseAgeExclude:
 trustLockfile: true
 
 overrides:
+  "@openai/codex": "$@openai/codex-sdk"
   "@openai/codex-sdk": "$@openai/codex-sdk"
-  "@opencode-ai/sdk": 1.14.33
+  "@opencode-ai/sdk": "$@opencode-ai/sdk"
 
 allowBuilds:
   "@playwright/browser-chromium": false

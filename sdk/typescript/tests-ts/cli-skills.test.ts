@@ -1172,7 +1172,7 @@ process.stdout.write(JSON.stringify({
   test("accepts skill events and responses larger than 16 MiB", async () => {
     let drained = false;
     async function* oversizedLine(): AsyncGenerator<Buffer> {
-      for (let remaining = 1_024 * 1_024 + 1; remaining > 0; ) {
+      for (let remaining = 1_024 * 1_024 + 1; remaining > 0;) {
         const length = Math.min(64 * 1_024, remaining);
         yield Buffer.alloc(length, 0x78);
         remaining -= length;
