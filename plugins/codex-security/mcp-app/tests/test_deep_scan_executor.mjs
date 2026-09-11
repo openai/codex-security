@@ -680,7 +680,6 @@ async function testOpenAiCredentialsReachWorker() {
     { openai: "  synthetic-openai-key  ", codex: " ", expected: "synthetic-openai-key" },
     { openai: "synthetic-openai-key", codex: "synthetic-selected-key", expected: "synthetic-selected-key" },
     { codex: "synthetic-selected-key", expected: "synthetic-selected-key" },
-    { openai: "synthetic-openai-key", resumeThreadId: "fixture-resume", expected: "synthetic-openai-key" },
     { openai: "synthetic-openai-key", accountResult: { account: { type: "apiKey" }, requiresOpenaiAuth: true } },
     { openai: "synthetic-openai-key", accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true } },
     { openai: "synthetic-provider-key", accountResult: { account: null, requiresOpenaiAuth: false } },
@@ -708,20 +707,28 @@ async function testOpenAiCredentialsReachWorker() {
       syncBuiltinESMExports();
       const promptPath = path.join(fixture.root, "prompt.md");
       await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH\n");
-      await new CodexSdkWorkerExecutor({ parentSandbox: trustedParentSandbox }).run({
-        kind: "discovery",
-        promptPath,
-        workingDirectory: fixture.root,
-        subagents: 0,
-        resumeThreadId: entry.resumeThreadId,
-        signal: new AbortController().signal
-      });
-      const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
-      assert.equal(invocation.openaiAuthentication.CODEX_API_KEY, entry.expected);
-      assert.equal(invocation.openaiAuthentication.OPENAI_API_KEY, entry.openai);
-      assert.equal(process.env.CODEX_API_KEY, entry.codex);
-      assert.equal(process.env.OPENAI_API_KEY, entry.openai);
-      assert.equal(invocation.argv.some((arg) => arg.includes("synthetic-")), false);
+      const executor = new CodexSdkWorkerExecutor({ parentSandbox: trustedParentSandbox });
+      for (const kind of ["discovery", "dedup"]) {
+        for (const resumeThreadId of [undefined, "fixture-resume"]) {
+          await executor.run({
+            kind,
+            promptPath,
+            workingDirectory: fixture.root,
+            subagents: 0,
+            resumeThreadId,
+            signal: new AbortController().signal
+          });
+          const preflight = JSON.parse(await readFile(fixture.preflightMarkerPath, "utf8"));
+          const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+          assert.equal(preflight.codexHome, fixture.root);
+          assert.equal(invocation.codexHome, fixture.root);
+          assert.equal(invocation.openaiAuthentication.CODEX_API_KEY, entry.expected);
+          assert.equal(invocation.openaiAuthentication.OPENAI_API_KEY, entry.openai);
+          assert.equal(process.env.CODEX_API_KEY, entry.codex);
+          assert.equal(process.env.OPENAI_API_KEY, entry.openai);
+          assert.equal(invocation.argv.some((arg) => arg.includes("synthetic-")), false);
+        }
+      }
     } finally {
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();

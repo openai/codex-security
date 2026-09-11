@@ -1456,8 +1456,10 @@ The checkout's identity, revision, and contents must match the saved target.
 Completed, failed, and canceled scans cannot resume; `scans rerun` starts a new scan.
 
 Resume uses the saved configuration and instructions with the installed plugin.
-New scans save the explicit safety identifier and post-scan prompt contents.
-Single-scan resume restores them even if the prompt file changes or disappears.
+New scans save the selected authentication mode, explicit safety identifier, and
+post-scan prompt contents. Resume restores the authentication choice without
+saving credentials. Single-scan resume restores the prompt even if its original
+file changes or disappears.
 Older records that did not save these values cannot reconstruct them. Bulk
 recovery still requires matching campaign inputs and options; it uses the supplied
 post-scan prompt when the scan has no saved prompt.
