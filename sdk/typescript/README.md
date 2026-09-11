@@ -300,6 +300,8 @@ home is empty. Import errors make `login status` exit with code 2 and SDK
 `account()` reject its promise. Logout disables imports until you log in again.
 Status imports and logout share the credential-home lock so a concurrent status
 check cannot restore credentials after logout completes.
+Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
+`HOME` or `USERPROFILE` environment setting.
 
 Finish operations using older versions before upgrading. Runtime preparation
 holds the credential-home lock through pauses; exit or crash releases it.
@@ -1459,8 +1461,10 @@ The checkout's identity, revision, and contents must match the saved target.
 Completed, failed, and canceled scans cannot resume; `scans rerun` starts a new scan.
 
 Resume uses the saved configuration and instructions with the installed plugin.
-New scans save the explicit safety identifier and post-scan prompt contents.
-Single-scan resume restores them even if the prompt file changes or disappears.
+New scans save the selected authentication mode, explicit safety identifier, and
+post-scan prompt contents. Resume restores the authentication choice without
+saving credentials. Single-scan resume restores the prompt even if its original
+file changes or disappears.
 Older records that did not save these values cannot reconstruct them. Bulk
 recovery still requires matching campaign inputs and options; it uses the supplied
 post-scan prompt when the scan has no saved prompt.

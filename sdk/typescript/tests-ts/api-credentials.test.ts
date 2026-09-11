@@ -358,7 +358,9 @@ describe("CodexSecurity orchestration", () => {
         { pluginPath: PLUGIN_ROOT },
         {
           environment: {
-            CODEX_HOME: ambientHome,
+            HOME: root,
+            USERPROFILE: root,
+            CODEX_HOME: "~/ambient-codex-home",
             CODEX_SECURITY_STATE_DIR: stateDirectory,
           },
           resolvePluginPython: async () => "/managed/python",
@@ -520,7 +522,9 @@ describe("CodexSecurity orchestration", () => {
       { pluginPath: PLUGIN_ROOT },
       {
         environment: {
-          CODEX_HOME: ambientHome,
+          HOME: root,
+          USERPROFILE: root,
+          CODEX_HOME: "~/ambient-codex-home",
           CODEX_SECURITY_STATE_DIR: stateDirectory,
           OPENAI_API_KEY: "synthetic-transient-key",
         },
@@ -626,20 +630,22 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("recognizes ambient credentials during account() on a fresh instance", async () => {
-    const root = await temporaryDirectory();
-    const ambientHome = join(root, "ambient-home");
-    const stateDir = join(root, "state");
-    const script = join(root, "codex.mjs");
-    await mkdir(ambientHome);
-    await mkdir(stateDir, { mode: 0o700 });
-    await writeFile(
-      join(ambientHome, "auth.json"),
-      '{"auth_mode":"chatgpt"}\n',
-    );
-    await writeFile(
-      script,
-      `
+  test.each([false, true])(
+    "recognizes ambient credentials during account() on a fresh instance (home-relative: %p)",
+    async (homeRelative) => {
+      const root = await temporaryDirectory();
+      const ambientHome = join(root, "ambient-home");
+      const stateDir = join(root, "state");
+      const script = join(root, "codex.mjs");
+      await mkdir(ambientHome);
+      await mkdir(stateDir, { mode: 0o700 });
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        '{"auth_mode":"chatgpt"}\n',
+      );
+      await writeFile(
+        script,
+        `
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 
@@ -656,30 +662,35 @@ if (args.join(" ") === "login status") {
 }
 process.exit(process.exitCode ?? 0);
 `,
-    );
-    const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT },
-      {
-        environment: {
-          PATH: process.env["PATH"],
-          NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
-          CODEX_HOME: ambientHome,
-          CODEX_SECURITY_STATE_DIR: stateDir,
+      );
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            PATH: process.env["PATH"],
+            NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
+            HOME: root,
+            USERPROFILE: root,
+            CODEX_HOME: homeRelative ? "~/ambient-home" : ambientHome,
+            CODEX_SECURITY_STATE_DIR: stateDir,
+          },
+          resolveCodexCommand: () => ({
+            command: execFileSync("node", ["-p", "process.execPath"], {
+              encoding: "utf8",
+            }).trim(),
+          }),
         },
-        resolveCodexCommand: () => ({
-          command: execFileSync("node", ["-p", "process.execPath"], {
-            encoding: "utf8",
-          }).trim(),
-        }),
-      },
-    );
-    try {
-      const status = await client.account();
-      expect(status.authenticated).toBe(true);
-      expect(status.details).toContain("Logged in using ChatGPT");
-      expect(existsSync(join(stateDir, "codex-home", "auth.json"))).toBe(true);
-    } finally {
-      await client.close();
-    }
-  });
+      );
+      try {
+        const status = await client.account();
+        expect(status.authenticated).toBe(true);
+        expect(status.details).toContain("Logged in using ChatGPT");
+        expect(existsSync(join(stateDir, "codex-home", "auth.json"))).toBe(
+          true,
+        );
+      } finally {
+        await client.close();
+      }
+    },
+  );
 });

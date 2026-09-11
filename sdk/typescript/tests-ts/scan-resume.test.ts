@@ -729,95 +729,117 @@ test.each([
   },
 );
 
-test("CLI saves launch settings before execution without depending on the prompt file", async () => {
-  const root = await temporaryDirectory();
-  const repository = join(root, "repository");
-  const codexHome = join(root, "state", "codex-home");
-  await mkdir(repository);
-  await mkdir(codexHome, { recursive: true });
-  await writeFile(join(repository, "source.py"), "# synthetic source\n");
-  const promptFile = join(root, "post-scan.md");
-  const postScanPrompt = "Keep these original post-scan instructions.\n";
-  await writeFile(promptFile, postScanPrompt);
-  const python = Bun.which("python3") ?? Bun.which("python");
-  if (python === null) throw new Error("Python is required for this test.");
-  const environment = {
-    PATH: process.env["PATH"],
-    SystemRoot: process.env["SystemRoot"],
-    TEMP: process.env["TEMP"],
-    TMP: process.env["TMP"],
-    CODEX_HOME: codexHome,
-    CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    OPENAI_API_KEY: "synthetic-launch-key",
-  };
-  const command = (args: readonly string[], input?: string) =>
-    runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args, input);
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(
-    [
-      "scan",
-      repository,
-      "--mode",
-      "deep",
-      "--output-dir",
-      join(root, "scan"),
-      "--safety-identifier",
-      "synthetic-original-user",
-      "--post-scan-prompt-file",
+test.each(["chatgpt", "api-key"] as const)(
+  "CLI saves %s authentication and launch settings before execution",
+  async (auth) => {
+    const safetyIdentifier =
+      auth === "chatgpt" ? undefined : "synthetic-original-user";
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "state", "codex-home");
+    await mkdir(repository);
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(join(repository, "source.py"), "# synthetic source\n");
+    const promptFile = join(root, "post-scan.md");
+    const postScanPrompt = "Keep these original post-scan instructions.\n";
+    await writeFile(promptFile, postScanPrompt);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    if (python === null) throw new Error("Python is required for this test.");
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      TEMP: process.env["TEMP"],
+      TMP: process.env["TMP"],
+      CODEX_HOME: codexHome,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENAI_API_KEY: "synthetic-launch-key",
+    };
+    const command = (args: readonly string[], input?: string) =>
+      runWorkbench(
+        { python, pluginRoot: PLUGIN_ROOT, environment },
+        args,
+        input,
+      );
+    const stdout = capture();
+    const stderr = capture();
+    const code = await main(
+      [
+        "scan",
+        repository,
+        "--mode",
+        "deep",
+        "--output-dir",
+        join(root, "scan"),
+        "--auth",
+        auth,
+        ...(safetyIdentifier === undefined
+          ? []
+          : ["--safety-identifier", safetyIdentifier]),
+        "--post-scan-prompt-file",
+        promptFile,
+        "--json",
+      ],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...dependencies({ environment, currentDirectory: root }),
+        runWorkbench: command,
+        createSecurity: (config) =>
+          new TestClient(config, {
+            environment,
+            prepareRuntime: async () => preparedRuntime(codexHome),
+            resolvePluginPython: async () => python,
+            runWorkbench,
+            createCodex: () => {
+              throw new Error("Synthetic stop after registration");
+            },
+          }),
+      },
+    );
+    expect(code).toBe(2);
+    expect(stderr.text()).toContain("Synthetic stop after registration");
+    await writeFile(
       promptFile,
-      "--json",
-    ],
-    stdout.stream,
-    stderr.stream,
-    {
-      ...dependencies({ environment, currentDirectory: root }),
-      runWorkbench: command,
-      createSecurity: (config) =>
-        new TestClient(config, {
-          environment,
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => python,
-          runWorkbench,
-          createCodex: () => {
-            throw new Error("Synthetic stop after registration");
-          },
-        }),
-    },
-  );
-  expect(code).toBe(2);
-  expect(stderr.text()).toContain("Synthetic stop after registration");
-  await writeFile(
-    promptFile,
-    "Changed instructions that must not replace the saved text.",
-  );
-  await rm(promptFile);
-  const scans = (await command(["list-scans", "--repository", repository]))[
-    "scans"
-  ] as Array<{ scanId: string }>;
-  expect(scans).toHaveLength(1);
-  const saved = await command([
-    "get-scan-recipe",
-    "--scan-id",
-    scans[0]!.scanId,
-  ]);
-  expect(saved["recipe"]).toMatchObject({
-    safetyIdentifier: "synthetic-original-user",
-    postScanPrompt,
-  });
-  expect(JSON.stringify(saved)).not.toContain("synthetic-launch-key");
-  expect(JSON.stringify(saved)).not.toContain(promptFile);
-});
+      "Changed instructions that must not replace the saved text.",
+    );
+    await rm(promptFile);
+    const scans = (await command(["list-scans", "--repository", repository]))[
+      "scans"
+    ] as Array<{ scanId: string }>;
+    expect(scans).toHaveLength(1);
+    const saved = await command([
+      "get-scan-recipe",
+      "--scan-id",
+      scans[0]!.scanId,
+    ]);
+    expect(saved["recipe"]).toMatchObject({
+      auth,
+      ...(safetyIdentifier === undefined ? {} : { safetyIdentifier }),
+      postScanPrompt,
+    });
+    expect(JSON.stringify(saved)).not.toContain("synthetic-launch-key");
+    expect(JSON.stringify(saved)).not.toContain(promptFile);
+  },
+);
 
-test.each([false, true])(
-  "resume restores saved launch settings (bulk: %p)",
-  async (bulk) => {
+test.each([
+  ["chatgpt", false],
+  ["api-key", false],
+  [undefined, false],
+  ["chatgpt", true],
+  ["api-key", true],
+  [undefined, true],
+] as const)(
+  "resume restores saved launch settings with %s auth (bulk: %p)",
+  async (auth, bulk) => {
     const settings = {
-      auth: "api-key" as const,
-      safetyIdentifier: "synthetic-original-user",
+      auth,
+      safetyIdentifier:
+        auth === "chatgpt" ? undefined : "synthetic-original-user",
       postScanPrompt: "Run these exact saved post-scan instructions.\n",
     };
     const f = await interruptedScan("deep", bulk, settings, true);
+    f.environment.OPENAI_API_KEY = "synthetic-resume-key";
     const ambientHome = join(f.root, "ambient-codex-home");
     f.environment.CODEX_HOME = ambientHome;
     const ambientDeepConfig = join(
@@ -846,7 +868,11 @@ test.each([false, true])(
           expect(options.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
             settings.safetyIdentifier,
           );
-          expect(options.apiKey).toBe("synthetic-resume-key");
+          expect(options.apiKey).toBe(
+            auth === "chatgpt" ? undefined : "synthetic-resume-key",
+          );
+          expect(options.env?.["OPENAI_API_KEY"]).toBeUndefined();
+          expect(options.env?.["CODEX_API_KEY"]).toBeUndefined();
           return {
             startThread() {
               throw new Error("Resume must use the original session.");
@@ -881,6 +907,7 @@ test.each([false, true])(
     expect(code, stderr.text()).toBe(2);
     expect(prompts, stderr.text()).toHaveLength(2);
     expect(prompts[1]).toBe(settings.postScanPrompt);
+    expect(f.environment.OPENAI_API_KEY).toBe("synthetic-resume-key");
     expect(
       (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
     ).toMatchObject({

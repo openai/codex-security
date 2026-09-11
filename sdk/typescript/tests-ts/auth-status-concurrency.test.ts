@@ -38,13 +38,11 @@ for (const surface of ["CLI", "SDK"] as const) {
       let lockRequests = 0;
       mock.module("../src/runtime.js", () => ({
         ...runtime,
-        acquireCodexSecurityCredentialHomeLock: (
-          ...args: Parameters<
-            typeof runtime.acquireCodexSecurityCredentialHomeLock
-          >
+        withCredentialHomeLock: (
+          ...args: Parameters<typeof runtime.withCredentialHomeLock>
         ) => {
           if (++lockRequests === 2) contending.resolve();
-          return runtime.acquireCodexSecurityCredentialHomeLock(...args);
+          return runtime.withCredentialHomeLock(...args);
         },
       }));
       const environment = {
@@ -163,13 +161,11 @@ for (const operation of ["account", "logout"] as const) {
     const waiting = Promise.withResolvers<void>();
     mock.module("../src/runtime.js", () => ({
       ...runtime,
-      acquireCodexSecurityCredentialHomeLock: (
-        ...args: Parameters<
-          typeof runtime.acquireCodexSecurityCredentialHomeLock
-        >
+      withCredentialHomeLock: (
+        ...args: Parameters<typeof runtime.withCredentialHomeLock>
       ) => {
         waiting.resolve();
-        return runtime.acquireCodexSecurityCredentialHomeLock(...args);
+        return runtime.withCredentialHomeLock(...args);
       },
     }));
     const { TestClient } = await import("./support/api-client.js");

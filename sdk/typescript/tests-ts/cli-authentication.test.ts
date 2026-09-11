@@ -1120,43 +1120,48 @@ describe("CLI authentication", () => {
     },
   );
 
-  test("recognizes existing ambient Codex authentication on a fresh state directory during login status", async () => {
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-cli-ambient-auth-")),
-    );
-    try {
-      const ambientHome = join(root, "ambient-codex");
-      await mkdir(ambientHome, { mode: 0o700 });
-      await writeFile(
-        join(ambientHome, "auth.json"),
-        '{"auth_mode":"chatgpt"}\n',
+  test.each([false, true])(
+    "recognizes existing ambient Codex authentication on a fresh state directory during login status (home-relative: %p)",
+    async (homeRelative) => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-cli-ambient-auth-")),
       );
+      try {
+        const ambientHome = join(root, "ambient-codex");
+        await mkdir(ambientHome, { mode: 0o700 });
+        await writeFile(
+          join(ambientHome, "auth.json"),
+          '{"auth_mode":"chatgpt"}\n',
+        );
 
-      const stdout = capture();
-      const stderr = capture();
-      let forwardedHome: string | undefined;
-      const deps = dependencies({
-        environment: {
-          CODEX_HOME: ambientHome,
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
-        },
-      });
-      deps.runCodex = async (_args, _output, authEnvironment) => {
-        forwardedHome = authEnvironment?.["CODEX_HOME"];
-        return 0;
-      };
+        const stdout = capture();
+        const stderr = capture();
+        let forwardedHome: string | undefined;
+        const deps = dependencies({
+          environment: {
+            HOME: root,
+            USERPROFILE: root,
+            CODEX_HOME: homeRelative ? "~/ambient-codex" : ambientHome,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        });
+        deps.runCodex = async (_args, _output, authEnvironment) => {
+          forwardedHome = authEnvironment?.["CODEX_HOME"];
+          return 0;
+        };
 
-      expect(
-        await main(["login", "status"], stdout.stream, stderr.stream, deps),
-      ).toBe(0);
-      expect(forwardedHome).toBe(join(stateDirectory, "codex-home"));
-      expect(existsSync(join(stateDirectory, "codex-home", "auth.json"))).toBe(
-        true,
-      );
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
+        expect(
+          await main(["login", "status"], stdout.stream, stderr.stream, deps),
+        ).toBe(0);
+        expect(forwardedHome).toBe(join(stateDirectory, "codex-home"));
+        expect(
+          existsSync(join(stateDirectory, "codex-home", "auth.json")),
+        ).toBe(true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("does not import ambient Codex authentication during login status after explicit logout", async () => {
     const root = await realpath(
