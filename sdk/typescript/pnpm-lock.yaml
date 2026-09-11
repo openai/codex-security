@@ -30,8 +30,8 @@ importers:
         specifier: 2.0.1
         version: 2.0.1
       fast-uri:
-        specifier: 3.1.6
-        version: 3.1.6
+        specifier: 4.1.4
+        version: 4.1.4
       fflate:
         specifier: 0.8.3
         version: 0.8.3
@@ -1943,6 +1943,9 @@ packages:
 
   fast-uri@3.1.6:
     resolution: {integrity: sha512-7Ical1vFEMr0onbVzEDIreM22I4khW+fzyQPwvAFWBp1iwdshSZRsL4jjRvPG9JP1uiqMHRto+YU6R2/CzDz5Q==}
+
+  fast-uri@4.1.4:
+    resolution: {integrity: sha512-dODXrIxlS9JSdgAnhIUKOosKV1oMtU2VtVw87QRaHzyl5jxO290Ii5tEZfCfzfWNHi3jKWwBSdQj0qIyshdZdQ==}
 
   fast-wrap-ansi@0.2.2:
     resolution: {integrity: sha512-7F2Fl+TjRSenLqlU3UjSH0iyqopqoZIu7eZVpEirP2g1GtWa2G/ecEmBdgz31+Mxr+ELclgg6sokpSFIQiZ02Q==}
@@ -4826,6 +4829,8 @@ snapshots:
       fast-string-truncated-width: 3.0.3
 
   fast-uri@3.1.6: {}
+
+  fast-uri@4.1.4: {}
 
   fast-wrap-ansi@0.2.2:
     dependencies:
