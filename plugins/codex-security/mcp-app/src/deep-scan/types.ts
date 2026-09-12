@@ -49,6 +49,8 @@ export interface DeepScanRunState {
   targetPath: string;
   scope: string;
   userContext?: string;
+  model?: string;
+  reasoningEffort?: string;
   scanDir: string;
   config: DeepScanConfig;
   dispatchedCount: number;

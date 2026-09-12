@@ -475,6 +475,8 @@ def _deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, 
         "scanId": run["scan_id"],
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
+        "model": scan["model"],
+        "reasoningEffort": scan["reasoning_effort"],
         "userContext": (
             run["discovery_user_context"]
             if "discovery_user_context" in run.keys()
@@ -609,9 +611,9 @@ def ensure_deep_scan_run(
         INSERT INTO deep_scan_runs (
             scan_id, schema_version, workflow_version, status, phase,
             workers, subagents, stop_after_no_new, stop_after_consecutive_errors,
-            max_discovery_runs, max_time_hours,
+            max_discovery_runs, max_time_hours, discovery_user_context,
             created_at, updated_at
-        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan["id"],
@@ -622,6 +624,7 @@ def ensure_deep_scan_run(
             config["stopAfterConsecutiveErrors"],
             config["maxDiscoveryRuns"],
             config["maxTimeHours"],
+            scan["user_context"],
             timestamp,
             timestamp,
         ),
@@ -756,23 +759,10 @@ def begin_deep_scan_for_scan(
     )
     if scan["mode"] != "deep":
         raise SystemExit("Deep Scan orchestration requires a scan in deep mode.")
-    model = optional_text(args.model, maximum=200)
-    reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
-    if model is not None or reasoning_effort is not None:
-        connection.execute(
-            """
-            UPDATE scans
-            SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort)
-            WHERE id = ?
-            """,
-            (model, reasoning_effort, scan_id),
-        )
-        connection.commit()
-    existing = connection.execute(
-        "SELECT scan_id FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
-    ).fetchone()
     if existing is not None:
         return deep_scan_result(connection, scan_id, start_disposition="joined")
+    model = optional_text(args.model, maximum=200)
+    reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
     config = effective_deep_scan_config(args)
     workflow_version = optional_text(args.workflow_version, maximum=256)
     if workflow_version is None:
@@ -785,6 +775,22 @@ def begin_deep_scan_for_scan(
             args.claim_token,
             error_message="Deep Scan orchestration is owned by another continuation.",
         )
+        existing = connection.execute(
+            "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+        ).fetchone()
+        if existing is not None:
+            require_supported_deep_scan(existing)
+            connection.commit()
+            return deep_scan_result(connection, scan_id, start_disposition="joined")
+        if model is not None or reasoning_effort is not None:
+            connection.execute(
+                """
+                UPDATE scans
+                SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort)
+                WHERE id = ?
+                """,
+                (model, reasoning_effort, scan_id),
+            )
         ensure_deep_scan_run(connection, scan, config, workflow_version, now())
         connection.commit()
     except BaseException:

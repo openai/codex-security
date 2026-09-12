@@ -879,7 +879,9 @@ function deferred() {
 
 function testWorkflowVersionParsing() {
   const value = stateResult(randomUUID()).deepScan;
-  const run = parseDeepScan({ deepScan: { ...value, schemaVersion: 1, workflowVersion: "deep-scan-mcp/v1" } });
+  const run = parseDeepScan({ deepScan: { ...value, schemaVersion: 1, workflowVersion: "deep-scan-mcp/v1", model: "original-model", reasoningEffort: "high" } });
+  assert.equal(run.model, "original-model");
+  assert.equal(run.reasoningEffort, "high");
   assert.equal(run.schemaVersion, 1);
   assert.equal(run.workflowVersion, "deep-scan-mcp/v1");
   const future = parseDeepScan({ deepScan: { ...value, schemaVersion: 99, workflowVersion: "future/v99" } });

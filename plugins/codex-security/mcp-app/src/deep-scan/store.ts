@@ -596,6 +596,8 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
     targetPath: requiredString(value.targetPath, "deepScan.targetPath"),
     scope: requiredString(value.scope, "deepScan.scope"),
     userContext: optionalString(value.userContext),
+    model: optionalString(value.model),
+    reasoningEffort: optionalString(value.reasoningEffort),
     scanDir: requiredString(value.scanDir, "deepScan.scanDir"),
     config,
     dispatchedCount: nonNegativeInteger(value.dispatchedCount, "deepScan.dispatchedCount"),
