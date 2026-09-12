@@ -658,6 +658,9 @@ def _read_rollout_usage(
                 continue
             if event.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue
+            # Native rate-limit updates can carry no token usage.
+            if "info" in payload and payload["info"] is None:
+                continue
             timestamp = _timestamp(event.get("timestamp"))
             snapshot = _token_snapshot(payload)
             if timestamp is None or snapshot is None:

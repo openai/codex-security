@@ -492,21 +492,29 @@ def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path)
     assert "totalTokens" not in usage
 
 
-@pytest.mark.parametrize("reported", [False, True], ids=["missing", "explicit-zero"])
+@pytest.mark.parametrize("reported", ["missing", "null-counter", "explicit-zero"])
 def test_completion_distinguishes_missing_token_records_from_zero(
-    tmp_path: Path, reported: bool
+    tmp_path: Path, reported: str
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
-    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 0, 0)] if reported else [])
+    events = []
+    if reported == "explicit-zero":
+        events.append(_token_event(counted, 0, 0))
+    elif reported == "null-counter":
+        events.append(
+            _event(counted, "event_msg", {"type": "token_count", "info": None, "rate_limits": None})
+        )
+    parent = _rollout(tmp_path, "scan-parent", events)
     _state_graph(fixture.environment, {"scan-parent": parent}, [])
     usage = _complete_scan(fixture)["scan"]["usage"]
-    if reported:
+    if reported == "explicit-zero":
         assert usage["coverage"] == "complete"
         assert usage["totalTokens"] == 0
     else:
         assert usage["coverage"] == "unavailable"
         assert "token_usage_unavailable" in usage["warnings"]
+        assert "token_record_invalid" not in usage["warnings"]
         assert "totalTokens" not in usage
 
 
@@ -774,6 +782,72 @@ def test_shared_parent_usage_requires_original_turn_and_scan_interval(
     assert counts == _counts(10, 0, 2)
     assert warnings == set()
     assert models == {"gpt-6-astra": _counts(10, 0, 2)}
+
+
+@pytest.mark.parametrize(
+    "counter_info,receipt_state,expected_warning",
+    [
+        (None, "complete", None),
+        ({}, "complete", "token_record_invalid"),
+        ({"total_token_usage": {"input_tokens": -1}}, "complete", "token_record_invalid"),
+        (None, "missing-response", "token_receipts_incomplete"),
+        (None, "incomplete-line", "rollout_record_incomplete"),
+        (None, "invalid-timestamp", "token_record_invalid"),
+    ],
+    ids=[
+        "null-counter",
+        "empty-info",
+        "malformed-usage",
+        "missing-response",
+        "incomplete-line",
+        "invalid-timestamp",
+    ],
+)
+def test_completion_handles_no_usage_counter_without_hiding_incomplete_receipts(
+    tmp_path: Path, counter_info: Any, receipt_state: str, expected_warning: str | None
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    tokens = dict(input_tokens=100, cached_input_tokens=20, output_tokens=10, total_tokens=110)
+    response = _event(
+        counted,
+        "token_usage_record",
+        dict(
+            response_id="response-one",
+            thread_id="scan-parent",
+            model="gpt-5.6-sol",
+            usage=tokens,
+            thread_token_usage=(
+                {**tokens, "input_tokens": 150, "total_tokens": 160}
+                if receipt_state == "missing-response"
+                else tokens
+            ),
+        ),
+    )
+    counter = _event(
+        counted,
+        "event_msg",
+        {"type": "token_count", "info": counter_info, "rate_limits": None},
+    )
+    events = [counter, response, counter]
+    if receipt_state == "invalid-timestamp":
+        events.append(
+            {
+                **response,
+                "timestamp": None,
+                "payload": {**response["payload"], "response_id": "response-two"},
+            }
+        )
+    parent = _rollout(tmp_path, "scan-parent", events)
+    if receipt_state == "incomplete-line":
+        with parent.open("a") as stream:
+            stream.write('{"type":"token_usage_record"')
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["totalTokens"] == 110
+    assert usage["modelUsage"] == [{"model": "gpt-5.6-sol", **_counts(100, 20, 10)}]
+    assert usage["coverage"] == ("partial" if expected_warning else "complete")
+    assert usage.get("warnings", []) == ([expected_warning] if expected_warning else [])
 
 
 @pytest.mark.parametrize("counters", [False, True])
