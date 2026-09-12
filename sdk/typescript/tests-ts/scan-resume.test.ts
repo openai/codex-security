@@ -158,10 +158,16 @@ async function interruptedScan(
   const sessionPath = join(codexHome, "sessions", `rollout-${threadId}.jsonl`);
   await writeFile(
     sessionPath,
-    JSON.stringify({
-      type: "session_meta",
-      payload: { id: threadId, cwd: scanDir },
-    }) + "\n",
+    [
+      { type: "session_meta", payload: { id: threadId, cwd: scanDir } },
+      {
+        type: "turn_context",
+        timestamp: new Date().toISOString(),
+        payload: { turn_id: "synthetic-scan-turn", model: "gpt-5.6-sol" },
+      },
+    ]
+      .map((event) => JSON.stringify(event))
+      .join("\n") + "\n",
   );
   if (mode === "deep") {
     await command([
@@ -488,6 +494,7 @@ test.each([
       f.sessionPath,
       JSON.stringify({
         type: "event_msg",
+        timestamp: new Date().toISOString(),
         payload: {
           type: "token_count",
           info: {

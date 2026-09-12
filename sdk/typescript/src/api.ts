@@ -74,6 +74,7 @@ import {
   type ScanCost,
   type ScanSessionEvent,
 } from "./cost.js";
+import type { ScanExecutionAttribution } from "./scan-sessions.js";
 import {
   DeepScanProgressTracker,
   type DeepScanProgress,
@@ -1714,6 +1715,22 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions, mode };
+      if (mode === "deep") {
+        tracker.setAttributionReader(async () => {
+          const context = await workbench(
+            { ...workbenchOptions, signal: undefined },
+            ["get-scan", "--scan-id", scanId],
+          );
+          const scan = context["scan"];
+          if (isRecord(scan) && !("executionAttribution" in scan))
+            return undefined;
+          return isRecord(scan) && isRecord(scan["executionAttribution"])
+            ? (scan[
+                "executionAttribution"
+              ] as unknown as ScanExecutionAttribution)
+            : null;
+        });
+      }
       if (mode === "deep" && options.onDeepProgress !== undefined) {
         let progressWarningReported = false;
         deepProgressTracker = new DeepScanProgressTracker({
@@ -2063,7 +2080,10 @@ export class CodexSecurity {
             return { usage, cost: estimateScanCost(model, usage) };
           });
           throwIfAborted(signal, scanDir);
-          if (options.maxCostUsd !== undefined && snapshot.cost === null) {
+          if (
+            options.maxCostUsd !== undefined &&
+            (snapshot.cost === null || snapshot.cost.coverage === "partial")
+          ) {
             notifyObserver(
               "onWarning",
               options.onWarning,
@@ -4216,6 +4236,23 @@ function addScanCosts(
       previous.cacheWriteInputTokens + current.cacheWriteInputTokens,
     outputTokens: previous.outputTokens + current.outputTokens,
     estimatedUsd: previous.estimatedUsd + current.estimatedUsd,
+    ...(previous.coverage === "partial" || current.coverage === "partial"
+      ? { coverage: "partial" as const }
+      : {}),
+    ...(previous.modelCosts ||
+    current.modelCosts ||
+    previous.model !== current.model
+      ? {
+          modelCosts: [
+            ...(previous.modelCosts ?? [previous]),
+            ...(current.modelCosts ?? [current]),
+          ],
+        }
+      : {}),
+    ...(previous.cacheWriteInputTokensReported === false ||
+    current.cacheWriteInputTokensReported === false
+      ? { cacheWriteInputTokensReported: false }
+      : {}),
   };
 }
 

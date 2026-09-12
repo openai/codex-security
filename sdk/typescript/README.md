@@ -941,6 +941,14 @@ including cache reads and writes. They exclude long-context and other processing
 tier adjustments, fees, and surcharges. GPT-5.5 and GPT-6 Astra are supported;
 models without known prices show an unavailable estimate.
 
+Deep Scan accounting includes failed, replaced, and canceled worker attempts and
+their descendants once. Shared conversation usage is limited to the original
+scan turn and scan interval. Missing usage remains unavailable or partial;
+reported zero remains zero. When sessions use different models, `cost.modelCosts`
+records each model's tokens, estimate, and pricing basis, and `estimatedUsd` sums
+those estimates. A partial estimate has `cost.coverage: "partial"`; missing model
+attribution leaves the estimate unavailable until usage can be reconciled.
+
 For compatibility, `cacheWriteInputTokens` remains the reported token subtotal.
 `cacheWriteInputTokensReported: false` means at least one included usage record
 did not report cache writes. Raw usage uses `cache_write_input_tokens_reported`.
