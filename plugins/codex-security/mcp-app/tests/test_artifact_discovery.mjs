@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -76,7 +77,24 @@ assert.deepEqual(
 assert.deepEqual(toolSchemas.$defs.workbenchListCandidatesInput.required, ["scanId"]);
 
 const root = await realpath(await mkdtemp(path.join(tmpdir(), "security-artifact-discovery-")));
+const runtimePluginRoot = path.join(root, "plugin");
 try {
+  await build({
+    bundle: true,
+    entryPoints: [path.join(pluginRoot, "mcp-app", "helpers-main.ts")],
+    outfile: path.join(runtimePluginRoot, "mcp", "helpers.mjs"),
+    format: "esm",
+    platform: "node"
+  });
+  if (process.platform === "win32") {
+    const target = `win32-${process.arch}`;
+    const destination = path.join(runtimePluginRoot, "mcp", "native", target);
+    await mkdir(destination, { recursive: true });
+    await copyFile(
+      path.join(pluginRoot, "native", "prebuilt", target, "windows.node"),
+      path.join(destination, "windows.node")
+    );
+  }
   const repoRoot = path.join(root, "repository");
   await mkdir(path.join(repoRoot, "src"), { recursive: true });
   await mkdir(path.join(repoRoot, "support"), { recursive: true });
@@ -388,7 +406,8 @@ async function createContext(root, repoRoot, name, layout) {
     root: artifactRoot,
     repoRoot,
     layout,
-    pluginRoot
+    pluginRoot: runtimePluginRoot,
+    pythonCommand: path.join(root, "python-must-not-run")
   };
 }
 

@@ -1,3 +1,4 @@
+import { decodeUtf8 } from "./utf8";
 import {
   closeSync,
   lstatSync,
@@ -26,8 +27,7 @@ import {
 } from "./posix-path";
 
 const MAX_SECURITY_MD_BYTES = 1024 * 1024;
-const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-class HomeExpansionError extends Error {}
+export class HomeExpansionError extends Error {}
 const windows = process.platform === "win32";
 const windowsFiles = () => windowsFileSystem(windowsBinding());
 const encodePath = (path: string) =>
@@ -40,7 +40,7 @@ type FileInfo = Pick<Stats, "isDirectory" | "isFile" | "isSymbolicLink"> & {
 const statPath = (path: Buffer): FileInfo =>
   windows ? windowsFiles().stat(path) : statSync(path);
 
-function parsedPath(value: string): string {
+export function parsedPath(value: string): string {
   // pathlib removes empty and '.' components while preserving symlink/.. pairs.
   let root = windows
     ? windowsParts(value).slice(0, 2).join("").replaceAll("/", "\\")
@@ -71,7 +71,10 @@ function resolvedPath(path: Buffer): Buffer {
   }
 }
 
-function expandHome(path: string, posixHome: string | undefined): string {
+export function expandHome(
+  path: string,
+  posixHome: string | undefined,
+): string {
   if (!path.startsWith("~")) return path;
   if (process.platform === "win32") {
     const environment = (name: string) =>
@@ -138,18 +141,27 @@ function parentDirectory(path: Buffer): Buffer {
     : path.subarray(0, Math.max(1, separator));
 }
 
-function windowsRelativePath(path: Buffer, root: Buffer): Buffer | undefined {
+export function windowsRelativePath(
+  path: Buffer,
+  root: Buffer,
+  allowMissing = false,
+): Buffer | undefined {
   const files = windowsFiles();
   const rootIdentity = files.identity(root);
   const parts: string[] = [];
   let current = path;
   while (true) {
-    const identity = files.identity(current);
-    if (
-      identity.volume === rootIdentity.volume &&
-      identity.fileId.equals(rootIdentity.fileId)
-    )
-      return encodePath(parts.reverse().join("\\"));
+    try {
+      const identity = files.identity(current);
+      if (
+        identity.volume === rootIdentity.volume &&
+        identity.fileId.equals(rootIdentity.fileId)
+      )
+        return encodePath(parts.reverse().join("\\"));
+    } catch (error) {
+      if (!allowMissing || (error as NodeJS.ErrnoException).code !== "ENOENT")
+        throw error;
+    }
     const parent = parentDirectory(current);
     if (parent.equals(current)) return undefined;
     parts.push(basename(decodePath(current)));
@@ -307,7 +319,7 @@ function readPolicy(path: Buffer, displayedPath: Buffer): string {
     throw new Error(`SECURITY.md exceeds 1 MiB: ${decodePath(displayedPath)}`);
   }
   try {
-    return utf8.decode(buffer.subarray(0, length));
+    return decodeUtf8(buffer.subarray(0, length));
   } catch {
     throw new Error(
       `SECURITY.md is not valid UTF-8: ${decodePath(displayedPath)}`,
