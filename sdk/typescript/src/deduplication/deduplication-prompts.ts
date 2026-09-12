@@ -1,5 +1,22 @@
 import type { Finding } from "../models.js";
 
+export const DEFAULT_RESULT_TOOL_NAMESPACE = "review_validator";
+
+// Only SDK-authored instructions are rendered here, before finding JSON is added.
+function resultToolInstructions(
+  instructions: string,
+  namespace: string,
+): string {
+  return instructions.replaceAll(
+    `${DEFAULT_RESULT_TOOL_NAMESPACE}.`,
+    `${namespace}.`,
+  );
+}
+
+export function reviewSubmissionInstructionsFor(namespace: string): string {
+  return resultToolInstructions(reviewSubmissionInstructions, namespace);
+}
+
 const evidenceAvailabilityInstructions = `Distinguish insufficient finding content from an operational blocker. If the supplied finding content is incomplete or insufficient to establish a shared correction, return DISTINCT and explain that limitation. If an execution, tool, or source-access failure prevents a required check and sufficient evidence is not available elsewhere, do not submit SAME or DISTINCT: call review_validator.submit_error with {"reason":"..."} explaining the blocker. A failed optional lookup is not itself an error or a DISTINCT verdict; continue when other available evidence is sufficient.`;
 
 export const screeningInstructions = `Review the complete assigned security-issue neighborhood in ONE session. The first supplied issue is the anchor; every later supplied issue is one assigned candidate neighbor. For EVERY neighbor, in its original order, recommend whether that anchor/neighbor pair may describe the same actionable finding. Every pair must include the anchor; never nominate pairs between candidate neighbors.
@@ -49,10 +66,16 @@ function records(
   return `${formatInstructions}\n\n${JSON.stringify({ findings })}`;
 }
 
-export function screeningPrompt(findings: readonly Finding[]): string {
-  return `${screeningInstructions}\n\n${records(findings, screeningFindingFormatInstructions)}`;
+export function screeningPrompt(
+  findings: readonly Finding[],
+  resultToolNamespace = DEFAULT_RESULT_TOOL_NAMESPACE,
+): string {
+  return `${resultToolInstructions(screeningInstructions, resultToolNamespace)}\n\n${records(findings, screeningFindingFormatInstructions)}`;
 }
 
-export function pairReviewPrompt(findings: readonly Finding[]): string {
-  return `${pairReviewInstructions}\n\n${records(findings, pairFindingFormatInstructions)}`;
+export function pairReviewPrompt(
+  findings: readonly Finding[],
+  resultToolNamespace = DEFAULT_RESULT_TOOL_NAMESPACE,
+): string {
+  return `${resultToolInstructions(pairReviewInstructions, resultToolNamespace)}\n\n${records(findings, pairFindingFormatInstructions)}`;
 }

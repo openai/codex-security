@@ -5,6 +5,7 @@ import {
   classifyScanSeverity,
   classifyScanDirectorySeverity,
   deduplicateScan,
+  deduplicateRecords,
   estimateScanCost,
   loadProjectConfig,
   matchScanFindings,
@@ -15,6 +16,8 @@ import {
   resolveProjectConfig,
   type ComponentScanOptions,
   type DeduplicateScanResult,
+  type DeduplicateRecordsOptions,
+  type DeduplicateRecordsResult,
   type CustomPublicationResult,
   type Finding,
   type ProjectConfigInput,
@@ -103,6 +106,18 @@ export async function dedupe(
     allRepositories: true,
     signal,
   });
+}
+
+export async function dedupeRecords(
+  options: DeduplicateRecordsOptions,
+): Promise<DeduplicateRecordsResult> {
+  const result = await deduplicateRecords(options);
+  for (const outcome of result.pairOutcomes) {
+    const decision: "SAME" | "DISTINCT" = outcome.decision;
+    const binding: string = outcome.bindingDigest;
+    void [decision, binding];
+  }
+  return result;
 }
 
 const options: ScanOptions = {

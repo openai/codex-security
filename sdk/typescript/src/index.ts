@@ -124,6 +124,18 @@ export {
   deduplicateScan,
   deduplicateScanDirectory,
 } from "./deduplication/scan.js";
+export { deduplicateRecords } from "./deduplication/records.js";
+export type {
+  BoundDeduplicationPairOutcome,
+  DeduplicateRecordsOptions,
+  DeduplicateRecordsResult,
+  DeduplicationCandidateProvider,
+  DeduplicationCheckpointStore,
+  DeduplicationReviewRequest,
+  DeduplicationReviewRunner,
+  DeduplicationSourceTool,
+  PriorDeduplicationDecision,
+} from "./deduplication/records.js";
 export type {
   DeduplicateScanDirectoryOptions,
   DeduplicateScanOptions,
