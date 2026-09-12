@@ -127,6 +127,39 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(unboundLegacy.model, "stored-model");
   assert.equal(unboundLegacy.modelProvider, undefined, "unrecorded legacy ownership cannot recover caller selections");
   assert.equal(unboundLegacy.reasoningSummary, undefined);
+  await writeFile(join(sessionDirectory, "applied.jsonl"), [
+    { type: "session_meta", timestamp: "2026-01-01T00:00:00Z", payload: { id: "fixture-applied", model_provider: "openai" } },
+    { type: "event_msg", timestamp: "2026-01-01T00:00:01Z", payload: { type: "thread_settings_applied", thread_id: "fixture-applied",
+      thread_settings: { model: "applied-model", model_provider_id: "openai", service_tier: "default", reasoning_effort: "high", reasoning_summary: "concise" } } },
+    { type: "turn_context", timestamp: "2026-01-01T00:00:02Z", payload: { turn_id: "applied-turn", model: "applied-model", effort: "high", summary: "none" } },
+    { type: "event_msg", timestamp: "2026-01-01T00:00:03Z", payload: { type: "thread_settings_applied", thread_id: "fixture-copied-owner",
+      thread_settings: { model: "copied-model", model_provider_id: "copied-provider", service_tier: "flex", reasoning_summary: "detailed" } } },
+    { type: "event_msg", timestamp: "2026-01-01T00:02:00Z", payload: { type: "thread_settings_applied", thread_id: "fixture-applied",
+      thread_settings: { model: "later-model", model_provider_id: "later-provider", service_tier: "fast", reasoning_summary: "detailed" } } }
+  ].map(JSON.stringify).join("\n") + "\n");
+  const appliedOwner = { threadId: "fixture-applied", turnId: "applied-turn", startedAt: "2026-01-01T00:00:00Z" };
+  const applied = await captureSettings({ usageOwner: appliedOwner }, { filesystemDenies: [] }, parentEnvironment,
+    { threadId: "fixture-other", startedAt: "2026-01-01T00:01:00Z" });
+  assert.equal(applied.serviceTier, "default", "original explicit standard routing survives later and copied snapshots");
+  assert.equal(applied.reasoningSummary, "concise", "native applied summary overrides the legacy compatibility field");
+  assert.equal(applied.modelProvider, "openai");
+  const tierDir = join(root, "missing-tier");
+  const { serviceTier: omittedTier, ...withoutTier } = applied;
+  assert.equal(omittedTier, "default");
+  await loadSettings(tierDir, async () => withoutTier);
+  const repairedTier = await loadSettings(tierDir, async () => assert.fail(), {
+    usageOwner: appliedOwner, createdAt: "2026-01-01T00:01:00Z"
+  });
+  assert.equal(repairedTier.serviceTier, "default");
+  await writeFile(join(sessionDirectory, "applied.jsonl"), (await readFile(join(sessionDirectory, "applied.jsonl"), "utf8"))
+    + JSON.stringify({ type: "event_msg", timestamp: "2026-01-01T00:00:04Z", payload: {
+      type: "thread_settings_applied", thread_id: "fixture-applied",
+      thread_settings: { model: "applied-model", model_provider_id: "openai", reasoning_effort: "high" }
+    } }) + "\n");
+  const nativeDefaults = await captureSettings({ usageOwner: appliedOwner }, { filesystemDenies: [] }, parentEnvironment,
+    { threadId: "fixture-other", startedAt: "2026-01-01T00:01:00Z" });
+  assert.equal(nativeDefaults.serviceTier, undefined, "native model-default selection is not explicit standard routing");
+  assert.equal(nativeDefaults.reasoningSummary, undefined, "a compatibility summary is not a recorded native default");
   const incompleteDir = join(root, "incomplete");
   const incomplete = { codexPath: process.execPath, codexHome: root, serviceTier: "flex" };
   await loadSettings(incompleteDir, async () => incomplete);

@@ -56,7 +56,7 @@ export async function captureDeepScanExecutionSettings(
     reasoningEffort: original.reasoningEffort ?? (selected.model_reasoning_effort as string | undefined) ?? native.reasoningEffort,
     modelProvider: (selected.model_provider as string | undefined) ?? native.modelProvider,
     reasoningSummary: (selected.model_reasoning_summary as string | undefined) ?? native.reasoningSummary,
-    serviceTier: selected.service_tier as string | undefined,
+    serviceTier: (selected.service_tier as string | undefined) ?? native.serviceTier,
     providerConfig: selected.model_providers as JsonObject | undefined,
     parentSandbox
   });
@@ -75,6 +75,7 @@ async function originalParentSettings(
       codexHome, allowMissingRoot: true
     });
     const settings: Partial<DeepScanExecutionSettings> = {};
+    let applied: Partial<DeepScanExecutionSettings> | undefined;
     const cutoff = parent.startedAt === undefined ? Infinity : Date.parse(parent.startedAt);
     for (const entry of log.events) {
       const event = entry.event as Record<string, unknown>;
@@ -83,6 +84,19 @@ async function originalParentSettings(
       const payload = event.payload;
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
       const context = payload as Record<string, unknown>;
+      if (event.type === "event_msg" && context.type === "thread_settings_applied") {
+        if (typeof context.thread_id === "string" && context.thread_id !== parent.threadId) continue;
+        const snapshot = context.thread_settings;
+        if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) continue;
+        const value = snapshot as Record<string, unknown>;
+        applied = {
+          model: typeof value.model === "string" ? value.model : undefined,
+          modelProvider: typeof value.model_provider_id === "string" ? value.model_provider_id : undefined,
+          reasoningEffort: typeof value.reasoning_effort === "string" ? value.reasoning_effort : undefined,
+          reasoningSummary: typeof value.reasoning_summary === "string" ? value.reasoning_summary : undefined,
+          serviceTier: typeof value.service_tier === "string" ? value.service_tier : undefined
+        };
+      }
       if (event.type === "session_meta" && typeof context.model_provider === "string") {
         settings.modelProvider = context.model_provider;
       }
@@ -93,7 +107,9 @@ async function originalParentSettings(
         if (typeof context.summary === "string") settings.reasoningSummary = context.summary;
       }
     }
-    return settings;
+    // Applied snapshots contain native selected values. Newer turn-context
+    // summaries are only a compatibility field, not the active selection.
+    return { ...settings, ...applied };
   } catch {
     return {};
   }
@@ -120,7 +136,8 @@ export async function loadOrCaptureDeepScanExecutionSettings(
     return settings;
   }
   if (!original || (settings.model !== undefined && settings.reasoningEffort !== undefined
-    && settings.modelProvider !== undefined && settings.reasoningSummary !== undefined)) return settings;
+    && settings.modelProvider !== undefined && settings.reasoningSummary !== undefined
+    && settings.serviceTier !== undefined)) return settings;
   // Earlier snapshots can omit native selections. Recover only from the saved
   // home and recorded owner; the continuation's current config is not history.
   const owner = original.usageOwner;
@@ -132,7 +149,8 @@ export async function loadOrCaptureDeepScanExecutionSettings(
     model: settings.model ?? original.model ?? native.model,
     reasoningEffort: settings.reasoningEffort ?? original.reasoningEffort ?? native.reasoningEffort,
     modelProvider: settings.modelProvider ?? native.modelProvider,
-    reasoningSummary: settings.reasoningSummary ?? native.reasoningSummary
+    reasoningSummary: settings.reasoningSummary ?? native.reasoningSummary,
+    serviceTier: settings.serviceTier ?? native.serviceTier
   });
   if (JSON.stringify(recovered) !== JSON.stringify(settings)) {
     await writeJsonAtomic(path, { version: 1, settings: recovered });

@@ -756,11 +756,11 @@ async function testIsolatedReconstructedWorkers() {
         model: `fixture-${name}-inherited`,
         model_provider: `fixture-${name}-provider`,
         model_reasoning_effort: "medium",
-        model_reasoning_summary: name === "first" ? "none" : "concise",
-        service_tier: name === "first" ? "flex" : "fast"
+        model_reasoning_summary: "concise",
+        service_tier: name === "first" ? "default" : "fast"
       };
       await writeFile(configPath, Object.entries(config).filter(([key]) => name !== "first"
-        || !["model_provider", "model_reasoning_summary"].includes(key))
+        || !["model_provider", "model_reasoning_summary", "service_tier"].includes(key))
         .map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join(""));
       await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH NULL_USAGE\n");
       const executable = path.join(fixture.root, process.platform === "win32" ? "node.exe" : "node");
@@ -789,8 +789,13 @@ async function testIsolatedReconstructedWorkers() {
       await writeFile(path.join(codexHome, "sessions", "owner.jsonl"), [
         { type: "session_meta", timestamp: "2026-01-01T00:00:00Z",
           payload: { id: `fixture-${name}-owner`, model_provider: config.model_provider } },
+        { type: "event_msg", timestamp: "2026-01-01T00:00:00Z",
+          payload: { type: "thread_settings_applied", thread_id: `fixture-${name}-owner`, thread_settings: {
+            model: "native-parent-model", model_provider_id: config.model_provider, service_tier: "default",
+            reasoning_effort: "medium", reasoning_summary: config.model_reasoning_summary
+          } } },
         { type: "turn_context", timestamp: "2026-01-01T00:00:01Z",
-          payload: { turn_id: "original-turn", model: "native-parent-model", effort: "medium", summary: config.model_reasoning_summary } },
+          payload: { turn_id: "original-turn", model: "native-parent-model", effort: "medium", summary: "none" } },
         { type: "turn_context", timestamp: "2026-01-01T00:02:00Z",
           payload: { turn_id: "later-turn", model: "later-parent-model", effort: "low", summary: "detailed" } }
       ].map(JSON.stringify).join("\n") + "\n");
@@ -824,6 +829,7 @@ async function testIsolatedReconstructedWorkers() {
           if (phase === "incomplete") {
             const saved = JSON.parse(scan.snapshot);
             for (const key of ["model", "reasoningEffort", "modelProvider", "reasoningSummary"]) delete saved.settings[key];
+            if (scan.name === "first") delete saved.settings.serviceTier;
             await writeFile(scan.snapshotPath, JSON.stringify(saved));
           }
           const recorded = await loadOrCaptureDeepScanExecutionSettings(scan.fixture.root, () =>
