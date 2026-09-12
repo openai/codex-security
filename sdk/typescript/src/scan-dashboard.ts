@@ -561,8 +561,8 @@ export class ScanDashboard {
     );
     const time = formatElapsed(elapsed);
     const files =
-      this.#files === null
-        ? "waiting for inventory"
+      this.#files === null || this.#files.filesTotal === 0
+        ? null
         : `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`;
     const cost =
       this.#cost === null
@@ -620,7 +620,10 @@ export class ScanDashboard {
         : [
             ...(this.#options.mode === "deep"
               ? []
-              : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
+              : [
+                  `  STAGE    ${this.#stage}`,
+                  ...(files === null ? [] : [`  FILES    ${files}`]),
+                ]),
             ...this.#tokenLines(),
             ...(this.#showCost ? [`  COST     ${cost}`] : []),
             ...(this.#budget === null
@@ -752,7 +755,7 @@ export class ScanDashboard {
           receipt.status === "started"
             ? dashboard.#stage
             : componentStatus(receipt),
-          files === null
+          files === null || files.filesTotal === 0
             ? "—"
             : `${formatCount(files.filesCompleted)}/${formatCount(files.filesTotal)}`,
           receipt.findingCount === undefined
@@ -825,7 +828,9 @@ export class ScanDashboard {
           ? 2
           : this.#options.mode === "deep"
             ? 2
-            : 0),
+            : this.#files === null || this.#files.filesTotal === 0
+              ? 1
+              : 0),
     );
   }
 

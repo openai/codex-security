@@ -1199,6 +1199,7 @@ describe("one-shot scan events", () => {
             "--- commands.py ---",
             "--- server.py ---",
             'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":2,"filesTotal":2}',
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"reporting"}',
           ].join("\n"),
           exit_code: 0,
           status: "completed",
@@ -1225,6 +1226,7 @@ describe("one-shot scan events", () => {
     expect(updates).toEqual([
       { phase: "discovery", filesCompleted: 0, filesTotal: 2 },
       { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
+      { phase: "reporting", filesCompleted: 0, filesTotal: 0 },
     ]);
   });
 });

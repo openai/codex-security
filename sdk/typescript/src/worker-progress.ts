@@ -22,6 +22,7 @@ export type ScanPhase =
 export interface ScanProgress {
   phase: ScanPhase;
   filesCompleted: number;
+  /** Zero when no file count is supplied. */
   filesTotal: number;
 }
 
@@ -98,9 +99,14 @@ function scanProgressFromMarker(marker: string): ScanProgress | null {
   } catch {
     return null;
   }
+  if (!isRecord(payload) || !isScanPhase(payload["phase"])) return null;
   if (
-    !isRecord(payload) ||
-    !isScanPhase(payload["phase"]) ||
+    payload["filesCompleted"] === undefined &&
+    payload["filesTotal"] === undefined
+  ) {
+    return { phase: payload["phase"], filesCompleted: 0, filesTotal: 0 };
+  }
+  if (
     !isProgressCount(payload["filesCompleted"]) ||
     !isProgressCount(payload["filesTotal"]) ||
     payload["filesCompleted"] > payload["filesTotal"]

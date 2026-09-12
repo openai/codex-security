@@ -4736,39 +4736,47 @@ describe("CLI", () => {
     );
   });
 
-  test("deduplicates live file progress and reports later scan phases", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const discovery = {
-      phase: "discovery",
-      filesCompleted: 8,
-      filesTotal: 8,
-    } as const;
+  test.each([0, 8])(
+    "reports scan phases with %p files and skips duplicate updates",
+    async (filesTotal) => {
+      const stdout = capture();
+      const stderr = capture();
+      const discovery = {
+        phase: "discovery",
+        filesCompleted: filesTotal,
+        filesTotal,
+      } as const;
 
-    expect(
-      await main(
-        ["scan", ".", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({
-          scanProgress: [
-            discovery,
-            discovery,
-            { phase: "validation", filesCompleted: 8, filesTotal: 8 },
-            { phase: "reporting", filesCompleted: 8, filesTotal: 8 },
-          ],
-        }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(
-      stderr.text().match(/Scan phase: reviewing files \(8\/8 files\)/g),
-    ).toHaveLength(1);
-    expect(stderr.text()).toContain(
-      "Scan phase: validating findings (8/8 files).",
-    );
-    expect(stderr.text()).toContain("Scan phase: writing report (8/8 files).");
-  });
+      expect(
+        await main(
+          ["scan", ".", "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            scanProgress: [
+              discovery,
+              discovery,
+              { phase: "validation", filesCompleted: filesTotal, filesTotal },
+              { phase: "reporting", filesCompleted: filesTotal, filesTotal },
+            ],
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      const count = filesTotal === 0 ? "" : " (8/8 files)";
+      expect(
+        stderr.text().split(`Scan phase: reviewing files${count}.`),
+      ).toHaveLength(2);
+      expect(stderr.text()).toContain(
+        `Scan phase: validating findings${count}.`,
+      );
+      expect(stderr.text()).toContain(`Scan phase: writing report${count}.`);
+      if (filesTotal === 0) {
+        expect(stderr.text()).not.toContain("Files:");
+        expect(stderr.text()).not.toContain("0/0");
+      }
+    },
+  );
 
   test("prints a truthful completion summary without changing JSON results", async () => {
     const stdout = capture();

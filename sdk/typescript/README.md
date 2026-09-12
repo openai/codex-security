@@ -209,6 +209,10 @@ protections as the CLI. The SDK records `failureSeverity` without throwing or
 changing process status. `hasFindingsAtOrAbove()` uses the CLI's severity ordering
 and leaves the findings unchanged.
 
+The scan's `onProgress` callback reports its current phase. Standard scans do
+not count reviewed files and return zero for `filesCompleted` and `filesTotal`.
+When `filesTotal` is zero, show the phase without a file counter.
+
 ## Authentication
 
 Sign in with ChatGPT:

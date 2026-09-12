@@ -892,7 +892,7 @@ def test_completion_preserves_findings_with_invalid_or_duplicate_writeups(
     assert (scan_dir / "report.md").is_file()
 
 
-def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path) -> None:
+def test_malformed_final_finding_is_reported_without_restoring_checkpoint(tmp_path: Path) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     findings = json.loads((scan_dir / "findings.json").read_text())
     checkpoint = {
@@ -905,8 +905,9 @@ def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path)
     findings["findings"][0]["summary"] = ""
     (scan_dir / "findings.json").write_text(json.dumps(findings))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
-    assert completed["findingCount"] == 1
-    assert completed["findings"][0]["summary"] == checkpoint["findings"][0]["summary"]
+    assert completed["findingCount"] == 0
+    assert "summary" in completed["warnings"][0]
+    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
 
 
 def test_duplicate_finding_with_malformed_history_does_not_block_valid_results(
