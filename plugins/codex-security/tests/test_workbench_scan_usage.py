@@ -702,3 +702,72 @@ def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
     )["scan"]
     assert failed["progress"]["status"] == "failed"
     assert "usage" not in failed
+
+
+def test_rollout_usage_reconciles_stale_cumulative_events_and_models(
+    tmp_path: Path, workbench_api
+) -> None:
+    usage_reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    events = [
+        _event(start, "turn_context", {"turn_id": "own-turn", "model": "gpt-5.6-sol"}),
+        _token_event(start, 100, 10),
+        _token_event(start, 60, 6),
+        _event(start, "turn_context", {"turn_id": "own-turn", "model": "gpt-6-astra"}),
+        _token_event(start, 200, 20),
+    ]
+    rollout = _rollout(tmp_path, "worker", events)
+    counts, warnings = usage_reader._read_rollout_usage(
+        usage_reader.RolloutSession("worker", None, rollout),
+        started_at=start,
+        completed_at=None,
+    )
+    assert counts == _counts(200, 0, 20)
+    assert warnings == set()
+    models = {}
+    counts, warnings = usage_reader._read_rollout_usage(
+        usage_reader.RolloutSession("worker", None, rollout),
+        started_at=start,
+        completed_at=None,
+        model_usage=models,
+    )
+    assert counts == _counts(200, 0, 20)
+    assert warnings == set()
+    assert models == {"gpt-5.6-sol": _counts(100, 0, 10), "gpt-6-astra": _counts(100, 0, 10)}
+
+
+def test_shared_parent_usage_requires_original_turn_and_scan_interval(
+    tmp_path: Path, workbench_api
+) -> None:
+    usage_reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    end = start + timedelta(seconds=5)
+    events = [
+        _event(
+            start - timedelta(seconds=1),
+            "turn_context",
+            {"turn_id": "prior", "model": "gpt-5.6-sol"},
+        ),
+        _token_event(start - timedelta(seconds=1), 100, 10),
+        _event(start, "turn_context", {"turn_id": "scan-turn", "model": "gpt-6-astra"}),
+        _token_event(start, 110, 12),
+        _event(start, "turn_context", {"turn_id": "unrelated", "model": "gpt-5.6-sol"}),
+        _token_event(start, 910, 92),
+        _event(
+            end + timedelta(seconds=1),
+            "turn_context",
+            {"turn_id": "scan-turn", "model": "gpt-6-astra"},
+        ),
+        _token_event(end + timedelta(seconds=1), 1000, 100),
+    ]
+    models = {}
+    counts, warnings = usage_reader._read_rollout_usage(
+        usage_reader.RolloutSession("parent", None, _rollout(tmp_path, "parent", events)),
+        started_at=start,
+        completed_at=end,
+        owner_turn_id="scan-turn",
+        model_usage=models,
+    )
+    assert counts == _counts(10, 0, 2)
+    assert warnings == set()
+    assert models == {"gpt-6-astra": _counts(10, 0, 2)}

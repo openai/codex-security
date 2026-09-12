@@ -90,7 +90,23 @@ def collect_scan_usage(
 ) -> dict[str, Any]:
     """Count only complete, attributable rollout events inside this scan's window."""
 
-    roots = _scan_root_thread_ids(connection, scan, thread_id)
+    attribution = scan_execution_attribution(connection, scan)
+    roots = (
+        list(
+            dict.fromkeys(
+                [
+                    *(
+                        [attribution["owner"]["threadId"]]
+                        if attribution["owner"].get("threadId")
+                        else []
+                    ),
+                    *attribution["executionThreadIds"],
+                ]
+            )
+        )
+        if attribution
+        else _scan_root_thread_ids(connection, scan, thread_id)
+    )
     if not roots:
         return _unavailable_usage("scan_thread_unavailable")
 
@@ -109,6 +125,7 @@ def collect_scan_usage(
             state_database,
             roots,
             warnings,
+            descendant_roots=set(attribution["executionThreadIds"]) if attribution else None,
         )
     except (OSError, sqlite3.Error, ValueError):
         return _unavailable_usage("codex_state_unavailable")
@@ -120,7 +137,20 @@ def collect_scan_usage(
     observed_thread_count = 0
     accepted_thread_ids: set[str] = set()
     excluded_thread_ids: set[str] = set()
+    model_usage: dict[str | None, dict[str, int]] = {}
     for session in sessions:
+        owner_turn_id = None
+        if (
+            attribution
+            and session.thread_id not in attribution["executionThreadIds"]
+            and session.parent_thread_id is None
+        ):
+            owner = attribution["owner"]
+            if session.thread_id != owner.get("threadId") or not owner.get("turnId"):
+                missing_thread_ids.add(session.thread_id)
+                warnings.add("scan_owner_turn_unavailable")
+                continue
+            owner_turn_id = owner["turnId"]
         if session.parent_thread_id in excluded_thread_ids:
             excluded_thread_ids.add(session.thread_id)
             continue
@@ -136,6 +166,8 @@ def collect_scan_usage(
                 session,
                 started_at=started_at,
                 completed_at=stopped_at,
+                owner_turn_id=owner_turn_id,
+                model_usage=model_usage,
             )
         except (OSError, UnicodeError, ValueError):
             missing_thread_ids.add(session.thread_id)
@@ -170,6 +202,8 @@ def collect_scan_usage(
         result["missingThreadCount"] = len(missing_thread_ids)
     if warnings:
         result["warnings"] = sorted(warnings)
+    if attribution or any(model is not None for model in model_usage):
+        result["modelUsage"] = [{"model": model, **usage} for model, usage in model_usage.items()]
     return result
 
 
@@ -197,12 +231,13 @@ def _scan_root_thread_ids(
             row["sdk_thread_id"]
             for row in connection.execute(
                 """
-                SELECT DISTINCT sdk_thread_id
-                FROM deep_scan_workers
+                SELECT sdk_thread_id FROM deep_scan_attempt_sessions WHERE scan_id = ?
+                UNION
+                SELECT sdk_thread_id FROM deep_scan_workers
                 WHERE scan_id = ? AND sdk_thread_id IS NOT NULL
                 ORDER BY sdk_thread_id
                 """,
-                (scan["id"],),
+                (scan["id"], scan["id"]),
             )
         )
     roots: list[str] = []
@@ -222,6 +257,85 @@ def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row
         scan["continuation_thread_id"] if scan["recipe_json"] is not None else None,
         include_owner_threads=False,
     )
+
+
+def capture_scan_usage_owner(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
+    """Bind the active native turn once; joining a scan does not bind later conversation work."""
+    roots = _scan_root_thread_ids(connection, scan, None)
+    owner = roots[0] if roots else None
+    result = {
+        "threadId": owner,
+        "turnId": None,
+        "startedAt": scan["started_at"],
+        "dedicated": scan["recipe_json"] is not None,
+    }
+    database = _codex_state_database()
+    if owner is None or database is None:
+        return result
+    try:
+        sessions, _ = _discover_rollout_sessions(database, [owner], set(), descendant_roots=set())
+        if not sessions:
+            return result
+        with sessions[0].path.open("rb") as source:
+            for line in source:
+                if not line.endswith(b"\n"):
+                    continue
+                event = json.loads(line)
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if event.get("type") == "turn_context" or (
+                    event.get("type") == "event_msg" and payload.get("type") == "task_started"
+                ):
+                    turn_id = payload.get("turn_id")
+                    if isinstance(turn_id, str):
+                        result["turnId"] = turn_id
+                elif event.get("type") == "event_msg" and payload.get("type") == "task_complete":
+                    result["turnId"] = None
+    except (OSError, ValueError, sqlite3.Error):
+        # Accounting availability must not prevent a scan from starting.
+        pass
+    return result
+
+
+def scan_execution_attribution(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> dict[str, Any] | None:
+    if scan["mode"] != "deep":
+        return None
+    run = connection.execute(
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
+    ).fetchone()
+    if run is None:
+        return None
+    owner_json = run["usage_owner_json"] if "usage_owner_json" in run.keys() else None
+    if owner_json is None:
+        if (
+            connection.execute(
+                "SELECT 1 FROM deep_scan_attempts WHERE scan_id = ? LIMIT 1", (scan["id"],)
+            ).fetchone()
+            is None
+        ):
+            return None
+        roots = _scan_root_thread_ids(connection, scan, None)
+        owner = {
+            "threadId": roots[0] if roots else None,
+            "turnId": None,
+            "startedAt": scan["started_at"],
+            "dedicated": scan["recipe_json"] is not None,
+        }
+    else:
+        owner = json.loads(owner_json)
+    executions = _scan_execution_thread_ids(connection, scan)
+    if owner.get("dedicated") and owner.get("threadId") not in executions:
+        executions.append(owner["threadId"])
+    return {
+        "formatVersion": 1,
+        "executionThreadIds": executions,
+        "owner": owner,
+        "startedAt": scan["started_at"],
+        "completedAt": scan["completed_at"],
+    }
 
 
 def _codex_state_database() -> Path | None:
@@ -263,6 +377,8 @@ def _discover_rollout_sessions(
     state_database: Path,
     roots: list[str],
     warnings: set[str],
+    *,
+    descendant_roots: set[str] | None = None,
 ) -> tuple[list[RolloutSession], set[str]]:
     database = sqlite3.connect(
         state_database.as_uri() + "?mode=ro",
@@ -298,6 +414,8 @@ def _discover_rollout_sessions(
                     continue
                 sessions.append(RolloutSession(root, None, path))
                 seen_thread_ids.add(root)
+            if descendant_roots is not None and root not in descendant_roots:
+                continue
             descendants = database.execute(
                 """
                 WITH RECURSIVE descendants(
@@ -402,12 +520,16 @@ def _read_rollout_usage(
     *,
     started_at: datetime,
     completed_at: datetime | None,
+    owner_turn_id: str | None = None,
+    model_usage: dict[str | None, dict[str, int]] | None = None,
 ) -> tuple[dict[str, int], set[str]]:
     total = _empty_token_usage()
     warnings: set[str] = set()
     previous = _empty_token_usage()
     boundary_reached = False
     usage_observed = False
+    current_turn_id: str | None = None
+    current_model: str | None = None
 
     with session.path.open("rb") as source:
         for line_number, raw_line in enumerate(source, start=1):
@@ -427,6 +549,10 @@ def _read_rollout_usage(
                     warnings.add("rollout_record_invalid")
                 continue
             payload = event.get("payload")
+            if event.get("type") in {"session_meta", "turn_context"} and isinstance(payload, dict):
+                model = payload.get("model")
+                if isinstance(model, str) and model:
+                    current_model = model
             if line_number == 1:
                 if event.get("type") != "session_meta" or not isinstance(payload, dict):
                     warnings.add("thread_identity_mismatch")
@@ -449,6 +575,10 @@ def _read_rollout_usage(
 
             if not isinstance(payload, dict):
                 continue
+            if event.get("type") == "turn_context" or (
+                event.get("type") == "event_msg" and payload.get("type") == "task_started"
+            ):
+                current_turn_id = payload.get("turn_id")
             if not boundary_reached:
                 if _is_owned_task_start(session.thread_id, event, payload):
                     task_started_at = _timestamp(event.get("timestamp"))
@@ -473,19 +603,24 @@ def _read_rollout_usage(
             if timestamp is None or snapshot is None:
                 warnings.add("token_record_invalid")
                 continue
-            delta = {
-                key: value - previous[key] if value >= previous[key] else value
-                for key, value in snapshot.items()
-            }
+            if snapshot["totalTokens"] < previous["totalTokens"]:
+                continue
+            delta = {key: max(0, value - previous[key]) for key, value in snapshot.items()}
             previous = snapshot
             if timestamp < started_at:
                 continue
             if completed_at is not None and timestamp > completed_at:
                 continue
+            if owner_turn_id is not None and current_turn_id != owner_turn_id:
+                continue
             usage_observed = True
+            if model_usage is not None:
+                model_usage.setdefault(current_model, _empty_token_usage())
             if delta["totalTokens"] <= 0:
                 continue
             _add_token_usage(total, delta)
+            if model_usage is not None:
+                _add_token_usage(model_usage.setdefault(current_model, _empty_token_usage()), delta)
 
     if not boundary_reached:
         warnings.add("thread_ownership_unavailable")

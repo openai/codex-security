@@ -137,6 +137,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         "threadCount",
         "missingThreadCount",
         "warnings",
+        "modelUsage",
         *SCAN_USAGE_TOKEN_KEYS,
     }
     if thread_count == 0 or not set(usage).issubset(allowed_keys):
@@ -144,6 +145,19 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     counts = {key: usage.get(key) for key in SCAN_USAGE_TOKEN_KEYS}
     if not _valid_scan_token_counts(counts):
         return False
+    if "modelUsage" in usage:
+        parts = usage["modelUsage"]
+        if not isinstance(parts, list) or not parts:
+            return False
+        for part in parts:
+            if not isinstance(part, dict) or set(part) != {"model", *SCAN_USAGE_TOKEN_KEYS}:
+                return False
+            if part["model"] is not None and not isinstance(part["model"], str):
+                return False
+            if not _valid_scan_token_counts({key: part[key] for key in SCAN_USAGE_TOKEN_KEYS}):
+                return False
+        if any(sum(part[key] for part in parts) != counts[key] for key in SCAN_USAGE_TOKEN_KEYS):
+            return False
     missing = usage.get("missingThreadCount", 0)
     if type(missing) is not int or missing < 0:
         return False
