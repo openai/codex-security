@@ -1241,8 +1241,15 @@ def budget_exhausted_draft(
         path = db.artifact_path(scan_dir, name, required=False)
         if path is not None:
             documents[name] = db.read_json_object(path)
+    interrupted_documents = {}
     if documents and len(documents) != 3:
-        raise SystemExit("Budget-exhausted scan contains an incomplete canonical scan draft.")
+        if not before_selection or set(documents) not in (
+            {"findings.json"},
+            {"findings.json", "coverage.json"},
+        ):
+            raise SystemExit("Budget-exhausted scan contains an incomplete canonical scan draft.")
+        interrupted_documents = documents
+        documents = {}
 
     if documents:
         manifest = documents["scan-manifest.json"]
@@ -1380,11 +1387,20 @@ def budget_exhausted_draft(
             }
         )
     coverage["completeness"] = "partial"
-    for name, payload in (
+    outputs = (
         ("findings.json", findings),
         ("coverage.json", coverage),
         ("scan-manifest.json", manifest),
+    )
+    # Process death can leave a prefix of these derived writes before SQLite
+    # commits. Recover only bytes whose documents match the accepted inputs.
+    if any(
+        interrupted_documents[name] != payload
+        for name, payload in outputs
+        if name in interrupted_documents
     ):
+        raise SystemExit("Budget-exhausted scan contains an incomplete canonical scan draft.")
+    for name, payload in outputs:
         try:
             write_scan_local_bytes(
                 scan_dir,

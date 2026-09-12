@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import subprocess
+import sys
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 from test_accepted_publication_references import accept_reducer
@@ -433,3 +436,242 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         with pytest.raises(SystemExit, match="stopped"):
             workbench_api["write_scan_draft"](connection, staged)
         assert published_bytes(scan) == frozen
+
+
+@pytest.mark.parametrize("cut", ["after-findings", "after-coverage", "after-draft-commit"])
+@pytest.mark.parametrize("has_reducer", [False, True])
+def test_budget_process_death_replays_exact_evidence(
+    workbench_api, workbench_db, publication_scan, tmp_path, cut, has_reducer
+):
+    scan = publication_scan()
+    thread_id = "a23e657b-c14c-4da7-bd20-baa9e7579390"
+    workbench_api["set_scan_thread"](
+        workbench_db, Namespace(scan_id=scan.scan_id, thread_id=thread_id)
+    )
+    accepted = None
+    if has_reducer:
+        _, accepted, _ = accept_reducer(workbench_db, scan)
+    unmerged = accept_unmerged(workbench_db, scan)
+    originals = {str(p): p.read_bytes() for p in [unmerged, *([accepted] if accepted else [])]}
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    with workbench_db:
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status='running', workflow_version='deep-security-scan/v2'"
+        )
+    database = tmp_path / "budget-process-cut.sqlite3"
+    with sqlite3.connect(database) as db:
+        workbench_db.backup(db)
+    budget = workbench_api["complete_budget_exhausted_scan"]
+    args = Namespace(
+        scan_id=scan.scan_id,
+        cost_json=json.dumps(BUDGET_COST),
+        message="Original synthetic cost stop.",
+    )
+    marker = tmp_path / "crash-marker.json"
+    child_source = """
+from argparse import Namespace
+from pathlib import Path
+import json
+import os
+import runpy
+import sqlite3
+import sys
+
+script, database, scan_id, cost_json, warning, cut, marker = sys.argv[1:]
+api = runpy.run_path(str(script), run_name='fault_review_budget_child')
+budget = api['complete_budget_exhausted_scan']
+deep = budget.__globals__['deep_scan']
+deep.configure(deep.DeepScanDependencies(**{
+    name: api['preserve_stopped_results_after_transition' if name == 'preserve_stopped_results' else name]
+    for name in deep.DeepScanDependencies.__dataclass_fields__
+}))
+
+
+def terminate(stage):
+    Path(marker).write_text(json.dumps({'stage': stage, 'pid': os.getpid()}))
+    os._exit(86)
+
+
+if cut == 'after-draft-commit':
+    budget.__globals__['complete_scan_locked'] = lambda *a, **kw: terminate(cut)
+else:
+    saved = budget.__globals__['saved_results']
+    original = saved.write_scan_local_bytes
+
+    def write_then_die(scan_dir, name, contents):
+        result = original(scan_dir, name, contents)
+        if name == ('findings.json' if cut == 'after-findings' else 'coverage.json'):
+            terminate(cut)
+        return result
+
+    saved.write_scan_local_bytes = write_then_die
+
+with sqlite3.connect(database) as connection:
+    connection.row_factory = sqlite3.Row
+    connection.execute('PRAGMA foreign_keys=ON')
+    budget(connection, Namespace(scan_id=scan_id, cost_json=cost_json, message=warning))
+os._exit(87)
+"""
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            child_source,
+            workbench_api["__file__"],
+            str(database),
+            scan.scan_id,
+            args.cost_json,
+            args.message,
+            cut,
+            str(marker),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert child.returncode == 86, (child.returncode, child.stdout, child.stderr)
+    assert json.loads(marker.read_text())["stage"] == cut
+    before = {
+        name: (scan.scan_dir / name).exists()
+        for name in ("findings.json", "coverage.json", "scan-manifest.json")
+    }
+    with sqlite3.connect(database) as db:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
+        run = dict(db.execute("SELECT * FROM deep_scan_runs").fetchone())
+        snapshot = {
+            "cut": cut,
+            "hasReducer": has_reducer,
+            "database": str(database),
+            "scanDir": str(scan.scan_dir),
+            "beforeFiles": before,
+            "beforeStatus": run["status"],
+            "beforeSelection": run["finalization_input_json"],
+        }
+        saved_scan = workbench_api["require_scan"](db, scan.scan_id)
+        resumed = workbench_api["scan_history"].cli_scan_resume(
+            db,
+            saved_scan,
+            workbench_api["require_workspace"](db, saved_scan["workspace_id"]),
+            **{
+                name: workbench_api[source]
+                for name, source in {
+                    "parse_scan_recipe": "parse_scan_recipe",
+                    "scan_contract": "scan_contract",
+                    "require_scan_directory": "require_canonical_scan_directory",
+                    "artifact_path": "artifact_path",
+                    "read_json_object": "read_json_object",
+                    "workbench_completion_binding": "workbench_completion_binding",
+                }.items()
+            },
+        )
+        assert resumed["scanId"] == scan.scan_id
+        assert resumed["threadId"] == thread_id
+        try:
+            budget(db, args)
+        except BaseException as error:
+            snapshot["replayError"] = str(error)
+            (tmp_path / "crash-result.json").write_text(json.dumps(snapshot, indent=2))
+            raise
+        snapshot["afterStatus"] = db.execute("SELECT status FROM scans").fetchone()[0]
+        snapshot["afterSelection"] = db.execute(
+            "SELECT finalization_input_json FROM deep_scan_runs"
+        ).fetchone()[0]
+        (tmp_path / "crash-result.json").write_text(json.dumps(snapshot, indent=2))
+        assert snapshot["afterStatus"] == "complete"
+        if run["finalization_input_json"] is not None:
+            assert snapshot["afterSelection"] == run["finalization_input_json"]
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert len(findings) == int(has_reducer)
+    assert coverage["completeness"] == "partial"
+    assert len({x["id"] for x in coverage["deferred"]}) == len(coverage["deferred"])
+    assert all(Path(path).read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("files", ["findings", "coverage", "manifest", "findings-and-coverage"])
+def test_budget_rejects_unrelated_incomplete_drafts(
+    workbench_api, workbench_db, publication_scan, files
+):
+    scan = publication_scan()
+    accept_unmerged(workbench_db, scan)
+    keep = {
+        "findings": {"findings.json"},
+        "coverage": {"coverage.json"},
+        "manifest": {"scan-manifest.json"},
+        "findings-and-coverage": {"findings.json", "coverage.json"},
+    }[files]
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        if name not in keep:
+            (scan.scan_dir / name).unlink()
+    before = {name: (scan.scan_dir / name).read_bytes() for name in keep}
+    with workbench_db:
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', workflow_version = 'deep-security-scan/v2'"
+        )
+    with pytest.raises(SystemExit, match="incomplete canonical scan draft"):
+        workbench_api["complete_budget_exhausted_scan"](
+            workbench_db,
+            Namespace(
+                scan_id=scan.scan_id,
+                cost_json=json.dumps(BUDGET_COST),
+                message="Original cost stop.",
+            ),
+        )
+    assert {name: (scan.scan_dir / name).read_bytes() for name in keep} == before
+    assert all(
+        not (scan.scan_dir / name).exists()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+        if name not in keep
+    )
+    assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "running"
+
+
+@pytest.mark.parametrize(
+    "state", ["parent-canceled", "stopping", "failed", "canceled", "unselected"]
+)
+def test_budget_resume_keeps_explicit_stop_and_unselected_guards(
+    workbench_api, workbench_db, publication_scan, state
+):
+    scan = publication_scan()
+    workbench_api["set_scan_thread"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, thread_id="a23e657b-c14c-4da7-bd20-baa9e7579390"),
+    )
+    with workbench_db:
+        if state == "parent-canceled":
+            workbench_db.execute("UPDATE scans SET canceled_at = ?", (scan.timestamp,))
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = ?, cancel_requested = 1, finalization_input_json = NULL",
+            (
+                "running"
+                if state == "stopping"
+                else state
+                if state in {"failed", "canceled"}
+                else "succeeded",
+            ),
+        )
+    saved_scan = workbench_api["require_scan"](workbench_db, scan.scan_id)
+    with pytest.raises(SystemExit, match="cannot resume"):
+        workbench_api["scan_history"].cli_scan_resume(
+            workbench_db,
+            saved_scan,
+            workbench_api["require_workspace"](workbench_db, saved_scan["workspace_id"]),
+            **{
+                name: workbench_api[source]
+                for name, source in {
+                    "parse_scan_recipe": "parse_scan_recipe",
+                    "scan_contract": "scan_contract",
+                    "require_scan_directory": "require_canonical_scan_directory",
+                    "artifact_path": "artifact_path",
+                    "read_json_object": "read_json_object",
+                    "workbench_completion_binding": "workbench_completion_binding",
+                }.items()
+            },
+        )

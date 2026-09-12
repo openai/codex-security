@@ -75,10 +75,16 @@ def cli_scan_resume(
     ):
         raise SystemExit("Resume requires the original owning CLI session.")
     run = connection.execute(
-        "SELECT status, cancel_requested FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
+        "SELECT status, cancel_requested, finalization_input_json FROM deep_scan_runs "
+        "WHERE scan_id = ?",
+        (scan["id"],),
     ).fetchone()
     if run is not None and (
-        run["status"] not in {"running", "succeeded"} or run["cancel_requested"]
+        run["status"] not in {"running", "succeeded"}
+        or (
+            run["cancel_requested"]
+            and not (run["status"] == "succeeded" and run["finalization_input_json"] is not None)
+        )
     ):
         raise SystemExit("This Deep Scan has stopped and cannot resume.")
     try:
