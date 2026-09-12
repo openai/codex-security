@@ -8348,10 +8348,10 @@ async function executeScan(
           if (status.kind === "dispatch") {
             dashboard.setStage(scanPhase(status.phase));
           }
-          if (message !== null) dashboard.note(message);
+          dashboard.note(message);
           return;
         }
-        if (message === null || progress === null) return;
+        if (progress === null) return;
         progress.stopTimer();
         progress.stage(message);
         progress.startTimer(runningMessage());
@@ -9242,7 +9242,7 @@ export function parseCodexOverrides(
   return result;
 }
 
-function workerStatusMessage(status: ScanWorkerStatus): string | null {
+function workerStatusMessage(status: ScanWorkerStatus): string {
   if (status.kind === "preflight") {
     if (status.delegation === "unavailable") {
       return "Preflight: worker delegation unavailable; continuing without delegated workers.";

@@ -2486,7 +2486,7 @@ def require_reviewed_patch_applied(
             checkout = checkout_root
             copy_directory_excluding(target, checkout, excluded)
         else:
-            checkout = copy_git_worktree_files(target, checkout_root, excluded)
+            copy_git_worktree_files(target, checkout_root, excluded)
         arguments = ["apply", "--reverse", "--whitespace=nowarn"]
         if unversioned:
             arguments.append("--no-index")
