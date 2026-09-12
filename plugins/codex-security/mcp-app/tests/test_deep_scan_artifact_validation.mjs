@@ -202,7 +202,7 @@ async function testReducerValidation(root) {
     "worker-001",
     draft([firstFinding])
   );
-  const second = await createWorker(
+  await createWorker(
     artifacts,
     "discovery-0002",
     "worker-002",
