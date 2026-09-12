@@ -18,6 +18,7 @@ export class DeepScanCoordinatorRegistry {
   }
 
   start(options: CoordinatorOptions): DeepScanCoordinator {
+    requireSupportedDeepScan(options.run);
     const existing = this.coordinators.get(options.run.scanId);
     if (existing) return existing;
     const { observeReplacement: _unused, ...remoteOptions } = options;
@@ -136,6 +137,7 @@ export class DeepScanRemoteCoordinator {
         continue;
       }
       if (run.status !== "running") return run;
+      requireSupportedDeepScan(run);
 
       const heartbeat = run.updatedAt ? Date.parse(run.updatedAt) : Number.NaN;
       if (
@@ -190,6 +192,7 @@ export async function startOrJoinDeepScanCoordinator(input: {
   coordinator: DeepScanCoordinator | DeepScanRemoteCoordinator;
   joined: boolean;
 }> {
+  requireSupportedDeepScan(input.begin.run);
   const existing = input.registry.get(input.begin.run.scanId);
   if (existing) return { coordinator: existing, joined: true };
   const threadId = input.options.threadId;
@@ -215,6 +218,21 @@ export async function startOrJoinDeepScanCoordinator(input: {
     coordinator: input.registry.start({ ...input.options, run: claim.run }),
     joined: false
   };
+}
+
+function requireSupportedDeepScan(run: DeepScanRunState): void {
+  // Missing versions are supported for older adapters that did not project them.
+  if (
+    (run.schemaVersion !== undefined && run.schemaVersion !== 1)
+    || (run.workflowVersion !== undefined
+      && run.workflowVersion !== "deep-security-scan/v1"
+      && run.workflowVersion !== "deep-scan-mcp/v1")
+  ) {
+    throw new Error(
+      "This Deep Scan uses an unsupported workflow or schema version. "
+      + "Resume it with a compatible Codex Security release."
+    );
+  }
 }
 
 function remoteAbortError(reason: unknown): Error {

@@ -38,6 +38,7 @@ DEEP_SCAN_REPLACEABLE_FAILURE_KINDS = (
 )
 DEEP_SCAN_TERMINAL_REASONS = ("saturated", "capped")
 DEEP_SCAN_WORKFLOW_VERSION = "deep-security-scan/v1"
+SUPPORTED_DEEP_SCAN_WORKFLOWS = {DEEP_SCAN_WORKFLOW_VERSION, "deep-scan-mcp/v1"}
 DEEP_SCAN_COORDINATOR_LEASE_SECONDS = 30
 DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS = 120
 DEEP_SCAN_MAX_ERROR_LENGTH = 2400
@@ -264,6 +265,14 @@ def require_deep_scan_run(connection: sqlite3.Connection, scan_id: str) -> sqlit
     return row
 
 
+def require_supported_deep_scan(run: sqlite3.Row) -> None:
+    if run["schema_version"] != 1 or run["workflow_version"] not in SUPPORTED_DEEP_SCAN_WORKFLOWS:
+        raise SystemExit(
+            "This Deep Scan uses an unsupported workflow or schema version. "
+            "Resume it with a compatible Codex Security release."
+        )
+
+
 def deep_scan_deadline_reached(run: sqlite3.Row) -> bool:
     elapsed = _parse_timestamp(now()) - _parse_timestamp(str(run["created_at"]))
     return elapsed.total_seconds() / 3600 >= run["max_time_hours"]
@@ -453,7 +462,11 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "scanId": run["scan_id"],
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
-        "userContext": scan["user_context"],
+        "userContext": (
+            run["discovery_user_context"]
+            if "discovery_user_context" in run.keys()
+            else scan["user_context"]
+        ),
         "scanDir": scan["scan_dir"],
         "schemaVersion": run["schema_version"],
         "workflowVersion": run["workflow_version"],
@@ -572,6 +585,7 @@ def ensure_deep_scan_run(
         "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
     ).fetchone()
     if existing is not None:
+        require_supported_deep_scan(existing)
         return existing
     if scan["mode"] != "deep":
         raise SystemExit("Deep Scan orchestration requires a scan in deep mode.")
@@ -687,6 +701,11 @@ def begin_deep_scan_for_scan(
 ) -> dict[str, Any]:
     scan_id = require_uuid(scan_id, "scan-id")
     candidate = require_scan(connection, scan_id)
+    existing = connection.execute(
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+    ).fetchone()
+    if existing is not None:
+        require_supported_deep_scan(existing)
     workspace = require_workspace(connection, candidate["workspace_id"])
     if (
         candidate["mode"] == "deep"
@@ -788,8 +807,10 @@ def begin_deep_scan_for_target(
         existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
         if existing is not None:
             existing_run = connection.execute(
-                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ?", (existing["id"],)
+                "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (existing["id"],)
             ).fetchone()
+            if existing_run is not None:
+                require_supported_deep_scan(existing_run)
             if existing_run is None:
                 config = effective_deep_scan_config(args)
                 workflow_version = optional_text(args.workflow_version, maximum=256)
@@ -979,6 +1000,7 @@ def coordinator_lease_is_live(
 
 
 def require_current_coordinator(run: sqlite3.Row, args: argparse.Namespace) -> None:
+    require_supported_deep_scan(run)
     generation = getattr(args, "coordinator_generation", None)
     if run["coordinator_generation"] == 1:
         if generation is not None:
@@ -1047,6 +1069,7 @@ def claim_deep_scan_coordinator_locked(
 def recover_expired_coordinator(
     connection: sqlite3.Connection, run: sqlite3.Row, timestamp: str
 ) -> None:
+    require_supported_deep_scan(run)
     scan_id = run["scan_id"]
     recover_candidate_ledger_publication(connection, scan_id)
     legacy_generation = int(run["coordinator_generation"] == 1)
@@ -1173,6 +1196,7 @@ def require_running_deep_scan(
     connection: sqlite3.Connection, scan_id: str
 ) -> tuple[sqlite3.Row, sqlite3.Row]:
     run = require_deep_scan_run(connection, scan_id)
+    require_supported_deep_scan(run)
     scan = require_scan(connection, run["scan_id"])
     if run["status"] != "running" or run["cancel_requested"]:
         raise SystemExit("Only a running Deep Scan can update orchestration state.")

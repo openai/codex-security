@@ -39,6 +39,8 @@ export type DeepScanReducerArtifacts = DeepScanCanonicalArtifacts;
 
 export interface DeepScanRunState {
   scanId: string;
+  schemaVersion?: number;
+  workflowVersion?: string;
   status: DeepScanRunStatus;
   phase?: "setup" | "discovery" | "reducing" | "terminal";
   coordinatorGeneration?: number;
