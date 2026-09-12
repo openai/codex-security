@@ -682,6 +682,7 @@ async function testOpenAiCredentialsReachWorker() {
     { codex: "synthetic-selected-key", expected: "synthetic-selected-key" },
     { openai: "synthetic-openai-key", accountResult: { account: { type: "apiKey" }, requiresOpenaiAuth: true } },
     { openai: "synthetic-openai-key", accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true } },
+    { accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true } },
     { openai: "synthetic-provider-key", accountResult: { account: null, requiresOpenaiAuth: false } },
     {},
     { openai: " " }

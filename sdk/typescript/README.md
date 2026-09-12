@@ -294,9 +294,14 @@ verification also synchronize the ambient home's project-trust decisions and
 project-root markers, preserving which project configuration Codex loads.
 They hold the credential-home lock until the app-server thread is ready,
 then release it before model execution.
-Managed-device policies still apply. If this home has no credentials, it imports
-an existing file-based Codex sign-in. Logout disables
-imports until you log in again.
+Managed-device policies still apply. Without an overriding environment API key,
+scans and status checks import existing file-based Codex credentials when this
+home is empty. Import errors make `login status` exit with code 2 and SDK
+`account()` reject its promise. Logout disables imports until you log in again.
+Status imports and logout share the credential-home lock so a concurrent status
+check cannot restore credentials after logout completes.
+Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
+`HOME` or `USERPROFILE` environment setting.
 
 Finish operations using older versions before upgrading. Runtime preparation
 holds the credential-home lock through pauses; exit or crash releases it.
