@@ -9,14 +9,17 @@ const bundle = await build({
   stdin: {
     contents: `export * from "./src/artifact-scan-draft.ts";
       export * from "./src/deep-scan/artifact-validation.ts";
-      export * from "./src/deep-scan/artifacts.ts";`,
+      export * from "./src/deep-scan/artifacts.ts";
+      export * from "../../../sdk/typescript/src/accepted-audit.ts";`,
     resolveDir: path.resolve(import.meta.dirname, ".."),
   },
   bundle: true, format: "esm", platform: "node", write: false,
+  footer: { js: "//# sourceURL=audit-acceptance-contract.js" },
 });
 const {
   createDeepScanArtifacts, recordCodexSecurityScanDraft,
   recordCodexSecurityWorkerScanDraft, validateDiscoveryArtifacts,
+  readDiscoveryAuditDraft, auditEvidence, runAcceptedAudit,
 } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`);
 
 const scanId = "811aef98-3709-4c2d-8b7a-742977521865";
@@ -67,6 +70,16 @@ for (const completeness of ["complete", "partial", "unknown"]) {
       await recordCodexSecurityWorkerScanDraft(worker, checkpoint);
       await assert.rejects(validateDiscoveryArtifacts(artifacts, path.join(workerRoot, "result.json"), scanId), /checkpoint/);
       assert.equal(JSON.parse(await readFile(path.join(scanDir, "scan-manifest.json"))).scan.complete, false);
+      const controller = new AbortController();
+      const execute = async () => ({ threadId: "audit-conversation", usage: null });
+      const accept = async () => auditEvidence(await readDiscoveryAuditDraft(
+        artifacts, path.join(workerRoot, "result.json"), scanId,
+      ));
+      const unfinished = await runAcceptedAudit({ signal: controller.signal, execute, accept });
+      assert.equal(unfinished.status, "checkpoint");
+      assert.equal(unfinished.checkpoint.complete, false);
+      assert.equal(unfinished.accepted, undefined);
+      assert.equal(unfinished.execution.usage, null);
       const standardWrite = await recordCodexSecurityScanDraft(standard, semantic);
       const deepWrite = await recordCodexSecurityWorkerScanDraft(worker, semantic);
       assert.equal(standardWrite.status, "draft_written");
@@ -85,6 +98,24 @@ for (const completeness of ["complete", "partial", "unknown"]) {
         assert.deepEqual(coverage[field], accepted.coverage[field]);
       }
       assert.equal(accepted.scanId, scanId);
+      const audit = await runAcceptedAudit({ signal: controller.signal, execute, accept });
+      assert.equal(audit.status, "accepted");
+      assert.deepEqual(audit.accepted, accepted);
+      assert.deepEqual(audit.checkpoint, accepted);
+      const failure = new Error("Synthetic execution failure");
+      const failed = await runAcceptedAudit({ signal: controller.signal,
+        execute: async () => { throw failure; },
+        accept: async () => { assert.fail("An execution failure cannot accept old output"); },
+      });
+      assert.equal(failed.status, "failed");
+      assert.equal(failed.stage, "execution");
+      assert.equal(failed.error, failure);
+      assert.equal(failed.accepted, undefined);
+      const canceled = await runAcceptedAudit({ signal: controller.signal, execute,
+        accept: async () => { const evidence = await accept(); controller.abort("user canceled"); return evidence; },
+      });
+      assert.equal(canceled.status, "canceled");
+      assert.deepEqual(canceled.checkpoint, accepted);
       assert.equal(manifest.scan.sealedAt, undefined);
       assert.equal(manifest.scan.artifacts, undefined);
       assert.equal((await readdir(workerRoot)).includes("scan-manifest.json"), false);

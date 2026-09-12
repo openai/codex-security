@@ -73,6 +73,16 @@ export async function validateDiscoveryArtifacts(
   resultPath: string,
   expectedScanId: string
 ): Promise<ScanDraftInput> {
+  const result = await readDiscoveryAuditDraft(artifacts, resultPath, expectedScanId);
+  if (result.complete === false) throw new Error("Standard scan worker wrote only a checkpoint; its audit is not complete.");
+  return result;
+}
+
+export async function readDiscoveryAuditDraft(
+  artifacts: DeepScanArtifacts,
+  resultPath: string,
+  expectedScanId: string,
+): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const result = parseStoredScanDraft(
     await readJsonObject(resultPath),
@@ -80,7 +90,6 @@ export async function validateDiscoveryArtifacts(
     expectedScanId,
     parsePersistedScanDraft
   );
-  if (result.complete === false) throw new Error("Standard scan worker wrote only a checkpoint; its audit is not complete.");
   return result;
 }
 

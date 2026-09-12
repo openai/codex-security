@@ -1,8 +1,10 @@
+import type { ScanDraftInput } from "../artifact-scan-draft.js";
+import { auditEvidence, runAcceptedAudit } from "../../../../../sdk/typescript/src/accepted-audit.js";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
-  validateDiscoveryArtifacts,
+  readDiscoveryAuditDraft,
   validateReducerArtifacts
 } from "./artifact-validation.js";
 import type { DeepReductionInput, ReducerArtifactValidation } from "./artifact-validation.js";
@@ -163,8 +165,9 @@ export class DeepScanWorkerRunner {
       artifactContext: { root: artifactDir, layout: "worker" },
       subagents: run.config.subagents,
       validate: async () => {
-        await validateDiscoveryArtifacts(artifacts, files.resultPath, run.scanId);
-        discoveryValidated = true;
+        const draft = await readDiscoveryAuditDraft(artifacts, files.resultPath, run.scanId);
+        discoveryValidated = draft.complete !== false;
+        return draft;
       },
       beforeRetry: async (attempt) => {
         await archiveDirectory(
@@ -424,7 +427,7 @@ export class DeepScanWorkerRunner {
     artifactDir: string;
     artifactContext?: CodexWorkerArtifactContext;
     subagents: number;
-    validate: () => Promise<void>;
+    validate: () => Promise<ScanDraftInput | void>;
     beforeRetry: (attempt: number) => Promise<void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
@@ -459,7 +462,7 @@ export class DeepScanWorkerRunner {
         attempt
       });
       try {
-        const result = await this.options.executor.run({
+        const execute = () => this.options.executor.run({
           kind: input.kind,
           promptPath: executionPromptPath,
           // Discovery workers write only to their isolated directory. Setup and
@@ -488,19 +491,37 @@ export class DeepScanWorkerRunner {
             });
           }
         });
-        if (signal.aborted) {
-          return await this.cancelAttempt(input, attempt, activeThreadId);
+        const accept = async (result: Awaited<ReturnType<typeof execute>>) => {
+          validationStarted = true;
+          let accepted: ScanDraftInput | void;
+          try {
+            accepted = await input.validate();
+          } catch (validationError) {
+            throw withWorkerDiagnostics(validationError, result.diagnostics);
+          }
+          validationCompleted = accepted?.complete !== false;
+          return accepted === undefined ? {} : auditEvidence(accepted);
+        };
+        // Reducers keep their aggregate contract; discovery uses the shared audit.
+        const audit = input.kind === "discovery"
+          ? await runAcceptedAudit({ signal, execute, accept })
+          : undefined;
+        let result: Awaited<ReturnType<typeof execute>>;
+        if (audit) {
+          if (audit.status === "checkpoint") {
+            throw withWorkerDiagnostics(
+              new Error("Standard scan worker wrote only a checkpoint; its audit is not complete."),
+              audit.execution.diagnostics,
+            );
+          }
+          if (audit.status === "accepted") result = audit.execution;
+          else throw audit.error;
+        } else {
+          result = await execute();
+          if (signal.aborted) return await this.cancelAttempt(input, attempt, activeThreadId);
+          await accept(result);
         }
-        validationStarted = true;
-        try {
-          await input.validate();
-        } catch (validationError) {
-          throw withWorkerDiagnostics(validationError, result.diagnostics);
-        }
-        validationCompleted = true;
-        if (signal.aborted) {
-          return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
+        if (signal.aborted) return await this.cancelAttempt(input, attempt, activeThreadId);
         this.options.log({
           event: "worker_succeeded",
           scanId: run.scanId,
