@@ -131,14 +131,11 @@ def collect_scan_usage(
         worker_roots = set(
             _scan_root_thread_ids(connection, scan, None, include_owner_threads=False)
         )
-        # Restored workers use their recorded home. A current owner or CLI
-        # continuation still belongs to the current process's native state.
+        # Workers retain their Codex home, but inherit an explicit current
+        # SQLite home. Their earlier and resumed sessions can be in either index.
         worker_database = _codex_state_database(worker_codex_home)
         if worker_database != current_database:
-            groups = [
-                (current_database, [root for root in roots if root not in worker_roots]),
-                (worker_database, [root for root in roots if root in worker_roots]),
-            ]
+            groups.append((worker_database, [root for root in roots if root in worker_roots]))
     if not any(database is not None for database, _ in groups):
         return _unavailable_usage("codex_state_unavailable")
 
@@ -171,6 +168,11 @@ def collect_scan_usage(
             if session.thread_id not in seen_thread_ids:
                 sessions.append(session)
                 seen_thread_ids.add(session.thread_id)
+
+    # Absence from one known index is not missing usage when another has it.
+    missing_thread_ids.difference_update(seen_thread_ids)
+    if not missing_thread_ids:
+        warnings.difference_update({"scan_root_unavailable", "codex_state_unavailable"})
 
     if not sessions:
         return _unavailable_usage(

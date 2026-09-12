@@ -645,7 +645,7 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
     }
 
 
-@pytest.mark.parametrize("worker_home", ["recorded", "current", "unavailable"])
+@pytest.mark.parametrize("worker_home", ["recorded", "current", "inherited-sqlite", "unavailable"])
 def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
     tmp_path: Path, worker_home: str
 ) -> None:
@@ -761,7 +761,7 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             [_token_event(counted, index * 7, 1)],
             parent_thread_id=f"discovery-{index}",
         )
-        if worker_home == "current":
+        if worker_home in {"current", "inherited-sqlite"}:
             with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
                 connection.executemany(
                     "INSERT INTO threads VALUES (?, ?)",
@@ -769,6 +769,14 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                 )
                 connection.execute(
                     "INSERT INTO thread_spawn_edges VALUES (?, ?)", (f"discovery-{index}", child_id)
+                )
+            if worker_home == "inherited-sqlite":
+                # Earlier launches used A; the resumed process forwards its
+                # explicit SQLite home C even while workers keep Codex home A.
+                _state_graph(
+                    {"CODEX_SQLITE_HOME": str(selected_home)},
+                    {f"discovery-{index}": worker_threads[f"discovery-{index}"]},
+                    [],
                 )
         elif worker_home == "recorded":
             _state_graph(
