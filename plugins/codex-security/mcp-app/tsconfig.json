@@ -5,6 +5,9 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "noEmit": true,
+    "paths": {
+      "@openai/codex-sdk": ["./node_modules/@openai/codex-sdk"]
+    },
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "strict": true,
