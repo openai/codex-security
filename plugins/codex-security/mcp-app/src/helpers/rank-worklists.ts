@@ -140,7 +140,7 @@ export function argumentsFor(
   required: readonly string[],
   integerOptions: readonly string[] = [],
 ): Record<string, string | bigint | true> {
-  const names = [...required, "help", ...integerOptions];
+  const names = [...new Set([...required, "help", ...integerOptions])];
   const values: Record<string, string | bigint | true> = {};
   const extra: string[] = [];
   const looksOptional = (arg: string) =>

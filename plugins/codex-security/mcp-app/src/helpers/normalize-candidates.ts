@@ -1,4 +1,5 @@
 import { decodeUtf8 } from "./utf8";
+import { resolvedPath } from "./resolve-path";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -11,12 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
-import {
-  decodePosixBytes,
-  encodePosixPath,
-  resolvePosixPath,
-  SymlinkLoopError,
-} from "./posix-path";
+import { encodePosixPath, SymlinkLoopError } from "./posix-path";
 import {
   expandHome,
   HomeExpansionError,
@@ -105,20 +101,6 @@ const stat = (path: string) =>
   windows ? windowsFiles().stat(fsPath(path)) : statSync(fsPath(path));
 const pathKey = (value: string) =>
   process.platform === "win32" ? value.toLowerCase() : value;
-
-function resolvedPath(value: string, strict = true): string {
-  if (process.platform !== "win32")
-    return decodePosixBytes(
-      resolvePosixPath(encodePosixPath(parsedPath(value)), strict),
-    );
-  try {
-    return pathText(windowsFiles().realpath(widePath(value), strict));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ELOOP")
-      throw new SymlinkLoopError(`Symlink loop from ${value}`);
-    throw error;
-  }
-}
 
 function inside(path: string, root: string, allowMissing = false): string {
   let result: string | undefined;

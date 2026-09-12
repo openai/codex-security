@@ -6,6 +6,7 @@ import { normalizeCandidatesCommand } from "./src/helpers/normalize-candidates";
 import { validatePatchRiskAssessmentCommand } from "./src/helpers/validate-patch-risk-assessment";
 import { deepReviewInputCommand } from "./src/helpers/deep-review-input";
 import { rankShardsCommand } from "./src/helpers/rank-shards";
+import { rankPoolCommand } from "./src/helpers/rank-pool";
 
 let commandLine = process.argv.slice(2);
 if (process.platform === "win32") {
@@ -48,9 +49,15 @@ if (command === "resolve-security-md") {
   command === "merge-rank-outputs"
 ) {
   process.exitCode = rankShardsCommand(command, args, posixHome);
+} else if (
+  command === "make-rank-pool-plan" ||
+  command === "validate-rank-worker" ||
+  command === "validate-rank-pool"
+) {
+  process.exitCode = rankPoolCommand(command, args, posixHome);
 } else {
   console.error(
-    "Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs> [options]",
+    "Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool> [options]",
   );
   process.exitCode = 2;
 }
