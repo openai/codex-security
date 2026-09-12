@@ -6,6 +6,7 @@ import os
 import runpy
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import workbench_test_support
 from workbench_test_support import (
     SCRIPT,
     create_saved_git_workspace,
@@ -170,6 +172,97 @@ def budget_scan_fixture(
                 (terminal_reason, str(manifest), scan_id),
             )
     return state_dir, target, scan_dir, scan_id, ledger
+
+
+@pytest.mark.parametrize("operation", ["complete-scan", "complete-budget-exhausted-scan"])
+@pytest.mark.parametrize("protocol", ["supported", "future-workflow", "future-selection"])
+def test_completion_rejects_unknown_protocol_before_mutation(
+    workbench_api, monkeypatch, tmp_path, operation, protocol
+):
+    script = str(workbench_api["__file__"])
+    monkeypatch.setattr(workbench_test_support, "SCRIPT", script)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "home"))
+    state_dir, _, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
+    environment = {**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)}
+    cost_args = ["--scan-id", scan_id, "--cost-json", json.dumps(BUDGET_COST)]
+    if operation == "complete-scan":
+        cut_program = """
+import os, runpy, sys
+script, *args = sys.argv[1:]
+api = runpy.run_path(script, run_name="completion_version_test")
+namespace = api["main"].__globals__
+original = namespace["_write_prepared_scan_finalization"]
+def after_seal(*args, **kwargs):
+    original(*args, **kwargs)
+    os._exit(86)
+namespace["_write_prepared_scan_finalization"] = after_seal
+sys.argv = [script, *args]
+api["main"]()
+"""
+        cut = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                cut_program,
+                script,
+                "complete-budget-exhausted-scan",
+                *cost_args,
+                "--message",
+                BUDGET_WARNING,
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        assert cut.returncode == 86, cut.stderr
+        assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+    database = state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT status FROM scans").fetchone() == ("running",)
+        if protocol == "future-workflow":
+            connection.execute("UPDATE deep_scan_runs SET workflow_version = 'future/v99'")
+        elif protocol == "future-selection":
+            connection.execute(
+                "UPDATE deep_scan_runs SET workflow_version = 'deep-security-scan/v2', "
+                "finalization_input_json = ?",
+                (json.dumps({"version": 99}),),
+            )
+
+    def snapshot():
+        with sqlite3.connect(database) as connection:
+            return list(connection.iterdump()), {
+                str(path.relative_to(scan_dir)): path.read_bytes()
+                for path in scan_dir.rglob("*")
+                if path.is_file()
+            }
+
+    before = snapshot()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            script,
+            operation,
+            *cost_args,
+            *([] if operation == "complete-scan" else ["--message", BUDGET_WARNING]),
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    after = snapshot()
+    if protocol == "supported":
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["scan"]["progress"]["status"] == "complete"
+        if operation == "complete-scan":
+            assert after[1] == before[1]
+    else:
+        assert result.returncode != 0
+        assert "unsupported" in result.stderr.lower()
+        assert after == before
 
 
 def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -> dict[str, object]:

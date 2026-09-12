@@ -317,9 +317,11 @@ def require_deep_scan_ready_for_parent_completion(
     if scan["mode"] != "deep":
         return
     run = connection.execute(
-        "SELECT status, manifest_path FROM deep_scan_runs WHERE scan_id = ?",
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?",
         (scan["id"],),
     ).fetchone()
+    if run is not None:
+        require_supported_deep_scan(run)
     if run is None or run["status"] != "succeeded" or run["manifest_path"] is None:
         raise SystemExit(
             "Deep Scan discovery orchestration must finish and persist its manifest before "

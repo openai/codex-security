@@ -1178,6 +1178,8 @@ def complete_budget_exhausted_scan(
             "SELECT * FROM deep_scan_runs WHERE scan_id = ?",
             (scan_id,),
         ).fetchone()
+        if run is not None:
+            deep_scan.require_supported_deep_scan(run)
         before_selection = (
             run is not None
             and run["status"] == "running"
