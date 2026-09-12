@@ -81,7 +81,7 @@ async function testBeginProtocolAndParsing() {
   assert.equal(calls[0].input, "focus on archive parsing");
   assert.equal(flagValue(calls[0].args, "--scan-root"), "/fixture/scans");
   assert.equal(flagValue(calls[0].args, "--available-parallelism"), String(availableParallelism()));
-  assert.equal(flagValue(calls[0].args, "--workflow-version"), "deep-scan-mcp/v1");
+  assert.equal(flagValue(calls[0].args, "--workflow-version"), "deep-security-scan/v2");
 
   const claimToken = randomUUID();
   let joinedArgs;

@@ -64,14 +64,18 @@ export async function publishCoverageFixture(root, completeness, {
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
   let { run } = await store.begin({ targetPath, scope: ".", threadId, scanRoot });
+  assert.equal(run.workflowVersion, "deep-security-scan/v2", "new scans use persisted finalization");
   if (selectedRecovery) {
-    // Exercise an existing v2 run without enabling the new-run writer.
+    ({ run } = await store.claimCoordinator({ scanId: run.scanId, threadId }));
+  } else {
+    // Seed an existing v1 run for legacy direct publication and in-memory coverage recovery.
     await exec(process.env.PYTHON || "python3", ["-c", [
       "import sqlite3, sys",
       "with sqlite3.connect(sys.argv[1]) as db:",
-      "    db.execute(\"UPDATE deep_scan_runs SET workflow_version = 'deep-security-scan/v2' WHERE scan_id = ?\", (sys.argv[2],))",
+      "    db.execute(\"UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?\", (sys.argv[2],))",
     ].join("\n"), path.join(root, "state", "workbench.sqlite3"), run.scanId]);
-    ({ run } = await store.claimCoordinator({ scanId: run.scanId, threadId }));
+    run = await store.get(run.scanId, threadId);
+    assert.equal(run.workflowVersion, "deep-scan-mcp/v1");
   }
   const context = await createScanArtifactContext(run.scanId, runWorkbench, { requireRunning: true });
   const rawSources = new Map();
