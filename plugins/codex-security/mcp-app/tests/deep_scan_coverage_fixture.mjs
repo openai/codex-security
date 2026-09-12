@@ -17,16 +17,16 @@ const bundled = await build({
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
       'export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } from "./src/artifact-scan-draft.ts";',
-      'export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts";',
+      'export { recordCodexSecurityDeepReduction, getCodexSecurityDeepReducerInputs } from "./src/artifact-deep-reducer.ts";',
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
   },
   format: "esm", platform: "node", loader: { ".md": "text" }, write: false,
 });
-export async function publishCoverageFixture(root, completeness, { resume = false, continueAfterResume = false, immutableInputs = false } = {}) {
+export async function publishCoverageFixture(root, completeness, { resume = false, continueAfterResume = false, immutableInputs = false, materialFindings = false } = {}) {
   const runtimePath = path.join(root, "fixture-runtime.mjs");
   await writeFile(runtimePath, bundled.outputFiles[0].contents);
-  const { DeepScanCoordinator, WorkbenchDeepScanStore, createScanArtifactContext, recordCodexSecurityScanDraftViaWorkbench, recordCodexSecurityDeepReduction, saveScanDraftCheckpoint } = await import(pathToFileURL(runtimePath).href);
+  const { DeepScanCoordinator, WorkbenchDeepScanStore, createScanArtifactContext, recordCodexSecurityScanDraftViaWorkbench, recordCodexSecurityDeepReduction, getCodexSecurityDeepReducerInputs, saveScanDraftCheckpoint } = await import(pathToFileURL(runtimePath).href);
   const targetPath = path.join(root, "target");
   const codexHome = path.join(root, "codex-home");
   const scanRoot = path.join(root, "scans");
@@ -49,6 +49,18 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
   let { run } = await store.begin({ targetPath, scope: ".", threadId, scanRoot });
   const context = await createScanArtifactContext(run.scanId, runWorkbench, { requireRunning: true });
   const rawSources = new Map();
+  const writeReduction = async (context) => {
+    const inputs = await getCodexSecurityDeepReducerInputs(context);
+    const sources = [...(inputs.previous?.findings ?? []), ...inputs.discoveries.flatMap((source) => source.result.findings)];
+    const findings = [];
+    if (sources.length) {
+      const finding = structuredClone(sources[0]);
+      finding.provenance.sourceFindingIds = [...new Set(sources.flatMap((source) => source.provenance.sourceFindingIds))];
+      delete finding.provenance.sourceFindings;
+      findings.push(finding);
+    }
+    await recordCodexSecurityDeepReduction(context, { scanId: run.scanId, findings });
+  };
   const writeDiscovery = async (artifactDir, index) => {
     const status = statuses[index];
     const pending = completeness === "partial" && status !== "complete";
@@ -62,7 +74,19 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
     await mkdir(path.join(artifactDir, "artifacts"), { recursive: true });
     await writeFile(path.join(artifactDir, "artifacts", "review.md"), "Synthetic review evidence.\n");
     const resultPath = path.join(artifactDir, "result.json");
-    const bytes = JSON.stringify({ scanId: run.scanId, complete: true, findings: [], coverage });
+    const findings = materialFindings && index < 2 ? [{
+      ruleId: "archive-extraction", identity: { anchor: "archive-destination" },
+      title: "Archive entries can escape the destination",
+      summary: "Archive extraction requires both entry containment and symbolic-link handling.",
+      severity: { level: "high" },
+      confidence: { level: "high", rationale: "Synthetic accepted source evidence." },
+      taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
+      locations: [{ path: "source.py", startLine: 1, endLine: 1 }],
+      remediation: materialRemediations[index],
+      remediationTests: [materialRemediationTests[index]],
+      provenance: { source: "local_plugin" },
+    }] : [];
+    const bytes = JSON.stringify({ scanId: run.scanId, complete: true, findings, coverage });
     await writeFile(resultPath, bytes);
     rawSources.set(resultPath, bytes);
     if (immutableInputs) {
@@ -86,7 +110,7 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
       for (const status of ["queued", "running", "succeeded"]) {
         await store.updateWorker({ ...worker, status, ...(status === "succeeded" ? { resultManifestPath } : {}) });
       }
-      workers.push(worker);
+      workers.push({ ...worker, resultPath: resultManifestPath });
     }
     const artifactDir = path.join(run.scanDir, "artifacts", "deep_discovery", "dedup", "dedup-0001", "output");
     const promptPath = path.join(path.dirname(artifactDir), "prompt.md");
@@ -96,9 +120,16 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
     await store.claimDedup({ id, scanId: run.scanId, workerIds: workers.map((worker) => worker.id), artifactDir, promptPath });
     const resultManifestPath = path.join(artifactDir, "result.json");
     // Legacy accepted reducers omitted coverage entirely.
-    await writeFile(resultManifestPath, JSON.stringify({ scanId: run.scanId, findings: [] }));
+    if (materialFindings) {
+      await writeReduction({
+        root: artifactDir, repoRoot: targetPath, scanId: run.scanId, layout: "reducer",
+        deepReducer: { scanRoot: run.scanDir, claimedWorkers: workers },
+      });
+    } else {
+      await writeFile(resultManifestPath, JSON.stringify({ scanId: run.scanId, findings: [] }));
+    }
     rawSources.set(resultManifestPath, await readFile(resultManifestPath, "utf8"));
-    await store.commitDedup({ id, scanId: run.scanId, newFindings: 0, resultManifestPath });
+    await store.commitDedup({ id, scanId: run.scanId, newFindings: materialFindings ? 1 : 0, resultManifestPath });
     run = await store.get(run.scanId, threadId);
   }
   let discoveryCalls = 0;
@@ -121,7 +152,7 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
             assert.equal(claimed.artifactDir, accepted.artifactDir, "receipts retain their original output owner");
           }
         }
-        await recordCodexSecurityDeepReduction({ ...request.artifactContext, repoRoot: targetPath, scanId: run.scanId }, { scanId: run.scanId, findings: [] });
+        await writeReduction({ ...request.artifactContext, repoRoot: targetPath, scanId: run.scanId });
       }
       return { threadId: thread, finalResponse: "Audit finished." };
     },
@@ -135,7 +166,8 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
   coordinator.start();
   const terminal = await coordinator.wait(undefined, 30_000);
   assert.equal(terminal?.status, "succeeded", terminal?.error);
-  assert.equal(terminal.noNewStreak, statuses.length, "source coverage must not change stopping policy");
+  assert.equal(terminal.noNewStreak, materialFindings ? (resume && !continueAfterResume ? 0 : 1) : statuses.length,
+    "source coverage must not change stopping policy");
   assert.equal(discoveryCalls, resume ? (continueAfterResume ? 1 : 0) : statuses.length + 1);
   const accepted = await store.get(run.scanId, threadId);
   for (const worker of accepted.persistedWorkers.filter((worker) => worker.kind === "dedup")) {
@@ -152,6 +184,15 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
   for (const [file, bytes] of rawSources) assert.equal(await readFile(file, "utf8"), bytes);
   return { scanDir: run.scanDir, threadId, terminal };
 }
+
+export const materialRemediations = [
+  "Check the destination before writing the archive entry.",
+  "Reject symbolic links before opening the destination.",
+];
+export const materialRemediationTests = [
+  "Reject an archive entry outside the destination.",
+  "Reject a symbolic link inside the destination.",
+];
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const result = await publishCoverageFixture(process.argv[2], process.argv[3], { resume: process.argv[4] === "true", continueAfterResume: process.argv[5] === "true" });

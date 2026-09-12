@@ -1131,12 +1131,13 @@ async function testReducerCoveragePersistenceBinding() {
       for (const persistSourceCoverage of [false, true]) {
         const markerPath = path.join(fixture.root, `coverage-${resume}-${persistSourceCoverage}.json`);
         process.env.FAKE_CODEX_MARKER = markerPath;
+        const scanRoot = path.join(fixture.root, `scan-${resume}-${persistSourceCoverage}`);
         const deepReducer = {
-          scanRoot: path.join(fixture.root, "scans"),
+          scanRoot,
           claimedWorkers: [{
             id: "worker-1", attempt: 2,
-            resultPath: path.join(fixture.root, "worker", "checkpoints", "accepted.json"),
-            artifactDir: path.join(fixture.root, "worker"),
+            resultPath: path.join(scanRoot, "worker", "checkpoints", "accepted.json"),
+            artifactDir: path.join(scanRoot, "worker"),
           }],
           persistSourceCoverage,
         };
