@@ -1293,6 +1293,11 @@ def budget_exhausted_draft(
             coverage = accepted_result["sourceCoverage"]
             if "threatModel" in accepted_result:
                 manifest["scan"]["threatModel"] = accepted_result["threatModel"]
+            if "scope" in accepted_result:
+                manifest["scan"]["scope"].update(copy.deepcopy(accepted_result["scope"]))
+        limitations = manifest["scan"]["scope"].setdefault("limitations", [])
+        if warning not in limitations:
+            limitations.append(warning)
 
     for worker in unmerged_workers:
         retain_unmerged_budget_coverage(scan, scan_dir, coverage, worker)
@@ -1409,6 +1414,14 @@ def retain_unmerged_budget_coverage(
         item.get("id"): f"{prefix}-surface-{index + 1}"
         for index, item in enumerate(source.get("surfaces", []))
     }
+
+    def retain(field: str, item: dict[str, Any]) -> None:
+        # A committed budget draft can be replayed before the scan is sealed.
+        # These IDs and provenance identify the same immutable accepted review.
+        items = coverage.setdefault(field, [])
+        if item not in items:
+            items.append(item)
+
     for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
         for index, original in enumerate(source.get(field, [])):
             item = copy.deepcopy(original if isinstance(original, dict) else {"question": original})
@@ -1427,16 +1440,24 @@ def retain_unmerged_budget_coverage(
                 item["candidateId"] = f"{prefix}-candidate-{index + 1}"
             if "surfaceIds" in item:
                 item["surfaceIds"] = [surfaces.get(value, value) for value in item["surfaceIds"]]
-            coverage.setdefault(field, []).append(item)
-    coverage.setdefault("reviews", []).append(
-        {**provenance, "completeness": source["completeness"]}
-    )
-    coverage["deferred"].append(
+            retain(field, item)
+    retain("reviews", {**provenance, "completeness": source["completeness"]})
+    for index, limitation in enumerate(draft.get("scope", {}).get("limitations", [])):
+        retain(
+            "deferred",
+            {
+                "id": f"{prefix}-scope-{index + 1}",
+                "reason": limitation,
+                "provenance": provenance,
+            },
+        )
+    retain(
+        "deferred",
         {
             "id": f"{prefix}-unmerged",
             "provenance": provenance,
             "reason": "This accepted discovery was not merged before the scan reached its cost limit.",
-        }
+        },
     )
 
 

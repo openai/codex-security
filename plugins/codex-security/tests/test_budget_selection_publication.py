@@ -256,6 +256,121 @@ def test_budget_accepts_complete_reducer_without_optional_complete_flag(
     assert len(json.loads((scan.scan_dir / "findings.json").read_text())["findings"]) == 1
 
 
+def test_budget_preserves_accepted_scope_and_unmerged_scope_limits(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    _, accepted, _ = accept_reducer(workbench_db, scan)
+    unmerged = accept_unmerged(workbench_db, scan)
+    scope = {
+        "summary": "Synthetic upload boundaries.",
+        "artifactsReviewed": ["subdir/extract.py"],
+        "runtimeStatus": "Synthetic runtime unavailable.",
+        "validationMode": "Static validation of the accepted findings.",
+        "context": "External deployment behavior remains unresolved.",
+        "limitations": ["The accepted review did not execute the deployment integration."],
+    }
+    unmerged_limit = "A separate unmerged review could not inspect the deployment credentials."
+    for path, value in [(accepted, scope), (unmerged, {"limitations": [unmerged_limit]})]:
+        document = json.loads(path.read_bytes())
+        document["scope"] = value
+        path.write_text(json.dumps(document))
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_attempts SET accepted_result_sha256 = ? WHERE accepted_result_path = ?",
+                (hashlib.sha256(path.read_bytes()).hexdigest(), str(path)),
+            )
+    originals = {p: p.read_bytes() for p in [accepted, unmerged]}
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    with workbench_db:
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', workflow_version = 'deep-security-scan/v2'"
+        )
+    warning = "Scan stopped at its original cost limit before further validation."
+    workbench_api["complete_budget_exhausted_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message=warning),
+    )
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    saved_scope = manifest["scan"]["scope"]
+    for key, value in scope.items():
+        if key == "limitations":
+            assert all(item in saved_scope[key] for item in value)
+        else:
+            assert saved_scope[key] == value
+    assert warning in saved_scope["limitations"]
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert coverage["completeness"] == "partial"
+    assert any(
+        item["reason"] == unmerged_limit
+        and item["provenance"]["workerId"] == unmerged.parent.parent.name
+        for item in coverage["deferred"]
+    )
+    assert all(p.read_bytes() == contents for p, contents in originals.items())
+    assert len(json.loads((scan.scan_dir / "findings.json").read_text())["findings"]) == 1
+
+
+@pytest.mark.parametrize("has_reducer", [False, True])
+def test_budget_replay_after_draft_commit_keeps_unmerged_coverage_once(
+    workbench_api, workbench_db, publication_scan, tmp_path, monkeypatch, has_reducer
+):
+    scan = publication_scan()
+    if has_reducer:
+        accept_reducer(workbench_db, scan)
+    unmerged = accept_unmerged(workbench_db, scan)
+    original = unmerged.read_bytes()
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    with workbench_db:
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', workflow_version = 'deep-security-scan/v2'"
+        )
+    budget = workbench_api["complete_budget_exhausted_scan"]
+    original_complete = budget.__globals__["complete_scan_locked"]
+
+    def fail_before_seal(*args, **kwargs):
+        raise RuntimeError("Synthetic process loss after budget draft commit.")
+
+    monkeypatch.setitem(budget.__globals__, "complete_scan_locked", fail_before_seal)
+    args = Namespace(
+        scan_id=scan.scan_id,
+        cost_json=json.dumps(BUDGET_COST),
+        message="Original cost interruption.",
+    )
+    path = tmp_path / "budget-gap.sqlite3"
+    with sqlite3.connect(path) as connection:
+        workbench_db.backup(connection)
+        connection.row_factory = sqlite3.Row
+        with pytest.raises(RuntimeError, match="after budget draft commit"):
+            budget(connection, args)
+        run = connection.execute("SELECT * FROM deep_scan_runs").fetchone()
+        assert run["status"] == "succeeded"
+        selection = run["finalization_input_json"]
+        assert connection.execute("SELECT status FROM scans").fetchone()[0] == "running"
+    before = json.loads((scan.scan_dir / "coverage.json").read_text())
+    monkeypatch.setitem(budget.__globals__, "complete_scan_locked", original_complete)
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        budget(connection, args)
+        assert connection.execute("SELECT status FROM scans").fetchone()[0] == "complete"
+        assert (
+            connection.execute("SELECT finalization_input_json FROM deep_scan_runs").fetchone()[0]
+            == selection
+        )
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    for key in ("surfaces", "explicitExclusions", "deferred", "reviews"):
+        assert coverage.get(key, []) == before.get(key, [])
+    assert len({row["id"] for row in coverage["deferred"]}) == len(coverage["deferred"])
+    assert unmerged.read_bytes() == original
+
+
 @pytest.mark.parametrize("selected", [False, True], ids=["legacy-v1", "selected-v2"])
 @pytest.mark.parametrize("reason", ["saturated", "capped"])
 @pytest.mark.parametrize("cancel_first", [False, True], ids=["budget-first", "cancel-first"])
