@@ -91,7 +91,10 @@ async function testRecoveredPublicationRejectsLateFailure() {
           paths: ["fixture.py"],
         }],
       },
-    }, runWorkbench);
+    }, runWorkbench, undefined, {
+      coordinatorGeneration: claim.run.coordinatorGeneration,
+      resultPath: null,
+    });
     await runWorkbench([
       "cancel-scan", "--scan-id", run.scanId,
       "--thread-id", "publication-failure-owner",
