@@ -294,6 +294,7 @@ export class DeepScanWorkerRunner {
       count: consumed.length
     });
 
+    const persistSourceCoverage = "workflowVersion" in run && run.workflowVersion === "deep-security-scan/v2";
     const artifactContext = {
       root: artifactDir,
       repoRoot: run.targetPath,
@@ -301,6 +302,7 @@ export class DeepScanWorkerRunner {
       layout: "reducer" as const,
       deepReducer: {
         scanRoot: artifacts.scanDir,
+        persistSourceCoverage,
         claimedWorkers: consumed.map((worker) => ({ id: worker.id, resultPath: worker.resultPath, attempt: worker.attempt })),
         previousReducerResultPath
       }
@@ -327,7 +329,8 @@ export class DeepScanWorkerRunner {
           resultPath,
           reducerId,
           previousReducerResultPath,
-          sources
+          sources,
+          persistSourceCoverage
         }, run.scanId);
       },
       beforeRetry: async (attempt) => {

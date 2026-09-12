@@ -100,6 +100,7 @@ try {
     layout: "reducer",
     deepReducer: {
       scanRoot,
+      persistSourceCoverage: true,
       claimedWorkers: [first, second]
     }
   };
@@ -249,6 +250,7 @@ try {
     layout: "reducer",
     deepReducer: {
       scanRoot,
+      persistSourceCoverage: true,
       claimedWorkers: [third],
       previousReducerResultPath: path.join(outputRoot, "result.json")
     }

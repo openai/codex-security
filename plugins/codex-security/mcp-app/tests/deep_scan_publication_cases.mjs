@@ -108,6 +108,7 @@ export async function testDeepScanPublication({
 
   async function testSaturationIgnoresDiscoveryCancellationWriteFailure() {
     const fixture = await fixtureRun({ workers: 2, subagents: 0, stopAfterNoNew: 2, maxDiscoveryRuns: 6 });
+    fixture.run.workflowVersion = "deep-security-scan/v2";
     const store = new FakeStore(fixture.run);
     const executor = new FakeExecutor({ blockDedup: true, blockDiscoveryAfterCalls: 2 });
     const updateWorker = store.updateWorker.bind(store);

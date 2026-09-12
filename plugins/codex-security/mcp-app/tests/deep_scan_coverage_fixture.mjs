@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -121,6 +121,17 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(terminal.noNewStreak, statuses.length, "source coverage must not change stopping policy");
   assert.equal(discoveryCalls, resume ? (continueAfterResume ? 1 : 0) : statuses.length + 1);
+  const accepted = await store.get(run.scanId, threadId);
+  for (const worker of accepted.persistedWorkers.filter((worker) => worker.kind === "dedup")) {
+    const result = JSON.parse(await readFile(worker.resultManifestPath, "utf8"));
+    assert.equal(Object.hasOwn(result, "sourceCoverage"), false, "v1 reducers remain readable by earlier binaries");
+    if (!rawSources.has(worker.resultManifestPath)) {
+      for (const name of await readdir(path.join(worker.artifactDir, "checkpoints"))) {
+        const checkpoint = JSON.parse(await readFile(path.join(worker.artifactDir, "checkpoints", name), "utf8"));
+        assert.equal(Object.hasOwn(checkpoint, "sourceCoverage"), false, "v1 checkpoints remain readable by earlier binaries");
+      }
+    }
+  }
   await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
   for (const [file, bytes] of rawSources) assert.equal(await readFile(file, "utf8"), bytes);
   return { scanDir: run.scanDir, threadId, terminal };

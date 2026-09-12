@@ -30,6 +30,16 @@ export function deepReductionToScanDraft(result: DeepReductionInput): ScanDraftI
   return { ...draft, coverage: sourceCoverage ?? unknownSourceCoverage() };
 }
 
+/** Older workflow readers reject the host field; retain their persisted shape. */
+export function deepReductionForPersistence(
+  result: DeepReductionInput,
+  persistSourceCoverage = false,
+): DeepReductionInput {
+  if (persistSourceCoverage) return result;
+  const { sourceCoverage: _coverage, ...legacy } = result;
+  return legacy;
+}
+
 /**
  * Check reducer findings with the Standard scan validator.
  * It requires coverage, so add an empty value and remove it after validation.
@@ -82,6 +92,7 @@ export async function validateReducerArtifacts(input: {
   reducerId: string;
   previousReducerResultPath?: string;
   sources?: DeepReductionSources;
+  persistSourceCoverage?: boolean;
 }, expectedScanId?: string): Promise<ReducerArtifactValidation> {
   const {
     artifacts,
@@ -113,8 +124,9 @@ export async function validateReducerArtifacts(input: {
 
   if (input.sources) {
     result = reconcileDeepReduction(result, input.sources.discoveries, input.sources.previous);
-    await saveScanDraftCheckpoint({ root: artifactDir, repoRoot: artifacts.scanDir, layout: "reducer" }, result);
-    await writeJsonAtomic(resultPath, result);
+    const persisted = deepReductionForPersistence(result, input.persistSourceCoverage);
+    await saveScanDraftCheckpoint({ root: artifactDir, repoRoot: artifacts.scanDir, layout: "reducer" }, persisted);
+    await writeJsonAtomic(resultPath, persisted);
   } else {
     validateRetainedFindings(result, [], previous);
   }

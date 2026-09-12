@@ -12,6 +12,7 @@ export interface DeepReducerContext {
   scanRoot: string;
   claimedWorkers: DeepReducerWorkerContext[];
   previousReducerResultPath?: string;
+  persistSourceCoverage?: boolean;
 }
 
 /**

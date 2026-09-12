@@ -20,6 +20,7 @@ import {
   type DeepScanArtifacts
 } from "./deep-scan/artifacts.js";
 import {
+  deepReductionForPersistence,
   parseDeepReduction,
   projectDiscoveryCoverage,
   reconcileDeepReduction,
@@ -134,8 +135,9 @@ export async function recordCodexSecurityDeepReduction(
     }
     reduction = reconcileDeepReduction(reduction, inputs.discoveries, inputs.previous);
 
-    await saveScanDraftCheckpoint(context, reduction);
-    await writeJsonAtomic(bound.resultPath, reduction);
+    const persisted = deepReductionForPersistence(reduction, bound.state.persistSourceCoverage);
+    await saveScanDraftCheckpoint(context, persisted);
+    await writeJsonAtomic(bound.resultPath, persisted);
     return {
       findingCount: reduction.findings.length,
       consumedWorkerIds: bound.state.claimedWorkers.map((worker) => worker.id)
