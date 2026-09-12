@@ -1,19 +1,23 @@
 import { execFile } from "node:child_process";
 import {
   chmod,
+  copyFile,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
+import { transform } from "esbuild";
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
 import { assertGeneratedPluginUntracked } from "../scripts/check-plugin-source.mjs";
 
@@ -69,6 +73,104 @@ afterEach(async () => {
 });
 
 describe("bundled plugin build", () => {
+  test("bundles the native policy proof with only SDK dependencies", async () => {
+    const root = await temporaryDirectory();
+    const plugin = join(root, "plugins", "codex-security");
+    const native = join(plugin, "native");
+    const sdk = join(root, "sdk", "typescript");
+    const source = new URL("../../../plugins/codex-security/", import.meta.url);
+    await mkdir(native, { recursive: true });
+    await mkdir(sdk, { recursive: true });
+    await symlink(
+      fileURLToPath(new URL("../node_modules", import.meta.url)),
+      join(sdk, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    for (const name of ["schemas", "mcp-app/src"]) {
+      await cp(new URL(name, source), join(plugin, name), { recursive: true });
+    }
+    await copyFile(
+      new URL("mcp-app/helpers-main.ts", source),
+      join(plugin, "mcp-app", "helpers-main.ts"),
+    );
+    for (const name of [
+      "binding",
+      "platform",
+      "windows-binding",
+      "windows-flags",
+      "windows-files",
+      "proof-policy-windows",
+    ]) {
+      const compiled = await transform(
+        await readFile(new URL(`native/${name}.mts`, source), "utf8"),
+        { loader: "ts", format: "esm", target: "node20" },
+      );
+      await writeFile(join(native, `${name}.mjs`), compiled.code);
+    }
+    const { nativeTarget } = await import(
+      pathToFileURL(join(native, "platform.mjs")).href
+    );
+    const binary = process.platform === "win32" ? "windows.node" : "unix.node";
+    // The build copies this artifact; this portable test does not load native code.
+    await writeFixture(
+      native,
+      `dist/${nativeTarget}/${binary}`,
+      "native fixture",
+    );
+    await expect(
+      stat(join(plugin, "mcp-app", "node_modules")),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await execFileAsync(
+      "node",
+      [join(native, "proof-policy-windows.mjs"), "build"],
+      {
+        cwd: native,
+        env: { ...process.env, NODE_PATH: "" },
+      },
+    );
+    const proof = join(native, "dist", nativeTarget, "policy-proof");
+    expect(
+      await readFile(
+        join(proof, "native", nativeTarget, "windows.node"),
+        "utf8",
+      ),
+    ).toBe("native fixture");
+    const helper = join(root, "helpers.cjs");
+    await copyFile(join(proof, "helpers.cjs"), helper);
+    await rm(join(sdk, "node_modules"), { force: true });
+    const result = await execFileAsync(
+      "node",
+      [
+        "--eval",
+        `
+      const assert = require("node:assert/strict");
+      const helper = require(process.argv.pop());
+      const input = {
+        scanId: "synthetic-scan",
+        manifest: { scan: {} },
+        findings: { findings: [] },
+        coverage: {
+          completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [],
+        },
+      };
+      assert.equal(helper.parseCanonicalScanDraft(input).scanId, input.scanId);
+      assert.throws(() => helper.parseCanonicalScanDraft({
+        ...input, coverage: { ...input.coverage, completeness: "invalid" },
+      }));
+      console.log("Bundled parser accepted valid input and rejected invalid coverage.");
+    `,
+        helper,
+      ],
+      { cwd: root, env: { ...process.env, NODE_PATH: "" } },
+    );
+    expect(result.stdout).toBe(
+      "Bundled parser accepted valid input and rejected invalid coverage.\n",
+    );
+    expect(result.stderr).toBe("");
+  });
+
   test("builds the MCP runtime without invoking an npm launcher", async () => {
     const root = await temporaryDirectory();
     const bin = join(root, "bin");
