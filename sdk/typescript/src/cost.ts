@@ -1,4 +1,4 @@
-import { open, readdir, readFile } from "node:fs/promises";
+import { open, readdir, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
   estimateScanCost,
@@ -284,8 +284,18 @@ export class ScanCostTracker {
     }
     // Recovery restores workers to their recorded home; the SDK parent can
     // continue in the current home. Apply the same scan membership to both.
+    const directories = new Set<string>();
     for (const home of homes) {
-      for await (const path of sessionFiles(join(home, "sessions"))) {
+      let directory: string;
+      try {
+        directory = await realpath(join(home, "sessions"));
+      } catch (error) {
+        if (isMissingFile(error)) continue;
+        throw error;
+      }
+      if (directories.has(directory)) continue;
+      directories.add(directory);
+      for await (const path of sessionFiles(directory)) {
         let session = this.#sessions.get(path);
         if (session === undefined) {
           session = createSessionUsage();

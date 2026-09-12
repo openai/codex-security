@@ -1,11 +1,13 @@
 import { spawnSync } from "node:child_process";
 import {
   appendFile,
+  cp,
   mkdir,
   mkdtemp,
   realpath,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -2386,6 +2388,98 @@ describe("recorded Deep worker homes", () => {
       expect((await trackers[1]!.refresh()).cost?.inputTokens).toBe(63);
     } finally {
       await Promise.all(trackers.map((tracker) => tracker.stop()));
+    }
+  });
+
+  test("reads a recorded directory alias only once", async () => {
+    const home = await codexHome();
+    const alias = join(await codexHome(), "recorded-home");
+    await symlink(
+      home,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const scanDirectory = join(home, "scan");
+    const directory = join(scanDirectory, "artifacts", "deep_discovery");
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, "execution-settings.json"),
+      JSON.stringify({ version: 1, settings: { codexHome: alias } }),
+    );
+    await writeSession(home, "worker", { input_tokens: 100, output_tokens: 0 });
+    const events: ScanSessionEvent[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      scanDirectory,
+      model: "gpt-5.6-sol",
+      onSessionEvent: (event) => events.push(event),
+    });
+    tracker.start("worker");
+    try {
+      expect((await tracker.stop()).cost?.inputTokens).toBe(100);
+      expect(events).toHaveLength(2);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test("charges copied response records across homes once with their actual models", async () => {
+    const home = await codexHome();
+    const recordedHome = await codexHome();
+    const scanDirectory = join(home, "scan");
+    const directory = join(scanDirectory, "artifacts", "deep_discovery");
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, "execution-settings.json"),
+      JSON.stringify({ version: 1, settings: { codexHome: recordedHome } }),
+    );
+    const path = await writeSession(home, "worker", {});
+    for (const [id, model, input, output] of [
+      ["response-one", "gpt-5.6-sol", 100, 10],
+      ["response-two", "gpt-6-astra", 50, 5],
+    ] as const) {
+      await appendFile(
+        path,
+        JSON.stringify({
+          type: "token_usage_record",
+          payload: {
+            thread_id: "worker",
+            turn_id: "turn",
+            response_id: id,
+            model,
+            usage: { input_tokens: input, output_tokens: output },
+          },
+        }) + "\n",
+      );
+    }
+    await mkdir(join(recordedHome, "sessions"));
+    await cp(path, join(recordedHome, "sessions", "copied-worker.jsonl"));
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      scanDirectory,
+      model: "gpt-5.6-sol",
+    });
+    tracker.start("worker");
+    try {
+      const snapshot = await tracker.stop();
+      expect(snapshot.usage).toMatchObject({
+        input_tokens: 150,
+        output_tokens: 15,
+        total_tokens: 165,
+      });
+      expect(
+        Object.fromEntries(
+          snapshot.cost!.modelCosts!.map((part) => [
+            part.model,
+            [part.inputTokens, part.outputTokens],
+          ]),
+        ),
+      ).toEqual({
+        "gpt-5.6-sol": [100, 10],
+        "gpt-6-astra": [50, 5],
+      });
+    } finally {
+      await tracker.stop();
     }
   });
 });
