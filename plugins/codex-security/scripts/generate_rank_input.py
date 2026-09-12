@@ -8,15 +8,11 @@ This script stays deliberately model-free:
 - `make-diff-rank-input` creates the deterministic diff-scoped JSONL candidate
   worklist from Git changed paths. It supports committed revision diffs and
   local working-tree patches.
-- `make-rank-shards` partitions the ranking input into deterministic shards.
 - `make-rank-pool-plan` assigns those shards to a deterministic bounded worker
   pool.
 - `validate-rank-worker` validates one worker slot and emits a content-bound
   completion receipt.
-- `validate-rank-shard` validates one completed worker output before the
-  coordinator accepts it.
 - `validate-rank-pool` validates the pool plan and every assigned shard output.
-- `merge-rank-outputs` validates and combines worker-local shard outputs.
 """
 
 from __future__ import annotations
@@ -199,19 +195,6 @@ def parse_args() -> argparse.Namespace:
         help=f"Maximum UTF-8 bytes in each preview. Defaults to {DEFAULT_PREVIEW_BYTES}.",
     )
 
-    shards = subparsers.add_parser(
-        "make-rank-shards",
-        help="Partition rank_input.jsonl into deterministic worker input shards.",
-    )
-    shards.add_argument("--rank-input", required=True, help="Deterministic rank input JSONL.")
-    shards.add_argument("--out-dir", required=True, help="Directory for worker input shards.")
-    shards.add_argument(
-        "--max-rows",
-        type=int,
-        default=150,
-        help="Maximum rows per shard. Defaults to 150.",
-    )
-
     pool_plan = subparsers.add_parser(
         "make-rank-pool-plan",
         help="Assign rank shards to a deterministic bounded worker pool.",
@@ -224,13 +207,6 @@ def parse_args() -> argparse.Namespace:
         help="Usable ranking-worker slots reported by capability preflight; capped at 6.",
     )
     pool_plan.add_argument("--out", required=True, help="Output rank_worker_assignments.json path.")
-
-    validate_shard = subparsers.add_parser(
-        "validate-rank-shard",
-        help="Validate one worker output against its rank input shard.",
-    )
-    validate_shard.add_argument("--input", required=True, help="Worker rank input shard.")
-    validate_shard.add_argument("--output", required=True, help="Worker rank output shard.")
 
     validate_worker = subparsers.add_parser(
         "validate-rank-worker",
@@ -251,14 +227,6 @@ def parse_args() -> argparse.Namespace:
     )
     validate_pool.add_argument("--plan", required=True, help="Rank pool plan JSON path.")
     validate_pool.add_argument("--shard-dir", required=True, help="Directory of rank shards.")
-
-    merge = subparsers.add_parser(
-        "merge-rank-outputs",
-        help="Validate worker shard outputs and create rank_output.jsonl.",
-    )
-    merge.add_argument("--rank-input", required=True, help="Authoritative rank input JSONL.")
-    merge.add_argument("--shard-dir", required=True, help="Directory of input and output shards.")
-    merge.add_argument("--out", required=True, help="Output rank_output.jsonl path.")
 
     return parser.parse_args()
 
@@ -722,29 +690,6 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     print(f"Wrote {len(rows)} rows to {output}")
 
 
-def make_rank_shards(args: argparse.Namespace) -> None:
-    if args.max_rows < 1:
-        raise SystemExit("--max-rows must be at least 1")
-
-    rank_input = Path(args.rank_input).expanduser()
-    rows = load_jsonl(rank_input, "Rank input", validate_rank_input_row)
-    require_unique_paths(rows, "Rank input")
-
-    output_dir = Path(args.out_dir).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted((*output_dir.glob(SHARD_INPUT_GLOB), *output_dir.glob(SHARD_OUTPUT_GLOB)))
-    if existing:
-        raise SystemExit(f"Rank shard directory already contains shard files: {output_dir}")
-
-    shard_count = 0
-    for start in range(0, len(rows), args.max_rows):
-        shard_count += 1
-        shard_path = output_dir / f"rank-shard-{shard_count:04d}.input.jsonl"
-        write_jsonl(shard_path, rows[start : start + args.max_rows])
-
-    print(f"Wrote {shard_count} rank shards to {output_dir}")
-
-
 def discover_input_shards(shard_dir: Path) -> list[Path]:
     if not shard_dir.is_dir():
         raise SystemExit(f"Rank shard directory missing: {shard_dir}")
@@ -1065,58 +1010,6 @@ def validate_rank_shard(
     return shard_inputs, shard_outputs
 
 
-def validate_rank_shard_command(args: argparse.Namespace) -> None:
-    input_shard = Path(args.input).expanduser()
-    output_shard = Path(args.output).expanduser()
-    _, output_rows = validate_rank_shard(input_shard, output_shard)
-    print(f"Validated {len(output_rows)} ranking rows in {output_shard}")
-
-
-def merge_rank_outputs(args: argparse.Namespace) -> None:
-    rank_input = Path(args.rank_input).expanduser()
-    authoritative_rows = load_jsonl(rank_input, "Rank input", validate_rank_input_row)
-    require_unique_paths(authoritative_rows, "Rank input")
-
-    shard_dir = Path(args.shard_dir).expanduser()
-    input_shards = discover_input_shards(shard_dir)
-    output_shards = sorted(shard_dir.glob(SHARD_OUTPUT_GLOB))
-    expected_output_names = {
-        path.name.replace(".input.jsonl", ".output.jsonl") for path in input_shards
-    }
-    actual_output_names = {path.name for path in output_shards}
-    if expected_output_names != actual_output_names:
-        missing = sorted(expected_output_names - actual_output_names)
-        unexpected = sorted(actual_output_names - expected_output_names)
-        details: list[str] = []
-        if missing:
-            details.append(f"missing output shards {missing}")
-        if unexpected:
-            details.append(f"unexpected output shards {unexpected}")
-        raise SystemExit(f"Rank shard outputs are incomplete: {'; '.join(details)}")
-
-    sharded_inputs: list[JsonRow] = []
-    output_by_path: dict[str, JsonRow] = {}
-    for input_shard in input_shards:
-        output_shard = input_shard.with_name(
-            input_shard.name.replace(".input.jsonl", ".output.jsonl")
-        )
-        shard_inputs, shard_outputs = validate_rank_shard(input_shard, output_shard)
-        sharded_inputs.extend(shard_inputs)
-        for row in shard_outputs:
-            row_path = str(row["path"])
-            if row_path in output_by_path:
-                raise SystemExit(f"Rank outputs contain duplicate path: {row_path}")
-            output_by_path[row_path] = row
-
-    if sharded_inputs != authoritative_rows:
-        raise SystemExit("Rank input shards do not exactly partition the authoritative rank input")
-
-    merged = [output_by_path[str(row["path"])] for row in authoritative_rows]
-    output = Path(args.out).expanduser()
-    write_jsonl(output, merged)
-    print(f"Merged {len(merged)} ranking rows into {output}")
-
-
 def main() -> None:
     args = parse_args()
     if args.command == "make-repo-rank-input":
@@ -1127,18 +1020,12 @@ def main() -> None:
         bind_repo_scopes(args)
     elif args.command == "make-diff-rank-input":
         make_diff_rank_input(args)
-    elif args.command == "make-rank-shards":
-        make_rank_shards(args)
     elif args.command == "make-rank-pool-plan":
         make_rank_pool_plan(args)
-    elif args.command == "validate-rank-shard":
-        validate_rank_shard_command(args)
     elif args.command == "validate-rank-worker":
         validate_rank_worker_command(args)
     elif args.command == "validate-rank-pool":
         validate_rank_pool_command(args)
-    elif args.command == "merge-rank-outputs":
-        merge_rank_outputs(args)
     else:
         raise SystemExit(f"Unknown command: {args.command}")
 

@@ -89,17 +89,12 @@ def make_shards_and_pool_plan(
     tmp_path: Path, *, shard_count: int = 5, usable_worker_slots: int = 2
 ) -> tuple[Path, Path, Path]:
     rank_input = tmp_path / "rank_input.jsonl"
-    write_jsonl(rank_input, make_rank_rows(shard_count))
+    rows = make_rank_rows(shard_count)
+    write_jsonl(rank_input, rows)
     shard_dir = tmp_path / "rank_shards"
-    run_cli(
-        "make-rank-shards",
-        "--rank-input",
-        str(rank_input),
-        "--max-rows",
-        "1",
-        "--out-dir",
-        str(shard_dir),
-    )
+    shard_dir.mkdir()
+    for index, row in enumerate(rows, start=1):
+        write_jsonl(shard_dir / f"rank-shard-{index:04d}.input.jsonl", [row])
     plan = tmp_path / "rank_worker_assignments.json"
     run_cli(
         "make-rank-pool-plan",
@@ -869,41 +864,6 @@ def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: s
     assert {row["path"]: row["preview"] for row in read_jsonl(output)} == expected
 
 
-def test_make_rank_shards_is_deterministic_and_bounded(tmp_path: Path) -> None:
-    rank_input = tmp_path / "rank_input.jsonl"
-    rows = make_rank_rows(312)
-    write_jsonl(rank_input, rows)
-    shard_dir = tmp_path / "shards"
-
-    run_cli(
-        "make-rank-shards",
-        "--rank-input",
-        str(rank_input),
-        "--out-dir",
-        str(shard_dir),
-    )
-
-    shards = sorted(shard_dir.glob("*.input.jsonl"))
-    assert [path.name for path in shards] == [
-        "rank-shard-0001.input.jsonl",
-        "rank-shard-0002.input.jsonl",
-        "rank-shard-0003.input.jsonl",
-    ]
-    assert [len(read_jsonl(path)) for path in shards] == [150, 150, 12]
-    assert [row for path in shards for row in read_jsonl(path)] == rows
-
-    result = run_cli(
-        "make-rank-shards",
-        "--rank-input",
-        str(rank_input),
-        "--out-dir",
-        str(shard_dir),
-        check=False,
-    )
-    assert result.returncode != 0
-    assert "already contains shard files" in result.stderr
-
-
 def test_make_rank_pool_plan_is_deterministic_round_robin_and_exact_once(
     tmp_path: Path,
 ) -> None:
@@ -983,19 +943,9 @@ def test_make_rank_pool_plan_caps_workers_at_six(tmp_path: Path) -> None:
     ]
 
 
-def test_empty_rank_input_closes_with_zero_shards_and_workers(tmp_path: Path) -> None:
-    rank_input = tmp_path / "rank_input.jsonl"
-    write_jsonl(rank_input, [])
+def test_empty_rank_pool_closes_with_zero_shards_and_workers(tmp_path: Path) -> None:
     shard_dir = tmp_path / "rank_shards"
-
-    shards_result = run_cli(
-        "make-rank-shards",
-        "--rank-input",
-        str(rank_input),
-        "--out-dir",
-        str(shard_dir),
-    )
-    assert shards_result.stdout == f"Wrote 0 rank shards to {shard_dir}\n"
+    shard_dir.mkdir()
 
     plan = tmp_path / "rank_worker_assignments.json"
     plan_result = run_cli(
@@ -1025,33 +975,11 @@ def test_empty_rank_input_closes_with_zero_shards_and_workers(tmp_path: Path) ->
     )
     assert pool_result.stdout == "Validated 0 ranking workers, 0 shards, and 0 ranking rows\n"
 
-    rank_output = tmp_path / "rank_output.jsonl"
-    merge_result = run_cli(
-        "merge-rank-outputs",
-        "--rank-input",
-        str(rank_input),
-        "--shard-dir",
-        str(shard_dir),
-        "--out",
-        str(rank_output),
-    )
-    assert merge_result.stdout == f"Merged 0 ranking rows into {rank_output}\n"
-    assert rank_output.read_bytes() == b""
-
 
 def test_make_rank_pool_plan_requires_sibling_rank_shards_directory(tmp_path: Path) -> None:
-    rank_input = tmp_path / "rank_input.jsonl"
-    write_jsonl(rank_input, make_rank_rows(2))
     shard_dir = tmp_path / "other_shards"
-    run_cli(
-        "make-rank-shards",
-        "--rank-input",
-        str(rank_input),
-        "--max-rows",
-        "1",
-        "--out-dir",
-        str(shard_dir),
-    )
+    for index, row in enumerate(make_rank_rows(2), start=1):
+        write_jsonl(shard_dir / f"rank-shard-{index:04d}.input.jsonl", [row])
     plan = tmp_path / "rank_worker_assignments.json"
 
     result = run_cli(
@@ -1310,9 +1238,7 @@ def test_validate_rank_pool_accepts_complete_multi_shard_workers(tmp_path: Path)
 def test_rank_pool_accepts_parent_completion_for_an_unstarted_worker_slot(
     tmp_path: Path,
 ) -> None:
-    rank_input, shard_dir, plan = make_shards_and_pool_plan(
-        tmp_path, shard_count=5, usable_worker_slots=2
-    )
+    _, shard_dir, plan = make_shards_and_pool_plan(tmp_path, shard_count=5, usable_worker_slots=2)
     write_worker_shard_outputs(shard_dir, plan, slot=1)
     write_worker_shard_outputs(shard_dir, plan, slot=2)
 
@@ -1335,21 +1261,7 @@ def test_rank_pool_accepts_parent_completion_for_an_unstarted_worker_slot(
         "--shard-dir",
         str(shard_dir),
     )
-    rank_output = tmp_path / "rank_output.jsonl"
-    run_cli(
-        "merge-rank-outputs",
-        "--rank-input",
-        str(rank_input),
-        "--shard-dir",
-        str(shard_dir),
-        "--out",
-        str(rank_output),
-    )
-
     assert "Validated 2 ranking workers, 5 shards, and 5 ranking rows" in pool.stdout
-    assert [row["path"] for row in read_jsonl(rank_output)] == [
-        row["path"] for row in read_jsonl(rank_input)
-    ]
 
 
 def test_validate_rank_pool_rejects_missing_and_unexpected_outputs(tmp_path: Path) -> None:
@@ -1426,170 +1338,3 @@ def test_validate_rank_pool_rejects_duplicate_output_rows(tmp_path: Path) -> Non
 
     assert result.returncode != 0
     assert "contains duplicate paths" in result.stderr
-
-
-def test_validate_rank_shard_validates_one_pool_output(tmp_path: Path) -> None:
-    rank_input = tmp_path / "rank_input.jsonl"
-    write_jsonl(rank_input, make_rank_rows(7))
-    shard_dir = tmp_path / "shards"
-    run_cli(
-        "make-rank-shards",
-        "--rank-input",
-        str(rank_input),
-        "--max-rows",
-        "5",
-        "--out-dir",
-        str(shard_dir),
-    )
-    first_input = shard_dir / "rank-shard-0001.input.jsonl"
-    first_output = shard_dir / "rank-shard-0001.output.jsonl"
-    write_jsonl(first_output, [rank_result(row) for row in read_jsonl(first_input)])
-
-    result = run_cli(
-        "validate-rank-shard",
-        "--input",
-        str(first_input),
-        "--output",
-        str(first_output),
-    )
-
-    assert "Validated 5 ranking rows" in result.stdout
-    assert not (shard_dir / "rank-shard-0002.output.jsonl").exists()
-
-
-def test_merge_rank_outputs_validates_and_restores_authoritative_order(tmp_path: Path) -> None:
-    rank_input = tmp_path / "rank_input.jsonl"
-    rows = make_rank_rows(7)
-    write_jsonl(rank_input, rows)
-    shard_dir = tmp_path / "shards"
-    run_cli(
-        "make-rank-shards",
-        "--rank-input",
-        str(rank_input),
-        "--max-rows",
-        "5",
-        "--out-dir",
-        str(shard_dir),
-    )
-    for input_shard in sorted(shard_dir.glob("*.input.jsonl")):
-        output_shard = input_shard.with_name(input_shard.name.replace(".input.", ".output."))
-        shard_rows = read_jsonl(input_shard)
-        write_jsonl(output_shard, [rank_result(row) for row in reversed(shard_rows)])
-
-    output = tmp_path / "rank_output.jsonl"
-    run_cli(
-        "merge-rank-outputs",
-        "--rank-input",
-        str(rank_input),
-        "--shard-dir",
-        str(shard_dir),
-        "--out",
-        str(output),
-    )
-
-    assert [row["path"] for row in read_jsonl(output)] == [row["path"] for row in rows]
-
-
-@pytest.mark.parametrize(
-    ("output_text", "expected_error"),
-    [
-        ("{not json}\n", "invalid JSON"),
-        (
-            '{"path":"a.py","area":"core","score":10,"include":true}\n',
-            "missing fields ['reason']",
-        ),
-        (
-            '{"path":"a.py","area":"core","score":true,"include":true,"reason":"x"}\n',
-            "score must be an integer",
-        ),
-        (
-            '{"path":"a.py","area":"core","score":11,"include":true,"reason":"x"}\n',
-            "score must be from 1 through 10",
-        ),
-        (
-            '{"path":"a.py","area":"core","score":10,"include":"true","reason":"x"}\n',
-            "include must be a boolean",
-        ),
-        (
-            '{"path":"a.py","area":"core","score":10,"include":true,"reason":""}\n',
-            "reason must be a non-empty string",
-        ),
-        (
-            '{"path":"b.py","area":"core","score":10,"include":true,"reason":"x"}\n',
-            "paths do not match its input shard",
-        ),
-        (
-            "",
-            "paths do not match its input shard",
-        ),
-    ],
-)
-def test_merge_rank_outputs_rejects_invalid_worker_results(
-    tmp_path: Path, output_text: str, expected_error: str
-) -> None:
-    rank_input = tmp_path / "rank_input.jsonl"
-    write_jsonl(rank_input, [{"path": "a.py", "area": "core", "preview": "a"}])
-    shard_dir = tmp_path / "shards"
-    run_cli(
-        "make-rank-shards",
-        "--rank-input",
-        str(rank_input),
-        "--out-dir",
-        str(shard_dir),
-    )
-    (shard_dir / "rank-shard-0001.output.jsonl").write_text(output_text, encoding="utf-8")
-
-    result = run_cli(
-        "merge-rank-outputs",
-        "--rank-input",
-        str(rank_input),
-        "--shard-dir",
-        str(shard_dir),
-        "--out",
-        str(tmp_path / "rank_output.jsonl"),
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert expected_error in result.stderr
-
-
-def test_merge_rank_outputs_rejects_missing_and_duplicate_results(tmp_path: Path) -> None:
-    rank_input = tmp_path / "rank_input.jsonl"
-    rows = [{"path": "a.py", "area": "core", "preview": "a"}]
-    write_jsonl(rank_input, rows)
-    shard_dir = tmp_path / "shards"
-    run_cli(
-        "make-rank-shards",
-        "--rank-input",
-        str(rank_input),
-        "--out-dir",
-        str(shard_dir),
-    )
-
-    result = run_cli(
-        "merge-rank-outputs",
-        "--rank-input",
-        str(rank_input),
-        "--shard-dir",
-        str(shard_dir),
-        "--out",
-        str(tmp_path / "rank_output.jsonl"),
-        check=False,
-    )
-    assert "missing output shards" in result.stderr
-
-    output_shard = shard_dir / "rank-shard-0001.output.jsonl"
-    duplicate = rank_result(rows[0])
-    write_jsonl(output_shard, [duplicate, duplicate])
-    result = run_cli(
-        "merge-rank-outputs",
-        "--rank-input",
-        str(rank_input),
-        "--shard-dir",
-        str(shard_dir),
-        "--out",
-        str(tmp_path / "rank_output.jsonl"),
-        check=False,
-    )
-    assert "duplicate paths" in result.stderr
