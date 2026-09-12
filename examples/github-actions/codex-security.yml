@@ -39,14 +39,14 @@ jobs:
 
     steps:
       - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.13.0"
+          node-version: "24.21.0"
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.14.7"
 
       # Install outside the checkout, before any repository content is present.
       - name: Install Codex Security
@@ -60,7 +60,7 @@ jobs:
           echo "$RUNNER_TEMP/codex-security-cli/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Check out the commit to scan
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -94,7 +94,6 @@ jobs:
             --model "$BEDROCK_MODEL_ID"
             --mode standard
             --effort high
-            --codex 'model_reasoning_summary="none"'
             --output-dir "$RUNNER_TEMP/codex-security-scan"
             --json
           )
@@ -123,7 +122,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Code Scanning
         if: ${{ !cancelled() && steps.sarif.outcome == 'success' }}
-        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           sarif_file: ${{ runner.temp }}/codex-security.sarif
           category: codex-security/${{ github.event_name == 'pull_request' && 'diff' || 'full' }}
