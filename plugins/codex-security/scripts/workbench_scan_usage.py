@@ -341,6 +341,14 @@ def scan_execution_attribution(
     }
 
 
+def scan_execution_fields(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "threadIds": _scan_root_thread_ids(connection, scan, None),
+        "executionThreadIds": _scan_execution_thread_ids(connection, scan),
+        "executionAttribution": scan_execution_attribution(connection, scan),
+    }
+
+
 def _codex_state_database() -> Path | None:
     configured_database = os.environ.get("CODEX_STATE_DB", "").strip()
     if configured_database:
