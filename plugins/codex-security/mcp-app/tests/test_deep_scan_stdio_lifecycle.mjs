@@ -432,7 +432,7 @@ async function testDeepScanStdioLifecycle() {
       "the MCP server must remain responsive after canceling one scan"
     );
 
-    const resumedThreadId = "deep-scan-stdio-resumed-thread";
+    let resumedThreadId = "deep-scan-stdio-resumed-thread";
     const opened = await server.request(24, "tools/call", toolCall(
       "open_codex_security_workspace",
       { targetPath, scope: ".", mode: "deep" },
@@ -453,7 +453,7 @@ async function testDeepScanStdioLifecycle() {
     assertNoError(started);
     const resumedScan = started.result.structuredContent.workspace.results;
     const resumedScanId = resumedScan.scanId;
-    const handoffClaimToken = randomUUID();
+    let handoffClaimToken = randomUUID();
     for (const [id, name, arguments_] of [
       [27, "claim_codex_security_scan_handoff_delivery", {
         scanId: resumedScanId, claimToken: handoffClaimToken
@@ -488,6 +488,7 @@ async function testDeepScanStdioLifecycle() {
     assert.equal(completedDraft.scanId, resumedScanId);
     assert.deepEqual(completedDraft.findings, []);
     assert.equal(partial.userContext, "Original discovery focus");
+    assert.equal(partial.usageOwner.threadId, resumedThreadId);
     const settingsPath = path.join(resumedScan.scanDir, "artifacts", "deep_discovery", "execution-settings.json");
     const originalSettings = await readFile(settingsPath, "utf8");
     assertNoError(await server.request(30, "tools/call", toolCall(
@@ -523,6 +524,18 @@ async function testDeepScanStdioLifecycle() {
       path.join(stateDir, "workbench.sqlite3"),
       resumedScanId
     ]);
+    await runWorkbench(environment, [
+      "release-handoff-delivery", "--scan-id", resumedScanId, "--claim-token", handoffClaimToken
+    ]);
+    handoffClaimToken = randomUUID();
+    resumedThreadId = "deep-scan-stdio-replacement-thread";
+    await runWorkbench(environment, [
+      "claim-handoff-delivery", "--scan-id", resumedScanId, "--claim-token", handoffClaimToken
+    ]);
+    await runWorkbench(environment, [
+      "attach-scan-continuation-thread", "--scan-id", resumedScanId,
+      "--claim-token", handoffClaimToken, "--thread-id", resumedThreadId
+    ]);
     await writeFile(restartControlPath, "after-restart");
     // A replacement caller's configuration must not replace the original selection.
     await writeFile(runtimeConfigPath, 'model_reasoning_summary = "detailed"\n');
@@ -555,6 +568,7 @@ async function testDeepScanStdioLifecycle() {
       assert.equal(finished.userContext, partial.userContext);
       assert.equal(finished.createdAt, partial.createdAt, "recovery retains the original deadline origin");
       assert.equal(finished.config.maxTimeHours, partial.config.maxTimeHours);
+      assert.deepEqual(finished.usageOwner, partial.usageOwner, "a replacement continuation does not rebind original usage");
       assert.equal(await readFile(settingsPath, "utf8"), originalSettings);
       const successfulDiscoveries = finished.workers.filter((worker) => (
         worker.kind === "discovery" && worker.status === "succeeded"
