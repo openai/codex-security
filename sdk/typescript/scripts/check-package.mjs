@@ -176,6 +176,7 @@ const distFiles = new Set(
     "cloud-publish",
     "codex-prompt",
     "codex-session",
+    "preflight-config",
     "component-plan",
     "component-scan",
     "config",

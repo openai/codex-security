@@ -15,7 +15,7 @@ const bundle = await build({
   },
   stdin: {
     // Test the environment snapshot without adding a production export.
-    contents: `${await readFile(executorSource, "utf8")}\nexport { snapshotWorkerEnvironment };`,
+    contents: `${await readFile(executorSource, "utf8")}\nexport { snapshotWorkerEnvironment };\nexport { captureDeepScanExecutionSettings, loadOrCaptureDeepScanExecutionSettings, restoredDeepScanWorkerSettings } from "./recovery-settings.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
     sourcefile: fileURLToPath(executorSource)
@@ -24,7 +24,7 @@ const bundle = await build({
   platform: "node",
   write: false
 });
-const { CodexSdkWorkerExecutor, resolveCodexPath, snapshotWorkerEnvironment } = await import(
+const { CodexSdkWorkerExecutor, resolveCodexPath, snapshotWorkerEnvironment, captureDeepScanExecutionSettings, loadOrCaptureDeepScanExecutionSettings, restoredDeepScanWorkerSettings } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
 const errorsBundle = await build({
@@ -782,7 +782,16 @@ async function testIsolatedReconstructedWorkers() {
         reasoningEffort: "ultra",
         parentSandbox: trustedParentSandboxWithDenials
       };
-      scans.push({ name, fixture, config, configPath, promptPath, settings, executor: new CodexSdkWorkerExecutor(settings) });
+      const saved = await loadOrCaptureDeepScanExecutionSettings(fixture.root, () =>
+        captureDeepScanExecutionSettings(settings, settings.parentSandbox, { ...codexOptions.env, CODEX_CLI_PATH: executable }));
+      const snapshotPath = path.join(fixture.root, "artifacts", "deep_discovery", "execution-settings.json");
+      const snapshot = await readFile(snapshotPath, "utf8");
+      assert.equal(snapshot.includes("synthetic-"), false);
+      const runtimeEnvironment = { ...codexOptions.env };
+      const restored = restoredDeepScanWorkerSettings(saved, settings.parentSandbox, () => runtimeEnvironment);
+      restored.codexOptions.baseUrl = codexOptions.baseUrl;
+      scans.push({ name, fixture, config, configPath, promptPath, settings, runtimeEnvironment, snapshotPath, snapshot,
+        executor: new CodexSdkWorkerExecutor(restored) });
     }
     childProcess.spawn = (command, args, options) => {
       const scan = scans.find((scan) => options?.env?.FAKE_CODEX_MARKER === scan.fixture.markerPath);
@@ -796,11 +805,17 @@ async function testIsolatedReconstructedWorkers() {
           // The caller restores recorded selections. Its old config file need
           // not exist; current credentials still come from the selected home/env.
           await rm(scan.configPath);
-          scan.executor = new CodexSdkWorkerExecutor({
-            ...scan.settings,
-            codexOptions: { ...scan.settings.codexOptions, config: scan.config }
-          });
+          const recorded = await loadOrCaptureDeepScanExecutionSettings(scan.fixture.root, () =>
+            assert.fail("reconstruction must not recapture current settings"));
+          const restored = restoredDeepScanWorkerSettings(recorded, scan.settings.parentSandbox, () => scan.runtimeEnvironment);
+          restored.codexOptions.baseUrl = scan.settings.codexOptions.baseUrl;
+          scan.executor = new CodexSdkWorkerExecutor(restored);
+          assert.equal(await readFile(scan.snapshotPath, "utf8"), scan.snapshot);
         }
+      }
+      for (const scan of scans) {
+        scan.runtimeEnvironment.CODEX_API_KEY = `synthetic-${scan.name}-${phase}`;
+        scan.runtimeEnvironment.CODEX_HOME = path.join(scan.fixture.root, "observer-home");
       }
       for (const kind of ["discovery", "dedup"]) {
         await Promise.all(scans.map(async (scan) => {
@@ -819,7 +834,7 @@ async function testIsolatedReconstructedWorkers() {
           assert.equal(preflight.codexHome, child.codexHome);
           assert.equal(child.scanValue, scan.name);
           assert.equal(child.configPath, scan.configPath);
-          assert.deepEqual(child.openaiAuthentication, { CODEX_API_KEY: `synthetic-${scan.name}-credential` });
+          assert.deepEqual(child.openaiAuthentication, { CODEX_API_KEY: `synthetic-${scan.name}-${phase}` });
           assertFlagPair(child.argv, "--model", scan.settings.model);
           for (const key of ["model_provider", "model_reasoning_summary", "service_tier"]) {
             const override = `${key}=${JSON.stringify(scan.config[key])}`;
