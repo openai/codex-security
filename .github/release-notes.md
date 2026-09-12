@@ -32,6 +32,7 @@
 - simplify scan runtime bookkeeping ([#903](https://github.com/openai/codex-security/pull/903))
 - upgrade json-schema-to-typescript to 16.0.0 ([#914](https://github.com/openai/codex-security/pull/914))
 - upgrade eval OpenCode SDK to 1.18.29 ([#911](https://github.com/openai/codex-security/pull/911))
+- upgrade Ink and use complete Escape input in TUI tests ([#913](https://github.com/openai/codex-security/pull/913))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
