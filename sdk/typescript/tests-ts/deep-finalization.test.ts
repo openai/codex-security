@@ -26,6 +26,94 @@ afterEach(cleanup);
 const threadId = "1af317a1-c9ed-4c73-b428-cb0d160cf8e8";
 const followUp = "Explain the selected finding.";
 
+for (const boundary of ["registration", "stream-start"] as const) {
+  test(`SDK cancels registered Deep Scan before first thread event: ${boundary}`, async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const codexHome = join(root, "codex-home");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(scanDir, { mode: 0o700 }),
+      mkdir(codexHome),
+    ]);
+    await writeFile(join(repository, "source.py"), "# Synthetic source\n");
+    const environment = {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const cancellation = new AbortController();
+    const reason = new Error(
+      "Synthetic cancellation before first thread event",
+    );
+    const commands: string[][] = [];
+    let scanId = "";
+    let savedOptions: WorkbenchCommandOptions;
+    let startedTurns = 0;
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+        }),
+        resolvePluginPython: async () => "python3",
+        prepareOutputDir: async () => scanDir,
+        runWorkbench: async (options, args, input) => {
+          savedOptions = options;
+          commands.push([...args]);
+          const result = await runWorkbench(options, args, input);
+          if (args[0] === "register-cli-scan") {
+            scanId = result["scanId"] as string;
+            if (boundary === "registration") cancellation.abort(reason);
+          }
+          return result;
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            runStreamed: async () => {
+              startedTurns++;
+              cancellation.abort(reason);
+              throw reason;
+            },
+          }),
+        }),
+      },
+    );
+    try {
+      const error = await client
+        .run(repository, {
+          mode: "deep",
+          signal: cancellation.signal,
+          postScanPrompt: followUp,
+        })
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(ScanInterruptedError);
+      expect((error as ScanInterruptedError).cause).toBe(reason);
+      const stopped = await runWorkbench(
+        { ...savedOptions!, signal: undefined },
+        ["get-scan", "--scan-id", scanId],
+      );
+      expect(stopped["scan"]).toMatchObject({
+        progress: { status: "canceled" },
+      });
+      expect(commands.filter((args) => args[0] === "cancel-scan")).toEqual([
+        ["cancel-scan", "--scan-id", scanId],
+      ]);
+      expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
+      expect(commands.some((args) => args[0] === "set-scan-thread")).toBe(
+        false,
+      );
+      expect(startedTurns).toBe(boundary === "registration" ? 0 : 1);
+    } finally {
+      await client.close();
+    }
+  }, 30_000);
+}
+
 const outcomes = [
   "failed",
   "completed",

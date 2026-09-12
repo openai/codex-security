@@ -2496,11 +2496,9 @@ export class CodexSecurity {
           return result;
         } catch {}
       }
-      const cancellationThreadId =
-        activeScan?.mode === "deep" && options.signal?.aborted
-          ? observedScanThreadId
-          : undefined;
-      if (activeScan !== null && cancellationThreadId !== undefined) {
+      const callerCanceledDeepScan =
+        activeScan?.mode === "deep" && options.signal?.aborted;
+      if (activeScan !== null && callerCanceledDeepScan) {
         const workbenchOptions = { ...activeScan.options, signal: undefined };
         // The workbench owns the running-state check and repeated cancellation.
         // Selection may have committed before the SDK received its response.
@@ -2508,15 +2506,16 @@ export class CodexSecurity {
           "cancel-scan",
           "--scan-id",
           activeScan.id,
-          "--thread-id",
-          cancellationThreadId,
+          ...(observedScanThreadId === undefined
+            ? []
+            : ["--thread-id", observedScanThreadId]),
         ]).catch(() => undefined);
       }
       // Publication failures remain resumable. A cost stop or explicit client close
       // still uses the existing failure path to retain partial results and stop work.
       if (
         activeScan !== null &&
-        cancellationThreadId === undefined &&
+        !callerCanceledDeepScan &&
         ((options.resumeScanId === undefined && !selectedDeepFinalization) ||
           (selectedDeepFinalization &&
             !options.signal?.aborted &&
