@@ -4930,6 +4930,10 @@ describe("CodexSecurity orchestration", () => {
             input?: string,
           ): Promise<JsonObject> => {
             commands.push(args);
+            if (args[0] === "get-scan") {
+              // Older workbench readers return a scan without execution attribution.
+              return { scan: { id: "scan_example_001" } };
+            }
             if (args[0] !== "complete-budget-exhausted-scan") {
               return mockWorkbench(args, input);
             }
