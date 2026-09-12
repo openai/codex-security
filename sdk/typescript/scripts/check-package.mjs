@@ -166,6 +166,7 @@ const allowedRoot = new Set([
 ]);
 const distFiles = new Set(
   [
+    "accepted-audit",
     "api",
     "auth",
     "bulk-scan-discovery",

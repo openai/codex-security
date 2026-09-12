@@ -1,4 +1,4 @@
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -477,7 +477,8 @@ describe("one-shot scan events", () => {
 
   test("lets the workbench seal artifacts before validating completed scans", async () => {
     const root = await temporaryDirectory();
-    const scanDir = join(root, "scan");
+    const scanDir = await copyCompletedScan(root);
+    await rm(join(scanDir, "report.md"));
     const events = completedEvents();
     let finalized = false;
 
@@ -506,7 +507,8 @@ describe("one-shot scan events", () => {
           cache_write_input_tokens: 0,
           output_tokens: 3,
         });
-        expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(false);
+        expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(true);
+        expect(existsSync(join(scanDir, "report.md"))).toBe(false);
         await copyCompletedScan(root);
         finalized = true;
       },
