@@ -983,6 +983,9 @@ def begin_deep_scan_for_target(
 
 
 def begin_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    workflow_version = optional_text(args.workflow_version, maximum=256)
+    if workflow_version not in SUPPORTED_DEEP_SCAN_WORKFLOWS:
+        raise SystemExit("This Deep Scan uses an unsupported workflow version.")
     thread_id = optional_text(args.thread_id, maximum=512)
     if thread_id is None:
         raise SystemExit("thread-id is required.")

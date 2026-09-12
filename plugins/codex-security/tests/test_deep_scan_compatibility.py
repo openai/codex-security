@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from pathlib import Path
@@ -156,3 +157,45 @@ def test_reader_honors_original_context_when_present(tmp_path: Path, original: s
         "fixture-thread",
     )["deepScan"]
     assert observed["userContext"] == original
+
+
+def test_unsupported_new_workflow_does_not_claim_registered_scan(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    registered = run_workbench(
+        state,
+        "register-cli-scan",
+        "--scan-dir",
+        str(scan_dir),
+        "--repository",
+        str(target),
+        "--registration-json-stdin",
+        input_text=json.dumps(
+            {
+                "recipe": {
+                    "config": {},
+                    "mode": "deep",
+                    "repository": str(target),
+                    "target": {"kind": "repository", "paths": []},
+                }
+            }
+        ),
+    )
+    before = snapshot(state)
+    rejected = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--scan-id",
+        str(registered["scanId"]),
+        "--thread-id",
+        "fixture-thread",
+        "--workflow-version",
+        "future/v99",
+        check=False,
+    )
+    assert rejected["returncode"] != 0
+    assert "unsupported" in str(rejected["stderr"]).lower()
+    assert snapshot(state) == before
