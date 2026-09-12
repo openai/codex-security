@@ -7428,7 +7428,11 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
             expect(children[1].args).toContain("resume");
             expect(children[1].args).toContain(`fixture-${name}-thread`);
             for (const child of children) {
-              expect(child.executable).toBe(fake.command.command);
+              expect(child.executable).toBe(
+                process.platform === "win32"
+                  ? win32.toNamespacedPath(fake.command.command)
+                  : fake.command.command,
+              );
               expect(child.home).toBe(codexHome);
               expect(child.key).toBe(`synthetic-${name}-key`);
               expect(child.value).toBe(name);
