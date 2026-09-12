@@ -2423,63 +2423,95 @@ describe("recorded Deep worker homes", () => {
     }
   });
 
-  test("charges copied response records across homes once with their actual models", async () => {
-    const home = await codexHome();
-    const recordedHome = await codexHome();
-    const scanDirectory = join(home, "scan");
-    const directory = join(scanDirectory, "artifacts", "deep_discovery");
-    await mkdir(directory, { recursive: true });
-    await writeFile(
-      join(directory, "execution-settings.json"),
-      JSON.stringify({ version: 1, settings: { codexHome: recordedHome } }),
-    );
-    const path = await writeSession(home, "worker", {});
-    for (const [id, model, input, output] of [
-      ["response-one", "gpt-5.6-sol", 100, 10],
-      ["response-two", "gpt-6-astra", 50, 5],
-    ] as const) {
-      await appendFile(
-        path,
-        JSON.stringify({
-          type: "token_usage_record",
-          payload: {
-            thread_id: "worker",
-            turn_id: "turn",
-            response_id: id,
-            model,
-            usage: { input_tokens: input, output_tokens: output },
-          },
-        }) + "\n",
+  test.each([
+    ["identical", false],
+    ["identical", true],
+    ["prefix-first", false],
+    ["prefix-first", true],
+    ["prefix-last", false],
+    ["prefix-last", true],
+  ] as const)(
+    "prices copied response records (%s, attribution: %s)",
+    async (copy, attributed) => {
+      const home = await codexHome();
+      const recordedHome = await codexHome();
+      const scanDirectory = join(home, "scan");
+      const directory = join(scanDirectory, "artifacts", "deep_discovery");
+      await mkdir(directory, { recursive: true });
+      await writeFile(
+        join(directory, "execution-settings.json"),
+        JSON.stringify({ version: 1, settings: { codexHome: recordedHome } }),
       );
-    }
-    await mkdir(join(recordedHome, "sessions"));
-    await cp(path, join(recordedHome, "sessions", "copied-worker.jsonl"));
-    const tracker = new ScanCostTracker({
-      codexHome: home,
-      scanDirectory,
-      model: "gpt-5.6-sol",
-    });
-    tracker.start("worker");
-    try {
-      const snapshot = await tracker.stop();
-      expect(snapshot.usage).toMatchObject({
-        input_tokens: 150,
-        output_tokens: 15,
-        total_tokens: 165,
+      const path = await writeSession(home, "worker", {});
+      for (const [id, model, input, output] of [
+        ["response-one", "gpt-5.6-sol", 100, 10],
+        ["response-two", "gpt-6-astra", 50, 5],
+      ] as const) {
+        await appendFile(
+          path,
+          JSON.stringify({
+            type: "token_usage_record",
+            timestamp: "2026-09-01T00:00:02Z",
+            payload: {
+              thread_id: "worker",
+              turn_id: "turn",
+              response_id: id,
+              model,
+              usage: { input_tokens: input, output_tokens: output },
+            },
+          }) + "\n",
+        );
+      }
+      await mkdir(join(recordedHome, "sessions"));
+      const copiedPath = join(recordedHome, "sessions", "copied-worker.jsonl");
+      await cp(path, copiedPath);
+      const prefix =
+        (await readFile(path, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .slice(0, -1)
+          .join("\n") + "\n";
+      if (copy === "prefix-first") await writeFile(path, prefix);
+      if (copy === "prefix-last") await writeFile(copiedPath, prefix);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        scanDirectory,
+        model: "gpt-5.6-sol",
       });
-      expect(
-        Object.fromEntries(
-          snapshot.cost!.modelCosts!.map((part) => [
-            part.model,
-            [part.inputTokens, part.outputTokens],
-          ]),
-        ),
-      ).toEqual({
-        "gpt-5.6-sol": [100, 10],
-        "gpt-6-astra": [50, 5],
-      });
-    } finally {
-      await tracker.stop();
-    }
-  });
+      if (attributed)
+        tracker.setAttributionReader(async () => ({
+          formatVersion: 1,
+          executionThreadIds: ["worker"],
+          owner: {
+            threadId: null,
+            turnId: null,
+            startedAt: "2026-09-01T00:00:00Z",
+          },
+          startedAt: "2026-09-01T00:00:00Z",
+          completedAt: null,
+        }));
+      tracker.start("worker");
+      try {
+        const snapshot = await tracker.stop();
+        expect(snapshot.usage).toMatchObject({
+          input_tokens: 150,
+          output_tokens: 15,
+          total_tokens: 165,
+        });
+        expect(
+          Object.fromEntries(
+            snapshot.cost!.modelCosts!.map((part) => [
+              part.model,
+              [part.inputTokens, part.outputTokens],
+            ]),
+          ),
+        ).toEqual({
+          "gpt-5.6-sol": [100, 10],
+          "gpt-6-astra": [50, 5],
+        });
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
 });

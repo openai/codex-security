@@ -377,6 +377,7 @@ export class ScanCostTracker {
         if (!usages.has(threadId)) usages.set(threadId, null);
       }
     }
+    const usageSessions = new Map<string, SessionUsage>();
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
@@ -418,6 +419,15 @@ export class ScanCostTracker {
           });
         }
         this.#reportWorkerProgress(session);
+      }
+      // A copied prefix must not supply model usage for a more complete log.
+      const previous = usageSessions.get(threadId);
+      if (
+        previous === undefined ||
+        (session.usage?.total_tokens ?? -1) >
+          (previous.usage?.total_tokens ?? -1)
+      ) {
+        usageSessions.set(threadId, session);
       }
       if (
         session.counterUsage &&
@@ -465,9 +475,7 @@ export class ScanCostTracker {
     let observedModel = false;
     for (const [threadId, value] of usages) {
       if (value === null) continue;
-      const session = [...this.#sessions.values()].find(
-        (item) => item.threadId === threadId,
-      );
+      const session = usageSessions.get(threadId);
       for (const [model, tokens] of session?.modelUsage ?? []) {
         if (model !== null) observedModel = true;
         modelUsage.set(
