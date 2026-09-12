@@ -759,7 +759,7 @@ async function testIsolatedReconstructedWorkers() {
         model_reasoning_summary: name === "first" ? "none" : "concise",
         service_tier: name === "first" ? "flex" : "fast"
       };
-      await writeFile(configPath, Object.entries(config).map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join(""));
+      await writeFile(configPath, Object.entries(config).filter(([key]) => name !== "first" || key !== "model_provider").map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join(""));
       await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH NULL_USAGE\n");
       const executable = path.join(fixture.root, process.platform === "win32" ? "node.exe" : "node");
       await copyFile(process.execPath, executable);
@@ -782,8 +782,13 @@ async function testIsolatedReconstructedWorkers() {
         reasoningEffort: "ultra",
         parentSandbox: trustedParentSandboxWithDenials
       };
+      await mkdir(path.join(codexHome, "sessions"));
+      await writeFile(path.join(codexHome, "sessions", "owner.jsonl"), JSON.stringify({
+        type: "session_meta", timestamp: "2026-01-01T00:00:00Z",
+        payload: { id: `fixture-${name}-owner`, model_provider: config.model_provider }
+      }) + "\n");
       const saved = await loadOrCaptureDeepScanExecutionSettings(fixture.root, () =>
-        captureDeepScanExecutionSettings(settings, settings.parentSandbox, { ...codexOptions.env, CODEX_CLI_PATH: executable }));
+        captureDeepScanExecutionSettings(settings, settings.parentSandbox, { ...codexOptions.env, CODEX_CLI_PATH: executable }, { threadId: `fixture-${name}-owner`, startedAt: "2026-01-01T00:01:00Z" }));
       const snapshotPath = path.join(fixture.root, "artifacts", "deep_discovery", "execution-settings.json");
       const snapshot = await readFile(snapshotPath, "utf8");
       assert.equal(snapshot.includes("synthetic-"), false);
@@ -817,6 +822,7 @@ async function testIsolatedReconstructedWorkers() {
         scan.runtimeEnvironment.CODEX_API_KEY = `synthetic-${scan.name}-${phase}`;
         scan.runtimeEnvironment.FAKE_CODEX_SCAN_VALUE = `${scan.name}-${phase}`;
         scan.runtimeEnvironment.CODEX_HOME = path.join(scan.fixture.root, "observer-home");
+        scan.runtimeEnvironment.CODEX_CLI_PATH = path.join(scan.fixture.root, "observer-codex");
       }
       for (const kind of ["discovery", "dedup"]) {
         await Promise.all(scans.map(async (scan) => {
@@ -831,6 +837,7 @@ async function testIsolatedReconstructedWorkers() {
           const child = JSON.parse(await readFile(scan.fixture.markerPath, "utf8"));
           const preflight = JSON.parse(await readFile(scan.fixture.preflightMarkerPath, "utf8"));
           assert.equal(child.executable, scan.settings.codexOptions.codexPathOverride);
+          assert.equal(child.codexCliPath, scan.settings.codexOptions.codexPathOverride);
           assert.equal(child.codexHome, scan.settings.codexOptions.env.CODEX_HOME);
           assert.equal(preflight.codexHome, child.codexHome);
           assert.equal(child.scanValue, `${scan.name}-${phase}`);
@@ -1771,7 +1778,7 @@ async function fakeCodexFixture(
     "for await (const chunk of process.stdin) stdin += chunk;",
     "const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;",
     "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
-    "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ executable: process.execPath, argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, scanValue: process.env.FAKE_CODEX_SCAN_VALUE, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
+    "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ executable: process.execPath, argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, codexCliPath: process.env.CODEX_CLI_PATH, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, scanValue: process.env.FAKE_CODEX_SCAN_VALUE, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
     "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
     "if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }",
     "if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }",

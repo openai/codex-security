@@ -186,6 +186,7 @@ const distFiles = new Set(
     "cost",
     "cost-model",
     "custom-validation",
+    "deep-scan-finalization",
     "custom-validation-prompt",
     "custom-publish",
     "deep-progress",
