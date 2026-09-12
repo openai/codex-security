@@ -22,7 +22,7 @@ import {
   DeepScanStartLock,
   startOrJoinDeepScanCoordinator
 } from "./src/deep-scan/registry.js";
-import { captureDeepScanExecutionSettings, loadOrCaptureDeepScanExecutionSettings, restoredDeepScanWorkerSettings } from "./src/deep-scan/recovery-settings.js";
+import { captureDeepScanExecutionSettings, loadDeepScanExecutionSettings, restoredDeepScanWorkerSettings } from "./src/deep-scan/recovery-settings.js";
 import { CodexSdkWorkerExecutor } from "./src/deep-scan/executor.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
@@ -728,7 +728,13 @@ export function createCodexSecurityServer(): McpServer {
       return toolErrorResult(deepScanInvocationFailureMessage(error));
     }
     const preparation = await deepScanStartLock.run(async () => {
+      // A joining observer does not need a usable current home. A new run,
+      // however, must save its original settings before creation can commit.
+      const executionSettings = await captureDeepScanExecutionSettings(
+        modelSettings, parentSandbox, process.env, { threadId, startedAt: new Date().toISOString() }
+      ).catch(() => null);
       const begun = await deepScanStore.begin({
+        executionSettings,
         scanId,
         targetPath,
         scope: hasTarget ? scope ?? "." : undefined,
@@ -753,8 +759,7 @@ export function createCodexSecurityServer(): McpServer {
           store: deepScanStore,
           prepareExecutor: async (run) => new CodexSdkWorkerExecutor({
             ...restoredDeepScanWorkerSettings(
-              await loadOrCaptureDeepScanExecutionSettings(run.scanDir, () =>
-                captureDeepScanExecutionSettings(run, parentSandbox, process.env, { threadId, startedAt: run.createdAt }), run),
+              await loadDeepScanExecutionSettings(run.scanDir, run),
               parentSandbox
             ),
             artifactContext: {
@@ -1663,11 +1668,12 @@ async function runWorkbench(
   args: string[],
   input?: string | Buffer,
   selectFinalization = false,
+  beginWithExecutionSettings = false,
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
-    return await executeWorkbenchWithStateSelection(pythonCommand, args, input, selectFinalization);
+    return await executeWorkbenchWithStateSelection(pythonCommand, args, input, selectFinalization, beginWithExecutionSettings);
   } catch (error) {
     const launchError = pythonCommand
       ? missingPythonHelperMessage(error, pythonCommand)
@@ -1687,35 +1693,36 @@ async function executeWorkbenchWithStateSelection(
   args: string[],
   input?: string | Buffer,
   selectFinalization = false,
+  beginWithExecutionSettings = false,
 ): Promise<JsonObject> {
   if (WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "")) {
-    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization);
+    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, beginWithExecutionSettings);
   }
   if (CONFIGURED_WORKBENCH_STATE_DIR) {
-    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization);
+    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, beginWithExecutionSettings);
   }
   if (fallbackWorkbenchStateDir) {
-    return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input, selectFinalization);
+    return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input, selectFinalization, beginWithExecutionSettings);
   }
   if (persistentWorkbenchStateSucceeded) {
-    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization);
+    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, beginWithExecutionSettings);
   }
   return await withWorkbenchStateSelectionLock(async () => {
     if (fallbackWorkbenchStateDir) {
-      return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input, selectFinalization);
+      return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input, selectFinalization, beginWithExecutionSettings);
     }
     if (persistentWorkbenchStateSucceeded) {
-      return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization);
+      return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, beginWithExecutionSettings);
     }
     try {
-      const result = await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization);
+      const result = await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, beginWithExecutionSettings);
       persistentWorkbenchStateSucceeded = true;
       return result;
     } catch (error) {
       if (!isUnwritableSqliteOpenError(error)) throw error;
       const fallbackStateDir = await pinFallbackWorkbenchStateDir();
       logWorkbenchStateFallback();
-      return await executeWorkbench(pythonCommand, args, fallbackStateDir, input, selectFinalization);
+      return await executeWorkbench(pythonCommand, args, fallbackStateDir, input, selectFinalization, beginWithExecutionSettings);
     }
   });
 }
@@ -1740,6 +1747,7 @@ async function executeWorkbench(
   stateDir?: string,
   input?: string | Buffer,
   selectFinalization = false,
+  beginWithExecutionSettings = false,
 ): Promise<JsonObject> {
   const userContextIndex = args.indexOf("--user-context");
   const userContext = userContextIndex === -1 ? undefined : args[userContextIndex + 1];
@@ -1748,8 +1756,10 @@ async function executeWorkbench(
     workbenchArgs.splice(userContextIndex, 2, "--user-context-stdin");
   }
   const workbenchInput = input ?? userContext;
-  const pythonArgs = selectFinalization
-    ? ["-c", "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](select_finalization=True)", workbenchScriptPath(), ...workbenchArgs]
+  const internalInvocation = selectFinalization ? "select_finalization=True"
+    : beginWithExecutionSettings ? "begin_with_execution_settings=True" : undefined;
+  const pythonArgs = internalInvocation
+    ? ["-c", `import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](${internalInvocation})`, workbenchScriptPath(), ...workbenchArgs]
     : [workbenchScriptPath(), ...workbenchArgs];
   const execution = execFileAsync(pythonCommand, pythonArgs, {
     cwd: PLUGIN_ROOT,

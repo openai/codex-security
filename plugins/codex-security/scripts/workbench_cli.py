@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -30,7 +31,7 @@ def add_user_context(parser: argparse.ArgumentParser, *, required: bool = False)
     context.add_argument("--user-context-stdin", action="store_true")
 
 
-def parse_args(description: str) -> argparse.Namespace:
+def parse_args(description: str, *, execution_settings: bool = False) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -392,7 +393,14 @@ def parse_args(description: str) -> argparse.Namespace:
             parser.error("pass exactly one user-context transport")
         index = arguments.index("--user-context-stdin")
         arguments[index] = "--user-context=" + sys.stdin.buffer.read().decode("utf-8")
-    return parser.parse_args(arguments)
+    args = parser.parse_args(arguments)
+    if execution_settings:
+        # Private MCP creation input shares stdin with the user's unchanged context.
+        payload = json.load(sys.stdin)
+        args.execution_settings = payload["executionSettings"]
+        args.user_context = payload.get("userContext")
+        args.user_context_stdin = False
+    return args
 
 
 def non_negative_int(value: str) -> int:

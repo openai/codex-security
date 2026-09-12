@@ -2,6 +2,7 @@ import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeJsonAtomic } from "./artifacts.js";
+import type { DeepScanExecutionSettings } from "./recovery-settings.js";
 import {
   boundedDeepScanErrorMessage,
   DeepScanNonRetryableError,
@@ -30,6 +31,7 @@ export type WorkbenchRunner = (
   args: string[],
   input?: string,
   selectFinalization?: boolean,
+  beginWithExecutionSettings?: boolean,
 ) => Promise<JsonObject>;
 
 const WORKFLOW_VERSION = "deep-security-scan/v2";
@@ -120,6 +122,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
     reasoningEffort?: string;
     threadId: string;
     scanRoot: string;
+    executionSettings?: DeepScanExecutionSettings | null;
   }): Promise<BeginDeepScanResult> {
     const userContext = input.userContext;
     const result = await this.enqueueWrite([
@@ -129,7 +132,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
       ...(input.scanId ? ["--scan-id", input.scanId] : []),
       ...(input.targetPath ? ["--target-path", input.targetPath] : []),
       ...(input.scope ? ["--scope", input.scope] : []),
-      ...(userContext ? ["--user-context-stdin"] : []),
+      ...(userContext && input.executionSettings === undefined ? ["--user-context-stdin"] : []),
       ...(input.handoffClaimToken ? ["--claim-token", input.handoffClaimToken] : []),
       ...(input.model ? ["--model", input.model] : []),
       ...(input.reasoningEffort ? ["--reasoning-effort", input.reasoningEffort] : []),
@@ -139,7 +142,10 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
       String(availableParallelism()),
       "--workflow-version",
       WORKFLOW_VERSION
-    ], false, userContext);
+    ], false, input.executionSettings === undefined ? userContext : JSON.stringify({
+      executionSettings: input.executionSettings,
+      userContext
+    }), false, input.executionSettings !== undefined);
     const run = parseDeepScan(result);
     const startDisposition = result.startDisposition;
     if (startDisposition !== "created" && startDisposition !== "joined") {
@@ -438,12 +444,13 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
     retryTransientFailure = false,
     input?: string,
     selectFinalization = false,
+    beginWithExecutionSettings = false,
   ): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {
         return retryTransientFailure
           ? await this.runIdempotentPersistence(args, input, selectFinalization)
-          : await this.runWorkbench(args, input, selectFinalization);
+          : await this.runWorkbench(args, input, selectFinalization, beginWithExecutionSettings);
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");
         if (scanId && isStaleCoordinatorGenerationError(error)) {

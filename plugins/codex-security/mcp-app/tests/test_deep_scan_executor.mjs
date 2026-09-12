@@ -16,7 +16,7 @@ const bundle = await build({
   },
   stdin: {
     // Test the environment snapshot without adding a production export.
-    contents: `${await readFile(executorSource, "utf8")}\nexport { snapshotWorkerEnvironment };\nexport { captureDeepScanExecutionSettings, loadOrCaptureDeepScanExecutionSettings, restoredDeepScanWorkerSettings } from "./recovery-settings.js";`,
+    contents: `${await readFile(executorSource, "utf8")}\nexport { snapshotWorkerEnvironment };\nexport { captureDeepScanExecutionSettings, loadDeepScanExecutionSettings, restoredDeepScanWorkerSettings } from "./recovery-settings.js";\nexport { WorkbenchDeepScanStore } from "./store.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
     sourcefile: fileURLToPath(executorSource)
@@ -25,7 +25,7 @@ const bundle = await build({
   platform: "node",
   write: false
 });
-const { CodexSdkWorkerExecutor, resolveCodexPath, snapshotWorkerEnvironment, captureDeepScanExecutionSettings, loadOrCaptureDeepScanExecutionSettings, restoredDeepScanWorkerSettings } = await import(
+const { WorkbenchDeepScanStore, CodexSdkWorkerExecutor, resolveCodexPath, snapshotWorkerEnvironment, captureDeepScanExecutionSettings, loadDeepScanExecutionSettings, restoredDeepScanWorkerSettings } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
 const errorsBundle = await build({
@@ -811,16 +811,47 @@ async function testIsolatedReconstructedWorkers() {
         type: "session_meta", timestamp: "2026-01-01T00:00:00Z",
         payload: { id: `fixture-${name}-observer`, model_provider: "observer-provider" }
       }) + "\n");
-      const saved = await loadOrCaptureDeepScanExecutionSettings(fixture.root, () =>
-        captureDeepScanExecutionSettings(settings, settings.parentSandbox, { ...codexOptions.env, CODEX_CLI_PATH: executable }, { threadId: `fixture-${name}-observer`, startedAt: "2026-01-01T00:01:00Z" }));
+      const saved = await captureDeepScanExecutionSettings(settings, settings.parentSandbox,
+        { ...codexOptions.env, CODEX_CLI_PATH: executable },
+        { threadId: `fixture-${name}-observer`, startedAt: "2026-01-01T00:01:00Z" });
       assert.equal(saved.nativeServiceTierAbsent, name === "first" ? true : undefined);
-      const snapshotPath = path.join(fixture.root, "artifacts", "deep_discovery", "execution-settings.json");
+      const targetPath = path.join(fixture.root, "target");
+      await mkdir(targetPath);
+      const workbenchPath = fileURLToPath(new URL("../../scripts/workbench_db.py", import.meta.url));
+      const runWorkbench = async (args, input, _selectFinalization, beginWithExecutionSettings) => {
+        const pythonArgs = beginWithExecutionSettings ? ["-c",
+          "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](begin_with_execution_settings=True)",
+          workbenchPath, ...args] : [workbenchPath, ...args];
+        const result = spawnSync(process.env.PYTHON?.trim() || "python3", pythonArgs, {
+          env: { ...process.env, CODEX_HOME: codexHome,
+            CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state") },
+          input, encoding: "utf8", timeout: 30_000
+        });
+        assert.equal(result.status, 0, result.stderr);
+        return JSON.parse(result.stdout);
+      };
+      const store = new WorkbenchDeepScanStore(runWorkbench);
+      const beginInput = { targetPath, threadId: settings.usageOwner.threadId,
+        model: settings.model, reasoningEffort: settings.reasoningEffort,
+        scanRoot: path.join(fixture.root, "scans") };
+      const { run } = await store.begin({ ...beginInput, executionSettings: saved });
+      const recordedScanDir = run.scanDir;
+      const snapshotPath = path.join(recordedScanDir, "artifacts", "deep_discovery", "execution-settings.json");
       const snapshot = await readFile(snapshotPath, "utf8");
+      assert.deepEqual(await loadDeepScanExecutionSettings(recordedScanDir), saved);
+      const claim = await store.claimCoordinator({ scanId: run.scanId, threadId: beginInput.threadId });
+      assert.equal(claim.acquired, true);
+      const observer = await new WorkbenchDeepScanStore(runWorkbench).begin({
+        ...beginInput, executionSettings: null, model: "observer-model", reasoningEffort: "low"
+      });
+      assert.equal(observer.shouldStart, false);
+      assert.equal(await readFile(snapshotPath, "utf8"), snapshot);
+      assert.equal(observer.run.model, settings.model);
       assert.equal(snapshot.includes("synthetic-"), false);
       const runtimeEnvironment = { ...codexOptions.env };
       const restored = restoredDeepScanWorkerSettings(saved, currentParentSandbox, () => runtimeEnvironment);
       restored.codexOptions.baseUrl = codexOptions.baseUrl;
-      scans.push({ name, fixture, currentParentSandbox, config, configPath, promptPath, settings, runtimeEnvironment, snapshotPath, snapshot,
+      scans.push({ name, fixture, recordedScanDir, currentParentSandbox, config, configPath, promptPath, settings, runtimeEnvironment, snapshotPath, snapshot,
         executor: new CodexSdkWorkerExecutor(restored) });
     }
     childProcess.spawn = (command, args, options) => {
@@ -845,8 +876,7 @@ async function testIsolatedReconstructedWorkers() {
             if (scan.name === "first") delete saved.settings.serviceTier;
             await writeFile(scan.snapshotPath, JSON.stringify(saved));
           }
-          const recorded = await loadOrCaptureDeepScanExecutionSettings(scan.fixture.root, () =>
-            assert.fail("reconstruction must not recapture current settings"), {
+          const recorded = await loadDeepScanExecutionSettings(scan.recordedScanDir, {
             ...scan.settings, createdAt: "2026-01-01T00:01:00Z"
           });
           const restored = restoredDeepScanWorkerSettings(recorded, scan.currentParentSandbox, () => scan.runtimeEnvironment);

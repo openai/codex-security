@@ -14,7 +14,7 @@ const bundle = await build({
   platform: "node",
   write: false
 });
-const { captureDeepScanExecutionSettings: captureSettings, restoredDeepScanWorkerSettings: restoreSettings, loadOrCaptureDeepScanExecutionSettings: loadSettings } = await import(
+const { captureDeepScanExecutionSettings: captureSettings, restoredDeepScanWorkerSettings: restoreSettings, loadDeepScanExecutionSettings: loadSettings } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
 const root = await mkdtemp(join(tmpdir(), "deep-settings-"));
@@ -45,24 +45,24 @@ try {
   assert.equal(restoreSettings({ ...settings, parentSandbox: globSandbox(2) }, {
     filesystemDenies: ["/fixture/exact-denial"]
   }).parentSandbox.globScanMaxDepth, 2, "exact denials do not change glob expansion");
-  const first = await loadSettings(join(root, "one"), async () => ({
-    ...settings,
-    apiKey: "synthetic-do-not-persist",
-    env: { CODEX_API_KEY: "synthetic-do-not-persist" }
-  }));
-  assert.deepEqual(first, settings);
+  const writeSnapshot = async (directory, value) => {
+    const path = join(directory, "artifacts", "deep_discovery", "execution-settings.json");
+    await mkdir(join(directory, "artifacts", "deep_discovery"), { recursive: true });
+    await writeFile(path, JSON.stringify({ version: 1, settings: value }, null, 2) + "\n");
+  };
+  await assert.rejects(loadSettings(join(root, "missing")), /no recorded original execution settings/);
+  await writeSnapshot(join(root, "one"), settings);
+  await writeSnapshot(join(root, "two"), { ...settings, model: "other-model" });
   const savedPath = join(root, "one", "artifacts", "deep_discovery", "execution-settings.json");
   const saved = await readFile(savedPath, "utf8");
-  assert.equal(saved.includes("synthetic-do-not-persist"), false);
   const [recovered, concurrent] = await Promise.all([
-    loadSettings(join(root, "one"), async () => assert.fail("recovery recaptured observer settings")),
-    loadSettings(join(root, "two"), async () => ({ ...settings, model: "other-model" }))
+    loadSettings(join(root, "one")), loadSettings(join(root, "two"))
   ]);
   assert.deepEqual(recovered, settings);
   assert.equal(concurrent.model, "other-model");
   assert.equal(await readFile(savedPath, "utf8"), saved);
   recovered.model = "caller-mutation";
-  assert.deepEqual(await loadSettings(join(root, "one"), async () => assert.fail()), settings);
+  assert.deepEqual(await loadSettings(join(root, "one")), settings);
   const configPath = join(root, "runtime.toml");
   await writeFile(configPath, `model = "inherited-model"
 model_provider = "custom"
@@ -169,10 +169,10 @@ http_headers = { Authorization = "synthetic-secret" }
     assert.equal(fresh.reasoningSummary, undefined, "fresh native compatibility auto is not an original selection");
     assert.equal(restoreSettings(fresh, { filesystemDenies: [] }).codexOptions.config.model_reasoning_summary, undefined);
     const freshDir = join(root, threadId);
-    await loadSettings(freshDir, async () => fresh);
+    await writeSnapshot(freshDir, fresh);
     const freshPath = join(freshDir, "artifacts", "deep_discovery", "execution-settings.json");
     const freshBytes = await readFile(freshPath, "utf8");
-    assert.deepEqual(await loadSettings(freshDir, async () => assert.fail(), { usageOwner: owner, createdAt: owner.startedAt }), fresh);
+    assert.deepEqual(await loadSettings(freshDir, { usageOwner: owner, createdAt: owner.startedAt }), fresh);
     assert.equal(await readFile(freshPath, "utf8"), freshBytes, "unknown summary is not replaced by a compatibility field or a later selection");
     await writeFile(join(root, "config.toml"), 'model_reasoning_summary = "auto"\n');
     const explicit = await captureSettings({ usageOwner: owner }, { filesystemDenies: [] }, parentEnvironment);
@@ -201,8 +201,8 @@ http_headers = { Authorization = "synthetic-secret" }
   const tierDir = join(root, "missing-tier");
   const { serviceTier: omittedTier, ...withoutTier } = applied;
   assert.equal(omittedTier, "default");
-  await loadSettings(tierDir, async () => withoutTier);
-  const repairedTier = await loadSettings(tierDir, async () => assert.fail(), {
+  await writeSnapshot(tierDir, withoutTier);
+  const repairedTier = await loadSettings(tierDir, {
     usageOwner: appliedOwner, createdAt: "2026-01-01T00:01:00Z"
   });
   assert.equal(repairedTier.serviceTier, "default");
@@ -230,28 +230,28 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(nativeDefaults.reasoningSummary, undefined, "a compatibility summary is not a recorded native default");
   const incompleteDir = join(root, "incomplete");
   const incomplete = { codexPath: process.execPath, codexHome: root, serviceTier: "flex" };
-  await loadSettings(incompleteDir, async () => incomplete);
+  await writeSnapshot(incompleteDir, incomplete);
   await writeFile(join(root, "config.toml"), 'model_provider = "observer-provider"\nmodel_reasoning_summary = "detailed"\n');
   const originalRun = { model: "stored-model", reasoningEffort: "ultra", usageOwner: originalOwner,
     createdAt: "2026-01-01T00:01:00Z" };
-  const repaired = await loadSettings(incompleteDir, async () => assert.fail("existing settings must not recapture current config"), originalRun);
+  const repaired = await loadSettings(incompleteDir, originalRun);
   assert.deepEqual(repaired, { ...incomplete, model: "stored-model", reasoningEffort: "ultra",
     modelProvider: "openai", reasoningSummary: "none" });
   const repairedPath = join(incompleteDir, "artifacts", "deep_discovery", "execution-settings.json");
   const repairedBytes = await readFile(repairedPath, "utf8");
   await rm(sessionDirectory, { recursive: true });
-  assert.deepEqual(await loadSettings(incompleteDir, async () => assert.fail(), originalRun), repaired);
+  assert.deepEqual(await loadSettings(incompleteDir, originalRun), repaired);
   assert.equal(await readFile(repairedPath, "utf8"), repairedBytes, "recovered selections survive unavailable history");
   const unknownDir = join(root, "unknown");
-  await loadSettings(unknownDir, async () => incomplete);
-  const unknown = await loadSettings(unknownDir, async () => assert.fail(), { ...originalRun, usageOwner: null });
+  await writeSnapshot(unknownDir, incomplete);
+  const unknown = await loadSettings(unknownDir, { ...originalRun, usageOwner: null });
   assert.equal(unknown.model, "stored-model");
   assert.equal(unknown.modelProvider, undefined, "missing original ownership is not current config");
   assert.equal(unknown.reasoningSummary, undefined);
   assert.equal(unknown.nativeServiceTierAbsent, undefined);
   const unsupported = JSON.stringify({ version: 99, settings });
   await writeFile(savedPath, unsupported);
-  await assert.rejects(loadSettings(join(root, "one"), async () => assert.fail()), /unsupported/);
+  await assert.rejects(loadSettings(join(root, "one")), /unsupported/);
   assert.equal(await readFile(savedPath, "utf8"), unsupported);
 } finally {
   await rm(root, { recursive: true, force: true });

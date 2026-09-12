@@ -130,10 +130,9 @@ async function originalParentSettings(
   }
 }
 
-/** Called by the acquired coordinator before it starts any worker. */
-export async function loadOrCaptureDeepScanExecutionSettings(
+/** New runs save settings in their creation transaction, before any coordinator claim. */
+export async function loadDeepScanExecutionSettings(
   scanDir: string,
-  capture: () => Promise<DeepScanExecutionSettings>,
   original?: Pick<DeepScanRunState, "model" | "reasoningEffort" | "usageOwner" | "createdAt">
 ): Promise<DeepScanExecutionSettings> {
   const path = join(scanDir, "artifacts", "deep_discovery", "execution-settings.json");
@@ -146,9 +145,7 @@ export async function loadOrCaptureDeepScanExecutionSettings(
     settings = executionSettings(saved.settings);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    settings = executionSettings(await capture());
-    await writeJsonAtomic(path, { version: 1, settings });
-    return settings;
+    throw new Error("This Deep Scan has no recorded original execution settings; its executable and Codex home cannot be recovered.");
   }
   if (!original || (settings.model !== undefined && settings.reasoningEffort !== undefined
     && settings.modelProvider !== undefined && settings.reasoningSummary !== undefined

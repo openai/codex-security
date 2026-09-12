@@ -17,6 +17,7 @@ const { WorkbenchDeepScanStore, parseDeepScan } = await import(
 );
 
 await testBeginProtocolAndParsing();
+await testBeginCarriesOriginalSettingsWithUserContext();
 await testCanonicalCommitProtocol();
 await testTerminalProtocol();
 testCanonicalNullAndPartialParsing();
@@ -44,6 +45,24 @@ function testOriginalUsageOwnerParsing() {
   assert.deepEqual(parseDeepScan({ deepScan: { ...value.deepScan, usageOwner } }).usageOwner, usageOwner);
   assert.equal(parseDeepScan({ deepScan: { ...value.deepScan, usageOwner: null } }).usageOwner, null);
   assert.equal(parseDeepScan(value).usageOwner, null, "old readers do not establish an original owner");
+}
+
+async function testBeginCarriesOriginalSettingsWithUserContext() {
+  const executionSettings = { codexPath: "/fixture/codex", codexHome: "/fixture/home",
+    model: "original-model", reasoningSummary: "concise" };
+  const userContext = "Review the parser.\nKeep this second line.";
+  const runner = async (args, input, selectFinalization, beginWithExecutionSettings) => {
+    assert.equal(selectFinalization, false);
+    assert.equal(beginWithExecutionSettings, true);
+    assert.deepEqual(JSON.parse(input), { executionSettings, userContext });
+    assert.equal(args.includes("--user-context-stdin"), false,
+      "the private structured input carries context without a second stdin consumer");
+    assert.equal(args.some((arg) => arg.includes("execution-settings")), false,
+      "no public argument is added for the internal settings handoff");
+    return stateResult(randomUUID(), { startDisposition: "created" });
+  };
+  await new WorkbenchDeepScanStore(runner).begin({ targetPath: "/fixture/repository",
+    threadId: "fixture-thread", scanRoot: "/fixture/scans", userContext, executionSettings });
 }
 
 async function testBeginProtocolAndParsing() {

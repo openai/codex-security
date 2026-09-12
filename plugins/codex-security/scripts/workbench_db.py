@@ -3403,10 +3403,10 @@ _WORKBENCH_DB_CONTEXT = saved_results.WorkbenchDbContext(
 )
 
 
-def main(*, select_finalization: bool = False) -> None:
+def main(*, select_finalization: bool = False, begin_with_execution_settings: bool = False) -> None:
     # Workbench callers send UTF-8 even when Windows uses a legacy code page.
     sys.stdin.reconfigure(encoding="utf-8")
-    args = parse_args(__doc__)
+    args = parse_args(__doc__, execution_settings=begin_with_execution_settings)
     deep_scan.configure(
         deep_scan.DeepScanDependencies(
             now=now,

@@ -670,6 +670,7 @@ def ensure_deep_scan_run(
     config: dict[str, int | float],
     workflow_version: str,
     timestamp: str,
+    args: argparse.Namespace | None = None,
 ) -> sqlite3.Row:
     existing = connection.execute(
         "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
@@ -681,6 +682,39 @@ def ensure_deep_scan_run(
         raise SystemExit("Deep Scan orchestration requires a scan in deep mode.")
     if scan["status"] != "running":
         raise SystemExit("Only a running Deep Scan can start orchestration.")
+    if args is not None and hasattr(args, "execution_settings"):
+        # The creation transaction serializes contenders. Persist before the run
+        # becomes recoverable; joined callers never replace the original bytes.
+        scan_dir = Path(scan["scan_dir"])
+        relative_path = "artifacts/deep_discovery/execution-settings.json"
+        if (scan_dir / relative_path).exists():
+            saved = _read_scan_local_json(scan_dir, relative_path, "Deep Scan execution settings")
+            if saved.get("version") != 1:
+                raise SystemExit("This Deep Scan uses an unsupported execution settings version.")
+            # A managed scan directory can survive a rolled-back creation.
+            # Keep its saved selections and the returned scan model consistent.
+            connection.execute(
+                "UPDATE scans SET model = ?, reasoning_effort = ? WHERE id = ?",
+                (
+                    saved["settings"].get("model"),
+                    saved["settings"].get("reasoningEffort"),
+                    scan["id"],
+                ),
+            )
+        else:
+            if args.execution_settings is None:
+                raise SystemExit("The original Deep Scan execution settings could not be captured.")
+            settings = dict(args.execution_settings)
+            # The persisted scan remains authoritative when the caller did not
+            # supply a model or effort (for example a managed handoff).
+            for key, column in (("model", "model"), ("reasoningEffort", "reasoning_effort")):
+                if scan[column] is not None:
+                    settings[key] = scan[column]
+            write_scan_local_bytes(
+                scan_dir,
+                relative_path,
+                (json.dumps({"version": 1, "settings": settings}, indent=2) + "\n").encode(),
+            )
     connection.execute(
         """
         INSERT INTO deep_scan_runs (
@@ -873,7 +907,8 @@ def begin_deep_scan_for_scan(
                 """,
                 (model, reasoning_effort, scan_id),
             )
-        ensure_deep_scan_run(connection, scan, config, workflow_version, now())
+        scan = require_scan(connection, scan_id)
+        ensure_deep_scan_run(connection, scan, config, workflow_version, now(), args)
         connection.commit()
     except BaseException:
         connection.rollback()
@@ -917,7 +952,7 @@ def begin_deep_scan_for_target(
                 workflow_version = optional_text(args.workflow_version, maximum=256)
                 if workflow_version is None:
                     raise SystemExit("workflow-version is required.")
-                ensure_deep_scan_run(connection, existing, config, workflow_version, now())
+                ensure_deep_scan_run(connection, existing, config, workflow_version, now(), args)
             connection.commit()
             return deep_scan_result(
                 connection,
@@ -1037,7 +1072,7 @@ def begin_deep_scan_for_target(
             (scan_id, timestamp, workspace_id),
         )
         scan = require_scan(connection, scan_id)
-        ensure_deep_scan_run(connection, scan, config, workflow_version, timestamp)
+        ensure_deep_scan_run(connection, scan, config, workflow_version, timestamp, args)
         connection.commit()
     except BaseException:
         connection.rollback()
