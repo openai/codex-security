@@ -306,7 +306,7 @@ export class DeepScanWorkerRunner {
       deepReducer: {
         scanRoot: artifacts.scanDir,
         persistSourceCoverage,
-        claimedWorkers: consumed.map((worker) => ({ id: worker.id, resultPath: worker.resultPath, attempt: worker.attempt })),
+        claimedWorkers: consumed.map((worker) => ({ id: worker.id, resultPath: worker.resultPath, artifactDir: worker.artifactDir, attempt: worker.attempt })),
         previousReducerResultPath
       }
     };

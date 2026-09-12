@@ -1133,7 +1133,11 @@ async function testReducerCoveragePersistenceBinding() {
         process.env.FAKE_CODEX_MARKER = markerPath;
         const deepReducer = {
           scanRoot: path.join(fixture.root, "scans"),
-          claimedWorkers: [{ id: "worker-1", resultPath: path.join(fixture.root, "worker", "result.json"), attempt: 2 }],
+          claimedWorkers: [{
+            id: "worker-1", attempt: 2,
+            resultPath: path.join(fixture.root, "worker", "checkpoints", "accepted.json"),
+            artifactDir: path.join(fixture.root, "worker"),
+          }],
           persistSourceCoverage,
         };
         const launch = new CodexSdkWorkerExecutor({

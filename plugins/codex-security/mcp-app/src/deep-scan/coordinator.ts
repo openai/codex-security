@@ -978,7 +978,7 @@ export class DeepScanCoordinator {
           deepReducer: {
             scanRoot: this.artifacts.scanDir,
             claimedWorkers: accepted.map((source) => ({
-              id: source.id, resultPath: source.resultPath, attempt: source.attempt,
+              id: source.id, resultPath: source.resultPath, artifactDir: source.artifactDir, attempt: source.attempt,
             })),
           },
         };

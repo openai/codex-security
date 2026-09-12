@@ -91,7 +91,7 @@ export async function readDeepReductionSources(
       return {
         workerId: worker.id,
         ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
-        coverage: projectDiscoveryCoverage(coverage, worker, relative(bound.artifacts.scanDir, dirname(worker.resultPath)).split(sep).join("/")),
+        coverage: projectDiscoveryCoverage(coverage, worker, relative(bound.artifacts.scanDir, worker.artifactDir ?? dirname(worker.resultPath)).split(sep).join("/")),
         result: reduction,
       };
     }));

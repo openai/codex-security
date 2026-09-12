@@ -5,6 +5,8 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 export interface DeepReducerWorkerContext {
   id: string;
   resultPath: string;
+  /** Original output owner for relative evidence, including accepted checkpoints. */
+  artifactDir?: string;
   attempt?: number;
 }
 

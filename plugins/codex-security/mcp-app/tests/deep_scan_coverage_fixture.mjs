@@ -16,17 +16,17 @@ const bundled = await build({
       'export { DeepScanCoordinator } from "./src/deep-scan/coordinator.ts";',
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
-      'export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";',
+      'export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } from "./src/artifact-scan-draft.ts";',
       'export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts";',
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
   },
   format: "esm", platform: "node", loader: { ".md": "text" }, write: false,
 });
-export async function publishCoverageFixture(root, completeness, { resume = false, continueAfterResume = false } = {}) {
+export async function publishCoverageFixture(root, completeness, { resume = false, continueAfterResume = false, immutableInputs = false } = {}) {
   const runtimePath = path.join(root, "fixture-runtime.mjs");
   await writeFile(runtimePath, bundled.outputFiles[0].contents);
-  const { DeepScanCoordinator, WorkbenchDeepScanStore, createScanArtifactContext, recordCodexSecurityScanDraftViaWorkbench, recordCodexSecurityDeepReduction } = await import(pathToFileURL(runtimePath).href);
+  const { DeepScanCoordinator, WorkbenchDeepScanStore, createScanArtifactContext, recordCodexSecurityScanDraftViaWorkbench, recordCodexSecurityDeepReduction, saveScanDraftCheckpoint } = await import(pathToFileURL(runtimePath).href);
   const targetPath = path.join(root, "target");
   const codexHome = path.join(root, "codex-home");
   const scanRoot = path.join(root, "scans");
@@ -65,6 +65,14 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
     const bytes = JSON.stringify({ scanId: run.scanId, complete: true, findings: [], coverage });
     await writeFile(resultPath, bytes);
     rawSources.set(resultPath, bytes);
+    if (immutableInputs) {
+      await saveScanDraftCheckpoint({ root: artifactDir, repoRoot: targetPath, layout: "worker" }, JSON.parse(bytes));
+      const head = JSON.parse(await readFile(path.join(artifactDir, "checkpoint-head.json"), "utf8"));
+      const acceptedPath = path.join(artifactDir, "checkpoints", head.checkpoint);
+      rawSources.set(acceptedPath, await readFile(acceptedPath, "utf8"));
+      return acceptedPath;
+    }
+    return resultPath;
   };
   if (resume) {
     const workers = [];
@@ -73,10 +81,10 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
       const workerRoot = path.join(run.scanDir, "artifacts", "deep_discovery", "workers", `discovery-${String(index + 1).padStart(4, "0")}`);
       const artifactDir = path.join(workerRoot, "output");
       const worker = { id: randomUUID(), scanId: run.scanId, kind: "discovery", promptPath: path.join(workerRoot, "prompt.md"), artifactDir, attempt: index === 0 ? 2 : 1 };
-      await writeDiscovery(artifactDir, index);
+      const resultManifestPath = await writeDiscovery(artifactDir, index);
       await writeFile(worker.promptPath, "Synthetic discovery prompt.\n");
       for (const status of ["queued", "running", "succeeded"]) {
-        await store.updateWorker({ ...worker, status, ...(status === "succeeded" ? { resultManifestPath: path.join(artifactDir, "result.json") } : {}) });
+        await store.updateWorker({ ...worker, status, ...(status === "succeeded" ? { resultManifestPath } : {}) });
       }
       workers.push(worker);
     }
@@ -105,6 +113,14 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
         if (index === 0 && !request.resumeThreadId) return { threadId: thread, finalResponse: "Continue the unfinished audit." };
         await writeDiscovery(request.artifactContext.root, index);
       } else {
+        if (immutableInputs) {
+          const current = await store.get(run.scanId, threadId);
+          for (const claimed of request.artifactContext.deepReducer.claimedWorkers) {
+            const accepted = current.persistedWorkers.find((worker) => worker.id === claimed.id);
+            assert.equal(claimed.resultPath, accepted.resultManifestPath, "the reducer uses the exact accepted input");
+            assert.equal(claimed.artifactDir, accepted.artifactDir, "receipts retain their original output owner");
+          }
+        }
         await recordCodexSecurityDeepReduction({ ...request.artifactContext, repoRoot: targetPath, scanId: run.scanId }, { scanId: run.scanId, findings: [] });
       }
       return { threadId: thread, finalResponse: "Audit finished." };
