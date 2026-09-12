@@ -522,6 +522,22 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
+  test("removes a profile login shell override from every configured profile", () => {
+    const hardened = scanRuntimeCodexConfig({
+      profile: "selected",
+      profiles: {
+        selected: { model: "profile-model", allow_login_shell: true },
+        other: { allow_login_shell: true },
+      },
+    });
+
+    expect(hardened["allow_login_shell"]).toBe(false);
+    expect(hardened["profiles"]).toEqual({
+      selected: { model: "profile-model" },
+      other: {},
+    });
+  });
+
   test("preserves configured Responses metadata without persisting scan attribution", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const credentialHome = join(stateDirectory, "codex-home");

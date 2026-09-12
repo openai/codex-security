@@ -4476,6 +4476,7 @@ export function scanRuntimeCodexConfig(
   if (isRecord(profiles)) {
     for (const profile of Object.values(profiles)) {
       if (!isRecord(profile)) continue;
+      delete profile["allow_login_shell"];
       delete profile["approval_policy"];
       delete profile["approvals_reviewer"];
       delete profile["default_permissions"];
