@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import type { ZodType } from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import reducerSchema from "../../schemas/tools/deep-reducer.schema.json";
@@ -21,6 +21,7 @@ import {
 } from "./deep-scan/artifacts.js";
 import {
   parseDeepReduction,
+  projectDiscoveryCoverage,
   reconcileDeepReduction,
   type DeepReductionInput,
   type DeepReductionSources,
@@ -73,8 +74,13 @@ export async function getCodexSecurityDeepReducerInputs(
           sourceFindingIds: [`${worker.id}:${index}`],
         },
       }));
-      const { coverage: _coverage, ...reduction } = result;
-      return { workerId: worker.id, result: reduction };
+      const { coverage, ...reduction } = result;
+      return {
+        workerId: worker.id,
+        ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
+        coverage: projectDiscoveryCoverage(coverage, worker, relative(bound.artifacts.scanDir, dirname(worker.resultPath)).split(sep).join("/")),
+        result: reduction,
+      };
     }));
     const previous = await readPreviousReduction(bound);
     const scanId = bound.scanId ?? previous?.scanId ?? discoveries[0]?.result.scanId;

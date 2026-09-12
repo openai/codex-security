@@ -299,7 +299,7 @@ export class DeepScanWorkerRunner {
       layout: "reducer" as const,
       deepReducer: {
         scanRoot: artifacts.scanDir,
-        claimedWorkers: consumed.map((worker) => ({ id: worker.id, resultPath: worker.resultPath })),
+        claimedWorkers: consumed.map((worker) => ({ id: worker.id, resultPath: worker.resultPath, attempt: worker.attempt })),
         previousReducerResultPath
       }
     };

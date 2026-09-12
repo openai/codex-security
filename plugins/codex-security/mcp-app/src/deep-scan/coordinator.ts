@@ -3,12 +3,15 @@ import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import {
   createDeepScanArtifacts,
-  ensureDeepScanDirectories
+  ensureDeepScanDirectories,
+  writeJsonAtomic
 } from "./artifacts.js";
-import { validateDiscoveryArtifacts, validateReducerArtifacts, type DeepReductionInput } from "./artifact-validation.js";
+import { aggregateSourceCoverage, deepReductionToScanDraft, validateDiscoveryArtifacts, validateReducerArtifacts, type DeepReductionInput } from "./artifact-validation.js";
+import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
 import {
   scanDraftInputSchema,
   type DeepScanPublication,
+  saveScanDraftCheckpoint,
   type ScanDraftInput
 } from "../artifact-scan-draft.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
@@ -269,17 +272,7 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) return;
       this.phase = "terminal";
       const draft = schedulerResult.result
-        ? {
-            ...structuredClone(schedulerResult.result),
-            // Readers require coverage.json. The coordinator has accepted this
-            // result, so mark it complete and leave review notes empty.
-            coverage: {
-              completeness: "complete",
-              surfaces: [],
-              explicitExclusions: [],
-              deferred: []
-            }
-          }
+        ? deepReductionToScanDraft(schedulerResult.result)
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
@@ -977,6 +970,24 @@ export class DeepScanCoordinator {
         reducerId: worker.id,
         previousReducerResultPath: outcomes.at(-1)?.resultPath
       }, this.state.scanId);
+      if (result.sourceCoverage === undefined) {
+        const context = {
+          root: worker.artifactDir,
+          repoRoot: this.state.targetPath,
+          scanId: this.state.scanId,
+          layout: "reducer" as const,
+          deepReducer: {
+            scanRoot: this.artifacts.scanDir,
+            claimedWorkers: accepted.map((source) => ({
+              id: source.id, resultPath: source.resultPath, attempt: source.attempt,
+            })),
+          },
+        };
+        const sources = await getCodexSecurityDeepReducerInputs(context);
+        result.sourceCoverage = aggregateSourceCoverage(sources.discoveries, latestResult ?? null);
+        await saveScanDraftCheckpoint(context, result);
+        await writeJsonAtomic(worker.resultManifestPath, result);
+      }
       latestResult = result;
       noNewStreak = newFindings > 0 ? 0 : noNewStreak + accepted.length;
       outcomes.push({
