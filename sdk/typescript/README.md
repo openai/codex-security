@@ -586,6 +586,23 @@ Scans are report-only by default. Set `--fail-on-severity high` to exit with
 `1` if a completed scan finds high or critical issues. Incomplete scans exit
 with `2`, writing available results to stdout and a coverage warning to stderr.
 
+For machine-readable scan output (`--format json` or `--format jsonl`), a scan
+execution failure writes one structured object to stdout:
+
+```json
+{
+  "status": "failed",
+  "code": "SCAN_FAILED",
+  "message": "..."
+}
+```
+
+The command still exits with `2` for runtime, export, invalid-input, or
+incomplete-scan failures, and human-readable diagnostics remain on stderr.
+Use `scan --schema --format json` to discover this failure variant alongside
+the successful scan output. Cancellation and termination retain their `130`
+and `143` exit codes.
+
 ### Import findings as a saved scan
 
 Import an existing findings CSV or JSON file into local scan history and SQLite:
