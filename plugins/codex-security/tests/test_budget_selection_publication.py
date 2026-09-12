@@ -438,7 +438,9 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         assert published_bytes(scan) == frozen
 
 
-@pytest.mark.parametrize("cut", ["after-findings", "after-coverage", "after-draft-commit"])
+@pytest.mark.parametrize(
+    "cut", ["after-findings", "after-coverage", "after-draft-commit", "after-seal"]
+)
 @pytest.mark.parametrize("has_reducer", [False, True])
 def test_budget_process_death_replays_exact_evidence(
     workbench_api, workbench_db, publication_scan, tmp_path, cut, has_reducer
@@ -498,6 +500,14 @@ def terminate(stage):
 
 if cut == 'after-draft-commit':
     budget.__globals__['complete_scan_locked'] = lambda *a, **kw: terminate(cut)
+elif cut == 'after-seal':
+    original = budget.__globals__['_write_prepared_scan_finalization']
+
+    def seal_then_die(prepared):
+        original(prepared)
+        terminate(cut)
+
+    budget.__globals__['_write_prepared_scan_finalization'] = seal_then_die
 else:
     saved = budget.__globals__['saved_results']
     original = saved.write_scan_local_bytes
@@ -538,6 +548,9 @@ os._exit(87)
         name: (scan.scan_dir / name).exists()
         for name in ("findings.json", "coverage.json", "scan-manifest.json")
     }
+    sealed_bytes = published_bytes(scan) if cut == "after-seal" else None
+    if sealed_bytes is not None:
+        assert json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
     with sqlite3.connect(database) as db:
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
@@ -582,6 +595,8 @@ os._exit(87)
         ).fetchone()[0]
         (tmp_path / "crash-result.json").write_text(json.dumps(snapshot, indent=2))
         assert snapshot["afterStatus"] == "complete"
+        if sealed_bytes is not None:
+            assert published_bytes(scan) == sealed_bytes
         if run["finalization_input_json"] is not None:
             assert snapshot["afterSelection"] == run["finalization_input_json"]
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
@@ -631,6 +646,68 @@ def test_budget_rejects_unrelated_incomplete_drafts(
         if name not in keep
     )
     assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "running"
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["changed-findings", "wrong-scan", "running-discovery", "canceled", "other-owner", "complete"],
+)
+def test_budget_sealed_replay_keeps_integrity_and_ownership_guards(
+    workbench_api, workbench_db, publication_scan, monkeypatch, state
+):
+    scan = publication_scan()
+    accept_reducer(workbench_db, scan)
+    with workbench_db:
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', workflow_version = 'deep-security-scan/v2'"
+        )
+    budget = workbench_api["complete_budget_exhausted_scan"]
+    complete = budget.__globals__["complete_scan_locked"]
+    args = Namespace(
+        scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message="Original cost stop."
+    )
+    with monkeypatch.context() as patch:
+        patch.setitem(
+            budget.__globals__,
+            "complete_scan_locked",
+            lambda *a: complete(*a, prepare_only=True),
+        )
+        budget(workbench_db, args)
+    manifest = scan.scan_dir / "scan-manifest.json"
+    assert json.loads(manifest.read_text())["scan"]["sealedAt"]
+    if state in {"changed-findings", "wrong-scan"}:
+        path = scan.scan_dir / (
+            "findings.json" if state == "changed-findings" else "scan-manifest.json"
+        )
+        document = json.loads(path.read_text())
+        if state == "changed-findings":
+            document["findings"] = []
+        else:
+            document["scan"]["id"] = "69078890-d24c-4416-a6fa-c286825bef88"
+        path.write_text(json.dumps(document))
+    elif state == "running-discovery":
+        with workbench_db:
+            workbench_db.execute("UPDATE deep_scan_runs SET status = 'running'")
+    elif state == "canceled":
+        workbench_api["cancel_scan"](workbench_db, Namespace(scan_id=scan.scan_id, thread_id=None))
+    elif state == "other-owner":
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE scans SET handoff_claim_token = 'a3292ae4-9b47-430f-8ed6-73ff73db575c'"
+            )
+    else:
+        complete(workbench_db, scan.scan_id, None, args.cost_json)
+    before_files = published_bytes(scan)
+    before_scan = dict(workbench_db.execute("SELECT * FROM scans").fetchone())
+    before_run = dict(workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone())
+    with pytest.raises(SystemExit):
+        budget(workbench_db, args)
+    assert published_bytes(scan) == before_files
+    assert dict(workbench_db.execute("SELECT * FROM scans").fetchone()) == before_scan
+    assert dict(workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone()) == before_run
 
 
 @pytest.mark.parametrize(

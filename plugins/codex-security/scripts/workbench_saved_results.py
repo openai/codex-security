@@ -1263,7 +1263,23 @@ def budget_exhausted_draft(
             if not isinstance(coverage.get(key), list):
                 raise SystemExit("Budget-exhausted scan contains invalid canonical coverage.")
         if manifest["scan"].get("sealedAt") is not None or manifest["scan"].get("artifacts"):
-            raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
+            if before_selection:
+                raise SystemExit(
+                    "Budget-exhausted scan cannot replace an already sealed scan draft."
+                )
+            # The seal can reach disk before parent completion commits. Validate
+            # it without changing bytes; the existing finalizer commits replay.
+            try:
+                _prepare_scan_finalization(
+                    scan_dir,
+                    expected_coverage_mode=db.expected_coverage_mode(scan),
+                    completion_binding=db.workbench_completion_binding(
+                        scan, scan["started_at"], manifest
+                    ),
+                )
+            except ContractError as exc:
+                raise SystemExit(str(exc)) from exc
+            return
     else:
         target_contract = contract["target"]
         target: dict[str, Any] = {
