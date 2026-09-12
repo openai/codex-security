@@ -1,6 +1,7 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
 import { scanPreflightCodexConfig } from "./preflight-config.js";
+import { captureOriginalReasoningSummary } from "./reasoning-summary.js";
 export { scanPreflightCodexConfig } from "./preflight-config.js";
 import { resumeSelectedDeepScan } from "./deep-scan-finalization.js";
 import {
@@ -1297,13 +1298,12 @@ export class CodexSecurity {
       const {
         runtime,
         runtimeHome,
-        effectiveConfig,
-        preflightConfig,
         modelProvider,
         authentication,
         approvalPolicy,
         python,
       } = session;
+      let { effectiveConfig, preflightConfig } = session;
       releaseCredentialHome = session.releaseCredentialHome;
       const deepScanConfigPath =
         mode === "deep"
@@ -1361,6 +1361,38 @@ export class CodexSecurity {
         scanDir,
       );
       checkOpen();
+
+      if (mode === "deep" && options.resumeScanId === undefined) {
+        const summary = await captureOriginalReasoningSummary({
+          config: session.sessionConfig,
+          command: this.#codexCommand(),
+          cwd: scanDir,
+          environment: {
+            ...withoutOpenAiApiKeys(
+              this.#createSessionEnvironment(session, {}, options.auth),
+            ),
+            ...(session.externalProvider === null && session.apiKey !== null
+              ? { CODEX_API_KEY: session.apiKey }
+              : {}),
+          },
+          signal,
+        });
+        if (summary !== undefined) {
+          effectiveConfig = {
+            ...effectiveConfig,
+            model_reasoning_summary: summary,
+          };
+          preflightConfig = scanPreflightCodexConfig(effectiveConfig);
+          session.effectiveConfig = effectiveConfig;
+          session.preflightConfig = preflightConfig;
+          session.sessionConfig = {
+            ...session.sessionConfig,
+            model_reasoning_summary: summary,
+          };
+          if (runtime.configPath !== undefined)
+            await writeCodexConfig(runtime.configPath, preflightConfig);
+        }
+      }
 
       const shellPluginRoot = runtime.plugin.pluginRoot;
       const canonicalShellPluginRoot = await realpath(shellPluginRoot);
@@ -2773,13 +2805,11 @@ export class CodexSecurity {
     }
   }
 
-  #createSessionCodex(
+  #createSessionEnvironment(
     session: PreparedSession,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
-    config?: JsonObject,
-    configOverrides: string[] = [],
-  ): { codex: CodexClientLike; environment: ProcessEnvironment } {
+  ): ProcessEnvironment {
     const {
       runtime,
       python,
@@ -2815,6 +2845,23 @@ export class CodexSecurity {
     if (session.safetyIdentifier !== undefined) {
       environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
     }
+    return environment;
+  }
+
+  #createSessionCodex(
+    session: PreparedSession,
+    runtimePaths: Record<string, string>,
+    auth: ScanAuthMode = "auto",
+    config?: JsonObject,
+    configOverrides: string[] = [],
+  ): { codex: CodexClientLike; environment: ProcessEnvironment } {
+    const { externalProvider, apiKey, sessionConfig } = session;
+    const commandAuth = hasCommandAuth(sessionConfig);
+    const environment = this.#createSessionEnvironment(
+      session,
+      runtimePaths,
+      auth,
+    );
     const sdkCodexConfig = { ...(config ?? sessionConfig) };
     // Projects and permissions already live in generated TOML files; the SDK
     // cannot safely encode their path and selector keys as dotted overrides.

@@ -7302,9 +7302,13 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     expect(scanSignal?.aborted).toBe(false);
   });
 
-  test.each(["standard", "deep"] as const)(
-    "isolates concurrent managed %s sessions at the Codex child boundary",
-    async (mode) => {
+  test.each([
+    ["standard", false],
+    ["deep", false],
+    ["deep", true],
+  ] as const)(
+    "isolates concurrent managed %s sessions at the Codex child boundary (capture=%s)",
+    async (mode, captureSummary) => {
       const clients: TestClient[] = [];
       try {
         const outcomes = await Promise.allSettled(
@@ -7320,12 +7324,17 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               mkdir(codexHome),
               mkdir(scanDir, { mode: 0o700 }),
             ]);
+            const model = `fixture-${name}-model`;
+            const summary = name === "first" ? "none" : "concise";
+            const configPath = join(codexHome, "config-preflight.toml");
+            let recipeConfig: JsonObject | undefined;
             await writeFile(
               preload,
               [
                 'import { appendFileSync } from "node:fs";',
                 'let prompt = ""; for await (const chunk of process.stdin) prompt += chunk;',
-                `appendFileSync(${JSON.stringify(marker)}, JSON.stringify({args:process.argv, executable:process.execPath, home:process.env.CODEX_HOME, key:process.env.CODEX_API_KEY, value:process.env.FIXTURE_SCAN_VALUE, prompt}) + "\\n");`,
+                `appendFileSync(${JSON.stringify(marker)}, JSON.stringify({args:process.argv, executable:process.execPath, cwd:process.cwd(), home:process.env.CODEX_HOME, key:process.env.CODEX_API_KEY, value:process.env.FIXTURE_SCAN_VALUE, prompt}) + "\\n");`,
+                `if (process.argv.includes("models")) { console.log(JSON.stringify({models:[{slug:${JSON.stringify(model)},default_reasoning_summary:${JSON.stringify(summary)}}]})); process.exit(0); }`,
                 `console.log(JSON.stringify({type:"thread.started",thread_id:${JSON.stringify(`fixture-${name}-thread`)}}));`,
                 'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"scan complete"}}));',
                 'console.log(JSON.stringify({type:"turn.completed",usage:null}));',
@@ -7333,7 +7342,6 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               ].join("\n"),
             );
             const fake = nodeCodex(preload);
-            const model = `fixture-${name}-model`;
             const provider = `fixture-${name}-provider`;
             const client = new TestClient(
               {
@@ -7341,8 +7349,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                   model,
                   model_provider: provider,
                   model_reasoning_effort: "ultra",
-                  model_reasoning_summary:
-                    name === "first" ? "none" : "concise",
+                  // JavaScript callers can omit the merged default with undefined.
+                  model_reasoning_summary: captureSummary
+                    ? (undefined as unknown as string)
+                    : summary,
                   service_tier: name === "first" ? "flex" : "fast",
                   features: {
                     multi_agent_v2: { max_concurrent_threads_per_session: 4 },
@@ -7356,6 +7366,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                 },
                 prepareRuntime: async () => ({
                   ...preparedRuntime(codexHome),
+                  configPath,
                   environment: {
                     ...fake.environment,
                     FIXTURE_SCAN_VALUE: name,
@@ -7364,6 +7375,11 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                 resolvePluginPython: async () => "/managed/python",
                 prepareOutputDir: async () => scanDir,
                 repositoryRevision: async () => "deadbeef",
+                runWorkbench: async (_options, args, input) => {
+                  if (args[0] === "register-cli-scan")
+                    recipeConfig = JSON.parse(input!).recipe.config;
+                  return mockWorkbench(args, input);
+                },
                 createCodex: (options: CodexOptions) => {
                   const codex = new Codex(options);
                   return {
@@ -7424,10 +7440,30 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
             });
             expect(result.threadId).toBe(`fixture-${name}-thread`);
             expect(result.turnResult.usage).toBeNull();
-            const children = (await readFile(marker, "utf8"))
+            const invocations = (await readFile(marker, "utf8"))
               .trim()
               .split("\n")
               .map((line) => JSON.parse(line));
+            const lookups = invocations.filter((child) =>
+              child.args.includes("models"),
+            );
+            const children = invocations.filter(
+              (child) => !child.args.includes("models"),
+            );
+            expect(recipeConfig?.["model_reasoning_summary"]).toBe(summary);
+            expect(lookups).toHaveLength(captureSummary ? 1 : 0);
+            for (const lookup of lookups) {
+              expect(await realpath(lookup.cwd)).toBe(await realpath(scanDir));
+              expect(lookup.home).toBe(codexHome);
+              expect(lookup.key).toBe(`synthetic-${name}-key`);
+              expect(lookup.value).toBe(name);
+              expect(lookup.args).toContain(`model=${JSON.stringify(model)}`);
+            }
+            const preflight = await readFile(configPath, "utf8");
+            expect(parseToml(preflight)["model_reasoning_summary"]).toBe(
+              summary,
+            );
+            expect(preflight).not.toContain(`synthetic-${name}-key`);
             expect(children).toHaveLength(2);
             expect(children[1].prompt).toBe(postScanPrompt);
             expect(children[1].args).toContain("resume");
