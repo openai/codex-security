@@ -16,7 +16,9 @@ def snapshot(state_dir: Path) -> str:
         return "\n".join(connection.iterdump())
 
 
-@pytest.mark.parametrize("version", ["deep-security-scan/v1", "deep-scan-mcp/v1"])
+@pytest.mark.parametrize(
+    "version", ["deep-security-scan/v1", "deep-scan-mcp/v1", "deep-security-scan/v2"]
+)
 def test_supported_workflows_keep_their_identity(tmp_path: Path, version: str) -> None:
     target = tmp_path / "target"
     target.mkdir()

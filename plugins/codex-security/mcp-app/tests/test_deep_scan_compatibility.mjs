@@ -14,6 +14,27 @@ const { startOrJoinDeepScanCoordinator, DeepScanRemoteCoordinator } = await impo
 );
 
 await testUnsupportedWorkflowDoesNotAcquireOwnership();
+await testUnsupportedSelectionDoesNotAcquireOwnership();
+
+async function testUnsupportedSelectionDoesNotAcquireOwnership() {
+  for (const selection of [
+    { workflowVersion: "deep-security-scan/v1", finalizationInput: { version: 1 } },
+    { workflowVersion: "deep-security-scan/v2", finalizationInput: { version: 99 } }
+  ]) {
+    await assert.rejects(startOrJoinDeepScanCoordinator({
+      begin: { run: { scanId: "fixture", schemaVersion: 1, ...selection }, shouldStart: false },
+      registry: {
+        get: () => assert.fail("unsupported selection inspected a live coordinator"),
+        start: () => assert.fail("unsupported selection started a coordinator")
+      },
+      options: {
+        threadId: "fixture-thread",
+        prepareExecutor: async () => assert.fail("unsupported selection resolved settings"),
+        store: { claimCoordinator: async () => assert.fail("unsupported selection acquired ownership") }
+      }
+    }), /finalization input version/);
+  }
+}
 
 async function testUnsupportedWorkflowDoesNotAcquireOwnership() {
   for (const version of [
@@ -38,21 +59,52 @@ async function testUnsupportedWorkflowDoesNotAcquireOwnership() {
 
 
 // A joining client must not resolve or replace the live executor's settings.
-for (const local of [true, false]) {
-  let preparations = 0;
-  const run = { scanId: "fixture", status: "running", workflowVersion: "deep-scan-mcp/v1" };
-  const options = {
-    threadId: "fixture-thread",
-    executor: { marker: "observer" },
-    prepareExecutor: async () => { preparations += 1; return {}; },
-    store: { claimCoordinator: async () => ({ run, acquired: false }) }
+for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v1", "deep-security-scan/v2"]) {
+  for (const local of [true, false]) {
+    let preparations = 0;
+    const run = { scanId: "fixture", status: "running", workflowVersion };
+    const options = {
+      threadId: "fixture-thread",
+      executor: { marker: "observer" },
+      prepareExecutor: async () => { preparations += 1; return {}; },
+      store: { claimCoordinator: async () => ({ run, acquired: false }) }
+    };
+    await startOrJoinDeepScanCoordinator({
+      begin: { run, shouldStart: false },
+      registry: { get: () => local ? {} : undefined, start: () => assert.fail("observer started") },
+      options
+    });
+    assert.equal(preparations, 0);
+  }
+}
+
+// Selected publication has no worker launch and must not need current settings.
+for (const selected of [false, true]) {
+  const run = {
+    scanId: "fixture", status: "running", workflowVersion: "deep-security-scan/v2",
+    ...(selected ? { finalizationInput: { version: 1 } } : {})
   };
+  let preparations = 0;
+  const fallback = {};
+  const restored = {};
   await startOrJoinDeepScanCoordinator({
     begin: { run, shouldStart: false },
-    registry: { get: () => local ? {} : undefined, start: () => assert.fail("observer started") },
-    options
+    registry: {
+      get: () => undefined,
+      start: (options) => {
+        assert.equal(options.executor, selected ? fallback : restored);
+        assert.equal(options.run, run);
+        return {};
+      }
+    },
+    options: {
+      threadId: "fixture-thread",
+      executor: fallback,
+      prepareExecutor: async () => { preparations += 1; return restored; },
+      store: { claimCoordinator: async () => ({ run, acquired: true }) }
+    }
   });
-  assert.equal(preparations, 0);
+  assert.equal(preparations, selected ? 0 : 1);
 }
 
 const originalNow = Date.now;
