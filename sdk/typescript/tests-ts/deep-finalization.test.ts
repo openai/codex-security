@@ -107,18 +107,29 @@ for (const outcome of [
               await appendFile(
                 usagePath,
                 JSON.stringify({
-                  type: "event_msg",
+                  timestamp: new Date().toISOString(),
+                  type: "turn_context",
                   payload: {
-                    type: "token_count",
-                    info: {
-                      total_token_usage: {
-                        input_tokens: 1_250,
-                        cached_input_tokens: 200,
-                        output_tokens: 30,
+                    turn_id: "synthetic-scan-turn",
+                    model: "gpt-5.6-sol",
+                  },
+                }) +
+                  "\n" +
+                  JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    type: "event_msg",
+                    payload: {
+                      type: "token_count",
+                      info: {
+                        total_token_usage: {
+                          input_tokens: 1_250,
+                          cached_input_tokens: 200,
+                          output_tokens: 30,
+                        },
                       },
                     },
-                  },
-                }) + "\n",
+                  }) +
+                  "\n",
               );
               await new Promise<void>((resolve) => {
                 if (options.signal?.aborted) resolve();
@@ -435,8 +446,8 @@ for (const outcome of [
         ...(restart ? { resumeScanId: scanId, outputDir: scanDir } : {}),
       });
       expect(result.threadId).toBe(threadId);
-      if (outcome === "completed") expect(result.cost?.estimatedUsd).toBe(0);
-      else expect(result.cost).toBeNull();
+      // The synthetic accepted workers have no native usage receipts.
+      expect(result.cost).toBeNull();
       expect(result.coverage.completeness).toBe("partial");
       expect(result.findings.findings[0]?.remediation).toBe(
         "Validate the resolved destination before writing.",
