@@ -102,7 +102,7 @@
     "esbuild": "0.28.2",
     "fast-check": "4.9.0",
     "ink-testing-library": "4.0.0",
-    "json-schema-to-typescript": "15.0.4",
+    "json-schema-to-typescript": "16.0.0",
     "minimatch": "10.2.6",
     "postcss": "8.5.28",
     "prettier": "3.9.6",
