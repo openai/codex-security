@@ -12,7 +12,6 @@ const fixtureUrl = new URL(
   "../../../plugins/codex-security/mcp-app/tests/deep_scan_coverage_fixture.mjs",
   import.meta.url,
 );
-const { publishCoverageFixture } = await import(fixtureUrl.href);
 
 test.each([
   ["partial", false],
@@ -24,12 +23,25 @@ test.each([
   async (completeness, resume) => {
     const root = await mkdtemp(join(tmpdir(), "deep-coverage-publication-"));
     try {
-    await mkdir(join(root, "fixture"), { mode: 0o700 });
-      const { scanDir, threadId, terminal } = await publishCoverageFixture(
-        join(root, "fixture"),
-        completeness,
-        { resume },
+      await mkdir(join(root, "fixture"), { mode: 0o700 });
+      // Keep the real workbench outside other suites' persistent module mocks.
+      const child = Bun.spawn(
+        [
+          Bun.which("node")!,
+          fileURLToPath(fixtureUrl),
+          join(root, "fixture"),
+          completeness,
+          String(resume),
+        ],
+        { stdout: "pipe", stderr: "pipe" },
       );
+      const [output, errors, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(exitCode, errors).toBe(0);
+      const { scanDir, threadId, terminal } = JSON.parse(output);
       const contract = await loadContract(scanDir, {
         pluginRoot: fileURLToPath(
           new URL("../../../plugins/codex-security/", import.meta.url),
@@ -47,9 +59,10 @@ test.each([
       );
       expect(coverage.reviews[0].attempt).toBe(2);
       const report = await readFile(join(scanDir, "report.md"), "utf8");
-    expect(report).toContain(`| Coverage | ${completeness} |`);
-    expect(coverage.explicitExclusions).toHaveLength(coverage.reviews.length);
-    for (const review of coverage.reviews) expect(report).toContain(review.workerId);
+      expect(report).toContain(`| Coverage | ${completeness} |`);
+      expect(coverage.explicitExclusions).toHaveLength(coverage.reviews.length);
+      for (const review of coverage.reviews)
+        expect(report).toContain(review.workerId);
       if (completeness === "partial") {
         expect(
           coverage.deferred.map((item: { reason: string }) => item.reason),

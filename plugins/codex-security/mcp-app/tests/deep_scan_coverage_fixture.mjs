@@ -122,3 +122,8 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
   for (const [file, bytes] of rawSources) assert.equal(await readFile(file, "utf8"), bytes);
   return { scanDir: run.scanDir, threadId, terminal };
 }
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const result = await publishCoverageFixture(process.argv[2], process.argv[3], { resume: process.argv[4] === "true" });
+  process.stdout.write(JSON.stringify(result));
+}
