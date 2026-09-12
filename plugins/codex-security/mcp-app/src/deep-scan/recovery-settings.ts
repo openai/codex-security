@@ -6,7 +6,6 @@ import { parse as parseToml } from "smol-toml";
 import { scanPreflightCodexConfig } from "../../../../../sdk/typescript/src/preflight-config.js";
 import { resolveCodexProfile, type JsonObject } from "../../../../../sdk/typescript/src/config.js";
 import { readScanLogs } from "../../../../../sdk/typescript/src/scan-logs.js";
-import { writeJsonAtomic } from "./artifacts.js";
 import { resolveCodexPath } from "./executor.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
 import type { DeepScanRunState } from "./types.js";
@@ -186,7 +185,9 @@ export async function loadDeepScanExecutionSettings(
   const native = !owner?.threadId ? {} : await originalParentSettings(settings.codexHome, {
     ...owner, threadId: owner.threadId, startedAt: original.createdAt
   });
-  const recovered = executionSettings({
+  // History reads can outlive this coordinator. Project missing selections for
+  // its workers without overwriting a snapshot owned by a newer coordinator.
+  return executionSettings({
     ...settings,
     model: settings.model ?? original.model ?? native.model,
     reasoningEffort: settings.reasoningEffort ?? original.reasoningEffort ?? native.reasoningEffort,
@@ -196,10 +197,6 @@ export async function loadDeepScanExecutionSettings(
     ...(settings.serviceTier === undefined && native.nativeServiceTierAbsent
       ? { nativeServiceTierAbsent: true as const } : {})
   });
-  if (JSON.stringify(recovered) !== JSON.stringify(settings)) {
-    await writeJsonAtomic(path, { version: 1, settings: recovered });
-  }
-  return recovered;
 }
 
 export function restoredDeepScanWorkerSettings(

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
@@ -296,14 +299,60 @@ access_key_id = "synthetic-secret"
   await writeFile(join(root, "config.toml"), 'model_provider = "observer-provider"\nmodel_reasoning_summary = "detailed"\n');
   const originalRun = { model: "stored-model", reasoningEffort: "ultra", usageOwner: originalOwner,
     createdAt: "2026-01-01T00:01:00Z" };
+  const raceDir = join(root, "concurrent-recovery");
+  await writeSnapshot(raceDir, incomplete);
+  const racePath = join(raceDir, "artifacts", "deep_discovery", "execution-settings.json");
+  const originalCreateReadStream = fs.createReadStream;
+  const readingHistory = Promise.withResolvers();
+  const releaseHistory = Promise.withResolvers();
+  let held = false;
+  let pendingRead;
+  fs.createReadStream = (path, options) => {
+    const source = originalCreateReadStream(path, options);
+    if (path !== join(sessionDirectory, "parent.jsonl") || held) return source;
+    held = true;
+    const delayed = new PassThrough();
+    source.once("error", (error) => delayed.destroy(error));
+    delayed.once("close", () => source.destroy());
+    void releaseHistory.promise.then(() => source.pipe(delayed));
+    readingHistory.resolve();
+    return delayed;
+  };
+  syncBuiltinESMExports();
+  try {
+    pendingRead = loadSettings(raceDir, originalRun);
+    await Promise.race([readingHistory.promise, pendingRead.then(() =>
+      assert.fail("historical recovery must reach the controlled history read"))]);
+    const newer = { ...settings, modelProvider: "newer-provider", reasoningSummary: "concise" };
+    await writeSnapshot(raceDir, newer);
+    const newerBytes = await readFile(racePath, "utf8");
+    releaseHistory.resolve();
+    const delayedProjection = await pendingRead;
+    assert.equal(delayedProjection.modelProvider, "openai");
+    assert.equal(delayedProjection.reasoningSummary, "none");
+    assert.equal(await readFile(racePath, "utf8"), newerBytes,
+      "a delayed historical projection must not overwrite a newer snapshot");
+    assert.deepEqual(await loadSettings(raceDir), newer);
+  } finally {
+    releaseHistory.resolve();
+    await pendingRead?.catch(() => {});
+    fs.createReadStream = originalCreateReadStream;
+    syncBuiltinESMExports();
+  }
+  const incompletePath = join(incompleteDir, "artifacts", "deep_discovery", "execution-settings.json");
+  const incompleteBytes = await readFile(incompletePath, "utf8");
   const repaired = await loadSettings(incompleteDir, originalRun);
   assert.deepEqual(repaired, { ...incomplete, model: "stored-model", reasoningEffort: "ultra",
     modelProvider: "openai", reasoningSummary: "none" });
-  const repairedPath = join(incompleteDir, "artifacts", "deep_discovery", "execution-settings.json");
-  const repairedBytes = await readFile(repairedPath, "utf8");
+  assert.equal(await readFile(incompletePath, "utf8"), incompleteBytes,
+    "recovering historical fields is read-only");
   await rm(sessionDirectory, { recursive: true });
-  assert.deepEqual(await loadSettings(incompleteDir, originalRun), repaired);
-  assert.equal(await readFile(repairedPath, "utf8"), repairedBytes, "recovered selections survive unavailable history");
+  const unavailable = await loadSettings(incompleteDir, originalRun);
+  assert.equal(unavailable.model, "stored-model");
+  assert.equal(unavailable.reasoningEffort, "ultra");
+  assert.equal(unavailable.modelProvider, undefined, "unavailable history remains unknown");
+  assert.equal(unavailable.reasoningSummary, undefined);
+  assert.equal(await readFile(incompletePath, "utf8"), incompleteBytes);
   const unknownDir = join(root, "unknown");
   await writeSnapshot(unknownDir, incomplete);
   const unknown = await loadSettings(unknownDir, { ...originalRun, usageOwner: null });

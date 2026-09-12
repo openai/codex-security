@@ -887,13 +887,15 @@ async function testIsolatedReconstructedWorkers() {
             if (scan.name === "first") delete saved.settings.serviceTier;
             await writeFile(scan.snapshotPath, JSON.stringify(saved));
           }
+          const snapshotBeforeRead = await readFile(scan.snapshotPath, "utf8");
           const recorded = await loadDeepScanExecutionSettings(scan.recordedScanDir, {
             ...scan.settings, createdAt: "2026-01-01T00:01:00Z"
           });
           const restored = restoredDeepScanWorkerSettings(recorded, scan.currentParentSandbox, () => scan.runtimeEnvironment);
           restored.codexOptions.baseUrl = scan.settings.codexOptions.baseUrl;
           scan.executor = new CodexSdkWorkerExecutor(restored);
-          assert.equal(await readFile(scan.snapshotPath, "utf8"), scan.snapshot);
+          assert.equal(await readFile(scan.snapshotPath, "utf8"), snapshotBeforeRead,
+            "restoring original worker selections must not rewrite saved settings");
         }
       }
       for (const scan of scans) {
