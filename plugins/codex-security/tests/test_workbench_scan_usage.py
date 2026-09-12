@@ -645,11 +645,29 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
     }
 
 
-@pytest.mark.parametrize("worker_home", ["recorded", "current", "inherited-sqlite", "unavailable"])
+@pytest.mark.parametrize(
+    "worker_home",
+    [
+        "recorded",
+        "current",
+        "inherited-sqlite",
+        "current-prefix",
+        "recorded-prefix",
+        "current-unreadable",
+        "current-mismatched",
+        "unavailable",
+    ],
+)
 def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
     tmp_path: Path, worker_home: str
 ) -> None:
     current_home = tmp_path / "current-home"
+    copied_rollout = worker_home in {
+        "current-prefix",
+        "recorded-prefix",
+        "current-unreadable",
+        "current-mismatched",
+    }
     environment = {
         "CODEX_HOME": str(current_home),
         "CODEX_SQLITE_HOME": str(current_home / "sqlite"),
@@ -749,8 +767,24 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                 root,
                 thread_id,
                 [
+                    *(
+                        [_event(counted, "turn_context", {"model": "model-alpha"})]
+                        if copied_rollout and kind == "discovery"
+                        else []
+                    ),
                     _token_event(counted, index * 20, 3),
-                    _event(counted, "turn_context", {"turn_id": "resumed"}),
+                    _event(
+                        counted,
+                        "turn_context",
+                        {
+                            "turn_id": "resumed",
+                            **(
+                                {"model": "model-beta"}
+                                if copied_rollout and kind == "discovery"
+                                else {}
+                            ),
+                        },
+                    ),
                     _token_event(counted, index * 30, 5),
                 ],
             )
@@ -778,10 +812,34 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                     {f"discovery-{index}": worker_threads[f"discovery-{index}"]},
                     [],
                 )
-        elif worker_home == "recorded":
+        elif worker_home in {
+            "recorded",
+            "current-prefix",
+            "recorded-prefix",
+            "current-unreadable",
+            "current-mismatched",
+        }:
+            recorded_threads = dict(worker_threads)
+            if worker_home != "recorded":
+                thread_id = f"discovery-{index}"
+                full = worker_threads[thread_id]
+                copied = full.with_name(f"copied-{thread_id}.jsonl")
+                copied.write_bytes(b"\n".join(full.read_bytes().splitlines()[:3]) + b"\n")
+                if worker_home == "current-unreadable":
+                    copied.write_text("invalid session metadata\n")
+                elif worker_home == "current-mismatched":
+                    copied.write_text(full.read_text().replace(thread_id, "unrelated-thread"))
+                current_copy = copied
+                if worker_home == "recorded-prefix":
+                    recorded_threads[thread_id] = copied
+                    current_copy = full
+                with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
+                    connection.execute(
+                        "INSERT INTO threads VALUES (?, ?)", (thread_id, str(current_copy))
+                    )
             _state_graph(
                 {"CODEX_SQLITE_HOME": str(selected_home)},
-                worker_threads,
+                recorded_threads,
                 [(f"discovery-{index}", child_id)],
             )
         result = _complete_scan(fixture)["scan"]["usage"]
@@ -804,7 +862,15 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                 "source": "codex_rollout",
                 **_counts(index * 77, 0, 13),
                 "threadCount": 4,
-                "modelUsage": [{"model": None, **_counts(index * 77, 0, 13)}],
+                "modelUsage": (
+                    [
+                        {"model": None, **_counts(index * 47, 0, 8)},
+                        {"model": "model-alpha", **_counts(index * 20, 0, 3)},
+                        {"model": "model-beta", **_counts(index * 10, 0, 2)},
+                    ]
+                    if copied_rollout
+                    else [{"model": None, **_counts(index * 77, 0, 13)}]
+                ),
             }
 
 

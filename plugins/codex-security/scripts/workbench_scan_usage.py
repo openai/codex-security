@@ -144,7 +144,7 @@ def collect_scan_usage(
     if started_at is None:
         return _unavailable_usage("scan_window_unavailable")
 
-    sessions: list[RolloutSession] = []
+    sessions: dict[str, list[RolloutSession]] = {}
     missing_thread_ids: set[str] = set()
     seen_thread_ids: set[str] = set()
     for state_database, group_roots in groups:
@@ -165,9 +165,10 @@ def collect_scan_usage(
             continue
         missing_thread_ids.update(missing)
         for session in discovered:
-            if session.thread_id not in seen_thread_ids:
-                sessions.append(session)
-                seen_thread_ids.add(session.thread_id)
+            copies = sessions.setdefault(session.thread_id, [])
+            if session not in copies:
+                copies.append(session)
+            seen_thread_ids.add(session.thread_id)
 
     # Absence from one known index is not missing usage when another has it.
     missing_thread_ids.difference_update(seen_thread_ids)
@@ -187,7 +188,8 @@ def collect_scan_usage(
     accepted_thread_ids: set[str] = set()
     excluded_thread_ids: set[str] = set()
     model_usage: dict[str | None, dict[str, int]] = {}
-    for session in sessions:
+    for copies in sessions.values():
+        session = copies[0]
         owner_turn_id = None
         if (
             attribution
@@ -211,8 +213,8 @@ def collect_scan_usage(
             warnings.add("thread_lineage_incomplete")
             continue
         try:
-            session_usage, session_warnings = _read_rollout_usage(
-                session,
+            session_usage, session_warnings = _read_rollout_copies_usage(
+                copies,
                 started_at=started_at,
                 completed_at=stopped_at,
                 owner_turn_id=owner_turn_id,
@@ -254,6 +256,52 @@ def collect_scan_usage(
     if attribution or any(model is not None for model in model_usage):
         result["modelUsage"] = [{"model": model, **usage} for model, usage in model_usage.items()]
     return result
+
+
+def _read_rollout_copies_usage(
+    copies: list[RolloutSession],
+    *,
+    started_at: datetime,
+    completed_at: datetime | None,
+    owner_turn_id: str | None,
+    model_usage: dict[str | None, dict[str, int]],
+) -> tuple[dict[str, int], set[str]]:
+    readings = []
+    for session in copies:
+        local_models: dict[str | None, dict[str, int]] = {}
+        try:
+            usage, warnings = _read_rollout_usage(
+                session,
+                started_at=started_at,
+                completed_at=completed_at,
+                owner_turn_id=owner_turn_id,
+                model_usage=local_models,
+            )
+        except (OSError, UnicodeError, ValueError):
+            continue
+        readings.append((usage, warnings, local_models))
+    if not readings:
+        raise ValueError("No readable rollout copy.")
+    attributable = [
+        reading
+        for reading in readings
+        if not reading[1].intersection(
+            {
+                "thread_identity_mismatch",
+                "thread_ownership_unavailable",
+                "thread_outside_scan_window",
+                "token_usage_unavailable",
+            }
+        )
+    ]
+    # Restored indexes can reference a prefix and its complete continuation.
+    # Keep totals and model attribution from the same copy, counting it once.
+    usage, warnings, selected_models = max(
+        attributable or readings, key=lambda reading: reading[0]["totalTokens"]
+    )
+    for model, tokens in selected_models.items():
+        _add_token_usage(model_usage.setdefault(model, _empty_token_usage()), tokens)
+    return usage, warnings
 
 
 def _scan_root_thread_ids(
