@@ -487,6 +487,7 @@ async function testDeepScanStdioLifecycle() {
     const completedDraft = JSON.parse(await readFile(completedWorker.resultManifestPath, "utf8"));
     assert.equal(completedDraft.scanId, resumedScanId);
     assert.deepEqual(completedDraft.findings, []);
+    assert.equal(partial.workflowVersion, "deep-security-scan/v2", "new scans use selected finalization by default");
     assert.equal(partial.userContext, "Original discovery focus");
     assert.equal(partial.usageOwner.threadId, resumedThreadId);
     const settingsPath = path.join(resumedScan.scanDir, "artifacts", "deep_discovery", "execution-settings.json");
@@ -563,6 +564,8 @@ async function testDeepScanStdioLifecycle() {
         environment, scanId: resumedScanId, threadId: resumedThreadId
       });
       assert.equal(finished.status, "succeeded");
+      assert.equal(finished.workflowVersion, partial.workflowVersion);
+      assert.equal(finished.finalizationInput.version, 1, "recovery selects a persisted finalization input");
       assert.equal(finished.coordinatorGeneration, partial.coordinatorGeneration + 1);
       assert.equal(finished.dispatchedCount, 2);
       assert.equal(finished.userContext, partial.userContext);

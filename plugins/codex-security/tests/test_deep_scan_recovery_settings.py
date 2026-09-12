@@ -82,13 +82,18 @@ def test_reconstruction_preserves_discovery_input_settings_and_deadline(
         assert run["workflowVersion"] == begun["workflowVersion"]
 
 
-def test_supported_old_run_snapshots_context_on_upgrade(tmp_path: Path) -> None:
+@pytest.mark.parametrize("workflow_version", ["deep-security-scan/v1", "deep-scan-mcp/v1"])
+def test_supported_old_run_snapshots_context_on_upgrade(
+    tmp_path: Path, workflow_version: str
+) -> None:
     target = tmp_path / "target"
     target.mkdir()
     state = tmp_path / "state"
     begun = run_workbench(
         state,
         "begin-deep-scan",
+        "--workflow-version",
+        workflow_version,
         "--thread-id",
         "fixture-thread",
         "--target-path",
@@ -109,6 +114,7 @@ def test_supported_old_run_snapshots_context_on_upgrade(tmp_path: Path) -> None:
         "--thread-id",
         "fixture-thread",
     )["deepScan"]
+    assert upgraded["workflowVersion"] == workflow_version
     assert upgraded["userContext"] == "Legacy context"
     assert upgraded["config"] == begun["config"]
     assert upgraded["createdAt"] == begun["createdAt"]
