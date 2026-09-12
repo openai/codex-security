@@ -293,6 +293,72 @@ test("matching prior decisions skip repeated reviews while stale source bindings
   );
 });
 
+test("stable source policy preserves prior pairs across batch growth while record revisions stay bound", async () => {
+  const withRevision = (index: number, revision: string): Finding => ({
+    ...finding(index),
+    extensions: {
+      source: { repository: "synthetic-repository", revision },
+    },
+  });
+  const left = withRevision(1, "a".repeat(40));
+  const right = withRevision(2, "b".repeat(40));
+  const unrelated = withRevision(3, "c".repeat(40));
+  // The policy is corpus-wide; each complete record carries its own revision.
+  const sourceManifest = {
+    repository: "synthetic-repository",
+    providerVersion: "synthetic-git-v1",
+  };
+  const previous = options([left, right]);
+  previous.sourceManifest = sourceManifest;
+  previous.reviewRunner = {
+    async run(request) {
+      return submission(request, false);
+    },
+  };
+  const prior = await deduplicateRecords(previous);
+  const reviewedPairs: string[][] = [];
+  const current = options([left, right, unrelated]);
+  current.sourceManifest = sourceManifest;
+  current.priorDecisions = prior.pairOutcomes;
+  current.reviewRunner = {
+    async run(request) {
+      expect(request.stage).toBe("screening");
+      const [anchor, ...neighbors] = assigned(request);
+      for (const neighbor of neighbors)
+        reviewedPairs.push([anchor!.findingId, neighbor.findingId].sort());
+      return submission(request, false);
+    },
+  };
+  const result = await deduplicateRecords(current);
+  const reused = result.pairOutcomes.filter(({ origin }) => origin === "prior");
+  expect(reused).toHaveLength(1);
+  expect(reused[0]!.bindingDigest).toBe(prior.pairOutcomes[0]!.bindingDigest);
+  expect(reused[0]!.decision).toBe("DISTINCT");
+  expect(reviewedPairs.length).toBeGreaterThan(0);
+  expect(
+    reviewedPairs.every((pair) => pair.includes(unrelated.findingId)),
+  ).toBe(true);
+  expect(result.pairOutcomes).toHaveLength(3);
+
+  for (const changedIndex of [1, 2]) {
+    const changed = options([
+      changedIndex === 1 ? withRevision(1, "d".repeat(40)) : left,
+      changedIndex === 2 ? withRevision(2, "d".repeat(40)) : right,
+      unrelated,
+    ]);
+    changed.sourceManifest = sourceManifest;
+    changed.priorDecisions = prior.pairOutcomes;
+    changed.reviewRunner = {
+      async run() {
+        throw new Error("Reject stale source binding before review");
+      },
+    };
+    await expect(deduplicateRecords(changed)).rejects.toThrow(
+      "current record/source binding",
+    );
+  }
+});
+
 test("checkpoint persistence is acknowledged before scheduling the next review", async () => {
   const saving = deferred<void>();
   const release = deferred<void>();
