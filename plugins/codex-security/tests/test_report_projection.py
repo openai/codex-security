@@ -75,6 +75,26 @@ def test_projection_normalizes_multiline_and_block_structural_text() -> None:
     assert "Text: ## Injected remediation - unsafe instruction" in markdown
 
 
+def test_linked_writeup_retains_distinct_source_fixes() -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["writeup"] = {"reportPath": "findings/parser/parser.md"}
+    finding["remediation"] = "Validate the record length."
+    finding["provenance"] = {
+        "sourceFindings": [
+            {"id": "review-1:0", "finding": {"remediation": "Validate the record length."}},
+            {"id": "review-2:0", "finding": {"remediation": "Reject duplicate record keys."}},
+            {"id": "review-3:0", "finding": {"remediation": "Reject duplicate record keys."}},
+        ]
+    }
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "findings/parser/parser.md" in markdown
+    assert markdown.count("Validate the record length.") == 1
+    assert markdown.count("Reject duplicate record keys.") == 1
+
+
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]
