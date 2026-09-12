@@ -27,9 +27,11 @@ const {
 const temporaryRoots = [];
 async function testCappedQueueAndSerialDedup() {
   const fixture = await fixtureRun({ workers: 3, subagents: 2, stopAfterNoNew: 10, maxDiscoveryRuns: 5 });
+  fixture.run.coordinatorGeneration = 3;
   const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor({ dedupNewFindings: [1, 0] });
   const completedDrafts = [];
+  const published = [];
   const coordinator = new DeepScanCoordinator({
     run: fixture.run,
     store,
@@ -39,7 +41,10 @@ async function testCappedQueueAndSerialDedup() {
     retryDelaysMs: [1, 3, 9],
     clock: immediateClock,
     handoffClaimToken: "claim-fixture",
-    onComplete: async (draft) => completedDrafts.push(structuredClone(draft))
+    onComplete: async (draft, _signal, publication) => {
+      completedDrafts.push(structuredClone(draft));
+      published.push(publication);
+    }
   });
   coordinator.start();
   const terminal = await coordinator.wait(undefined, 5_000);
@@ -68,6 +73,10 @@ async function testCappedQueueAndSerialDedup() {
   const reducerWorkers = [...store.workers.values()].filter((worker) => (
     worker.kind === "dedup" && worker.status === "succeeded"
   ));
+  assert.deepEqual(published, [{
+    coordinatorGeneration: 3,
+    resultPath: reducerWorkers.at(-1).resultManifestPath,
+  }]);
   const finalReducerResult = JSON.parse(await readFile(
     reducerWorkers.at(-1).resultManifestPath,
     "utf8"

@@ -8,6 +8,7 @@ import {
 import { validateDiscoveryArtifacts, validateReducerArtifacts, type DeepReductionInput } from "./artifact-validation.js";
 import {
   scanDraftInputSchema,
+  type DeepScanPublication,
   type ScanDraftInput
 } from "../artifact-scan-draft.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
@@ -54,6 +55,7 @@ interface SchedulerResult {
   mergedWorkerIds: string[];
   reducers: AcceptedReducer[];
   result?: DeepReductionInput;
+  resultPath?: string;
 }
 
 type CoordinatorPhase = "setup" | "discovery" | "terminal";
@@ -72,7 +74,7 @@ export interface CoordinatorOptions {
   threadId?: string;
   heartbeatIntervalMs?: number;
   observeReplacement?: (run: DeepScanRunState) => Promise<DeepScanRunState>;
-  onComplete?: (draft: ScanDraftInput, signal: AbortSignal) => Promise<void>;
+  onComplete?: (draft: ScanDraftInput, signal: AbortSignal, publication: DeepScanPublication) => Promise<void>;
   onStopped?: (run: DeepScanRunState) => Promise<void>;
 }
 
@@ -293,7 +295,10 @@ export class DeepScanCoordinator {
       if (draft.scanId !== this.state.scanId) {
         throw new Error("Deep Scan aggregate does not match its authoritative scan identity.");
       }
-      await this.options.onComplete?.(draft, this.publicationAbortController.signal);
+      await this.options.onComplete?.(draft, this.publicationAbortController.signal, {
+        coordinatorGeneration: this.state.coordinatorGeneration,
+        resultPath: schedulerResult.resultPath ?? null,
+      });
       if (this.canceled || this.externallyFailed) return;
       this.state = await this.finishWithReplay(schedulerResult);
       if (this.canceled || this.externallyFailed) return;
@@ -910,6 +915,7 @@ export class DeepScanCoordinator {
       mergedWorkerIds: unique(mergedDiscoveries.map((worker) => worker.id)),
       reducers: reducerOutcomes,
       result: latestResult,
+      resultPath: previousReducerResultPath,
     };
   }
 

@@ -1418,6 +1418,41 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
+def _read_staged_scan_draft(scan_dir: Path, draft_path: str) -> dict[str, Any]:
+    try:
+        relative = Path(draft_path).relative_to(scan_dir).as_posix()
+    except ValueError as exc:
+        raise SystemExit("Scan draft must be inside the registered scan drafts directory.") from exc
+    if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.json", relative):
+        raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
+    return _read_scan_local_json(scan_dir, relative, "Staged scan draft")
+
+
+def _require_current_deep_publication(
+    db: Any, connection: Any, scan_id: str, draft: dict[str, Any]
+) -> None:
+    publication = draft.get("deepScanPublication")
+    run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    db.deep_scan.require_current_coordinator(
+        run,
+        argparse.Namespace(
+            coordinator_generation=publication.get("coordinatorGeneration") if publication else None
+        ),
+    )
+    # Generation-one runs predate host publication metadata. Keep their existing
+    # draft path; adopted coordinators must carry their generation and selection.
+    if publication is None:
+        return
+    reducer = _latest_successful_reducer(
+        connection.execute(
+            "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+        ).fetchall()
+    )
+    selected_result = reducer["result_manifest_path"] if reducer is not None else None
+    if publication["resultPath"] != selected_result:
+        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+
+
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
@@ -1430,6 +1465,10 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 "The scan stopped; its saved checkpoint was retained without replacing sealed results."
             )
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+        draft = None
+        if scan["mode"] == "deep":
+            draft = _read_staged_scan_draft(scan_dir, args.draft_path)
+            _require_current_deep_publication(db, connection, scan_id, draft)
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
@@ -1459,15 +1498,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit(
                 "scan_draft_conflict: canonical scan results changed; reconcile the saved checkpoint again."
             )
-        try:
-            relative = Path(args.draft_path).relative_to(scan_dir).as_posix()
-        except ValueError as exc:
-            raise SystemExit(
-                "Scan draft must be inside the registered scan drafts directory."
-            ) from exc
-        if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.json", relative):
-            raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
-        draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
+        if draft is None:
+            draft = _read_staged_scan_draft(scan_dir, args.draft_path)
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
         binding = db.workbench_completion_binding(scan, db.now())
         # Validate on copies: saved canonical documents remain ordinary unsealed drafts.

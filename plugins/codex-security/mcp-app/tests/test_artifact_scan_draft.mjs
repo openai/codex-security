@@ -591,6 +591,10 @@ try {
   const obsoleteCheckpointPath = path.join(deepParentRoot, "checkpoints", "obsolete.json");
   await writeFile(obsoleteCheckpointPath, "{malformed obsolete checkpoint\n");
   let deepWorkbenchWrites = 0;
+  const deepPublication = {
+    coordinatorGeneration: 3,
+    resultPath: path.join(deepParentRoot, "workers", "reducer", "result.json"),
+  };
   await recordCodexSecurityScanDraftViaWorkbench(
     deepParentContext,
     acceptedDeepDraft,
@@ -603,11 +607,15 @@ try {
       const checkpointPath = arguments_[arguments_.indexOf("--checkpoint-path") + 1];
       const staged = JSON.parse(await readFile(draftPath, "utf8"));
       const stagedCheckpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+      assert.deepEqual(staged.deepScanPublication, deepPublication);
+      assert.equal(stagedCheckpoint.deepScanPublication, undefined);
       assert.deepEqual(staged.findings, acceptedDeepFindings);
       assert.deepEqual(staged.coverage, acceptedDeepCoverage);
       assert.deepEqual(stagedCheckpoint.findings, acceptedDeepDraft.findings);
       assert.equal(stagedCheckpoint.handoffClaimToken, undefined);
     },
+    undefined,
+    deepPublication,
   );
   assert.equal(deepWorkbenchWrites, 1, "terminal Deep drafts still publish through the workbench lock despite obsolete malformed checkpoints");
   assert.deepEqual(await readdir(path.join(deepParentRoot, "drafts")), []);
