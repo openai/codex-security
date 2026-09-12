@@ -5,6 +5,10 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "noEmit": true,
+    "paths": {
+      "@openai/codex-sdk": ["./node_modules/@openai/codex-sdk"],
+      "smol-toml": ["./node_modules/smol-toml"]
+    },
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "strict": true,
