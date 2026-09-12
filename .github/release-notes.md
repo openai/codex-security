@@ -35,6 +35,7 @@
 - upgrade Ink and use complete Escape input in TUI tests ([#913](https://github.com/openai/codex-security/pull/913))
 - upgrade pnpm setup and align the package-manager pin ([#910](https://github.com/openai/codex-security/pull/910))
 - upgrade actions/setup-python to 7.0.0 ([#909](https://github.com/openai/codex-security/pull/909))
+- upgrade Stryker with compatible mutation tooling ([#912](https://github.com/openai/codex-security/pull/912))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

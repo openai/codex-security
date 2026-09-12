@@ -65,7 +65,7 @@ async function interruptedScan(
       "initial",
     );
     const source = join(root, "source");
-    await cp(repository, source, { recursive: true });
+    git("clone", "--quiet", "--no-hardlinks", repository, source);
     const task = {
       id: "repo",
       repository: source,

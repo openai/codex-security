@@ -91,7 +91,7 @@
   },
   "devDependencies": {
     "@openai/apps-sdk-ui": "0.2.2",
-    "@stryker-mutator/core": "9.6.1",
+    "@stryker-mutator/core": "10.0.0",
     "@tailwindcss/postcss": "4.3.3",
     "@types/bun": "1.4.1",
     "@types/node": "26.4.1",
