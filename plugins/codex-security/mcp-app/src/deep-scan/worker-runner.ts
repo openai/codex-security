@@ -292,7 +292,7 @@ export class DeepScanWorkerRunner {
       consumed = inputs.sort((a, b) => a.inputOrder - b.inputOrder).map((item) => {
         const discovery = consumed.find((worker) => worker.id === item.discoveryWorkerId);
         if (!discovery || !item.resultManifestPath) throw new Error("The reducer claim is missing an accepted input.");
-        return { ...discovery, resultPath: item.resultManifestPath };
+        return { ...discovery, resultPath: item.resultManifestPath, attempt: item.attempt ?? discovery.attempt };
       });
     }
     this.options.log({

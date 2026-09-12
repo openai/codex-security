@@ -68,6 +68,14 @@ async function testResponseLoss(responseLosses) {
       clock: { now: () => Date.now(), sleep: async () => {} },
       executor: { async run(request) {
         executions++;
+        if (request.kind === "dedup") {
+          const workers = request.artifactContext.deepReducer.claimedWorkers;
+          const prompt = await readFile(request.promptPath, "utf8");
+          const configuration = JSON.parse(prompt.match(/```json\n([\s\S]*?)\n```/)[1]);
+          assert.deepEqual(configuration.claimedWorkerIds, workers.map(worker => worker.id));
+          assert.equal(workers.every(worker => worker.resultPath.includes("checkpoints")), true);
+          assert.deepEqual(workers.map(worker => worker.attempt), [1, 1], "execution uses the immutable claim attempts");
+        }
         await request.onThreadStarted?.(`fixture-session-${executions}`);
         const draft = { scanId: run.scanId, findings: [], threatModel: { summary: "Synthetic fixture." } };
         if (request.kind === "discovery") draft.coverage = {
@@ -90,7 +98,13 @@ async function testResponseLoss(responseLosses) {
     const second = await runner.runDiscoveryWorker(randomUUID(), "discovery-2");
     // Acceptance receipts are operation-specific, so only the first discovery loses a response.
     await rm(path.join(discovery.worker.artifactDir, "result.json"));
-    const merged = await runner.runReducer({ id: randomUUID(), label: "dedup-1", consumed: [discovery.worker, second.worker] });
+    const merged = await runner.runReducer({
+      id: randomUUID(), label: "dedup-1",
+      consumed: [discovery.worker, second.worker].map(worker => ({
+        ...worker, resultPath: path.join(worker.artifactDir, "result.json"), attempt: 99
+      }))
+    });
+    assert.equal(merged.error, undefined, merged.error?.stack);
     assert.match(merged.resultPath, /checkpoints/);
     assert.equal(merged.newFindings, 0);
     assert.equal(merged.run.persistedDedupInputs.filter((input) => input.dedupWorkerId === merged.id).length, 2);
