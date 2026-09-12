@@ -148,6 +148,21 @@ def test_inventory_keeps_ignored_tracked_files_without_ignored_untracked_files(
     assert "./app/ignored.skip" not in paths
 
 
+def test_inventory_reports_a_failed_ignored_tracked_listing(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "ignored/tracked.py")
+    git(repository, "add", "--force", "--", "ignored/tracked.py")
+    git(repository, "config", "core.repositoryformatversion", "1")
+    git(repository, "config", "extensions.exampleUnsupported", "true")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output)
+
+    assert result.returncode == 2, result.stdout
+    assert "git ls-files" in result.stderr
+    assert not output.exists()
+
+
 def test_diff_inventory_includes_power_shell_files(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
