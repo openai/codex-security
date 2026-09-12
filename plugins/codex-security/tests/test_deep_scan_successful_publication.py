@@ -173,6 +173,38 @@ def assert_published_aggregate(scan):
     assert (scan.scan_dir / "report.md").is_file()
 
 
+def test_deep_publication_renders_each_source_remediation(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    finding = scan.findings[0]
+    first = copy.deepcopy(finding)
+    first.pop("provenance")
+    first["remediation"] = "Check the destination before writing the archive entry."
+    first["remediationTests"] = ["Reject an archive entry outside the destination."]
+    second = copy.deepcopy(first)
+    second["remediation"] = "Reject symbolic links before opening the destination."
+    second["remediationTests"] = ["Reject a symbolic link inside the destination."]
+    second["preventiveControls"] = ["Use a directory-relative file handle."]
+    finding["remediation"] = first["remediation"]
+    finding["remediationTests"] = first["remediationTests"]
+    finding["provenance"]["sourceFindings"] = [
+        {"id": "review-1:0", "finding": first},
+        {"id": "review-2:0", "finding": second},
+    ]
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": scan.findings}))
+
+    complete(workbench_api, workbench_db, scan)
+
+    assert_published_aggregate(scan)
+    report = (scan.scan_dir / "report.md").read_text()
+    for source in (first, second):
+        assert report.count(source["remediation"]) == 1
+        for test in source["remediationTests"]:
+            assert report.count(test) == 1
+    assert "Use a directory-relative file handle." in report
+
+
 @pytest.mark.parametrize("scope", [".", "subdir"], ids=["repository", "scoped"])
 def test_deep_publication_keeps_configured_scope_without_worker_observations(
     workbench_api, workbench_db, publication_scan, scope
