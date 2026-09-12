@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { startRpc } from "./package-rpc.mjs";
@@ -325,6 +325,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
   } finally {
     await rpc.close();
   }
+  await assertSavedState(f, scanId, owner);
   await assertExecutions(f, scanId, 4);
 }
 
@@ -473,7 +474,77 @@ async function runInstalledSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
+  await assertSavedState(f, scanId, owner);
   await assertExecutions(f, scanId, 4);
+}
+
+async function assertSavedState(f, scanId, owner) {
+  const { deepScan } = await workbench(f, [
+    "get-deep-scan",
+    "--scan-id",
+    scanId,
+    "--thread-id",
+    owner,
+  ]);
+  assert.equal(deepScan.status, "succeeded");
+  if (deepScan.workflowVersion === "deep-security-scan/v2") {
+    const selected = deepScan.finalizationInput;
+    assert.ok(
+      selected,
+      "The completed v2 scan retains its finalization input.",
+    );
+    assert.equal(selected.version, 1);
+    assert.equal(selected.terminalReason, deepScan.terminalReason);
+    assert.deepEqual(selected.omittedWorkerIds, []);
+    await assertDigest(
+      resolve(deepScan.scanDir, selected.resultPath),
+      selected.resultSha256,
+    );
+    const workers = deepScan.workers.filter(
+      (worker) => worker.status === "succeeded",
+    );
+    assert.equal(workers.length, 3);
+    for (const worker of workers) {
+      const attempt = deepScan.attempts.find(
+        (entry) =>
+          entry.workerId === worker.id && entry.attempt === worker.attempt,
+      );
+      assert.ok(attempt, "Each accepted worker retains its execution attempt.");
+      assert.equal(attempt.status, "succeeded");
+      await assertDigest(
+        attempt.acceptedResultPath,
+        attempt.acceptedResultSha256,
+      );
+      if (worker.kind === "dedup") {
+        assert.equal(selected.resultSha256, attempt.acceptedResultSha256);
+      } else {
+        const input = deepScan.dedupInputs.find(
+          (entry) => entry.discoveryWorkerId === worker.id,
+        );
+        assert.ok(input, "The reducer retains each accepted discovery input.");
+        assert.equal(input.attempt, worker.attempt);
+        assert.equal(input.resultManifestSha256, attempt.acceptedResultSha256);
+        await assertDigest(
+          input.resultManifestPath,
+          input.resultManifestSha256,
+        );
+      }
+    }
+    assert.equal(deepScan.dedupInputs.length, 2);
+  }
+  console.log(
+    JSON.stringify({
+      fixture: basename(f.directory),
+      workflowVersion: deepScan.workflowVersion,
+      attempts: deepScan.attempts?.length ?? null,
+      selectedFinalization: deepScan.finalizationInput != null,
+    }),
+  );
+}
+
+async function assertDigest(path, expected) {
+  const bytes = await readFile(path);
+  assert.equal(createHash("sha256").update(bytes).digest("hex"), expected);
 }
 
 async function assertDraft(path) {
