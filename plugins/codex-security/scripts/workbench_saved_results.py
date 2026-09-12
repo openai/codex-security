@@ -166,9 +166,12 @@ def _read_saved_result(
     draft = _read_scan_local_json(scan_dir, relative, "Saved scan checkpoint")
     if draft.get("scanId") != scan_id:
         raise ContractError("checkpoint belongs to a different scan")
-    if not isinstance(draft.get("findings"), list) or not isinstance(
-        draft.get("coverage", {} if kind == "dedup" else None), dict
-    ):
+    coverage = (
+        draft.get("sourceCoverage", draft.get("coverage", {}))
+        if kind == "dedup"
+        else draft.get("coverage")
+    )
+    if not isinstance(draft.get("findings"), list) or not isinstance(coverage, dict):
         raise ContractError("checkpoint has no semantic findings or coverage")
     return draft, _digest(draft)
 
@@ -569,6 +572,7 @@ def merge_saved_results(
             reducer_paths.add(latest_reducer)
         except ValueError:
             warnings.append("Skipped a reducer result outside the scan directory.")
+    accepted_reducer = latest_reducer
 
     def checkpoints(directory: str, worker_id: str | None) -> None:
         for name in _children(scan_dir, directory):
@@ -665,9 +669,14 @@ def merge_saved_results(
             if frozen_source_digests is not None and frozen_source_digests[relative] != digest:
                 raise ContractError("checkpoint changed after the scan stopped")
             source_digests[relative] = digest
-            # Recovery expects coverage, but reducer results only contain findings
-            # and context. Add an empty value after hashing the original result.
-            sources.append((relative, {"coverage": {}, **draft}, worker_id))
+            # The host supplies reducer coverage separately from model output.
+            # Preserve the digest of the original accepted document.
+            if relative in reducer_paths:
+                draft = {
+                    **draft,
+                    "coverage": draft.get("sourceCoverage", draft.get("coverage", {})),
+                }
+            sources.append((relative, draft, worker_id))
         except (ContractError, OSError, ValueError) as exc:
             if (scan_dir / relative).exists():
                 warnings.append(f"Preserved unreadable checkpoint {relative}: {exc}")
@@ -676,6 +685,15 @@ def merge_saved_results(
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.")
 
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
+    if "sourceCoverage" not in drafts_by_path.get(accepted_reducer, {}):
+        accepted_reducer = None
+    accepted_coverage = drafts_by_path.get(accepted_reducer, {}).get("coverage", {})
+    reviewed_attempts = {
+        (review.get("workerId"), review.get("attempt"))
+        for review in accepted_coverage.get("reviews", [])
+        if isinstance(review, dict)
+    }
+    workers_by_id = {worker["id"]: worker for worker in workers}
     latest_reducer_key = (
         (reducer["completed_at"] or "", reducer["id"], int(reducer["attempt"] or 0))
         if reducer is not None and latest_reducer in drafts_by_path
@@ -792,8 +810,19 @@ def merge_saved_results(
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     current_drafts = ([(None, parent)] if parent else []) + [
-        (worker_id, draft) for relative, draft, worker_id in sources if relative in current_results
+        (worker_id, draft)
+        for relative, draft, worker_id in sources
+        if relative in current_results or relative == accepted_reducer
     ]
+
+    def coverage_candidate(owner: str | None, item: dict[str, Any]) -> tuple[str | None, Any]:
+        provenance = item.get("provenance")
+        if owner is None and isinstance(provenance, dict):
+            return provenance.get("workerId"), provenance.get(
+                "candidateId", item.get("candidateId")
+            )
+        return owner, item.get("candidateId")
+
     resolved: dict[tuple[str | None, str], str] = {}
     for owner, draft in current_drafts:
         for finding in draft["findings"]:
@@ -811,7 +840,7 @@ def merge_saved_results(
                     and isinstance(item.get("candidateId"), str)
                     and item.get("disposition") in {"reported", "rejected", "not_applicable"}
                 ):
-                    resolved.setdefault((owner, item["candidateId"]), item["disposition"])
+                    resolved.setdefault(coverage_candidate(owner, item), item["disposition"])
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
     for draft in [parent] if parent else []:
@@ -1025,11 +1054,18 @@ def merge_saved_results(
                 continue
             finding_positions[key] = len(findings)
             findings.append(finding)
-        if superseded:
+        worker = workers_by_id.get(worker_id)
+        reviewed = (
+            worker is not None
+            and worker["status"] == "succeeded"
+            and worker["merge_state"] == "merged"
+            and (worker_id, worker["attempt"]) in reviewed_attempts
+        )
+        if reviewed or (superseded and relative != accepted_reducer):
             continue
-        for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+        for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
             items = draft["coverage"].get(field, [])
-            if not isinstance(items, list):
+            if not isinstance(items, list) or (field == "reviews" and not items):
                 continue
             output = coverage.setdefault(field, [])
             if not isinstance(output, list):
@@ -1060,7 +1096,7 @@ def merge_saved_results(
                             history.append(copy.deepcopy(finding))
                 if (
                     isinstance(item, dict)
-                    and (worker_id, item.get("candidateId")) in resolved
+                    and coverage_candidate(worker_id, item) in resolved
                     and (field == "deferred" or item.get("disposition") == "needs_follow_up")
                 ):
                     continue
