@@ -145,4 +145,19 @@ describe("findings import formats", () => {
       ),
     ).rejects.toThrow("duplicate occurrenceId");
   });
+
+  test("rejects an unsafe finding location path in either import format", async () => {
+    const document = await sourceDocument();
+    document.findings[0]!.locations[0]!.path = "../../../outside/secrets.env";
+    await expect(
+      parseImportedFindings(JSON.stringify(document), "json", PLUGIN_ROOT),
+    ).rejects.toThrow("has an invalid path");
+    await expect(
+      parseImportedFindings(
+        CSV_SOURCE.replace("src/extract.ts", "../../../outside/secrets.env"),
+        "csv",
+        PLUGIN_ROOT,
+      ),
+    ).rejects.toThrow("has an invalid path");
+  });
 });
