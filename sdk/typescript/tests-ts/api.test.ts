@@ -2682,10 +2682,7 @@ describe("CodexSecurity orchestration", () => {
       "This Standard scan authorizes its independent baseline auditor and focused investigators",
     );
     expect(prompt).not.toContain("This exhaustive scan authorizes");
-    expect(prompt).toContain(
-      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
-    );
-    expect(prompt).toContain("the parent owns global progress updates");
+    expect(prompt).not.toContain("CODEX_SECURITY_SCAN_PROGRESS");
     expect(prompt).toContain(
       `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
     );

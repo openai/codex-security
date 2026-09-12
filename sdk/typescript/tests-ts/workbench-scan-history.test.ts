@@ -205,7 +205,7 @@ print(json.dumps({'summary': accepted['summary'],
       join(tmpdir(), "codex-security-validation-fixture"),
     ),
   ).toEqual({
-    summary: { new: 1, persisting: 2, reopened: 0, resolved: 1, unknown: 0 },
+    summary: { new: 1, persisting: 2, reopened: 0, resolved: 0, unknown: 1 },
     related: [
       ["a2", "y"],
       ["c", "z"],
@@ -480,7 +480,7 @@ payload['uncertain'] = []
 cache()
 excluded = compare()
 coverage['excludePaths'] = []
-resolved = compare()
+covered = compare()
 connection.execute('INSERT INTO finding_triage VALUES (?, ?, ?)', ('a1', 'closed', 'already_fixed'))
 link('c1', 'd1')
 link('c2', 'd1')
@@ -488,7 +488,7 @@ linked = compare()
 unchanged = json.loads(connection.execute('SELECT result_json FROM scan_comparisons').fetchone()[0]) == payload
 connection.execute("DELETE FROM scan_comparison_matches WHERE after_scan_id = 'latest'")
 restored = compare()
-print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': resolved,
+print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'covered': covered,
                   'linked': linked, 'unchanged': unchanged, 'restored': restored}))
 `;
   const observed = await runPythonProbe(
@@ -515,7 +515,7 @@ print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': reso
       ],
     },
     excluded: { summary: { new: 1, resolved: 0, unknown: 1 } },
-    resolved: { summary: { new: 1, resolved: 1, unknown: 0 } },
+    covered: { summary: { new: 1, resolved: 0, unknown: 1 } },
     linked: {
       summary: { new: 0, persisting: 0, reopened: 1, resolved: 0, unknown: 0 },
       findings: [
@@ -530,7 +530,7 @@ print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': reso
     unchanged: true,
   });
   expect(observed["linked"]).not.toHaveProperty("related");
-  expect(observed["restored"]).toEqual(observed["resolved"]);
+  expect(observed["restored"]).toEqual(observed["covered"]);
 });
 
 test("loads displayed relations in bulk and follows current confirmed identities", async () => {

@@ -3986,10 +3986,7 @@ function scanPrompt(
     `When ${shellEnvironmentReference("CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST")} is set, use its exact value as scan.target.snapshotDigest. For git_revision, omit scan.target.snapshotDigest.`,
     'Use exactly "codex-security-plugin" as scan.producer.name.',
     ...(skillName === "security-scan"
-      ? [
-          'At discovery start, after meaningful completed-review batches, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line using the best established file total and actual fully reviewed file count. Do not create inventories or receipts solely for progress.',
-          "Collect truthful completed-review counts from delegated workers; the parent owns global progress updates.",
-        ]
+      ? []
       : [
           'After the file inventory, after each fully reviewed file batch, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line in a completed command output or agent message. Use the actual phase and file counts. Never count unread or partially reviewed files.',
           'Every delegated review assignment must say: After each completed batch, emit CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} on its own line using your worker-local reviewed and assigned file counts.',

@@ -492,10 +492,7 @@ def test_frozen_stopped_results_ignore_late_foreign_checkpoint_warning(tmp_path:
     assert (scan_dir / "scan-manifest.json").read_bytes() == seal
 
 
-@pytest.mark.parametrize("disposition", ["reported", "rejected", "provenance-reported"])
-def test_final_candidate_disposition_supersedes_pending_checkpoint(
-    tmp_path: Path, disposition: str
-) -> None:
+def test_completion_uses_final_result_without_restoring_checkpoints(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     target.mkdir()
@@ -509,41 +506,32 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
     )["results"]
     scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
-    pending = {
+    findings = json.loads((scan_dir / "findings.json").read_text())
+    earlier = {
         "scanId": scan_id,
         "complete": False,
-        "findings": [],
+        "findings": findings["findings"],
         "coverage": {
             "completeness": "partial",
             "surfaces": [],
             "explicitExclusions": [],
-            "deferred": [{"candidateId": "candidate-x", "reason": "Validation is pending."}],
+            "deferred": [{"candidateId": "candidate-x", "reason": "Needs investigation."}],
         },
     }
-    write_checkpoint(scan_dir / "checkpoints", pending)
-    findings = json.loads((scan_dir / "findings.json").read_text())
-    if disposition == "provenance-reported":
-        findings["findings"][0]["provenance"]["candidateId"] = "candidate-x"
-    elif disposition == "reported":
-        findings["findings"][0]["extensions"] = {"candidateId": "candidate-x"}
-    else:
-        findings["findings"] = []
+    write_checkpoint(scan_dir / "checkpoints", earlier)
+    checkpoint_bytes = {
+        path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")
+    }
+    findings["findings"] = []
     (scan_dir / "findings.json").write_text(json.dumps(findings))
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    disposition = disposition.removeprefix("provenance-")
-    coverage["surfaces"][0].update(
-        candidateId="candidate-x", disposition=disposition, notes="Final source review disposition."
-    )
-    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    final_findings = json.loads((scan_dir / "findings.json").read_text())
     final_coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert completed["progress"]["status"] == "complete"
+    assert final_findings["findings"] == []
+    assert final_coverage["deferred"] == []
     assert final_coverage["completeness"] == "complete"
-    assert not any(item.get("candidateId") == "candidate-x" for item in final_coverage["deferred"])
-    assert any(
-        item.get("candidateId") == "candidate-x" and item["disposition"] == disposition
-        for item in final_coverage["surfaces"]
-    )
+    assert all(path.read_bytes() == contents for path, contents in checkpoint_bytes.items())
 
 
 def test_incomplete_parent_checkpoint_cannot_complete_scan(tmp_path: Path) -> None:
