@@ -4,13 +4,20 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
+import { parseArgs } from "node:util";
 import { build } from "esbuild";
 
 const root = resolve(import.meta.dirname, "..");
 const maxChunkBytes = 140_000;
 
-export async function buildMcpApp({ output }) {
+export async function buildMcpApp({ output, native = "universal" }) {
+  if (native !== "universal" && native !== "host") {
+    throw new Error("Native packaging must be universal or host.");
+  }
   const mcpDir = resolve(output);
+  const nativeTarget = native === "host"
+    ? (await import("../../native/platform.mjs")).nativeTarget
+    : undefined;
 
   execFileSync(process.execPath, ["--run", "build"], {
     cwd: root,
@@ -21,11 +28,18 @@ export async function buildMcpApp({ output }) {
 
   await writeRuntime("server", "main.ts");
   const contract = JSON.parse(await readFile(join(root, "../plugin-files.json"), "utf8"));
-  for (const file of contract.shippedExact.filter((path) => path.startsWith("mcp/native/"))) {
+  const nativeFiles = contract.shippedExact.filter((path) => path.startsWith("mcp/native/"));
+  if (nativeTarget !== undefined && !nativeFiles.some((path) => path.startsWith(`mcp/native/${nativeTarget}/`))) {
+    throw new Error(`Unsupported native target: ${nativeTarget}`);
+  }
+  for (const file of nativeFiles) {
+    if (nativeTarget !== undefined && file.endsWith(".node") && !file.startsWith(`mcp/native/${nativeTarget}/`)) {
+      continue;
+    }
     const path = file.slice("mcp/native/".length);
     const destination = join(mcpDir, "native", path);
     await mkdir(dirname(destination), { recursive: true });
-    await copyFile(join(root, "../native/prebuilt", path), destination);
+    await copyFile(join(root, "../native", native === "host" ? "dist" : "prebuilt", path), destination);
   }
   await writeRuntime("helpers", "helpers-main.ts");
 
@@ -71,15 +85,20 @@ if (
   invokedPath !== undefined
   && pathToFileURL(resolve(invokedPath)).href === import.meta.url
 ) {
-  const args = process.argv.slice(2);
-  if (args.length !== 2 || args[0] !== "--output") {
-    console.error("Usage: node scripts/build_mcp_app.mjs --output <directory>");
-    process.exitCode = 1;
-  } else {
-    buildMcpApp({ output: args[1] }).catch((error) => {
-      console.error(error instanceof Error ? error.message : error);
-      process.exitCode = 1;
+  try {
+    const { values } = parseArgs({
+      options: {
+        output: { type: "string" },
+        native: { type: "string", default: "universal" }
+      }
     });
+    if (!values.output) {
+      throw new Error("Usage: node scripts/build_mcp_app.mjs --output <directory> [--native universal|host]");
+    }
+    await buildMcpApp(values);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
   }
 }
 
