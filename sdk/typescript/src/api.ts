@@ -2205,7 +2205,7 @@ export class CodexSecurity {
         let artifactRestorer: ScanArtifactRestorer | null = null;
         try {
           artifactRestorer = await prepareArtifactRestorer(
-            workbenchOptions,
+            { ...workbenchOptions, signal: undefined },
             scanDir,
           );
           await runScanEvents({
@@ -2222,7 +2222,6 @@ export class CodexSecurity {
           });
           checkOpen();
         } catch (error) {
-          if (signal.aborted || this.#closed) throw error;
           if (artifactRestorer !== null) {
             for (const artifact of completedArtifacts) {
               try {
@@ -2239,6 +2238,7 @@ export class CodexSecurity {
               }
             }
           }
+          if (signal.aborted || this.#closed) throw error;
           await collectResult(
             result.turnResult,
             result.threadId,

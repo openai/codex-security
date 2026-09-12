@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import type { ThreadEvent } from "@openai/codex-sdk";
-import { runWorkbench, type WorkbenchCommandOptions } from "../src/runtime.js";
+import {
+  prepareScanArtifactRestorer,
+  runWorkbench,
+  type WorkbenchCommandOptions,
+} from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
 import {
   completedEvents,
@@ -30,12 +34,17 @@ for (const outcome of [
   "budget-after-deep-finish",
   "budget-during-resumed-publication",
   "closed-during-resumed-publication",
+  "followup-canceled",
 ] as const) {
   const resumedStop = outcome.includes("-resumed-");
   const restart = outcome === "restart" || resumedStop;
   const closed = outcome.startsWith("closed-");
   const budgeted = outcome.startsWith("budget-");
-  test(`SDK handles selected aggregate: ${outcome}`, async () => {
+  const name =
+    outcome === "followup-canceled"
+      ? "SDK preserves a selected aggregate when its follow-up is canceled"
+      : `SDK handles selected aggregate: ${outcome}`;
+  const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scanDir = join(root, "scan");
@@ -56,6 +65,7 @@ for (const outcome of [
     let scanId = "";
     let workbenchOptions: WorkbenchCommandOptions;
     let publicationFails = restart;
+    let acceptedReport = "";
     const modelInputs: string[] = [];
     const commands: string[] = [];
     const usagePath = join(
@@ -72,6 +82,7 @@ for (const outcome of [
         {},
         {
           environment,
+          prepareScanArtifactRestorer,
           prepareRuntime: async () => {
             const runtime = preparedRuntime(codexHome);
             const manifest = JSON.parse(
@@ -165,8 +176,23 @@ for (const outcome of [
               id: threadId,
               async runStreamed(input: string) {
                 modelInputs.push(input);
-                if (input === followUp)
+                if (input === followUp) {
+                  if (outcome === "followup-canceled") {
+                    const reportPath = join(scanDir, "report.md");
+                    acceptedReport = await readFile(reportPath, "utf8");
+                    expect(acceptedReport).toContain(
+                      "Validate the resolved destination",
+                    );
+                    await writeFile(
+                      reportPath,
+                      "Incomplete follow-up report.\n",
+                    );
+                    cancellation.abort(
+                      "Synthetic cancellation during follow-up",
+                    );
+                  }
                   return { events: completedEvents(threadId) };
+                }
                 expect(modelInputs.length).toBe(1);
                 async function* events(): AsyncGenerator<ThreadEvent> {
                   yield { type: "thread.started", thread_id: threadId };
@@ -438,6 +464,32 @@ for (const outcome of [
         expect(modelInputs.length).toBe(1);
         return;
       }
+      if (outcome === "followup-canceled") {
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            signal: cancellation.signal,
+            postScanPrompt: followUp,
+          }),
+        ).rejects.toThrow(/interrupted/);
+        const completed = await runWorkbench(
+          { ...workbenchOptions!, signal: undefined },
+          ["get-scan", "--scan-id", scanId],
+        );
+        expect(completed["scan"]).toMatchObject({
+          progress: { status: "complete" },
+          findingCount: 1,
+          reportAvailable: true,
+        });
+        expect(modelInputs.length).toBe(2);
+        expect(modelInputs[1]).toBe(followUp);
+        expect(commands).not.toContain("cancel-scan");
+        expect(commands).not.toContain("fail-scan");
+        expect(await readFile(join(scanDir, "report.md"), "utf8")).toBe(
+          acceptedReport,
+        );
+        return;
+      }
       const result = await client.run(repository, {
         mode: "deep",
         signal: cancellation.signal,
@@ -472,5 +524,6 @@ for (const outcome of [
       clearTimeout(keepAlive);
       await client.close();
     }
-  }, 30_000);
+  };
+  test(name, runCase, 30_000);
 }
