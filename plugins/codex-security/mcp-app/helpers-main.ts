@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+export { parseCanonicalScanDraft } from "./src/artifact-scan-draft.js";
 export { resumeSelectedDeepScan } from "./src/deep-scan/finalization.js";
 import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";
 import { decodePosixBytes } from "./src/helpers/posix-path";

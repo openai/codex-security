@@ -3,7 +3,12 @@
 import { scanPreflightCodexConfig } from "./preflight-config.js";
 export { scanPreflightCodexConfig } from "./preflight-config.js";
 import { resumeSelectedDeepScan } from "./deep-scan-finalization.js";
-import { auditEvidence, runAcceptedAudit } from "./accepted-audit.js";
+import {
+  auditEvidence,
+  runAcceptedAudit,
+  type ScanDraftInput,
+} from "./accepted-audit.js";
+import { pathToFileURL } from "node:url";
 import { statSync } from "node:fs";
 import {
   chmod,
@@ -1979,6 +1984,7 @@ export class CodexSecurity {
         events,
         signal,
         scanDir,
+        scanId,
         pluginRoot: runtime.plugin.installedRoot,
         expectation,
         authentication,
@@ -2213,6 +2219,7 @@ export class CodexSecurity {
             events: (await followUp()).events,
             signal,
             scanDir,
+            scanId,
             pluginRoot: runtime.plugin.installedRoot,
             expectation,
             model,
@@ -3698,6 +3705,7 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
 }
 
 interface ScanEventRunOptions {
+  scanId?: string;
   savedCompletion?: Awaited<ReturnType<typeof readCodexTurn>>;
   recoverCompletion?: () => Promise<Awaited<
     ReturnType<typeof readCodexTurn>
@@ -3842,8 +3850,7 @@ export async function runScanEvents(
       return (completedTurn = { ...turn, threadId, status });
     };
     const accept = async () => {
-      // The plugin's existing writer accepts these semantic documents. Matching,
-      // custom validation and the canonical seal remain in the enclosing owner.
+      // Matching, custom validation and the canonical seal remain with the caller.
       const [manifest, findings, coverage] = await Promise.all(
         ["scan-manifest.json", "findings.json", "coverage.json"].map(
           async (name) =>
@@ -3854,11 +3861,18 @@ export async function runScanEvents(
             ),
         ),
       );
-      return auditEvidence({
-        complete: manifest.scan.complete,
-        findings: findings.findings,
+      const helper = (
+        await import(
+          pathToFileURL(join(options.pluginRoot, "mcp/helpers.mjs")).href
+        )
+      ).default;
+      const draft: ScanDraftInput = helper.parseCanonicalScanDraft({
+        scanId: options.scanId ?? manifest.scan.id,
+        manifest,
+        findings,
         coverage,
       });
+      return auditEvidence(draft);
     };
     let audit;
     try {
