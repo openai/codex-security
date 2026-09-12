@@ -214,6 +214,7 @@ const distFiles = new Set(
     "publication-events",
     "publication-store",
     "publish",
+    "reasoning-summary",
     "result",
     "runtime",
     "scan-activity",
