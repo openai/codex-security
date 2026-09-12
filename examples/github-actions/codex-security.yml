@@ -1,0 +1,143 @@
+name: Codex Security (Amazon Bedrock)
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+  # Uncomment after testing to scan the default branch weekly.
+  # schedule:
+  #   - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    # This job receives AWS credentials. Do not use pull_request_target or
+    # enable it for untrusted contributors; see the README's trust boundary.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.actor != 'dependabot[bot]' &&
+       github.event.pull_request.draft == false)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+      actions: read
+    env:
+      CODEX_SECURITY_VERSION: "0.1.27"
+      BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
+      # Report-only by default. Set to "high" to fail on high/critical findings.
+      FAIL_ON_SEVERITY: ""
+
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      # Install outside the checkout, before any repository content is present.
+      - name: Install Codex Security
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/codex-security-cli" \
+            --ignore-scripts --no-audit --no-fund \
+            --registry=https://registry.npmjs.org/ \
+            "@openai/codex-security@$CODEX_SECURITY_VERSION"
+          echo "$RUNNER_TEMP/codex-security-cli/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Check out the commit to scan
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          # On pull_request, the default checkout is GitHub's PR merge commit.
+
+      - name: Assume the Bedrock role with OIDC
+        id: aws
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: codex-security-${{ github.run_id }}
+          role-duration-seconds: 3600
+          output-env-credentials: false
+          output-credentials: true
+
+      - name: Scan
+        id: scan
+        shell: bash
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          args=(
+            scan "$GITHUB_WORKSPACE"
+            --provider amazon-bedrock
+            --model "$BEDROCK_MODEL_ID"
+            --mode standard
+            --effort high
+            --codex 'model_reasoning_summary="none"'
+            --output-dir "$RUNNER_TEMP/codex-security-scan"
+            --json
+          )
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            args+=(--diff "$BASE_SHA")
+          fi
+          if [[ -n "$FAIL_ON_SEVERITY" ]]; then
+            args+=(--fail-on-severity "$FAIL_ON_SEVERITY")
+          fi
+          scan_status=0
+          codex-security "${args[@]}" > "$RUNNER_TEMP/codex-security-result.json" || scan_status=$?
+          echo "exit-code=$scan_status" >> "$GITHUB_OUTPUT"
+          exit "$scan_status"
+
+      # A policy violation (1) is still a completed scan. An incomplete/error
+      # result (2) must not replace code-scanning alerts with a partial report.
+      - name: Export completed findings as SARIF
+        id: sarif
+        if: ${{ !cancelled() && (steps.scan.outputs.exit-code == '0' || steps.scan.outputs.exit-code == '1') }}
+        shell: bash
+        run: |
+          codex-security export "$RUNNER_TEMP/codex-security-scan" \
+            --export-format sarif \
+            --source-root "$GITHUB_WORKSPACE" \
+            --output "$RUNNER_TEMP/codex-security.sarif"
+
+      - name: Upload SARIF to GitHub Code Scanning
+        if: ${{ !cancelled() && steps.sarif.outcome == 'success' }}
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
+        with:
+          sarif_file: ${{ runner.temp }}/codex-security.sarif
+          category: codex-security/${{ github.event_name == 'pull_request' && 'diff' || 'full' }}
+
+      - name: Save reports
+        if: ${{ !cancelled() && steps.scan.outputs.exit-code != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-security-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/codex-security-result.json
+            ${{ runner.temp }}/codex-security.sarif
+            ${{ runner.temp }}/codex-security-scan/report.md
+            ${{ runner.temp }}/codex-security-scan/coverage.json
+            ${{ runner.temp }}/codex-security-scan/findings.json
