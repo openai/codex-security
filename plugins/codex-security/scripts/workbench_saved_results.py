@@ -1464,7 +1464,7 @@ def retain_unmerged_budget_coverage(
             }
             item["id"] = f"{prefix}-{field}-{index + 1}"
             if field == "surfaces":
-                item["id"] = surfaces.get(original.get("id"), item["id"])
+                item["id"] = f"{prefix}-surface-{index + 1}"
                 item["receiptRefs"] = [
                     f"{artifact_prefix}/{ref}" for ref in item.get("receiptRefs", [])
                 ]
