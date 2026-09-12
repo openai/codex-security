@@ -129,6 +129,37 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(unboundLegacy.model, "stored-model");
   assert.equal(unboundLegacy.modelProvider, undefined, "unrecorded legacy ownership cannot recover caller selections");
   assert.equal(unboundLegacy.reasoningSummary, undefined);
+  await writeFile(join(sessionDirectory, "legacy-auto.jsonl"), [
+    { type: "session_meta", payload: { id: "fixture-legacy-auto", cli_version: "0.132.0", model_provider: "openai" } },
+    { type: "turn_context", payload: { turn_id: "legacy-turn", model: "legacy-model", effort: "high", summary: "auto" } }
+  ].map(JSON.stringify).join("\n") + "\n");
+  const legacyAuto = await captureSettings({ usageOwner: { threadId: "fixture-legacy-auto", turnId: "legacy-turn" } },
+    { filesystemDenies: [] }, parentEnvironment);
+  assert.equal(legacyAuto.reasoningSummary, "auto", "older native turn-context selections remain readable");
+  for (const version of ["0.133.0", "0.154.0"]) {
+    const threadId = `fixture-fresh-${version}`;
+    await writeFile(join(sessionDirectory, `${threadId}.jsonl`), [
+      { type: "session_meta", timestamp: "2026-01-01T00:00:00Z", payload: { id: threadId, cli_version: version, model_provider: "openai" } },
+      { type: "turn_context", timestamp: "2026-01-01T00:00:01Z", payload: { turn_id: "fresh-turn", model: "fresh-model", effort: "high", summary: "auto" } },
+      { type: "event_msg", timestamp: "2026-01-01T00:02:00Z", payload: { type: "thread_settings_applied", thread_id: threadId,
+        thread_settings: { model: "fresh-model", model_provider_id: "openai", reasoning_summary: "detailed" } } }
+    ].map(JSON.stringify).join("\n") + "\n");
+    const owner = { threadId, turnId: "fresh-turn", startedAt: "2026-01-01T00:01:00Z" };
+    const fresh = await captureSettings({ usageOwner: owner }, { filesystemDenies: [] }, parentEnvironment);
+    assert.equal(fresh.model, "fresh-model");
+    assert.equal(fresh.reasoningSummary, undefined, "fresh native compatibility auto is not an original selection");
+    assert.equal(restoreSettings(fresh, { filesystemDenies: [] }).codexOptions.config.model_reasoning_summary, undefined);
+    const freshDir = join(root, threadId);
+    await loadSettings(freshDir, async () => fresh);
+    const freshPath = join(freshDir, "artifacts", "deep_discovery", "execution-settings.json");
+    const freshBytes = await readFile(freshPath, "utf8");
+    assert.deepEqual(await loadSettings(freshDir, async () => assert.fail(), { usageOwner: owner, createdAt: owner.startedAt }), fresh);
+    assert.equal(await readFile(freshPath, "utf8"), freshBytes, "unknown summary is not replaced by a compatibility field or a later selection");
+    await writeFile(join(root, "config.toml"), 'model_reasoning_summary = "auto"\n');
+    const explicit = await captureSettings({ usageOwner: owner }, { filesystemDenies: [] }, parentEnvironment);
+    assert.equal(explicit.reasoningSummary, "auto", "an explicit original config selection still takes precedence");
+    await writeFile(join(root, "config.toml"), "");
+  }
   await writeFile(join(sessionDirectory, "applied.jsonl"), [
     { type: "session_meta", timestamp: "2026-01-01T00:00:00Z", payload: { id: "fixture-applied", model_provider: "previous-provider" } },
     { type: "event_msg", timestamp: "2026-01-01T00:00:01Z", payload: { type: "thread_settings_applied", thread_id: "fixture-applied",

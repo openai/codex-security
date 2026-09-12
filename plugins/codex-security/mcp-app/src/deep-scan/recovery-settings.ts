@@ -70,8 +70,8 @@ async function originalParentSettings(
   codexHome: string,
   parent: { threadId: string; turnId?: string | null; startedAt?: string }
 ): Promise<Partial<DeepScanExecutionSettings>> {
-  // Native config/read represents omitted selections as null. The existing
-  // parent record contains the provider and summary actually used by that turn.
+  // Native config/read represents omitted selections as null. Recover recorded
+  // selections from the original parent; some native records omit the summary.
   // History can be disabled or unavailable; configured selections still work.
   try {
     const log = await readScanLogs({
@@ -80,6 +80,7 @@ async function originalParentSettings(
     });
     const settings: Partial<DeepScanExecutionSettings> = {};
     let applied: Partial<DeepScanExecutionSettings> | undefined;
+    let summaryIsCompatibilityOnly = false;
     const cutoff = parent.startedAt === undefined ? Infinity : Date.parse(parent.startedAt);
     for (const entry of log.events) {
       const event = entry.event as Record<string, unknown>;
@@ -105,14 +106,20 @@ async function originalParentSettings(
           ...(value.service_tier === undefined ? { nativeServiceTierAbsent: true as const } : {})
         };
       }
-      if (event.type === "session_meta" && typeof context.model_provider === "string") {
-        settings.modelProvider = context.model_provider;
+      if (event.type === "session_meta") {
+        if (typeof context.model_provider === "string") settings.modelProvider = context.model_provider;
+        // Codex 0.133 replaced turn_context.summary with a compatibility default.
+        // Fresh threads need not have a thread_settings_applied record to replace it.
+        const version = typeof context.cli_version === "string"
+          ? /^(\d+)\.(\d+)\./u.exec(context.cli_version) : null;
+        summaryIsCompatibilityOnly = version !== null
+          && (Number(version[1]) > 0 || Number(version[2]) >= 133);
       }
       if (event.type === "turn_context") {
         if (parent.turnId && context.turn_id !== parent.turnId) continue;
         if (typeof context.model === "string") settings.model = context.model;
         if (typeof context.effort === "string") settings.reasoningEffort = context.effort;
-        if (typeof context.summary === "string") settings.reasoningSummary = context.summary;
+        if (!summaryIsCompatibilityOnly && typeof context.summary === "string") settings.reasoningSummary = context.summary;
       }
     }
     // Applied snapshots contain native selected values. Newer turn-context
