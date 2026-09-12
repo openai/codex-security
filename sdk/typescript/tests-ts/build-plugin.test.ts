@@ -139,7 +139,14 @@ describe("bundled plugin build", () => {
     ).toBe("native fixture");
     const helper = join(root, "helpers.cjs");
     await copyFile(join(proof, "helpers.cjs"), helper);
-    await rm(join(sdk, "node_modules"), { force: true });
+    await execFileAsync("node", [
+      "--eval",
+      "require('node:fs').unlinkSync(process.argv[1])",
+      join(sdk, "node_modules"),
+    ]);
+    await expect(stat(join(sdk, "node_modules"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
     const result = await execFileAsync(
       "node",
       [
