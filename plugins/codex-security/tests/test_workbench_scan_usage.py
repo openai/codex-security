@@ -726,7 +726,7 @@ def test_rollout_usage_reconciles_stale_cumulative_events_and_models(
         completed_at=None,
     )
     assert counts == _counts(200, 0, 20)
-    assert warnings == set()
+    assert warnings == {"token_counter_regressed"}
     models = {}
     counts, warnings = usage_reader._read_rollout_usage(
         usage_reader.RolloutSession("worker", None, rollout),
@@ -735,7 +735,7 @@ def test_rollout_usage_reconciles_stale_cumulative_events_and_models(
         model_usage=models,
     )
     assert counts == _counts(200, 0, 20)
-    assert warnings == set()
+    assert warnings == {"token_counter_regressed"}
     assert models == {"gpt-5.6-sol": _counts(100, 0, 10), "gpt-6-astra": _counts(100, 0, 10)}
 
 
@@ -774,3 +774,138 @@ def test_shared_parent_usage_requires_original_turn_and_scan_interval(
     assert counts == _counts(10, 0, 2)
     assert warnings == set()
     assert models == {"gpt-6-astra": _counts(10, 0, 2)}
+
+
+@pytest.mark.parametrize("counters", [False, True])
+def test_response_receipts_count_compaction_once_across_resets(
+    tmp_path: Path, workbench_api, counters: bool
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+
+    def usage(input_tokens, cached, output):
+        return dict(
+            input_tokens=input_tokens,
+            cached_input_tokens=cached,
+            cache_write_input_tokens=0,
+            output_tokens=output,
+            reasoning_output_tokens=0,
+            total_tokens=input_tokens + output,
+        )
+
+    def receipt(response, count, cumulative, model="gpt-5.6-sol", turn="scan-turn", second=1):
+        return _event(
+            start + timedelta(seconds=second),
+            "token_usage_record",
+            dict(
+                response_id=response,
+                thread_id="parent",
+                turn_id=turn,
+                model=model,
+                usage=count,
+                thread_token_usage=cumulative,
+            ),
+        )
+
+    first = receipt("first", usage(100, 80, 10), usage(100, 80, 10))
+    compact = receipt("compaction", usage(50, 40, 5), usage(150, 120, 15), model="gpt-6-astra")
+    second = receipt("second", usage(120, 90, 12), usage(120, 90, 12))
+    events = [
+        first,
+        *([_token_event(start + timedelta(seconds=1), 100, 10)] if counters else []),
+        compact,
+        _event(start + timedelta(seconds=1), "compacted", {"message": "Synthetic summary"}),
+        compact,
+        second,
+        *([_token_event(start + timedelta(seconds=1), 220, 22)] if counters else []),
+        first,
+        receipt("other", usage(900, 0, 0), usage(900, 0, 0), turn="other-turn"),
+        receipt("post", usage(800, 0, 0), usage(1700, 0, 0), second=11),
+    ]
+    models = {}
+    total, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("parent", None, _rollout(tmp_path, "parent", events)),
+        started_at=start,
+        completed_at=start + timedelta(seconds=10),
+        owner_turn_id="scan-turn",
+        model_usage=models,
+    )
+    assert total == _counts(270, 210, 27)
+    assert warnings == set()
+    assert models == {"gpt-5.6-sol": _counts(220, 170, 22), "gpt-6-astra": _counts(50, 40, 5)}
+
+
+def test_delayed_response_receipt_resolves_missing_cumulative_usage(
+    tmp_path: Path, workbench_api
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+
+    def receipt(response, tokens, cumulative):
+        def usage(value):
+            return dict(input_tokens=value, output_tokens=0, total_tokens=value)
+
+        return _event(
+            start,
+            "token_usage_record",
+            dict(
+                response_id=response,
+                thread_id="parent",
+                model="gpt-5.6-sol",
+                usage=usage(tokens),
+                thread_token_usage=usage(cumulative),
+            ),
+        )
+
+    rollout = _rollout(tmp_path, "parent", [receipt("first", 100, 100), receipt("third", 50, 180)])
+    session = reader.RolloutSession("parent", None, rollout)
+    total, warnings = reader._read_rollout_usage(session, started_at=start, completed_at=None)
+    assert total == _counts(150, 0, 0)
+    assert warnings == {"token_receipts_incomplete"}
+    with rollout.open("a") as source:
+        source.write(json.dumps(receipt("second", 30, 130)) + "\n")
+    total, warnings = reader._read_rollout_usage(session, started_at=start, completed_at=None)
+    assert total == _counts(180, 0, 0)
+    assert warnings == set()
+
+
+def test_exact_receipts_replace_overlapping_legacy_counter(tmp_path: Path, workbench_api) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+
+    def receipt(response, tokens, cumulative):
+        def usage(value):
+            return dict(input_tokens=value, output_tokens=0, total_tokens=value)
+
+        return _event(
+            start,
+            "token_usage_record",
+            dict(
+                response_id=response,
+                thread_id="parent",
+                model="gpt-5.6-sol",
+                usage=usage(tokens),
+                thread_token_usage=usage(cumulative),
+            ),
+        )
+
+    rollout = _rollout(
+        tmp_path,
+        "parent",
+        [
+            _token_event(start, 100, 0),
+            receipt("new", 10, 110),
+            receipt("old", 100, 100),
+            _token_event(start, 10, 0),
+        ],
+    )
+    models = {}
+    total, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("parent", None, rollout),
+        started_at=start,
+        completed_at=None,
+        model_usage=models,
+    )
+    assert total == _counts(110, 0, 0)
+    assert warnings == set()
+    assert models == {"gpt-5.6-sol": _counts(110, 0, 0)}

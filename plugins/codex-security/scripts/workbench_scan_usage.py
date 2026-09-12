@@ -91,6 +91,8 @@ def collect_scan_usage(
     """Count only complete, attributable rollout events inside this scan's window."""
 
     attribution = scan_execution_attribution(connection, scan)
+    if attribution and attribution.get("legacy"):
+        attribution = None
     roots = (
         list(
             dict.fromkeys(
@@ -309,14 +311,14 @@ def scan_execution_attribution(
     if run is None:
         return None
     owner_json = run["usage_owner_json"] if "usage_owner_json" in run.keys() else None
+    legacy = False
     if owner_json is None:
-        if (
+        legacy = (
             connection.execute(
                 "SELECT 1 FROM deep_scan_attempts WHERE scan_id = ? LIMIT 1", (scan["id"],)
             ).fetchone()
             is None
-        ):
-            return None
+        )
         roots = _scan_root_thread_ids(connection, scan, None)
         owner = {
             "threadId": roots[0] if roots else None,
@@ -331,6 +333,7 @@ def scan_execution_attribution(
         executions.append(owner["threadId"])
     return {
         "formatVersion": 1,
+        **({"legacy": True} if legacy else {}),
         "executionThreadIds": executions,
         "owner": owner,
         "startedAt": scan["started_at"],
@@ -524,12 +527,18 @@ def _read_rollout_usage(
     model_usage: dict[str | None, dict[str, int]] | None = None,
 ) -> tuple[dict[str, int], set[str]]:
     total = _empty_token_usage()
+    counter_total = _empty_token_usage()
     warnings: set[str] = set()
     previous = _empty_token_usage()
     boundary_reached = False
     usage_observed = False
     current_turn_id: str | None = None
     current_model: str | None = None
+    response_ids: set[str] = set()
+    response_usage_observed = False
+    response_tokens = 0
+    expected_response_tokens = 0
+    local_models: dict[str | None, dict[str, int]] = {}
 
     with session.path.open("rb") as source:
         for line_number, raw_line in enumerate(source, start=1):
@@ -596,6 +605,49 @@ def _read_rollout_usage(
                     if inherited_usage is not None:
                         previous = inherited_usage
                 continue
+            if event.get("type") == "token_usage_record":
+                response_id = payload.get("response_id")
+                usage = _token_snapshot({"info": {"total_token_usage": payload.get("usage")}})
+                if (
+                    not isinstance(response_id, str)
+                    or usage is None
+                    or payload.get("thread_id", session.thread_id) != session.thread_id
+                    or response_id in response_ids
+                ):
+                    continue
+                response_ids.add(response_id)
+                cumulative = _token_snapshot(
+                    {"info": {"total_token_usage": payload.get("thread_token_usage")}}
+                )
+                if cumulative is not None:
+                    expected_response_tokens = max(
+                        expected_response_tokens, cumulative["totalTokens"]
+                    )
+                if not response_usage_observed:
+                    response_usage_observed = True
+                    total = _empty_token_usage()
+                    local_models = {}
+                response_tokens += usage["totalTokens"]
+                timestamp = _timestamp(event.get("timestamp"))
+                if timestamp is None:
+                    warnings.add("token_record_invalid")
+                    continue
+                if timestamp < started_at or (
+                    completed_at is not None and timestamp > completed_at
+                ):
+                    continue
+                if (
+                    owner_turn_id is not None
+                    and payload.get("turn_id", current_turn_id) != owner_turn_id
+                ):
+                    continue
+                usage_observed = True
+                model = payload.get("model", current_model)
+                if not isinstance(model, str):
+                    model = None
+                _add_token_usage(total, usage)
+                _add_token_usage(local_models.setdefault(model, _empty_token_usage()), usage)
+                continue
             if event.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue
             timestamp = _timestamp(event.get("timestamp"))
@@ -604,6 +656,7 @@ def _read_rollout_usage(
                 warnings.add("token_record_invalid")
                 continue
             if snapshot["totalTokens"] < previous["totalTokens"]:
+                warnings.add("token_counter_regressed")
                 continue
             delta = {key: max(0, value - previous[key]) for key, value in snapshot.items()}
             previous = snapshot
@@ -614,14 +667,28 @@ def _read_rollout_usage(
             if owner_turn_id is not None and current_turn_id != owner_turn_id:
                 continue
             usage_observed = True
-            if model_usage is not None:
-                model_usage.setdefault(current_model, _empty_token_usage())
+            if not response_usage_observed:
+                local_models.setdefault(current_model, _empty_token_usage())
             if delta["totalTokens"] <= 0:
                 continue
-            _add_token_usage(total, delta)
-            if model_usage is not None:
-                _add_token_usage(model_usage.setdefault(current_model, _empty_token_usage()), delta)
+            _add_token_usage(counter_total, delta)
+            if not response_usage_observed:
+                _add_token_usage(total, delta)
+                _add_token_usage(
+                    local_models.setdefault(current_model, _empty_token_usage()), delta
+                )
 
+    if counter_total["totalTokens"] > total["totalTokens"]:
+        remainder = {key: max(0, value - total[key]) for key, value in counter_total.items()}
+        total = dict(counter_total)
+        _add_token_usage(local_models.setdefault(None, _empty_token_usage()), remainder)
+    if response_usage_observed:
+        warnings.discard("token_counter_regressed")
+    if expected_response_tokens > response_tokens:
+        warnings.add("token_receipts_incomplete")
+    if model_usage is not None:
+        for model, usage in local_models.items():
+            _add_token_usage(model_usage.setdefault(model, _empty_token_usage()), usage)
     if not boundary_reached:
         warnings.add("thread_ownership_unavailable")
     elif not usage_observed:
