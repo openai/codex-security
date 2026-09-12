@@ -419,6 +419,19 @@ def canonical_discovery_artifacts(scan: sqlite3.Row) -> dict[str, str]:
 
 
 def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
+    if connection.in_transaction:
+        return _deep_scan_state(connection, scan_id)
+    connection.execute("BEGIN")
+    try:
+        state = _deep_scan_state(connection, scan_id)
+        connection.commit()
+        return state
+    except BaseException:
+        connection.rollback()
+        raise
+
+
+def _deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
     run = require_deep_scan_run(connection, scan_id)
     scan = require_scan(connection, run["scan_id"])
     worker_rows = connection.execute(
