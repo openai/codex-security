@@ -1160,6 +1160,9 @@ def complete_budget_exhausted_scan(
         scan = require_scan(connection, scan_id)
         if scan["status"] != "running" or scan["mode"] != "deep" or scan["recipe_json"] is None:
             raise SystemExit("Only a running CLI Deep Scan can complete after its cost limit.")
+        handoff.require_current_continuation(
+            scan, None, error_message="Scan completion is owned by another continuation."
+        )
         recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
         if not isinstance(recipe, dict) or recipe.get("mode") != "deep":
             raise SystemExit("Budget-exhausted scan completion requires a Deep Scan launch recipe.")
@@ -1174,12 +1177,7 @@ def complete_budget_exhausted_scan(
             or measured.get("estimatedUsd", 0) <= limit
         ):
             raise SystemExit("Deep Scan has not exceeded its configured cost limit.")
-        run = connection.execute(
-            "SELECT * FROM deep_scan_runs WHERE scan_id = ?",
-            (scan_id,),
-        ).fetchone()
-        if run is not None:
-            deep_scan.require_supported_deep_scan(run)
+        run = deep_scan.find_supported_deep_scan_run(connection, scan_id)
         before_selection = (
             run is not None
             and run["status"] == "running"
@@ -1353,6 +1351,7 @@ def complete_scan_locked(
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
+        deep_scan.find_supported_deep_scan_run(connection, scan_id)
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         require_recorded_manifest_digest(scan, scan_dir)
         verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))

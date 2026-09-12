@@ -265,6 +265,107 @@ api["main"]()
         assert after == before
 
 
+@pytest.mark.parametrize("legacy_digest", [False, True])
+@pytest.mark.parametrize(
+    "protocol", ["supported", "legacy-no-run", "future-workflow", "future-selection"]
+)
+def test_completed_replay_checks_protocol_before_cost_or_digest_writes(
+    workbench_api, monkeypatch, tmp_path, protocol, legacy_digest
+):
+    monkeypatch.setattr(workbench_test_support, "SCRIPT", workbench_api["__file__"])
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "home"))
+    state_dir, _, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
+    complete_budget_scan(state_dir, scan_id)
+    database = state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT status FROM scans").fetchone() == ("complete",)
+        if legacy_digest:
+            connection.execute("UPDATE scans SET seal_manifest_digest = NULL")
+        if protocol == "future-workflow":
+            connection.execute("UPDATE deep_scan_runs SET workflow_version = 'future/v99'")
+        elif protocol == "future-selection":
+            connection.execute(
+                "UPDATE deep_scan_runs SET workflow_version = 'deep-security-scan/v2', "
+                "finalization_input_json = ?",
+                (json.dumps({"version": 99}),),
+            )
+        elif protocol == "legacy-no-run":
+            connection.execute("DELETE FROM deep_scan_runs")
+
+    def snapshot():
+        with sqlite3.connect(database) as connection:
+            return list(connection.iterdump()), {
+                str(path.relative_to(scan_dir)): path.read_bytes()
+                for path in scan_dir.rglob("*")
+                if path.is_file()
+            }
+
+    before = snapshot()
+    cost = {**BUDGET_COST, "inputTokens": 1500, "estimatedUsd": 0.0075}
+    result = run_workbench(
+        state_dir,
+        "complete-scan",
+        "--scan-id",
+        scan_id,
+        "--cost-json",
+        json.dumps(cost),
+        check=not protocol.startswith("future-"),
+    )
+    after = snapshot()
+    if protocol.startswith("future-"):
+        assert after == before
+        assert result["returncode"] != 0
+        assert "unsupported" in result["stderr"].lower()
+    else:
+        assert result["scan"]["progress"]["status"] == "complete"
+        assert result["scan"]["cost"] == cost
+        assert after[1] == before[1]
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("SELECT seal_manifest_digest FROM scans").fetchone()[0]
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize("continuation", ["current", "pending", "claimed"])
+def test_budget_completion_checks_continuation_before_draft_writes(
+    workbench_api, monkeypatch, tmp_path, terminal, continuation
+):
+    monkeypatch.setattr(workbench_test_support, "SCRIPT", workbench_api["__file__"])
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "home"))
+    state_dir, _, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path, terminal=terminal)
+    database = state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE deep_scan_runs SET workflow_version = 'deep-security-scan/v2'")
+        if continuation != "current":
+            connection.execute("UPDATE scans SET handoff_status = 'pending'")
+    if continuation == "claimed":
+        run_workbench(
+            state_dir,
+            "claim-handoff-delivery",
+            "--scan-id",
+            scan_id,
+            "--claim-token",
+            str(uuid.uuid4()),
+        )
+
+    def snapshot():
+        with sqlite3.connect(database) as connection:
+            return list(connection.iterdump()), {
+                str(path.relative_to(scan_dir)): path.read_bytes()
+                for path in scan_dir.rglob("*")
+                if path.is_file()
+            }
+
+    before = snapshot()
+    result = complete_budget_scan(state_dir, scan_id, check=continuation == "current")
+    after = snapshot()
+    if continuation == "current":
+        assert result["scan"]["progress"]["status"] == "complete"
+    else:
+        assert after == before
+        assert result["returncode"] != 0
+        assert "owned by another continuation" in result["stderr"]
+
+
 def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -> dict[str, object]:
     return run_workbench(
         state_dir,

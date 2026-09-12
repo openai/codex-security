@@ -311,17 +311,23 @@ def deep_scan_deadline_reached(run: sqlite3.Row) -> bool:
     return elapsed.total_seconds() / 3600 >= run["max_time_hours"]
 
 
+def find_supported_deep_scan_run(
+    connection: sqlite3.Connection, scan_id: str
+) -> sqlite3.Row | None:
+    run = connection.execute(
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+    ).fetchone()
+    if run is not None:
+        require_supported_deep_scan(run)
+    return run
+
+
 def require_deep_scan_ready_for_parent_completion(
     connection: sqlite3.Connection, scan: sqlite3.Row
 ) -> None:
     if scan["mode"] != "deep":
         return
-    run = connection.execute(
-        "SELECT * FROM deep_scan_runs WHERE scan_id = ?",
-        (scan["id"],),
-    ).fetchone()
-    if run is not None:
-        require_supported_deep_scan(run)
+    run = find_supported_deep_scan_run(connection, scan["id"])
     if run is None or run["status"] != "succeeded" or run["manifest_path"] is None:
         raise SystemExit(
             "Deep Scan discovery orchestration must finish and persist its manifest before "
