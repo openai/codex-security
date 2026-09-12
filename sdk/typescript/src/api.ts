@@ -1218,6 +1218,24 @@ export class CodexSecurity {
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+    const recoverCompletedScan = async (
+      commandOptions: WorkbenchCommandOptions,
+      scanId: string,
+      error: unknown,
+      completionArgs: readonly string[],
+    ): Promise<JsonObject> => {
+      const saved = await workbench(commandOptions, [
+        "get-scan",
+        "--scan-id",
+        scanId,
+      ]).catch(() => null);
+      const savedScan = saved?.["scan"];
+      const progress = isRecord(savedScan) ? savedScan["progress"] : null;
+      if (!isRecord(progress) || progress["status"] !== "complete") throw error;
+      // A lost response can follow a durable seal. Only the existing normal
+      // completion command can validate and return that committed receipt.
+      return workbench(commandOptions, completionArgs);
+    };
     try {
       const checkOpen = (): void => {
         this.#requireOpen();
@@ -2167,20 +2185,9 @@ export class CodexSecurity {
       const completion = await workbench(
         workbenchOptions,
         completionArgs,
-      ).catch(async (error) => {
-        const saved = await workbench(workbenchOptions, [
-          "get-scan",
-          "--scan-id",
-          scanId,
-        ]).catch(() => null);
-        const savedScan = saved?.["scan"];
-        const progress = isRecord(savedScan) ? savedScan["progress"] : null;
-        if (!isRecord(progress) || progress["status"] !== "complete")
-          throw error;
-        // A lost response can follow a durable seal. The existing completion
-        // command validates that seal and returns its committed receipt.
-        return workbench(workbenchOptions, completionArgs);
-      });
+      ).catch((error) =>
+        recoverCompletedScan(workbenchOptions, scanId, error, completionArgs),
+      );
       activeScan = null;
       const completedScan = completion["scan"];
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
@@ -2356,6 +2363,8 @@ export class CodexSecurity {
         options.signal?.aborted !== true
       ) {
         try {
+          const budgetScanId = activeScan.id;
+          const budgetCost = snapshot?.cost ?? failure.cost;
           const completionSignal = AbortSignal.any([
             this.#abortController.signal,
             ...(options.signal === undefined ? [] : [options.signal]),
@@ -2390,12 +2399,20 @@ export class CodexSecurity {
           const completion = await workbench(completionOptions, [
             "complete-budget-exhausted-scan",
             "--scan-id",
-            activeScan.id,
+            budgetScanId,
             "--cost-json",
-            JSON.stringify(snapshot?.cost ?? failure.cost),
+            JSON.stringify(budgetCost),
             "--message",
             failure.message.slice(0, 2400),
-          ]);
+          ]).catch((error) =>
+            recoverCompletedScan(completionOptions, budgetScanId, error, [
+              "complete-scan",
+              "--scan-id",
+              budgetScanId,
+              "--cost-json",
+              JSON.stringify(budgetCost),
+            ]),
+          );
           activeScan = null;
           runPostScan = null;
           const result = await collectResult(

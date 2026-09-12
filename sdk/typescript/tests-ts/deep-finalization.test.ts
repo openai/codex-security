@@ -22,7 +22,7 @@ afterEach(cleanup);
 const threadId = "1af317a1-c9ed-4c73-b428-cb0d160cf8e8";
 const followUp = "Explain the selected finding.";
 
-for (const outcome of [
+const outcomes = [
   "failed",
   "completed",
   "restart",
@@ -38,7 +38,30 @@ for (const outcome of [
   "lost-completion-response-followup-canceled",
   "completion-before-commit-fails",
   "followup-canceled",
-] as const) {
+] as const;
+type BudgetCompletionFault = "lost" | "before-commit" | "lost-and-canceled";
+const cases: {
+  outcome: (typeof outcomes)[number];
+  budgetCompletionFault?: BudgetCompletionFault;
+}[] = [
+  ...outcomes.map((outcome) => ({ outcome })),
+  ...(
+    [
+      "budget-during-publication",
+      "budget-after-deep-finish",
+      "budget-during-resumed-publication",
+    ] as const
+  ).map((outcome) => ({ outcome, budgetCompletionFault: "lost" as const })),
+  {
+    outcome: "budget-after-deep-finish",
+    budgetCompletionFault: "before-commit",
+  },
+  {
+    outcome: "budget-after-deep-finish",
+    budgetCompletionFault: "lost-and-canceled",
+  },
+];
+for (const { outcome, budgetCompletionFault } of cases) {
   const resumedStop = outcome.includes("-resumed-");
   const restart = outcome === "restart" || resumedStop;
   const closed = outcome.startsWith("closed-");
@@ -48,7 +71,7 @@ for (const outcome of [
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
-      : `SDK handles selected aggregate: ${outcome}`;
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}`;
   const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -71,6 +94,9 @@ for (const outcome of [
     let workbenchOptions: WorkbenchCommandOptions;
     let publicationFails = restart;
     let completionReceiptLost = loseCompletionResponse;
+    let budgetReceiptLost =
+      budgetCompletionFault === "lost" ||
+      budgetCompletionFault === "lost-and-canceled";
     let budgetTriggered = false;
     let acceptedReport = "";
     const modelInputs: string[] = [];
@@ -119,7 +145,28 @@ for (const outcome of [
               outcome === "completion-before-commit-fails"
             )
               throw new Error("Synthetic completion failure before commit");
+            if (
+              args[0] === "complete-budget-exhausted-scan" &&
+              budgetCompletionFault === "before-commit"
+            )
+              throw new Error(
+                "Synthetic budget completion failure before commit",
+              );
             const result = await runWorkbench(options, args, input);
+            if (
+              args[0] === "complete-budget-exhausted-scan" &&
+              budgetReceiptLost
+            ) {
+              budgetReceiptLost = false;
+              if (budgetCompletionFault === "lost-and-canceled")
+                cancellation.abort(
+                  "Synthetic cancellation after budget completion",
+                );
+              throw Object.assign(
+                new Error("Synthetic lost budget completion response"),
+                { code: "ETIMEDOUT" },
+              );
+            }
             if (args[0] === "complete-scan" && completionReceiptLost) {
               completionReceiptLost = false;
               throw new Error("Synthetic lost completion response");
@@ -384,11 +431,40 @@ for (const outcome of [
       if (budgeted || closed) {
         const running = client.run(repository, {
           mode: "deep",
+          signal: cancellation.signal,
           ...(budgeted ? { maxCostUsd: 0.004 } : {}),
           ...(resumedStop ? { resumeScanId: scanId, outputDir: scanDir } : {}),
           postScanPrompt: followUp,
         });
         if (budgeted) {
+          if (
+            budgetCompletionFault === "before-commit" ||
+            budgetCompletionFault === "lost-and-canceled"
+          ) {
+            await expect(running).rejects.toThrow();
+            expect(
+              commands.filter(
+                (command) => command === "complete-budget-exhausted-scan",
+              ),
+            ).toHaveLength(1);
+            expect(commands).not.toContain("complete-scan");
+            expect(modelInputs).toHaveLength(1);
+            const saved = await runWorkbench(
+              { ...workbenchOptions!, signal: undefined },
+              ["get-scan", "--scan-id", scanId],
+            );
+            expect(saved["scan"]).toMatchObject({
+              progress: {
+                status:
+                  budgetCompletionFault === "before-commit"
+                    ? "failed"
+                    : "complete",
+              },
+              findingCount: 1,
+              reportAvailable: true,
+            });
+            return;
+          }
           const result = await running;
           expect(result.coverage.completeness).toBe("partial");
           expect(JSON.stringify(result.coverage)).toContain("cost limit");
@@ -397,6 +473,29 @@ for (const outcome of [
           expect(modelInputs).toHaveLength(1);
           expect(commands).toContain("complete-budget-exhausted-scan");
           expect(commands).not.toContain("fail-scan");
+          expect(
+            commands.filter(
+              (command) => command === "complete-budget-exhausted-scan",
+            ),
+          ).toHaveLength(1);
+          if (budgetCompletionFault === "lost") {
+            expect(
+              commands.filter((command) => command === "complete-scan"),
+            ).toHaveLength(1);
+            expect(result.findings.findings[0]?.remediation).toBe(
+              "Validate the resolved destination before writing.",
+            );
+            const saved = await runWorkbench(workbenchOptions!, [
+              "get-scan",
+              "--scan-id",
+              scanId,
+            ]);
+            expect(saved["scan"]).toMatchObject({
+              progress: { status: "complete" },
+              findingCount: 1,
+              reportAvailable: true,
+            });
+          }
           const completed = await runWorkbench(workbenchOptions!, [
             "get-deep-scan",
             "--scan-id",
