@@ -10,6 +10,7 @@ import { build } from "esbuild";
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
 const bundle = await build({
   bundle: true,
+  nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
   define: {
     "import.meta.url": JSON.stringify(executorSource.href)
   },
