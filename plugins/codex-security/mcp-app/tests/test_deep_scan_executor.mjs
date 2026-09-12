@@ -791,7 +791,7 @@ async function testIsolatedReconstructedWorkers() {
           payload: { id: `fixture-${name}-owner`, model_provider: config.model_provider } },
         { type: "event_msg", timestamp: "2026-01-01T00:00:00Z",
           payload: { type: "thread_settings_applied", thread_id: `fixture-${name}-owner`, thread_settings: {
-            model: "native-parent-model", model_provider_id: config.model_provider, service_tier: "default",
+            model: "native-parent-model", model_provider_id: config.model_provider,
             reasoning_effort: "medium", reasoning_summary: config.model_reasoning_summary
           } } },
         { type: "turn_context", timestamp: "2026-01-01T00:00:01Z",
@@ -805,6 +805,7 @@ async function testIsolatedReconstructedWorkers() {
       }) + "\n");
       const saved = await loadOrCaptureDeepScanExecutionSettings(fixture.root, () =>
         captureDeepScanExecutionSettings(settings, settings.parentSandbox, { ...codexOptions.env, CODEX_CLI_PATH: executable }, { threadId: `fixture-${name}-observer`, startedAt: "2026-01-01T00:01:00Z" }));
+      assert.equal(saved.nativeServiceTierAbsent, name === "first" ? true : undefined);
       const snapshotPath = path.join(fixture.root, "artifacts", "deep_discovery", "execution-settings.json");
       const snapshot = await readFile(snapshotPath, "utf8");
       assert.equal(snapshot.includes("synthetic-"), false);

@@ -114,6 +114,8 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(unavailableParent.reasoningEffort, "ultra");
   assert.equal(unavailableParent.modelProvider, undefined, "missing history does not establish a provider");
   assert.equal(unavailableParent.reasoningSummary, undefined);
+  assert.equal(unavailableParent.serviceTier, undefined);
+  assert.equal(unavailableParent.nativeServiceTierAbsent, undefined, "missing history does not prove native absence");
   const originalOwner = { threadId: "fixture-parent", turnId: "original-turn", startedAt: "2026-01-01T00:00:00Z" };
   const [rebound, unboundLegacy] = await Promise.all([
     captureSettings({ usageOwner: originalOwner }, { filesystemDenies: [] }, parentEnvironment,
@@ -145,6 +147,7 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(applied.modelProvider, "openai", "complete native snapshot replaces the session metadata provider");
   assert.equal(applied.model, "applied-model", "complete native snapshot replaces compatibility turn settings");
   assert.equal(applied.reasoningEffort, "high");
+  assert.equal(applied.nativeServiceTierAbsent, undefined, "explicit native standard remains an explicit selection");
   const tierDir = join(root, "missing-tier");
   const { serviceTier: omittedTier, ...withoutTier } = applied;
   assert.equal(omittedTier, "default");
@@ -156,6 +159,15 @@ http_headers = { Authorization = "synthetic-secret" }
   await writeFile(join(sessionDirectory, "applied.jsonl"), (await readFile(join(sessionDirectory, "applied.jsonl"), "utf8"))
     + JSON.stringify({ type: "event_msg", timestamp: "2026-01-01T00:00:04Z", payload: {
       type: "thread_settings_applied", thread_id: "fixture-applied",
+      thread_settings: { model: "applied-model", model_provider_id: "openai", reasoning_effort: "high", service_tier: "priority" }
+    } }) + "\n");
+  const nativeTier = await captureSettings({ usageOwner: appliedOwner }, { filesystemDenies: [] }, parentEnvironment,
+    { threadId: "fixture-other", startedAt: "2026-01-01T00:01:00Z" });
+  assert.equal(nativeTier.serviceTier, "priority", "an effective tier selected by native remains unchanged");
+  assert.equal(nativeTier.nativeServiceTierAbsent, undefined);
+  await writeFile(join(sessionDirectory, "applied.jsonl"), (await readFile(join(sessionDirectory, "applied.jsonl"), "utf8"))
+    + JSON.stringify({ type: "event_msg", timestamp: "2026-01-01T00:00:05Z", payload: {
+      type: "thread_settings_applied", thread_id: "fixture-applied",
       thread_settings: { model: "applied-model", model_provider_id: "openai", reasoning_effort: "high" }
     } }) + "\n");
   const nativeDefaults = await captureSettings({ usageOwner: appliedOwner }, { filesystemDenies: [] }, parentEnvironment,
@@ -163,7 +175,8 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(nativeDefaults.model, "applied-model", "absent optional selections do not erase the required model");
   assert.equal(nativeDefaults.modelProvider, "openai", "absent optional selections do not erase the required provider");
   assert.equal(nativeDefaults.reasoningEffort, "high");
-  assert.equal(nativeDefaults.serviceTier, undefined, "native model-default selection is not explicit standard routing");
+  assert.equal(nativeDefaults.serviceTier, "default", "known native absence retains its omitted request tier");
+  assert.equal(nativeDefaults.nativeServiceTierAbsent, true, "known native absence is recorded separately from explicit standard");
   assert.equal(nativeDefaults.reasoningSummary, undefined, "a compatibility summary is not a recorded native default");
   const incompleteDir = join(root, "incomplete");
   const incomplete = { codexPath: process.execPath, codexHome: root, serviceTier: "flex" };
@@ -185,6 +198,7 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(unknown.model, "stored-model");
   assert.equal(unknown.modelProvider, undefined, "missing original ownership is not current config");
   assert.equal(unknown.reasoningSummary, undefined);
+  assert.equal(unknown.nativeServiceTierAbsent, undefined);
   const unsupported = JSON.stringify({ version: 99, settings });
   await writeFile(savedPath, unsupported);
   await assert.rejects(loadSettings(join(root, "one"), async () => assert.fail()), /unsupported/);

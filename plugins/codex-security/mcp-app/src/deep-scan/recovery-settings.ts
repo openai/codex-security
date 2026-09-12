@@ -20,6 +20,8 @@ export interface DeepScanExecutionSettings {
   reasoningEffort?: string;
   reasoningSummary?: string;
   serviceTier?: string;
+  /** The native snapshot recorded no request tier; serviceTier preserves its wire behavior. */
+  nativeServiceTierAbsent?: true;
   providerConfig?: JsonObject;
   parentSandbox?: DeepWorkerParentSandbox;
 }
@@ -57,6 +59,8 @@ export async function captureDeepScanExecutionSettings(
     modelProvider: (selected.model_provider as string | undefined) ?? native.modelProvider,
     reasoningSummary: (selected.model_reasoning_summary as string | undefined) ?? native.reasoningSummary,
     serviceTier: (selected.service_tier as string | undefined) ?? native.serviceTier,
+    ...(selected.service_tier === undefined && native.nativeServiceTierAbsent
+      ? { nativeServiceTierAbsent: true as const } : {}),
     providerConfig: selected.model_providers as JsonObject | undefined,
     parentSandbox
   });
@@ -94,7 +98,11 @@ async function originalParentSettings(
           modelProvider: typeof value.model_provider_id === "string" ? value.model_provider_id : undefined,
           reasoningEffort: typeof value.reasoning_effort === "string" ? value.reasoning_effort : undefined,
           reasoningSummary: typeof value.reasoning_summary === "string" ? value.reasoning_summary : undefined,
-          serviceTier: typeof value.service_tier === "string" ? value.service_tier : undefined
+          // A persisted native absent tier and explicit standard both omit the
+          // request tier. This does not infer a tier from missing history.
+          serviceTier: typeof value.service_tier === "string" ? value.service_tier
+            : value.service_tier === undefined ? "default" : undefined,
+          ...(value.service_tier === undefined ? { nativeServiceTierAbsent: true as const } : {})
         };
       }
       if (event.type === "session_meta" && typeof context.model_provider === "string") {
@@ -150,7 +158,9 @@ export async function loadOrCaptureDeepScanExecutionSettings(
     reasoningEffort: settings.reasoningEffort ?? original.reasoningEffort ?? native.reasoningEffort,
     modelProvider: settings.modelProvider ?? native.modelProvider,
     reasoningSummary: settings.reasoningSummary ?? native.reasoningSummary,
-    serviceTier: settings.serviceTier ?? native.serviceTier
+    serviceTier: settings.serviceTier ?? native.serviceTier,
+    ...(settings.serviceTier === undefined && native.nativeServiceTierAbsent
+      ? { nativeServiceTierAbsent: true as const } : {})
   });
   if (JSON.stringify(recovered) !== JSON.stringify(settings)) {
     await writeJsonAtomic(path, { version: 1, settings: recovered });
@@ -213,6 +223,7 @@ function executionSettings(value: DeepScanExecutionSettings): DeepScanExecutionS
     reasoningEffort: value.reasoningEffort,
     reasoningSummary: value.reasoningSummary,
     serviceTier: value.serviceTier,
+    ...(value.nativeServiceTierAbsent === true ? { nativeServiceTierAbsent: true } : {}),
     ...(provider === undefined ? {} : { providerConfig: provider }),
     ...(value.parentSandbox === undefined ? {} : { parentSandbox: {
       filesystemDenies: [...value.parentSandbox.filesystemDenies],
