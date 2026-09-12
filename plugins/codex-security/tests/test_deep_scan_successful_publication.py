@@ -72,7 +72,7 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
                     "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, "
                     "status, phase, workers, subagents, stop_after_no_new, max_discovery_runs, "
                     "manifest_path, terminal_reason, created_at, updated_at, completed_at) "
-                    "VALUES (?, 1, 'publication-test', 'succeeded', 'terminal', 1, 0, 1, 1, "
+                    "VALUES (?, 1, 'deep-security-scan/v1', 'succeeded', 'terminal', 1, 0, 1, 1, "
                     "?, 'saturated', ?, ?, ?)",
                     (
                         scan_id,
@@ -459,4 +459,33 @@ def test_standard_publication_preserves_deliberately_partial_coverage(
 
     complete(workbench_api, workbench_db, scan)
 
+    assert_published_aggregate(scan)
+
+
+def test_deep_publication_write_failure_keeps_original_terminal_cause(
+    workbench_api, workbench_db, publication_scan, monkeypatch
+):
+    scan = publication_scan()
+    finalizer_globals = workbench_api["_write_prepared_scan_finalization"].__globals__
+    write_bytes = finalizer_globals["write_scan_local_bytes"]
+
+    def fail_report(scan_dir, relative_path, payload, **kwargs):
+        if relative_path == "report.md":
+            raise finalizer_globals["ContractError"]("Synthetic report write interruption")
+        return write_bytes(scan_dir, relative_path, payload, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setitem(finalizer_globals, "write_scan_local_bytes", fail_report)
+        with pytest.raises(SystemExit, match="Synthetic report write interruption"):
+            complete(workbench_api, workbench_db, scan)
+
+    assert (
+        workbench_db.execute("SELECT status FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()[0]
+        == "running"
+    )
+    run = workbench_db.execute(
+        "SELECT status, terminal_reason FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
+    ).fetchone()
+    assert tuple(run) == ("succeeded", "saturated")
+    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
     assert_published_aggregate(scan)
