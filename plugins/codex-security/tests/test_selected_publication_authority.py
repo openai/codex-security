@@ -42,7 +42,8 @@ def test_publication_uses_committed_finalization_selection(
             (str(result),),
         )
         workbench_db.execute(
-            "UPDATE deep_scan_runs SET coordinator_generation = ?, finalization_input_json = ? "
+            "UPDATE deep_scan_runs SET coordinator_generation = ?, finalization_input_json = ?, "
+            "workflow_version = 'deep-security-scan/v2' "
             "WHERE scan_id = ?",
             (1 if publication == "unfenced" else 3, json.dumps(selection), scan.scan_id),
         )

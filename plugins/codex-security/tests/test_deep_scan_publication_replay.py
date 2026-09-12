@@ -8,9 +8,11 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
+from test_accepted_publication_references import accept_reducer
 from test_deep_scan_publication_authority import stage_publication
 from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
+from test_publication_stop_interleavings import saved_selection
 
 _CRASH_PUBLICATION = """
 import json, os, runpy, sqlite3, sys
@@ -55,11 +57,21 @@ raise AssertionError("publication never reached the requested crash boundary")
     "boundary",
     ["findings.json", "coverage.json", "scan-manifest.json", "sqlite-before", "sqlite-after"],
 )
+@pytest.mark.parametrize("selection_reason", [None, "saturated", "capped"])
 def test_publication_crash_replays_selected_input_without_stale_overwrite(
-    workbench_api, workbench_db, publication_scan, tmp_path, boundary
+    workbench_api, workbench_db, publication_scan, tmp_path, boundary, selection_reason
 ):
     scan = publication_scan()
-    result_path = add_worker(workbench_db, scan)
+    if selection_reason is None:
+        result_path = add_worker(workbench_db, scan)
+    else:
+        _, result_path, _ = accept_reducer(workbench_db, scan)
+        saved_selection(workbench_db, scan, result_path, reason=selection_reason)
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_runs SET terminal_reason = ? WHERE scan_id = ?",
+                (selection_reason, scan.scan_id),
+            )
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = 3 WHERE scan_id = ?",
