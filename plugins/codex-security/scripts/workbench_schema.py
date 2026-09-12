@@ -939,6 +939,13 @@ MIGRATIONS = (
         ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;
         """,
     ),
+    (
+        48,
+        "bind original deep scan parent usage turn",
+        """
+        ALTER TABLE deep_scan_runs ADD COLUMN usage_owner_json TEXT;
+        """,
+    ),
 )
 
 

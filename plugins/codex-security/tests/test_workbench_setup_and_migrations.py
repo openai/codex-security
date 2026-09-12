@@ -405,7 +405,7 @@ def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) ->
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (45,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (46,)
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])
@@ -871,6 +871,7 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
             (45, "retain deep scan attempts and exact merge inputs"),
             (46, "persist selected deep scan finalization input"),
             (47, "freeze stopped scan checkpoint selections"),
+            (48, "bind original deep scan parent usage turn"),
         ]
         assert {row[1] for row in connection.execute("PRAGMA table_info(workspaces)")} >= {
             "diff_target_kind",
@@ -973,7 +974,7 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN handoff_claim_token")
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (47,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (48,)
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
             "handoff_claim_token",
@@ -2004,6 +2005,7 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
             (45, "retain deep scan attempts and exact merge inputs"),
             (46, "persist selected deep scan finalization input"),
             (47, "freeze stopped scan checkpoint selections"),
+            (48, "bind original deep scan parent usage turn"),
         ]
         assert "capability_preflight_json" in {
             row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
@@ -2091,6 +2093,7 @@ def test_workbench_upgrades_pre_release_phase_progress_migration(tmp_path: Path)
             (45, "retain deep scan attempts and exact merge inputs"),
             (46, "persist selected deep scan finalization input"),
             (47, "freeze stopped scan checkpoint selections"),
+            (48, "bind original deep scan parent usage turn"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
@@ -2186,6 +2189,7 @@ def test_workbench_upgrades_pre_release_preflight_progress_migration(tmp_path: P
             (45, "retain deep scan attempts and exact merge inputs"),
             (46, "persist selected deep scan finalization input"),
             (47, "freeze stopped scan checkpoint selections"),
+            (48, "bind original deep scan parent usage turn"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
