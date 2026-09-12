@@ -2754,6 +2754,35 @@ The extraction root is not enforced.
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected 'coverage.json'"):
             FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_terminal_missing_scan_ids_preserves_incomplete_artifacts(self) -> None:
+        for missing_ids in (("findings",), ("coverage",), ("findings", "coverage")):
+            with self.subTest(missing_ids=missing_ids):
+                documents = {
+                    "scan-manifest": copy.deepcopy(self.manifest),
+                    "findings": copy.deepcopy(self.findings),
+                    "coverage": copy.deepcopy(self.coverage),
+                }
+                for name in missing_ids:
+                    documents[name].pop("scanId")
+                for name, document in documents.items():
+                    self.write_json(f"{name}.json", document)
+                before = {path.name: path.read_bytes() for path in self.scan_dir.iterdir()}
+
+                result = subprocess.run(
+                    [sys.executable, FINALIZER.__file__, "--scan-dir", str(self.scan_dir)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(
+                    f"{missing_ids[0]}.scanId: must match manifest scan id", result.stderr
+                )
+                self.assertEqual(
+                    {path.name: path.read_bytes() for path in self.scan_dir.iterdir()}, before
+                )
+
     def test_completion_binding_populates_unsealed_workbench_envelope(self) -> None:
         scan = self.manifest["scan"]
         self.manifest["documentType"] = "wrong.manifest"

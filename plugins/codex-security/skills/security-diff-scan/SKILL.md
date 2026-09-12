@@ -28,12 +28,12 @@ Read `../../references/config-preflight.md` before dispatching the `security_dif
 5. Record `complete: false` semantic checkpoints with `record_codex_security_scan_draft` as findings and validation decisions arrive, retaining unresolved candidates and original evidence in `coverage.deferred`. After the review settles, record one final `complete: true` semantic draft with the retained canonical model, findings, and coverage. Request detailed write-ups or hardening plans only when the user asks.
 6. Call `complete_codex_security_scan` once, then read `get_codex_security_completed_scan`. Finalization creates `report.md` and SARIF. Include measured token usage when available and identify incomplete coverage.
 
-For terminal scans without a `scanId`, generate the changed-file list with:
+For terminal scans without a host-registered `scanId`, generate the changed-file list with:
 
 ```text
 <python_command> <plugin_dir>/scripts/generate_in_scope_files.py --repo <repo_root> --scope . --diff-base <base> --diff-head <head> --diff-mode <revisions|local-patch> --out <discovery_dir>/in_scope_files.txt
 ```
 
-Record candidates with `normalize_candidates.py --input <candidate-source> --out <discovery_dir>/candidate_ledger.jsonl --repo-root <repo_root> --in-scope-files <discovery_dir>/in_scope_files.txt --allow-missing-in-scope`. Add validation and attack-path decisions to that same file. Following `../../references/final-report.md`, assemble unsealed `scan-manifest.json`, `findings.json`, and `coverage.json` before running `finalize_scan_contract.py --scan-dir <scan_dir> --source-root <repo_root>`.
+Record candidates with `normalize_candidates.py --input <candidate-source> --out <discovery_dir>/candidate_ledger.jsonl --repo-root <repo_root> --in-scope-files <discovery_dir>/in_scope_files.txt --allow-missing-in-scope`. Add validation and attack-path decisions to that same file. Follow File-Authored Draft Assembly in `../../references/final-report.md`: resolve one local scan identity using `../../references/scan-artifacts.md`, and use `scripts/scan_draft.py`'s `build_scan_draft` to assemble all three unsealed canonical envelopes from that identity and the new audit semantics. Verify that the manifest's `scan.id` and both artifact `scanId` fields match that identity before running `finalize_scan_contract.py --scan-dir <scan_dir> --source-root <repo_root>`.
 
 Finish only after every changed file and candidate is accounted for. Return the generated report, actual coverage gaps, and Codex review comments for confirmed findings.
