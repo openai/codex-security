@@ -1530,21 +1530,27 @@ def _require_current_deep_publication(
             coordinator_generation=publication.get("coordinatorGeneration") if publication else None
         ),
     )
-    # Generation-one runs predate host publication metadata. Keep their existing
-    # draft path; adopted coordinators must carry their generation and selection.
-    if publication is None:
-        return
-    reducer = _latest_successful_reducer(
-        connection.execute(
-            "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
-        ).fetchall()
-    )
-    selected_result = reducer["result_manifest_path"] if reducer is not None else None
-    finalization = db.deep_scan.deep_scan_finalization_input(run)
-    if finalization is not None:
-        selected = finalization["resultPath"]
+    selection = db.deep_scan.deep_scan_finalization_input(run)
+    if selection is not None:
+        if publication is None:
+            raise SystemExit("Deep Scan publication requires its committed selection.")
         scan = db.require_scan(connection, scan_id)
-        selected_result = str(Path(scan["scan_dir"]) / selected) if selected is not None else None
+        selected_result = (
+            str(Path(scan["scan_dir"]) / selection["resultPath"])
+            if selection["resultPath"] is not None
+            else None
+        )
+    else:
+        # Generation-one runs predate host publication metadata. Keep their existing
+        # draft path; adopted coordinators must carry their generation and selection.
+        if publication is None:
+            return
+        reducer = _latest_successful_reducer(
+            connection.execute(
+                "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+            ).fetchall()
+        )
+        selected_result = reducer["result_manifest_path"] if reducer is not None else None
     if publication["resultPath"] != selected_result:
         raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
 
