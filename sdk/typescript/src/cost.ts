@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { open, readdir, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
   estimateScanCost,
+  estimateScanCostLowerBound,
   tokenUsage,
   type ScanCost,
   type ScanTokenUsage,
@@ -69,7 +71,8 @@ interface SessionUsage {
   prose: Set<string>;
   reasoning: SessionReasoning | null;
   reasoningCount: number;
-  events?: Record<string, unknown>[];
+  eventIndex: number;
+  events?: { index: number; event: Record<string, unknown> }[];
 }
 
 interface ScanCostTrackerOptions {
@@ -80,6 +83,8 @@ interface ScanCostTrackerOptions {
   maxCostUsd?: number;
   expectedFilesTotal?: number;
   onCost?: (cost: Readonly<ScanCost>) => void;
+  // Only reported when the full public estimate is unavailable.
+  onCostLowerBound?: (cost: Readonly<ScanCost>) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
@@ -125,6 +130,7 @@ function createSessionUsage(): SessionUsage {
     prose: new Set(),
     reasoning: null,
     reasoningCount: 0,
+    eventIndex: 0,
   };
 }
 
@@ -135,11 +141,13 @@ export class ScanCostTracker {
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
+  readonly #reportedSessionEvents = new Map<string, Set<string>>();
   #threadId: string | null = null;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
   #lastCost: string | null = null;
+  #lastCostLowerBound: string | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
   #attribution: ScanExecutionAttribution | null = null;
@@ -181,6 +189,7 @@ export class ScanCostTracker {
     if (
       this.#options.maxCostUsd === undefined &&
       this.#options.onCost === undefined &&
+      this.#options.onCostLowerBound === undefined &&
       this.#options.onActivity === undefined &&
       this.#options.onProgress === undefined &&
       this.#options.onSessionEvent === undefined
@@ -236,7 +245,7 @@ export class ScanCostTracker {
       return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
-    this.#reportCost(cost);
+    this.#reportCost(cost, fallbackUsage);
     return this.#snapshot;
   }
 
@@ -402,7 +411,20 @@ export class ScanCostTracker {
         worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
         this.#workers.set(threadId, worker);
       }
-      for (const event of session.events?.splice(0) ?? []) {
+      for (const { index, event } of session.events?.splice(0) ?? []) {
+        let reported = this.#reportedSessionEvents.get(threadId);
+        if (reported === undefined) {
+          reported = new Set();
+          this.#reportedSessionEvents.set(threadId, reported);
+        }
+        // A physical copy keeps each event's position, including repeated
+        // identical events. Positions count unfiltered records so attribution
+        // changes can replay the same log without changing occurrence identity.
+        const identity = `${index}:${createHash("sha256")
+          .update(JSON.stringify(event))
+          .digest("hex")}`;
+        if (reported.has(identity)) continue;
+        reported.add(identity);
         this.#options.onSessionEvent?.({
           threadId,
           parentThreadId: session.parentThreadId,
@@ -513,7 +535,7 @@ export class ScanCostTracker {
       : reconciled;
     const cost = estimateScanCost(this.#options.model, measured);
     this.#snapshot = { usage: measured, cost };
-    this.#reportCost(cost);
+    this.#reportCost(cost, measured);
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -556,8 +578,17 @@ export class ScanCostTracker {
     }
   }
 
-  #reportCost(cost: ScanCost | null): void {
-    if (cost === null) return;
+  #reportCost(cost: ScanCost | null, usage: unknown): void {
+    if (cost === null) {
+      if (this.#options.onCostLowerBound === undefined) return;
+      const lowerBound = estimateScanCostLowerBound(this.#options.model, usage);
+      if (lowerBound === null) return;
+      const signature = JSON.stringify(lowerBound);
+      if (signature === this.#lastCostLowerBound) return;
+      this.#lastCostLowerBound = signature;
+      this.#options.onCostLowerBound(lowerBound);
+      return;
+    }
     const signature = JSON.stringify(cost);
     if (signature === this.#lastCost) return;
     this.#lastCost = signature;
@@ -685,10 +716,11 @@ function readSessionEvent(
   }
   if (!isRecord(event) || !isRecord(event["payload"])) return;
   const payload = event["payload"];
+  const index = session.eventIndex++;
   if (event["type"] === "session_meta") {
     if (session.threadId !== null) {
       session.replaying = payload["id"] !== session.threadId;
-      if (!session.replaying) session.events?.push(event);
+      if (!session.replaying) session.events?.push({ index, event });
       return;
     }
     if (typeof payload["id"] === "string") {
@@ -700,7 +732,7 @@ function readSessionEvent(
     if (typeof payload["model"] === "string") session.model = payload["model"];
     session.startedAt = sessionStartedAt(payload["timestamp"]);
     session.parentThreadId = sessionParentThreadId(payload);
-    session.events?.push(event);
+    session.events?.push({ index, event });
     return;
   }
   if (session.replaying) {
@@ -721,7 +753,7 @@ function readSessionEvent(
           : turnOrder !== null && turnOrder >= threadOrder;
       if (owned) {
         session.replaying = false;
-        session.events?.push(event);
+        session.events?.push({ index, event });
       }
     }
     return;
@@ -785,7 +817,7 @@ function readSessionEvent(
       model,
       addTokenUsage(session.modelUsage.get(model) ?? null, usage),
     );
-    session.events?.push(event);
+    session.events?.push({ index, event });
     return;
   }
   const attributable =
@@ -796,7 +828,7 @@ function readSessionEvent(
       session.currentTurnId,
       event["timestamp"],
     );
-  if (attributable) session.events?.push(event);
+  if (attributable) session.events?.push({ index, event });
   if (
     !attributable &&
     !(event["type"] === "event_msg" && payload["type"] === "token_count")

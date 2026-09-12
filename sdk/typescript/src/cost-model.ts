@@ -147,6 +147,50 @@ export function estimateScanCost(
     : cost;
 }
 
+// Internal budget enforcement only. The public estimate remains unavailable
+// when some attributed usage has no price.
+export function estimateScanCostLowerBound(
+  model: string | undefined,
+  usage: unknown,
+): ScanCost | null {
+  if (!isRecord(usage) || !Array.isArray(usage["modelUsage"])) return null;
+  const total = tokenUsage(usage);
+  if (total === null) return null;
+  const keys = [
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+  ] as const;
+  const observed = Object.fromEntries(keys.map((key) => [key, 0]));
+  const priced = Object.fromEntries(keys.map((key) => [key, 0]));
+  const parts: Record<string, unknown>[] = [];
+  let cacheWritesReported = true;
+  for (const part of usage["modelUsage"]) {
+    const normalized = tokenUsage(part);
+    if (!isRecord(part) || normalized === null) return null;
+    for (const key of keys) observed[key]! += normalized[key];
+    if (
+      typeof part["model"] !== "string" ||
+      estimateModelCost(part["model"], part) === null
+    )
+      continue;
+    parts.push(part);
+    for (const key of keys) priced[key]! += normalized[key];
+    if (normalized.cache_write_input_tokens_reported === false)
+      cacheWritesReported = false;
+  }
+  // A malformed partition is not evidence of an enforceable lower bound.
+  if (keys.some((key) => observed[key] !== total[key])) return null;
+  return estimateScanCost(model, {
+    ...priced,
+    cache_write_input_tokens_reported: cacheWritesReported,
+    modelUsage: parts,
+    coverage: "partial",
+  });
+}
+
 function estimateModelCost(
   model: string | undefined,
   usage: unknown,
