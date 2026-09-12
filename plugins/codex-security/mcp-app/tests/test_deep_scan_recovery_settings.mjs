@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const bundle = await build({
   bundle: true,
+  nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
   define: { "import.meta.url": JSON.stringify(new URL("../src/deep-scan/recovery-settings.ts", import.meta.url).href) },
   entryPoints: [new URL("../src/deep-scan/recovery-settings.ts", import.meta.url).pathname],
   format: "esm",

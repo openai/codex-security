@@ -613,6 +613,7 @@ async function testDeepScanStdioLifecycle() {
 async function bundleServer(outfile) {
   await build({
     bundle: true,
+    nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
     define: { "import.meta.url": "__filename" },
     entryPoints: [path.join(mcpAppRoot, "main.ts")],
     external: ["fsevents"],
