@@ -173,6 +173,23 @@ def _read_saved_result(
     return draft, _digest(draft)
 
 
+def _worker_checkpoint_head(scan_dir: Path, directory: str, scan_id: str) -> str | None:
+    relative = f"{directory}/checkpoint-head.json"
+    try:
+        (scan_dir / relative).lstat()
+    except FileNotFoundError:
+        return None
+    head = _read_scan_local_json(scan_dir, relative, "Saved worker checkpoint head")
+    name = head.get("checkpoint")
+    if not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", name):
+        raise ContractError("Saved worker checkpoint head is invalid.")
+    checkpoint = f"{directory}/checkpoints/{name}"
+    # A committed head precedes replacement of result.json. Do not fall back to
+    # that older result if the selected checkpoint cannot be read.
+    _read_saved_result(scan_dir, checkpoint, scan_id)
+    return checkpoint
+
+
 def _read_saved_parent_result(
     scan_dir: Path, scan_id: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -560,22 +577,40 @@ def merge_saved_results(
             continue
         if worker["kind"] != "discovery":
             continue
+        head = _worker_checkpoint_head(scan_dir, output, scan_id)
+        if head is not None:
+            paths[head] = worker["id"]
+            current_results.add(head)
         paths[f"{output}/result.json"] = worker["id"]
-        current_results.add(f"{output}/result.json")
+        if head is None:
+            current_results.add(f"{output}/result.json")
         checkpoints(f"{output}/checkpoints", worker["id"])
         attempts = (
             Path(output).parent if Path(output).name == "output" else Path(output)
         ) / "attempts"
-        for name in _children(scan_dir, attempts.as_posix()):
-            if re.fullmatch(r"attempt-\d+", name):
-                archived = (attempts / name).as_posix()
-                paths[f"{archived}/result.json"] = worker["id"]
-                checkpoints(f"{archived}/checkpoints", worker["id"])
+        archived_attempts = sorted(
+            (
+                name
+                for name in _children(scan_dir, attempts.as_posix())
+                if re.fullmatch(r"attempt-\d+", name)
+            ),
+            key=lambda name: int(name.removeprefix("attempt-")),
+            reverse=True,
+        )
+        for name in archived_attempts:
+            archived = (attempts / name).as_posix()
+            archived_head = _worker_checkpoint_head(scan_dir, archived, scan_id)
+            if archived_head is not None:
+                paths[archived_head] = worker["id"]
+                current_results.add(archived_head)
+            paths[f"{archived}/result.json"] = worker["id"]
+            checkpoints(f"{archived}/checkpoints", worker["id"])
         if worker["result_manifest_path"]:
             try:
                 current_path = Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix()
                 paths[current_path] = worker["id"]
-                current_results.add(current_path)
+                if head is None:
+                    current_results.add(current_path)
             except ValueError:
                 warnings.append("Skipped a worker result outside the scan directory.")
 
