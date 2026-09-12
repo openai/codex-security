@@ -1,0 +1,163 @@
+# Setup and permissions: examples/azure-pipelines/README.md
+trigger: none
+
+parameters:
+  - name: targetRef
+    type: string
+    default: refs/heads/main
+  - name: scanMode
+    type: string
+    default: full
+    values: [full, diff]
+  - name: baseRevision
+    type: string
+    default: HEAD^
+  - name: failOnSeverity
+    type: string
+    default: none
+    values: [none, low, medium, high, critical]
+  - name: publishToAdvancedSecurity
+    type: boolean
+    default: false
+
+resources:
+  repositories:
+    - repository: target
+      type: git
+      name: ExampleProject/example-app # Replace with the approved project/repository.
+      ref: ${{ parameters.targetRef }}
+      trigger: none
+
+variables:
+  codexSecurityVersion: "0.1.27"
+  awsServiceConnection: codex-security-bedrock
+  awsRegion: us-east-1
+  bedrockModelId: REPLACE_WITH_APPROVED_MODEL_ID
+  aws.rolecredential.maxduration: "3600"
+  targetDirectory: $(Pipeline.Workspace)/s/scan-target
+  scanDirectory: $(Agent.TempDirectory)/codex-security/scan
+  reportDirectory: $(Agent.TempDirectory)/codex-security/reports
+  scanExitCode: not-started
+  sarifReady: "false"
+
+jobs:
+  - job: scan
+    displayName: Codex Security
+    timeoutInMinutes: 60
+    pool:
+      vmImage: ubuntu-24.04
+    variables:
+      # Attribute alerts to the scanned repository, not the pipeline's repository.
+      advancedsecurity.publish.repository: $[ convertToJson(resources.repositories['target']) ]
+    steps:
+      - task: UseNode@1
+        inputs:
+          version: "24.21.0"
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: "3.14.7"
+
+      # Install before checkout so repository npm configuration is not consulted.
+      - task: Bash@3
+        name: installCli
+        displayName: Install Codex Security
+        inputs:
+          targetType: inline
+          workingDirectory: $(Agent.TempDirectory)
+          script: |
+            set -euo pipefail
+            npm install --prefix "$CLI_DIRECTORY" --ignore-scripts --no-audit --no-fund \
+              --registry=https://registry.npmjs.org/ \
+              "@openai/codex-security@$CODEX_SECURITY_VERSION"
+            printf '##vso[task.prependpath]%s\n' "$CLI_DIRECTORY/node_modules/.bin"
+        env:
+          CLI_DIRECTORY: $(Agent.TempDirectory)/codex-security-cli
+          CODEX_SECURITY_VERSION: $(codexSecurityVersion)
+
+      - checkout: target
+        path: s/scan-target
+        fetchDepth: 0
+        persistCredentials: false
+
+      - task: AWSShellScript@1
+        name: runScan
+        displayName: Scan with Bedrock OIDC credentials
+        inputs:
+          awsCredentials: $(awsServiceConnection)
+          regionName: $(awsRegion)
+          scriptType: inline
+          disableAutoCwd: true
+          workingDirectory: $(targetDirectory)
+          inlineScript: |
+            set -euo pipefail
+            mkdir -p "$REPORT_DIRECTORY"
+            args=(scan "$TARGET_DIRECTORY" --provider amazon-bedrock
+              --model "$BEDROCK_MODEL_ID" --mode standard --effort high
+              --output-dir "$SCAN_DIRECTORY" --json)
+            if [[ "$SCAN_MODE" == diff ]]; then
+              args+=(--diff "$BASE_REVISION")
+            fi
+            if [[ "$FAIL_ON_SEVERITY" != none ]]; then
+              args+=(--fail-on-severity "$FAIL_ON_SEVERITY")
+            fi
+            status=0
+            codex-security "${args[@]}" > "$REPORT_DIRECTORY/result.json" || status=$?
+            printf '##vso[task.setvariable variable=scanExitCode]%s\n' "$status"
+            exit "$status"
+        env:
+          TARGET_DIRECTORY: $(targetDirectory)
+          SCAN_DIRECTORY: $(scanDirectory)
+          REPORT_DIRECTORY: $(reportDirectory)
+          BEDROCK_MODEL_ID: $(bedrockModelId)
+          SCAN_MODE: ${{ parameters.scanMode }}
+          BASE_REVISION: ${{ parameters.baseRevision }}
+          FAIL_ON_SEVERITY: ${{ parameters.failOnSeverity }}
+
+      - task: Bash@3
+        name: exportSarif
+        displayName: Export completed scan to SARIF
+        condition: and(succeededOrFailed(), in(variables['scanExitCode'], '0', '1'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            codex-security export "$SCAN_DIRECTORY" --export-format sarif \
+              --source-root "$TARGET_DIRECTORY" --output "$REPORT_DIRECTORY/results.sarif"
+            printf '##vso[task.setvariable variable=sarifReady]true\n'
+        env:
+          TARGET_DIRECTORY: $(targetDirectory)
+          SCAN_DIRECTORY: $(scanDirectory)
+          REPORT_DIRECTORY: $(reportDirectory)
+
+      - ${{ if parameters.publishToAdvancedSecurity }}:
+          - task: AdvancedSecurity-Publish@1
+            displayName: Publish SARIF to the target repository
+            condition: and(succeededOrFailed(), eq(variables['sarifReady'], 'true'))
+            inputs:
+              SarifsInputDirectory: $(reportDirectory)
+              Category: codex-security/${{ parameters.scanMode }}
+              WaitForProcessing: true
+
+      - task: Bash@3
+        name: stageReports
+        displayName: Collect reports without raw scan state
+        condition: and(succeededOrFailed(), ne(variables['scanExitCode'], 'not-started'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            for report in report.md coverage.json findings.json; do
+              if [[ -f "$SCAN_DIRECTORY/$report" ]]; then
+                cp "$SCAN_DIRECTORY/$report" "$REPORT_DIRECTORY/$report"
+              fi
+            done
+        env:
+          SCAN_DIRECTORY: $(scanDirectory)
+          REPORT_DIRECTORY: $(reportDirectory)
+
+      - task: PublishPipelineArtifact@1
+        displayName: Retain scan reports
+        condition: and(succeededOrFailed(), ne(variables['scanExitCode'], 'not-started'))
+        inputs:
+          targetPath: $(reportDirectory)
+          artifact: codex-security
