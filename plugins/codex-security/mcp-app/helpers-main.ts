@@ -3,6 +3,7 @@ import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";
 import { decodePosixBytes } from "./src/helpers/posix-path";
 import { windowsBinding } from "./src/native";
 import { normalizeCandidatesCommand } from "./src/helpers/normalize-candidates";
+import { validatePatchRiskAssessmentCommand } from "./src/helpers/validate-patch-risk-assessment";
 
 let commandLine = process.argv.slice(2);
 if (process.platform === "win32") {
@@ -32,9 +33,11 @@ if (command === "resolve-security-md") {
   process.exitCode = resolveSecurityMdCommand(args, posixHome);
 } else if (command === "normalize-candidates") {
   process.exitCode = normalizeCandidatesCommand(args, posixHome);
+} else if (command === "validate-patch-risk-assessment") {
+  process.exitCode = validatePatchRiskAssessmentCommand(args);
 } else {
   console.error(
-    "Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates> [options]",
+    "Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates | validate-patch-risk-assessment> [options]",
   );
   process.exitCode = 2;
 }

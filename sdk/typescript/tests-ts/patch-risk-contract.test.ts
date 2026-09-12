@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -61,18 +61,8 @@ const schemaPath = join(
   "schemas",
   "patch-risk-assessment.schema.json",
 );
-const validatorPath = join(
-  PLUGIN_ROOT,
-  "skills",
-  "assess-patch-risk",
-  "scripts",
-  "validate_patch_risk_assessment.py",
-);
-const python =
-  process.env["PYTHON"] ??
-  Bun.which("python3") ??
-  Bun.which("python") ??
-  Bun.which("py");
+const node = Bun.which("node")!;
+const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
 
 function assessment(): Assessment {
   return {
@@ -132,13 +122,13 @@ function assessment(): Assessment {
   };
 }
 
-function validateText(input: string, cwd = PLUGIN_ROOT) {
-  expect(python).toBeDefined();
-  expect(python).not.toBeNull();
-  return spawnSync(python!, ["-I", "-B", "-S", validatorPath, "-"], {
+function validateText(input: string | Buffer, cwd = PLUGIN_ROOT, args = ["-"]) {
+  return spawnSync(node, [helper, "validate-patch-risk-assessment", ...args], {
     cwd,
     encoding: "utf8",
     input,
+    env: { ...process.env, PATH: "", PYTHON: join(cwd, "unavailable-python") },
+    maxBuffer: Infinity,
   });
 }
 
@@ -146,24 +136,8 @@ function validate(payload: Assessment) {
   return validateText(JSON.stringify(payload));
 }
 
-function validateWithSharedSchema(payload: Assessment) {
-  expect(python).toBeDefined();
-  expect(python).not.toBeNull();
-  const program = [
-    "import json, pathlib, sys",
-    "sys.path.insert(0, sys.argv[1])",
-    "import finalize_scan_contract as finalizer",
-    "finalizer.validate_against_schema(json.load(sys.stdin), pathlib.Path(sys.argv[2]))",
-  ].join("\n");
-  return spawnSync(
-    python!,
-    ["-I", "-B", "-S", "-c", program, join(PLUGIN_ROOT, "scripts"), schemaPath],
-    { encoding: "utf8", input: JSON.stringify(payload) },
-  );
-}
-
 describe("patch risk assessment contract", () => {
-  test("resolves the validator from the installed skill", async () => {
+  test("loads the installed helper without Python from another working directory", async () => {
     const outside = await mkdtemp(join(tmpdir(), "patch-risk-contract-"));
     try {
       const result = validateText(JSON.stringify(assessment()), outside);
@@ -192,7 +166,7 @@ describe("patch risk assessment contract", () => {
   });
 
   test("enforces the patch-risk schema through the shared validator", () => {
-    const valid = validateWithSharedSchema(assessment());
+    const valid = validate(assessment());
     expect(valid.status, valid.stderr).toBe(0);
 
     const duplicateChangedFiles = assessment();
@@ -200,15 +174,15 @@ describe("patch risk assessment contract", () => {
       "src/request.ts",
       "src/request.ts",
     ];
-    expect(validateWithSharedSchema(duplicateChangedFiles).status).not.toBe(0);
+    expect(validate(duplicateChangedFiles).status).not.toBe(0);
 
     const emptyRationale = assessment();
     emptyRationale.impact.rationale = "";
-    expect(validateWithSharedSchema(emptyRationale).status).not.toBe(0);
+    expect(validate(emptyRationale).status).not.toBe(0);
 
     const duplicateItems = assessment();
     duplicateItems.autoMergeExclusions = ["migration", "migration"];
-    expect(validateWithSharedSchema(duplicateItems).status).not.toBe(0);
+    expect(validate(duplicateItems).status).not.toBe(0);
 
     const tooManyEvidenceSteps = assessment();
     tooManyEvidenceSteps.evidencePlan = Array.from(
@@ -219,7 +193,9 @@ describe("patch risk assessment contract", () => {
         outcomes: { supported: "merge", contradicted: "revise" },
       }),
     );
-    expect(validateWithSharedSchema(tooManyEvidenceSteps).status).not.toBe(0);
+    expect(validate(tooManyEvidenceSteps).stderr).toBe(
+      "patch-risk-assessment.schema.evidencePlan: array has too many items\n",
+    );
 
     const incompleteOutcomes = assessment();
     incompleteOutcomes.evidencePlan = [
@@ -229,7 +205,9 @@ describe("patch risk assessment contract", () => {
         outcomes: { supported: "merge" },
       },
     ];
-    expect(validateWithSharedSchema(incompleteOutcomes).status).not.toBe(0);
+    expect(validate(incompleteOutcomes).stderr).toBe(
+      "patch-risk-assessment.schema.evidencePlan[0].outcomes: object has too few properties\n",
+    );
 
     const emptyOutcome = assessment();
     emptyOutcome.evidencePlan = [
@@ -239,10 +217,12 @@ describe("patch risk assessment contract", () => {
         outcomes: { supported: "", contradicted: "revise" },
       },
     ];
-    expect(validateWithSharedSchema(emptyOutcome).status).not.toBe(0);
+    expect(validate(emptyOutcome).stderr).toBe(
+      "patch-risk-assessment.schema.evidencePlan[0].outcomes.supported: unsupported value ''\n",
+    );
   });
 
-  test("enforces the published schema without site packages", async () => {
+  test("enforces the published schema without Python", async () => {
     const schema = JSON.parse(await readFile(schemaPath, "utf8"));
     const validateSchema = new Ajv2020({
       strict: false,
@@ -284,7 +264,7 @@ describe("patch risk assessment contract", () => {
     }
   });
 
-  test("accepts a supported human-review merge without site packages", () => {
+  test("accepts a supported human-review merge without Python", () => {
     const result = validate(assessment());
     expect(result.status, result.stderr).toBe(0);
   });
@@ -424,5 +404,401 @@ describe("patch risk assessment contract", () => {
     expect(rejected.stderr).toContain(
       "duplicate JSON object key: recommendation",
     );
+  });
+
+  test("preserves the ordered auto-merge gates", () => {
+    const cases: Array<[string, (value: Assessment) => void]> = [
+      [
+        "impact.rating",
+        (value) => {
+          value.impact.rating = "moderate";
+        },
+      ],
+      [
+        "regressionLikelihood.rating",
+        (value) => {
+          value.regressionLikelihood.rating = "high";
+        },
+      ],
+      [
+        "regressionProtection.rating",
+        (value) => {
+          value.regressionProtection.rating = "partial";
+        },
+      ],
+      [
+        "regressionProtection.exactHeadChecksPassed",
+        (value) => {
+          value.regressionProtection.exactHeadChecksPassed = false;
+        },
+      ],
+      [
+        "recoverability.rating",
+        (value) => {
+          value.recoverability.rating = "managed";
+        },
+      ],
+      [
+        "confidence.rating",
+        (value) => {
+          value.confidence.rating = "moderate";
+        },
+      ],
+      [
+        "applicability.status",
+        (value) => {
+          value.applicability.status = "unknown";
+        },
+      ],
+      [
+        "affectedRuntimeRoots",
+        (value) => {
+          value.affectedRuntimeRoots = [];
+        },
+      ],
+      [
+        "statusQuoRisk.rating",
+        (value) => {
+          value.statusQuoRisk.rating = "unknown";
+        },
+      ],
+      [
+        "autoMergeExclusions",
+        (value) => {
+          value.autoMergeExclusions = ["public_contract"];
+        },
+      ],
+      [
+        "unknowns",
+        (value) => {
+          value.unknowns = [
+            { summary: "A non-critical detail.", decisionCritical: false },
+          ];
+        },
+      ],
+      [
+        "validation",
+        (value) => {
+          value.validation[0]!.status = "skipped";
+        },
+      ],
+    ];
+    const payload = assessment();
+    payload.workflowLabel = "auto_merge_candidate";
+    payload.impact.rating = "low";
+    expect(validate(payload).status).toBe(0);
+    for (const [field, mutate] of cases) {
+      const changed = structuredClone(payload);
+      mutate(changed);
+      const result = validate(changed);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `auto_merge_candidate gate failed: ${field}`,
+      );
+      mutate(payload);
+    }
+    expect(validate(payload).stderr.trim().split("\n")).toEqual([
+      "merge requires confirmed applicability",
+      ...cases.map(([field]) => `auto_merge_candidate gate failed: ${field}`),
+    ]);
+  });
+
+  test("keeps all merge errors in their established order", () => {
+    const payload = assessment();
+    payload.workflowLabel = "block";
+    payload.applicability.status = "wrong_owner";
+    payload.unknowns = [
+      { summary: "The owner is unknown.", decisionCritical: true },
+    ];
+    payload.materialBoundaries[0]!.result = "unresolved";
+    payload.validation[0]!.status = "failed";
+    payload.evidencePlan = [
+      {
+        question: "Who owns this?",
+        action: "Inspect the mapping.",
+        outcomes: { owned: "revise", unowned: "no_op" },
+      },
+    ];
+    const result = validate(payload);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr.trim().split("\n")).toEqual([
+      "merge requires an auto-merge or human-review workflow label",
+      "merge requires confirmed applicability",
+      "merge cannot retain a decision-critical unknown",
+      "merge requires every material boundary to be supported",
+      "merge cannot retain a failed validation",
+      "merge cannot retain an evidence plan",
+      "only hold_for_evidence may include an evidence plan",
+      "an established non-applicable disposition requires no_op",
+    ]);
+    delete (payload as Record<string, unknown>)["patch"];
+    expect(validate(payload).stderr).toBe(
+      "patch-risk-assessment.schema.patch: missing required schema property\n",
+    );
+  });
+
+  test("requires matching non-merge labels and a settled no-op disposition", () => {
+    const payload = assessment();
+    payload.recommendation = "revise";
+    payload.validation[0]!.status = "failed";
+    expect(validate(payload).stderr).toBe(
+      "non-merge workflow label must match the recommendation\n",
+    );
+    payload.workflowLabel = "revise";
+    expect(validate(payload).status).toBe(0);
+    for (const status of [
+      "no_live_effect",
+      "wrong_owner",
+      "duplicate",
+      "superseded",
+    ]) {
+      const noOp = assessment();
+      noOp.recommendation = noOp.workflowLabel = "no_op";
+      noOp.applicability.status = status;
+      expect(validate(noOp).status).toBe(0);
+      noOp.unknowns = [
+        { summary: "Coverage is unresolved.", decisionCritical: true },
+      ];
+      expect(validate(noOp).stderr).toBe(
+        "no_op cannot retain a decision-critical unknown\n",
+      );
+    }
+  });
+
+  test("keeps each established failure out of an evidence hold", () => {
+    const failures: Array<(value: Assessment) => void> = [
+      (value) => {
+        value.regressionLikelihood.rating = "critical";
+      },
+      (value) => {
+        value.materialBoundaries[0]!.result = "contradicted";
+      },
+      (value) => {
+        value.validation[0]!.status = "failed";
+      },
+    ];
+    for (const fail of failures) {
+      const payload = assessment();
+      payload.recommendation = payload.workflowLabel = "hold_for_evidence";
+      payload.unknowns = [
+        { summary: "A rollout detail.", decisionCritical: true },
+      ];
+      payload.evidencePlan = [
+        {
+          question: "Which rollout?",
+          action: "Inspect deployment.",
+          outcomes: { owned: "merge", unowned: "no_op" },
+        },
+      ];
+      fail(payload);
+      expect(validate(payload).stderr).toBe(
+        "hold_for_evidence cannot defer an established defect\n",
+      );
+      payload.evidencePlan = [];
+      for (const recommendation of ["revise", "block"]) {
+        payload.recommendation = payload.workflowLabel = recommendation;
+        expect(validate(payload).status).toBe(0);
+      }
+    }
+  });
+
+  test("distinguishes booleans, exact integers, and floating-point values", () => {
+    const serialized = JSON.stringify(assessment());
+    for (const token of ["1", "1.0", "1e0", "1.00000000000000000000001"]) {
+      const result = validateText(
+        serialized.replace('"schemaVersion":1', `"schemaVersion":${token}`),
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("");
+    }
+    for (const token of [
+      "true",
+      "false",
+      "0",
+      "-0.0",
+      "NaN",
+      "Infinity",
+      "-Infinity",
+      "1e9999",
+      "9007199254740993",
+    ]) {
+      const result = validateText(
+        serialized.replace('"schemaVersion":1', `"schemaVersion":${token}`),
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe(
+        "patch-risk-assessment.schema.schemaVersion: expected 1\n",
+      );
+    }
+    for (const [items, message] of [
+      ["1,1.0", "unsupported value 1"],
+      ["true,1", "unsupported value True"],
+      [
+        "9007199254740992,9007199254740993.0",
+        "unsupported value 9007199254740992",
+      ],
+      [
+        "9007199254740993,9007199254740993.0",
+        "unsupported value 9007199254740993",
+      ],
+      ['{"x":1,"y":2},{"y":2.0,"x":1.0}', "unsupported value"],
+      ["NaN,NaN", "unsupported value nan"],
+    ]) {
+      const result = validateText(
+        serialized.replace(
+          '"autoMergeExclusions":[]',
+          `"autoMergeExclusions":[${items}]`,
+        ),
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message!);
+    }
+  });
+
+  test("rejects malformed JSON and preserves duplicate and property order", () => {
+    for (const [text, message] of [
+      ["\ufeff{}", "cannot read assessment: Unexpected UTF-8 BOM"],
+      ['{"x":1,}', "Expecting property name enclosed in double quotes"],
+      ['{"x":"\\uZZZZ"}', "cannot read assessment:"],
+      ['{"x":"\\q"}', "cannot read assessment:"],
+      ['"\\q', "cannot read assessment:"],
+      ['"\\u123', "cannot read assessment:"],
+      ['{"x":"line\n"}', "cannot read assessment:"],
+      ["{} false", "Extra data"],
+      ["[]", "assessment must be a JSON object"],
+      ['{"x":0,"x":1,"nested":{"y":0,"y":1}}', "duplicate JSON object key: y"],
+      ['{"x":0,"\\u0078":1}', "duplicate JSON object key: x"],
+      ['{"__proto__":0,"__proto__":1}', "duplicate JSON object key: __proto__"],
+    ]) {
+      const result = validateText(text!);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message!);
+    }
+    const serialized = JSON.stringify(assessment());
+    const reordered = `{"unexpected":0,"1":0,${serialized.slice(1)}`;
+    expect(validateText(reordered).stderr).toBe(
+      "patch-risk-assessment.schema.unexpected: unexpected schema property\n",
+    );
+    expect(validateText(`{"\\ud800":0,${serialized.slice(1)}`).stderr).toBe(
+      "patch-risk-assessment.schema.\\ud800: unexpected schema property\n",
+    );
+    const control = assessment();
+    control.patch.sourceType = "can't\u00a0merge\n";
+    expect(validate(control).stderr).toBe(
+      'patch-risk-assessment.schema.patch.sourceType: unsupported value "can\'t\\xa0merge\\n"\n',
+    );
+    control.patch.repository = "\ud800";
+    control.patch.sourceType = "patch_file";
+    expect(validate(control).status).toBe(0);
+    for (const value of [`${"c".repeat(64)}\n`, `${"c".repeat(64)}\r\n`]) {
+      control.patch.sha256 = value;
+      expect(validate(control).stderr).toContain(
+        "string does not match schema pattern",
+      );
+    }
+  });
+
+  test("reads file and stdin inputs without rewriting the assessment", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "patch-risk-files-"));
+    try {
+      const original =
+        JSON.stringify(assessment(), null, 2).replaceAll("\n", "\r\n") + "\r\n";
+      for (const name of ["assessment with spaces.json", "-1", "- item", "-"]) {
+        const path = join(outside, name);
+        await writeFile(path, original);
+        const result = validateText("not stdin", outside, [
+          name === "-" ? "./-" : name,
+        ]);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toBe("");
+        expect(await readFile(path, "utf8")).toBe(original);
+        expect(validateText("", outside, ["--", name]).status).toBe(
+          name === "-" ? 1 : 0,
+        );
+      }
+      const file = join(outside, "assessment with spaces.json");
+      if (process.platform !== "win32")
+        expect(validateText("", outside, [`${file}/.`]).status).toBe(0);
+      expect(validateText(original, outside).status).toBe(0);
+      if (process.platform !== "win32") {
+        const launched = spawnSync(
+          join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
+          ["--helper", "validate-patch-risk-assessment", "-"],
+          {
+            cwd: outside,
+            input: original,
+            encoding: "utf8",
+            env: { ...process.env, CODEX_MCP_NODE_PATH: node },
+          },
+        );
+        expect(launched.status, launched.stderr).toBe(0);
+        expect(launched.stdout).toBe("");
+        expect(launched.stderr).toBe("");
+      }
+      const invalid = join(outside, "invalid.json");
+      const malformed = '{\r\n"x":1\r\n"y":2}';
+      await writeFile(invalid, malformed);
+      expect(validateText(malformed).stderr).toContain(
+        "line 3 column 1 (char 10)",
+      );
+      expect(validateText("", outside, [invalid]).stderr).toContain(
+        "line 3 column 1 (char 8)",
+      );
+      await writeFile(invalid, Buffer.from([0xff]));
+      expect(validateText("", outside, [invalid]).status).toBe(1);
+      expect(validateText("", outside, ["missing.json"]).stderr).toContain(
+        "cannot read assessment:",
+      );
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "keeps stdin surrogate escapes distinct from replacement characters",
+    () => {
+      const serialized = JSON.stringify(assessment()).replace(
+        '"changedFiles":["src/request.ts"]',
+        '"changedFiles":["RAW","\\ufffd"]',
+      );
+      const [before, after] = serialized.split("RAW");
+      const result = validateText(
+        Buffer.concat([
+          Buffer.from(before!),
+          Buffer.from([0xff]),
+          Buffer.from(after!),
+        ]),
+      );
+      expect(result.status, result.stderr).toBe(0);
+    },
+  );
+
+  test("preserves help, positional arguments, and parser exit statuses", () => {
+    for (const args of [
+      ["-h"],
+      ["--h"],
+      ["--he"],
+      ["-hfoo"],
+      ["--bad", "--help"],
+    ]) {
+      const result = validateText("", PLUGIN_ROOT, args);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Validate a patch-risk assessment.");
+    }
+    for (const args of [
+      [],
+      ["--"],
+      ["--bad"],
+      ["one", "two"],
+      ["--help=bad"],
+      ["-h=bad"],
+    ]) {
+      expect(validateText("", PLUGIN_ROOT, args).status).toBe(2);
+    }
+    expect(validateText("", PLUGIN_ROOT, ["--", "-h"]).status).toBe(1);
+    expect(validateText("", PLUGIN_ROOT, ["-.5"]).status).toBe(1);
   });
 });

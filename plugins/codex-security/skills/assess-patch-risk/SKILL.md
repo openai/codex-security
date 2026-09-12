@@ -62,15 +62,15 @@ Return both a concise Markdown report and a JSON object conforming to [`../../sc
 7. top risk drivers, protective factors, and status-quo risk; and
 8. unknowns plus the bounded evidence plan when held.
 
-This skill lives at `<plugin-root>/skills/assess-patch-risk/SKILL.md`, so `<plugin-root>` is two directories up. Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts.
+This skill lives at `<plugin-root>/skills/assess-patch-risk/SKILL.md`, so `<plugin-root>` is two directories up.
 
 Before returning the result, validate the JSON from any working directory with:
 
 ```text
-<python_command> <plugin-root>/skills/assess-patch-risk/scripts/validate_patch_risk_assessment.py <assessment.json>
+<plugin-root>/scripts/launch_codex_security_mcp --helper validate-patch-risk-assessment <assessment.json>
 ```
 
-Pass `-` as `<assessment.json>` to read the assessment from standard input without creating a file.
+Use the `.cmd` launcher on Windows and prefix its quoted path with `&` in PowerShell. Pass `-` as `<assessment.json>` to read the assessment from standard input without creating a file. The validator uses the bundled Node runtime helper and does not require Python.
 
 Correct structural or invariant errors by revisiting the evidence; never change a recommendation merely to make validation pass. Return the validated JSON in the response. Write it to disk only when the caller requests an artifact, and keep every assessment-created file outside the subject checkout and its Git directories.
 
