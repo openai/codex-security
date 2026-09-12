@@ -960,7 +960,13 @@ export class DeepScanCoordinator {
     const recovered: AcceptedDiscovery[] = [];
     for (const worker of this.state.persistedWorkers ?? []) {
       if (worker.kind !== "discovery" || worker.status !== "succeeded") continue;
-      const resultPath = worker.acceptedResultPath ?? worker.resultManifestPath;
+      // Migrated workers can have frozen merge inputs without an attempt record.
+      const claimedInput = this.state.persistedDedupInputs?.find((input) => (
+        input.discoveryWorkerId === worker.id
+        && (input.attempt === undefined || input.attempt === worker.attempt)
+        && input.resultManifestPath
+      ));
+      const resultPath = worker.acceptedResultPath ?? claimedInput?.resultManifestPath ?? worker.resultManifestPath;
       if (!resultPath || !worker.completionSequence) {
         throw new Error(`Accepted discovery ${worker.id} has incomplete persisted evidence.`);
       }
@@ -997,7 +1003,12 @@ export class DeepScanCoordinator {
       ));
     let noNewStreak = 0;
     for (const worker of completedReducers) {
-      const resultPath = worker.acceptedResultPath ?? worker.resultManifestPath;
+      // A later merge claim can retain a legacy aggregate's accepted reference.
+      const resultPath = worker.acceptedResultPath
+        ?? this.state.persistedMergeClaims?.find((claim) => (
+          claim.previousWorkerId === worker.id && claim.previousResultPath
+        ))?.previousResultPath
+        ?? worker.resultManifestPath;
       if (!resultPath) {
         throw new Error(`Completed reducer ${worker.id} has no persisted result manifest.`);
       }
