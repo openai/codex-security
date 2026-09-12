@@ -2683,9 +2683,9 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(prompt).not.toContain("This exhaustive scan authorizes");
     expect(prompt).toContain(
-      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
+      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery"}',
     );
-    expect(prompt).toContain("the parent owns global progress updates");
+    expect(prompt).not.toContain("filesCompleted");
     expect(prompt).toContain(
       `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
     );
@@ -3515,86 +3515,85 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("uses the actual scanner inventory instead of a stale workbench estimate", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    const updates: ScanProgress[] = [];
-    const client = new TestClient(
-      {},
-      {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 4_207 }
-            : mockWorkbench(args, input),
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed(prompt: string) {
-              expect(prompt).toContain(
-                "The SDK's current in-scope file-count estimate is 4207",
-              );
-              await copyCompletedScan(root);
-              async function* scanEvents(): AsyncGenerator<ThreadEvent> {
-                for await (const event of completedEvents()) {
-                  yield event;
-                  if (event.type === "turn.started") {
-                    for (const filesCompleted of [0, 250, 4_198]) {
-                      const progress: ScanProgress = {
-                        phase:
-                          filesCompleted === 4_198 ? "validation" : "discovery",
-                        filesCompleted,
-                        filesTotal: 4_198,
-                      };
-                      yield {
-                        type: "item.completed",
-                        item: {
-                          id: "inventory-" + filesCompleted,
-                          type: "agent_message",
-                          text:
-                            "CODEX_SECURITY_SCAN_PROGRESS " +
-                            JSON.stringify(progress),
-                        },
-                      };
+  test.each([4_207, null])(
+    "reports Standard scan phases without file counts (inventory %p)",
+    async (scopeFileCount) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      const updates: ScanProgress[] = [];
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> =>
+            args[0] === "register-cli-scan"
+              ? { ...mockScanRegistration(args, input), scopeFileCount }
+              : mockWorkbench(args, input),
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed(prompt: string) {
+                expect(prompt).not.toContain("file-count estimate");
+                await copyCompletedScan(root);
+                async function* scanEvents(): AsyncGenerator<ThreadEvent> {
+                  for await (const event of completedEvents()) {
+                    yield event;
+                    if (event.type === "turn.started") {
+                      for (const phase of [
+                        "discovery",
+                        "validation",
+                        "reporting",
+                      ]) {
+                        yield {
+                          type: "item.completed",
+                          item: {
+                            id: "phase-" + phase,
+                            type: "agent_message",
+                            text:
+                              "CODEX_SECURITY_SCAN_PROGRESS " +
+                              JSON.stringify({ phase }),
+                          },
+                        };
+                      }
                     }
                   }
                 }
-              }
-              return { events: scanEvents() };
-            },
+                return { events: scanEvents() };
+              },
+            }),
           }),
-        }),
-      },
-    );
+        },
+      );
 
-    const result = await client.run(repository, {
-      onProgress: (progress) => updates.push(progress),
-    });
+      const result = await client.run(repository, {
+        onProgress: (progress) => updates.push(progress),
+      });
 
-    expect(result.threadId).toBe("thread-1");
-    expect(updates).toEqual([
-      { phase: "preflight", filesCompleted: 0, filesTotal: 4_207 },
-      { phase: "discovery", filesCompleted: 0, filesTotal: 4_198 },
-      { phase: "discovery", filesCompleted: 250, filesTotal: 4_198 },
-      { phase: "validation", filesCompleted: 4_198, filesTotal: 4_198 },
-    ]);
-    await client.close();
-  });
+      expect(result.threadId).toBe("thread-1");
+      expect(updates).toEqual([
+        { phase: "preflight", filesCompleted: 0, filesTotal: 0 },
+        { phase: "discovery", filesCompleted: 0, filesTotal: 0 },
+        { phase: "validation", filesCompleted: 0, filesTotal: 0 },
+        { phase: "reporting", filesCompleted: 0, filesTotal: 0 },
+      ]);
+      await client.close();
+    },
+  );
 
-  test("normalizes worker progress while streaming related session events", async () => {
+  test("omits Standard worker file counts while streaming related session events", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3698,10 +3697,10 @@ describe("CodexSecurity orchestration", () => {
 
     expect(result.threadId).toBe("thread-1");
     expect(updates).toEqual([
-      { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
-      { phase: "discovery", filesCompleted: 3, filesTotal: 1_258 },
-      { phase: "discovery", filesCompleted: 1_249, filesTotal: 1_258 },
-      { phase: "validation", filesCompleted: 1_249, filesTotal: 1_258 },
+      { phase: "preflight", filesCompleted: 0, filesTotal: 0 },
+      { phase: "discovery", filesCompleted: 0, filesTotal: 0 },
+      { phase: "discovery", filesCompleted: 0, filesTotal: 0 },
+      { phase: "validation", filesCompleted: 0, filesTotal: 0 },
     ]);
     expect(sessionEvents).toHaveLength(10);
     expect(

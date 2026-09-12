@@ -807,8 +807,10 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
     assert reopened["summary"]["reopened"] == 1
     assert reopened["findings"][0]["triage"] == {"closeReason": None, "status": "open"}
 
-    resolved = compare_scan_pair(state_dir, after, fixed)
-    assert resolved["summary"]["resolved"] == 1
+    compared = compare_scan_pair(state_dir, after, fixed)
+    assert compared["summary"]["unknown"] == 1
+    assert compared["summary"]["resolved"] == 0
+    assert "a fix has not been verified" in compared["findings"][0]["reason"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_occurrences").fetchone() == (2,)
@@ -945,7 +947,7 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
     baseline = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
     assert baseline["matchingCached"] is False
     assert baseline["summary"]["new"] == 1
-    assert baseline["summary"]["resolved"] == 1
+    assert baseline["summary"]["unknown"] == 1
     unmatched = run_workbench(state_dir, "get-scan", "--scan-id", before["scanId"])["scan"][
         "findings"
     ][0]
@@ -1199,7 +1201,7 @@ def test_semantic_scan_comparison_replaces_cached_matches_atomically(tmp_path: P
     save_scan_matches(state_dir, before, after, confirmed_match(previous, current))
     compared = save_scan_matches(state_dir, before, after)
 
-    assert compared["summary"]["resolved"] == 1
+    assert compared["summary"]["unknown"] == 1
     assert compared["summary"]["new"] == 1
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone() == (1,)
@@ -1272,7 +1274,7 @@ def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -
 
     compared = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
     assert compared["summary"]["new"] == 1
-    assert compared["summary"]["resolved"] == 1
+    assert compared["summary"]["unknown"] == 1
 
     saved = save_scan_matches(
         state_dir,
@@ -1313,7 +1315,7 @@ def test_semantic_scan_comparison_accepts_matching_git_origins(tmp_path: Path) -
 
     compared = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
     assert compared["summary"]["new"] == 1
-    assert compared["summary"]["resolved"] == 1
+    assert compared["summary"]["unknown"] == 1
 
     saved = save_scan_matches(state_dir, before, after)
     assert saved["summary"]["new"] == 1

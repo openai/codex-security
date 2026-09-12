@@ -570,6 +570,19 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       completed: 1, total: 2, unit: "candidate_findings"
     });
 
+    requireSuccessfulTool(await call("record_codex_security_scan_draft", {
+      scanId,
+      handoffClaimToken,
+      complete: false,
+      findings: [{ ...finding, title: "Earlier draft finding" }],
+      coverage: {
+        completeness: "partial",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [{ candidateId: "earlier-candidate", reason: "Needs investigation." }]
+      }
+    }), `${runtimeLabel}: save an earlier draft`);
+
     const drafted = requireSuccessfulTool(await call(
       "record_codex_security_scan_draft",
       {

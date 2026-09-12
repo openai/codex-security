@@ -8990,7 +8990,11 @@ function componentScanEventLine(
 ): string | null {
   if (event.type === "progress") {
     const progress = event.value;
-    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | Files: ${progress.filesCompleted.toLocaleString("en-US")}/${progress.filesTotal.toLocaleString("en-US")}\n`;
+    const files =
+      progress.filesTotal === 0
+        ? ""
+        : ` | Files: ${progress.filesCompleted.toLocaleString("en-US")}/${progress.filesTotal.toLocaleString("en-US")}`;
+    return `codex-security: ${componentName} ${scanPhase(progress.phase)}${files}\n`;
   }
   if (event.type !== "cost") return null;
   const cost = event.value;

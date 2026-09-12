@@ -216,6 +216,14 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("$3.00 · component scans only");
     expect(frame()).toContain("before deduplication");
     expect(frame().split("\n")).toHaveLength(20);
+    dashboard.recordComponentEvent({
+      componentId: receipts[0]!.id,
+      type: "progress",
+      value: { phase: "reporting", filesCompleted: 0, filesTotal: 0 },
+    });
+    expect(frame()).toContain("writing report");
+    expect(frame()).not.toContain("0/0");
+    expect(frame()).not.toContain("1/10");
     input.emit("data", "\r");
     expect(frame()).toContain("API only activity");
     expect(frame()).not.toContain("Web only activity");
@@ -583,6 +591,24 @@ describe("live scan dashboard", () => {
     expect(timers).toEqual([]);
   });
 
+  test("shows Standard scan phases without a file counter", () => {
+    const stderr = capture(true);
+    const dashboard = new ScanDashboard(stderr.stream, {
+      repository: "/code/juice-shop",
+      clock: fakeClock(),
+    });
+    dashboard.start();
+    dashboard.setStage("validating findings");
+    dashboard.setFiles({
+      phase: "validation",
+      filesCompleted: 0,
+      filesTotal: 0,
+    });
+    expect(lastFrame(stderr)).toContain("validating findings");
+    dashboard.stop();
+    expect(stripVTControlCharacters(stderr.text())).not.toContain("FILES");
+  });
+
   test("hides stage and file counts during Deep scans without wasting screen rows", () => {
     const stderr = capture(true);
     const dashboard = new ScanDashboard(
@@ -874,7 +900,7 @@ describe("live scan dashboard", () => {
 
     input.emit("data", "\u0015");
     let frame = lastFrame(stderr);
-    expect(frame).toContain("3 lines above live");
+    expect(frame).toContain("4 lines above live");
     expect(frame).toContain("finding-13");
     expect(frame).not.toContain("finding-20");
     expect(frame).toContain("Ctrl+C to exit");
@@ -887,7 +913,7 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("above live");
 
     input.emit("data", "\u001B[5~");
-    expect(lastFrame(stderr)).toContain("7 lines above live");
+    expect(lastFrame(stderr)).toContain("8 lines above live");
     input.emit("data", "\u001B[6~");
     expect(lastFrame(stderr)).not.toContain("above live");
     dashboard.stop();

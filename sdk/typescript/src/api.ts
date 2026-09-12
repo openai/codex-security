@@ -1410,19 +1410,27 @@ export class CodexSecurity {
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
       const reportProgress = (progress: ScanProgress): void => {
-        if (
-          scopeFileCount === null ||
-          progress.filesTotal > scopeFileCount ||
-          progress.filesCompleted < reviewedFileCount
-        ) {
-          return;
+        if (skillName === "security-scan" || progress.filesTotal === 0) {
+          progress = {
+            phase: progress.phase,
+            filesCompleted: 0,
+            filesTotal: 0,
+          };
+        } else {
+          if (
+            scopeFileCount === null ||
+            progress.filesTotal > scopeFileCount ||
+            progress.filesCompleted < reviewedFileCount
+          )
+            return;
+          reviewedFileCount = progress.filesCompleted;
+          progress = { ...progress, filesTotal: scopeFileCount };
         }
-        reviewedFileCount = progress.filesCompleted;
         notifyObserver(
           "onProgress",
           options.onProgress,
           options.onObserverError,
-          { ...progress, filesTotal: scopeFileCount },
+          progress,
         );
       };
       const reportTrackingError = (error: unknown): void => {
@@ -1711,17 +1719,12 @@ export class CodexSecurity {
           : null;
       if (scopeFileCount !== null) {
         tracker.setExpectedFilesTotal(scopeFileCount);
-        notifyObserver(
-          "onProgress",
-          options.onProgress,
-          options.onObserverError,
-          {
-            phase: "preflight",
-            filesCompleted: 0,
-            filesTotal: scopeFileCount,
-          },
-        );
       }
+      reportProgress({
+        phase: "preflight",
+        filesCompleted: 0,
+        filesTotal: scopeFileCount ?? 0,
+      });
       activeScan = { id: scanId, options: workbenchOptions };
       if (mode === "deep" && options.onDeepProgress !== undefined) {
         let progressWarningReported = false;
@@ -1804,7 +1807,7 @@ export class CodexSecurity {
       }
       checkOpen();
       let prompt =
-        scopeFileCount === null
+        skillName === "security-scan" || scopeFileCount === null
           ? basePrompt
           : `${basePrompt}\nThe SDK's current in-scope file-count estimate is ${scopeFileCount}; use it for scan progress unless exact scoped-source enumeration establishes a different total before review begins.`;
       if (options.resumeScanId !== undefined) {
@@ -1978,12 +1981,11 @@ export class CodexSecurity {
               falsePositives: falsePositiveExamples,
               signal,
               run: async (validationPrompt, outputSchema) => {
-                if (scopeFileCount !== null)
-                  reportProgress({
-                    phase: "validation",
-                    filesCompleted: reviewedFileCount,
-                    filesTotal: scopeFileCount,
-                  });
+                reportProgress({
+                  phase: "validation",
+                  filesCompleted: reviewedFileCount,
+                  filesTotal: scopeFileCount ?? 0,
+                });
                 const validationThread = codex.startThread({
                   threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
                   workingDirectory: join(scanDir, "artifacts"),
@@ -2082,6 +2084,7 @@ export class CodexSecurity {
         onProgress: (progress) => {
           if (
             progress.phase === "discovery" &&
+            progress.filesTotal > 0 &&
             progress.filesCompleted === 0 &&
             reviewedFileCount === 0 &&
             progress.filesTotal !== scopeFileCount
@@ -3683,6 +3686,7 @@ export async function runScanEvents(
         for (const progress of scanProgressUpdatesFromEvent(event)) {
           if (
             options.expectedFilesTotal !== undefined &&
+            progress.filesTotal > 0 &&
             progress.filesTotal !== options.expectedFilesTotal
           ) {
             continue;
@@ -3987,8 +3991,7 @@ function scanPrompt(
     'Use exactly "codex-security-plugin" as scan.producer.name.',
     ...(skillName === "security-scan"
       ? [
-          'At discovery start, after meaningful completed-review batches, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line using the best established file total and actual fully reviewed file count. Do not create inventories or receipts solely for progress.',
-          "Collect truthful completed-review counts from delegated workers; the parent owns global progress updates.",
+          'At each phase change, the parent must emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery"} line in an agent message. Use the current phase: preflight, threat_model, discovery, validation, attack_path, or reporting. Do not include file counts or ask workers to send these updates.',
         ]
       : [
           'After the file inventory, after each fully reviewed file batch, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line in a completed command output or agent message. Use the actual phase and file counts. Never count unread or partially reviewed files.',

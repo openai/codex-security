@@ -228,13 +228,18 @@ async function testConcurrentParentDraftsPreserveBothCheckpoints() {
         runWorkbench,
       )
     ]);
-    assert.equal(stagedWrites, 3, "the stale writer retries after the host rejects its digest");
+    assert.equal(stagedWrites, 2);
 
     const coverage = JSON.parse(await readFile(path.join(run.scanDir, "coverage.json"), "utf8"));
+    assert.equal(coverage.deferred.length, 1, "the current draft is one submitted snapshot");
+    assert.ok(["concurrent-a", "concurrent-b"].includes(coverage.deferred[0].candidateId));
+
+    await rawRunWorkbench(["cancel-scan", "--scan-id", run.scanId, "--thread-id", "concurrent-draft-owner"]);
+    const recovered = JSON.parse(await readFile(path.join(run.scanDir, "coverage.json"), "utf8"));
     assert.deepEqual(
-      new Set(coverage.deferred.map((item) => item.candidateId)),
+      new Set(recovered.deferred.map((item) => item.candidateId).filter(Boolean)),
       new Set(["concurrent-a", "concurrent-b"]),
-      "overlapping canonical writes must merge every immutable checkpoint",
+      "interruption recovery retains work from both saved checkpoints",
     );
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });

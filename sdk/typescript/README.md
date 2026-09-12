@@ -209,6 +209,10 @@ protections as the CLI. The SDK records `failureSeverity` without throwing or
 changing process status. `hasFindingsAtOrAbove()` uses the CLI's severity ordering
 and leaves the findings unchanged.
 
+The scan's `onProgress` callback reports its current phase. Standard scans do
+not count reviewed files and return zero for `filesCompleted` and `filesTotal`.
+When `filesTotal` is zero, show the phase without a file counter.
+
 ## Authentication
 
 Sign in with ChatGPT:
@@ -1493,9 +1497,8 @@ does not update campaign receipts.
 #### Matching saved scans
 
 Matching requires sealed artifacts and reuses saved matches unless you pass
-`--force`. Comparisons classify findings as new, persisting, reopened, resolved,
-or unknown. Missing findings aren't resolved if the later scan is incomplete
-or excludes their original scope. With one ID, `scans compare` compares it
+`--force`. Comparisons classify findings as new, persisting, reopened, or unknown. A finding
+that is absent from a later scan is unknown; its absence does not verify a fix. With one ID, `scans compare` compares it
 to the latest completed scan.
 
 Use `scans match --all --force` to rebuild comparisons chronologically while

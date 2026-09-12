@@ -1812,6 +1812,19 @@ describe("live scan cost tracking", () => {
     tracker.start("scan-thread");
     await tracker.refresh();
 
+    await appendSessionItem(worker, {
+      type: "message",
+      role: "assistant",
+      content: [
+        {
+          type: "output_text",
+          text: 'CODEX_SECURITY_SCAN_PROGRESS {"phase":"reporting"}',
+        },
+      ],
+    });
+    await tracker.refresh();
+    expect(updates).toEqual([]);
+
     await appendSessionItem(worker, progressMessage(3, 1_249));
     await tracker.refresh();
 

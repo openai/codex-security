@@ -144,7 +144,9 @@ For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repe
 | `directory`        | Deterministic non-Git directory inventory                 |
 | `custom`           | Producer-defined inventory described by detailed receipts |
 
-For Standard and diff scans, use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
+For Standard and diff scans, use `partial` for known unfinished work and `unknown` otherwise. Scan completion describes execution, not exhaustive source review.
+
+Each `record_codex_security_scan_draft` call saves the full submitted result. Successful completion validates and seals that result without merging earlier checkpoints into it. Earlier checkpoints remain available for interrupted-scan recovery.
 
 Map detailed ledger closure into completed surface summaries in this order:
 
