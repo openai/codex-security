@@ -799,6 +799,12 @@ four workers. Unknown keys are rejected.
 `max_time_hours` accepts positive values up to 96, including fractional hours.
 At the deadline, discovery stops; the scan combines and returns completed findings.
 
+New Deep scans save the accepted aggregate before publishing the result. If
+publication is interrupted, recovering the same scan reuses that aggregate and
+its original stop reason without another discovery or reducer run. Explicit
+cancellation and cost stops retain their stopped or partial-result behavior.
+Scans created by earlier versions keep their original workflow when resumed.
+
 `scan --workers` controls discovery workers within one deep scan;
 `bulk-scan --workers` controls how many repositories are scanned concurrently.
 

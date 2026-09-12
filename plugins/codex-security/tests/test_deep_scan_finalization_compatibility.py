@@ -10,6 +10,38 @@ import pytest
 from workbench_test_support import run_workbench
 
 
+@pytest.mark.parametrize("legacy_version", [None, "deep-security-scan/v1", "deep-scan-mcp/v1"])
+def test_new_workflow_default_preserves_existing_run_version(
+    tmp_path: Path, legacy_version: str | None
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    created = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--thread-id",
+        "fixture-thread",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(tmp_path / "scans"),
+        *(["--workflow-version", legacy_version] if legacy_version else []),
+    )["deepScan"]
+    expected_version = legacy_version or "deep-security-scan/v2"
+    assert created["workflowVersion"] == expected_version
+    resumed = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--scan-id",
+        created["scanId"],
+        "--thread-id",
+        "fixture-thread",
+    )["deepScan"]
+    assert resumed["workflowVersion"] == expected_version
+    assert resumed["createdAt"] == created["createdAt"]
+
+
 def selected_scan(tmp_path: Path, version: int) -> tuple[Path, str, dict[str, object]]:
     target = tmp_path / "target"
     target.mkdir()

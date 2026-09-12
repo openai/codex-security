@@ -39,11 +39,11 @@ DEEP_SCAN_REPLACEABLE_FAILURE_KINDS = (
     "invalid_discovery_artifacts",
 )
 DEEP_SCAN_TERMINAL_REASONS = ("saturated", "capped")
-DEEP_SCAN_WORKFLOW_VERSION = "deep-security-scan/v1"
+DEEP_SCAN_WORKFLOW_VERSION = "deep-security-scan/v2"
 SUPPORTED_DEEP_SCAN_WORKFLOWS = {
     DEEP_SCAN_WORKFLOW_VERSION,
     "deep-scan-mcp/v1",
-    "deep-security-scan/v2",
+    "deep-security-scan/v1",
 }
 DEEP_SCAN_COORDINATOR_LEASE_SECONDS = 30
 DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS = 120
