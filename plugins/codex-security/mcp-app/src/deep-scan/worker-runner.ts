@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
-import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
+import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
   validateDiscoveryArtifacts,
   validateReducerArtifacts
@@ -305,7 +305,7 @@ export class DeepScanWorkerRunner {
     };
     // Snapshot inputs before execution: direct file output has the same
     // conservation checks as the MCP writer without rereading consumed sources.
-    const sources = await getCodexSecurityDeepReducerInputs(artifactContext);
+    const sources = await readDeepReductionSources(artifactContext);
     let reducerValidation: ReducerArtifactValidation | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId: reducerId,

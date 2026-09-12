@@ -7,7 +7,7 @@ import {
   writeJsonAtomic
 } from "./artifacts.js";
 import { aggregateSourceCoverage, deepReductionToScanDraft, validateDiscoveryArtifacts, validateReducerArtifacts, type DeepReductionInput } from "./artifact-validation.js";
-import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
+import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
   scanDraftInputSchema,
   type DeepScanPublication,
@@ -983,7 +983,7 @@ export class DeepScanCoordinator {
             })),
           },
         };
-        const sources = await getCodexSecurityDeepReducerInputs(context);
+        const sources = await readDeepReductionSources(context);
         result.sourceCoverage = aggregateSourceCoverage(sources.discoveries, latestResult ?? null);
         await saveScanDraftCheckpoint(context, result);
         await writeJsonAtomic(worker.resultManifestPath, result);

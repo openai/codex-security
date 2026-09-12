@@ -14,7 +14,8 @@ const bundled = await build({
 const {
   deepReducerInputsInputSchema,
   deepReductionInputSchema,
-  getCodexSecurityDeepReducerInputs,
+  getCodexSecurityDeepReducerInputs: getModelInputs,
+  readDeepReductionSources: getCodexSecurityDeepReducerInputs,
   recordCodexSecurityDeepReduction
 } = await import(
   "data:text/javascript;base64,"
@@ -136,6 +137,10 @@ try {
   });
   assert.equal(inputs.discoveries[0].coverage.completeness, "partial");
   assert.equal(inputs.discoveries[1].coverage.completeness, "unknown");
+  assert.deepEqual(await getModelInputs(context), {
+    discoveries: inputs.discoveries.map(({ workerId, result }) => ({ workerId, result })),
+    previous: null,
+  }, "coverage accounting does not change reducer model inputs");
   assert.deepEqual(inputs.discoveries[0].coverage.deferred[0].provenance,
     { workerId: first.id, candidateId: "candidate-upload" });
   assert.deepEqual(inputs.discoveries[0].coverage.surfaces[0].receiptRefs,
@@ -249,6 +254,9 @@ try {
     }
   };
   const nextInputs = await getCodexSecurityDeepReducerInputs(nextContext);
+  const { sourceCoverage, ...previousModelInput } = mergedWithSources;
+  assert.deepEqual((await getModelInputs(nextContext)).previous, previousModelInput,
+    "host coverage metadata is excluded from the previous model input too");
   assert.deepEqual({ ...nextInputs, discoveries: nextInputs.discoveries.map(({ coverage, ...source }) => source) }, {
     discoveries: [{ workerId: third.id, result: withSourceRefs(third) }],
     previous: mergedWithSources

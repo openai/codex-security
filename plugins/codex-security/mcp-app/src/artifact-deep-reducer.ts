@@ -56,6 +56,18 @@ interface BoundReducer {
 export async function getCodexSecurityDeepReducerInputs(
   context: ArtifactContext
 ): Promise<DeepReductionSources> {
+  const inputs = await readDeepReductionSources(context);
+  const { sourceCoverage: _coverage, ...previous } = inputs.previous ?? {};
+  return {
+    discoveries: inputs.discoveries.map(({ workerId, result }) => ({ workerId, result })),
+    previous: inputs.previous === null ? null : previous as DeepReductionInput,
+  };
+}
+
+/** Capture host coverage alongside the reducer's immutable finding inputs. */
+export async function readDeepReductionSources(
+  context: ArtifactContext
+): Promise<DeepReductionSources> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
     const discoveries = await Promise.all(bound.state.claimedWorkers.map(async (worker) => {
@@ -113,7 +125,7 @@ export async function recordCodexSecurityDeepReduction(
     const submitted = deepReductionInputSchema.parse(input);
     let reduction = parseDeepReduction(submitted);
     if (reduction.complete === false) throw new Error("Deep reduction is only a checkpoint, not a complete result.");
-    const inputs = await getCodexSecurityDeepReducerInputs(context);
+    const inputs = await readDeepReductionSources(context);
     const expectedScanId = bound.scanId
       ?? inputs.previous?.scanId
       ?? inputs.discoveries[0]?.result.scanId;
