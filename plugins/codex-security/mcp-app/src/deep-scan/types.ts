@@ -167,8 +167,17 @@ export interface DeepScanStore {
     artifactDir: string;
   }): Promise<void>;
   commitDedup(commit: DedupCommit): Promise<DeepScanRunState>;
+  selectFinalization?(input: {
+    scanId: string;
+    coordinatorGeneration?: number;
+    reason: DeepScanTerminalReason;
+    manifestPath: string;
+    resultPath?: string;
+    omittedWorkerIds: string[];
+  }): Promise<DeepScanRunState>;
   finish(input: {
     scanId: string;
+    coordinatorGeneration?: number;
     reason: DeepScanTerminalReason;
     manifestPath: string;
     stagedManifestPath?: string;

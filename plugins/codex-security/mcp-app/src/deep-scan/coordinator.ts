@@ -1,3 +1,4 @@
+import { publishSelectedDeepScan } from "./finalization.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -152,7 +153,7 @@ export class DeepScanCoordinator {
     if (this.started) return;
     this.started = true;
     this.log({ event: "coordinator_started", scanId: this.state.scanId });
-    this.scheduleDiscoveryDeadline();
+    if (!this.state.finalizationInput) this.scheduleDiscoveryDeadline();
     this.scheduleHeartbeat();
     void this.run().catch((error: unknown) => {
       this.log({
@@ -265,10 +266,27 @@ export class DeepScanCoordinator {
       await ensureDeepScanDirectories(this.artifacts);
       if (this.canceled || this.externallyFailed) return;
 
+      if (this.state.finalizationInput) {
+        this.phase = "terminal";
+        await this.completeSelectedFinalization();
+        return;
+      }
       this.phase = "discovery";
       const schedulerResult = await this.runScheduler();
       if (this.canceled || this.externallyFailed) return;
       this.phase = "terminal";
+      if (this.state.workflowVersion === "deep-security-scan/v2") {
+        if (!this.options.store.selectFinalization) throw new Error("The Deep Scan store cannot select finalization input.");
+        this.state = await this.options.store.selectFinalization({
+          scanId: this.state.scanId,
+          reason: schedulerResult.reason,
+          manifestPath: join(this.state.scanDir, "scan-manifest.json"),
+          resultPath: schedulerResult.resultPath,
+          omittedWorkerIds: schedulerResult.omittedWorkerIds,
+        });
+        await this.completeSelectedFinalization();
+        return;
+      }
       const draft = schedulerResult.result
         ? deepReductionToScanDraft(schedulerResult.result)
         : scanDraftInputSchema.parse({
@@ -291,7 +309,12 @@ export class DeepScanCoordinator {
         resultPath: schedulerResult.resultPath ?? null,
       });
       if (this.canceled || this.externallyFailed) return;
-      this.state = await this.finishWithReplay(schedulerResult);
+      this.state = await this.options.store.finish({
+        scanId: this.state.scanId,
+        reason: schedulerResult.reason,
+        manifestPath: join(this.state.scanDir, "scan-manifest.json"),
+        omittedWorkerIds: schedulerResult.omittedWorkerIds,
+      });
       if (this.canceled || this.externallyFailed) return;
       this.log({
         event: "coordinator_terminal",
@@ -309,6 +332,12 @@ export class DeepScanCoordinator {
         isStaleCoordinatorGenerationError(error)
       )) {
         await this.settleSchedulerWork();
+        return;
+      }
+      if (this.state.finalizationInput) {
+        // Publication can be retried from the committed input without model work.
+        this.log({ event: "coordinator_publication_pending", scanId: this.state.scanId, reason: errorKind(error) });
+        this.failLocally(error);
         return;
       }
       const message = errorMessage(error);
@@ -405,6 +434,17 @@ export class DeepScanCoordinator {
       if (this.canceled) this.state = { ...this.state, status: "canceled" };
       this.finishLocally(this.state);
     }
+  }
+
+  private async completeSelectedFinalization(): Promise<void> {
+    this.state = await publishSelectedDeepScan({
+      run: this.state,
+      artifacts: this.artifacts,
+      signal: this.publicationAbortController.signal,
+      publish: async (...args) => { await this.options.onComplete?.(...args); },
+      finish: (input) => this.options.store.finish(input),
+    });
+    this.finishLocally(this.state);
   }
 
   private finishLocally(state: DeepScanRunState): void {
@@ -530,7 +570,12 @@ export class DeepScanCoordinator {
       && this.state.coordinatorGeneration !== undefined
       && current.coordinatorGeneration > this.state.coordinatorGeneration
     );
-    if (current.status === "running" && !replacementConfirmed) return false;
+    if (current.status === "running" && !replacementConfirmed) {
+      // A selection response can be lost after its transaction commits.
+      if (current.finalizationInput) this.state = { ...this.state,
+        finalizationInput: current.finalizationInput, terminalReason: current.terminalReason };
+      return false;
+    }
 
     this.externallyFailed = true;
     this.abortController.abort("deep_scan_coordinator_lease_lost");
@@ -1039,36 +1084,7 @@ export class DeepScanCoordinator {
     });
   }
 
-  /**
-   * A workbench process can commit SQLite and still lose its stdout response.
-   * Replay the exact idempotent finish once before treating the run as failed;
-   * otherwise we could overwrite a successful terminal state after durable success.
-   */
-  private async finishWithReplay(result: SchedulerResult): Promise<DeepScanRunState> {
-    const input = {
-      scanId: this.state.scanId,
-      reason: result.reason,
-      manifestPath: join(this.state.scanDir, "scan-manifest.json"),
-      omittedWorkerIds: result.omittedWorkerIds
-    };
-    try {
-      return await this.options.store.finish(input);
-    } catch (firstError) {
-      this.log({
-        event: "coordinator_finish_replay",
-        scanId: this.state.scanId,
-        reason: errorKind(firstError)
-      });
-      try {
-        return await this.options.store.finish(input);
-      } catch (replayError) {
-        throw new Error(
-          `Deep Scan terminal persistence replay failed: ${errorMessage(replayError)}`,
-          { cause: firstError }
-        );
-      }
-    }
-  }
+
 }
 
 const systemClock: DeepScanClock = {

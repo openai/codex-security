@@ -28,7 +28,8 @@ import type {
 type JsonObject = Record<string, unknown>;
 export type WorkbenchRunner = (
   args: string[],
-  input?: string
+  input?: string,
+  selectFinalization?: boolean,
 ) => Promise<JsonObject>;
 
 const WORKFLOW_VERSION = "deep-scan-mcp/v1";
@@ -303,8 +304,32 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
     ], true));
   }
 
+  async selectFinalization(input: {
+    scanId: string;
+    coordinatorGeneration?: number;
+    reason: DeepScanTerminalReason;
+    manifestPath: string;
+    resultPath?: string;
+    omittedWorkerIds: string[];
+  }): Promise<DeepScanRunState> {
+    return parseDeepScan(await this.enqueueWrite([
+      "finish-deep-scan",
+      "--scan-id",
+      input.scanId,
+      ...(input.coordinatorGeneration === undefined
+        ? this.coordinatorLeaseArgs(input.scanId)
+        : ["--coordinator-generation", String(input.coordinatorGeneration)]),
+      "--terminal-reason",
+      input.reason,
+      "--manifest-path",
+      input.manifestPath,
+      ...input.omittedWorkerIds.flatMap((workerId) => ["--omitted-worker-id", workerId])
+    ], true, JSON.stringify({ resultPath: input.resultPath ?? null }), true));
+  }
+
   async finish(input: {
     scanId: string;
+    coordinatorGeneration?: number;
     reason: DeepScanTerminalReason;
     manifestPath: string;
     stagedManifestPath?: string;
@@ -314,7 +339,9 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
       "finish-deep-scan",
       "--scan-id",
       input.scanId,
-      ...this.coordinatorLeaseArgs(input.scanId),
+      ...(input.coordinatorGeneration === undefined
+        ? this.coordinatorLeaseArgs(input.scanId)
+        : ["--coordinator-generation", String(input.coordinatorGeneration)]),
       "--terminal-reason",
       input.reason,
       "--manifest-path",
@@ -407,13 +434,14 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
   private enqueueWrite(
     args: string[],
     retryTransientFailure = false,
-    input?: string
+    input?: string,
+    selectFinalization = false,
   ): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {
         return retryTransientFailure
-          ? await this.runIdempotentPersistence(args)
-          : await this.runWorkbench(args, input);
+          ? await this.runIdempotentPersistence(args, input, selectFinalization)
+          : await this.runWorkbench(args, input, selectFinalization);
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");
         if (scanId && isStaleCoordinatorGenerationError(error)) {
@@ -430,11 +458,11 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
   }
 
   /** Replay only existing, same-identity workbench mutations after transient failures. */
-  private async runIdempotentPersistence(args: string[]): Promise<JsonObject> {
+  private async runIdempotentPersistence(args: string[], input?: string, selectFinalization = false): Promise<JsonObject> {
     const startedAt = Date.now();
     for (let attempt = 1; attempt <= MAX_IDEMPOTENT_PERSISTENCE_ATTEMPTS; attempt += 1) {
       try {
-        return await this.runWorkbench(args);
+        return await this.runWorkbench(args, input, selectFinalization);
       } catch (error) {
         if (!isTransientPersistenceError(error)) {
           throw error;

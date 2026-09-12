@@ -811,12 +811,26 @@ export function createCodexSecurityServer(): McpServer {
       invocationFailure: toolErrorResult(deepScanInvocationFailureMessage(error))
     }));
     if ("invocationFailure" in preparation) return preparation.invocationFailure;
-    if (preparation.immediate) return preparation.immediate;
+    const completeSelectedParent = async (run: DeepScanRunState) => {
+      if (run.finalizationInput && run.status === "succeeded") {
+        await runWorkbench([
+          "complete-scan", "--scan-id", run.scanId, "--thread-id", threadId,
+          ...optionalArg("--claim-token", handoffClaimToken),
+        ]);
+      }
+    };
+    if (preparation.immediate) {
+      try { await completeSelectedParent(preparation.begun.run); }
+      catch (error) { return toolErrorResult(deepScanInvocationFailureMessage(error)); }
+      return preparation.immediate;
+    }
     const { begun, coordinator, joined } = preparation;
     if (joined) {
       logDeepScanEvent({ event: "coordinator_joined", scanId: begun.run.scanId });
     }
     const terminal = await coordinator.wait(abortSignalFromExtra(extra));
+    try { await completeSelectedParent(terminal); }
+    catch (error) { return toolErrorResult(deepScanInvocationFailureMessage(error)); }
     const result = deepScanTerminalResult(terminal);
     if (!result) {
       return toolErrorResult(deepScanInvocationFailureMessage(
@@ -1647,12 +1661,13 @@ function logDeepScanEvent(event: {
 
 async function runWorkbench(
   args: string[],
-  input?: string | Buffer
+  input?: string | Buffer,
+  selectFinalization = false,
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
-    return await executeWorkbenchWithStateSelection(pythonCommand, args, input);
+    return await executeWorkbenchWithStateSelection(pythonCommand, args, input, selectFinalization);
   } catch (error) {
     const launchError = pythonCommand
       ? missingPythonHelperMessage(error, pythonCommand)
@@ -1670,36 +1685,37 @@ async function runWorkbench(
 async function executeWorkbenchWithStateSelection(
   pythonCommand: string,
   args: string[],
-  input?: string | Buffer
+  input?: string | Buffer,
+  selectFinalization = false,
 ): Promise<JsonObject> {
   if (WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "")) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
+    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization);
   }
   if (CONFIGURED_WORKBENCH_STATE_DIR) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
+    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization);
   }
   if (fallbackWorkbenchStateDir) {
-    return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input);
+    return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input, selectFinalization);
   }
   if (persistentWorkbenchStateSucceeded) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
+    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization);
   }
   return await withWorkbenchStateSelectionLock(async () => {
     if (fallbackWorkbenchStateDir) {
-      return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input);
+      return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input, selectFinalization);
     }
     if (persistentWorkbenchStateSucceeded) {
-      return await executeWorkbench(pythonCommand, args, undefined, input);
+      return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization);
     }
     try {
-      const result = await executeWorkbench(pythonCommand, args, undefined, input);
+      const result = await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization);
       persistentWorkbenchStateSucceeded = true;
       return result;
     } catch (error) {
       if (!isUnwritableSqliteOpenError(error)) throw error;
       const fallbackStateDir = await pinFallbackWorkbenchStateDir();
       logWorkbenchStateFallback();
-      return await executeWorkbench(pythonCommand, args, fallbackStateDir, input);
+      return await executeWorkbench(pythonCommand, args, fallbackStateDir, input, selectFinalization);
     }
   });
 }
@@ -1722,7 +1738,8 @@ async function executeWorkbench(
   pythonCommand: string,
   args: string[],
   stateDir?: string,
-  input?: string | Buffer
+  input?: string | Buffer,
+  selectFinalization = false,
 ): Promise<JsonObject> {
   const userContextIndex = args.indexOf("--user-context");
   const userContext = userContextIndex === -1 ? undefined : args[userContextIndex + 1];
@@ -1731,7 +1748,10 @@ async function executeWorkbench(
     workbenchArgs.splice(userContextIndex, 2, "--user-context-stdin");
   }
   const workbenchInput = input ?? userContext;
-  const execution = execFileAsync(pythonCommand, [workbenchScriptPath(), ...workbenchArgs], {
+  const pythonArgs = selectFinalization
+    ? ["-c", "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](select_finalization=True)", workbenchScriptPath(), ...workbenchArgs]
+    : [workbenchScriptPath(), ...workbenchArgs];
+  const execution = execFileAsync(pythonCommand, pythonArgs, {
     cwd: PLUGIN_ROOT,
     env: stateDir
       ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }

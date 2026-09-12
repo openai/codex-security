@@ -3404,7 +3404,7 @@ _WORKBENCH_DB_CONTEXT = saved_results.WorkbenchDbContext(
 )
 
 
-def main() -> None:
+def main(*, select_finalization: bool = False) -> None:
     # Workbench callers send UTF-8 even when Windows uses a legacy code page.
     sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__)
@@ -3479,7 +3479,7 @@ def main() -> None:
         elif args.command == "commit-deep-scan-dedup":
             result = deep_scan.commit_deep_scan_dedup(connection, args)
         elif args.command == "finish-deep-scan":
-            result = deep_scan.finish_deep_scan(connection, args)
+            result = deep_scan.finish_deep_scan(connection, args, select_finalization)
         elif args.command == "fail-deep-scan":
             result = deep_scan.fail_deep_scan(connection, args)
         elif args.command == "record-deep-scan-publication-failure":

@@ -321,6 +321,7 @@ async function testReducerCommitAndFinishAgainstRealWorkbench() {
     CODEX_SECURITY_STATE_DIR: stateDir
   };
   const python = process.env.PYTHON?.trim() || "python3";
+  const finishCalls = [];
   const runWorkbench = async (args) => {
     const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
       cwd: pluginRoot,
@@ -328,6 +329,12 @@ async function testReducerCommitAndFinishAgainstRealWorkbench() {
       maxBuffer: 4 * 1024 * 1024,
       timeout: 30_000
     });
+    if (args[0] === "finish-deep-scan") {
+      finishCalls.push([...args]);
+      if (finishCalls.length === 1) {
+        throw Object.assign(new Error("Synthetic lost committed finish response"), { code: "ETIMEDOUT" });
+      }
+    }
     return JSON.parse(stdout);
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
@@ -508,6 +515,8 @@ async function testReducerCommitAndFinishAgainstRealWorkbench() {
       omittedWorkerIds: [late.id]
     });
     assert.equal(finished.status, "succeeded");
+    assert.equal(finishCalls.length, 2);
+    assert.deepEqual(finishCalls[1], finishCalls[0]);
     assert.equal(finished.terminalReason, "saturated");
     assert.equal(finished.manifestPath, manifestPath);
 

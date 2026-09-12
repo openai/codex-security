@@ -108,5 +108,6 @@ const runtimeModule = new Module(loaderPath);
 runtimeModule.filename = loaderPath;
 runtimeModule.paths = Module._nodeModulePaths(dirname(loaderPath));
 runtimeModule._compile(runtimeSource, loaderPath);
+export default runtimeModule.exports;
 `;
 }

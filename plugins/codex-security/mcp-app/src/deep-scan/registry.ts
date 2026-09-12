@@ -231,22 +231,25 @@ async function startClaimedCoordinator(
   run: DeepScanRunState
 ): Promise<DeepScanCoordinator> {
   requireSupportedDeepScan(run);
-  const executor = options.prepareExecutor
+  const executor = options.prepareExecutor && !run.finalizationInput
     ? await options.prepareExecutor(run)
     : options.executor;
   return registry.start({ ...options, executor, run });
 }
 
 function requireSupportedDeepScan(run: DeepScanRunState): void {
-  if (run.finalizationInput !== undefined) {
-    throw new Error("This executor does not support resuming selected Deep Scan finalization.");
+  if (run.finalizationInput !== undefined && (
+    run.workflowVersion !== "deep-security-scan/v2" || run.finalizationInput.version !== 1
+  )) {
+    throw new Error("This executor does not support this Deep Scan finalization input version.");
   }
   // Missing versions are supported for older adapters that did not project them.
   if (
     (run.schemaVersion !== undefined && run.schemaVersion !== 1)
     || (run.workflowVersion !== undefined
       && run.workflowVersion !== "deep-security-scan/v1"
-      && run.workflowVersion !== "deep-scan-mcp/v1")
+      && run.workflowVersion !== "deep-scan-mcp/v1"
+      && run.workflowVersion !== "deep-security-scan/v2")
   ) {
     throw new Error(
       "This Deep Scan uses an unsupported workflow or schema version. "

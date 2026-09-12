@@ -1540,6 +1540,11 @@ def _require_current_deep_publication(
         ).fetchall()
     )
     selected_result = reducer["result_manifest_path"] if reducer is not None else None
+    finalization = db.deep_scan.deep_scan_finalization_input(run)
+    if finalization is not None:
+        selected = finalization["resultPath"]
+        scan = db.require_scan(connection, scan_id)
+        selected_result = str(Path(scan["scan_dir"]) / selected) if selected is not None else None
     if publication["resultPath"] != selected_result:
         raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
 

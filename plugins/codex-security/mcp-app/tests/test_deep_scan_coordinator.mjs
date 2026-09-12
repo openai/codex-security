@@ -1362,12 +1362,13 @@ async function testFinishPersistenceFailureRewritesManifestAsFailure() {
   await assertFailureManifest(terminal, "terminal");
 }
 
-async function testLostFinishResponseReplaysWithoutOverwritingSuccessManifest() {
+async function testLostFinishResponseObservesCommitWithoutOverwritingSuccessManifest() {
   const fixture = await fixtureRun({ workers: 1, subagents: 0, stopAfterNoNew: 1, maxDiscoveryRuns: 1 });
   const store = new FakeStore(fixture.run);
   store.loseFirstFinishResponseAfterCommit = true;
   const coordinator = new DeepScanCoordinator({
     run: fixture.run,
+    threadId: "original-parent-thread",
     store,
     executor: new FakeExecutor({ dedupNewFindings: [0] }),
     pluginRoot: fixture.pluginRoot,
@@ -1377,8 +1378,7 @@ async function testLostFinishResponseReplaysWithoutOverwritingSuccessManifest() 
 
   const terminal = await coordinator.wait(undefined, 5_000);
   assert.equal(terminal?.status, "succeeded");
-  assert.equal(store.finishCalls.length, 2);
-  assert.deepEqual(store.finishCalls[1], store.finishCalls[0]);
+  assert.equal(store.finishCalls.length, 1);
   assert.equal(store.failCalls, 0);
   const manifest = JSON.parse(await readFile(terminal.manifestPath, "utf8"));
   assert.equal(manifest.scan.scanId, fixture.run.scanId);
@@ -3997,7 +3997,7 @@ try {
   await testConfigurationFailureDoesNotRetry();
   await testFailureManifestWriteDoesNotMaskOriginalError();
   await testFinishPersistenceFailureRewritesManifestAsFailure();
-  await testLostFinishResponseReplaysWithoutOverwritingSuccessManifest();
+  await testLostFinishResponseObservesCommitWithoutOverwritingSuccessManifest();
   await testLostWorkerCommitResponsesReplayIdempotently();
   await testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest();
   await testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary();

@@ -1767,7 +1767,17 @@ def commit_deep_scan_dedup_locked(
     return deep_scan_result(connection, scan_id)
 
 
-def finish_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+def finish_deep_scan(
+    connection: sqlite3.Connection, args: argparse.Namespace, select_finalization: bool = False
+) -> dict[str, Any]:
+    if select_finalization:
+        import sys
+
+        args = argparse.Namespace(
+            **vars(args),
+            select_finalization=True,
+            finalization_result_path=json.load(sys.stdin)["resultPath"],
+        )
     scan_id = require_uuid(args.scan_id, "scan-id")
     with scan_completion_lock(scan_id):
         return finish_deep_scan_locked(connection, args, scan_id)
@@ -1781,15 +1791,26 @@ def finish_deep_scan_locked(
     ]
     if len(set(omitted_worker_ids)) != len(omitted_worker_ids):
         raise SystemExit("Omitted Deep Scan worker IDs must be unique.")
+    selecting = getattr(args, "select_finalization", False)
     promotion: tuple[Path, Path, Path | None] | None = None
     connection.execute("BEGIN IMMEDIATE")
     try:
         run = require_deep_scan_run(connection, scan_id)
         require_current_coordinator(run, args)
         scan = require_scan(connection, scan_id)
+        if selecting and run["workflow_version"] != "deep-security-scan/v2":
+            raise SystemExit("Selected finalization requires the supported v2 workflow.")
+        finalization = deep_scan_finalization_input(run)
+        if finalization is not None and (
+            args.terminal_reason != finalization["terminalReason"]
+            or omitted_worker_ids != finalization["omittedWorkerIds"]
+        ):
+            raise SystemExit(
+                "Deep Scan finalization must retain its selected reason and omissions."
+            )
         manifest_path = (
             deep_scan_output_path(scan, args.manifest_path, "Deep Scan coordinator manifest path")
-            if args.staged_manifest_path
+            if args.staged_manifest_path or selecting
             else deep_scan_path(
                 scan, args.manifest_path, "Deep Scan coordinator manifest path", kind="file"
             )
@@ -1799,6 +1820,7 @@ def finish_deep_scan_locked(
         failure_capped = False
         if (
             standard_scan_manifest
+            and not selecting
             and args.terminal_reason == "capped"
             and (run["status"] == "running" or omitted_worker_ids)
         ):
@@ -1905,7 +1927,10 @@ def finish_deep_scan_locked(
                 "Deep Scan cannot finish capped before reaching its configured maximum."
             )
         canonical_artifacts = None
-        if standard_scan_manifest:
+        if selecting:
+            if not standard_scan_manifest:
+                raise SystemExit("Selected Deep Scan finalization requires the parent manifest.")
+        elif standard_scan_manifest:
             for artifact_name in ("scan-manifest.json", "findings.json", "coverage.json"):
                 deep_scan_path(
                     scan,
@@ -2009,6 +2034,17 @@ def finish_deep_scan_locked(
                 f"Deep Scan {args.terminal_reason} completion must exactly identify all buffered discovery "
                 "workers with --omitted-worker-id."
             )
+        if selecting:
+            selection = selected_deep_scan_finalization(
+                connection, run, scan, args, omitted_worker_ids, zero_discovery_deadline
+            )
+            connection.execute(
+                "UPDATE deep_scan_runs SET finalization_input_json = ?, terminal_reason = ?, "
+                "phase = 'terminal', updated_at = ? WHERE scan_id = ?",
+                (json.dumps(selection), selection["terminalReason"], now(), scan_id),
+            )
+            connection.commit()
+            return deep_scan_result(connection, scan_id)
         if args.staged_manifest_path:
             staged_manifest_path = deep_scan_path(
                 scan,
@@ -2037,6 +2073,60 @@ def finish_deep_scan_locked(
     if promotion is not None:
         finish_staged_file(promotion)
     return deep_scan_result(connection, scan_id)
+
+
+def selected_deep_scan_finalization(
+    connection: sqlite3.Connection,
+    run: sqlite3.Row,
+    scan: sqlite3.Row,
+    args: argparse.Namespace,
+    omitted_worker_ids: list[str],
+    zero_discovery_deadline: bool,
+) -> dict[str, Any]:
+    """Select the committed attempt's immutable aggregate before publication."""
+    if run["finalization_input_json"] is not None:
+        return json.loads(run["finalization_input_json"])
+    result_path = getattr(args, "finalization_result_path", None)
+    relative: str | None = None
+    digest: str | None = None
+    if result_path is None:
+        if not zero_discovery_deadline:
+            raise SystemExit("Deep Scan finalization requires its accepted reducer result.")
+    else:
+        accepted = connection.execute(
+            "SELECT attempts.accepted_result_path, attempts.accepted_result_sha256 "
+            "FROM deep_scan_workers AS workers LEFT JOIN deep_scan_attempts AS attempts "
+            "ON attempts.worker_id = workers.id AND attempts.attempt = workers.attempt "
+            "WHERE workers.id = (SELECT id FROM deep_scan_workers WHERE scan_id = ? "
+            "AND kind = 'dedup' AND status = 'succeeded' ORDER BY completed_at DESC, id DESC LIMIT 1) "
+            "AND (workers.result_manifest_path = ? OR attempts.accepted_result_path = ?)",
+            (scan["id"], result_path, result_path),
+        ).fetchone()
+        if (
+            accepted is None
+            or not accepted["accepted_result_path"]
+            or not accepted["accepted_result_sha256"]
+        ):
+            raise SystemExit(
+                "Deep Scan finalization requires its committed accepted reducer reference."
+            )
+        scan_dir = Path(scan["scan_dir"])
+        source = Path(
+            deep_scan_path(
+                scan, accepted["accepted_result_path"], "Selected Deep Scan result", kind="file"
+            )
+        )
+        relative = source.relative_to(scan_dir).as_posix()
+        digest = accepted["accepted_result_sha256"]
+    selection = {
+        "version": 1,
+        "resultPath": relative,
+        "resultSha256": digest,
+        "terminalReason": args.terminal_reason,
+        "omittedWorkerIds": omitted_worker_ids,
+        "selectedAt": now(),
+    }
+    return selection
 
 
 def fail_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
