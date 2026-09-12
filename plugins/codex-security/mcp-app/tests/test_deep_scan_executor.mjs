@@ -815,6 +815,7 @@ async function testIsolatedReconstructedWorkers() {
       }
       for (const scan of scans) {
         scan.runtimeEnvironment.CODEX_API_KEY = `synthetic-${scan.name}-${phase}`;
+        scan.runtimeEnvironment.FAKE_CODEX_SCAN_VALUE = `${scan.name}-${phase}`;
         scan.runtimeEnvironment.CODEX_HOME = path.join(scan.fixture.root, "observer-home");
       }
       for (const kind of ["discovery", "dedup"]) {
@@ -832,7 +833,7 @@ async function testIsolatedReconstructedWorkers() {
           assert.equal(child.executable, scan.settings.codexOptions.codexPathOverride);
           assert.equal(child.codexHome, scan.settings.codexOptions.env.CODEX_HOME);
           assert.equal(preflight.codexHome, child.codexHome);
-          assert.equal(child.scanValue, scan.name);
+          assert.equal(child.scanValue, `${scan.name}-${phase}`);
           assert.equal(child.configPath, scan.configPath);
           assert.deepEqual(child.openaiAuthentication, { CODEX_API_KEY: `synthetic-${scan.name}-${phase}` });
           assertFlagPair(child.argv, "--model", scan.settings.model);
@@ -1638,22 +1639,27 @@ async function testDisallowedWorkerProfileFailsBeforeWorkerLaunch() {
     await mkdir(workingDirectory);
     await writeFile(promptPath, "fixture blocked worker prompt\n");
 
-    await assert.rejects(
-      new CodexSdkWorkerExecutor({
-        parentSandbox: trustedParentSandbox
-      }).run({
-        kind: "discovery",
-        promptPath,
-        workingDirectory,
-        subagents: 0,
-        signal: new AbortController().signal
-      }),
-      (error) => error?.name === "DeepScanNonRetryableError"
-        && error.message.includes("codex_security_deep_scan_worker")
-        && error.message.includes("[allowed_permission_profiles]")
-        && error.message.includes("codex_security_deep_scan_worker = true")
-        && error.message.includes("Deep Scan did not run.")
-    );
+    for (const kind of ["discovery", "dedup"]) {
+      for (const resumeThreadId of [undefined, "fixture-resumed-worker"]) {
+        await assert.rejects(
+          new CodexSdkWorkerExecutor({
+            parentSandbox: trustedParentSandbox
+          }).run({
+            kind,
+            resumeThreadId,
+            promptPath,
+            workingDirectory,
+            subagents: 0,
+            signal: new AbortController().signal
+          }),
+          (error) => error?.name === "DeepScanNonRetryableError"
+            && error.message.includes("codex_security_deep_scan_worker")
+            && error.message.includes("[allowed_permission_profiles]")
+            && error.message.includes("codex_security_deep_scan_worker = true")
+            && error.message.includes("Deep Scan did not run.")
+        );
+      }
+    }
     await assert.rejects(
       readFile(fixture.markerPath, "utf8"),
       (error) => error?.code === "ENOENT"
