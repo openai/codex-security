@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, win32 } from "node:path";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import { scanPreflightCodexConfig } from "../../../../../sdk/typescript/src/preflight-config.js";
@@ -40,7 +40,9 @@ export async function captureDeepScanExecutionSettings(
   const selected = scanPreflightCodexConfig(resolveCodexProfile(config));
   return executionSettings({
     codexPath: resolveCodexPath(environment, process.platform, process.arch, process.cwd()),
-    codexHome: isAbsolute(codexHome) ? codexHome : await fs.realpath(codexHome),
+    codexHome: !isAbsolute(codexHome)
+      || (process.platform === "win32" && ["\\", "/"].includes(win32.parse(codexHome).root))
+      ? await fs.realpath(codexHome) : codexHome,
     model: original.model ?? selected.model as string | undefined,
     reasoningEffort: original.reasoningEffort ?? selected.model_reasoning_effort as string | undefined,
     modelProvider: selected.model_provider as string | undefined,
@@ -98,7 +100,7 @@ export function restoredDeepScanWorkerSettings(
       // The executor reads this property for each launch. API keys can refresh;
       // only the original account home and non-secret selections are bound.
       get env() {
-        return Object.fromEntries(Object.entries({ ...environment(), CODEX_HOME: settings.codexHome })
+        return Object.fromEntries(Object.entries({ ...environment(), CODEX_CLI_PATH: settings.codexPath, CODEX_HOME: settings.codexHome })
           .filter((entry): entry is [string, string] => entry[1] !== undefined));
       },
       config: {

@@ -66,12 +66,13 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(JSON.stringify(captured).includes("synthetic-secret"), false);
   let credential = "synthetic-first";
   const restored = restoreSettings(captured, { filesystemDenies: ["/fixture/current-deny"] }, () => ({
-    CODEX_API_KEY: credential, CODEX_HOME: "/fixture/observer-home"
+    CODEX_API_KEY: credential, CODEX_HOME: "/fixture/observer-home", CODEX_CLI_PATH: "/fixture/observer-codex"
   }));
   assert.equal(restored.codexOptions.env.CODEX_API_KEY, "synthetic-first");
   credential = "synthetic-refreshed";
   assert.equal(restored.codexOptions.env.CODEX_API_KEY, "synthetic-refreshed");
   assert.equal(restored.codexOptions.env.CODEX_HOME, root);
+  assert.equal(restored.codexOptions.env.CODEX_CLI_PATH, captured.codexPath);
   assert.deepEqual(restored.parentSandbox.filesystemDenies, ["/fixture/original-deny", "/fixture/current-deny"]);
   assert.equal(restored.codexOptions.config.model_reasoning_effort, "ultra");
   await writeFile(join(root, "config.toml"), 'model = "native-home-model"\n');
