@@ -35,6 +35,7 @@ for (const outcome of [
   "budget-during-resumed-publication",
   "closed-during-resumed-publication",
   "lost-completion-response",
+  "lost-completion-response-followup-canceled",
   "completion-before-commit-fails",
   "followup-canceled",
 ] as const) {
@@ -42,6 +43,8 @@ for (const outcome of [
   const restart = outcome === "restart" || resumedStop;
   const closed = outcome.startsWith("closed-");
   const budgeted = outcome.startsWith("budget-");
+  const canceledFollowUp = outcome.endsWith("followup-canceled");
+  const loseCompletionResponse = outcome.startsWith("lost-completion-response");
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
@@ -67,7 +70,7 @@ for (const outcome of [
     let scanId = "";
     let workbenchOptions: WorkbenchCommandOptions;
     let publicationFails = restart;
-    let completionReceiptLost = outcome === "lost-completion-response";
+    let completionReceiptLost = loseCompletionResponse;
     let budgetTriggered = false;
     let acceptedReport = "";
     const modelInputs: string[] = [];
@@ -192,7 +195,7 @@ for (const outcome of [
               async runStreamed(input: string) {
                 modelInputs.push(input);
                 if (input === followUp) {
-                  if (outcome === "followup-canceled") {
+                  if (canceledFollowUp) {
                     const reportPath = join(scanDir, "report.md");
                     acceptedReport = await readFile(reportPath, "utf8");
                     expect(acceptedReport).toContain(
@@ -293,9 +296,7 @@ for (const outcome of [
                       "--coordinator-generation",
                       "2",
                       "--terminal-reason",
-                      outcome === "lost-completion-response"
-                        ? "capped"
-                        : "saturated",
+                      loseCompletionResponse ? "capped" : "saturated",
                       "--manifest-path",
                       join(scanDir, "scan-manifest.json"),
                     ],
@@ -490,7 +491,7 @@ for (const outcome of [
         expect(modelInputs.length).toBe(1);
         return;
       }
-      if (outcome === "followup-canceled") {
+      if (canceledFollowUp) {
         await expect(
           client.run(repository, {
             mode: "deep",
@@ -509,6 +510,9 @@ for (const outcome of [
         });
         expect(modelInputs.length).toBe(2);
         expect(modelInputs[1]).toBe(followUp);
+        expect(
+          commands.filter((command) => command === "complete-scan"),
+        ).toHaveLength(loseCompletionResponse ? 2 : 1);
         expect(commands).not.toContain("cancel-scan");
         expect(commands).not.toContain("fail-scan");
         expect(await readFile(join(scanDir, "report.md"), "utf8")).toBe(
