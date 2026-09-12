@@ -1118,20 +1118,24 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
 async function testReducerCoveragePersistenceBinding() {
   const fixture = await fakeCodexFixture();
   const previousPath = process.env.CODEX_CLI_PATH;
+  const previousMarker = process.env.FAKE_CODEX_MARKER;
   process.env.CODEX_CLI_PATH = fixture.executablePath;
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
     const workingDirectory = path.join(fixture.root, "artifacts");
     await mkdir(workingDirectory);
     await writeFile(promptPath, "fixture reducer prompt\n");
+    const launches = [];
     for (const resume of [false, true]) {
       for (const persistSourceCoverage of [false, true]) {
+        const markerPath = path.join(fixture.root, `coverage-${resume}-${persistSourceCoverage}.json`);
+        process.env.FAKE_CODEX_MARKER = markerPath;
         const deepReducer = {
           scanRoot: path.join(fixture.root, "scans"),
           claimedWorkers: [{ id: "worker-1", resultPath: path.join(fixture.root, "worker", "result.json"), attempt: 2 }],
           persistSourceCoverage,
         };
-        await new CodexSdkWorkerExecutor({
+        const launch = new CodexSdkWorkerExecutor({
           parentSandbox: trustedParentSandbox,
           artifactContext: { pluginRoot: fixture.root, scanRoot: deepReducer.scanRoot, repoRoot: fixture.root, scanId: "fixture-scan-id" },
         }).run({
@@ -1140,15 +1144,19 @@ async function testReducerCoveragePersistenceBinding() {
           ...(resume ? { resumeThreadId: "fixture-existing-thread", continuationPrompt: "continue the reducer\n" } : {}),
           artifactContext: { root: workingDirectory, layout: "reducer", deepReducer },
         });
-        const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
-        const prefix = "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON=";
-        const encoded = invocation.argv.find((arg) => arg.startsWith(prefix));
-        assert.ok(encoded, "the launched reducer receives its host-bound artifact context");
-        assert.deepEqual(JSON.parse(JSON.parse(encoded.slice(prefix.length))), deepReducer);
+        launches.push(launch.then(async () => {
+          const invocation = JSON.parse(await readFile(markerPath, "utf8"));
+          const prefix = "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON=";
+          const encoded = invocation.argv.find((arg) => arg.startsWith(prefix));
+          assert.ok(encoded, "the launched reducer receives its host-bound artifact context");
+          assert.deepEqual(JSON.parse(JSON.parse(encoded.slice(prefix.length))), deepReducer);
+        }));
       }
     }
+    await Promise.all(launches);
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
+    restoreEnv("FAKE_CODEX_MARKER", previousMarker);
   }
 }
 
