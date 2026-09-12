@@ -9,6 +9,7 @@ import re
 import sqlite3
 import sys
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -127,6 +128,7 @@ def collect_scan_usage(
             # Legacy scans may have no recorded home. Keep usage best effort.
             pass
     groups = [(current_database, roots)]
+    worker_roots: set[str] = set()
     if worker_codex_home is not None:
         worker_roots = set(
             _scan_root_thread_ids(connection, scan, None, include_owner_threads=False)
@@ -136,7 +138,7 @@ def collect_scan_usage(
         worker_database = _codex_state_database(worker_codex_home)
         if worker_database != current_database:
             groups.append((worker_database, [root for root in roots if root in worker_roots]))
-    if not any(database is not None for database, _ in groups):
+    if not any(database is not None for database, _ in groups) and not worker_roots:
         return _unavailable_usage("codex_state_unavailable")
 
     started_at = _timestamp(scan["started_at"])
@@ -165,6 +167,15 @@ def collect_scan_usage(
             continue
         missing_thread_ids.update(missing)
         for session in discovered:
+            copies = sessions.setdefault(session.thread_id, [])
+            if session not in copies:
+                copies.append(session)
+            seen_thread_ids.add(session.thread_id)
+
+    if worker_codex_home is not None and worker_roots:
+        # An external SQLite location can change on recovery. Native rollouts
+        # still live in the recorded worker home; they retain their lineage.
+        for session in _discover_recorded_worker_sessions(worker_codex_home, worker_roots):
             copies = sessions.setdefault(session.thread_id, [])
             if session not in copies:
                 copies.append(session)
@@ -584,6 +595,50 @@ def _discover_rollout_sessions(
         return sessions, missing_thread_ids
     finally:
         database.close()
+
+
+def _discover_recorded_worker_sessions(codex_home: Path, roots: set[str]) -> list[RolloutSession]:
+    recorded: dict[str, list[RolloutSession]] = {}
+    children: dict[str, set[str]] = {}
+    for candidate in sorted((codex_home / "sessions").rglob("*.jsonl")):
+        path = _rollout_path(str(candidate))
+        if path is None:
+            continue
+        try:
+            with path.open("rb") as stream:
+                metadata = json.loads(stream.readline())
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if not isinstance(metadata, dict) or metadata.get("type") != "session_meta":
+            continue
+        payload = metadata.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        thread_id = payload.get("id") or payload.get("session_id")
+        if not isinstance(thread_id, str):
+            continue
+        parent_id = _session_parent_thread_id(payload)
+        recorded.setdefault(thread_id, []).append(RolloutSession(thread_id, parent_id, path))
+        if parent_id is not None:
+            children.setdefault(parent_id, set()).add(thread_id)
+
+    sessions: list[RolloutSession] = []
+    included = set(roots)
+    pending = deque(sorted(roots))
+    while pending:
+        thread_id = pending.popleft()
+        for session in recorded.get(thread_id, []):
+            sessions.append(
+                RolloutSession(
+                    thread_id,
+                    None if thread_id in roots else session.parent_thread_id,
+                    session.path,
+                )
+            )
+        for child_id in sorted(children.get(thread_id, set()) - included):
+            included.add(child_id)
+            pending.append(child_id)
+    return sessions
 
 
 def _require_state_columns(

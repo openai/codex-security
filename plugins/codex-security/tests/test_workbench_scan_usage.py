@@ -655,6 +655,8 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         "recorded-prefix",
         "current-unreadable",
         "current-mismatched",
+        "external-sqlite",
+        "external-shared-home",
         "unavailable",
     ],
 )
@@ -688,6 +690,8 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
         target = root / "target"
         target.mkdir(parents=True)
         selected_home = current_home if worker_home == "current" else root / "original-home"
+        if worker_home == "external-shared-home":
+            selected_home = tmp_path / "shared-original-home"
         process = subprocess.run(
             [
                 sys.executable,
@@ -840,6 +844,20 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             _state_graph(
                 {"CODEX_SQLITE_HOME": str(selected_home)},
                 recorded_threads,
+                [(f"discovery-{index}", child_id)],
+            )
+        elif worker_home in {"external-sqlite", "external-shared-home"}:
+            # Native keeps rollouts in its Codex home even when its SQLite
+            # index lives elsewhere and recovery chooses a different index.
+            sessions = selected_home / "sessions" / "2026" / "01" / "01"
+            sessions.mkdir(parents=True, exist_ok=True)
+            for thread_id, path in worker_threads.items():
+                recorded = sessions / f"rollout-{thread_id}.jsonl"
+                path.rename(recorded)
+                worker_threads[thread_id] = recorded
+            _state_graph(
+                {"CODEX_SQLITE_HOME": str(root / "original-external-sqlite")},
+                worker_threads,
                 [(f"discovery-{index}", child_id)],
             )
         result = _complete_scan(fixture)["scan"]["usage"]
