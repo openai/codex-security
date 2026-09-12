@@ -414,8 +414,13 @@ try {
     [
       "--input-type=commonjs",
       "--eval",
-      "require(process.argv[1])",
+      `const assert = require("node:assert/strict");
+const native = require(process.argv[1]);
+if (process.platform !== "win32") {
+  assert.deepEqual(native.directoryEntries(Buffer.from(process.argv[2]), false), { value: [], errno: 2 });
+}`,
       nativeLibrary,
+      join(consumer, "missing-native-file"),
     ],
     { cwd: consumer, env: { ...process.env, PATH: "" } },
   );

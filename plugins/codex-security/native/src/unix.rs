@@ -1,8 +1,10 @@
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use std::{
-    ffi::{CStr, CString},
-    io,
+    ffi::{CStr, CString, OsStr},
+    fs, io,
+    os::unix::ffi::OsStrExt,
+    path::Path,
 };
 
 #[napi(object)]
@@ -33,6 +35,55 @@ fn retry_eintr(mut operation: impl FnMut() -> i32) -> SyscallResult {
 
 fn path(value: Buffer) -> napi::Result<CString> {
     CString::new(value.as_ref()).map_err(|_| napi::Error::from_reason("Path contains a NUL byte"))
+}
+
+#[napi(object)]
+pub struct DirectoryEntry {
+    pub name: Buffer,
+    pub is_directory: bool,
+    pub is_symbolic_link: bool,
+    pub errno: i32,
+}
+
+#[napi(object)]
+pub struct DirectoryResult {
+    pub value: Vec<DirectoryEntry>,
+    pub errno: i32,
+}
+
+#[napi]
+pub fn directory_entries(name: Buffer, with_types: bool) -> napi::Result<DirectoryResult> {
+    let name = path(name)?;
+    let entries = fs::read_dir(Path::new(OsStr::from_bytes(name.to_bytes()))).and_then(|entries| {
+        entries
+            .map(|entry| {
+                let entry = entry?;
+                let mut value = DirectoryEntry {
+                    name: entry.file_name().as_bytes().to_vec().into(),
+                    is_directory: false,
+                    is_symbolic_link: false,
+                    errno: 0,
+                };
+                if with_types {
+                    match entry.file_type() {
+                        Ok(kind) => {
+                            value.is_directory = kind.is_dir();
+                            value.is_symbolic_link = kind.is_symlink();
+                        }
+                        Err(error) => value.errno = error.raw_os_error().unwrap(),
+                    }
+                }
+                Ok(value)
+            })
+            .collect::<io::Result<Vec<_>>>()
+    });
+    Ok(match entries {
+        Ok(value) => DirectoryResult { value, errno: 0 },
+        Err(error) => DirectoryResult {
+            value: Vec::new(),
+            errno: error.raw_os_error().unwrap(),
+        },
+    })
 }
 
 #[napi]

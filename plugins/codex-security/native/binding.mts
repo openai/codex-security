@@ -23,8 +23,25 @@ export interface MetadataResult {
   inode: string;
 }
 
-/** Paths are uninterpreted POSIX bytes. Only openAt and fileLock retry EINTR. */
+export interface DirectoryEntry {
+  name: Buffer;
+  isDirectory: boolean;
+  isSymbolicLink: boolean;
+  errno: number;
+}
+
+/** Paths are uninterpreted POSIX bytes. */
 export interface UnixBinding {
+  /**
+   * Filesystem order; known types are cached and symlinks are not followed.
+   * Entry errno reports type-query errors; outer errno reports enumeration
+   * failure with an empty value. With types disabled, no type query runs and
+   * both flags are false with entry errno zero.
+   */
+  directoryEntries(
+    name: Buffer,
+    withTypes: boolean,
+  ): { errno: number; value: DirectoryEntry[] };
   openAt(
     directory: number,
     name: Buffer,
