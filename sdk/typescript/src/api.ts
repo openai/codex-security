@@ -1202,9 +1202,11 @@ export class CodexSecurity {
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
     let selectedDeepFinalization = false;
+    let observedScanThreadId: string | undefined;
     let activeScan: {
       id: string;
       options: WorkbenchCommandOptions;
+      mode: ScanMode;
     } | null = null;
     const prepareArtifactRestorer =
       this.#dependencies.prepareScanArtifactRestorer ??
@@ -1711,7 +1713,7 @@ export class CodexSecurity {
           },
         );
       }
-      activeScan = { id: scanId, options: workbenchOptions };
+      activeScan = { id: scanId, options: workbenchOptions, mode };
       if (mode === "deep" && options.onDeepProgress !== undefined) {
         let progressWarningReported = false;
         deepProgressTracker = new DeepScanProgressTracker({
@@ -1909,7 +1911,7 @@ export class CodexSecurity {
       if (postScanPrompt?.trim()) {
         runPostScan = () => thread.runStreamed(postScanPrompt, { signal });
       }
-      let observedScanThreadId =
+      observedScanThreadId =
         typeof resumeThreadId === "string" ? resumeThreadId : undefined;
       const recoverSelectedCompletion = async () => {
         const threadId = observedScanThreadId ?? thread.id;
@@ -2375,6 +2377,31 @@ export class CodexSecurity {
           scanFailure = false;
           return result;
         } catch {}
+      }
+      if (
+        activeScan?.mode === "deep" &&
+        options.signal?.aborted &&
+        observedScanThreadId
+      ) {
+        const workbenchOptions = { ...activeScan.options, signal: undefined };
+        const saved = await workbench(workbenchOptions, [
+          "get-deep-scan",
+          "--scan-id",
+          activeScan.id,
+          "--thread-id",
+          observedScanThreadId,
+        ]).catch(() => null);
+        const deep = saved?.["deepScan"];
+        if (isRecord(deep) && isRecord(deep["finalizationInput"])) {
+          selectedDeepFinalization = true;
+          await workbench(workbenchOptions, [
+            "cancel-scan",
+            "--scan-id",
+            activeScan.id,
+            "--thread-id",
+            observedScanThreadId,
+          ]);
+        }
       }
       // A failed attachment must not turn a resumable coordinator into a terminal failure.
       // Deep Scan orchestration persists its own terminal failures and cancellations.

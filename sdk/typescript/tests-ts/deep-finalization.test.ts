@@ -18,7 +18,14 @@ afterEach(cleanup);
 const threadId = "1af317a1-c9ed-4c73-b428-cb0d160cf8e8";
 const followUp = "Explain the selected finding.";
 
-for (const outcome of ["failed", "completed", "restart"] as const) {
+for (const outcome of [
+  "failed",
+  "completed",
+  "restart",
+  "canceled-before-publication",
+  "canceled-during-publication",
+  "published-before-cancellation",
+] as const) {
   const restart = outcome === "restart";
   test(`SDK completes a selected aggregate ${restart ? "after restart" : `after the parent turn ${outcome}`}`, async () => {
     const root = await temporaryDirectory();
@@ -37,6 +44,7 @@ for (const outcome of ["failed", "completed", "restart"] as const) {
       CODEX_HOME: codexHome,
       CODEX_SECURITY_STATE_DIR: stateDir,
     };
+    const cancellation = new AbortController();
     let scanId = "";
     let workbenchOptions: WorkbenchCommandOptions;
     let publicationFails = restart;
@@ -72,6 +80,20 @@ for (const outcome of ["failed", "completed", "restart"] as const) {
               throw new Error("Synthetic publication write failure");
             }
             const result = await runWorkbench(options, args, input);
+            if (
+              args[0] === "write-scan-draft" &&
+              outcome === "canceled-during-publication"
+            ) {
+              cancellation.abort("Synthetic user cancellation");
+            }
+            if (
+              args[0] === "complete-scan" &&
+              outcome === "published-before-cancellation"
+            ) {
+              cancellation.abort(
+                "Synthetic user cancellation after completion",
+              );
+            }
             if (args[0] === "register-cli-scan")
               scanId = result["scanId"] as string;
             return result;
@@ -194,6 +216,8 @@ for (const outcome of ["failed", "completed", "restart"] as const) {
                       payload: { id: threadId, cwd: scanDir },
                     }) + "\n",
                   );
+                  if (outcome === "canceled-before-publication")
+                    cancellation.abort("Synthetic user cancellation");
                   if (outcome === "completed") {
                     yield {
                       type: "turn.completed",
@@ -245,9 +269,52 @@ for (const outcome of ["failed", "completed", "restart"] as const) {
         await client.close();
         client = makeClient();
       }
+      if (outcome.startsWith("canceled-")) {
+        await expect(
+          client.run(repository, { mode: "deep", signal: cancellation.signal }),
+        ).rejects.toThrow(/interrupted/);
+        const stopped = await runWorkbench(
+          { ...workbenchOptions!, signal: undefined },
+          ["get-scan", "--scan-id", scanId],
+        );
+        const deep = await runWorkbench(
+          { ...workbenchOptions!, signal: undefined },
+          ["get-deep-scan", "--scan-id", scanId, "--thread-id", threadId],
+        );
+        expect(stopped["scan"]).toMatchObject({
+          progress: { status: "canceled" },
+          findingCount: 1,
+          reportAvailable: true,
+        });
+        expect(
+          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8"))
+            .completeness,
+        ).toBe("partial");
+        expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
+          "Validate the resolved destination",
+        );
+        expect(deep["deepScan"]).toMatchObject({
+          status: "canceled",
+          finalizationInput: { terminalReason: "saturated" },
+        });
+        expect(commands).toContain("cancel-scan");
+        expect(commands).not.toContain("fail-scan");
+        expect(modelInputs.length).toBe(1);
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            resumeScanId: scanId,
+            outputDir: scanDir,
+          }),
+        ).rejects.toThrow();
+        expect(modelInputs.length).toBe(1);
+        return;
+      }
       const result = await client.run(repository, {
         mode: "deep",
-        postScanPrompt: followUp,
+        signal: cancellation.signal,
+        postScanPrompt:
+          outcome === "published-before-cancellation" ? undefined : followUp,
         ...(restart ? { resumeScanId: scanId, outputDir: scanDir } : {}),
       });
       expect(result.threadId).toBe(threadId);
@@ -260,13 +327,12 @@ for (const outcome of ["failed", "completed", "restart"] as const) {
       // postScanPrompt retains its existing behavior on each caller invocation.
       expect(modelInputs.filter((input) => input !== followUp).length).toBe(1);
       expect(modelInputs.filter((input) => input === followUp).length).toBe(
-        restart ? 2 : 1,
+        outcome === "published-before-cancellation" ? 0 : restart ? 2 : 1,
       );
-      const completed = await runWorkbench(workbenchOptions!, [
-        "get-scan",
-        "--scan-id",
-        scanId,
-      ]);
+      const completed = await runWorkbench(
+        { ...workbenchOptions!, signal: undefined },
+        ["get-scan", "--scan-id", scanId],
+      );
       expect(completed["scan"]).toMatchObject({
         progress: { status: "complete" },
       });

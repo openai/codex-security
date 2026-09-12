@@ -9,10 +9,6 @@ from pathlib import Path
 payload = json.load(sys.stdin)
 scan_id = payload["scanId"]
 scan_dir = Path(payload["scanDir"])
-draft = dict(payload["draft"])
-draft["sourceCoverage"] = draft.pop("coverage")
-encoded = json.dumps(draft).encode()
-digest = hashlib.sha256(encoded).hexdigest()
 with sqlite3.connect(payload["database"]) as connection:
     connection.execute("PRAGMA foreign_keys = ON")
     timestamp = connection.execute(
@@ -27,6 +23,11 @@ with sqlite3.connect(payload["database"]) as connection:
     )
     discoveries = []
     for kind, label in [("discovery", "review-1"), ("discovery", "review-2"), ("dedup", "merge-1")]:
+        draft = dict(payload["draft"])
+        if kind == "dedup":
+            draft["sourceCoverage"] = draft.pop("coverage")
+        encoded = json.dumps(draft).encode()
+        digest = hashlib.sha256(encoded).hexdigest()
         worker_id = str(uuid.uuid4())
         output = scan_dir / "artifacts" / "deep_discovery" / label / "output"
         output.mkdir(parents=True)
