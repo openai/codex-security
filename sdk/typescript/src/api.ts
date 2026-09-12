@@ -2420,6 +2420,7 @@ export class CodexSecurity {
           ) {
             // Cost stops model work, but an already selected result can still
             // finish through the local publisher. Caller cancellation remains live.
+            selectedDeepFinalization = true;
             await resumeSelectedDeepScan({
               scanId: activeScan.id,
               threadId: budgetRecovery.threadId,
@@ -2502,16 +2503,19 @@ export class CodexSecurity {
         observedScanThreadId
       ) {
         const workbenchOptions = { ...activeScan.options, signal: undefined };
-        const saved = await workbench(workbenchOptions, [
-          "get-deep-scan",
-          "--scan-id",
-          activeScan.id,
-          "--thread-id",
-          observedScanThreadId,
-        ]).catch(() => null);
-        const deep = saved?.["deepScan"];
-        if (isRecord(deep) && isRecord(deep["finalizationInput"])) {
-          selectedDeepFinalization = true;
+        if (!selectedDeepFinalization) {
+          const saved = await workbench(workbenchOptions, [
+            "get-deep-scan",
+            "--scan-id",
+            activeScan.id,
+            "--thread-id",
+            observedScanThreadId,
+          ]).catch(() => null);
+          const deep = saved?.["deepScan"];
+          selectedDeepFinalization =
+            isRecord(deep) && isRecord(deep["finalizationInput"]);
+        }
+        if (selectedDeepFinalization) {
           // The workbench owns the running-state check and repeated cancellation.
           // A lost cleanup response must preserve the original interruption.
           await workbench(workbenchOptions, [
