@@ -28,6 +28,7 @@
 - bump the third-party group across 3 directories with 19 updates ([#892](https://github.com/openai/codex-security/pull/892))
 - report patch failures and changed files ([#874](https://github.com/openai/codex-security/pull/874))
 - persist scan artifacts through MCP ([#862](https://github.com/openai/codex-security/pull/862))
+- advance scan progress when saving drafts ([#882](https://github.com/openai/codex-security/pull/882))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
