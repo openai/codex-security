@@ -764,7 +764,10 @@ async function testIsolatedReconstructedWorkers() {
         .map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join(""));
       await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH NULL_USAGE\n");
       const executable = path.join(fixture.root, process.platform === "win32" ? "node.exe" : "node");
-      await copyFile(process.execPath, executable);
+      // Keep dynamically linked Node beside its libraries on Unix. Each scan
+      // still selects a distinct executable path at the spawn boundary.
+      if (process.platform === "win32") await copyFile(process.execPath, executable);
+      else await symlink(process.execPath, executable);
       const codexOptions = {
         codexPathOverride: executable,
         baseUrl: `https://${name}.example.invalid/v1`,
@@ -817,6 +820,10 @@ async function testIsolatedReconstructedWorkers() {
     }
     childProcess.spawn = (command, args, options) => {
       const scan = scans.find((scan) => options?.env?.FAKE_CODEX_MARKER === scan.fixture.markerPath);
+      if (scan) {
+        const configured = scan.settings.codexOptions.codexPathOverride;
+        assert.ok(command === configured || command === path.toNamespacedPath(configured));
+      }
       return originalSpawn(command, scan ? [scan.fixture.executablePath, ...args] : args, options);
     };
     syncBuiltinESMExports();
@@ -861,7 +868,7 @@ async function testIsolatedReconstructedWorkers() {
           assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
           const child = JSON.parse(await readFile(scan.fixture.markerPath, "utf8"));
           const preflight = JSON.parse(await readFile(scan.fixture.preflightMarkerPath, "utf8"));
-          assert.equal(child.executable, scan.settings.codexOptions.codexPathOverride);
+          assert.equal(await realpath(child.executable), await realpath(scan.settings.codexOptions.codexPathOverride));
           assert.equal(child.codexCliPath, scan.settings.codexOptions.codexPathOverride);
           assert.equal(child.codexHome, scan.settings.codexOptions.env.CODEX_HOME);
           assert.equal(preflight.codexHome, child.codexHome);
