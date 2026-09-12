@@ -354,6 +354,10 @@ async function runInstalledSdk(pluginRoot, executable) {
     await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
   );
   const owner = "package-sdk-owner";
+  const postScanPrompt = "Explain the completed synthetic scan.";
+  const prompts = [];
+  let threadCount = 0;
+  let manifestBeforeFollowUp;
   let scanId;
   const client = new sdk.CodexSecurity(
     { pythonPath: f.env.PYTHON },
@@ -377,12 +381,33 @@ async function runInstalledSdk(pluginRoot, executable) {
       createCodex({ env, apiKey }) {
         return {
           startThread() {
+            threadCount += 1;
             return {
               id: owner,
-              async runStreamed() {
+              async runStreamed(prompt) {
+                prompts.push(prompt);
                 return {
                   events: (async function* () {
                     yield { type: "thread.started", thread_id: owner };
+                    if (prompts.length > 1) {
+                      assert.equal(prompt, postScanPrompt);
+                      manifestBeforeFollowUp = await readFile(
+                        join(env.CODEX_SECURITY_SCAN_DIR, "scan-manifest.json"),
+                        "utf8",
+                      );
+                      const completed = JSON.parse(manifestBeforeFollowUp);
+                      assert.equal(completed.scan.status, "completed");
+                      assert.ok(completed.scan.sealedAt);
+                      yield {
+                        type: "turn.completed",
+                        usage: {
+                          input_tokens: 100_000,
+                          cached_input_tokens: 0,
+                          output_tokens: 100_000,
+                        },
+                      };
+                      return;
+                    }
                     scanId = env.CODEX_SECURITY_SCAN_ID;
                     // The pinned SDK maps its apiKey option to this child variable.
                     const rpc = await server(f, {
@@ -424,13 +449,23 @@ async function runInstalledSdk(pluginRoot, executable) {
       subagents: 0,
       maxDiscoveryRuns: 2,
       stopAfterNoNew: 1,
+      postScanPrompt,
       outputDir: join(f.directory, "output"),
     });
+    assert.equal(threadCount, 1);
+    assert.equal(prompts.length, 2);
+    assert.equal(prompts[1], postScanPrompt);
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
     assert.ok(result.manifest.scan.sealedAt);
     assert.equal(result.manifest.scan.id, scanId);
     assert.deepEqual(result.findings.findings, []);
+    assert.equal(
+      await readFile(result.manifestPath, "utf8"),
+      manifestBeforeFollowUp,
+    );
+    assert.ok(result.cost === null || result.cost.inputTokens < 100_000);
+    assert.equal(result.toJSON().threadId, owner);
     assert.ok(
       (await readFile(join(f.directory, "output", "report.md"), "utf8"))
         .length > 0,
