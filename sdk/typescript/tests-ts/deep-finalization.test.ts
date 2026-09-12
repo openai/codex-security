@@ -4,7 +4,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import type { ThreadEvent } from "@openai/codex-sdk";
-import { ScanCostLimitExceededError } from "../src/errors.js";
+import {
+  ScanCostLimitExceededError,
+  ScanInterruptedError,
+} from "../src/errors.js";
 import {
   prepareScanArtifactRestorer,
   runWorkbench,
@@ -29,6 +32,7 @@ const outcomes = [
   "restart",
   "canceled-before-publication",
   "canceled-during-publication",
+  "canceled-during-resumed-publication",
   "published-before-cancellation",
   "closed-during-publication",
   "budget-during-publication",
@@ -44,7 +48,7 @@ type BudgetCompletionFault = "lost" | "before-commit" | "lost-and-canceled";
 const cases: {
   outcome: (typeof outcomes)[number];
   budgetCompletionFault?: BudgetCompletionFault;
-  cancellationFault?: "status-read" | "cancel-response";
+  cancellationFault?: "status-read" | "deep-state-read" | "cancel-response";
 }[] = [
   ...outcomes.map((outcome) => ({ outcome })),
   ...(
@@ -69,6 +73,14 @@ const cases: {
   {
     outcome: "canceled-during-publication",
     cancellationFault: "cancel-response",
+  },
+  {
+    outcome: "canceled-during-publication",
+    cancellationFault: "deep-state-read",
+  },
+  {
+    outcome: "canceled-during-resumed-publication",
+    cancellationFault: "deep-state-read",
   },
 ];
 for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
@@ -100,6 +112,9 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
       CODEX_SECURITY_STATE_DIR: stateDir,
     };
     const cancellation = new AbortController();
+    const parentError = new Error(
+      "Parent turn ended before its final completion tool call",
+    );
     let scanId = "";
     let workbenchOptions: WorkbenchCommandOptions;
     let publicationFails = restart;
@@ -108,6 +123,9 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
       budgetCompletionFault === "lost" ||
       budgetCompletionFault === "lost-and-canceled";
     let budgetTriggered = false;
+    let cancellationReadLost = false;
+    let lostCancellationDeepState: unknown;
+    let originalFinalizationInput: unknown;
     let acceptedReport = "";
     let completedArtifacts: Buffer<ArrayBuffer>[] = [];
     const modelInputs: string[] = [];
@@ -171,6 +189,18 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
                 "Synthetic budget completion failure before commit",
               );
             const result = await runWorkbench(options, args, input);
+            if (
+              args[0] === "get-deep-scan" &&
+              cancellation.signal.aborted &&
+              cancellationFault === "deep-state-read" &&
+              !cancellationReadLost
+            ) {
+              cancellationReadLost = true;
+              lostCancellationDeepState = result["deepScan"];
+              throw new Error(
+                "Synthetic lost cancellation Deep state response",
+              );
+            }
             if (
               args[0] === "cancel-scan" &&
               cancellationFault === "cancel-response"
@@ -255,7 +285,8 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
             }
             if (
               args[0] === "write-scan-draft" &&
-              outcome === "canceled-during-publication"
+              (outcome === "canceled-during-publication" ||
+                outcome === "canceled-during-resumed-publication")
             ) {
               cancellation.abort("Synthetic user cancellation");
             }
@@ -366,7 +397,7 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
                     ),
                   );
                   // Exercise the dedicated function bridge, without extending CLI arguments.
-                  execFileSync(
+                  const selectionOutput = execFileSync(
                     "python3",
                     [
                       "-c",
@@ -383,11 +414,15 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
                       join(scanDir, "scan-manifest.json"),
                     ],
                     {
-                      input: JSON.stringify({ resultPath: seeded.resultPath }),
+                      input: JSON.stringify({
+                        resultPath: seeded.resultPath,
+                      }),
                       encoding: "utf8",
                       env: environment,
                     },
                   );
+                  originalFinalizationInput =
+                    JSON.parse(selectionOutput).deepScan.finalizationInput;
                   const sessions = join(
                     codexHome,
                     "sessions",
@@ -418,9 +453,7 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
                       },
                     };
                   } else {
-                    throw new Error(
-                      "Parent turn ended before its final completion tool call",
-                    );
+                    throw parentError;
                   }
                 }
                 return { events: events() };
@@ -596,9 +629,31 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
         return;
       }
       if (outcome.startsWith("canceled-")) {
-        await expect(
-          client.run(repository, { mode: "deep", signal: cancellation.signal }),
-        ).rejects.toThrow(/interrupted/);
+        const error = await client
+          .run(repository, {
+            mode: "deep",
+            signal: cancellation.signal,
+            ...(resumedStop
+              ? { resumeScanId: scanId, outputDir: scanDir }
+              : {}),
+            postScanPrompt: followUp,
+          })
+          .catch((error: unknown) => error);
+        expect(error).toBeInstanceOf(ScanInterruptedError);
+        expect((error as ScanInterruptedError).cause).toBe(
+          outcome === "canceled-before-publication"
+            ? parentError
+            : cancellation.signal.reason,
+        );
+        if (cancellationReadLost) {
+          expect(lostCancellationDeepState).toMatchObject({
+            status: "running",
+            finalizationInput: { terminalReason: "saturated" },
+          });
+        }
+        expect(originalFinalizationInput).toMatchObject({
+          terminalReason: "saturated",
+        });
         const stopped = await runWorkbench(
           { ...workbenchOptions!, signal: undefined },
           ["get-scan", "--scan-id", scanId],
@@ -621,9 +676,13 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
         );
         expect(deep["deepScan"]).toMatchObject({
           status: "canceled",
-          finalizationInput: { terminalReason: "saturated" },
         });
-        expect(commands).toContain("cancel-scan");
+        expect(
+          (deep["deepScan"] as Record<string, unknown>)["finalizationInput"],
+        ).toEqual(originalFinalizationInput);
+        expect(
+          commands.filter((command) => command === "cancel-scan"),
+        ).toHaveLength(1);
         expect(commands).not.toContain("fail-scan");
         expect(modelInputs.length).toBe(1);
         if (cancellationFault === "cancel-response") {
