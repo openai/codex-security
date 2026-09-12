@@ -29,7 +29,6 @@ import {
 import { type CodexOptions, type ThreadOptions } from "@openai/codex-sdk";
 import { z } from "incur";
 import {
-  CodexSession,
   createCodexClient,
   readCodexSessionTurn,
   type CodexSessionClient as CodexClientLike,
@@ -2673,33 +2672,30 @@ export class CodexSecurity {
         sdkEnvironment,
       );
     }
-    const codex = new CodexSession(
-      {
-        ...(codexPathOverride === undefined
-          ? {}
-          : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
-        ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-        ...(commandAuth || configOverrides.length > 0
-          ? {
-              configOverrides: [
-                ...(commandAuth
-                  ? modelProviderConfigOverride(sessionConfig)
-                  : []),
-                ...configOverrides,
-              ],
-            }
-          : {}),
-        env: sdkEnvironment,
-        config: {
-          ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
-          responses_api_metadata: {
-            ...configuredResponsesMetadata,
-            codex_security_surface: this.#surface,
-          },
+    const codex = this.#dependencies.createCodex({
+      ...(codexPathOverride === undefined
+        ? {}
+        : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
+      ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+      ...(commandAuth || configOverrides.length > 0
+        ? {
+            configOverrides: [
+              ...(commandAuth
+                ? modelProviderConfigOverride(sessionConfig)
+                : []),
+              ...configOverrides,
+            ],
+          }
+        : {}),
+      env: sdkEnvironment,
+      config: {
+        ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
+        responses_api_metadata: {
+          ...configuredResponsesMetadata,
+          codex_security_surface: this.#surface,
         },
       },
-      this.#dependencies.createCodex,
-    );
+    });
     return { codex, environment };
   }
 

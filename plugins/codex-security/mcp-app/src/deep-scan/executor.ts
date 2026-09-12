@@ -2,7 +2,7 @@ import { accessSync, constants as fsConstants, existsSync, promises as fs, readd
 import { createRequire } from "node:module";
 import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import {
-  CodexSession,
+  createCodexClient,
   readCodexSessionTurn
 } from "../../../../../sdk/typescript/src/codex-session.js";
 import type { CodexOptions } from "@openai/codex-sdk";
@@ -104,7 +104,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         signal: request.signal
       });
       const prompt = await fs.readFile(request.promptPath, "utf8");
-      const codex = new CodexSession({
+      const codex = createCodexClient({
         ...resolved,
         codexPathOverride: executablePathForSpawn(codexPath),
         env: childEnv,

@@ -26,28 +26,6 @@ export interface CodexSessionClient {
 export const createCodexClient = (options: CodexOptions): CodexSessionClient =>
   new Codex(options);
 
-/** Resource resolution and role-specific configuration belong to the caller. */
-export class CodexSession {
-  private readonly client: CodexSessionClient;
-
-  constructor(
-    options: CodexOptions,
-    createClient: (
-      options: CodexOptions,
-    ) => CodexSessionClient = createCodexClient,
-  ) {
-    this.client = createClient(options);
-  }
-
-  startThread(options: ThreadOptions): CodexSessionThread {
-    return this.client.startThread(options);
-  }
-
-  get resumeThread(): CodexSessionClient["resumeThread"] {
-    return this.client.resumeThread?.bind(this.client);
-  }
-}
-
 /** Reduce a single stream; callers retain error, retry and acceptance policy. */
 export async function readCodexSessionTurn(options: {
   thread: CodexSessionThread;
