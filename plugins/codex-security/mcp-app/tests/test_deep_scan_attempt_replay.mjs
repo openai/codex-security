@@ -16,10 +16,11 @@ const bundle = await build({
   stdin: { resolveDir: app, contents: [
     'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
     'export { DeepScanWorkerRunner } from "./src/deep-scan/worker-runner.ts";',
+    'export { DeepScanCoordinator } from "./src/deep-scan/coordinator.ts";',
     'export { createDeepScanArtifacts, ensureDeepScanDirectories } from "./src/deep-scan/artifacts.ts";'
   ].join("\n") }
 });
-const { WorkbenchDeepScanStore, DeepScanWorkerRunner, createDeepScanArtifacts, ensureDeepScanDirectories } =
+const { WorkbenchDeepScanStore, DeepScanWorkerRunner, DeepScanCoordinator, createDeepScanArtifacts, ensureDeepScanDirectories } =
   await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`);
 const execute = promisify(execFile);
 for (const responseLosses of [3, 1]) await testResponseLoss(responseLosses);
@@ -96,6 +97,20 @@ async function testResponseLoss(responseLosses) {
     assert.equal(counts.get("merge"), 2);
     assert.equal(executions, 3);
     assert.deepEqual(JSON.parse(await readFile(merged.resultPath, "utf8")), merged.result);
+    const snapshot = await store.get(run.scanId, "fixture-owner");
+    const resumed = new DeepScanCoordinator({
+      run: snapshot, store, pluginRoot: plugin,
+      executor: { run: async () => assert.fail("accepted recovery must not execute another model") },
+    });
+    const beforeRecovery = await readFile(merged.resultPath, "utf8");
+    const recovered = await resumed.recoverAcceptedDiscoveries();
+    assert.deepEqual(recovered.map(worker => worker.resultPath), [discovery.worker.resultPath, second.worker.resultPath]);
+    await rm(path.join(path.dirname(merged.resultPath), "..", "result.json"));
+    const reducers = await resumed.recoverCompletedReducers(recovered);
+    assert.equal(reducers.reducers[0].resultPath, merged.resultPath);
+    assert.deepEqual(reducers.result, merged.result);
+    assert.equal(await readFile(merged.resultPath, "utf8"), beforeRecovery, "recovery cannot rewrite accepted bytes");
+
   } finally {
     await rm(root, { recursive: true, force: true });
   }

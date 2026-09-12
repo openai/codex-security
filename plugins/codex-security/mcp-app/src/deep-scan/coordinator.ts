@@ -960,19 +960,20 @@ export class DeepScanCoordinator {
     const recovered: AcceptedDiscovery[] = [];
     for (const worker of this.state.persistedWorkers ?? []) {
       if (worker.kind !== "discovery" || worker.status !== "succeeded") continue;
-      if (!worker.resultManifestPath || !worker.completionSequence) {
+      const resultPath = worker.acceptedResultPath ?? worker.resultManifestPath;
+      if (!resultPath || !worker.completionSequence) {
         throw new Error(`Accepted discovery ${worker.id} has incomplete persisted evidence.`);
       }
       await validateDiscoveryArtifacts(
         this.artifacts,
-        worker.resultManifestPath,
+        resultPath,
         this.state.scanId
       );
       recovered.push({
         id: worker.id,
         label: basename(dirname(worker.promptPath)),
         artifactDir: worker.artifactDir,
-        resultPath: worker.resultManifestPath,
+        resultPath,
         completionSequence: worker.completionSequence,
         attempt: worker.attempt,
         ...(worker.threadId ? { threadId: worker.threadId } : {})
@@ -996,23 +997,32 @@ export class DeepScanCoordinator {
       ));
     let noNewStreak = 0;
     for (const worker of completedReducers) {
-      if (!worker.resultManifestPath) {
+      const resultPath = worker.acceptedResultPath ?? worker.resultManifestPath;
+      if (!resultPath) {
         throw new Error(`Completed reducer ${worker.id} has no persisted result manifest.`);
       }
       const consumed = inputs
         .filter((input) => input.dedupWorkerId === worker.id)
         .sort((left, right) => left.inputOrder - right.inputOrder)
-        .map((input) => discoveriesById.get(input.discoveryWorkerId));
+        .map((input) => {
+          const discovery = discoveriesById.get(input.discoveryWorkerId);
+          return discovery && {
+            ...discovery,
+            resultPath: input.resultManifestPath ?? discovery.resultPath,
+            attempt: input.attempt ?? discovery.attempt,
+          };
+        });
       if (consumed.length === 0 || consumed.some((value) => !value)) {
         throw new Error(`Completed reducer ${worker.id} has incomplete persisted inputs.`);
       }
       const accepted = consumed as AcceptedDiscovery[];
+      const claim = this.state.persistedMergeClaims?.find((item) => item.workerId === worker.id);
       const { newFindings, result } = await validateReducerArtifacts({
         artifacts: this.artifacts,
         artifactDir: worker.artifactDir,
-        resultPath: worker.resultManifestPath,
+        resultPath,
         reducerId: worker.id,
-        previousReducerResultPath: outcomes.at(-1)?.resultPath
+        previousReducerResultPath: claim ? claim.previousResultPath : outcomes.at(-1)?.resultPath
       }, this.state.scanId);
       if (result.sourceCoverage === undefined) {
         const context = {
@@ -1036,7 +1046,7 @@ export class DeepScanCoordinator {
         type: "dedup",
         id: worker.id,
         consumed: accepted,
-        resultPath: worker.resultManifestPath,
+        resultPath,
         newFindings,
         attempt: worker.attempt,
         ...(worker.threadId ? { threadId: worker.threadId } : {}),
