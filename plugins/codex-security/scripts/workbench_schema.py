@@ -867,6 +867,13 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        47,
+        "freeze stopped scan checkpoint selections",
+        """
+        ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;
+        """,
+    ),
 )
 
 
