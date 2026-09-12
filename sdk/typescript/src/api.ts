@@ -2156,14 +2156,31 @@ export class CodexSecurity {
         onObserverError: options.onObserverError,
       });
       checkOpen();
-      const completion = await workbench(workbenchOptions, [
+      const completionArgs = [
         "complete-scan",
         "--scan-id",
         scanId,
         ...(completionCost === null
           ? []
           : ["--cost-json", JSON.stringify(completionCost)]),
-      ]);
+      ];
+      const completion = await workbench(
+        workbenchOptions,
+        completionArgs,
+      ).catch(async (error) => {
+        const saved = await workbench(workbenchOptions, [
+          "get-scan",
+          "--scan-id",
+          scanId,
+        ]).catch(() => null);
+        const savedScan = saved?.["scan"];
+        const progress = isRecord(savedScan) ? savedScan["progress"] : null;
+        if (!isRecord(progress) || progress["status"] !== "complete")
+          throw error;
+        // A lost response can follow a durable seal. The existing completion
+        // command validates that seal and returns its committed receipt.
+        return workbench(workbenchOptions, completionArgs);
+      });
       activeScan = null;
       const completedScan = completion["scan"];
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
@@ -2339,18 +2356,46 @@ export class CodexSecurity {
         options.signal?.aborted !== true
       ) {
         try {
-          const completion = await workbench(
-            { ...activeScan.options, signal: undefined },
-            [
-              "complete-budget-exhausted-scan",
-              "--scan-id",
-              activeScan.id,
-              "--cost-json",
-              JSON.stringify(snapshot?.cost ?? failure.cost),
-              "--message",
-              failure.message.slice(0, 2400),
-            ],
-          );
+          const completionSignal = AbortSignal.any([
+            this.#abortController.signal,
+            ...(options.signal === undefined ? [] : [options.signal]),
+          ]);
+          const completionOptions = {
+            ...activeScan.options,
+            signal: completionSignal,
+          };
+          const saved = await workbench(completionOptions, [
+            "get-deep-scan",
+            "--scan-id",
+            activeScan.id,
+            "--thread-id",
+            budgetRecovery.threadId,
+          ]).catch(() => null);
+          const deep = saved?.["deepScan"];
+          if (
+            isRecord(deep) &&
+            deep["status"] === "running" &&
+            isRecord(deep["finalizationInput"])
+          ) {
+            // Cost stops model work, but an already selected result can still
+            // finish through the local publisher. Caller cancellation remains live.
+            await resumeSelectedDeepScan({
+              scanId: activeScan.id,
+              threadId: budgetRecovery.threadId,
+              pluginRoot: budgetRecovery.pluginRoot,
+              signal: completionSignal,
+              runWorkbench: (args) => workbench(completionOptions, args),
+            });
+          }
+          const completion = await workbench(completionOptions, [
+            "complete-budget-exhausted-scan",
+            "--scan-id",
+            activeScan.id,
+            "--cost-json",
+            JSON.stringify(snapshot?.cost ?? failure.cost),
+            "--message",
+            failure.message.slice(0, 2400),
+          ]);
           activeScan = null;
           runPostScan = null;
           const result = await collectResult(
@@ -2363,10 +2408,7 @@ export class CodexSecurity {
             scanDir,
             budgetRecovery.pluginRoot,
             budgetRecovery.expectation,
-            AbortSignal.any([
-              this.#abortController.signal,
-              ...(options.signal === undefined ? [] : [options.signal]),
-            ]),
+            completionSignal,
             true,
           );
           if (result.coverage.completeness !== "partial") {

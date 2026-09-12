@@ -34,6 +34,8 @@ for (const outcome of [
   "budget-after-deep-finish",
   "budget-during-resumed-publication",
   "closed-during-resumed-publication",
+  "lost-completion-response",
+  "completion-before-commit-fails",
   "followup-canceled",
 ] as const) {
   const resumedStop = outcome.includes("-resumed-");
@@ -65,6 +67,8 @@ for (const outcome of [
     let scanId = "";
     let workbenchOptions: WorkbenchCommandOptions;
     let publicationFails = restart;
+    let completionReceiptLost = outcome === "lost-completion-response";
+    let budgetTriggered = false;
     let acceptedReport = "";
     const modelInputs: string[] = [];
     const commands: string[] = [];
@@ -107,14 +111,25 @@ for (const outcome of [
               publicationFails = false;
               throw new Error("Synthetic publication write failure");
             }
-            const result = await runWorkbench(options, args, input);
             if (
-              (args[0] === "write-scan-draft" &&
+              args[0] === "complete-scan" &&
+              outcome === "completion-before-commit-fails"
+            )
+              throw new Error("Synthetic completion failure before commit");
+            const result = await runWorkbench(options, args, input);
+            if (args[0] === "complete-scan" && completionReceiptLost) {
+              completionReceiptLost = false;
+              throw new Error("Synthetic lost completion response");
+            }
+            if (
+              !budgetTriggered &&
+              ((args[0] === "write-scan-draft" &&
                 (outcome === "budget-during-publication" ||
                   outcome === "budget-during-resumed-publication")) ||
-              (args[0] === "finish-deep-scan" &&
-                outcome === "budget-after-deep-finish")
+                (args[0] === "finish-deep-scan" &&
+                  outcome === "budget-after-deep-finish"))
             ) {
+              budgetTriggered = true;
               await appendFile(
                 usagePath,
                 JSON.stringify({
@@ -278,7 +293,9 @@ for (const outcome of [
                       "--coordinator-generation",
                       "2",
                       "--terminal-reason",
-                      "saturated",
+                      outcome === "lost-completion-response"
+                        ? "capped"
+                        : "saturated",
                       "--manifest-path",
                       join(scanDir, "scan-manifest.json"),
                     ],
@@ -370,7 +387,7 @@ for (const outcome of [
           ...(resumedStop ? { resumeScanId: scanId, outputDir: scanDir } : {}),
           postScanPrompt: followUp,
         });
-        if (outcome === "budget-after-deep-finish") {
+        if (budgeted) {
           const result = await running;
           expect(result.coverage.completeness).toBe("partial");
           expect(JSON.stringify(result.coverage)).toContain("cost limit");
@@ -379,11 +396,20 @@ for (const outcome of [
           expect(modelInputs).toHaveLength(1);
           expect(commands).toContain("complete-budget-exhausted-scan");
           expect(commands).not.toContain("fail-scan");
+          const completed = await runWorkbench(workbenchOptions!, [
+            "get-deep-scan",
+            "--scan-id",
+            scanId,
+            "--thread-id",
+            threadId,
+          ]);
+          expect(completed["deepScan"]).toMatchObject({
+            status: "succeeded",
+            finalizationInput: { terminalReason: "saturated" },
+          });
           return;
         }
-        await expect(running).rejects.toThrow(
-          budgeted ? /estimated cost.*exceeded/ : /closed/,
-        );
+        await expect(running).rejects.toThrow(/closed/);
         await closePromise;
         const stopped = await runWorkbench(
           { ...workbenchOptions!, signal: undefined },
@@ -490,6 +516,25 @@ for (const outcome of [
         );
         return;
       }
+      if (outcome === "completion-before-commit-fails") {
+        await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+          "Synthetic completion failure before commit",
+        );
+        expect(
+          commands.filter((command) => command === "complete-scan"),
+        ).toHaveLength(1);
+        expect(commands).not.toContain("fail-scan");
+        expect(modelInputs).toHaveLength(1);
+        const saved = await runWorkbench(workbenchOptions!, [
+          "get-scan",
+          "--scan-id",
+          scanId,
+        ]);
+        expect(saved["scan"]).toMatchObject({
+          progress: { status: "running" },
+        });
+        return;
+      }
       const result = await client.run(repository, {
         mode: "deep",
         signal: cancellation.signal,
@@ -498,6 +543,11 @@ for (const outcome of [
         ...(restart ? { resumeScanId: scanId, outputDir: scanDir } : {}),
       });
       expect(result.threadId).toBe(threadId);
+      if (outcome === "lost-completion-response") {
+        expect(
+          commands.filter((command) => command === "complete-scan"),
+        ).toHaveLength(2);
+      }
       // The synthetic accepted workers have no native usage receipts.
       expect(result.cost).toBeNull();
       expect(result.coverage.completeness).toBe("partial");
