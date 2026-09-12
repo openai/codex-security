@@ -442,7 +442,7 @@ async function testDeepScanStdioLifecycle() {
     const sessionId = opened.result.structuredContent.workspace.id;
     assertNoError(await server.request(25, "tools/call", toolCall(
       "submit_codex_security_setup",
-      { sessionId, targetPath, scope: ".", mode: "deep" },
+      { sessionId, targetPath, scope: ".", mode: "deep", userContext: "Original discovery focus" },
       resumedThreadId
     )));
     const started = await server.request(26, "tools/call", toolCall(
@@ -487,6 +487,14 @@ async function testDeepScanStdioLifecycle() {
     const completedDraft = JSON.parse(await readFile(completedWorker.resultManifestPath, "utf8"));
     assert.equal(completedDraft.scanId, resumedScanId);
     assert.deepEqual(completedDraft.findings, []);
+    assert.equal(partial.userContext, "Original discovery focus");
+    const settingsPath = path.join(resumedScan.scanDir, "artifacts", "deep_discovery", "execution-settings.json");
+    const originalSettings = await readFile(settingsPath, "utf8");
+    assertNoError(await server.request(30, "tools/call", toolCall(
+      "update_codex_security_scan_context",
+      { scanId: resumedScanId, handoffClaimToken, userContext: "Later result discussion" },
+      resumedThreadId
+    )));
     await server.stop();
     assert.throws(() => process.kill(server.pid, 0), "the original MCP server must have exited");
     const paused = await runWorkbench(environment, ["get-scan", "--scan-id", resumedScanId]);
@@ -544,6 +552,10 @@ async function testDeepScanStdioLifecycle() {
       assert.equal(finished.status, "succeeded");
       assert.equal(finished.coordinatorGeneration, partial.coordinatorGeneration + 1);
       assert.equal(finished.dispatchedCount, 2);
+      assert.equal(finished.userContext, partial.userContext);
+      assert.equal(finished.createdAt, partial.createdAt, "recovery retains the original deadline origin");
+      assert.equal(finished.config.maxTimeHours, partial.config.maxTimeHours);
+      assert.equal(await readFile(settingsPath, "utf8"), originalSettings);
       const successfulDiscoveries = finished.workers.filter((worker) => (
         worker.kind === "discovery" && worker.status === "succeeded"
       ));
@@ -562,6 +574,8 @@ async function testDeepScanStdioLifecycle() {
       const executions = (await readJsonLines(startLogPath)).slice(restartStartIndex);
       for (const execution of executions) {
         assert.equal(execution.argv.includes('model_reasoning_summary="none"'), true);
+        const context = discoveryPromptContext(execution.stdin);
+        if (context.workerLabel) assert.equal(context.userContext, "Original discovery focus");
       }
       assert.equal(executions.filter((execution) => (
         discoveryPromptContext(execution.stdin).workerLabel === "discovery-0001"
