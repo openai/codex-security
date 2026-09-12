@@ -31,6 +31,7 @@
 - advance scan progress when saving drafts ([#882](https://github.com/openai/codex-security/pull/882))
 - simplify scan runtime bookkeeping ([#903](https://github.com/openai/codex-security/pull/903))
 - upgrade json-schema-to-typescript to 16.0.0 ([#914](https://github.com/openai/codex-security/pull/914))
+- upgrade eval OpenCode SDK to 1.18.29 ([#911](https://github.com/openai/codex-security/pull/911))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
