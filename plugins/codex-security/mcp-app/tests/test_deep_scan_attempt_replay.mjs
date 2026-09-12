@@ -110,9 +110,9 @@ async function testResponseLoss(responseLosses) {
     assert.equal(merged.run.persistedDedupInputs.filter((input) => input.dedupWorkerId === merged.id).length, 2);
     assert.equal(counts.get("merge"), 2);
     assert.equal(executions, 3);
-    const { sourceCoverage, ...persistedResult } = merged.result;
-    assert.deepEqual(JSON.parse(await readFile(merged.resultPath, "utf8")), persistedResult);
-    if (sourceCoverage) assert.equal(sourceCoverage.completeness, "complete");
+    assert.equal(run.workflowVersion, "deep-security-scan/v2");
+    assert.deepEqual(JSON.parse(await readFile(merged.resultPath, "utf8")), merged.result);
+    assert.equal(merged.result.sourceCoverage.completeness, "complete");
     const snapshot = await store.get(run.scanId, "fixture-owner");
     const resumed = new DeepScanCoordinator({
       run: snapshot, store, pluginRoot: plugin,
