@@ -48,6 +48,7 @@ type BudgetCompletionFault = "lost" | "before-commit" | "lost-and-canceled";
 const cases: {
   outcome: (typeof outcomes)[number];
   budgetCompletionFault?: BudgetCompletionFault;
+  initialResumeUsage?: boolean;
   cancellationFault?: "status-read" | "deep-state-read" | "cancel-response";
 }[] = [
   ...outcomes.map((outcome) => ({ outcome })),
@@ -82,8 +83,21 @@ const cases: {
     outcome: "canceled-during-resumed-publication",
     cancellationFault: "deep-state-read",
   },
+  {
+    outcome: "canceled-before-publication",
+    cancellationFault: "deep-state-read",
+  },
+  {
+    outcome: "canceled-during-resumed-publication",
+    initialResumeUsage: true,
+  },
 ];
-for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
+for (const {
+  outcome,
+  budgetCompletionFault,
+  cancellationFault,
+  initialResumeUsage,
+} of cases) {
   const resumedStop = outcome.includes("-resumed-");
   const restart = outcome === "restart" || resumedStop;
   const closed = outcome.startsWith("closed-");
@@ -93,7 +107,7 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
-      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}`;
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}`;
   const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -126,6 +140,9 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
     let cancellationReadLost = false;
     let lostCancellationDeepState: unknown;
     let originalFinalizationInput: unknown;
+    let selectedPath = "";
+    let selectedBytes: Buffer<ArrayBuffer>;
+    let originalResumeSignal: AbortSignal | undefined;
     let acceptedReport = "";
     let completedArtifacts: Buffer<ArrayBuffer>[] = [];
     const modelInputs: string[] = [];
@@ -138,6 +155,34 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
       "01",
       `rollout-${threadId}.jsonl`,
     );
+    const recordBudgetUsage = () =>
+      appendFile(
+        usagePath,
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          type: "turn_context",
+          payload: {
+            turn_id: "synthetic-scan-turn",
+            model: "gpt-5.6-sol",
+          },
+        }) +
+          "\n" +
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: {
+                  input_tokens: 1_250,
+                  cached_input_tokens: 200,
+                  output_tokens: 30,
+                },
+              },
+            },
+          }) +
+          "\n",
+      );
     let closePromise: Promise<void> | undefined;
     const makeClient = () =>
       new TestClient(
@@ -164,6 +209,8 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
           prepareOutputDir: async () => scanDir,
           runWorkbench: async (options, args, input) => {
             workbenchOptions = options;
+            if (args[0] === "get-cli-scan-resume")
+              originalResumeSignal = options.signal;
             commands.push(args[0]!);
             if (
               args[0] === "get-scan" &&
@@ -245,33 +292,7 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
                   outcome === "budget-after-deep-finish"))
             ) {
               budgetTriggered = true;
-              await appendFile(
-                usagePath,
-                JSON.stringify({
-                  timestamp: new Date().toISOString(),
-                  type: "turn_context",
-                  payload: {
-                    turn_id: "synthetic-scan-turn",
-                    model: "gpt-5.6-sol",
-                  },
-                }) +
-                  "\n" +
-                  JSON.stringify({
-                    timestamp: new Date().toISOString(),
-                    type: "event_msg",
-                    payload: {
-                      type: "token_count",
-                      info: {
-                        total_token_usage: {
-                          input_tokens: 1_250,
-                          cached_input_tokens: 200,
-                          output_tokens: 30,
-                        },
-                      },
-                    },
-                  }) +
-                  "\n",
-              );
+              await recordBudgetUsage();
               await new Promise<void>((resolve) => {
                 if (options.signal?.aborted) resolve();
                 else
@@ -288,6 +309,12 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
               (outcome === "canceled-during-publication" ||
                 outcome === "canceled-during-resumed-publication")
             ) {
+              if (initialResumeUsage) {
+                expect(originalResumeSignal?.reason).toBeInstanceOf(
+                  ScanCostLimitExceededError,
+                );
+                expect(options.signal?.aborted).toBe(false);
+              }
               cancellation.abort("Synthetic user cancellation");
             }
             if (
@@ -423,6 +450,12 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
                   );
                   originalFinalizationInput =
                     JSON.parse(selectionOutput).deepScan.finalizationInput;
+                  selectedPath = join(
+                    scanDir,
+                    (originalFinalizationInput as { resultPath: string })
+                      .resultPath,
+                  );
+                  selectedBytes = await readFile(selectedPath);
                   const sessions = join(
                     codexHome,
                     "sessions",
@@ -495,6 +528,7 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
         expect(commands).not.toContain("fail-scan");
         await client.close();
         client = makeClient();
+        if (initialResumeUsage) await recordBudgetUsage();
       }
       if (budgeted || closed) {
         const running = client.run(repository, {
@@ -637,14 +671,21 @@ for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
               ? { resumeScanId: scanId, outputDir: scanDir }
               : {}),
             postScanPrompt: followUp,
+            ...(initialResumeUsage ? { maxCostUsd: 0.004 } : {}),
           })
           .catch((error: unknown) => error);
-        expect(error).toBeInstanceOf(ScanInterruptedError);
-        expect((error as ScanInterruptedError).cause).toBe(
-          outcome === "canceled-before-publication"
-            ? parentError
-            : cancellation.signal.reason,
-        );
+        if (initialResumeUsage) {
+          expect(error).toBeInstanceOf(ScanCostLimitExceededError);
+          expect(error).toBe(originalResumeSignal?.reason);
+        } else {
+          expect(error).toBeInstanceOf(ScanInterruptedError);
+          expect((error as ScanInterruptedError).cause).toBe(
+            outcome === "canceled-before-publication"
+              ? parentError
+              : cancellation.signal.reason,
+          );
+        }
+        expect(await readFile(selectedPath)).toEqual(selectedBytes!);
         if (cancellationReadLost) {
           expect(lostCancellationDeepState).toMatchObject({
             status: "running",
