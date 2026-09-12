@@ -514,6 +514,9 @@ def _target_scope_lines(target: dict[str, Any]) -> list[str]:
 
 def _surface_notes(surface: dict[str, Any]) -> str:
     notes = surface.get("notes", "No additional canonical notes were recorded.")
+    source = _coverage_source(surface)
+    if source:
+        notes = f"{source}. {notes}"
     receipt_refs = surface.get("receiptRefs", [])
     if not isinstance(receipt_refs, list) or not receipt_refs:
         return _cell(notes)
@@ -521,6 +524,51 @@ def _surface_notes(surface: dict[str, Any]) -> str:
     if not evidence:
         return _cell(notes)
     return _cell(f"{notes} Evidence: {evidence}")
+
+
+def _coverage_source(item: dict[str, Any]) -> str:
+    provenance = item.get("provenance", {})
+    if not isinstance(provenance, dict) or not provenance.get("workerId"):
+        return ""
+    source = f"Review {provenance['workerId']}"
+    if provenance.get("attempt") is not None:
+        source += f", attempt {provenance['attempt']}"
+    return source
+
+
+def _remediation_section(finding: dict[str, Any]) -> list[str]:
+    remediation = _text(finding.get("remediation"), "No canonical remediation was recorded.")
+    lines = ["", "#### Remediation", "", remediation]
+    seen = {remediation}
+    sources = finding.get("provenance", {}).get("sourceFindings", [])
+    originals = (
+        [
+            source
+            for source in sources
+            if isinstance(source, dict) and isinstance(source.get("finding"), dict)
+        ]
+        if isinstance(sources, list)
+        else []
+    )
+    for source in originals:
+        text = _text(source["finding"].get("remediation"), "")
+        if text and text not in seen:
+            seen.add(text)
+            lines.extend(["", f"Source {_text(source.get('id'), 'finding')}: {text}"])
+    for field, label in (
+        ("remediationTests", "Tests"),
+        ("preventiveControls", "Preventive controls"),
+    ):
+        values = list(
+            dict.fromkeys(
+                value
+                for original in [finding, *(source["finding"] for source in originals)]
+                for value in _strings(original.get(field))
+            )
+        )
+        if values:
+            lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
+    return lines
 
 
 def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
@@ -616,8 +664,6 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         severity.get("changeConditions"),
         "Additional runtime or deployment evidence could raise or lower this severity.",
     )
-    remediation_tests = _strings(finding.get("remediationTests"))
-    preventive_controls = _strings(finding.get("preventiveControls"))
     attack_steps = _strings(attack_path.get("steps"))
     cwes = ", ".join(finding["taxonomy"]["cwe"]) or "none"
     title = _text(finding["title"], "Untitled finding")
@@ -736,18 +782,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
             lines.extend(
                 ["", f"{label} assessment:", *(f"- **{name}:** {value}" for name, value in details)]
             )
-    lines.extend(
-        [
-            "",
-            "#### Remediation",
-            "",
-            _text(finding["remediation"], "No canonical remediation was recorded."),
-        ]
-    )
-    if remediation_tests:
-        lines.extend(["", "Tests:", *_bullets(remediation_tests, "No tests recorded.")])
-    if preventive_controls:
-        lines.extend(["", "Preventive controls:", *_bullets(preventive_controls, "None recorded.")])
+    lines.extend(_remediation_section(finding))
     return lines
 
 
@@ -769,8 +804,12 @@ def _linked_finding_section(number: int, finding: dict[str, Any], report_path: s
         f"| CWE | {_cell(cwes)} |",
         f"| Affected lines | {_cell(_locations(finding))} |",
     ]
-    for heading in ("Summary", "Validation", "Dataflow", "Reachability", "Severity", "Remediation"):
+    for heading in ("Summary", "Validation", "Dataflow", "Reachability", "Severity"):
         lines.extend(["", f"#### {heading}", "", f"See the {link}."])
+    if finding.get("provenance", {}).get("sourceFindings"):
+        lines.extend(_remediation_section(finding))
+    else:
+        lines.extend(["", "#### Remediation", "", f"See the {link}."])
     return lines
 
 
@@ -1007,6 +1046,22 @@ def build_report_markdown(
                 f"[Open the structural hardening portfolio]({hardening_portfolio_path})",
             ]
         )
+    reviews = coverage.get("reviews", [])
+    if reviews:
+        lines.extend(
+            [
+                "",
+                "## Source Review Coverage",
+                "",
+                "| Review | Attempt | Coverage |",
+                "| --- | --- | --- |",
+            ]
+        )
+        for review in reviews:
+            if isinstance(review, dict):
+                lines.append(
+                    f"| {_cell(review.get('workerId'))} | {_cell(str(review.get('attempt', 'unknown')))} | {_cell(review.get('completeness'))} |"
+                )
     surfaces = coverage.get("surfaces", [])
     if surfaces:
         lines.extend(
@@ -1044,6 +1099,7 @@ def build_report_markdown(
         questions.extend(
             {
                 "question": item.get("reason", "Deferred review requires follow-up."),
+                "provenance": item.get("provenance", {}),
                 "followUpPrompt": " ".join(
                     (
                         f"Review deferred unit {item.get('id', 'unknown')} and close its stated proof gap.",
@@ -1065,6 +1121,9 @@ def build_report_markdown(
             if not isinstance(question, dict):
                 continue
             lines.append(f"- {_text(question.get('question'), 'Unspecified open question.')}")
+            source = _coverage_source(question)
+            if source:
+                lines.append(f"  - {_text(source, '')}.")
             prompt = _text(question.get("followUpPrompt"), "")
             if prompt:
                 lines.append(f"  - Follow-up prompt: {prompt}")

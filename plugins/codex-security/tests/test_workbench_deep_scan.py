@@ -279,7 +279,9 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         return claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
+        migrations = connection.execute(
+            "SELECT * FROM schema_migrations ORDER BY version"
+        ).fetchall()
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -311,6 +313,11 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
     assert sum(result["coordinatorDisposition"] == "adopted" for result in results) == 1
     assert sum(result["coordinatorDisposition"] == "observing" for result in results) == 3
     assert {result["deepScan"]["coordinatorGeneration"] for result in results} == {3}
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+            == migrations
+        )
 
 
 def test_legacy_generation_with_active_worker_observes_grace_then_adopts(tmp_path: Path) -> None:
@@ -1879,10 +1886,21 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         error="fixture reducer exhausted its attempts",
         coordinator_generation=2,
     )["deepScan"]
-    replayed_workers = {worker["id"]: worker for worker in replayed["workers"]}
+    assert replayed["workerReceipt"] == failed["workerReceipt"]
     assert replayed["phase"] == "reducing"
-    assert replayed["consecutiveErrors"] == counter_before_failure
-    assert all(replayed_workers[worker]["mergeState"] == "merging" for worker in replacement_inputs)
+    current = run_workbench(
+        state_dir,
+        "get-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        "thread-deep-scan",
+        environment=deep_environment(codex_home),
+    )["deepScan"]
+    current_workers = {worker["id"]: worker for worker in current["workers"]}
+    assert current["phase"] == "reducing"
+    assert current["consecutiveErrors"] == counter_before_failure
+    assert all(current_workers[worker]["mergeState"] == "merging" for worker in replacement_inputs)
 
     upsert_worker(
         state_dir,

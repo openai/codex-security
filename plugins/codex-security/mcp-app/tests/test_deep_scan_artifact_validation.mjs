@@ -217,8 +217,9 @@ async function testReducerValidation(root) {
     discoveries: [{ workerId: first.id, result: draft([firstFinding, secondFinding]) }],
     previous: null,
   };
-  const validateSnapshot = () => validateReducerArtifacts({
+  const validateSnapshot = (persistSourceCoverage = false) => validateReducerArtifacts({
     artifacts, artifactDir, resultPath, reducerId: "dedup-0001", sources,
+    persistSourceCoverage,
   }, scanId);
   await assert.rejects(validateSnapshot(), /unaccounted source findings/);
   await writeResult(resultPath, draft([firstFinding, secondFinding]));
@@ -226,11 +227,15 @@ async function testReducerValidation(root) {
   const validatedSnapshot = await validateSnapshot();
   assert.equal(validatedSnapshot.newFindings, 2);
   const admitted = JSON.parse(await readFile(resultPath, "utf8"));
+  const { sourceCoverage, ...legacySnapshot } = validatedSnapshot.result;
+  assert.equal(sourceCoverage.completeness, "unknown");
   assert.deepEqual(
-    validatedSnapshot.result,
+    legacySnapshot,
     admitted,
-    "validation returns the same reconciled result that was accepted on disk",
+    "v1 preserves host coverage in memory while retaining the legacy persisted shape",
   );
+  const versionedSnapshot = await validateSnapshot(true);
+  assert.deepEqual(versionedSnapshot.result, JSON.parse(await readFile(resultPath, "utf8")), "v2 persists the full host projection");
   assert.equal(Object.hasOwn(admitted, "coverage"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, ["worker-001:1"]);
   sources.previous = structuredClone(admitted);

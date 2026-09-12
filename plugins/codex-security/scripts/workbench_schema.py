@@ -867,6 +867,85 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        44,
+        "preserve original deep scan discovery context",
+        """
+        ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context TEXT;
+        UPDATE deep_scan_runs
+        SET discovery_user_context = (
+            SELECT user_context FROM scans WHERE scans.id = deep_scan_runs.scan_id
+        )
+        WHERE workflow_version IN (
+            'deep-security-scan/v1', 'deep-scan-mcp/v1'
+        );
+        """,
+    ),
+    (
+        45,
+        "retain deep scan attempts and exact merge inputs",
+        """
+        CREATE TABLE deep_scan_attempts (
+            scan_id TEXT NOT NULL REFERENCES deep_scan_runs(scan_id) ON DELETE CASCADE,
+            worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,
+            attempt INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            end_reason TEXT,
+            error_message TEXT,
+            accepted_result_path TEXT,
+            accepted_result_sha256 TEXT,
+            receipt_json TEXT,
+            PRIMARY KEY (worker_id, attempt)
+        );
+
+        CREATE TABLE deep_scan_attempt_sessions (
+            scan_id TEXT NOT NULL REFERENCES deep_scan_runs(scan_id) ON DELETE CASCADE,
+            worker_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            sdk_thread_id TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            PRIMARY KEY (worker_id, attempt, sdk_thread_id),
+            FOREIGN KEY (worker_id, attempt)
+                REFERENCES deep_scan_attempts(worker_id, attempt) ON DELETE CASCADE
+        );
+
+        CREATE TABLE deep_scan_merge_claims (
+            worker_id TEXT PRIMARY KEY REFERENCES deep_scan_workers(id) ON DELETE CASCADE,
+            scan_id TEXT NOT NULL REFERENCES deep_scan_runs(scan_id) ON DELETE CASCADE,
+            previous_worker_id TEXT,
+            previous_result_path TEXT,
+            previous_result_sha256 TEXT,
+            receipt_json TEXT
+        );
+
+        ALTER TABLE deep_scan_dedup_inputs ADD COLUMN result_manifest_path TEXT;
+        ALTER TABLE deep_scan_dedup_inputs ADD COLUMN result_manifest_sha256 TEXT;
+        ALTER TABLE deep_scan_dedup_inputs ADD COLUMN attempt INTEGER;
+        """,
+    ),
+    (
+        46,
+        "persist selected deep scan finalization input",
+        """
+        ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;
+        """,
+    ),
+    (
+        47,
+        "freeze stopped scan checkpoint selections",
+        """
+        ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;
+        """,
+    ),
+    (
+        48,
+        "bind original deep scan parent usage turn",
+        """
+        ALTER TABLE deep_scan_runs ADD COLUMN usage_owner_json TEXT;
+        """,
+    ),
 )
 
 

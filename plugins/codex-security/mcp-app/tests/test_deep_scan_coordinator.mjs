@@ -1362,12 +1362,13 @@ async function testFinishPersistenceFailureRewritesManifestAsFailure() {
   await assertFailureManifest(terminal, "terminal");
 }
 
-async function testLostFinishResponseReplaysWithoutOverwritingSuccessManifest() {
+async function testLostFinishResponseObservesCommitWithoutOverwritingSuccessManifest() {
   const fixture = await fixtureRun({ workers: 1, subagents: 0, stopAfterNoNew: 1, maxDiscoveryRuns: 1 });
   const store = new FakeStore(fixture.run);
   store.loseFirstFinishResponseAfterCommit = true;
   const coordinator = new DeepScanCoordinator({
     run: fixture.run,
+    threadId: "original-parent-thread",
     store,
     executor: new FakeExecutor({ dedupNewFindings: [0] }),
     pluginRoot: fixture.pluginRoot,
@@ -1377,34 +1378,10 @@ async function testLostFinishResponseReplaysWithoutOverwritingSuccessManifest() 
 
   const terminal = await coordinator.wait(undefined, 5_000);
   assert.equal(terminal?.status, "succeeded");
-  assert.equal(store.finishCalls.length, 2);
-  assert.deepEqual(store.finishCalls[1], store.finishCalls[0]);
+  assert.equal(store.finishCalls.length, 1);
   assert.equal(store.failCalls, 0);
   const manifest = JSON.parse(await readFile(terminal.manifestPath, "utf8"));
   assert.equal(manifest.scan.scanId, fixture.run.scanId);
-}
-
-async function testLostWorkerCommitResponsesReplayIdempotently() {
-  const fixture = await fixtureRun({ workers: 1, subagents: 0, stopAfterNoNew: 1, maxDiscoveryRuns: 1 });
-  const store = new FakeStore(fixture.run);
-  store.loseFirstDiscoveryAcceptanceResponseAfterCommit = true;
-  store.loseFirstDedupCommitResponseAfterCommit = true;
-  const coordinator = new DeepScanCoordinator({
-    run: fixture.run,
-    store,
-    executor: new FakeExecutor({ dedupNewFindings: [0] }),
-    pluginRoot: fixture.pluginRoot,
-    clock: immediateClock
-  });
-  coordinator.start();
-
-  const terminal = await coordinator.wait(undefined, 5_000);
-  assert.equal(terminal?.status, "succeeded");
-  assert.equal(store.discoveryAcceptanceResponseLosses, 1);
-  assert.equal(store.dedupCommitResponseLosses, 1);
-  assert.equal(store.dedupCommitCalls.length, 2);
-  assert.equal(store.dedupCommits.length, 1);
-  assert.equal(store.failCalls, 0);
 }
 
 async function testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest() {
@@ -2910,6 +2887,8 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
   store.heartbeatCoordinator = async () => structuredClone(store.run);
   const replacementExecutor = new FakeExecutor({ dedupNewFindings: [0] });
   const acceptedResult = await readFile(accepted.resultManifestPath, "utf8");
+  const acceptedWorkerId = await workerIdFromPrompt(accepted.promptPath);
+  await Promise.all(persistedWorkers.map((worker) => rm(worker.promptPath, { force: true })));
   const resumed = await startOrJoinDeepScanCoordinator({
     begin: { run: structuredClone(store.run), shouldStart: false },
     registry: new DeepScanCoordinatorRegistry(),
@@ -2926,11 +2905,11 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
 
   assert.equal(continuationClaims.length, 1);
   assert.equal(continuationClaims[0].handoffClaimToken, handoffClaimToken);
-  assert.equal(terminal?.status, "succeeded");
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(store.failCalls, 0);
   assert.equal(replacementExecutor.logicalDiscoveryWorkers.size, 1);
   assert.equal(
-    replacementExecutor.logicalDiscoveryWorkers.has(await workerIdFromPrompt(accepted.promptPath)),
+    replacementExecutor.logicalDiscoveryWorkers.has(acceptedWorkerId),
     false
   );
   assert.equal(store.dedupClaims.length, 1);
@@ -3995,8 +3974,7 @@ try {
   await testConfigurationFailureDoesNotRetry();
   await testFailureManifestWriteDoesNotMaskOriginalError();
   await testFinishPersistenceFailureRewritesManifestAsFailure();
-  await testLostFinishResponseReplaysWithoutOverwritingSuccessManifest();
-  await testLostWorkerCommitResponsesReplayIdempotently();
+  await testLostFinishResponseObservesCommitWithoutOverwritingSuccessManifest();
   await testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest();
   await testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary();
   await testDiscoveryPhasePersistenceFailureStopsDispatch();

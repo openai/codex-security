@@ -166,6 +166,7 @@ const allowedRoot = new Set([
 ]);
 const distFiles = new Set(
   [
+    "accepted-audit",
     "api",
     "auth",
     "bulk-scan-discovery",
@@ -175,6 +176,8 @@ const distFiles = new Set(
     "severity-store",
     "cloud-publish",
     "codex-prompt",
+    "codex-session",
+    "preflight-config",
     "component-plan",
     "component-scan",
     "config",
@@ -183,6 +186,7 @@ const distFiles = new Set(
     "cost",
     "cost-model",
     "custom-validation",
+    "deep-scan-finalization",
     "custom-validation-prompt",
     "custom-publish",
     "deep-progress",
@@ -210,6 +214,7 @@ const distFiles = new Set(
     "publication-events",
     "publication-store",
     "publish",
+    "reasoning-summary",
     "result",
     "runtime",
     "scan-activity",
@@ -327,7 +332,17 @@ assertExpectedGitHead(
 const internalMarker =
   /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket\x2dfirewall\x2dregistry|openai\.(?:enterprise\.)?slack\.com|app\.slack\.com\/client|(?:app\.notion\.com\/p|notion\.so)\/openai|linear\.app\/openai|(?:github\.com[:/]|api\.github\.com\/repos\/|raw\.githubusercontent\.com\/)openai\/openai(?:\.git)?(?:[^a-z0-9_-]|$)|LicenseRef\x2dProprietary|\/Users\/|\/home\/dev-user|flow\.apps\.openai\.org|(?:^|[^a-z0-9_-])go\/[a-z0-9_-]+)/iu;
 
-const payloads = [archiveBytes.toString("utf8")];
+// Scan compressed assets after decoding them below. Their binary bytes can
+// coincidentally match text references; keep scanning every tar header and all
+// other entry contents.
+const readableArchive = Buffer.from(archiveBytes);
+for (const file of files) {
+  if (!/\.br(?:\.part-[0-9]+)?$/iu.test(file)) continue;
+  const bytes = archiveFile(file);
+  const start = bytes.byteOffset - archiveBytes.byteOffset;
+  readableArchive.fill(0, start, start + bytes.byteLength);
+}
+const payloads = [readableArchive.toString("utf8")];
 const compressedFiles = [...files].filter((file) => /\.br$/iu.test(file));
 const compressedParts = new Map();
 for (const file of files) {

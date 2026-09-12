@@ -799,6 +799,12 @@ four workers. Unknown keys are rejected.
 `max_time_hours` accepts positive values up to 96, including fractional hours.
 At the deadline, discovery stops; the scan combines and returns completed findings.
 
+New Deep scans save the accepted aggregate before publishing the result. If
+publication is interrupted, recovering the same scan reuses that aggregate and
+its original stop reason without another discovery or reducer run. Explicit
+cancellation and cost stops retain their stopped or partial-result behavior.
+Scans created by earlier versions keep their original workflow when resumed.
+
 `scan --workers` controls discovery workers within one deep scan;
 `bulk-scan --workers` controls how many repositories are scanned concurrently.
 
@@ -940,6 +946,14 @@ tier, context category, and rates in USD per million tokens. Estimates use
 including cache reads and writes. They exclude long-context and other processing
 tier adjustments, fees, and surcharges. GPT-5.5 and GPT-6 Astra are supported;
 models without known prices show an unavailable estimate.
+
+Deep Scan accounting includes failed, replaced, and canceled worker attempts and
+their descendants once. Shared conversation usage is limited to the original
+scan turn and scan interval. Missing usage remains unavailable or partial;
+reported zero remains zero. When sessions use different models, `cost.modelCosts`
+records each model's tokens, estimate, and pricing basis, and `estimatedUsd` sums
+those estimates. A partial estimate has `cost.coverage: "partial"`; missing model
+attribution leaves the estimate unavailable until usage can be reconciled.
 
 For compatibility, `cacheWriteInputTokens` remains the reported token subtotal.
 `cacheWriteInputTokensReported: false` means at least one included usage record
