@@ -516,6 +516,8 @@ async function testDeepScanStdioLifecycle() {
       resumedScanId
     ]);
     await writeFile(restartControlPath, "after-restart");
+    // A replacement caller's configuration must not replace the original selection.
+    await writeFile(runtimeConfigPath, 'model_reasoning_summary = "detailed"\n');
 
     const restartedServer = startServer(serverBundlePath, environment);
     try {

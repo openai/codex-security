@@ -22,6 +22,7 @@ import {
   DeepScanStartLock,
   startOrJoinDeepScanCoordinator
 } from "./src/deep-scan/registry.js";
+import { captureDeepScanExecutionSettings, loadOrCaptureDeepScanExecutionSettings, restoredDeepScanWorkerSettings } from "./src/deep-scan/recovery-settings.js";
 import { CodexSdkWorkerExecutor } from "./src/deep-scan/executor.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
@@ -750,6 +751,20 @@ export function createCodexSecurityServer(): McpServer {
         registry: deepScanCoordinators,
         options: {
           store: deepScanStore,
+          prepareExecutor: async (run) => new CodexSdkWorkerExecutor({
+            ...restoredDeepScanWorkerSettings(
+              await loadOrCaptureDeepScanExecutionSettings(run.scanDir, () =>
+                captureDeepScanExecutionSettings(run, parentSandbox)),
+              parentSandbox
+            ),
+            artifactContext: {
+              pluginRoot: PLUGIN_ROOT,
+              scanRoot: run.scanDir,
+              repoRoot: run.targetPath,
+              scanId: run.scanId,
+              scope: run.scope
+            }
+          }),
           executor: new CodexSdkWorkerExecutor({
             ...modelSettings,
             parentSandbox,
