@@ -426,7 +426,7 @@ try {
       "--input-type=module",
       "--eval",
       `const sdk = await import(${JSON.stringify(packageManifest.name)});
-      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff", "loadProjectConfig", "resolveProjectConfig"]) {
+      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "deduplicateRecords", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff", "loadProjectConfig", "resolveProjectConfig"]) {
         if (typeof sdk[name] !== "function") {
           throw new Error("The installed package does not export " + name + ".");
         }
@@ -438,6 +438,16 @@ try {
       if (result.matches.length !== 0 || result.uncertain.length !== 0) {
         throw new Error("Empty finding comparison did not return an empty result.");
       }       const assert = await import("node:assert/strict");
+       const deduped = await sdk.deduplicateRecords({
+         observations: [],
+         sourceManifest: { repository: "synthetic" },
+         scopeKey: "package-smoke",
+         verifySource: async () => {},
+         candidateProvider: { potentialDuplicates: async () => { throw new Error("Unexpected retrieval"); } },
+         reviewRunner: { run: async () => { throw new Error("Unexpected review"); } },
+       });
+       assert.deepEqual(deduped.uniqueFindingIds, []);
+       assert.equal(deduped.deduplicationStatus, "completed");
        const { writeFile } = await import("node:fs/promises");
        const input = { scan: { mode: "deep", deep: { subagents_per_worker: 0 } }, policy: { fail_on_severity: "high" } };
        await writeFile("scan.json", JSON.stringify(input));

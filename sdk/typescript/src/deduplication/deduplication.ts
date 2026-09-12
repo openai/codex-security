@@ -5,6 +5,8 @@ import {
   pairKey,
   screeningPairSlot,
   type DeduplicationReviewer,
+  type DuplicateDecision,
+  type ScreeningResult,
 } from "./deduplication-reviewer.js";
 
 export const DEFAULT_DEDUPE_CONCURRENCY = 8;
@@ -65,6 +67,26 @@ export interface DeduplicationResult {
   uniqueFindingIds: string[];
   duplicateGroups: string[][];
   deduplicationStatus: "completed";
+}
+
+export interface DeduplicationPairConstraint {
+  findingIds: readonly [string, string];
+  decision: "SAME" | "DISTINCT";
+}
+
+export interface DeduplicationPairOutcome extends DeduplicationPairConstraint {
+  origin: "screening" | "pair-review" | "prior";
+  screenings: {
+    anchorId: string;
+    result: ScreeningResult["decisions"][string];
+  }[];
+  review?: DuplicateDecision;
+}
+
+export interface DetailedDeduplicationResult extends DeduplicationResult {
+  pairOutcomes: DeduplicationPairOutcome[];
+  /** SAME-connected components before contradiction-aware subgroup selection. */
+  sameComponents: string[][];
 }
 
 const severityOrder: Record<Finding["severity"]["level"], number> = {
@@ -238,6 +260,18 @@ export class FindingDeduplicator {
   ) {}
 
   async run(findingIds: readonly string[]): Promise<DeduplicationResult> {
+    const { uniqueFindingIds, duplicateGroups, deduplicationStatus } =
+      await this.runDetailed(findingIds, [], false);
+    return { uniqueFindingIds, duplicateGroups, deduplicationStatus };
+  }
+
+  async runDetailed(
+    findingIds: readonly string[],
+    priorDecisions:
+      | readonly DeduplicationPairConstraint[]
+      | (() => readonly DeduplicationPairConstraint[]) = [],
+    includeEvidence = true,
+  ): Promise<DetailedDeduplicationResult> {
     this.signal?.throwIfAborted();
     const concurrency = deduplicationConcurrency(this.concurrency);
     const ids = [...new Set(findingIds)];
@@ -260,6 +294,9 @@ export class FindingDeduplicator {
         remaining: number;
         rejected: boolean;
         decision?: "SAME" | "DISTINCT";
+        prior?: DeduplicationPairConstraint;
+        review?: DuplicateDecision;
+        screenings: Map<number, DeduplicationPairOutcome["screenings"][number]>;
       }
     >();
     // Freeze records, insertion order, and the last nominating anchor's pair
@@ -276,7 +313,12 @@ export class FindingDeduplicator {
         const key = pairKey(pair);
         const state = pairs.get(key);
         if (state === undefined) {
-          pairs.set(key, { ids: pair, remaining: 1, rejected: false });
+          pairs.set(key, {
+            ids: pair,
+            remaining: 1,
+            rejected: false,
+            screenings: new Map(),
+          });
         } else {
           state.ids = pair;
           state.remaining++;
@@ -284,10 +326,45 @@ export class FindingDeduplicator {
       }
     }
 
+    for (const prior of typeof priorDecisions === "function"
+      ? priorDecisions()
+      : priorDecisions) {
+      const [left, right] = prior.findingIds;
+      if (left === right || !findings.has(left) || !findings.has(right))
+        throw new CodexSecurityError(
+          "Prior decisions must refer to two distinct findings in the current corpus.",
+        );
+      const key = pairKey(prior.findingIds);
+      const existing = pairs.get(key);
+      if (existing?.prior && existing.prior.decision !== prior.decision)
+        throw new CodexSecurityError(
+          "Conflicting prior decisions for one pair.",
+        );
+      pairs.set(key, {
+        ids: existing?.ids ?? [left, right],
+        remaining: 0,
+        rejected: prior.decision === "DISTINCT",
+        decision: prior.decision,
+        prior,
+        screenings: new Map(),
+      });
+    }
+
     const ready: Job[] = [];
     const pending = neighborhoods
+      .map((neighborhood) => [
+        neighborhood[0]!,
+        ...neighborhood
+          .slice(1)
+          .filter(
+            (neighbor) =>
+              !pairs.get(
+                pairKey([neighborhood[0]!.findingId, neighbor.findingId]),
+              )?.prior,
+          ),
+      ])
       .filter((neighborhood) => neighborhood.length > 1)
-      .map((neighborhood) => async () => {
+      .map((neighborhood, neighborhoodIndex) => async () => {
         const screening = await this.reviewer.screen(neighborhood);
         this.signal?.throwIfAborted();
         for (let index = 0; index < neighborhood.length - 1; index++) {
@@ -296,21 +373,23 @@ export class FindingDeduplicator {
             neighborhood[index + 1]!.findingId,
           ]);
           const state = pairs.get(key)!;
-          if (
-            screening.decisions[screeningPairSlot(index)]!.decision ===
-            "DISTINCT"
-          )
-            state.rejected = true;
+          const result = screening.decisions[screeningPairSlot(index)]!;
+          if (includeEvidence)
+            state.screenings.set(neighborhoodIndex, {
+              anchorId: neighborhood[0]!.findingId,
+              result,
+            });
+          if (result.decision === "DISTINCT") state.rejected = true;
           state.remaining--;
           // Wait for every screening of this pair: a later DISTINCT veto must
           // prevent verification, including a verification that could fail.
           if (state.remaining === 0 && !state.rejected) {
             ready.push(async () => {
-              state.decision = (
-                await this.reviewer.reviewPair(
-                  state.ids.map((id) => findings.get(id)!),
-                )
-              ).decision;
+              const reviewed = await this.reviewer.reviewPair(
+                state.ids.map((id) => findings.get(id)!),
+              );
+              state.decision = reviewed.decision;
+              if (includeEvidence) state.review = reviewed;
             });
           }
         }
@@ -401,6 +480,22 @@ export class FindingDeduplicator {
       uniqueFindingIds: [...new Set(ids.map((id) => canonical.get(id) ?? id))],
       duplicateGroups,
       deduplicationStatus: "completed",
+      pairOutcomes: (includeEvidence ? [...pairs.values()] : []).map(
+        (state) => ({
+          findingIds: state.ids,
+          decision: state.rejected ? "DISTINCT" : state.decision!,
+          origin: state.prior
+            ? "prior"
+            : state.review
+              ? "pair-review"
+              : "screening",
+          screenings: [...state.screenings]
+            .sort(([left], [right]) => left - right)
+            .map(([, result]) => result),
+          ...(state.review ? { review: state.review } : {}),
+        }),
+      ),
+      sameComponents: components.map((component) => component.members),
     };
   }
 }

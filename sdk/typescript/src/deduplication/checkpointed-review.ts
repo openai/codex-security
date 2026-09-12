@@ -12,6 +12,7 @@ import {
   resolveCodexCommand,
 } from "../runtime.js";
 import type { CodexReview, CodexReviewRunner } from "./codex-review.js";
+import { runCheckpointedReview } from "./review-checkpoint.js";
 import {
   reviewSubmissionInstructions,
   sourceReviewInstructions,
@@ -83,12 +84,12 @@ export class CheckpointedReviewRunner {
       ]),
       contractDigest: workflowDigest(review.schema),
     };
-    const key = workflowDigest(binding);
-    const saved = await this.workflow.getReview(key);
-    if (saved !== null) return review.validate(saved);
-    const result = review.validate(await this.runner.run(review));
-    await this.assertSourceUnchanged();
-    await this.workflow.saveReview(key, binding, result);
-    return result;
+    return await runCheckpointedReview({
+      review,
+      binding,
+      store: this.workflow,
+      run: () => this.runner.run(review),
+      assertSourceUnchanged: () => this.assertSourceUnchanged(),
+    });
   }
 }

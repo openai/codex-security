@@ -1,4 +1,4 @@
-import { z } from "incur";
+import { z } from "zod";
 import { readFileSync } from "node:fs";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import type { Finding } from "../models.js";
@@ -43,8 +43,7 @@ const screeningSchema = z
 
 let validateMergedFinding: ValidateFunction<Finding> | undefined;
 
-function requireMergedFinding(result: DuplicateDecision): void {
-  if (result.decision !== "SAME") return;
+function findingValidator(): ValidateFunction<Finding> {
   if (validateMergedFinding === undefined) {
     const schema = JSON.parse(
       readFileSync(
@@ -59,8 +58,21 @@ function requireMergedFinding(result: DuplicateDecision): void {
       schema.properties.findings.items,
     );
   }
+  return validateMergedFinding;
+}
+
+/** @internal */
+export function requireFinding(value: unknown): asserts value is Finding {
+  if (!findingValidator()(value))
+    throw new Error(
+      "Deduplication records must satisfy the SDK Finding schema.",
+    );
+}
+
+function requireMergedFinding(result: DuplicateDecision): void {
+  if (result.decision !== "SAME") return;
   if (
-    !validateMergedFinding(result.mergedFinding) ||
+    !findingValidator()(result.mergedFinding) ||
     result.mergedFinding["findingId"] !== result.canonicalFindingId
   )
     throw new Error(
