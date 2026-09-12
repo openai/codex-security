@@ -104,6 +104,23 @@ def _children(scan_dir: Path, relative: str) -> list[str]:
     return sorted(child.name for child in cursor.iterdir())
 
 
+def _saved_workers(connection: Any, scan_id: str) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        "SELECT worker.*, attempt.accepted_result_path FROM deep_scan_workers AS worker "
+        "LEFT JOIN deep_scan_attempts AS attempt "
+        "ON attempt.worker_id = worker.id AND attempt.attempt = worker.attempt "
+        "WHERE worker.scan_id = ? ORDER BY worker.created_at, worker.id",
+        (scan_id,),
+    ).fetchall()
+    return [
+        {
+            **dict(row),
+            "result_manifest_path": row["accepted_result_path"] or row["result_manifest_path"],
+        }
+        for row in rows
+    ]
+
+
 def _latest_successful_reducer(workers: list[Any]) -> Any | None:
     return max(
         (
@@ -258,11 +275,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
     try:
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
         manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
-        workers = connection.execute(
-            "SELECT id, kind, status, completed_at, artifact_dir, result_manifest_path "
-            "FROM deep_scan_workers WHERE scan_id = ?",
-            (scan["id"],),
-        ).fetchall()
+        workers = _saved_workers(connection, scan["id"])
         paths = dict(_saved_result_paths(scan_dir, workers))
         frozen_sources = scan["retained_source_digests_json"]
 
@@ -354,11 +367,7 @@ def _recovery_source_digests(
             else:
                 include_parent = True
 
-    workers = connection.execute(
-        "SELECT id, kind, status, completed_at, artifact_dir, result_manifest_path "
-        "FROM deep_scan_workers WHERE scan_id = ?",
-        (scan["id"],),
-    ).fetchall()
+    workers = _saved_workers(connection, scan["id"])
     checkpoint_heads = _worker_checkpoint_heads(scan_dir, workers, scan["id"])
     paths = dict(_saved_result_paths(scan_dir, workers))
     recovery_sources = dict(frozen_sources or {})
@@ -1336,10 +1345,7 @@ def preserve_scan_results_locked(
         scan_dir,
         scan_id,
         binding,
-        connection.execute(
-            "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-            (scan_id,),
-        ).fetchall(),
+        _saved_workers(connection, scan_id),
         warnings,
         stopped=True,
         reason=(
@@ -1545,11 +1551,7 @@ def _require_current_deep_publication(
         # draft path; adopted coordinators must carry their generation and selection.
         if publication is None:
             return
-        reducer = _latest_successful_reducer(
-            connection.execute(
-                "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
-            ).fetchall()
-        )
+        reducer = _latest_successful_reducer(_saved_workers(connection, scan_id))
         selected_result = reducer["result_manifest_path"] if reducer is not None else None
     if publication["resultPath"] != selected_result:
         raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
