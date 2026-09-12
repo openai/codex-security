@@ -279,7 +279,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         return claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
+        migrations = connection.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -311,6 +311,11 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
     assert sum(result["coordinatorDisposition"] == "adopted" for result in results) == 1
     assert sum(result["coordinatorDisposition"] == "observing" for result in results) == 3
     assert {result["deepScan"]["coordinatorGeneration"] for result in results} == {3}
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+            == migrations
+        )
 
 
 def test_legacy_generation_with_active_worker_observes_grace_then_adopts(tmp_path: Path) -> None:
