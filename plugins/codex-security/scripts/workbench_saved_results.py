@@ -1295,8 +1295,10 @@ def preserve_scan_results_locked(
         checkpoint_heads = json.loads(scan["retained_checkpoint_heads_json"] or "{}")
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     deep_run = connection.execute(
-        "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
     ).fetchone()
+    if deep_run is not None:
+        db.deep_scan.require_supported_deep_scan(deep_run)
     outcome = (
         "canceled"
         if scan["canceled_at"]
