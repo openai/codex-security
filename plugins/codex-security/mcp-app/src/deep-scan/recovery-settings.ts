@@ -9,6 +9,7 @@ import { readScanLogs } from "../../../../../sdk/typescript/src/scan-logs.js";
 import { writeJsonAtomic } from "./artifacts.js";
 import { resolveCodexPath } from "./executor.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
+import type { DeepScanRunState } from "./types.js";
 
 /** Credentials and arbitrary environment/configuration stay with Codex. */
 export interface DeepScanExecutionSettings {
@@ -24,7 +25,7 @@ export interface DeepScanExecutionSettings {
 }
 
 export async function captureDeepScanExecutionSettings(
-  original: { model?: string; reasoningEffort?: string },
+  original: Pick<DeepScanRunState, "model" | "reasoningEffort" | "usageOwner">,
   parentSandbox: DeepWorkerParentSandbox,
   environment: NodeJS.ProcessEnv = process.env,
   parent?: { threadId: string; startedAt?: string }
@@ -40,7 +41,12 @@ export async function captureDeepScanExecutionSettings(
   }
   // Reuse the SDK projection: custom provider credentials belong in the native home.
   const selected = scanPreflightCodexConfig(resolveCodexProfile(config));
-  const native = parent === undefined ? {} : await originalParentSettings(codexHome, parent);
+  // A recovered scan can have a different continuation. Only its recorded owner
+  // establishes original history; null means that historical binding is missing.
+  const owner = original.usageOwner === undefined ? parent : original.usageOwner;
+  const native = !owner?.threadId ? {} : await originalParentSettings(codexHome, {
+    ...owner, threadId: owner.threadId, startedAt: parent?.startedAt ?? owner.startedAt
+  });
   return executionSettings({
     codexPath: resolveCodexPath(environment, process.platform, process.arch, process.cwd()),
     codexHome: !isAbsolute(codexHome)
@@ -58,7 +64,7 @@ export async function captureDeepScanExecutionSettings(
 
 async function originalParentSettings(
   codexHome: string,
-  parent: { threadId: string; startedAt?: string }
+  parent: { threadId: string; turnId?: string | null; startedAt?: string }
 ): Promise<Partial<DeepScanExecutionSettings>> {
   // Native config/read represents omitted selections as null. The existing
   // parent record contains the provider and summary actually used by that turn.
@@ -81,6 +87,7 @@ async function originalParentSettings(
         settings.modelProvider = context.model_provider;
       }
       if (event.type === "turn_context") {
+        if (parent.turnId && context.turn_id !== parent.turnId) continue;
         if (typeof context.model === "string") settings.model = context.model;
         if (typeof context.effort === "string") settings.reasoningEffort = context.effort;
         if (typeof context.summary === "string") settings.reasoningSummary = context.summary;

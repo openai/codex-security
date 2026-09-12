@@ -36,6 +36,15 @@ await testPersistenceRetryExhaustionPreservesDiagnostics();
 await testDeterministicPersistenceFailuresAreNotRetried();
 await testNonIdempotentMutationsAreNotRetried();
 testInvalidPersistedConfig();
+testOriginalUsageOwnerParsing();
+
+function testOriginalUsageOwnerParsing() {
+  const value = stateResult(randomUUID());
+  const usageOwner = { threadId: "original-thread", turnId: "original-turn", startedAt: "2026-01-01T00:00:00Z" };
+  assert.deepEqual(parseDeepScan({ deepScan: { ...value.deepScan, usageOwner } }).usageOwner, usageOwner);
+  assert.equal(parseDeepScan({ deepScan: { ...value.deepScan, usageOwner: null } }).usageOwner, null);
+  assert.equal(parseDeepScan(value).usageOwner, null, "old readers do not establish an original owner");
+}
 
 async function testBeginProtocolAndParsing() {
   const scanId = randomUUID();

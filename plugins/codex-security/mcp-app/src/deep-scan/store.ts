@@ -619,6 +619,7 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
     schemaVersion: optionalPositiveInteger(value.schemaVersion),
     workflowVersion: optionalString(value.workflowVersion),
     finalizationInput: parseFinalizationInput(value.finalizationInput),
+    usageOwner: parseUsageOwner(value.usageOwner),
     status,
     phase: deepScanPhase(value.phase),
     coordinatorGeneration: optionalPositiveInteger(value.coordinatorGeneration),
@@ -655,6 +656,16 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
       };
     }) : [],
     ...(value.committedMerge ? { committedMerge: parseCommittedMerge(value.committedMerge) } : {})
+  };
+}
+
+function parseUsageOwner(value: unknown): DeepScanRunState["usageOwner"] {
+  if (value === undefined || value === null) return null;
+  const owner = objectValue(value, "deepScan.usageOwner");
+  return {
+    threadId: optionalString(owner.threadId) ?? null,
+    turnId: optionalString(owner.turnId) ?? null,
+    startedAt: requiredString(owner.startedAt, "deepScan.usageOwner.startedAt")
   };
 }
 

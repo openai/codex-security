@@ -782,6 +782,7 @@ async function testIsolatedReconstructedWorkers() {
         codexOptions,
         model: `fixture-${name}-override`,
         reasoningEffort: "ultra",
+        usageOwner: { threadId: `fixture-${name}-owner`, turnId: "original-turn", startedAt: "2026-01-01T00:00:00Z" },
         parentSandbox: trustedParentSandboxWithDenials
       };
       await mkdir(path.join(codexHome, "sessions"));
@@ -789,12 +790,16 @@ async function testIsolatedReconstructedWorkers() {
         { type: "session_meta", timestamp: "2026-01-01T00:00:00Z",
           payload: { id: `fixture-${name}-owner`, model_provider: config.model_provider } },
         { type: "turn_context", timestamp: "2026-01-01T00:00:01Z",
-          payload: { model: "native-parent-model", effort: "medium", summary: config.model_reasoning_summary } },
+          payload: { turn_id: "original-turn", model: "native-parent-model", effort: "medium", summary: config.model_reasoning_summary } },
         { type: "turn_context", timestamp: "2026-01-01T00:02:00Z",
-          payload: { model: "later-parent-model", effort: "low", summary: "detailed" } }
+          payload: { turn_id: "later-turn", model: "later-parent-model", effort: "low", summary: "detailed" } }
       ].map(JSON.stringify).join("\n") + "\n");
+      await writeFile(path.join(codexHome, "sessions", "observer.jsonl"), JSON.stringify({
+        type: "session_meta", timestamp: "2026-01-01T00:00:00Z",
+        payload: { id: `fixture-${name}-observer`, model_provider: "observer-provider" }
+      }) + "\n");
       const saved = await loadOrCaptureDeepScanExecutionSettings(fixture.root, () =>
-        captureDeepScanExecutionSettings(settings, settings.parentSandbox, { ...codexOptions.env, CODEX_CLI_PATH: executable }, { threadId: `fixture-${name}-owner`, startedAt: "2026-01-01T00:01:00Z" }));
+        captureDeepScanExecutionSettings(settings, settings.parentSandbox, { ...codexOptions.env, CODEX_CLI_PATH: executable }, { threadId: `fixture-${name}-observer`, startedAt: "2026-01-01T00:01:00Z" }));
       const snapshotPath = path.join(fixture.root, "artifacts", "deep_discovery", "execution-settings.json");
       const snapshot = await readFile(snapshotPath, "utf8");
       assert.equal(snapshot.includes("synthetic-"), false);

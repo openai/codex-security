@@ -82,8 +82,8 @@ http_headers = { Authorization = "synthetic-secret" }
   await mkdir(sessionDirectory);
   await writeFile(join(sessionDirectory, "parent.jsonl"), [
     { type: "session_meta", timestamp: "2026-01-01T00:00:00Z", payload: { id: "fixture-parent", model_provider: "openai" } },
-    { type: "turn_context", timestamp: "2026-01-01T00:00:01Z", payload: { model: "parent-model", effort: "high", summary: "none" } },
-    { type: "turn_context", timestamp: "2026-01-01T00:02:00Z", payload: { model: "later-model", effort: "low", summary: "detailed" } }
+    { type: "turn_context", timestamp: "2026-01-01T00:00:01Z", payload: { turn_id: "original-turn", model: "parent-model", effort: "high", summary: "none" } },
+    { type: "turn_context", timestamp: "2026-01-01T00:02:00Z", payload: { turn_id: "later-turn", model: "later-model", effort: "low", summary: "detailed" } }
   ].map(JSON.stringify).join("\n") + "\n");
   await writeFile(join(sessionDirectory, "other.jsonl"), JSON.stringify({
     type: "session_meta", payload: { id: "fixture-other", model_provider: "other-provider" }
@@ -114,6 +114,19 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(unavailableParent.reasoningEffort, "ultra");
   assert.equal(unavailableParent.modelProvider, undefined, "missing history does not establish a provider");
   assert.equal(unavailableParent.reasoningSummary, undefined);
+  const originalOwner = { threadId: "fixture-parent", turnId: "original-turn", startedAt: "2026-01-01T00:00:00Z" };
+  const [rebound, unboundLegacy] = await Promise.all([
+    captureSettings({ usageOwner: originalOwner }, { filesystemDenies: [] }, parentEnvironment,
+      { threadId: "fixture-other", startedAt: "2026-01-01T00:03:00Z" }),
+    captureSettings({ model: "stored-model", usageOwner: null }, { filesystemDenies: [] }, parentEnvironment,
+      { threadId: "fixture-other", startedAt: "2026-01-01T00:03:00Z" })
+  ]);
+  assert.equal(rebound.modelProvider, "openai", "takeover uses the recorded owner, not the invoking conversation");
+  assert.equal(rebound.model, "parent-model", "the bound turn takes precedence over later turns");
+  assert.equal(rebound.reasoningSummary, "none");
+  assert.equal(unboundLegacy.model, "stored-model");
+  assert.equal(unboundLegacy.modelProvider, undefined, "unrecorded legacy ownership cannot recover caller selections");
+  assert.equal(unboundLegacy.reasoningSummary, undefined);
   const unsupported = JSON.stringify({ version: 99, settings });
   await writeFile(savedPath, unsupported);
   await assert.rejects(loadSettings(join(root, "one"), async () => assert.fail()), /unsupported/);
