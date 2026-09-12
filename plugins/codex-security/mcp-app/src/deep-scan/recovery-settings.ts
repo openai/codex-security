@@ -5,6 +5,7 @@ import type { CodexOptions } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import { scanPreflightCodexConfig } from "../../../../../sdk/typescript/src/preflight-config.js";
 import { resolveCodexProfile, type JsonObject } from "../../../../../sdk/typescript/src/config.js";
+import { readScanLogs } from "../../../../../sdk/typescript/src/scan-logs.js";
 import { writeJsonAtomic } from "./artifacts.js";
 import { resolveCodexPath } from "./executor.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
@@ -25,7 +26,8 @@ export interface DeepScanExecutionSettings {
 export async function captureDeepScanExecutionSettings(
   original: { model?: string; reasoningEffort?: string },
   parentSandbox: DeepWorkerParentSandbox,
-  environment: NodeJS.ProcessEnv = process.env
+  environment: NodeJS.ProcessEnv = process.env,
+  parent?: { threadId: string; startedAt?: string }
 ): Promise<DeepScanExecutionSettings> {
   const codexHome = environment.CODEX_HOME || join(homedir(), ".codex");
   const configPath = environment.CODEX_SECURITY_CONFIG_PATH ?? join(codexHome, "config.toml");
@@ -38,19 +40,56 @@ export async function captureDeepScanExecutionSettings(
   }
   // Reuse the SDK projection: custom provider credentials belong in the native home.
   const selected = scanPreflightCodexConfig(resolveCodexProfile(config));
+  const native = parent === undefined ? {} : await originalParentSettings(codexHome, parent);
   return executionSettings({
     codexPath: resolveCodexPath(environment, process.platform, process.arch, process.cwd()),
     codexHome: !isAbsolute(codexHome)
       || (process.platform === "win32" && ["\\", "/"].includes(win32.parse(codexHome).root))
       ? await fs.realpath(codexHome) : codexHome,
-    model: original.model ?? selected.model as string | undefined,
-    reasoningEffort: original.reasoningEffort ?? selected.model_reasoning_effort as string | undefined,
-    modelProvider: selected.model_provider as string | undefined,
-    reasoningSummary: selected.model_reasoning_summary as string | undefined,
+    model: original.model ?? (selected.model as string | undefined) ?? native.model,
+    reasoningEffort: original.reasoningEffort ?? (selected.model_reasoning_effort as string | undefined) ?? native.reasoningEffort,
+    modelProvider: (selected.model_provider as string | undefined) ?? native.modelProvider,
+    reasoningSummary: (selected.model_reasoning_summary as string | undefined) ?? native.reasoningSummary,
     serviceTier: selected.service_tier as string | undefined,
     providerConfig: selected.model_providers as JsonObject | undefined,
     parentSandbox
   });
+}
+
+async function originalParentSettings(
+  codexHome: string,
+  parent: { threadId: string; startedAt?: string }
+): Promise<Partial<DeepScanExecutionSettings>> {
+  // Native config/read represents omitted selections as null. The existing
+  // parent record contains the provider and summary actually used by that turn.
+  // History can be disabled or unavailable; configured selections still work.
+  try {
+    const log = await readScanLogs({
+      scanId: parent.threadId, threadId: parent.threadId, executionThreadIds: [],
+      codexHome, allowMissingRoot: true
+    });
+    const settings: Partial<DeepScanExecutionSettings> = {};
+    const cutoff = parent.startedAt === undefined ? Infinity : Date.parse(parent.startedAt);
+    for (const entry of log.events) {
+      const event = entry.event as Record<string, unknown>;
+      const timestamp = typeof event.timestamp === "string" ? Date.parse(event.timestamp) : undefined;
+      if (timestamp !== undefined && timestamp > cutoff) continue;
+      const payload = event.payload;
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+      const context = payload as Record<string, unknown>;
+      if (event.type === "session_meta" && typeof context.model_provider === "string") {
+        settings.modelProvider = context.model_provider;
+      }
+      if (event.type === "turn_context") {
+        if (typeof context.model === "string") settings.model = context.model;
+        if (typeof context.effort === "string") settings.reasoningEffort = context.effort;
+        if (typeof context.summary === "string") settings.reasoningSummary = context.summary;
+      }
+    }
+    return settings;
+  } catch {
+    return {};
+  }
 }
 
 /** Called by the acquired coordinator before it starts any worker. */

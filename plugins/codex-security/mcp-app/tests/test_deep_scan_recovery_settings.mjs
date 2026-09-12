@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build } from "esbuild";
@@ -78,6 +78,23 @@ http_headers = { Authorization = "synthetic-secret" }
   await writeFile(join(root, "config.toml"), 'model = "native-home-model"\n');
   const native = await captureSettings({}, { filesystemDenies: [] }, { CODEX_CLI_PATH: process.execPath, CODEX_HOME: root });
   assert.equal(native.model, "native-home-model");
+  const sessionDirectory = join(root, "sessions");
+  await mkdir(sessionDirectory);
+  await writeFile(join(sessionDirectory, "parent.jsonl"), [
+    { type: "session_meta", timestamp: "2026-01-01T00:00:00Z", payload: { id: "fixture-parent", model_provider: "openai" } },
+    { type: "turn_context", timestamp: "2026-01-01T00:00:01Z", payload: { model: "parent-model", effort: "high", summary: "none" } },
+    { type: "turn_context", timestamp: "2026-01-01T00:02:00Z", payload: { model: "later-model", effort: "low", summary: "detailed" } }
+  ].map(JSON.stringify).join("\n") + "\n");
+  await writeFile(join(sessionDirectory, "other.jsonl"), JSON.stringify({
+    type: "session_meta", payload: { id: "fixture-other", model_provider: "other-provider" }
+  }) + "\n");
+  const parentSettings = await captureSettings({}, { filesystemDenies: [] }, {
+    CODEX_CLI_PATH: process.execPath, CODEX_HOME: root
+  }, { threadId: "fixture-parent", startedAt: "2026-01-01T00:01:00Z" });
+  assert.equal(parentSettings.model, "native-home-model", "explicit config retains precedence");
+  assert.equal(parentSettings.modelProvider, "openai");
+  assert.equal(parentSettings.reasoningSummary, "none", "later owner turns are not original discovery settings");
+  assert.equal(parentSettings.reasoningEffort, "high");
   const unsupported = JSON.stringify({ version: 99, settings });
   await writeFile(savedPath, unsupported);
   await assert.rejects(loadSettings(join(root, "one"), async () => assert.fail()), /unsupported/);
