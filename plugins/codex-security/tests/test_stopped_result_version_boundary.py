@@ -22,11 +22,25 @@ def snapshot(connection, scan_dir):
 
 
 @pytest.mark.parametrize("operation", ["preserve", "recover"])
-@pytest.mark.parametrize("protocol", ["supported", "future-workflow", "future-selection"])
+@pytest.mark.parametrize(
+    "protocol",
+    ["supported", "supported-v2", "supported-mcp-v1", "future-workflow", "future-selection"],
+)
 def test_stopped_result_publication_requires_supported_protocol(
     workbench_api, workbench_db, publication_scan, monkeypatch, operation, protocol
 ):
     scan = publication_scan()
+    supported_workflows = {
+        "supported": "deep-security-scan/v1",
+        "supported-v2": "deep-security-scan/v2",
+        "supported-mcp-v1": "deep-scan-mcp/v1",
+    }
+    if protocol in supported_workflows:
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?",
+                (supported_workflows[protocol], scan.scan_id),
+            )
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     result = add_worker(workbench_db, scan, status="canceled")
     draft = save_disposition(scan, result.parent, "reported")
@@ -101,12 +115,16 @@ def test_stopped_result_publication_requires_supported_protocol(
             }
         )
     )
-    if protocol == "supported":
+    if protocol in supported_workflows:
         assert error is None
         assert before != after
         row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
         assert row["seal_manifest_digest"]
         assert row["failure_message"] == "Original worker stop."
+        run = workbench_db.execute(
+            "SELECT workflow_version FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
+        ).fetchone()
+        assert run["workflow_version"] == supported_workflows[protocol]
     else:
         assert error is not None and "unsupported" in error.lower()
         assert after == before
