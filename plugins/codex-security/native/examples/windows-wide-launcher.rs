@@ -35,6 +35,16 @@ fn main() -> std::io::Result<()> {
         for (index, name) in names.iter().enumerate() {
             fs::write(cwd.join(name), format!("sentinel-{index}"))?;
         }
+        std::os::windows::fs::symlink_file(&names[0], cwd.join("relative-link"))?;
+        std::os::windows::fs::symlink_file(raw("missing-", 0xdfff), cwd.join("missing-link"))?;
+        std::os::windows::fs::symlink_file(
+            Path::new("..").join(raw("missing-", 0xdfff)),
+            cwd.join("missing-parent-link"),
+        )?;
+        std::os::windows::fs::symlink_file("loop-link", cwd.join("loop-link"))?;
+        fs::write(cwd.join("missing-tail"), "ordinary sibling")?;
+        std::os::windows::fs::symlink_file("missing-tail.", cwd.join("dot-target-link"))?;
+        std::os::windows::fs::symlink_file("missing-tail ", cwd.join("space-target-link"))?;
         fs::create_dir(cwd.join("empty"))?;
         fs::create_dir(cwd.join(raw("directory-", 0xdc80)))?;
         std::os::windows::fs::symlink_file(&names[0], cwd.join("file-link"))?;
@@ -230,7 +240,7 @@ fn main() -> std::io::Result<()> {
     let mut args = env::args_os().skip(1);
     let node = args.next().expect("Node executable path");
     let script = args.next().expect("Windows wide proof script");
-    let root = PathBuf::from(args.next().expect("Proof fixture directory")).join("wide-process");
+    let root = PathBuf::from(args.next().expect("Proof fixture directory")).join("wide-İprocess");
     fs::create_dir(&root)?;
     let result = if args.next().is_some_and(|argument| argument == "policy") {
         policy_proof(node, script, &root)

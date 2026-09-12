@@ -13,7 +13,11 @@ import { homedir } from "node:os";
 import { basename, dirname, parse, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { unixBinding, windowsBinding } from "../native";
-import { windowsFileSystem } from "../../../native/windows-files.mjs";
+import {
+  windowsFileSystem,
+  windowsJoin,
+  windowsParts,
+} from "../../../native/windows-files.mjs";
 import {
   decodePosixBytes,
   encodePosixPath,
@@ -35,39 +39,6 @@ type FileInfo = Pick<Stats, "isDirectory" | "isFile" | "isSymbolicLink"> & {
 };
 const statPath = (path: Buffer): FileInfo =>
   windows ? windowsFiles().stat(path) : statSync(path);
-
-function windowsParts(value: string): [string, string, string] {
-  const path = value.replaceAll("/", "\\");
-  if (path.startsWith("\\\\")) {
-    const start = path.slice(0, 8).toUpperCase() === "\\\\?\\UNC\\" ? 8 : 2;
-    const server = path.indexOf("\\", start);
-    const share = server === -1 ? -1 : path.indexOf("\\", server + 1);
-    return share === -1
-      ? [value, "", ""]
-      : [value.slice(0, share), value[share]!, value.slice(share + 1)];
-  }
-  const drive = path[1] === ":" ? 2 : 0;
-  const root = path[drive] === "\\" ? 1 : 0;
-  return [
-    value.slice(0, drive),
-    value.slice(drive, drive + root),
-    value.slice(drive + root),
-  ];
-}
-
-function windowsJoin(left: string, right: string): string {
-  const [leftDrive, leftRoot, leftPath] = windowsParts(left);
-  const [rightDrive, rightRoot, rightPath] = windowsParts(right);
-  if (rightRoot) return (rightDrive || leftDrive) + rightRoot + rightPath;
-  if (rightDrive && rightDrive.toLowerCase() !== leftDrive.toLowerCase())
-    return right;
-  const drive = rightDrive || leftDrive;
-  const path =
-    leftPath + (leftPath && !/[/\\]$/u.test(leftPath) ? "\\" : "") + rightPath;
-  const root =
-    leftRoot || (path && drive && !/[:/\\]$/u.test(drive) ? "\\" : "");
-  return drive + root + path;
-}
 
 function parsedPath(value: string): string {
   // pathlib removes empty and '.' components while preserving symlink/.. pairs.

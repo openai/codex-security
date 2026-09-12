@@ -169,6 +169,23 @@ pub fn windows_directory_entries(path: Buffer) -> napi::Result<DirectoryEntriesR
     }
 }
 
+#[napi]
+pub fn windows_read_link(path: Buffer) -> napi::Result<BufferResult> {
+    Ok(match std::fs::read_link(os_string(path)?) {
+        Ok(target) => BufferResult {
+            error: 0,
+            value: wide_bytes(target.as_os_str().encode_wide()),
+        },
+        Err(error) => BufferResult {
+            error: error
+                .raw_os_error()
+                .ok_or_else(|| napi::Error::from_reason(error.to_string()))?
+                as u32,
+            value: Vec::new().into(),
+        },
+    })
+}
+
 fn io_range(buffer: &Buffer, offset: f64, length: f64) -> napi::Result<(usize, u32)> {
     if !offset.is_finite()
         || !length.is_finite()
