@@ -44,6 +44,7 @@ type BudgetCompletionFault = "lost" | "before-commit" | "lost-and-canceled";
 const cases: {
   outcome: (typeof outcomes)[number];
   budgetCompletionFault?: BudgetCompletionFault;
+  cancellationFault?: "status-read" | "cancel-response";
 }[] = [
   ...outcomes.map((outcome) => ({ outcome })),
   ...(
@@ -61,8 +62,16 @@ const cases: {
     outcome: "budget-after-deep-finish",
     budgetCompletionFault: "lost-and-canceled",
   },
+  {
+    outcome: "canceled-during-publication",
+    cancellationFault: "status-read",
+  },
+  {
+    outcome: "canceled-during-publication",
+    cancellationFault: "cancel-response",
+  },
 ];
-for (const { outcome, budgetCompletionFault } of cases) {
+for (const { outcome, budgetCompletionFault, cancellationFault } of cases) {
   const resumedStop = outcome.includes("-resumed-");
   const restart = outcome === "restart" || resumedStop;
   const closed = outcome.startsWith("closed-");
@@ -72,7 +81,7 @@ for (const { outcome, budgetCompletionFault } of cases) {
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
-      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}`;
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}`;
   const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -138,6 +147,13 @@ for (const { outcome, budgetCompletionFault } of cases) {
           runWorkbench: async (options, args, input) => {
             workbenchOptions = options;
             commands.push(args[0]!);
+            if (
+              args[0] === "get-scan" &&
+              cancellation.signal.aborted &&
+              cancellationFault === "status-read"
+            ) {
+              throw new Error("Synthetic lost cancellation status response");
+            }
             if (args[0] === "write-scan-draft" && publicationFails) {
               publicationFails = false;
               throw new Error("Synthetic publication write failure");
@@ -155,6 +171,17 @@ for (const { outcome, budgetCompletionFault } of cases) {
                 "Synthetic budget completion failure before commit",
               );
             const result = await runWorkbench(options, args, input);
+            if (
+              args[0] === "cancel-scan" &&
+              cancellationFault === "cancel-response"
+            ) {
+              completedArtifacts = await Promise.all(
+                ["report.md", "scan-manifest.json"].map((name) =>
+                  readFile(join(scanDir, name)),
+                ),
+              );
+              throw new Error("Synthetic lost cancellation response");
+            }
             if (
               args[0] === "complete-budget-exhausted-scan" &&
               budgetReceiptLost
@@ -474,7 +501,6 @@ for (const { outcome, budgetCompletionFault } of cases) {
               reportAvailable: true,
             });
             if (budgetCompletionFault === "lost-and-canceled") {
-              expect(commands).not.toContain("cancel-scan");
               expect(
                 await Promise.all(
                   ["report.md", "scan-manifest.json"].map((name) =>
@@ -600,6 +626,15 @@ for (const { outcome, budgetCompletionFault } of cases) {
         expect(commands).toContain("cancel-scan");
         expect(commands).not.toContain("fail-scan");
         expect(modelInputs.length).toBe(1);
+        if (cancellationFault === "cancel-response") {
+          expect(
+            await Promise.all(
+              ["report.md", "scan-manifest.json"].map((name) =>
+                readFile(join(scanDir, name)),
+              ),
+            ),
+          ).toEqual(completedArtifacts);
+        }
         await expect(
           client.run(repository, {
             mode: "deep",

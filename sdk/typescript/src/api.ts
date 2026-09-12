@@ -2480,25 +2480,15 @@ export class CodexSecurity {
         const deep = saved?.["deepScan"];
         if (isRecord(deep) && isRecord(deep["finalizationInput"])) {
           selectedDeepFinalization = true;
-          const current = await workbench(workbenchOptions, [
-            "get-scan",
+          // The workbench owns the running-state check and repeated cancellation.
+          // A lost cleanup response must preserve the original interruption.
+          await workbench(workbenchOptions, [
+            "cancel-scan",
             "--scan-id",
             activeScan.id,
-          ]).catch(() => null);
-          const scan = current?.["scan"];
-          if (
-            isRecord(scan) &&
-            isRecord(scan["progress"]) &&
-            scan["progress"]["status"] === "running"
-          ) {
-            await workbench(workbenchOptions, [
-              "cancel-scan",
-              "--scan-id",
-              activeScan.id,
-              "--thread-id",
-              observedScanThreadId,
-            ]).catch(() => undefined);
-          }
+            "--thread-id",
+            observedScanThreadId,
+          ]).catch(() => undefined);
         }
       }
       // Publication failures remain resumable. A cost stop or explicit client close
