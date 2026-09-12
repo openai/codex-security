@@ -754,7 +754,7 @@ export function createCodexSecurityServer(): McpServer {
           prepareExecutor: async (run) => new CodexSdkWorkerExecutor({
             ...restoredDeepScanWorkerSettings(
               await loadOrCaptureDeepScanExecutionSettings(run.scanDir, () =>
-                captureDeepScanExecutionSettings(run, parentSandbox, process.env, { threadId, startedAt: run.createdAt })),
+                captureDeepScanExecutionSettings(run, parentSandbox, process.env, { threadId, startedAt: run.createdAt }), run),
               parentSandbox
             ),
             artifactContext: {

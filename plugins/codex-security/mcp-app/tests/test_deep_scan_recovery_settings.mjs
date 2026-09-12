@@ -127,6 +127,26 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(unboundLegacy.model, "stored-model");
   assert.equal(unboundLegacy.modelProvider, undefined, "unrecorded legacy ownership cannot recover caller selections");
   assert.equal(unboundLegacy.reasoningSummary, undefined);
+  const incompleteDir = join(root, "incomplete");
+  const incomplete = { codexPath: process.execPath, codexHome: root, serviceTier: "flex" };
+  await loadSettings(incompleteDir, async () => incomplete);
+  await writeFile(join(root, "config.toml"), 'model_provider = "observer-provider"\nmodel_reasoning_summary = "detailed"\n');
+  const originalRun = { model: "stored-model", reasoningEffort: "ultra", usageOwner: originalOwner,
+    createdAt: "2026-01-01T00:01:00Z" };
+  const repaired = await loadSettings(incompleteDir, async () => assert.fail("existing settings must not recapture current config"), originalRun);
+  assert.deepEqual(repaired, { ...incomplete, model: "stored-model", reasoningEffort: "ultra",
+    modelProvider: "openai", reasoningSummary: "none" });
+  const repairedPath = join(incompleteDir, "artifacts", "deep_discovery", "execution-settings.json");
+  const repairedBytes = await readFile(repairedPath, "utf8");
+  await rm(sessionDirectory, { recursive: true });
+  assert.deepEqual(await loadSettings(incompleteDir, async () => assert.fail(), originalRun), repaired);
+  assert.equal(await readFile(repairedPath, "utf8"), repairedBytes, "recovered selections survive unavailable history");
+  const unknownDir = join(root, "unknown");
+  await loadSettings(unknownDir, async () => incomplete);
+  const unknown = await loadSettings(unknownDir, async () => assert.fail(), { ...originalRun, usageOwner: null });
+  assert.equal(unknown.model, "stored-model");
+  assert.equal(unknown.modelProvider, undefined, "missing original ownership is not current config");
+  assert.equal(unknown.reasoningSummary, undefined);
   const unsupported = JSON.stringify({ version: 99, settings });
   await writeFile(savedPath, unsupported);
   await assert.rejects(loadSettings(join(root, "one"), async () => assert.fail()), /unsupported/);

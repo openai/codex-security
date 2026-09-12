@@ -102,21 +102,42 @@ async function originalParentSettings(
 /** Called by the acquired coordinator before it starts any worker. */
 export async function loadOrCaptureDeepScanExecutionSettings(
   scanDir: string,
-  capture: () => Promise<DeepScanExecutionSettings>
+  capture: () => Promise<DeepScanExecutionSettings>,
+  original?: Pick<DeepScanRunState, "model" | "reasoningEffort" | "usageOwner" | "createdAt">
 ): Promise<DeepScanExecutionSettings> {
   const path = join(scanDir, "artifacts", "deep_discovery", "execution-settings.json");
+  let settings: DeepScanExecutionSettings;
   try {
     const saved = JSON.parse(await fs.readFile(path, "utf8"));
     if (saved.version !== 1) {
       throw new Error("This Deep Scan uses an unsupported execution settings version.");
     }
-    return executionSettings(saved.settings);
+    settings = executionSettings(saved.settings);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    settings = executionSettings(await capture());
+    await writeJsonAtomic(path, { version: 1, settings });
+    return settings;
   }
-  const settings = executionSettings(await capture());
-  await writeJsonAtomic(path, { version: 1, settings });
-  return settings;
+  if (!original || (settings.model !== undefined && settings.reasoningEffort !== undefined
+    && settings.modelProvider !== undefined && settings.reasoningSummary !== undefined)) return settings;
+  // Earlier snapshots can omit native selections. Recover only from the saved
+  // home and recorded owner; the continuation's current config is not history.
+  const owner = original.usageOwner;
+  const native = !owner?.threadId ? {} : await originalParentSettings(settings.codexHome, {
+    ...owner, threadId: owner.threadId, startedAt: original.createdAt
+  });
+  const recovered = executionSettings({
+    ...settings,
+    model: settings.model ?? original.model ?? native.model,
+    reasoningEffort: settings.reasoningEffort ?? original.reasoningEffort ?? native.reasoningEffort,
+    modelProvider: settings.modelProvider ?? native.modelProvider,
+    reasoningSummary: settings.reasoningSummary ?? native.reasoningSummary
+  });
+  if (JSON.stringify(recovered) !== JSON.stringify(settings)) {
+    await writeJsonAtomic(path, { version: 1, settings: recovered });
+  }
+  return recovered;
 }
 
 export function restoredDeepScanWorkerSettings(

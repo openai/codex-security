@@ -815,14 +815,21 @@ async function testIsolatedReconstructedWorkers() {
     };
     syncBuiltinESMExports();
 
-    for (const phase of ["fresh", "resume", "reconstructed"]) {
-      if (phase === "reconstructed") {
+    for (const phase of ["fresh", "resume", "reconstructed", "incomplete"]) {
+      if (phase === "reconstructed" || phase === "incomplete") {
         for (const scan of scans) {
           // The caller restores recorded selections. Its old config file need
           // not exist; current credentials still come from the selected home/env.
-          await rm(scan.configPath);
+          if (phase === "reconstructed") await rm(scan.configPath);
+          if (phase === "incomplete") {
+            const saved = JSON.parse(scan.snapshot);
+            for (const key of ["model", "reasoningEffort", "modelProvider", "reasoningSummary"]) delete saved.settings[key];
+            await writeFile(scan.snapshotPath, JSON.stringify(saved));
+          }
           const recorded = await loadOrCaptureDeepScanExecutionSettings(scan.fixture.root, () =>
-            assert.fail("reconstruction must not recapture current settings"));
+            assert.fail("reconstruction must not recapture current settings"), {
+            ...scan.settings, createdAt: "2026-01-01T00:01:00Z"
+          });
           const restored = restoredDeepScanWorkerSettings(recorded, scan.settings.parentSandbox, () => scan.runtimeEnvironment);
           restored.codexOptions.baseUrl = scan.settings.codexOptions.baseUrl;
           scan.executor = new CodexSdkWorkerExecutor(restored);
