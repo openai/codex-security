@@ -366,6 +366,9 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     result_path.unlink()
+    # Remove the immutable accepted copy too, leaving no recoverable worker source.
+    for checkpoint in (result_path.parent / "checkpoints").glob("*.json"):
+        checkpoint.unlink()
     contract_dir = tmp_path / "contract"
     contract_dir.mkdir()
     scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
@@ -1012,6 +1015,9 @@ def test_canceled_scan_reports_noop_coordinator_publication(tmp_path: Path) -> N
     state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     result_path.write_text("{incomplete")
+    # A valid immutable copy would let publication recover despite this corruption.
+    for checkpoint in (result_path.parent / "checkpoints").glob("*.json"):
+        checkpoint.unlink()
 
     scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
     wrapper = tmp_path / "fail_before_canceled_sources_are_frozen.py"
@@ -1584,7 +1590,7 @@ def test_complete_worker_supersedes_obsolete_checkpoint_coverage(tmp_path: Path)
         },
     }
     checkpoints = result_path.parent / "checkpoints"
-    checkpoints.mkdir()
+    checkpoints.mkdir(exist_ok=True)
     (checkpoints / ("0" * 64 + ".json")).write_text(json.dumps(checkpoint))
 
     run_workbench(
@@ -1826,7 +1832,7 @@ def test_recovery_selects_strongest_same_finding_checkpoint(tmp_path: Path) -> N
     strong["confidence"]["level"] = "high"
     strong["summary"] = "Later strong checkpoint evidence."
     checkpoint_dir = result_path.parent / "checkpoints"
-    checkpoint_dir.mkdir()
+    checkpoint_dir.mkdir(exist_ok=True)
     for name, finding in (("0" * 64, weak), ("f" * 64, strong)):
         (checkpoint_dir / f"{name}.json").write_text(
             json.dumps(
