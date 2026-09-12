@@ -583,11 +583,14 @@ jobs:
         run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
 
   windows-verify:
-    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
+    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / ${{ matrix.node == '24' && 'install diagnostic' || 'verify' }}
     needs: [validate-title, package]
     if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: windows-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -600,18 +603,51 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: ${{ matrix.node == '24' && '24.20.0' || matrix.node }}
           cache: npm
           cache-dependency-path: sdk/typescript/pnpm-lock.yaml
       - name: Download package for this commit
+        if: matrix.node != '24'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: package-${{ github.sha }}
           path: dist
       - name: Inspect installed package
+        if: matrix.node != '24'
         working-directory: sdk/typescript
         shell: bash
         run: node scripts/check-package.mjs ../../dist/*.tgz
+
+      - name: Test package install diagnostic
+        if: matrix.node == '24'
+        run: node --test .github/scripts/test_package_install_diagnostic.mjs
+      - name: Download baseline package
+        if: matrix.node == '24'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package-4372b9c4bb2b099bf3b2a8b461f5eb4ee0abc538
+          run-id: 34668484160
+          github-token: ${{ github.token }}
+          path: dist/package-baseline
+      - name: Download comparison package
+        if: matrix.node == '24'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package-0aab33cc319f1e85dd2ab72b3c8760d3dc21ac06
+          run-id: 34677084903
+          github-token: ${{ github.token }}
+          path: dist/package-candidate
+      - name: Compare package installs with persistent timing evidence
+        if: matrix.node == '24'
+        run: node .github/scripts/diagnose_package_install.mjs
+      - name: Upload package install phase evidence
+        if: always() && matrix.node == '24'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-node24-package-install-diagnostic-${{ github.run_attempt }}
+          overwrite: true
+          path: ${{ runner.temp }}/package-install-diagnostic/evidence/comparison.json
+          if-no-files-found: warn
 
   windows:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
