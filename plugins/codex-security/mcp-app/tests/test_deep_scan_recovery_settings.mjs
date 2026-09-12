@@ -128,10 +128,10 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(unboundLegacy.modelProvider, undefined, "unrecorded legacy ownership cannot recover caller selections");
   assert.equal(unboundLegacy.reasoningSummary, undefined);
   await writeFile(join(sessionDirectory, "applied.jsonl"), [
-    { type: "session_meta", timestamp: "2026-01-01T00:00:00Z", payload: { id: "fixture-applied", model_provider: "openai" } },
+    { type: "session_meta", timestamp: "2026-01-01T00:00:00Z", payload: { id: "fixture-applied", model_provider: "previous-provider" } },
     { type: "event_msg", timestamp: "2026-01-01T00:00:01Z", payload: { type: "thread_settings_applied", thread_id: "fixture-applied",
       thread_settings: { model: "applied-model", model_provider_id: "openai", service_tier: "default", reasoning_effort: "high", reasoning_summary: "concise" } } },
-    { type: "turn_context", timestamp: "2026-01-01T00:00:02Z", payload: { turn_id: "applied-turn", model: "applied-model", effort: "high", summary: "none" } },
+    { type: "turn_context", timestamp: "2026-01-01T00:00:02Z", payload: { turn_id: "applied-turn", model: "previous-model", effort: "low", summary: "none" } },
     { type: "event_msg", timestamp: "2026-01-01T00:00:03Z", payload: { type: "thread_settings_applied", thread_id: "fixture-copied-owner",
       thread_settings: { model: "copied-model", model_provider_id: "copied-provider", service_tier: "flex", reasoning_summary: "detailed" } } },
     { type: "event_msg", timestamp: "2026-01-01T00:02:00Z", payload: { type: "thread_settings_applied", thread_id: "fixture-applied",
@@ -142,7 +142,9 @@ http_headers = { Authorization = "synthetic-secret" }
     { threadId: "fixture-other", startedAt: "2026-01-01T00:01:00Z" });
   assert.equal(applied.serviceTier, "default", "original explicit standard routing survives later and copied snapshots");
   assert.equal(applied.reasoningSummary, "concise", "native applied summary overrides the legacy compatibility field");
-  assert.equal(applied.modelProvider, "openai");
+  assert.equal(applied.modelProvider, "openai", "complete native snapshot replaces the session metadata provider");
+  assert.equal(applied.model, "applied-model", "complete native snapshot replaces compatibility turn settings");
+  assert.equal(applied.reasoningEffort, "high");
   const tierDir = join(root, "missing-tier");
   const { serviceTier: omittedTier, ...withoutTier } = applied;
   assert.equal(omittedTier, "default");
@@ -158,6 +160,9 @@ http_headers = { Authorization = "synthetic-secret" }
     } }) + "\n");
   const nativeDefaults = await captureSettings({ usageOwner: appliedOwner }, { filesystemDenies: [] }, parentEnvironment,
     { threadId: "fixture-other", startedAt: "2026-01-01T00:01:00Z" });
+  assert.equal(nativeDefaults.model, "applied-model", "absent optional selections do not erase the required model");
+  assert.equal(nativeDefaults.modelProvider, "openai", "absent optional selections do not erase the required provider");
+  assert.equal(nativeDefaults.reasoningEffort, "high");
   assert.equal(nativeDefaults.serviceTier, undefined, "native model-default selection is not explicit standard routing");
   assert.equal(nativeDefaults.reasoningSummary, undefined, "a compatibility summary is not a recorded native default");
   const incompleteDir = join(root, "incomplete");
