@@ -95,6 +95,25 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(parentSettings.modelProvider, "openai");
   assert.equal(parentSettings.reasoningSummary, "none", "later owner turns are not original discovery settings");
   assert.equal(parentSettings.reasoningEffort, "high");
+  await writeFile(join(root, "config.toml"), "");
+  const parentEnvironment = { CODEX_CLI_PATH: process.execPath, CODEX_HOME: root };
+  const [originalParent, otherParent, unavailableParent] = await Promise.all([
+    captureSettings({}, { filesystemDenies: [] }, parentEnvironment,
+      { threadId: "fixture-parent", startedAt: "2026-01-01T00:00:01Z" }),
+    captureSettings({}, { filesystemDenies: [] }, parentEnvironment,
+      { threadId: "fixture-other", startedAt: "2026-01-01T00:00:01Z" }),
+    captureSettings({ model: "stored-model", reasoningEffort: "ultra" }, { filesystemDenies: [] }, parentEnvironment,
+      { threadId: "fixture-unavailable", startedAt: "2026-01-01T00:00:01Z" })
+  ]);
+  assert.equal(originalParent.model, "parent-model");
+  assert.equal(originalParent.reasoningSummary, "none", "the original turn is included at its timestamp");
+  assert.equal(otherParent.modelProvider, "other-provider");
+  assert.equal(otherParent.model, undefined, "concurrent scans do not borrow another parent's model");
+  assert.equal(otherParent.reasoningSummary, undefined);
+  assert.equal(unavailableParent.model, "stored-model");
+  assert.equal(unavailableParent.reasoningEffort, "ultra");
+  assert.equal(unavailableParent.modelProvider, undefined, "missing history does not establish a provider");
+  assert.equal(unavailableParent.reasoningSummary, undefined);
   const unsupported = JSON.stringify({ version: 99, settings });
   await writeFile(savedPath, unsupported);
   await assert.rejects(loadSettings(join(root, "one"), async () => assert.fail()), /unsupported/);

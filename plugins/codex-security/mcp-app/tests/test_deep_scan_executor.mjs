@@ -759,7 +759,9 @@ async function testIsolatedReconstructedWorkers() {
         model_reasoning_summary: name === "first" ? "none" : "concise",
         service_tier: name === "first" ? "flex" : "fast"
       };
-      await writeFile(configPath, Object.entries(config).filter(([key]) => name !== "first" || key !== "model_provider").map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join(""));
+      await writeFile(configPath, Object.entries(config).filter(([key]) => name !== "first"
+        || !["model_provider", "model_reasoning_summary"].includes(key))
+        .map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join(""));
       await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH NULL_USAGE\n");
       const executable = path.join(fixture.root, process.platform === "win32" ? "node.exe" : "node");
       await copyFile(process.execPath, executable);
@@ -783,10 +785,14 @@ async function testIsolatedReconstructedWorkers() {
         parentSandbox: trustedParentSandboxWithDenials
       };
       await mkdir(path.join(codexHome, "sessions"));
-      await writeFile(path.join(codexHome, "sessions", "owner.jsonl"), JSON.stringify({
-        type: "session_meta", timestamp: "2026-01-01T00:00:00Z",
-        payload: { id: `fixture-${name}-owner`, model_provider: config.model_provider }
-      }) + "\n");
+      await writeFile(path.join(codexHome, "sessions", "owner.jsonl"), [
+        { type: "session_meta", timestamp: "2026-01-01T00:00:00Z",
+          payload: { id: `fixture-${name}-owner`, model_provider: config.model_provider } },
+        { type: "turn_context", timestamp: "2026-01-01T00:00:01Z",
+          payload: { model: "native-parent-model", effort: "medium", summary: config.model_reasoning_summary } },
+        { type: "turn_context", timestamp: "2026-01-01T00:02:00Z",
+          payload: { model: "later-parent-model", effort: "low", summary: "detailed" } }
+      ].map(JSON.stringify).join("\n") + "\n");
       const saved = await loadOrCaptureDeepScanExecutionSettings(fixture.root, () =>
         captureDeepScanExecutionSettings(settings, settings.parentSandbox, { ...codexOptions.env, CODEX_CLI_PATH: executable }, { threadId: `fixture-${name}-owner`, startedAt: "2026-01-01T00:01:00Z" }));
       const snapshotPath = path.join(fixture.root, "artifacts", "deep_discovery", "execution-settings.json");
