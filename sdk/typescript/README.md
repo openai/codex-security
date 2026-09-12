@@ -1496,7 +1496,10 @@ Matching requires sealed artifacts and reuses saved matches unless you pass
 `--force`. Comparisons classify findings as new, persisting, reopened, resolved,
 or unknown. Missing findings aren't resolved if the later scan is incomplete
 or excludes their original scope. With one ID, `scans compare` compares it
-to the latest completed scan.
+to the latest completed scan. When two scans reviewed identical content, such
+as Standard and Deep scans of the same revision, comparisons group findings
+that unambiguously share a vulnerability class and identical locations even
+when their recorded identities differ.
 
 Use `scans match --all --force` to rebuild comparisons chronologically while
 retaining stable finding identities. Ctrl-C keeps comparisons already saved.

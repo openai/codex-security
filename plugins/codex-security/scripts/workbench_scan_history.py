@@ -490,6 +490,75 @@ def _known_finding_groups(links: list[sqlite3.Row], scan_ids: set[str]) -> list[
     return sorted(sorted(group) for group in groups.values() if len(group) > 1)
 
 
+_EQUIVALENT_MATCH_REASON = (
+    "The findings share a vulnerability class and identical locations in the same reviewed content."
+)
+
+
+def _same_reviewed_content(before: sqlite3.Row, after: sqlite3.Row) -> bool:
+    required = ("mode", "target_revision", "target_snapshot_digest")
+    if any(column not in scan.keys() for scan in (before, after) for column in required):
+        return False
+    return (
+        before["mode"] != "diff"
+        and after["mode"] != "diff"
+        and before["target_revision"] == after["target_revision"]
+        and before["target_snapshot_digest"] is not None
+        and before["target_snapshot_digest"] == after["target_snapshot_digest"]
+    )
+
+
+def _rule_location_identities(
+    connection: sqlite3.Connection, findings: dict[str, sqlite3.Row]
+) -> dict[tuple[str, str, int, int, str], list[str]]:
+    identities: dict[tuple[str, str, int, int, str], list[str]] = {}
+    located: set[str] = set()
+    for row in _rows_for_ids(
+        connection,
+        """
+        SELECT occurrences.id AS occurrence_id, occurrences.finding_id,
+            findings.rule_id, findings.identity_instance, locations.relative_path,
+            locations.start_line, locations.end_line
+        FROM finding_occurrences AS occurrences
+        JOIN findings ON findings.id = occurrences.finding_id
+        JOIN finding_locations AS locations ON locations.occurrence_id = occurrences.id
+        WHERE occurrences.id IN ({placeholders})
+        ORDER BY occurrences.id,
+            CASE WHEN locations.role = 'root_control' THEN 0 ELSE 1 END,
+            locations.sort_order
+        """,
+        (row["id"] for row in findings.values()),
+    ):
+        if row["occurrence_id"] in located:
+            continue
+        located.add(row["occurrence_id"])
+        key = (
+            row["rule_id"],
+            row["relative_path"],
+            row["start_line"],
+            row["end_line"],
+            row["identity_instance"] or "",
+        )
+        identities.setdefault(key, []).append(row["finding_id"])
+    return identities
+
+
+def _equivalent_finding_links(
+    connection: sqlite3.Connection,
+    before_findings: dict[str, sqlite3.Row],
+    after_findings: dict[str, sqlite3.Row],
+) -> list[tuple[str, str]]:
+    """Pair findings that unambiguously share a rule, primary location, and instance."""
+    before_keys = _rule_location_identities(connection, before_findings)
+    after_keys = _rule_location_identities(connection, after_findings)
+    return [
+        (before_ids[0], after_ids[0])
+        for key, before_ids in sorted(before_keys.items())
+        for after_ids in (after_keys.get(key, []),)
+        if len(before_ids) == 1 and len(after_ids) == 1 and before_ids[0] != after_ids[0]
+    ]
+
+
 def compare_scans(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
@@ -538,6 +607,28 @@ def compare_scans(
         row["id"]: row for row in chain(before_findings.values(), after_findings.values())
     }
     aliases = _confirmed_finding_aliases(connection, occurrences)
+    equivalent = [
+        (previous, current)
+        for previous, current in (
+            _equivalent_finding_links(connection, before_findings, after_findings)
+            if _same_reviewed_content(before, after)
+            else []
+        )
+        if aliases.get(previous, previous) != aliases.get(current, current)
+    ]
+    if equivalent:
+        aliases = _finding_aliases(chain(aliases.items(), equivalent))
+        saved_matches = [
+            *saved_matches,
+            *(
+                {
+                    "beforeOccurrenceIds": [before_findings[previous]["id"]],
+                    "afterOccurrenceIds": [after_findings[current]["id"]],
+                    "reason": _EQUIVALENT_MATCH_REASON,
+                }
+                for previous, current in equivalent
+            ),
+        ]
     groups = _finding_groups(before_findings, after_findings, saved_matches, aliases)
     uncertain = (
         {
