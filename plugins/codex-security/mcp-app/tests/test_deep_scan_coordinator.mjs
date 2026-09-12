@@ -2910,6 +2910,8 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
   store.heartbeatCoordinator = async () => structuredClone(store.run);
   const replacementExecutor = new FakeExecutor({ dedupNewFindings: [0] });
   const acceptedResult = await readFile(accepted.resultManifestPath, "utf8");
+  const acceptedWorkerId = await workerIdFromPrompt(accepted.promptPath);
+  await Promise.all(persistedWorkers.map((worker) => rm(worker.promptPath, { force: true })));
   const resumed = await startOrJoinDeepScanCoordinator({
     begin: { run: structuredClone(store.run), shouldStart: false },
     registry: new DeepScanCoordinatorRegistry(),
@@ -2926,11 +2928,11 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
 
   assert.equal(continuationClaims.length, 1);
   assert.equal(continuationClaims[0].handoffClaimToken, handoffClaimToken);
-  assert.equal(terminal?.status, "succeeded");
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(store.failCalls, 0);
   assert.equal(replacementExecutor.logicalDiscoveryWorkers.size, 1);
   assert.equal(
-    replacementExecutor.logicalDiscoveryWorkers.has(await workerIdFromPrompt(accepted.promptPath)),
+    replacementExecutor.logicalDiscoveryWorkers.has(acceptedWorkerId),
     false
   );
   assert.equal(store.dedupClaims.length, 1);
