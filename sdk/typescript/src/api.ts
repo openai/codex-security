@@ -1209,6 +1209,7 @@ export class CodexSecurity {
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
     let selectedDeepFinalization = false;
+    let budgetDeepFinalization = false;
     let observedScanThreadId: string | undefined;
     let activeScan: {
       id: string;
@@ -2429,6 +2430,7 @@ export class CodexSecurity {
               runWorkbench: (args) => workbench(completionOptions, args),
             });
           }
+          budgetDeepFinalization = true;
           const completion = await workbench(completionOptions, [
             "complete-budget-exhausted-scan",
             "--scan-id",
@@ -2503,7 +2505,7 @@ export class CodexSecurity {
         observedScanThreadId
       ) {
         const workbenchOptions = { ...activeScan.options, signal: undefined };
-        if (!selectedDeepFinalization) {
+        if (!selectedDeepFinalization && !budgetDeepFinalization) {
           const saved = await workbench(workbenchOptions, [
             "get-deep-scan",
             "--scan-id",
@@ -2515,7 +2517,7 @@ export class CodexSecurity {
           selectedDeepFinalization =
             isRecord(deep) && isRecord(deep["finalizationInput"]);
         }
-        if (selectedDeepFinalization) {
+        if (selectedDeepFinalization || budgetDeepFinalization) {
           // The workbench owns the running-state check and repeated cancellation.
           // A lost cleanup response must preserve the original interruption.
           await workbench(workbenchOptions, [

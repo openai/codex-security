@@ -1224,6 +1224,222 @@ def merge_saved_results(
     return manifest, {"findings": findings}, coverage
 
 
+def budget_exhausted_draft(
+    db: WorkbenchDbContext,
+    scan: sqlite3.Row,
+    scan_dir: Path,
+    candidates: list[dict[str, Any]],
+    warning: str,
+    contract: dict[str, Any],
+    *,
+    before_selection: bool = False,
+    accepted_result: dict[str, Any] | None = None,
+    unmerged_workers: list[sqlite3.Row] = (),
+) -> None:
+    documents: dict[str, dict[str, Any]] = {}
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        path = db.artifact_path(scan_dir, name, required=False)
+        if path is not None:
+            documents[name] = db.read_json_object(path)
+    if documents and len(documents) != 3:
+        raise SystemExit("Budget-exhausted scan contains an incomplete canonical scan draft.")
+
+    if documents:
+        manifest = documents["scan-manifest.json"]
+        findings = documents["findings.json"]
+        coverage = documents["coverage.json"]
+        if not isinstance(manifest.get("scan"), dict) or not isinstance(
+            findings.get("findings"), list
+        ):
+            raise SystemExit("Budget-exhausted scan contains an invalid canonical scan draft.")
+        for key in ("surfaces", "explicitExclusions", "deferred"):
+            if not isinstance(coverage.get(key), list):
+                raise SystemExit("Budget-exhausted scan contains invalid canonical coverage.")
+        if manifest["scan"].get("sealedAt") is not None or manifest["scan"].get("artifacts"):
+            raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
+    else:
+        target_contract = contract["target"]
+        target: dict[str, Any] = {
+            "kind": target_contract["allowedKinds"][0],
+            "targetId": target_contract["targetId"],
+            "displayName": target_contract["displayName"],
+        }
+        if scan["target_revision"] != "unversioned":
+            target["revision"] = scan["target_revision"]
+        if "requiredSnapshotDigest" in target_contract:
+            target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
+        manifest = {
+            "scan": {
+                "target": target,
+                "scope": {"limitations": [warning], "validationMode": "incomplete"},
+            }
+        }
+        findings = {"findings": []}
+        coverage = {
+            "completeness": "partial",
+            "inventoryStrategy": (
+                "scoped_path" if db.expected_coverage_mode(scan) == "scoped_path" else "repository"
+            ),
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+        }
+
+    if before_selection:
+        # Unmerged discoveries remain in their accepted artifacts. Only the
+        # committed reducer may contribute findings to this partial result.
+        findings = {"findings": accepted_result["findings"] if accepted_result else []}
+        if accepted_result is not None:
+            coverage = accepted_result["sourceCoverage"]
+            if "threatModel" in accepted_result:
+                manifest["scan"]["threatModel"] = accepted_result["threatModel"]
+
+    for worker in unmerged_workers:
+        retain_unmerged_budget_coverage(scan, scan_dir, coverage, worker)
+
+    findings_by_candidate = {
+        candidate_id
+        for finding in findings["findings"]
+        if isinstance(finding, dict)
+        and isinstance(candidate_id := finding_candidate_id(finding), str)
+    }
+    existing_deferred = {
+        item.get("candidateId", item.get("id"))
+        for item in coverage["deferred"]
+        if isinstance(item, dict) and isinstance(item.get("candidateId", item.get("id")), str)
+    }
+    existing_surfaces = {
+        item.get("id")
+        for item in coverage["surfaces"]
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    for candidate in candidates:
+        candidate_id = candidate["candidate_id"]
+        if candidate_id in findings_by_candidate or candidate_id in existing_deferred:
+            continue
+        paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
+        surface_id = f"candidate-{candidate_id}"
+        validation = candidate.get("validation")
+        validation = validation.get("disposition") if isinstance(validation, dict) else None
+        attack = candidate.get("attack_path")
+        attack = attack.get("decision") if isinstance(attack, dict) else None
+        disposition = (
+            "needs_follow_up"
+            if validation == "deferred" or attack == "deferred"
+            else "not_applicable"
+            if validation == "not_applicable"
+            else "rejected"
+            if validation == "suppressed" or attack == "ignore"
+            else "needs_follow_up"
+        )
+        if surface_id not in existing_surfaces:
+            coverage["surfaces"].append(
+                {
+                    "id": surface_id,
+                    "label": candidate["summary"],
+                    "disposition": disposition,
+                    "notes": candidate["evidence"],
+                    "receiptRefs": [],
+                }
+            )
+            existing_surfaces.add(surface_id)
+        if disposition != "needs_follow_up":
+            continue
+        coverage["deferred"].append(
+            {
+                "id": candidate_id,
+                "candidateId": candidate_id,
+                "reason": (
+                    "Validation was deferred because the scan reached its cost limit: "
+                    f"{candidate['summary']}. Evidence: {candidate['evidence']}"
+                ),
+                "paths": paths,
+                "surfaceIds": [surface_id],
+            }
+        )
+    if not any(
+        isinstance(item, dict)
+        and isinstance(reason := item.get("reason"), str)
+        and (
+            reason == "Validation was deferred because the scan reached its cost limit."
+            or reason.startswith(
+                "Validation was deferred because the scan reached its cost limit: "
+            )
+        )
+        for item in coverage["deferred"]
+    ):
+        coverage["deferred"].append(
+            {
+                "id": "scan-cost-limit",
+                "reason": "Validation was deferred because the scan reached its cost limit.",
+            }
+        )
+    coverage["completeness"] = "partial"
+    for name, payload in (
+        ("findings.json", findings),
+        ("coverage.json", coverage),
+        ("scan-manifest.json", manifest),
+    ):
+        try:
+            write_scan_local_bytes(
+                scan_dir,
+                name,
+                (json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(),
+            )
+        except (ContractError, OSError, TypeError, ValueError) as exc:
+            raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+
+
+def retain_unmerged_budget_coverage(
+    scan: sqlite3.Row, scan_dir: Path, coverage: dict[str, Any], worker: sqlite3.Row
+) -> None:
+    """Keep each unmerged review's obligations; its findings remain evidence only."""
+    relative = Path(worker["accepted_result_path"]).relative_to(scan_dir).as_posix()
+    draft, _ = _read_saved_result(
+        scan_dir,
+        relative,
+        scan["id"],
+        accepted_source_digests={worker["accepted_result_path"]: worker["accepted_result_sha256"]},
+    )
+    source = draft["coverage"]
+    provenance = {"workerId": worker["id"], "attempt": worker["attempt"]}
+    prefix = f"{worker['id']}-attempt-{worker['attempt']}"
+    artifact_prefix = Path(worker["artifact_dir"]).relative_to(scan_dir).as_posix()
+    surfaces = {
+        item.get("id"): f"{prefix}-surface-{index + 1}"
+        for index, item in enumerate(source.get("surfaces", []))
+    }
+    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+        for index, original in enumerate(source.get(field, [])):
+            item = copy.deepcopy(original if isinstance(original, dict) else {"question": original})
+            item["provenance"] = {
+                **provenance,
+                **({"sourceId": item["id"]} if "id" in item else {}),
+                **({"candidateId": item["candidateId"]} if "candidateId" in item else {}),
+            }
+            item["id"] = f"{prefix}-{field}-{index + 1}"
+            if field == "surfaces":
+                item["id"] = surfaces.get(original.get("id"), item["id"])
+                item["receiptRefs"] = [
+                    f"{artifact_prefix}/{ref}" for ref in item.get("receiptRefs", [])
+                ]
+            if field == "deferred" and "candidateId" in item:
+                item["candidateId"] = f"{prefix}-candidate-{index + 1}"
+            if "surfaceIds" in item:
+                item["surfaceIds"] = [surfaces.get(value, value) for value in item["surfaceIds"]]
+            coverage.setdefault(field, []).append(item)
+    coverage.setdefault("reviews", []).append(
+        {**provenance, "completeness": source["completeness"]}
+    )
+    coverage["deferred"].append(
+        {
+            "id": f"{prefix}-unmerged",
+            "provenance": provenance,
+            "reason": "This accepted discovery was not merged before the scan reached its cost limit.",
+        }
+    )
+
+
 def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     if scan["seal_manifest_digest"] is None:
         raise SystemExit("Only sealed scans can be compared.")

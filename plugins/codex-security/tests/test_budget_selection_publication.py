@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from argparse import Namespace
@@ -7,9 +8,252 @@ from argparse import Namespace
 import pytest
 from test_accepted_publication_references import accept_reducer
 from test_deep_scan_publication_authority import stage_publication
+from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_publication_stop_interleavings import published_bytes, saved_selection
 from test_workbench_db import BUDGET_COST
+
+
+def accept_unmerged(connection, scan):
+    result = add_worker(connection, scan)
+    worker_id = result.parent.name
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": scan.findings,
+                "coverage": {
+                    **scan.coverage,
+                    "completeness": "partial",
+                    "deferred": [
+                        {
+                            "id": "shared-gap",
+                            "reason": "Independent unresolved review.",
+                            "paths": ["subdir/extract.py"],
+                        }
+                    ],
+                },
+            }
+        )
+    )
+    digest = hashlib.sha256(result.read_bytes()).hexdigest()
+    accepted = result.parent / "accepted" / f"{digest}.json"
+    accepted.parent.mkdir()
+    accepted.write_bytes(result.read_bytes())
+    with connection:
+        connection.execute(
+            "UPDATE deep_scan_workers SET merge_state = 'buffered' WHERE id = ?", (worker_id,)
+        )
+        connection.execute(
+            "INSERT INTO deep_scan_attempts (scan_id, worker_id, attempt, status, started_at, "
+            "completed_at, accepted_result_path, accepted_result_sha256) VALUES (?, ?, 1, 'succeeded', ?, ?, ?, ?)",
+            (scan.scan_id, worker_id, scan.timestamp, scan.timestamp, str(accepted), digest),
+        )
+    return accepted
+
+
+@pytest.mark.parametrize("defect", ["changed-bytes", "incomplete-result"])
+def test_cost_before_selection_does_not_replace_invalid_accepted_evidence(
+    workbench_api, workbench_db, publication_scan, defect
+):
+    scan = publication_scan()
+    _, accepted, _ = accept_reducer(workbench_db, scan)
+    document = json.loads(accepted.read_bytes())
+    document["complete"] = False
+    accepted.write_text(json.dumps(document))
+    with workbench_db:
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
+            "workflow_version = 'deep-security-scan/v2', finalization_input_json = NULL"
+        )
+        if defect == "incomplete-result":
+            workbench_db.execute(
+                "UPDATE deep_scan_attempts SET accepted_result_sha256 = ?",
+                (hashlib.sha256(accepted.read_bytes()).hexdigest(),),
+            )
+    before = published_bytes(scan)
+    with pytest.raises(SystemExit):
+        workbench_api["complete_budget_exhausted_scan"](
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message=None),
+        )
+    assert published_bytes(scan) == before
+    assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "running"
+    assert (
+        workbench_db.execute("SELECT finalization_input_json FROM deep_scan_runs").fetchone()[0]
+        is None
+    )
+
+
+@pytest.mark.parametrize("accepted_kind", ["none", "unmerged", "reducer"])
+@pytest.mark.parametrize("cancel_first", [False, True])
+def test_cost_before_selection_retains_only_merged_findings(
+    workbench_api, workbench_db, publication_scan, accepted_kind, cancel_first
+):
+    scan = publication_scan()
+    accepted = None
+    if accepted_kind == "reducer":
+        _, accepted, _ = accept_reducer(workbench_db, scan)
+    elif accepted_kind == "unmerged":
+        accepted = accept_unmerged(workbench_db, scan)
+    active = add_worker(workbench_db, scan, status="running")
+    active_id = active.parent.name
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET completed_at = NULL WHERE id = ?", (active_id,)
+        )
+        workbench_db.execute(
+            "INSERT INTO deep_scan_attempts (scan_id, worker_id, attempt, status, started_at) "
+            "VALUES (?, ?, 1, 'running', ?)",
+            (scan.scan_id, active_id, scan.timestamp),
+        )
+    counters = tuple(
+        workbench_db.execute(
+            "SELECT discovery_runs_dispatched, consecutive_no_new, completion_sequence FROM deep_scan_runs"
+        ).fetchone()
+    )
+    original = accepted.read_bytes() if accepted is not None else None
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    with workbench_db:
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
+            "workflow_version = 'deep-security-scan/v2', manifest_path = NULL, "
+            "terminal_reason = NULL, completed_at = NULL, max_discovery_runs = 100"
+        )
+    args = Namespace(
+        scan_id=scan.scan_id,
+        cost_json=json.dumps(BUDGET_COST),
+        message="Scan reached its original cost limit.",
+    )
+    if cancel_first:
+        workbench_api["cancel_scan"](workbench_db, Namespace(scan_id=scan.scan_id, thread_id=None))
+        before = published_bytes(scan)
+        with pytest.raises(SystemExit, match="running"):
+            workbench_api["complete_budget_exhausted_scan"](workbench_db, args)
+        assert published_bytes(scan) == before
+    else:
+        workbench_api["complete_budget_exhausted_scan"](workbench_db, args)
+        row = workbench_db.execute("SELECT * FROM scans").fetchone()
+        run = workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone()
+        assert row["status"] == "complete"
+        assert run["terminal_reason"] == "capped"
+        assert run["error_message"] == args.message
+        assert args.message in json.loads(row["completion_warnings_json"])
+        findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+        assert len(findings) == (1 if accepted_kind == "reducer" else 0)
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        assert coverage["completeness"] == "partial"
+        assert any(item["id"] == "scan-cost-limit" for item in coverage["deferred"])
+        if accepted_kind == "reducer":
+            selection = json.loads(run["finalization_input_json"])
+            assert selection["resultSha256"] == hashlib.sha256(original).hexdigest()
+            assert any(item["id"] == "accepted-follow-up" for item in coverage["deferred"])
+        assert (
+            tuple(
+                workbench_db.execute(
+                    "SELECT discovery_runs_dispatched, consecutive_no_new, completion_sequence FROM deep_scan_runs"
+                ).fetchone()
+            )
+            == counters
+        )
+        interrupted = workbench_db.execute(
+            "SELECT * FROM deep_scan_attempts WHERE worker_id = ?", (active_id,)
+        ).fetchone()
+        assert interrupted["status"] == "canceled"
+        assert interrupted["end_reason"] == "scan_stopped"
+        if accepted_kind == "unmerged":
+            assert any(
+                item.get("provenance", {}).get("sourceId") == "shared-gap"
+                for item in coverage["deferred"]
+            )
+        before = published_bytes(scan)
+        workbench_api["complete_scan"](
+            workbench_db, Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
+        )
+        assert published_bytes(scan) == before
+    if accepted is not None:
+        assert accepted.read_bytes() == original
+
+
+@pytest.mark.parametrize("reason", ["saturated", "capped"])
+def test_budget_keeps_selection_committed_before_transaction_and_unmerged_obligations(
+    workbench_api, workbench_db, publication_scan, reason
+):
+    scan = publication_scan()
+    _, accepted, original_coverage = accept_reducer(workbench_db, scan)
+    unmerged = [accept_unmerged(workbench_db, scan) for _ in range(2)]
+    originals = {path: path.read_bytes() for path in [accepted, *unmerged]}
+    with workbench_db:
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', workflow_version = 'deep-security-scan/v2'"
+        )
+    # The selected publication may commit before cost recovery reaches its
+    # transaction. Budget completion must use that exact input and cause.
+    committed = saved_selection(workbench_db, scan, accepted, reason=reason)
+    workbench_api["complete_budget_exhausted_scan"](
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message="Original cost stop."
+        ),
+    )
+    run = workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone()
+    assert json.loads(run["finalization_input_json"]) == committed
+    assert run["terminal_reason"] == reason
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert len(findings) == 1
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert original_coverage["deferred"][0] in coverage["deferred"]
+    gaps = [
+        item
+        for item in coverage["deferred"]
+        if item.get("provenance", {}).get("sourceId") == "shared-gap"
+    ]
+    assert len(gaps) == 2
+    assert len({item["id"] for item in gaps}) == 2
+    assert {item["provenance"]["workerId"] for item in gaps} == {
+        path.parent.parent.name for path in unmerged
+    }
+    assert all(item["provenance"]["attempt"] == 1 for item in gaps)
+
+
+def test_budget_accepts_complete_reducer_without_optional_complete_flag(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    _, accepted, _ = accept_reducer(workbench_db, scan)
+    document = json.loads(accepted.read_bytes())
+    del document["complete"]
+    accepted.write_text(json.dumps(document))
+    digest = hashlib.sha256(accepted.read_bytes()).hexdigest()
+    with workbench_db:
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+        workbench_db.execute("UPDATE deep_scan_attempts SET accepted_result_sha256 = ?", (digest,))
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', workflow_version = 'deep-security-scan/v2'"
+        )
+    workbench_api["complete_budget_exhausted_scan"](
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message="Original cost stop."
+        ),
+    )
+    assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"
+    assert hashlib.sha256(accepted.read_bytes()).hexdigest() == digest
+    assert len(json.loads((scan.scan_dir / "findings.json").read_text())["findings"]) == 1
 
 
 @pytest.mark.parametrize("selected", [False, True], ids=["legacy-v1", "selected-v2"])

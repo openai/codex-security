@@ -19,9 +19,17 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_config import resolve_deep_scan_config
 from filesystem_identity import serialize_filesystem_identity
-from finalize_scan_contract import _read_scan_local_json, write_scan_local_bytes
+from finalize_scan_contract import (
+    _read_scan_local_json,
+    open_scan_local_file_descriptor,
+    write_scan_local_bytes,
+)
 from workbench.handoff import require_current_continuation
-from workbench_saved_results import _worker_checkpoint_head
+from workbench_saved_results import (
+    _restore_published_outputs,
+    _snapshot_published_outputs,
+    _worker_checkpoint_head,
+)
 from workbench_scan_usage import capture_scan_usage_owner
 from workbench_target import (
     directory_content_digest,
@@ -29,7 +37,12 @@ from workbench_target import (
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text, require_uuid, user_context_argument
+from workbench_validation import (
+    optional_text,
+    reject_non_finite_json,
+    require_uuid,
+    user_context_argument,
+)
 
 DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
 DEEP_SCAN_WORKER_STATUSES = ("queued", "running", "succeeded", "failed", "canceled")
@@ -2493,6 +2506,104 @@ def selected_deep_scan_finalization(
         "selectedAt": now(),
     }
     return selection
+
+
+def budget_unmerged_workers(connection: sqlite3.Connection, scan_id: str) -> list[sqlite3.Row]:
+    return connection.execute(
+        "SELECT workers.*, attempts.accepted_result_path, attempts.accepted_result_sha256 "
+        "FROM deep_scan_workers AS workers JOIN deep_scan_attempts AS attempts "
+        "ON attempts.worker_id = workers.id AND attempts.attempt = workers.attempt "
+        "WHERE workers.scan_id = ? AND workers.kind = 'discovery' "
+        "AND workers.status = 'succeeded' AND workers.merge_state IN ('buffered', 'merging') "
+        "ORDER BY workers.completion_sequence, workers.id",
+        (scan_id,),
+    ).fetchall()
+
+
+def prepare_budget_exhausted_deep_scan(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    scan_dir: Path,
+    warning: str,
+    write_draft: Callable[[dict[str, Any] | None, list[sqlite3.Row]], None],
+) -> None:
+    """Finish local budget publication without starting or promoting scan work."""
+    snapshots = _snapshot_published_outputs(scan_dir)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        # The completion lock and this transaction preserve any committed selector.
+        run, scan = require_running_deep_scan(connection, scan["id"])
+        unmerged = budget_unmerged_workers(connection, scan["id"])
+        if run["finalization_input_json"] is not None:
+            selection = json.loads(run["finalization_input_json"])
+        else:
+            reducer = connection.execute(
+                "SELECT attempts.accepted_result_path FROM deep_scan_workers AS workers "
+                "LEFT JOIN deep_scan_attempts AS attempts ON attempts.worker_id = workers.id "
+                "AND attempts.attempt = workers.attempt WHERE workers.scan_id = ? "
+                "AND workers.kind = 'dedup' AND workers.status = 'succeeded' "
+                "ORDER BY workers.completed_at DESC, workers.id DESC LIMIT 1",
+                (scan["id"],),
+            ).fetchone()
+            if reducer is not None and not reducer["accepted_result_path"]:
+                raise SystemExit("Budget completion requires the committed reducer reference.")
+            selection = selected_deep_scan_finalization(
+                connection,
+                run,
+                scan,
+                argparse.Namespace(
+                    finalization_result_path=reducer["accepted_result_path"] if reducer else None,
+                    terminal_reason="capped",
+                ),
+                [row["id"] for row in unmerged],
+                reducer is None,
+            )
+        accepted = None
+        if selection["resultPath"] is not None:
+            descriptor = open_scan_local_file_descriptor(
+                scan_dir, selection["resultPath"], "Accepted reducer"
+            )
+            with os.fdopen(descriptor, "rb") as source:
+                contents = source.read()
+            if hashlib.sha256(contents).hexdigest() != selection["resultSha256"]:
+                raise SystemExit("The accepted reducer changed before budget completion.")
+            accepted = json.loads(contents, parse_constant=reject_non_finite_json)
+            if (
+                not isinstance(accepted, dict)
+                or accepted.get("scanId") != scan["id"]
+                or accepted.get("complete", True) is not True
+                or not isinstance(accepted.get("sourceCoverage"), dict)
+            ):
+                raise SystemExit("Budget completion requires the accepted complete reducer.")
+        write_draft(accepted, unmerged)
+        timestamp = now()
+        cancel_active_workers(connection, scan["id"], timestamp)
+        connection.execute(
+            "UPDATE deep_scan_runs SET status = 'succeeded', phase = 'terminal', "
+            "terminal_reason = ?, cancel_requested = 1, error_message = ?, "
+            "manifest_path = ?, finalization_input_json = ?, completed_at = ?, updated_at = ? "
+            "WHERE scan_id = ?",
+            (
+                selection["terminalReason"],
+                warning,
+                str(scan_dir / "scan-manifest.json"),
+                json.dumps(selection),
+                timestamp,
+                timestamp,
+                scan["id"],
+            ),
+        )
+        warnings = json.loads(scan["completion_warnings_json"])
+        if warning not in warnings:
+            connection.execute(
+                "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+                (json.dumps([*warnings, warning]), scan["id"]),
+            )
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        _restore_published_outputs(scan_dir, snapshots)
+        raise
 
 
 def fail_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:

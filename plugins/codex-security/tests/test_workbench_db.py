@@ -464,17 +464,33 @@ def test_budget_exhaustion_rejects_scan_below_configured_limit(tmp_path: Path) -
     assert "has not exceeded its configured cost limit" in str(rejected["stderr"])
 
 
-def test_budget_exhaustion_rejects_incomplete_discovery(tmp_path: Path) -> None:
-    state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path, terminal=False)
-
-    rejected = complete_budget_scan(state_dir, scan_id, check=False)
-
-    assert rejected["returncode"] != 0
-    assert "requires successfully completed Deep Scan discovery" in str(rejected["stderr"])
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["status"]
-        == "running"
-    )
+@pytest.mark.parametrize("workflow", ["deep-security-scan/v1", "deep-security-scan/v2"])
+def test_budget_exhaustion_during_discovery_preserves_workflow_contract(
+    tmp_path: Path, workflow: str
+) -> None:
+    state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path, terminal=False)
+    original = ledger.read_bytes()
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?", (workflow, scan_id)
+        )
+    result = complete_budget_scan(state_dir, scan_id, check=False)
+    if workflow == "deep-security-scan/v1":
+        assert result["returncode"] != 0
+        assert "requires successfully completed Deep Scan discovery" in str(result["stderr"])
+        assert (
+            run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["status"]
+            == "running"
+        )
+    else:
+        assert result["returncode"] == 0
+        saved = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert saved["progress"]["status"] == "complete"
+        assert saved["findings"] == []
+        assert saved["cost"] == BUDGET_COST
+        assert saved["warnings"] == [BUDGET_WARNING]
+        assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
+    assert ledger.read_bytes() == original
 
 
 def test_budget_exhaustion_rejects_standard_scan(tmp_path: Path) -> None:
