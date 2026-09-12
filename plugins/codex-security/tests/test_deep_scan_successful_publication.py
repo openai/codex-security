@@ -72,7 +72,7 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
                     "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, "
                     "status, phase, workers, subagents, stop_after_no_new, max_discovery_runs, "
                     "manifest_path, terminal_reason, created_at, updated_at, completed_at) "
-                    "VALUES (?, 1, 'publication-test', 'succeeded', 'terminal', 1, 0, 1, 1, "
+                    "VALUES (?, 1, 'deep-security-scan/v1', 'succeeded', 'terminal', 1, 0, 1, 1, "
                     "?, 'saturated', ?, ?, ?)",
                     (
                         scan_id,
