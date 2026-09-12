@@ -748,7 +748,11 @@ async function testIsolatedReconstructedWorkers() {
   const scans = [];
   try {
     for (const name of ["first", "second"]) {
-      const fixture = await fakeCodexFixture(deniedWorkerPermissionProfile);
+      const uncappedSandbox = { filesystemDenies: trustedParentSandboxWithDenials.filesystemDenies };
+      const currentParentSandbox = name === "first" ? uncappedSandbox : trustedParentSandboxWithDenials;
+      const expectedProfile = structuredClone(deniedWorkerPermissionProfile);
+      delete expectedProfile.filesystem.glob_scan_max_depth;
+      const fixture = await fakeCodexFixture(expectedProfile);
       const codexHome = path.join(fixture.root, "home");
       const configPath = path.join(fixture.root, "scan config.toml");
       const promptPath = path.join(fixture.root, "prompt.md");
@@ -787,7 +791,7 @@ async function testIsolatedReconstructedWorkers() {
         model: `fixture-${name}-override`,
         reasoningEffort: "ultra",
         usageOwner: { threadId: `fixture-${name}-owner`, turnId: "original-turn", startedAt: "2026-01-01T00:00:00Z" },
-        parentSandbox: trustedParentSandboxWithDenials
+        parentSandbox: name === "first" ? trustedParentSandboxWithDenials : uncappedSandbox
       };
       await mkdir(path.join(codexHome, "sessions"));
       await writeFile(path.join(codexHome, "sessions", "owner.jsonl"), [
@@ -814,9 +818,9 @@ async function testIsolatedReconstructedWorkers() {
       const snapshot = await readFile(snapshotPath, "utf8");
       assert.equal(snapshot.includes("synthetic-"), false);
       const runtimeEnvironment = { ...codexOptions.env };
-      const restored = restoredDeepScanWorkerSettings(saved, settings.parentSandbox, () => runtimeEnvironment);
+      const restored = restoredDeepScanWorkerSettings(saved, currentParentSandbox, () => runtimeEnvironment);
       restored.codexOptions.baseUrl = codexOptions.baseUrl;
-      scans.push({ name, fixture, config, configPath, promptPath, settings, runtimeEnvironment, snapshotPath, snapshot,
+      scans.push({ name, fixture, currentParentSandbox, config, configPath, promptPath, settings, runtimeEnvironment, snapshotPath, snapshot,
         executor: new CodexSdkWorkerExecutor(restored) });
     }
     childProcess.spawn = (command, args, options) => {
@@ -845,7 +849,7 @@ async function testIsolatedReconstructedWorkers() {
             assert.fail("reconstruction must not recapture current settings"), {
             ...scan.settings, createdAt: "2026-01-01T00:01:00Z"
           });
-          const restored = restoredDeepScanWorkerSettings(recorded, scan.settings.parentSandbox, () => scan.runtimeEnvironment);
+          const restored = restoredDeepScanWorkerSettings(recorded, scan.currentParentSandbox, () => scan.runtimeEnvironment);
           restored.codexOptions.baseUrl = scan.settings.codexOptions.baseUrl;
           scan.executor = new CodexSdkWorkerExecutor(restored);
           assert.equal(await readFile(scan.snapshotPath, "utf8"), scan.snapshot);
@@ -888,6 +892,10 @@ async function testIsolatedReconstructedWorkers() {
           const baseUrl = `openai_base_url=${JSON.stringify(scan.settings.codexOptions.baseUrl)}`;
           assert.equal(child.argv.includes(baseUrl), true);
           assert.equal(preflight.argv.includes(baseUrl), true);
+          for (const launch of [child, preflight]) {
+            assert.equal(workerPermissionProfileOverride(launch.argv).includes("glob_scan_max_depth"), false,
+              "a resumed bounded cap must not truncate an original uncapped deny glob, in either order");
+          }
           assertReadOnlyWorkerPolicy(child.argv);
           assertWorkerSubagentPolicy(child.argv, scan.name === "first" ? 0 : 2);
           assert.equal(workerPermissionProfileOverride(child.argv).includes('"/repo/.env"="deny"'), true);

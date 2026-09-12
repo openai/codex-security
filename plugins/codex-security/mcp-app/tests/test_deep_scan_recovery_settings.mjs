@@ -28,6 +28,23 @@ try {
     reasoningSummary: "detailed",
     serviceTier: "fast"
   };
+  const globSandbox = (depth) => ({
+    filesystemDenies: ["/fixture/**/*.secret"],
+    ...(depth === undefined ? {} : { globScanMaxDepth: depth })
+  });
+  for (const [originalDepth, currentDepth, expectedDepth] of [
+    [2, 5, 5], [5, 2, 5], [undefined, 2, undefined], [2, undefined, undefined]
+  ]) {
+    const restored = restoreSettings({ ...settings, parentSandbox: globSandbox(originalDepth) },
+      globSandbox(currentDepth));
+    assert.equal(restored.parentSandbox.globScanMaxDepth, expectedDepth,
+      `deny expansion must preserve both policies: ${originalDepth}, ${currentDepth}`);
+  }
+  assert.equal(restoreSettings(settings, globSandbox(2)).parentSandbox.globScanMaxDepth, 2,
+    "unavailable historical policy does not establish uncapped glob expansion");
+  assert.equal(restoreSettings({ ...settings, parentSandbox: globSandbox(2) }, {
+    filesystemDenies: ["/fixture/exact-denial"]
+  }).parentSandbox.globScanMaxDepth, 2, "exact denials do not change glob expansion");
   const first = await loadSettings(join(root, "one"), async () => ({
     ...settings,
     apiKey: "synthetic-do-not-persist",

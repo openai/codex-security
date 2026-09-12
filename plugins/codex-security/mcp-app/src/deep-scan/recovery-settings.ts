@@ -188,6 +188,11 @@ export function restoredDeepScanWorkerSettings(
   const originalSandbox = settings.parentSandbox;
   const depths = [originalSandbox?.globScanMaxDepth, currentParentSandbox.globScanMaxDepth]
     .filter((depth): depth is number => depth !== undefined);
+  // Native depth caps limit deny-glob expansion, not allowed traversal. Keep
+  // the larger finite cap, or no cap when either known policy has uncapped globs.
+  const uncapped = [originalSandbox, currentParentSandbox].some((sandbox) =>
+    sandbox?.globScanMaxDepth === undefined && sandbox?.filesystemDenies.some((path) =>
+      ["*", "?", "[", "]"].some((character) => path.includes(character))));
   return {
     model: settings.model,
     reasoningEffort: settings.reasoningEffort,
@@ -195,7 +200,7 @@ export function restoredDeepScanWorkerSettings(
       filesystemDenies: [...new Set([
         ...(originalSandbox?.filesystemDenies ?? []), ...currentParentSandbox.filesystemDenies
       ])],
-      ...(depths.length === 0 ? {} : { globScanMaxDepth: Math.max(...depths) })
+      ...(uncapped || depths.length === 0 ? {} : { globScanMaxDepth: Math.max(...depths) })
     },
     codexOptions: {
       codexPathOverride: settings.codexPath,
