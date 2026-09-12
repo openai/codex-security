@@ -514,8 +514,7 @@ export class DeepScanWorkerRunner {
               audit.execution.diagnostics,
             );
           }
-          if (audit.status === "accepted") result = audit.execution;
-          else throw audit.error;
+          result = audit.execution;
         } else {
           result = await execute();
           if (signal.aborted) return await this.cancelAttempt(input, attempt, activeThreadId);

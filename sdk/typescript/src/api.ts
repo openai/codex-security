@@ -2,8 +2,8 @@
 
 import { scanPreflightCodexConfig } from "./preflight-config.js";
 export { scanPreflightCodexConfig } from "./preflight-config.js";
-
-import { runAcceptedAudit } from "./accepted-audit.js";
+import { resumeSelectedDeepScan } from "./deep-scan-finalization.js";
+import { auditEvidence, runAcceptedAudit } from "./accepted-audit.js";
 import { statSync } from "node:fs";
 import {
   chmod,
@@ -1201,6 +1201,7 @@ export class CodexSecurity {
     let preparedTargetWarnings: string[] = [];
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
+    let selectedDeepFinalization = false;
     let activeScan: {
       id: string;
       options: WorkbenchCommandOptions;
@@ -1908,12 +1909,53 @@ export class CodexSecurity {
       if (postScanPrompt?.trim()) {
         runPostScan = () => thread.runStreamed(postScanPrompt, { signal });
       }
-      const { events } = await thread.runStreamed(prompt, {
-        signal,
-      });
+      let observedScanThreadId =
+        typeof resumeThreadId === "string" ? resumeThreadId : undefined;
+      const recoverSelectedCompletion = async () => {
+        const threadId = observedScanThreadId ?? thread.id;
+        if (mode !== "deep" || !threadId || signal.aborted) return null;
+        const saved = await workbench(workbenchOptions, [
+          "get-deep-scan",
+          "--scan-id",
+          scanId,
+          "--thread-id",
+          threadId,
+        ]).catch(() => null);
+        const deep = saved?.["deepScan"];
+        if (
+          !isRecord(deep) ||
+          !isRecord(deep["finalizationInput"]) ||
+          (deep["status"] !== "running" && deep["status"] !== "succeeded")
+        )
+          return null;
+        selectedDeepFinalization = true;
+        await resumeSelectedDeepScan({
+          scanId,
+          threadId,
+          pluginRoot: runtime.plugin.installedRoot,
+          signal,
+          runWorkbench: (args) => workbench(workbenchOptions, args),
+        });
+        return {
+          status: "completed" as const,
+          threadId,
+          finalResponse: "",
+          usage: null,
+          lastStreamError: null,
+        };
+      };
+      const savedCompletion = resumeThreadId
+        ? await recoverSelectedCompletion()
+        : null;
+      const events = (async function* () {
+        if (savedCompletion) return;
+        yield* (await thread.runStreamed(prompt, { signal })).events;
+      })();
       checkOpen();
 
       const result = await runScanEvents({
+        savedCompletion: savedCompletion ?? undefined,
+        recoverCompletion: recoverSelectedCompletion,
         thread,
         events,
         signal,
@@ -1924,6 +1966,7 @@ export class CodexSecurity {
         workbenchValidated: true,
         model,
         onThreadStarted: async (threadId) => {
+          observedScanThreadId = threadId;
           if (resumeThreadId !== undefined) {
             if (threadId !== resumeThreadId) {
               throw new CodexSecurityError(
@@ -1952,6 +1995,7 @@ export class CodexSecurity {
           }
         },
         onFinalize: async (usage) => {
+          await recoverSelectedCompletion();
           if (options.validationPrompt !== undefined) {
             tracker.recordUsage(usage);
             await tracker.refresh().catch(reportTrackingError);
@@ -2334,7 +2378,11 @@ export class CodexSecurity {
       }
       // A failed attachment must not turn a resumable coordinator into a terminal failure.
       // Deep Scan orchestration persists its own terminal failures and cancellations.
-      if (activeScan !== null && options.resumeScanId === undefined) {
+      if (
+        activeScan !== null &&
+        options.resumeScanId === undefined &&
+        !selectedDeepFinalization
+      ) {
         if (
           options.validationPrompt !== undefined &&
           !customValidationComplete
@@ -3600,6 +3648,10 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
 }
 
 interface ScanEventRunOptions {
+  savedCompletion?: Awaited<ReturnType<typeof readCodexTurn>>;
+  recoverCompletion?: () => Promise<Awaited<
+    ReturnType<typeof readCodexTurn>
+  > | null>;
   thread: CodexThreadLike;
   events: AsyncGenerator<ScanEvent>;
   signal: AbortSignal;
@@ -3633,90 +3685,98 @@ export async function runScanEvents(
   let scanStarted = false;
   let tacStatusReported = false;
   try {
+    let completedTurn:
+      | (Awaited<ReturnType<typeof readCodexTurn>> & {
+          threadId: string;
+          status: "completed";
+        })
+      | undefined;
     const execute = async () => {
-      const turn = await readCodexTurn({
-        thread: options.thread,
-        events: options.events,
-        onEvent: async (event) => {
-          if (!tacStatusReported) {
-            const tacStatus = trustedAccessStatusFromEvent(event);
-            if (tacStatus !== null) {
-              tacStatusReported = true;
-              notifyObserver(
-                "onTrustedAccessStatus",
-                options.onTrustedAccessStatus,
-                options.onObserverError,
-                tacStatus,
-              );
-              if (tacStatus !== "granted") {
+      const turn =
+        options.savedCompletion ??
+        (await readCodexTurn({
+          thread: options.thread,
+          events: options.events,
+          onEvent: async (event) => {
+            if (!tacStatusReported) {
+              const tacStatus = trustedAccessStatusFromEvent(event);
+              if (tacStatus !== null) {
+                tacStatusReported = true;
                 notifyObserver(
-                  "onWarning",
-                  options.onWarning,
+                  "onTrustedAccessStatus",
+                  options.onTrustedAccessStatus,
                   options.onObserverError,
-                  trustedAccessWarning(tacStatus, options.authentication),
+                  tacStatus,
+                );
+                if (tacStatus !== "granted") {
+                  notifyObserver(
+                    "onWarning",
+                    options.onWarning,
+                    options.onObserverError,
+                    trustedAccessWarning(tacStatus, options.authentication),
+                  );
+                }
+              }
+            }
+            for (const activity of scanActivitiesFromEvent(
+              event,
+              options.expectation.repository,
+            )) {
+              notifyObserver(
+                "onActivity",
+                options.onActivity,
+                options.onObserverError,
+                activity,
+              );
+            }
+            for (const progress of scanProgressUpdatesFromEvent(event)) {
+              if (
+                options.expectedFilesTotal !== undefined &&
+                progress.filesTotal !== options.expectedFilesTotal
+              ) {
+                continue;
+              }
+              notifyObserver(
+                "onProgress",
+                options.onProgress,
+                options.onObserverError,
+                progress,
+              );
+            }
+            const workerStatus = workerStatusFromEvent(event);
+            if (workerStatus !== null) {
+              notifyObserver(
+                "onWorkerStatus",
+                options.onWorkerStatus,
+                options.onObserverError,
+                workerStatus,
+              );
+            }
+            if (event.type === "thread.started") {
+              const startedThreadId = event["thread_id"];
+              if (typeof startedThreadId === "string") {
+                await options.onThreadStarted?.(startedThreadId);
+              }
+              if (!scanStarted) {
+                scanStarted = true;
+                notifyObserver(
+                  "onScanStarted",
+                  options.onScanStarted,
+                  options.onObserverError,
                 );
               }
             }
-          }
-          for (const activity of scanActivitiesFromEvent(
-            event,
-            options.expectation.repository,
-          )) {
+          },
+          onReconnect: (message, reconnect) => {
             notifyObserver(
-              "onActivity",
-              options.onActivity,
+              "onReconnect",
+              options.onReconnect,
               options.onObserverError,
-              activity,
+              ...reconnect,
+              reconnectDetails(message),
             );
-          }
-          for (const progress of scanProgressUpdatesFromEvent(event)) {
-            if (
-              options.expectedFilesTotal !== undefined &&
-              progress.filesTotal !== options.expectedFilesTotal
-            ) {
-              continue;
-            }
-            notifyObserver(
-              "onProgress",
-              options.onProgress,
-              options.onObserverError,
-              progress,
-            );
-          }
-          const workerStatus = workerStatusFromEvent(event);
-          if (workerStatus !== null) {
-            notifyObserver(
-              "onWorkerStatus",
-              options.onWorkerStatus,
-              options.onObserverError,
-              workerStatus,
-            );
-          }
-          if (event.type === "thread.started") {
-            const startedThreadId = event["thread_id"];
-            if (typeof startedThreadId === "string") {
-              await options.onThreadStarted?.(startedThreadId);
-            }
-            if (!scanStarted) {
-              scanStarted = true;
-              notifyObserver(
-                "onScanStarted",
-                options.onScanStarted,
-                options.onObserverError,
-              );
-            }
-          }
-        },
-        onReconnect: (message, reconnect) => {
-          notifyObserver(
-            "onReconnect",
-            options.onReconnect,
-            options.onObserverError,
-            ...reconnect,
-            reconnectDetails(message),
-          );
-        },
-      });
+          },
+        }));
       const { status, threadId, lastStreamError } = turn;
       if (status !== "completed") {
         throw new IncompleteScanError(
@@ -3729,40 +3789,70 @@ export async function runScanEvents(
           "Codex Security did not report a thread ID.",
         );
       }
-      return { ...turn, threadId, status };
+      return (completedTurn = { ...turn, threadId, status });
     };
-    const audit = await runAcceptedAudit({
-      signal: options.signal,
-      execute,
-      accept: async (turn) => {
-        const { status, threadId, finalResponse } = turn;
-        let { usage } = turn;
-        if (options.onFinalize !== undefined) {
-          usage = (await options.onFinalize(usage)) ?? usage;
-        }
-        const result = await collectResult(
-          {
-            status,
-            finalResponse,
-            usage,
-            ...(options.model === undefined ? {} : { model: options.model }),
-          },
-          threadId,
-          options.scanDir,
-          options.pluginRoot,
-          options.expectation,
-          options.signal,
-          options.workbenchValidated,
-        );
-        return { checkpoint: result, accepted: result };
-      },
-    });
-    if (audit.status === "accepted") return audit.accepted;
+    const accept = async () => {
+      // The plugin's existing writer accepts these semantic documents. Matching,
+      // custom validation and the canonical seal remain in the enclosing owner.
+      const [manifest, findings, coverage] = await Promise.all(
+        ["scan-manifest.json", "findings.json", "coverage.json"].map(
+          async (name) =>
+            JSON.parse(
+              (
+                await readScanFile(options.scanDir, name, name, options.signal)
+              ).toString("utf8"),
+            ),
+        ),
+      );
+      return auditEvidence({
+        complete: manifest.scan.complete,
+        findings: findings.findings,
+        coverage,
+      });
+    };
+    let audit;
+    try {
+      audit = await runAcceptedAudit({
+        signal: options.signal,
+        execute,
+        accept,
+      });
+    } catch (error) {
+      if (options.signal.aborted) throw error;
+      const saved = await options.recoverCompletion?.();
+      if (!saved || saved.status !== "completed" || saved.threadId === null)
+        throw error;
+      // The enclosing scan publishes its saved selection; acceptance then reads it.
+      const recovered = completedTurn ?? { ...saved, threadId: saved.threadId };
+      audit = await runAcceptedAudit({
+        signal: options.signal,
+        execute: async () => recovered,
+        accept,
+      });
+    }
     if (audit.status === "checkpoint")
       throw new IncompleteScanError(
         "Codex Security produced only an unfinished audit checkpoint.",
       );
-    throw audit.error;
+    const { status, threadId, finalResponse } = audit.execution;
+    let { usage } = audit.execution;
+    if (options.onFinalize !== undefined) {
+      usage = (await options.onFinalize(usage)) ?? usage;
+    }
+    return await collectResult(
+      {
+        status,
+        finalResponse,
+        usage,
+        ...(options.model === undefined ? {} : { model: options.model }),
+      },
+      threadId,
+      options.scanDir,
+      options.pluginRoot,
+      options.expectation,
+      options.signal,
+      options.workbenchValidated,
+    );
   } catch (error) {
     if (options.signal.reason instanceof ScanCostLimitExceededError) {
       throw options.signal.reason;

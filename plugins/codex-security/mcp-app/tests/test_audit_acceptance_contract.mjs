@@ -103,19 +103,13 @@ for (const completeness of ["complete", "partial", "unknown"]) {
       assert.deepEqual(audit.accepted, accepted);
       assert.deepEqual(audit.checkpoint, accepted);
       const failure = new Error("Synthetic execution failure");
-      const failed = await runAcceptedAudit({ signal: controller.signal,
+      await assert.rejects(runAcceptedAudit({ signal: controller.signal,
         execute: async () => { throw failure; },
         accept: async () => { assert.fail("An execution failure cannot accept old output"); },
-      });
-      assert.equal(failed.status, "failed");
-      assert.equal(failed.stage, "execution");
-      assert.equal(failed.error, failure);
-      assert.equal(failed.accepted, undefined);
-      const canceled = await runAcceptedAudit({ signal: controller.signal, execute,
+      }), (error) => error === failure);
+      await assert.rejects(runAcceptedAudit({ signal: controller.signal, execute,
         accept: async () => { const evidence = await accept(); controller.abort("user canceled"); return evidence; },
-      });
-      assert.equal(canceled.status, "canceled");
-      assert.deepEqual(canceled.checkpoint, accepted);
+      }), (error) => error === controller.signal.reason);
       assert.equal(manifest.scan.sealedAt, undefined);
       assert.equal(manifest.scan.artifacts, undefined);
       assert.equal((await readdir(workerRoot)).includes("scan-manifest.json"), false);
