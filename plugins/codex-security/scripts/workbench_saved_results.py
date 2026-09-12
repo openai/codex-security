@@ -1260,7 +1260,6 @@ def preserve_scan_results_locked(
             for relative, digest in retained_sources.items()
         ):
             raise ContractError("Stopped scan source digests could not be frozen.")
-        frozen_source_digests = retained_sources
         with connection:
             connection.execute(
                 "UPDATE scans SET retained_source_digests_json = ? "
