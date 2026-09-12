@@ -168,7 +168,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     return True
 
 
-def parse_scan_cost(value: str | None) -> str | None:
+def parse_scan_cost(value: str | None, *, allow_lower_bound: bool = False) -> str | None:
     if value is None:
         return None
     if len(value.encode("utf-8")) > 8192:
@@ -177,7 +177,10 @@ def parse_scan_cost(value: str | None) -> str | None:
         cost = json.loads(value, parse_constant=reject_nonstandard_json_number)
     except (TypeError, UnicodeError, ValueError) as exc:
         raise SystemExit("Scan cost must be a valid JSON object.") from exc
-    if isinstance(cost, dict) and "usage" in cost:
+    if allow_lower_bound and isinstance(cost, dict) and set(cost) == {"lowerBound"}:
+        if not _valid_legacy_scan_cost(cost["lowerBound"]):
+            raise SystemExit("Scan cost lower bound must be a valid measured cost.")
+    elif isinstance(cost, dict) and "usage" in cost:
         if (
             not set(cost).issubset({"usage", "cost"})
             or not _valid_measured_scan_usage(cost["usage"])

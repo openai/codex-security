@@ -4767,6 +4767,183 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each([
+    ["standard", false],
+    ["deep", false],
+    ["standard", true],
+    ["deep", true],
+  ] as const)(
+    "enforces priced usage with an unpriced remainder (%s, raised limit: %s)",
+    async (mode, raised) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await Promise.all([
+        mkdir(repository),
+        mkdir(codexHome),
+        mkdir(scanDir, { mode: 0o700 }),
+      ]);
+      const commands: Array<readonly string[]> = [];
+      const costs: number[] = [];
+      let turns = 0;
+      let releaseIncrease!: () => void;
+      const increased = new Promise<void>((resolve) => {
+        releaseIncrease = resolve;
+      });
+      const knownUsage = {
+        input_tokens: raised ? 2_500 : 1_250,
+        cached_input_tokens: 200,
+        output_tokens: 30,
+      };
+      const expectedCost = estimateScanCost("gpt-5.6-sol", knownUsage)!;
+      const writePricedUsage = async (usage: Record<string, number>) => {
+        const path = await writeUsageSession(codexHome, "scan-thread", usage);
+        const lines = (await readFile(path, "utf8")).split("\n");
+        lines.splice(
+          1,
+          0,
+          JSON.stringify({
+            type: "turn_context",
+            payload: { model: "gpt-5.6-sol" },
+          }),
+        );
+        await writeFile(path, lines.join("\n"));
+      };
+      const writeUnpricedUsage = async () => {
+        const path = await writeUsageSession(
+          codexHome,
+          "unpriced-worker",
+          { input_tokens: 100, output_tokens: 10 },
+          "scan-thread",
+        );
+        const lines = (await readFile(path, "utf8")).split("\n");
+        lines.splice(
+          1,
+          0,
+          JSON.stringify({
+            type: "turn_context",
+            payload: { model: "synthetic-unpriced-model" },
+          }),
+        );
+        await writeFile(path, lines.join("\n"));
+      };
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_options, args, input) => {
+            commands.push(args);
+            if (args[0] === "get-scan")
+              return { scan: { id: "scan_example_001" } };
+            if (args[0] === "complete-budget-exhausted-scan")
+              throw new Error("Synthetic canonical output is not ready");
+            return mockWorkbench(args, input);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed(
+                _input: string,
+                options: { signal: AbortSignal },
+              ) {
+                turns++;
+                async function* events(): AsyncGenerator<ThreadEvent> {
+                  if (raised) {
+                    await writePricedUsage({
+                      input_tokens: 800,
+                      output_tokens: 0,
+                    });
+                  } else {
+                    await writePricedUsage(knownUsage);
+                    await writeUnpricedUsage();
+                  }
+                  yield { type: "thread.started", thread_id: "scan-thread" };
+                  if (raised) {
+                    await increased;
+                    await writeUnpricedUsage();
+                    const path = join(
+                      codexHome,
+                      "sessions",
+                      "2026",
+                      "07",
+                      "26",
+                      "rollout-scan-thread.jsonl",
+                    );
+                    await appendFile(
+                      path,
+                      JSON.stringify({
+                        type: "event_msg",
+                        payload: {
+                          type: "token_count",
+                          info: { total_token_usage: knownUsage },
+                        },
+                      }) + "\n",
+                    );
+                  }
+                  await new Promise<void>((resolve) => {
+                    if (options.signal.aborted) resolve();
+                    else
+                      options.signal.addEventListener(
+                        "abort",
+                        () => resolve(),
+                        { once: true },
+                      );
+                  });
+                  throw new DOMException("aborted", "AbortError");
+                }
+                return { events: events() };
+              },
+            }),
+          }),
+        },
+      );
+      const keepAlive = setTimeout(() => {}, 10_000);
+      try {
+        const failure = await client
+          .run(repository, {
+            mode,
+            maxCostUsd: 0.004,
+            signal: AbortSignal.timeout(5_000),
+            postScanPrompt: "No model work after the budget stop.",
+            ...(raised ? { onBudgetApproaching: () => 0.008 } : {}),
+            onCost: (cost, limit) => {
+              costs.push(cost.estimatedUsd);
+              if (limit === 0.008) releaseIncrease();
+            },
+          })
+          .catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(ScanCostLimitExceededError);
+        expect(failure).toMatchObject({
+          maxCostUsd: raised ? 0.008 : 0.004,
+          cost: {
+            estimatedUsd: expectedCost.estimatedUsd,
+            inputTokens: knownUsage.input_tokens,
+            coverage: "partial",
+          },
+        });
+        expect(costs.every((cost) => raised && cost === 0.0032)).toBe(true);
+        expect(turns).toBe(1);
+        expect(
+          commands.some((args) => args[0] === "complete-budget-exhausted-scan"),
+        ).toBe(mode === "deep");
+        if (raised)
+          expect(
+            commands
+              .filter((args) => args[0] === "set-scan-cost-limit")
+              .map((args) => args.at(-1)),
+          ).toEqual(["0.008"]);
+      } finally {
+        clearTimeout(keepAlive);
+        await client.close();
+      }
+    },
+  );
+
   test("stops and records a scan as soon as its live cost exceeds the limit", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

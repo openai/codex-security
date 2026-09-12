@@ -137,9 +137,20 @@ const cases: {
   outcome: (typeof outcomes)[number];
   budgetCompletionFault?: BudgetCompletionFault;
   initialResumeUsage?: boolean;
+  unpricedUsage?: boolean;
   cancellationFault?: "status-read" | "deep-state-read" | "cancel-response";
 }[] = [
   ...outcomes.map((outcome) => ({ outcome })),
+  ...(
+    [
+      "budget-during-publication",
+      "budget-after-deep-finish",
+      "budget-during-resumed-publication",
+    ] as const
+  ).flatMap((outcome) => [
+    { outcome, unpricedUsage: true },
+    { outcome, unpricedUsage: true, budgetCompletionFault: "lost" as const },
+  ]),
   ...(
     [
       "budget-during-publication",
@@ -185,6 +196,7 @@ for (const {
   budgetCompletionFault,
   cancellationFault,
   initialResumeUsage,
+  unpricedUsage,
 } of cases) {
   const resumedStop = outcome.includes("-resumed-");
   const restart = outcome === "restart" || resumedStop;
@@ -195,7 +207,7 @@ for (const {
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
-      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}`;
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}`;
   const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -235,6 +247,7 @@ for (const {
     let completedArtifacts: Buffer<ArrayBuffer>[] = [];
     const modelInputs: string[] = [];
     const commands: string[] = [];
+    const reportedCosts: number[] = [];
     const usagePath = join(
       codexHome,
       "sessions",
@@ -269,7 +282,34 @@ for (const {
               },
             },
           }) +
-          "\n",
+          "\n" +
+          (unpricedUsage
+            ? [
+                JSON.stringify({
+                  timestamp: new Date().toISOString(),
+                  type: "turn_context",
+                  payload: {
+                    turn_id: "synthetic-scan-turn",
+                    model: "synthetic-unpriced-model",
+                  },
+                }),
+                JSON.stringify({
+                  timestamp: new Date().toISOString(),
+                  type: "event_msg",
+                  payload: {
+                    type: "token_count",
+                    info: {
+                      total_token_usage: {
+                        input_tokens: 1_350,
+                        cached_input_tokens: 200,
+                        output_tokens: 30,
+                      },
+                    },
+                  },
+                }),
+                "",
+              ].join("\n")
+            : ""),
       );
     let closePromise: Promise<void> | undefined;
     const makeClient = () =>
@@ -624,6 +664,9 @@ for (const {
           signal: cancellation.signal,
           ...(budgeted ? { maxCostUsd: 0.004 } : {}),
           ...(resumedStop ? { resumeScanId: scanId, outputDir: scanDir } : {}),
+          ...(unpricedUsage
+            ? { onCost: (cost) => reportedCosts.push(cost.estimatedUsd) }
+            : {}),
           postScanPrompt: followUp,
         });
         if (budgeted) {
@@ -669,7 +712,18 @@ for (const {
           const result = await running;
           expect(result.coverage.completeness).toBe("partial");
           expect(JSON.stringify(result.coverage)).toContain("cost limit");
-          expect(result.cost?.estimatedUsd).toBeGreaterThan(0.004);
+          if (unpricedUsage) {
+            expect(result.cost).toBeNull();
+            expect(reportedCosts).toEqual([]);
+            const saved = await runWorkbench(workbenchOptions!, [
+              "get-scan",
+              "--scan-id",
+              scanId,
+            ]);
+            expect(
+              (saved["scan"] as { cost?: unknown }).cost ?? null,
+            ).toBeNull();
+          } else expect(result.cost?.estimatedUsd).toBeGreaterThan(0.004);
           expect(result.threadId).toBe(threadId);
           expect(modelInputs).toHaveLength(1);
           expect(commands).toContain("complete-budget-exhausted-scan");

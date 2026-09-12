@@ -1153,7 +1153,7 @@ def complete_budget_exhausted_scan(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    cost_json = parse_scan_cost(args.cost_json)
+    cost_json = parse_scan_cost(args.cost_json, allow_lower_bound=True)
     if cost_json is None:
         raise SystemExit("Budget-exhausted scan completion requires the measured scan cost.")
     with scan_completion_lock(scan_id):
@@ -1164,7 +1164,8 @@ def complete_budget_exhausted_scan(
         if not isinstance(recipe, dict) or recipe.get("mode") != "deep":
             raise SystemExit("Budget-exhausted scan completion requires a Deep Scan launch recipe.")
         cost = json.loads(cost_json)
-        measured = cost.get("cost", cost)
+        lower_bound = set(cost) == {"lowerBound"}
+        measured = cost["lowerBound"] if lower_bound else cost.get("cost", cost)
         limit = recipe.get("maxCostUsd")
         if (
             not isinstance(limit, (int, float))
@@ -1240,7 +1241,8 @@ def complete_budget_exhausted_scan(
                 (json.dumps([*warnings, warning]), scan_id),
             )
             connection.commit()
-        return complete_scan_locked(connection, scan_id, None, cost_json)
+        # A priced subtotal proves the stop but is not the saved total estimate.
+        return complete_scan_locked(connection, scan_id, None, None if lower_bound else cost_json)
 
 
 def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:

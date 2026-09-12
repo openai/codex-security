@@ -94,8 +94,9 @@ def test_cost_before_selection_does_not_replace_invalid_accepted_evidence(
 
 @pytest.mark.parametrize("accepted_kind", ["none", "unmerged", "reducer"])
 @pytest.mark.parametrize("cancel_first", [False, True])
+@pytest.mark.parametrize("lower_bound", [False, True])
 def test_cost_before_selection_retains_only_merged_findings(
-    workbench_api, workbench_db, publication_scan, accepted_kind, cancel_first
+    workbench_api, workbench_db, publication_scan, accepted_kind, cancel_first, lower_bound
 ):
     scan = publication_scan()
     accepted = None
@@ -133,7 +134,7 @@ def test_cost_before_selection_retains_only_merged_findings(
         )
     args = Namespace(
         scan_id=scan.scan_id,
-        cost_json=json.dumps(BUDGET_COST),
+        cost_json=json.dumps({"lowerBound": BUDGET_COST} if lower_bound else BUDGET_COST),
         message="Scan reached its original cost limit.",
     )
     if cancel_first:
@@ -147,6 +148,12 @@ def test_cost_before_selection_retains_only_merged_findings(
         row = workbench_db.execute("SELECT * FROM scans").fetchone()
         run = workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone()
         assert row["status"] == "complete"
+        stored = json.loads(row["cost_json"])
+        if lower_bound:
+            assert "cost" not in stored and "estimatedUsd" not in stored
+            assert stored["usage"]["coverage"] == "unavailable"
+        else:
+            assert stored == BUDGET_COST
         assert run["terminal_reason"] == "capped"
         assert run["error_message"] == args.message
         assert args.message in json.loads(row["completion_warnings_json"])
@@ -184,6 +191,47 @@ def test_cost_before_selection_retains_only_merged_findings(
         assert published_bytes(scan) == before
     if accepted is not None:
         assert accepted.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "bound", [None, {**BUDGET_COST, "estimatedUsd": -1}, {**BUDGET_COST, "estimatedUsd": 0.005}]
+)
+def test_lower_bound_budget_rejects_invalid_or_unexceeded_cost(
+    workbench_api, workbench_db, publication_scan, bound
+):
+    scan = publication_scan()
+    with workbench_db:
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+    before = published_bytes(scan)
+    with pytest.raises(SystemExit):
+        workbench_api["complete_budget_exhausted_scan"](
+            workbench_db,
+            Namespace(
+                scan_id=scan.scan_id, cost_json=json.dumps({"lowerBound": bound}), message=None
+            ),
+        )
+    assert published_bytes(scan) == before
+    assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "running"
+
+
+def test_lower_bound_is_not_an_ordinary_completion_cost(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    before = published_bytes(scan)
+    with pytest.raises(SystemExit):
+        workbench_api["complete_scan"](
+            workbench_db,
+            Namespace(
+                scan_id=scan.scan_id,
+                claim_token=None,
+                cost_json=json.dumps({"lowerBound": BUDGET_COST}),
+            ),
+        )
+    assert published_bytes(scan) == before
+    assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "running"
 
 
 @pytest.mark.parametrize("reason", ["saturated", "capped"])

@@ -1005,15 +1005,7 @@ export class CodexSecurity {
               `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystemPermissions(inputs.gitMetadataPaths))}`,
             ],
       );
-      const reportCost = (current: Readonly<ScanCost>): void => {
-        const total = addScanCosts(accumulatedCost, current);
-        if (completeCost)
-          notifyObserver(
-            "onCost",
-            options.onCost,
-            options.onObserverError,
-            total,
-          );
+      const enforceCostLimit = (total: Readonly<ScanCost>): void => {
         if (
           options.maxCostUsd !== undefined &&
           total.estimatedUsd > options.maxCostUsd
@@ -1024,6 +1016,17 @@ export class CodexSecurity {
             ),
           );
         }
+      };
+      const reportCost = (current: Readonly<ScanCost>): void => {
+        const total = addScanCosts(accumulatedCost, current);
+        if (completeCost)
+          notifyObserver(
+            "onCost",
+            options.onCost,
+            options.onObserverError,
+            total,
+          );
+        enforceCostLimit(total);
       };
       const outputSchema = securityPolicyStageOutputSchema();
       const run = async (
@@ -1048,6 +1051,10 @@ export class CodexSecurity {
             options.onCost === undefined && options.maxCostUsd === undefined
               ? undefined
               : reportCost,
+          onCostLowerBound:
+            options.maxCostUsd === undefined
+              ? undefined
+              : (cost) => enforceCostLimit(addScanCosts(accumulatedCost, cost)),
           onError: (error) => {
             if (options.maxCostUsd !== undefined) budgetController.abort(error);
             else
@@ -1484,6 +1491,14 @@ export class CodexSecurity {
           `Could not track scan activity: ${errorMessage(error)}`,
         );
       };
+      const enforceCostLimit = (cost: Readonly<ScanCost>): boolean => {
+        if (maxCostUsd === undefined || cost.estimatedUsd <= maxCostUsd)
+          return false;
+        costAbortController.abort(
+          new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
+        );
+        return true;
+      };
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
@@ -1524,15 +1539,7 @@ export class CodexSecurity {
                   cost,
                   maxCostUsd,
                 );
-                if (
-                  maxCostUsd !== undefined &&
-                  cost.estimatedUsd > maxCostUsd
-                ) {
-                  costAbortController.abort(
-                    new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
-                  );
-                  return;
-                }
+                if (enforceCostLimit(cost)) return;
                 const request = options.onBudgetApproaching;
                 if (
                   request === undefined ||
@@ -1597,6 +1604,8 @@ export class CodexSecurity {
                     }
                   });
               },
+        onCostLowerBound:
+          options.maxCostUsd === undefined ? undefined : enforceCostLimit,
         onError: reportTrackingError,
       });
       costTracker = tracker;
@@ -2395,7 +2404,7 @@ export class CodexSecurity {
       ) {
         try {
           const budgetScanId = activeScan.id;
-          const budgetCost = snapshot?.cost ?? failure.cost;
+          const budgetCost = snapshot?.cost ?? { lowerBound: failure.cost };
           const completionSignal = AbortSignal.any([
             this.#abortController.signal,
             ...(options.signal === undefined ? [] : [options.signal]),
@@ -2441,8 +2450,9 @@ export class CodexSecurity {
               "complete-scan",
               "--scan-id",
               budgetScanId,
-              "--cost-json",
-              JSON.stringify(budgetCost),
+              ...(snapshot?.cost
+                ? ["--cost-json", JSON.stringify(snapshot.cost)]
+                : []),
             ]),
           );
           activeScan = null;
