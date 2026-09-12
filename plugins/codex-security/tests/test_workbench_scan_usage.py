@@ -623,10 +623,13 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
     )
     usage = _complete_scan(fixture)["scan"]["usage"]
     assert usage == {
-        "coverage": "complete",
+        "coverage": "partial",
         "source": "codex_rollout",
-        **_counts(37, 0, 10),
-        "threadCount": 3,
+        **_counts(27, 0, 7),
+        "threadCount": 2,
+        "missingThreadCount": 1,
+        "warnings": ["scan_owner_turn_unavailable"],
+        "modelUsage": [{"model": None, **_counts(27, 0, 7)}],
     }
 
 

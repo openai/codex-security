@@ -72,12 +72,29 @@ export interface DeepScanRunState {
   error?: string;
   persistedWorkers?: PersistedDeepScanWorker[];
   persistedDedupInputs?: PersistedDeepScanDedupInput[];
+  persistedMergeClaims?: PersistedDeepScanMergeClaim[];
+  committedMerge?: {
+    workerId: string;
+    resultManifestPath: string;
+    resultManifestSha256: string;
+    newFindings: number;
+  };
+}
+
+export interface PersistedDeepScanMergeClaim {
+  workerId: string;
+  previousWorkerId?: string;
+  previousResultPath?: string;
+  previousResultSha256?: string;
 }
 
 export interface PersistedDeepScanDedupInput {
   dedupWorkerId: string;
   discoveryWorkerId: string;
   inputOrder: number;
+  resultManifestPath?: string;
+  resultManifestSha256?: string;
+  attempt?: number;
 }
 
 export interface BeginDeepScanResult {
@@ -126,6 +143,7 @@ export interface PersistedDeepScanWorker {
   attempt: number;
   threadId?: string;
   resultManifestPath?: string;
+  acceptedResultPath?: string;
   completionSequence?: number;
   consecutiveErrors?: number;
   mergeState: DeepScanMergeState;
@@ -165,7 +183,7 @@ export interface DeepScanStore {
     workerIds: string[];
     promptPath: string;
     artifactDir: string;
-  }): Promise<void>;
+  }): Promise<DeepScanRunState | void>;
   commitDedup(commit: DedupCommit): Promise<DeepScanRunState>;
   selectFinalization?(input: {
     scanId: string;

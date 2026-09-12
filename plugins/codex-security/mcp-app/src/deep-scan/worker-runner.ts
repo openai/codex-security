@@ -229,11 +229,7 @@ export class DeepScanWorkerRunner {
     };
     let persisted: PersistedDeepScanWorker;
     try {
-      persisted = await this.replayStoreMutation(
-        "discovery_acceptance_replay",
-        workerId,
-        async () => await this.options.store.updateWorker(acceptance)
-      );
+      persisted = await this.options.store.updateWorker(acceptance);
     } catch (error) {
       if (!this.options.signal.aborted) throw error;
       return { type: "discovery", status: "canceled", workerId };
@@ -252,7 +248,7 @@ export class DeepScanWorkerRunner {
         id: workerId,
         label: workerLabel,
         artifactDir,
-        resultPath: files.resultPath,
+        resultPath: persisted.acceptedResultPath ?? files.resultPath,
         completionSequence: persisted.completionSequence,
         attempt: outcome.attempt,
         threadId: outcome.threadId
@@ -264,10 +260,9 @@ export class DeepScanWorkerRunner {
     const {
       id: reducerId,
       label: reducerLabel,
-      consumed,
-      previousReducerResultPath,
       previousSourceCoverage
     } = request;
+    let { consumed, previousReducerResultPath } = request;
     const { artifacts, run } = this.options;
     const reducerRoot = join(artifacts.dedupRoot, reducerLabel);
     const artifactDir = join(reducerRoot, "output");
@@ -283,13 +278,23 @@ export class DeepScanWorkerRunner {
       }))
     });
     await writePrivateFile(promptPath, basePrompt);
-    await this.options.store.claimDedup({
+    const claimed = await this.options.store.claimDedup({
       id: reducerId,
       scanId: run.scanId,
       workerIds: consumed.map((worker) => worker.id),
       promptPath,
       artifactDir
     });
+    const claim = claimed?.persistedMergeClaims?.find((item) => item.workerId === reducerId);
+    if (claim) {
+      previousReducerResultPath = claim.previousResultPath;
+      const inputs = claimed?.persistedDedupInputs?.filter((item) => item.dedupWorkerId === reducerId) ?? [];
+      consumed = inputs.sort((a, b) => a.inputOrder - b.inputOrder).map((item) => {
+        const discovery = consumed.find((worker) => worker.id === item.discoveryWorkerId);
+        if (!discovery || !item.resultManifestPath) throw new Error("The reducer claim is missing an accepted input.");
+        return { ...discovery, resultPath: item.resultManifestPath };
+      });
+    }
     this.options.log({
       event: "dedup_claimed",
       scanId: run.scanId,
@@ -394,25 +399,26 @@ export class DeepScanWorkerRunner {
       newFindings: reducerValidation.newFindings,
       resultManifestPath: resultPath
     };
-    const committed = await this.replayStoreMutation(
-      "dedup_commit_replay",
-      reducerId,
-      async () => await this.options.store.commitDedup(commit)
-    );
+    const committed = await this.options.store.commitDedup(commit);
+    const accepted = committed.committedMerge;
+    const acceptedPath = accepted?.resultManifestPath ?? resultPath;
+    // V1 checkpoints omit host-only coverage; retain the validated projection.
+    const acceptedResult = reducerValidation.result;
+    const newFindings = accepted?.newFindings ?? reducerValidation.newFindings;
     this.options.log({
       event: "dedup_committed",
       scanId: run.scanId,
       workerId: reducerId,
       count: consumed.length,
-      newFindings: reducerValidation.newFindings
+      newFindings
     });
     return {
       type: "dedup",
       id: reducerId,
       consumed,
-      resultPath,
-      result: reducerValidation.result,
-      newFindings: reducerValidation.newFindings,
+      resultPath: acceptedPath,
+      result: acceptedResult,
+      newFindings,
       attempt: outcome.attempt,
       threadId: outcome.threadId,
       run: committed
@@ -659,32 +665,6 @@ export class DeepScanWorkerRunner {
     });
   }
 
-  /** Replay idempotent SQLite commits when their process response is ambiguous. */
-  private async replayStoreMutation<T>(
-    event: string,
-    workerId: string,
-    operation: () => Promise<T>
-  ): Promise<T> {
-    try {
-      return await operation();
-    } catch (firstError) {
-      this.options.log({
-        event,
-        scanId: this.options.run.scanId,
-        workerId,
-        reason: errorKind(firstError)
-      });
-      try {
-        return await operation();
-      } catch (replayError) {
-        throw new Error(
-          `Deep Scan persistence replay failed: ${asError(replayError).message}`,
-          { cause: firstError }
-        );
-      }
-    }
-  }
-
   private async cancelAttempt(
     input: {
       workerId: string;
@@ -840,14 +820,6 @@ function validationErrorData(error: Error, message: string): Record<string, unkn
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
-}
-
-function errorKind(error: unknown): string {
-  const normalized = asError(error);
-  const code = "code" in normalized && typeof normalized.code === "string"
-    ? normalized.code
-    : undefined;
-  return code ? `${normalized.name}:${code}` : normalized.name;
 }
 
 function abortError(reason?: unknown): Error {

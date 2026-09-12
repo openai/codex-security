@@ -251,8 +251,10 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
         ? ["--replaceable-failure-kind", update.replaceableFailureKind]
         : [])
     ], true);
-    const worker = parseWorker(result, update.id);
     const state = objectValue(result.deepScan, "deepScan");
+    const worker = parseWorker(state.workerReceipt
+      ? { deepScan: { ...state, workers: [state.workerReceipt] } }
+      : result, update.id);
     return state.consecutiveErrors === undefined
       ? worker
       : {
@@ -270,8 +272,8 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
     workerIds: string[];
     promptPath: string;
     artifactDir: string;
-  }): Promise<void> {
-    await this.enqueueWrite([
+  }): Promise<DeepScanRunState> {
+    return parseDeepScan(await this.enqueueWrite([
       "claim-deep-scan-dedup",
       "--scan-id",
       input.scanId,
@@ -283,7 +285,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
       input.artifactDir,
       ...this.coordinatorLeaseArgs(input.scanId),
       ...input.workerIds.flatMap((workerId) => ["--input-worker-id", workerId])
-    ], true);
+    ], true));
   }
 
   async commitDedup(commit: DedupCommit): Promise<DeepScanRunState> {
@@ -642,7 +644,17 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
       : undefined,
     error: optionalString(value.error),
     persistedWorkers: parsePersistedWorkers(value.workers),
-    persistedDedupInputs: parsePersistedDedupInputs(value.dedupInputs)
+    persistedDedupInputs: parsePersistedDedupInputs(value.dedupInputs),
+    persistedMergeClaims: Array.isArray(value.mergeClaims) ? value.mergeClaims.map((candidate) => {
+      const claim = objectValue(candidate, "deepScan.mergeClaim");
+      return {
+        workerId: requiredString(claim.workerId, "deepScan.mergeClaim.workerId"),
+        previousWorkerId: optionalString(claim.previousWorkerId),
+        previousResultPath: optionalString(claim.previousResultPath),
+        previousResultSha256: optionalString(claim.previousResultSha256)
+      };
+    }) : [],
+    ...(value.committedMerge ? { committedMerge: parseCommittedMerge(value.committedMerge) } : {})
   };
 }
 
@@ -686,9 +698,22 @@ function parsePersistedDedupInputs(value: unknown): PersistedDeepScanDedupInput[
       inputOrder: nonNegativeInteger(
         input.inputOrder,
         "deepScan.dedupInput.inputOrder"
-      )
+      ),
+      resultManifestPath: optionalString(input.resultManifestPath),
+      resultManifestSha256: optionalString(input.resultManifestSha256),
+      attempt: optionalPositiveInteger(input.attempt)
     };
   });
+}
+
+function parseCommittedMerge(value: unknown): NonNullable<DeepScanRunState["committedMerge"]> {
+  const commit = objectValue(value, "deepScan.committedMerge");
+  return {
+    workerId: requiredString(commit.workerId, "deepScan.committedMerge.workerId"),
+    resultManifestPath: requiredString(commit.resultManifestPath, "deepScan.committedMerge.resultManifestPath"),
+    resultManifestSha256: requiredString(commit.resultManifestSha256, "deepScan.committedMerge.resultManifestSha256"),
+    newFindings: nonNegativeInteger(commit.newFindings, "deepScan.committedMerge.newFindings")
+  };
 }
 
 function deepScanPhase(value: unknown): DeepScanRunState["phase"] {
@@ -752,6 +777,7 @@ function parsePersistedWorker(value: JsonObject): PersistedDeepScanWorker {
     attempt: nonNegativeInteger(value.attempt, "deepScan.worker.attempt"),
     threadId: optionalString(value.sdkThreadId),
     resultManifestPath: optionalString(value.resultManifestPath),
+    acceptedResultPath: optionalString(value.acceptedResultPath),
     completionSequence: optionalPositiveInteger(value.completionSequence),
     error: optionalString(value.error)
   };

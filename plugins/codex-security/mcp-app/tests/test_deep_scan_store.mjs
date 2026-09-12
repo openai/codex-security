@@ -425,7 +425,7 @@ async function testPersistenceRetriesRemainInsideTheWriteQueue() {
     if (args[0] === "claim-deep-scan-dedup" && calls.length === 1) {
       throw new Error("sqlite3.OperationalError: database is locked");
     }
-    return {};
+    return stateResult(scanId);
   });
 
   const claim = store.claimDedup({
@@ -706,7 +706,7 @@ function idempotentPersistenceScenarios() {
     })
   }, {
     operation: "claim-deep-scan-dedup",
-    result: {},
+    result: stateResult(scanId),
     invoke: (store) => store.claimDedup({
       id: reducerId,
       scanId,
