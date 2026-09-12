@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
@@ -25,9 +25,17 @@ for (const outcome of [
   "canceled-before-publication",
   "canceled-during-publication",
   "published-before-cancellation",
+  "closed-during-publication",
+  "budget-during-publication",
+  "budget-after-deep-finish",
+  "budget-during-resumed-publication",
+  "closed-during-resumed-publication",
 ] as const) {
-  const restart = outcome === "restart";
-  test(`SDK completes a selected aggregate ${restart ? "after restart" : `after the parent turn ${outcome}`}`, async () => {
+  const resumedStop = outcome.includes("-resumed-");
+  const restart = outcome === "restart" || resumedStop;
+  const closed = outcome.startsWith("closed-");
+  const budgeted = outcome.startsWith("budget-");
+  test(`SDK handles selected aggregate: ${outcome}`, async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scanDir = join(root, "scan");
@@ -50,6 +58,15 @@ for (const outcome of [
     let publicationFails = restart;
     const modelInputs: string[] = [];
     const commands: string[] = [];
+    const usagePath = join(
+      codexHome,
+      "sessions",
+      "2026",
+      "01",
+      "01",
+      `rollout-${threadId}.jsonl`,
+    );
+    let closePromise: Promise<void> | undefined;
     const makeClient = () =>
       new TestClient(
         {},
@@ -80,6 +97,40 @@ for (const outcome of [
               throw new Error("Synthetic publication write failure");
             }
             const result = await runWorkbench(options, args, input);
+            if (
+              (args[0] === "write-scan-draft" &&
+                (outcome === "budget-during-publication" ||
+                  outcome === "budget-during-resumed-publication")) ||
+              (args[0] === "finish-deep-scan" &&
+                outcome === "budget-after-deep-finish")
+            ) {
+              await appendFile(
+                usagePath,
+                JSON.stringify({
+                  type: "event_msg",
+                  payload: {
+                    type: "token_count",
+                    info: {
+                      total_token_usage: {
+                        input_tokens: 1_250,
+                        cached_input_tokens: 200,
+                        output_tokens: 30,
+                      },
+                    },
+                  },
+                }) + "\n",
+              );
+              await new Promise<void>((resolve) => {
+                if (options.signal?.aborted) resolve();
+                else
+                  options.signal!.addEventListener("abort", () => resolve(), {
+                    once: true,
+                  });
+              });
+            }
+            if (args[0] === "write-scan-draft" && closed) {
+              closePromise = client.close();
+            }
             if (
               args[0] === "write-scan-draft" &&
               outcome === "canceled-during-publication"
@@ -249,10 +300,16 @@ for (const outcome of [
         },
       );
     let client = makeClient();
+    // Native usage polling is unref'ed; the transport double has no child process.
+    const keepAlive = setTimeout(() => {}, 30_000);
     try {
       if (restart) {
         await expect(
-          client.run(repository, { mode: "deep", postScanPrompt: followUp }),
+          client.run(repository, {
+            mode: "deep",
+            postScanPrompt: resumedStop ? undefined : followUp,
+            ...(budgeted ? { maxCostUsd: 0.004 } : {}),
+          }),
         ).rejects.toThrow("Synthetic publication write failure");
         const pending = await runWorkbench(workbenchOptions!, [
           "get-deep-scan",
@@ -268,6 +325,66 @@ for (const outcome of [
         expect(commands).not.toContain("fail-scan");
         await client.close();
         client = makeClient();
+      }
+      if (budgeted || closed) {
+        const running = client.run(repository, {
+          mode: "deep",
+          ...(budgeted ? { maxCostUsd: 0.004 } : {}),
+          ...(resumedStop ? { resumeScanId: scanId, outputDir: scanDir } : {}),
+          postScanPrompt: followUp,
+        });
+        if (outcome === "budget-after-deep-finish") {
+          const result = await running;
+          expect(result.coverage.completeness).toBe("partial");
+          expect(JSON.stringify(result.coverage)).toContain("cost limit");
+          expect(result.cost?.estimatedUsd).toBeGreaterThan(0.004);
+          expect(result.threadId).toBe(threadId);
+          expect(modelInputs).toHaveLength(1);
+          expect(commands).toContain("complete-budget-exhausted-scan");
+          expect(commands).not.toContain("fail-scan");
+          return;
+        }
+        await expect(running).rejects.toThrow(
+          budgeted ? /estimated cost.*exceeded/ : /closed/,
+        );
+        await closePromise;
+        const stopped = await runWorkbench(
+          { ...workbenchOptions!, signal: undefined },
+          ["get-scan", "--scan-id", scanId],
+        );
+        const deep = await runWorkbench(
+          { ...workbenchOptions!, signal: undefined },
+          ["get-deep-scan", "--scan-id", scanId, "--thread-id", threadId],
+        );
+        expect(stopped["scan"]).toMatchObject({
+          progress: { status: "failed" },
+          findingCount: 1,
+          reportAvailable: true,
+        });
+        expect(deep["deepScan"]).toMatchObject({
+          status: "failed",
+          finalizationInput: { terminalReason: "saturated" },
+        });
+        expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
+          "Validate the resolved destination",
+        );
+        expect(
+          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8"))
+            .completeness,
+        ).toBe("partial");
+        expect(commands).toContain("fail-scan");
+        expect(modelInputs).toHaveLength(1);
+        await client.close();
+        client = makeClient();
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            resumeScanId: scanId,
+            outputDir: scanDir,
+          }),
+        ).rejects.toThrow();
+        expect(modelInputs).toHaveLength(1);
+        return;
       }
       if (outcome.startsWith("canceled-")) {
         await expect(
@@ -341,6 +458,7 @@ for (const outcome of [
       );
       expect(commands).not.toContain("fail-scan");
     } finally {
+      clearTimeout(keepAlive);
       await client.close();
     }
   }, 30_000);

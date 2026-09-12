@@ -2423,12 +2423,15 @@ export class CodexSecurity {
           ]);
         }
       }
-      // A failed attachment must not turn a resumable coordinator into a terminal failure.
-      // Deep Scan orchestration persists its own terminal failures and cancellations.
+      // Publication failures remain resumable. A cost stop or explicit client close
+      // still uses the existing failure path to retain partial results and stop work.
       if (
         activeScan !== null &&
-        options.resumeScanId === undefined &&
-        !selectedDeepFinalization
+        ((options.resumeScanId === undefined && !selectedDeepFinalization) ||
+          (selectedDeepFinalization &&
+            !options.signal?.aborted &&
+            (failure instanceof ScanCostLimitExceededError ||
+              this.#abortController.signal.aborted)))
       ) {
         if (
           options.validationPrompt !== undefined &&
