@@ -2841,7 +2841,8 @@ export class CodexSecurity {
         this.#runtimeCredentialSource === "api_key"
       ) {
         const ambientHome = scanCodexHome(this.#dependencies.environment);
-        runtime.credentialsAvailable = await importAmbientAuth(
+        runtime.credentialsAvailable = await initialCredentialsAvailable(
+          scanEnvironment,
           ambientHome,
           runtime.codexHome,
         );

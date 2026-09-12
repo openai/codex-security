@@ -7,6 +7,7 @@ import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
+import { AuthenticationRequiredError } from "../src/errors.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
@@ -597,6 +598,53 @@ describe("CodexSecurity orchestration", () => {
         async () => true,
       ),
     ).resolves.toBe(true);
+  });
+
+  test("respects another client's logout when switching from API-key to ChatGPT scans", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const ambientHome = join(root, "ambient-home");
+    const stateDirectory = join(root, "state");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(ambientHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(
+      join(ambientHome, "auth.json"),
+      '{"auth_mode":"chatgpt"}\n',
+    );
+    const environment = {
+      CODEX_HOME: ambientHome,
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+      OPENAI_API_KEY: "synthetic-transient-key",
+    };
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment,
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => {
+          throw new Error("synthetic scan started");
+        },
+      },
+    );
+    const logoutClient = new TestClient({}, { environment });
+    const credentials = join(stateDirectory, "codex-home", "auth.json");
+    try {
+      await expect(client.run(repository, { auth: "api-key" })).rejects.toThrow(
+        "synthetic scan started",
+      );
+      await logoutClient.logout();
+      expect(existsSync(credentials)).toBe(false);
+      await expect(client.run(repository, { auth: "chatgpt" })).rejects.toThrow(
+        AuthenticationRequiredError,
+      );
+      expect(existsSync(credentials)).toBe(false);
+    } finally {
+      await Promise.all([client.close(), logoutClient.close()]);
+    }
   });
 
   test.skipIf(process.platform === "win32" || process.geteuid?.() === 0)(
