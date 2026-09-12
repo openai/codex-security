@@ -31,6 +31,18 @@ async function bundledWorkerExecutor(
   if (source === undefined) {
     throw new Error("Bundled Deep Scan worker executor was not found.");
   }
+  const sessionSource =
+    /\n\/\/ [^\n]*\/codex-session\.ts\n([\s\S]*?)(?=\n\/\/)/u.exec(
+      runtime,
+    )?.[1];
+  expect(sessionSource).toBeDefined();
+  const recordFunction = /\b(isRecord\d*)\(/u.exec(source)?.[1];
+  expect(recordFunction).toBeDefined();
+  const recordSource = new RegExp(
+    `function ${recordFunction}\\([^\\n]*\\) \\{[\\s\\S]*?\\n\\}`,
+    "u",
+  ).exec(runtime)?.[0];
+  expect(recordSource).toBeDefined();
   const fileSystemImport = /\b(import_node_fs\d*)\.promises\.readFile\(/u.exec(
     source,
   )?.[1];
@@ -54,7 +66,8 @@ async function bundledWorkerExecutor(
     "workerPermissionProfile",
     "workerPermissionProfileConfigOverrides",
     "snapshotWorkerEnvironment",
-    "workerReasoningSummary",
+    "workerModelConfig",
+    "workerModelSelection",
     "environmentVariable",
     "preflightDeepScanWorkerPermissionProfile",
     "DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID",
@@ -64,14 +77,15 @@ async function bundledWorkerExecutor(
     "workerSubagentConfig",
     "appendSafeItemDiagnostic",
     "classifyCodexWorkerError",
-    `${source}\nreturn CodexSdkWorkerExecutor;`,
+    `${sessionSource}\n${recordSource}\n${source}\nreturn CodexSdkWorkerExecutor;`,
   )(
     FakeCodex,
     { promises: { readFile: async () => "fixture worker prompt" } },
     () => ({}),
     () => [],
     async () => ({}),
-    async () => undefined,
+    async () => ({}),
+    () => ({}),
     () => undefined,
     preflight,
     "codex_security_deep_scan_worker",

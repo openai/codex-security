@@ -7298,6 +7298,167 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     expect(scanSignal?.aborted).toBe(false);
   });
 
+  test.each(["standard", "deep"] as const)(
+    "isolates concurrent managed %s sessions at the Codex child boundary",
+    async (mode) => {
+      const clients: TestClient[] = [];
+      try {
+        const outcomes = await Promise.allSettled(
+          ["first", "second"].map(async (name) => {
+            const root = await temporaryDirectory();
+            const repository = join(root, "repository");
+            const codexHome = join(root, "codex-home");
+            const scanDir = join(root, "scan");
+            const preload = join(root, "fake-codex.mjs");
+            const marker = join(root, "invocation.jsonl");
+            await Promise.all([
+              mkdir(repository),
+              mkdir(codexHome),
+              mkdir(scanDir, { mode: 0o700 }),
+            ]);
+            await writeFile(
+              preload,
+              [
+                'import { appendFileSync } from "node:fs";',
+                'let prompt = ""; for await (const chunk of process.stdin) prompt += chunk;',
+                `appendFileSync(${JSON.stringify(marker)}, JSON.stringify({args:process.argv, executable:process.execPath, home:process.env.CODEX_HOME, key:process.env.CODEX_API_KEY, value:process.env.FIXTURE_SCAN_VALUE, prompt}) + "\\n");`,
+                `console.log(JSON.stringify({type:"thread.started",thread_id:${JSON.stringify(`fixture-${name}-thread`)}}));`,
+                'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"scan complete"}}));',
+                'console.log(JSON.stringify({type:"turn.completed",usage:null}));',
+                "process.exit(0);",
+              ].join("\n"),
+            );
+            const fake = nodeCodex(preload);
+            const model = `fixture-${name}-model`;
+            const provider = `fixture-${name}-provider`;
+            const client = new TestClient(
+              {
+                codexOverrides: {
+                  model,
+                  model_provider: provider,
+                  model_reasoning_effort: "ultra",
+                  model_reasoning_summary:
+                    name === "first" ? "none" : "concise",
+                  features: {
+                    multi_agent_v2: { max_concurrent_threads_per_session: 4 },
+                  },
+                },
+              },
+              {
+                environment: {
+                  OPENAI_API_KEY: `synthetic-${name}-key`,
+                  CODEX_CLI_PATH: fake.command.command,
+                },
+                prepareRuntime: async () => ({
+                  ...preparedRuntime(codexHome),
+                  environment: {
+                    ...fake.environment,
+                    FIXTURE_SCAN_VALUE: name,
+                  },
+                }),
+                resolvePluginPython: async () => "/managed/python",
+                prepareOutputDir: async () => scanDir,
+                repositoryRevision: async () => "deadbeef",
+                createCodex: (options: CodexOptions) => {
+                  const codex = new Codex(options);
+                  return {
+                    startThread: (threadOptions: ThreadOptions) => {
+                      const thread = codex.startThread(threadOptions);
+                      return {
+                        get id() {
+                          return thread.id;
+                        },
+                        runStreamed: async (
+                          ...args: Parameters<typeof thread.runStreamed>
+                        ) => {
+                          if (thread.id === null) {
+                            await copyCompletedScan(root);
+                            if (mode === "deep") {
+                              const coveragePath = join(
+                                scanDir,
+                                "coverage.json",
+                              );
+                              const coverage = JSON.parse(
+                                await readFile(coveragePath, "utf8"),
+                              );
+                              coverage.mode = "deep_repository";
+                              const coverageBytes = JSON.stringify(coverage);
+                              await writeFile(coveragePath, coverageBytes);
+                              const manifestPath = join(
+                                scanDir,
+                                "scan-manifest.json",
+                              );
+                              const manifest = JSON.parse(
+                                await readFile(manifestPath, "utf8"),
+                              );
+                              manifest.scan.artifacts.find(
+                                (artifact: { path: string }) =>
+                                  artifact.path === "coverage.json",
+                              ).sha256 = createHash("sha256")
+                                .update(coverageBytes)
+                                .digest("hex");
+                              await writeFile(
+                                manifestPath,
+                                JSON.stringify(manifest),
+                              );
+                            }
+                          }
+                          return thread.runStreamed(...args);
+                        },
+                      };
+                    },
+                  };
+                },
+              },
+            );
+            clients.push(client);
+            const postScanPrompt = "Summarize the completed synthetic scan.";
+            const result = await client.run(repository, {
+              mode,
+              postScanPrompt,
+            });
+            expect(result.threadId).toBe(`fixture-${name}-thread`);
+            expect(result.turnResult.usage).toBeNull();
+            const children = (await readFile(marker, "utf8"))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+            expect(children).toHaveLength(2);
+            expect(children[1].prompt).toBe(postScanPrompt);
+            expect(children[1].args).toContain("resume");
+            expect(children[1].args).toContain(`fixture-${name}-thread`);
+            for (const child of children) {
+              expect(child.executable).toBe(fake.command.command);
+              expect(child.home).toBe(codexHome);
+              expect(child.key).toBe(`synthetic-${name}-key`);
+              expect(child.value).toBe(name);
+              expect(child.args).toContain(`model=${JSON.stringify(model)}`);
+              expect(child.args).toContain(
+                `model_provider=${JSON.stringify(provider)}`,
+              );
+              expect(child.args).toContain('model_reasoning_effort="ultra"');
+              expect(child.args).toContain(
+                `model_reasoning_summary=${JSON.stringify(name === "first" ? "none" : "concise")}`,
+              );
+              expect(child.args).toContain(
+                "features.multi_agent_v2.max_concurrent_threads_per_session=4",
+              );
+              expect(child.args).toContain(
+                'default_permissions="codex_security_scan"',
+              );
+              expect(child.args).toContain('approval_policy="on-request"');
+            }
+          }),
+        );
+        for (const outcome of outcomes) {
+          if (outcome.status === "rejected") throw outcome.reason;
+        }
+      } finally {
+        await Promise.all(clients.map((client) => client.close()));
+      }
+    },
+  );
+
   test("closes a real Codex subprocess cleanly after a streamed terminal failure", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
