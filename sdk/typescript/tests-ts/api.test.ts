@@ -7343,6 +7343,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                   model_reasoning_effort: "ultra",
                   model_reasoning_summary:
                     name === "first" ? "none" : "concise",
+                  service_tier: name === "first" ? "flex" : "fast",
                   features: {
                     multi_agent_v2: { max_concurrent_threads_per_session: 4 },
                   },
@@ -7443,6 +7444,9 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               expect(child.args).toContain('model_reasoning_effort="ultra"');
               expect(child.args).toContain(
                 `model_reasoning_summary=${JSON.stringify(name === "first" ? "none" : "concise")}`,
+              );
+              expect(child.args).toContain(
+                `service_tier=${JSON.stringify(name === "first" ? "flex" : "fast")}`,
               );
               expect(child.args).toContain(
                 "features.multi_agent_v2.max_concurrent_threads_per_session=4",
