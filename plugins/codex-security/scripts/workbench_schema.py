@@ -925,6 +925,13 @@ MIGRATIONS = (
         ALTER TABLE deep_scan_dedup_inputs ADD COLUMN attempt INTEGER;
         """,
     ),
+    (
+        46,
+        "persist selected deep scan finalization input",
+        """
+        ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;
+        """,
+    ),
 )
 
 

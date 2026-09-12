@@ -2,12 +2,17 @@ import { setTimeout as delay } from "node:timers/promises";
 import { DeepScanCoordinator } from "./coordinator.js";
 import type { CoordinatorOptions } from "./coordinator.js";
 import { isTransientPersistenceError } from "./store.js";
-import type { BeginDeepScanResult, DeepScanCoordinatorClaim, DeepScanRunState } from "./types.js";
+import type { BeginDeepScanResult, CodexWorkerExecutor, DeepScanCoordinatorClaim, DeepScanRunState } from "./types.js";
 
 const COORDINATOR_LEASE_MS = 30_000;
 const COORDINATOR_POLL_MS = 1_000;
 
 export { DeepScanCoordinator, DeepScanNonRetryableError } from "./coordinator.js";
+
+export interface DeepScanCoordinatorStartOptions extends CoordinatorOptions {
+  /** Resolve persisted execution settings only after acquiring this run. */
+  prepareExecutor?: (run: DeepScanRunState) => Promise<CodexWorkerExecutor>;
+}
 
 /** Owns the live coordinators in this MCP server process. */
 export class DeepScanCoordinatorRegistry {
@@ -17,7 +22,7 @@ export class DeepScanCoordinatorRegistry {
     return this.coordinators.get(scanId);
   }
 
-  start(options: CoordinatorOptions): DeepScanCoordinator {
+  start(options: DeepScanCoordinatorStartOptions): DeepScanCoordinator {
     requireSupportedDeepScan(options.run);
     const existing = this.coordinators.get(options.run.scanId);
     if (existing) return existing;
@@ -105,7 +110,7 @@ export class DeepScanRemoteCoordinator {
     private readonly input: {
       run: DeepScanRunState;
       registry: Pick<DeepScanCoordinatorRegistry, "get" | "start">;
-      options: Omit<CoordinatorOptions, "run" | "observeReplacement">;
+      options: Omit<DeepScanCoordinatorStartOptions, "run" | "observeReplacement">;
     }
   ) {}
 
@@ -169,7 +174,7 @@ export class DeepScanRemoteCoordinator {
           }
         }
         if (claim?.acquired) {
-          const coordinator = registry.start({ ...options, run: claim.run });
+          const coordinator = await startClaimedCoordinator(registry, options, claim.run);
           return deadline === undefined
             ? await coordinator.wait(signal)
             : await coordinator.wait(signal, Math.max(0, deadline - Date.now()));
@@ -187,7 +192,7 @@ export class DeepScanRemoteCoordinator {
 export async function startOrJoinDeepScanCoordinator(input: {
   begin: BeginDeepScanResult;
   registry: Pick<DeepScanCoordinatorRegistry, "get" | "start">;
-  options: Omit<CoordinatorOptions, "run" | "observeReplacement">;
+  options: Omit<DeepScanCoordinatorStartOptions, "run" | "observeReplacement">;
 }): Promise<{
   coordinator: DeepScanCoordinator | DeepScanRemoteCoordinator;
   joined: boolean;
@@ -215,12 +220,27 @@ export async function startOrJoinDeepScanCoordinator(input: {
     };
   }
   return {
-    coordinator: input.registry.start({ ...input.options, run: claim.run }),
+    coordinator: await startClaimedCoordinator(input.registry, input.options, claim.run),
     joined: false
   };
 }
 
+async function startClaimedCoordinator(
+  registry: Pick<DeepScanCoordinatorRegistry, "start">,
+  options: Omit<DeepScanCoordinatorStartOptions, "run" | "observeReplacement">,
+  run: DeepScanRunState
+): Promise<DeepScanCoordinator> {
+  requireSupportedDeepScan(run);
+  const executor = options.prepareExecutor
+    ? await options.prepareExecutor(run)
+    : options.executor;
+  return registry.start({ ...options, executor, run });
+}
+
 function requireSupportedDeepScan(run: DeepScanRunState): void {
+  if (run.finalizationInput !== undefined) {
+    throw new Error("This executor does not support resuming selected Deep Scan finalization.");
+  }
   // Missing versions are supported for older adapters that did not project them.
   if (
     (run.schemaVersion !== undefined && run.schemaVersion !== 1)

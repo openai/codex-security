@@ -38,7 +38,11 @@ DEEP_SCAN_REPLACEABLE_FAILURE_KINDS = (
 )
 DEEP_SCAN_TERMINAL_REASONS = ("saturated", "capped")
 DEEP_SCAN_WORKFLOW_VERSION = "deep-security-scan/v1"
-SUPPORTED_DEEP_SCAN_WORKFLOWS = {DEEP_SCAN_WORKFLOW_VERSION, "deep-scan-mcp/v1"}
+SUPPORTED_DEEP_SCAN_WORKFLOWS = {
+    DEEP_SCAN_WORKFLOW_VERSION,
+    "deep-scan-mcp/v1",
+    "deep-security-scan/v2",
+}
 DEEP_SCAN_COORDINATOR_LEASE_SECONDS = 30
 DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS = 120
 DEEP_SCAN_MAX_ERROR_LENGTH = 2400
@@ -272,6 +276,20 @@ def require_supported_deep_scan(run: sqlite3.Row) -> None:
             "Resume it with a compatible Codex Security release."
         )
 
+    finalization = deep_scan_finalization_input(run)
+    if finalization is not None and (
+        run["workflow_version"] != "deep-security-scan/v2"
+        or not isinstance(finalization, dict)
+        or finalization.get("version") != 1
+    ):
+        raise SystemExit("This Deep Scan uses an unsupported finalization input version.")
+
+
+def deep_scan_finalization_input(run: sqlite3.Row) -> dict[str, Any] | None:
+    if "finalization_input_json" not in run.keys() or run["finalization_input_json"] is None:
+        return None
+    return json.loads(run["finalization_input_json"])
+
 
 def deep_scan_deadline_reached(run: sqlite3.Row) -> bool:
     elapsed = _parse_timestamp(now()) - _parse_timestamp(str(run["created_at"]))
@@ -485,6 +503,7 @@ def _deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, 
         "scanDir": scan["scan_dir"],
         "schemaVersion": run["schema_version"],
         "workflowVersion": run["workflow_version"],
+        "finalizationInput": deep_scan_finalization_input(run),
         "coordinatorGeneration": run["coordinator_generation"],
         "status": run["status"],
         "phase": run["phase"],
@@ -1089,6 +1108,8 @@ def recover_expired_coordinator(
     connection: sqlite3.Connection, run: sqlite3.Row, timestamp: str
 ) -> None:
     require_supported_deep_scan(run)
+    if deep_scan_finalization_input(run) is not None:
+        return
     scan_id = run["scan_id"]
     recover_candidate_ledger_publication(connection, scan_id)
     legacy_generation = int(run["coordinator_generation"] == 1)

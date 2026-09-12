@@ -588,6 +588,7 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
     scanId: requiredString(value.scanId, "deepScan.scanId"),
     schemaVersion: optionalPositiveInteger(value.schemaVersion),
     workflowVersion: optionalString(value.workflowVersion),
+    finalizationInput: parseFinalizationInput(value.finalizationInput),
     status,
     phase: deepScanPhase(value.phase),
     coordinatorGeneration: optionalPositiveInteger(value.coordinatorGeneration),
@@ -614,6 +615,27 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
     error: optionalString(value.error),
     persistedWorkers: parsePersistedWorkers(value.workers),
     persistedDedupInputs: parsePersistedDedupInputs(value.dedupInputs)
+  };
+}
+
+function parseFinalizationInput(value: unknown): DeepScanRunState["finalizationInput"] {
+  if (value === undefined || value === null) return undefined;
+  const input = objectValue(value, "deepScan.finalizationInput");
+  if (input.terminalReason !== "saturated" && input.terminalReason !== "capped") {
+    throw new Error("Codex Security workbench returned invalid finalization terminal reason.");
+  }
+  if (!Array.isArray(input.omittedWorkerIds)) {
+    throw new Error("Codex Security workbench returned invalid finalization omissions.");
+  }
+  return {
+    version: positiveInteger(input.version, "deepScan.finalizationInput.version"),
+    resultPath: input.resultPath === null
+      ? null : requiredString(input.resultPath, "deepScan.finalizationInput.resultPath"),
+    resultSha256: input.resultSha256 === null
+      ? null : requiredString(input.resultSha256, "deepScan.finalizationInput.resultSha256"),
+    terminalReason: input.terminalReason,
+    omittedWorkerIds: input.omittedWorkerIds.map((id) => requiredString(id, "omittedWorkerId")),
+    selectedAt: requiredString(input.selectedAt, "deepScan.finalizationInput.selectedAt")
   };
 }
 

@@ -37,10 +37,20 @@ export interface DeepScanCanonicalArtifacts {
 
 export type DeepScanReducerArtifacts = DeepScanCanonicalArtifacts;
 
+export interface DeepScanFinalizationInput {
+  version: number;
+  resultPath: string | null;
+  resultSha256: string | null;
+  terminalReason: DeepScanTerminalReason;
+  omittedWorkerIds: string[];
+  selectedAt: string;
+}
+
 export interface DeepScanRunState {
   scanId: string;
   schemaVersion?: number;
   workflowVersion?: string;
+  finalizationInput?: DeepScanFinalizationInput;
   status: DeepScanRunStatus;
   phase?: "setup" | "discovery" | "reducing" | "terminal";
   coordinatorGeneration?: number;

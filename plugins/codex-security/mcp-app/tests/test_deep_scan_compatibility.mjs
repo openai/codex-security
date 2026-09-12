@@ -9,7 +9,7 @@ const bundle = await build({
   platform: "node",
   write: false
 });
-const { startOrJoinDeepScanCoordinator } = await import(
+const { startOrJoinDeepScanCoordinator, DeepScanRemoteCoordinator } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
 
@@ -36,3 +36,60 @@ async function testUnsupportedWorkflowDoesNotAcquireOwnership() {
   }
 }
 
+
+// A joining client must not resolve or replace the live executor's settings.
+for (const local of [true, false]) {
+  let preparations = 0;
+  const run = { scanId: "fixture", status: "running", workflowVersion: "deep-scan-mcp/v1" };
+  const options = {
+    threadId: "fixture-thread",
+    executor: { marker: "observer" },
+    prepareExecutor: async () => { preparations += 1; return {}; },
+    store: { claimCoordinator: async () => ({ run, acquired: false }) }
+  };
+  await startOrJoinDeepScanCoordinator({
+    begin: { run, shouldStart: false },
+    registry: { get: () => local ? {} : undefined, start: () => assert.fail("observer started") },
+    options
+  });
+  assert.equal(preparations, 0);
+}
+
+const originalNow = Date.now;
+try {
+  let now = 0;
+  Date.now = () => now;
+  const run = { scanId: "fixture", status: "running", updatedAt: "1970-01-01T00:00:00Z" };
+  const acquired = { ...run, model: "original-model", coordinatorGeneration: 3 };
+  let preparations = 0;
+  const executor = { marker: "restored" };
+  const registry = {
+    get: () => undefined,
+    start: (options) => {
+      assert.equal(options.run, acquired);
+      assert.equal(options.executor, executor);
+      return { wait: async () => ({ ...acquired, status: "succeeded" }) };
+    }
+  };
+  const options = {
+    threadId: "fixture-thread",
+    executor: { marker: "observer" },
+    prepareExecutor: async (state) => {
+      assert.equal(state, acquired);
+      preparations += 1;
+      return executor;
+    },
+    store: {
+      get: async () => run,
+      claimCoordinator: async () => ({ run: acquired, acquired: true })
+    }
+  };
+  await startOrJoinDeepScanCoordinator({ begin: { run, shouldStart: true }, registry, options });
+  assert.equal(preparations, 1);
+  const remote = new DeepScanRemoteCoordinator({ run, registry, options });
+  now = 60_000;
+  assert.equal((await remote.wait(undefined, 1_000)).status, "succeeded");
+  assert.equal(preparations, 2, "takeover resolves settings from the newly acquired run");
+} finally {
+  Date.now = originalNow;
+}

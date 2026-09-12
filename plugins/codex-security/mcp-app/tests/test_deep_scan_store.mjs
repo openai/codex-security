@@ -888,3 +888,19 @@ function testWorkflowVersionParsing() {
   assert.equal(future.schemaVersion, 99);
   assert.equal(future.workflowVersion, "future/v99", "inspection preserves unsupported versions");
 }
+
+for (const version of [1, 99]) {
+  const finalizationInput = {
+    version,
+    resultPath: null,
+    resultSha256: null,
+    terminalReason: "capped",
+    omittedWorkerIds: ["fixture-worker"],
+    selectedAt: "2026-01-01T00:00:00Z"
+  };
+  assert.deepEqual(
+    parseDeepScan(stateResult(randomUUID(), { deepScan: { finalizationInput } })).finalizationInput,
+    finalizationInput,
+    "inspection preserves finalization input and version before execution compatibility checks"
+  );
+}
