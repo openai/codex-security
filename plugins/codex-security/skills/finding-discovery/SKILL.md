@@ -5,6 +5,8 @@ description: Use when Codex is already in the finding-discovery phase of a secur
 
 # Security Finding Discovery
 
+Before choosing paths or saving retained output, read `../../references/artifact-storage.md` and follow its storage policy.
+
 ## Objective
 
 Investigate the proposed code or code changes for technically plausible security vulnerabilities using the threat model as context.

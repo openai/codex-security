@@ -4028,7 +4028,7 @@ describe("GitHub release workflow safeguards", () => {
       }
       return name.replace(
         "${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
-        values["node"] === "22.13.0" ? "22" : values["node"] ?? "",
+        values["node"] === "22.13.0" ? "22" : (values["node"] ?? ""),
       );
     };
     const unixJob = workflow.jobs["required-test"];

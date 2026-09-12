@@ -2986,10 +2986,10 @@ export function expandHome(
 ): string {
   const home =
     (process.platform === "win32"
-      ? environmentValue(environment, "USERPROFILE") ??
-        environmentValue(environment, "HOME")
-      : environmentValue(environment, "HOME") ??
-        environmentValue(environment, "USERPROFILE")) ?? homedir();
+      ? (environmentValue(environment, "USERPROFILE") ??
+        environmentValue(environment, "HOME"))
+      : (environmentValue(environment, "HOME") ??
+        environmentValue(environment, "USERPROFILE"))) ?? homedir();
   if (value === "~") return home;
   if (value.startsWith("~/")) return join(home, value.slice(2));
   if (value.startsWith("~\\")) {

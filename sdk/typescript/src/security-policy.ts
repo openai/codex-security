@@ -40,20 +40,19 @@ import {
 
 export type SecurityPolicyStage = "architecture" | "threat_model" | "policy";
 
-export interface SecurityPolicyOptions
-  extends Pick<
-    ScanOptions,
-    | "auth"
-    | "knowledgeBasePaths"
-    | "outputDir"
-    | "maxCostUsd"
-    | "signal"
-    | "onAuthentication"
-    | "onOutputDirReady"
-    | "onCost"
-    | "onWarning"
-    | "onObserverError"
-  > {
+export interface SecurityPolicyOptions extends Pick<
+  ScanOptions,
+  | "auth"
+  | "knowledgeBasePaths"
+  | "outputDir"
+  | "maxCostUsd"
+  | "signal"
+  | "onAuthentication"
+  | "onOutputDirReady"
+  | "onCost"
+  | "onWarning"
+  | "onObserverError"
+> {
   path?: string;
   onStage?: (stage: SecurityPolicyStage) => void;
   answerQuestions?: (
@@ -158,8 +157,7 @@ export interface SecurityPolicySnapshot {
 }
 
 export interface SecurityPolicyDraft
-  extends SecurityPolicyTarget,
-    SecurityPolicySnapshot {
+  extends SecurityPolicyTarget, SecurityPolicySnapshot {
   outputDir: string;
   draftPath: string;
   specificationPath: string;

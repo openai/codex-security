@@ -155,9 +155,8 @@ function decodeText(path: string, bytes: Uint8Array): string {
 
 async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
   try {
-    const { getDocument, VerbosityLevel } = await import(
-      "pdfjs-dist/legacy/build/pdf.mjs"
-    );
+    const { getDocument, VerbosityLevel } =
+      await import("pdfjs-dist/legacy/build/pdf.mjs");
     const loadingTask = getDocument({
       data: new Uint8Array(bytes),
       stopAtErrors: true,

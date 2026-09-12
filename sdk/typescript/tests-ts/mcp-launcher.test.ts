@@ -146,7 +146,7 @@ test.each(["server", "helper"] as const)(
         env_vars: string[];
       };
       expect(config.env_vars).toContain("CODEX_MCP_NODE_PATH");
-      let managedNode = node;
+      let managedNode: string;
       const marker = join(root, "managed-node-used");
       if (process.platform !== "win32") {
         managedNode = join(root, "managed node");
@@ -188,7 +188,7 @@ test.each(["server", "helper"] as const)(
         );
       }
       const result = spawnSync(
-        windows ? process.env["ComSpec"] ?? "cmd.exe" : launcher,
+        windows ? (process.env["ComSpec"] ?? "cmd.exe") : launcher,
         windows
           ? [
               "/d",

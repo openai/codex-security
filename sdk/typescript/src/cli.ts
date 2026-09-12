@@ -21,6 +21,8 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
+  readlink,
   realpath,
   rm,
   writeFile,
@@ -1014,9 +1016,22 @@ interface SkillCommandOutput {
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
+    readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
 }
+
+class PatchCommandError extends CodexSecurityError {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+const SANDBOX_UNAVAILABLE_MESSAGE =
+  "The patch sandbox could not start. Check the runner's sandbox permissions and retry. No patch was applied; 0 files changed.";
 
 const findingPatchSchema = z.object({
   occurrenceId: z.string(),
@@ -1037,6 +1052,7 @@ const findingVerificationSchema = z.object({
 type FindingVerification = z.infer<typeof findingVerificationSchema>;
 
 interface SkillRunOptions {
+  externalSandbox?: boolean;
   readonly auth?: ScanAuthMode;
   safetyIdentifier?: string;
   directory?: string;
@@ -1271,7 +1287,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         new Promise<number>((resolve, reject) => {
           invocation.once("error", reject);
           invocation.once("close", (code, signal) =>
-            resolve(signal === null ? code ?? 1 : 1),
+            resolve(signal === null ? (code ?? 1) : 1),
           );
         }),
         forwarded,
@@ -1346,8 +1362,7 @@ export async function runCodexSkillCommand(
         typeof provider === "string"
           ? (
               config["model_providers"] as
-                | Record<string, JsonObject>
-                | undefined
+                Record<string, JsonObject> | undefined
             )?.[provider]
           : undefined;
       const requiresOpenAiAuth =
@@ -1566,6 +1581,7 @@ export async function runCodexSkillCommand(
                       threadSource: output.appServer.threadSource,
                       input: invocation.stdin!,
                       sandbox: output.appServer.sandbox,
+                      externalSandbox: output.appServer.externalSandbox,
                       onEvent: output.appServer.onEvent,
                     },
               ),
@@ -1587,7 +1603,7 @@ export async function runCodexSkillCommand(
               ? 130
               : requestedSignal === "SIGTERM" || signal === "SIGTERM"
                 ? 143
-                : code ?? 1,
+                : (code ?? 1),
           );
         };
         forceStatusCompletion = () => complete(null, null);
@@ -1600,6 +1616,12 @@ export async function runCodexSkillCommand(
         invocation.once(output === undefined ? "exit" : "close", complete);
       });
       let [status, events] = await Promise.all([invocationStatus, captured]);
+      if (events?.sandboxUnavailable && requestedSignal === null) {
+        throw new PatchCommandError(
+          "SANDBOX_UNAVAILABLE",
+          SANDBOX_UNAVAILABLE_MESSAGE,
+        );
+      }
       if (status === 0 && output?.appServer !== undefined && events?.error) {
         status = 1;
       }
@@ -1752,6 +1774,8 @@ export async function main(
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
   let renderedPolicy: string | undefined;
+  let renderedPatch: string | undefined;
+  let patchStructuredError = false;
   const runImport = (options: ImportScanOptions) =>
     runScanImport(options, errorOutput, dependencies);
   const history = async (
@@ -2839,7 +2863,7 @@ export async function main(
 
         if (options.to === "cloud") {
           const seenDirectories = new Set<string>();
-          for (let index = 0; index < selectedScans.length; ) {
+          for (let index = 0; index < selectedScans.length;) {
             const selected = selectedScans[index]!;
             const canonical = await realpath(selected.scanDir).catch(
               () => selected.scanDir,
@@ -3130,6 +3154,7 @@ export async function main(
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
+      tools: { discovery: "direct" },
       instructions:
         "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
     },
@@ -4854,6 +4879,12 @@ export async function main(
           .default("auto")
           .describe("Credential source: auto, chatgpt, or api-key."),
         effort: effortOption(),
+        externalSandbox: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Use the container's isolation instead of the Codex sandbox (default: false).",
+          ),
         scan: optionValue("--scan")
           .optional()
           .describe("Patch open findings from a saved scan."),
@@ -4887,7 +4918,15 @@ export async function main(
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ format, options }) {
+      async run({ format, options, error: commandError }) {
+        const jsonOutput = format === "json" || format === "jsonl";
+        const fullOutput = argv.includes("--full-output");
+        const structuredOutput = jsonOutput || fullOutput;
+        let patchResult: Record<string, unknown> = {
+          applied: false,
+          filesChanged: 0,
+          files: [],
+        };
         try {
           const linear =
             options.linearIssue.length > 0 || !!options.linearProject;
@@ -4898,6 +4937,7 @@ export async function main(
               options.severity !== undefined ||
               options.createPr ||
               options.assessPatchRisk ||
+              options.externalSandbox ||
               linear ||
               options.linearFilter !== undefined ||
               options.linearApiKey !== undefined ||
@@ -4943,6 +4983,11 @@ export async function main(
               "Saved findings cannot be combined with Linear issues or projects.",
             );
           }
+          if (options.externalSandbox) {
+            errorOutput.write(
+              "WARNING: --external-sandbox disables Codex sandbox enforcement for patching. The container must provide isolation.\n",
+            );
+          }
           if (savedFindings) {
             const selected = await selectSavedFindings(
               positionals,
@@ -4953,23 +4998,48 @@ export async function main(
             const patchRiskBase = options.assessPatchRisk
               ? await snapshotPatchTree(selected.repository, dependencies)
               : undefined;
+            const patchBase =
+              patchRiskBase ??
+              (await snapshotPatchState(selected.repository, dependencies));
             const patches = await runFindingPatches(
               selected,
               options.codex,
               options.effort,
               errorOutput,
               dependencies,
-              { auth: options.auth },
+              { auth: options.auth, externalSandbox: options.externalSandbox },
             );
             exitCode = patchExitCode(patches);
+            const files = await changedPatchFiles(
+              selected.repository,
+              patchBase,
+              dependencies,
+            );
+            patchResult = {
+              scanId: selected.scanId,
+              repository: selected.repository,
+              patches,
+              applied: files.length > 0,
+              filesChanged: files.length,
+              files,
+            };
+            if (exitCode !== 0 || files.length === 0) {
+              throw new PatchCommandError(
+                exitCode === 0 ? "NO_PATCH_APPLIED" : "PATCH_FAILED",
+                `Patch did not complete successfully; ${files.length} files changed. Review the patch results before retrying.`,
+              );
+            }
+            errorOutput.write(
+              `Patch applied. Files changed: ${files.length}.\n`,
+            );
             let patchRisk: PatchRiskAssessment | undefined;
-            if (options.assessPatchRisk && exitCode === 0) {
+            if (patchRiskBase !== undefined) {
               const files = verifiedPatchFiles(selected, patches);
               if (files.length > 0) {
                 patchRisk = await runPatchRiskAssessment(
                   {
                     repository: selected.repository,
-                    base: patchRiskBase!,
+                    base: patchRiskBase,
                     files,
                     codexOverrides: options.codex,
                     effort: options.effort,
@@ -4980,22 +5050,19 @@ export async function main(
                 );
               }
             }
-            const pullRequest =
-              options.createPr && exitCode === 0
-                ? await createPatchPullRequest(
-                    selected.repository,
-                    selected.scanId,
-                    verifiedPatchFiles(selected, patches),
-                    errorOutput,
-                    dependencies,
-                    patchRisk?.summary,
-                  )
-                : undefined;
-            if (format === "json" || format === "jsonl") {
+            const pullRequest = options.createPr
+              ? await createPatchPullRequest(
+                  selected.repository,
+                  selected.scanId,
+                  verifiedPatchFiles(selected, patches),
+                  errorOutput,
+                  dependencies,
+                  patchRisk?.summary,
+                )
+              : undefined;
+            if (structuredOutput) {
               return {
-                scanId: selected.scanId,
-                repository: selected.repository,
-                patches,
+                ...patchResult,
                 ...(patchRisk === undefined
                   ? {}
                   : { patchRisk: { report: patchRisk.report } }),
@@ -5014,12 +5081,6 @@ export async function main(
               "--severity requires a saved finding identifier or --scan.",
             );
           }
-          if (format === "json" || format === "jsonl") {
-            throw new CodexSecurityError(
-              "JSON patch output requires a saved finding identifier or --scan.",
-            );
-          }
-
           const imports = linear
             ? await importLinearIssues({
                 issues: options.linearIssue,
@@ -5042,66 +5103,119 @@ export async function main(
                   ),
                 );
           const repository = dependencies.currentDirectory();
-          const patchBase =
+          const patchGitBase =
             options.assessPatchRisk || options.createPr
               ? await snapshotPatchTree(repository, dependencies)
               : undefined;
+          const patchBase =
+            patchGitBase ??
+            (await snapshotPatchState(repository, dependencies));
           if (options.createPr) {
             await requireCleanPatchPullRequestBase(
               repository,
-              patchBase!,
+              patchGitBase!,
               dependencies,
             );
           }
+          let report = "";
           exitCode = await runSkill(
             "fix-finding",
             [...positionals, ...imports],
             options.codex,
             options.effort,
-            output,
+            {
+              write: (value) => {
+                report += value.toString();
+                return true;
+              },
+            },
             errorOutput,
             dependencies,
-            { environment, auth: options.auth },
+            {
+              environment,
+              auth: options.auth,
+              externalSandbox: options.externalSandbox,
+            },
           );
-          if (patchBase !== undefined && exitCode === 0) {
-            const files = await changedPatchFiles(
-              repository,
-              patchBase,
-              dependencies,
+          if (!jsonOutput) output.write(report);
+          const files = await changedPatchFiles(
+            repository,
+            patchBase,
+            dependencies,
+          );
+          patchResult = {
+            repository,
+            applied: files.length > 0,
+            filesChanged: files.length,
+            files,
+          };
+          if (exitCode !== 0) {
+            throw new PatchCommandError(
+              "PATCH_FAILED",
+              `Patch command exited with status ${exitCode}.`,
             );
-            const patchRisk = options.assessPatchRisk
-              ? await runPatchRiskAssessment(
-                  {
-                    repository,
-                    environment,
-                    base: patchBase,
-                    files,
-                    codexOverrides: options.codex,
-                    effort: options.effort,
-                    auth: options.auth,
-                  },
-                  errorOutput,
-                  dependencies,
-                )
-              : undefined;
-            if (options.createPr) {
-              const identifier = directPatchIdentifier(positionals, imports);
-              await createPatchPullRequest(
-                repository,
-                identifier ?? directPatchDigest(positionals, imports),
-                files,
+          }
+          if (files.length === 0) {
+            throw new PatchCommandError(
+              "NO_PATCH_APPLIED",
+              "No patch was applied; 0 files changed.",
+            );
+          }
+          errorOutput.write(`Patch applied. Files changed: ${files.length}.\n`);
+          const patchRisk = options.assessPatchRisk
+            ? await runPatchRiskAssessment(
+                {
+                  repository,
+                  environment,
+                  base: patchGitBase!,
+                  files,
+                  codexOverrides: options.codex,
+                  effort: options.effort,
+                  auth: options.auth,
+                },
                 errorOutput,
                 dependencies,
-                patchRisk?.summary,
-                identifier === undefined
-                  ? "Applies a security fix generated from supplied issue data."
-                  : `Applies a security fix generated for ${identifier}.`,
-              );
-            }
+              )
+            : undefined;
+          if (options.createPr) {
+            const identifier = directPatchIdentifier(positionals, imports);
+            await createPatchPullRequest(
+              repository,
+              identifier ?? directPatchDigest(positionals, imports),
+              files,
+              errorOutput,
+              dependencies,
+              patchRisk?.summary,
+              identifier === undefined
+                ? "Applies a security fix generated from supplied issue data."
+                : `Applies a security fix generated for ${identifier}.`,
+            );
           }
+          if (structuredOutput)
+            return {
+              ...patchResult,
+              ...(jsonOutput ? { report } : {}),
+            };
         } catch (error) {
-          exitCode = 2;
-          errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
+          if (exitCode === 0) exitCode = 2;
+          const message = safeErrorMessage(error);
+          errorOutput.write(`codex-security: ${message}\n`);
+          if (!structuredOutput) return;
+          patchStructuredError = true;
+          const failure = {
+            code:
+              error instanceof PatchCommandError ? error.code : "PATCH_FAILED",
+            message,
+          };
+          if (!fullOutput) {
+            renderedPatch =
+              JSON.stringify({
+                ok: false,
+                ...patchResult,
+                error: failure,
+              }) + "\n";
+          }
+          return commandError({ ...failure, exitCode });
         }
       },
     })
@@ -5536,7 +5650,7 @@ export async function main(
   }
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
-    if (policyFullOutput) {
+    if (policyFullOutput || patchStructuredError) {
       if (exitCode === 0) exitCode = 2;
     } else {
       if (exitCode !== 0) return exitCode;
@@ -5551,6 +5665,7 @@ export async function main(
     await writeCliOutput(
       output,
       renderedPolicy ??
+        renderedPatch ??
         renderedPublication ??
         renderedHistory ??
         frameworkOutput,
@@ -6577,9 +6692,15 @@ async function requireCleanPatchPullRequestBase(
 
 async function changedPatchFiles(
   repository: string,
-  base: string,
+  base: string | Map<string, string>,
   dependencies: CliDependencies,
 ): Promise<string[]> {
+  if (base instanceof Map) {
+    const head = await snapshotPatchDirectory(repository);
+    return [...new Set([...base.keys(), ...head.keys()])]
+      .filter((path) => base.get(path) !== head.get(path))
+      .sort();
+  }
   const head = await snapshotPatchTree(repository, dependencies);
   const output = await dependencies.runRepositoryCommand(
     "git",
@@ -6588,6 +6709,60 @@ async function changedPatchFiles(
     { trim: false },
   );
   return output.split("\0").filter(Boolean);
+}
+
+async function snapshotPatchState(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string | Map<string, string>> {
+  try {
+    await dependencies.runRepositoryCommand(
+      "git",
+      ["rev-parse", "--show-toplevel"],
+      repository,
+      { environment: { LC_ALL: "C" } },
+    );
+  } catch (error) {
+    const message = errorMessage(error);
+    if (
+      !message.includes("not a git repository") &&
+      message !== "git is not available on a trusted PATH."
+    )
+      throw error;
+    return snapshotPatchDirectory(repository);
+  }
+  return snapshotPatchTree(repository, dependencies);
+}
+
+// Literal patch inputs also work in directories without Git metadata.
+async function snapshotPatchDirectory(
+  repository: string,
+): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  const visit = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(join(repository, directory), {
+      withFileTypes: true,
+    })) {
+      if (entry.name === ".git") continue;
+      const path = directory ? `${directory}/${entry.name}` : entry.name;
+      const absolute = join(repository, path);
+      if (entry.isDirectory()) {
+        await visit(path);
+      } else if (entry.isSymbolicLink()) {
+        files.set(path, `link:${await readlink(absolute)}`);
+      } else if (entry.isFile()) {
+        const hash = createHash("sha256");
+        for await (const chunk of createReadStream(absolute))
+          hash.update(chunk);
+        files.set(
+          path,
+          `${(await lstat(absolute)).mode & 0o111}:${hash.digest("hex")}`,
+        );
+      }
+    }
+  };
+  await visit("");
+  return files;
 }
 
 function safePatchText(value: string): string {
@@ -6780,6 +6955,7 @@ async function runFindingPatches(
   );
   const patches: FindingPatch[] = [];
   for (const finding of selected.findings) {
+    const base = await snapshotPatchState(selected.repository, dependencies);
     let response = "";
     const stdout: Writable = {
       write(value: string | Uint8Array): boolean {
@@ -6808,6 +6984,12 @@ async function runFindingPatches(
     if (status === 130 || status === 143) {
       throw new CodexSecurityError("Patch operation was interrupted.");
     }
+
+    const changedFiles = await changedPatchFiles(
+      selected.repository,
+      base,
+      dependencies,
+    );
 
     const failed = (reason: string, files: string[] = []): FindingPatch => ({
       occurrenceId: finding.occurrenceId,
@@ -6844,6 +7026,11 @@ async function runFindingPatches(
             "Patch verification was not reported.",
             parsed.data.files,
           );
+        } else if (
+          parsed.data.status === "verified" &&
+          changedFiles.length === 0
+        ) {
+          patch = failed("No patch was applied; 0 files changed.");
         } else {
           patch = parsed.data;
         }
@@ -7105,6 +7292,7 @@ async function runSkill(
               directory,
               prompt,
               threadSource,
+              ...(options.externalSandbox ? { externalSandbox: true } : {}),
               ...(verify || assess ? { sandbox: "read-only" as const } : {}),
               ...(options.onEvent === undefined
                 ? {}
@@ -7129,6 +7317,7 @@ export async function readSkillCommandOutput(
     readonly threadSource: SkillThreadSource;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
+    readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
 ): Promise<{
@@ -7136,6 +7325,7 @@ export async function readSkillCommandOutput(
   error?: string;
   malformed: boolean;
   completed?: boolean;
+  sandboxUnavailable?: boolean;
 }> {
   let message: string | undefined;
   let error: string | undefined;
@@ -7143,8 +7333,23 @@ export async function readSkillCommandOutput(
   let threadId: string | undefined;
   let turnId: string | undefined;
   let completed = false;
+  let sandboxUnavailable = false;
+  const externalSandbox = appServer?.externalSandbox
+    ? { type: "externalSandbox", networkAccess: "enabled" }
+    : undefined;
   const send = (request: JsonObject): void => {
     appServer?.input.write(`${JSON.stringify(request)}\n`);
+  };
+  const startTurn = (): void => {
+    send({
+      id: 3,
+      method: "turn/start",
+      params: {
+        threadId: threadId!,
+        ...(externalSandbox ? { sandboxPolicy: externalSandbox } : {}),
+        input: [{ type: "text", text: appServer!.prompt, text_elements: [] }],
+      },
+    });
   };
   const startThread = (config?: JsonObject): void => {
     if (appServer === undefined) return;
@@ -7209,6 +7414,7 @@ export async function readSkillCommandOutput(
           });
         } else if (value["error"] !== undefined) {
           error = (value["error"] as { message: string }).message;
+          sandboxUnavailable = value["id"] === 5;
           appServer.input.end();
         } else if (value["id"] === 1 || value["id"] === "login") {
           if (value["id"] === 1) {
@@ -7301,17 +7507,35 @@ export async function readSkillCommandOutput(
           );
         } else if (value["id"] === 2) {
           await appServer.onThreadStarted?.();
-          threadId = (value["result"] as { thread: { id: string } }).thread.id;
-          send({
-            id: 3,
-            method: "turn/start",
-            params: {
-              threadId,
-              input: [
-                { type: "text", text: appServer.prompt, text_elements: [] },
-              ],
-            },
-          });
+          const result = value["result"] as {
+            thread: { id: string };
+            sandbox: JsonObject;
+          };
+          threadId = result.thread.id;
+          if (
+            appServer.threadSource === CODEX_SECURITY_THREAD_SOURCES.remediation
+          ) {
+            send({
+              id: 5,
+              method: "command/exec",
+              params: {
+                command: [process.execPath, "-e", ""],
+                cwd: appServer.directory!,
+                sandboxPolicy: externalSandbox ?? result.sandbox,
+              },
+            });
+            continue;
+          }
+          startTurn();
+        } else if (value["id"] === 5) {
+          const result = value["result"] as { exitCode: number };
+          if (result.exitCode !== 0) {
+            sandboxUnavailable = true;
+            error = SANDBOX_UNAVAILABLE_MESSAGE;
+            appServer.input.end();
+            continue;
+          }
+          startTurn();
         } else if (value["id"] === 3) {
           turnId = (value["result"] as { turn: { id: string } }).turn.id;
         }
@@ -7386,6 +7610,7 @@ export async function readSkillCommandOutput(
     ...(error === undefined ? {} : { error }),
     malformed,
     ...(appServer === undefined ? {} : { completed }),
+    ...(sandboxUnavailable ? { sandboxUnavailable } : {}),
   };
 }
 
@@ -7780,8 +8005,7 @@ async function executeScan(
         providerConfiguration:
           (
             effectiveConfiguration["model_providers"] as
-              | Record<string, JsonObject>
-              | undefined
+              Record<string, JsonObject> | undefined
           )?.[provider] ??
           (isExternalModelProvider(provider)
             ? EXTERNAL_CODEX_PROVIDERS[provider]
@@ -8102,10 +8326,10 @@ async function executeScan(
           if (status.kind === "dispatch") {
             dashboard.setStage(scanPhase(status.phase));
           }
-          if (message !== null) dashboard.note(message);
+          dashboard.note(message);
           return;
         }
-        if (message === null || progress === null) return;
+        if (progress === null) return;
         progress.stopTimer();
         progress.stage(message);
         progress.startTimer(runningMessage());
@@ -8313,7 +8537,7 @@ async function executeScan(
   }
 
   let patchThreshold = arguments_.patch
-    ? arguments_.patchSeverity ?? "low"
+    ? (arguments_.patchSeverity ?? "low")
     : undefined;
   let patchSelection: PatchSelection | null = null;
   if (
@@ -8688,7 +8912,7 @@ function printScanSummary(
     Number.isFinite(completed) &&
     completed >= started
       ? Math.floor((completed - started) / 1_000)
-      : progress?.elapsedSeconds ?? 0;
+      : (progress?.elapsedSeconds ?? 0);
   const duration =
     elapsed < 60
       ? `${elapsed}s`
@@ -8996,7 +9220,7 @@ export function parseCodexOverrides(
   return result;
 }
 
-function workerStatusMessage(status: ScanWorkerStatus): string | null {
+function workerStatusMessage(status: ScanWorkerStatus): string {
   if (status.kind === "preflight") {
     if (status.delegation === "unavailable") {
       return "Preflight: worker delegation unavailable; continuing without delegated workers.";

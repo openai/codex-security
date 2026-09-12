@@ -1416,6 +1416,18 @@ and worker activity. These can contain source code, prompts, findings, tool
 output, and other sensitive data. Only include logs you can share with OpenAI.
 The command uses Codex's feedback service and respects `feedback.enabled = false`.
 
+For scans started through the Desktop plugin, run the command on the machine
+where the scan ran, using the same Codex home and Codex Security state directory.
+It searches active and archived sessions in both that Codex home and the CLI's
+managed home, and attaches available worker logs even if the parent log is missing.
+Earlier retries that started separate sessions may be missing when their session
+IDs are no longer recorded.
+
+Standard scans run inside an existing Codex conversation attach only the owner's
+saved session; they do not record which subagents belong to the scan. Deep Scans
+and scans launched by `codex-security` also attach their recorded execution
+threads and descendants, without following unrelated children of the owner.
+
 ### Scan history and reruns
 
 Commands default to the current repository. Select scans by full ID or a
@@ -1620,10 +1632,30 @@ npx @openai/codex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
 npx @openai/codex-security patch --linear-issue SEC-123 --assess-patch-risk --create-pr
 ```
 
-`--scan latest` selects the current repository's latest scan. Saved-finding
-patch commands support `--json`; literal-text and file inputs don't. Change
+`--scan latest` selects the current repository's latest scan. Patch commands
+support `--json`, including literal-text and file inputs. Change
 the model with `--codex 'model="gpt-5.6-sol"'` or effort with `--effort high`.
 Each finding gets its own saved Codex desktop task.
+
+Before patching, the CLI runs a command with the task's sandbox policy. If the
+sandbox cannot start, the command exits with a nonzero status and reports
+`SANDBOX_UNAVAILABLE`. JSON errors include `ok: false`. A completed model response
+with no repository changes fails with `NO_PATCH_APPLIED`. Results report `applied`,
+`filesChanged`, and `files`; existing local changes do not count as patch changes.
+These fields report file changes, not proof that the security issue is fixed.
+Saved findings still require a verified result from the patch task.
+
+For a controlled container that provides its own isolation, explicitly opt in:
+
+```bash
+npx @openai/codex-security patch "Security issue" --external-sandbox --json
+```
+
+`--external-sandbox` defaults to false. It uses Codex's external-sandbox policy
+and prints a warning: Codex does not enforce filesystem or network isolation for
+the patch task. The container must enforce those boundaries. The CLI never
+falls back to this mode automatically. Optional patch-risk assessment still uses
+its read-only Codex sandbox.
 
 `scan --patch` patches after a complete scan. `--patch-severity` defaults to
 `low`; `high` selects high and critical findings. Use the interactive browser

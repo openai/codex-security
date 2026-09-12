@@ -339,7 +339,7 @@ function validateArtifactComponents(
   }
 }
 
-async function requireArtifactRoot(
+export async function requireArtifactRoot(
   artifactRoot: string,
   label: string
 ): Promise<string> {

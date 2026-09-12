@@ -397,9 +397,11 @@ describe("read-only publication history", () => {
 
     const fixture = await publicationFixture();
     databaseRows(fixture, "DROP TABLE finding_publications");
-    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version >= ?", [
-      29,
-    ]);
+    databaseRows(
+      fixture,
+      "DELETE FROM schema_migrations WHERE version >= ?",
+      [29],
+    );
     const database = join(fixture.stateDirectory, "workbench.sqlite3");
     const before = await readFile(database);
     const mode = (await stat(database)).mode;
@@ -734,9 +736,11 @@ connection.close()
       fixture,
       "DROP INDEX finding_publications_team_only_external_issue",
     );
-    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version = ?", [
-      30,
-    ]);
+    databaseRows(
+      fixture,
+      "DELETE FROM schema_migrations WHERE version = ?",
+      [30],
+    );
 
     await expect(
       preparePublicationStore(fixture.publication, fixture.environment),
