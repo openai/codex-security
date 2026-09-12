@@ -192,11 +192,15 @@ lines.on("line", (line) => {
           return 0;
         },
       });
-      expect(outcome.status).toBe(apply ? 0 : 2);
+      expect(outcome.status, outcome.stderr).toBe(apply ? 0 : 2);
       expect(outcome.result).toMatchObject({
         applied: apply,
         filesChanged: apply ? 1 : 0,
       });
+      if (!apply)
+        expect(outcome.result.error).toMatchObject({
+          code: "NO_PATCH_APPLIED",
+        });
     },
   );
 
