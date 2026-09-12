@@ -151,6 +151,9 @@ def collect_scan_usage(
             missing_thread_ids.add(session.thread_id)
             continue
         accepted_thread_ids.add(session.thread_id)
+        if "token_usage_unavailable" in session_warnings:
+            missing_thread_ids.add(session.thread_id)
+            continue
         observed_thread_count += 1
         _add_token_usage(total, session_usage)
 
@@ -404,6 +407,7 @@ def _read_rollout_usage(
     warnings: set[str] = set()
     previous = _empty_token_usage()
     boundary_reached = False
+    usage_observed = False
 
     with session.path.open("rb") as source:
         for line_number, raw_line in enumerate(source, start=1):
@@ -478,12 +482,15 @@ def _read_rollout_usage(
                 continue
             if completed_at is not None and timestamp > completed_at:
                 continue
+            usage_observed = True
             if delta["totalTokens"] <= 0:
                 continue
             _add_token_usage(total, delta)
 
     if not boundary_reached:
         warnings.add("thread_ownership_unavailable")
+    elif not usage_observed:
+        warnings.add("token_usage_unavailable")
     return total, warnings
 
 

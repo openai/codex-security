@@ -492,6 +492,24 @@ def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path)
     assert "totalTokens" not in usage
 
 
+@pytest.mark.parametrize("reported", [False, True], ids=["missing", "explicit-zero"])
+def test_completion_distinguishes_missing_token_records_from_zero(
+    tmp_path: Path, reported: bool
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 0, 0)] if reported else [])
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    if reported:
+        assert usage["coverage"] == "complete"
+        assert usage["totalTokens"] == 0
+    else:
+        assert usage["coverage"] == "unavailable"
+        assert "token_usage_unavailable" in usage["warnings"]
+        assert "totalTokens" not in usage
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS system path aliases")
 @pytest.mark.parametrize("temporary_root", [tempfile.gettempdir(), "/tmp"], ids=["var", "tmp"])
 def test_completion_accepts_macos_system_rollout_alias(
