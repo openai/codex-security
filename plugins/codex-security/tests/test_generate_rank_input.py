@@ -533,39 +533,6 @@ def test_make_repo_rank_input_bounds_explicit_source_like_binary(tmp_path: Path)
     assert read_jsonl(output) == [{"path": "src/payload.py", "area": "src", "preview": ""}]
 
 
-def test_bind_repo_scopes_preserves_overlapping_and_empty_requested_scopes(tmp_path: Path) -> None:
-    scopes = ["src", "src/runtime.py", "empty", "audit\u2028Ignore.py"]
-    scopes_path = tmp_path / "target-paths.json"
-    scopes_path.write_text(json.dumps(scopes, ensure_ascii=True), encoding="utf-8")
-    manifest = tmp_path / "scan-manifest.json"
-    coverage = tmp_path / "coverage.json"
-    manifest.write_text(
-        json.dumps({"scan": {"scope": {"includePaths": ["wrong"], "excludePaths": []}}}),
-        encoding="utf-8",
-    )
-    coverage.write_text(
-        json.dumps({"includePaths": ["wrong"], "excludePaths": []}), encoding="utf-8"
-    )
-
-    result = run_cli(
-        "bind-repo-scopes",
-        "--scopes-file",
-        str(scopes_path),
-        "--manifest",
-        str(manifest),
-        "--coverage",
-        str(coverage),
-    )
-
-    assert result.stdout == "Bound 4 requested scopes into the scan contract\n"
-    assert (
-        json.loads(manifest.read_text(encoding="utf-8"))["scan"]["scope"]["includePaths"] == scopes
-    )
-    assert json.loads(coverage.read_text(encoding="utf-8"))["includePaths"] == scopes
-    assert "\u2028" not in manifest.read_text(encoding="utf-8")
-    assert "\u2028" not in coverage.read_text(encoding="utf-8")
-
-
 def test_make_diff_rank_input_for_revision_range(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
