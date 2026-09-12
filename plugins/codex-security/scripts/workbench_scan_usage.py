@@ -112,8 +112,34 @@ def collect_scan_usage(
     if not roots:
         return _unavailable_usage("scan_thread_unavailable")
 
-    state_database = _codex_state_database()
-    if state_database is None:
+    warnings: set[str] = set()
+    current_database = _codex_state_database()
+    worker_codex_home = None
+    if scan["mode"] == "deep":
+        # Deep orchestration imports the owner-capture helper from this module;
+        # its settings reader is available once completion starts.
+        from deep_scan_workbench import read_deep_scan_execution_settings
+
+        try:
+            settings = read_deep_scan_execution_settings(Path(scan["scan_dir"]))
+            worker_codex_home = Path(settings["codexHome"])
+        except SystemExit:
+            # Legacy scans may have no recorded home. Keep usage best effort.
+            pass
+    groups = [(current_database, roots)]
+    if worker_codex_home is not None:
+        worker_roots = set(
+            _scan_root_thread_ids(connection, scan, None, include_owner_threads=False)
+        )
+        # Restored workers use their recorded home. A current owner or CLI
+        # continuation still belongs to the current process's native state.
+        worker_database = _codex_state_database(worker_codex_home)
+        if worker_database != current_database:
+            groups = [
+                (current_database, [root for root in roots if root not in worker_roots]),
+                (worker_database, [root for root in roots if root in worker_roots]),
+            ]
+    if not any(database is not None for database, _ in groups):
         return _unavailable_usage("codex_state_unavailable")
 
     started_at = _timestamp(scan["started_at"])
@@ -121,19 +147,38 @@ def collect_scan_usage(
     if started_at is None:
         return _unavailable_usage("scan_window_unavailable")
 
-    warnings: set[str] = set()
-    try:
-        sessions, missing_thread_ids = _discover_rollout_sessions(
-            state_database,
-            roots,
-            warnings,
-            descendant_roots=set(attribution["executionThreadIds"]) if attribution else None,
-        )
-    except (OSError, sqlite3.Error, ValueError):
-        return _unavailable_usage("codex_state_unavailable")
+    sessions: list[RolloutSession] = []
+    missing_thread_ids: set[str] = set()
+    seen_thread_ids: set[str] = set()
+    for state_database, group_roots in groups:
+        if not group_roots:
+            continue
+        try:
+            if state_database is None:
+                raise FileNotFoundError("Codex state is unavailable")
+            discovered, missing = _discover_rollout_sessions(
+                state_database,
+                group_roots,
+                warnings,
+                descendant_roots=set(attribution["executionThreadIds"]) if attribution else None,
+            )
+        except (OSError, sqlite3.Error, ValueError):
+            warnings.add("codex_state_unavailable")
+            missing_thread_ids.update(group_roots)
+            continue
+        missing_thread_ids.update(missing)
+        for session in discovered:
+            if session.thread_id not in seen_thread_ids:
+                sessions.append(session)
+                seen_thread_ids.add(session.thread_id)
 
     if not sessions:
-        return _unavailable_usage("scan_thread_unavailable", warnings=warnings)
+        return _unavailable_usage(
+            "codex_state_unavailable"
+            if "codex_state_unavailable" in warnings
+            else "scan_thread_unavailable",
+            warnings=warnings,
+        )
 
     total = _empty_token_usage()
     observed_thread_count = 0
@@ -349,15 +394,17 @@ def scan_execution_fields(connection: sqlite3.Connection, scan: sqlite3.Row) -> 
     }
 
 
-def _codex_state_database() -> Path | None:
-    configured_database = os.environ.get("CODEX_STATE_DB", "").strip()
+def _codex_state_database(worker_codex_home: Path | None = None) -> Path | None:
+    configured_home = os.environ.get("CODEX_HOME", "").strip()
+    current_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".codex"
+    codex_home = worker_codex_home if worker_codex_home is not None else current_home
+    same_home = worker_codex_home is None or codex_home.resolve() == current_home.resolve()
+    configured_database = os.environ.get("CODEX_STATE_DB", "").strip() if same_home else ""
     if configured_database:
         path = Path(configured_database).expanduser()
         return path.resolve() if path.is_file() and os.access(path, os.R_OK) else None
 
-    configured_home = os.environ.get("CODEX_HOME", "").strip()
-    codex_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".codex"
-    configured_sqlite_home = os.environ.get("CODEX_SQLITE_HOME", "").strip()
+    configured_sqlite_home = os.environ.get("CODEX_SQLITE_HOME", "").strip() if same_home else ""
     search_roots = [
         *([Path(configured_sqlite_home).expanduser()] if configured_sqlite_home else []),
         codex_home,
