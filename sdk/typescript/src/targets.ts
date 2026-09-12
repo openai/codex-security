@@ -103,10 +103,7 @@ export class DiffTarget {
 
 export type ScanTarget = "repository" | DiffTarget | readonly string[];
 export type NormalizedTargetKind =
-  | "repository"
-  | "paths"
-  | "refs"
-  | "working_tree";
+  "repository" | "paths" | "refs" | "working_tree";
 
 export interface NormalizedTarget {
   kind: NormalizedTargetKind;
@@ -322,7 +319,7 @@ function gitAlternatePaths(contents: Buffer): string[] {
   const text = contents.toString("latin1").split("\0", 1)[0]!;
   const paths: string[] = [];
   const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  for (let offset = 0; offset < text.length; ) {
+  for (let offset = 0; offset < text.length;) {
     const newline = text.indexOf("\n", offset);
     let end = newline === -1 ? text.length : newline;
     let path = text.slice(offset, end);

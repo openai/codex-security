@@ -727,8 +727,6 @@ try {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
-      coverageCompleteness: "complete",
-      deferredCount: 0,
       operation: "replace",
       status: "draft_written",
     },
@@ -780,8 +778,6 @@ try {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
-      coverageCompleteness: "complete",
-      deferredCount: 0,
       operation: "replace",
       status: "draft_written",
     },
@@ -801,8 +797,6 @@ try {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
-      coverageCompleteness: "complete",
-      deferredCount: 0,
       operation: "replace",
       status: "draft_written",
     },
@@ -821,8 +815,6 @@ try {
       scanId,
       findingCount: 3,
       surfaceCount: 1,
-      coverageCompleteness: "complete",
-      deferredCount: 0,
       operation: "replace",
       status: "draft_written",
     },
@@ -1802,99 +1794,6 @@ try {
     fsPromises.lstat = originalLstat;
   }
 
-  const mergedFindingsRoot = path.join(root, "merged-saved-findings");
-  await mkdir(mergedFindingsRoot);
-  const mergedFindingsContext = { ...context, root: mergedFindingsRoot };
-  const sourceFindings = ["candidate-source-a", "candidate-source-b"].map((candidateId, index) => ({
-    ...structuredClone(finding),
-    identity: { anchor: candidateId },
-    locations: [{ path: "src/extract.py", startLine: index + 1 }],
-    provenance: { source: "local_plugin", candidateId },
-  }));
-  await recordCodexSecurityScanDraft(mergedFindingsContext, {
-    ...input, complete: false, findings: sourceFindings,
-  });
-  const combined = {
-    ...structuredClone(finding),
-    identity: { anchor: "combined-finding" },
-    provenance: {
-      source: "local_plugin",
-      candidateId: "candidate-final",
-      mergedCandidateIds: sourceFindings.map((item) => item.provenance.candidateId),
-    },
-  };
-  await recordCodexSecurityScanDraft(mergedFindingsContext, { ...input, findings: [combined] });
-  const mergedFindings = (await readJson(mergedFindingsRoot, "findings.json")).findings;
-  assert.equal(mergedFindings.length, 1, "explicitly merged candidates must not return as separate findings");
-  assert.deepEqual(mergedFindings[0].provenance.previousFindings, sourceFindings);
-
-  for (const layout of ["scan", "worker", "resumed-worker"]) {
-    const candidateRoot = path.join(root, `candidate-closure-${layout}`);
-    const output = path.join(candidateRoot, "output");
-    await mkdir(output, { recursive: true });
-    const candidateContext = { ...(layout === "scan" ? context : workerContext), root: output };
-    const record = layout === "scan" ? recordCodexSecurityScanDraft : recordCodexSecurityWorkerScanDraft;
-    const pending = ["candidate-a", "candidate-b", "candidate-rejected", "candidate-open"].map((candidateId) => ({
-      candidateId,
-      reason: "Source validation is pending.",
-      candidate: { candidateId, evidence: `Evidence for ${candidateId}` },
-    }));
-    await record(candidateContext, {
-      ...input,
-      complete: false,
-      findings: [],
-      coverage: { ...coverage, completeness: "partial", surfaces: [], deferred: pending },
-    });
-    if (layout === "resumed-worker") {
-      await mkdir(path.join(candidateRoot, "attempts"));
-      await rename(output, path.join(candidateRoot, "attempts", "attempt-01"));
-      await mkdir(output);
-    }
-    const merged = structuredClone(finding);
-    merged.provenance.candidateId = "candidate-final";
-    merged.provenance.mergedCandidateIds = ["candidate-a", "candidate-b"];
-    const final = {
-      ...input,
-      complete: true,
-      findings: [merged],
-      coverage: {
-        ...coverage,
-        surfaces: [{
-          label: "Rejected candidate",
-          candidateId: "candidate-rejected",
-          disposition: "rejected",
-          notes: "The source check showed that the input is validated before use.",
-        }],
-      },
-    };
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = await record(candidateContext, final);
-      assert.equal(result.coverageCompleteness, "partial");
-      assert.equal(result.deferredCount, 1);
-      const saved = layout === "scan"
-        ? { ...(await readJson(output, "findings.json")), coverage: await readJson(output, "coverage.json") }
-        : await readJson(output, "result.json");
-      assert.equal(saved.findings.length, 1);
-      assert.deepEqual(saved.coverage.deferred.map((item) => item.candidateId), ["candidate-open"]);
-      assert.deepEqual(saved.findings[0].provenance.originalCandidates, pending.slice(0, 2).map((item) => item.candidate));
-      assert.deepEqual(saved.coverage.surfaces[0].candidate, pending[2].candidate);
-    }
-    const stalePending = await record(candidateContext, {
-      ...final,
-      coverage: { ...final.coverage, completeness: "partial", deferred: pending.slice(0, 3) },
-    });
-    assert.equal(stalePending.deferredCount, 1, "closed IDs in the submitted draft must also be reconciled");
-    final.coverage.surfaces.push({
-      label: "Remaining candidate",
-      candidateId: "candidate-open",
-      disposition: "rejected",
-      notes: "The remaining source path enforces the required check.",
-    });
-    const completed = await record(candidateContext, final);
-    assert.equal(completed.coverageCompleteness, "complete");
-    assert.equal(completed.deferredCount, 0);
-  }
-
   const partialDeferredRoot = path.join(root, "partial-deferred-worker");
   await mkdir(partialDeferredRoot);
   const partialDeferredContext = { ...workerContext, root: partialDeferredRoot };
@@ -1928,8 +1827,6 @@ try {
     scanId,
     findingCount: 1,
     surfaceCount: 1,
-    coverageCompleteness: "complete",
-    deferredCount: 0,
     operation: "replace",
     status: "draft_written",
   });
@@ -2998,8 +2895,6 @@ try {
     scanId,
     findingCount: 1,
     surfaceCount: 1,
-    coverageCompleteness: "partial",
-    deferredCount: 1,
     operation: "replace",
     status: "draft_written",
   });

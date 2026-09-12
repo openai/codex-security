@@ -65,7 +65,7 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
     legacyCacheWrite > 0 &&
     cached + legacyCacheWrite <= input
       ? legacyCacheWrite
-      : canonicalCacheWrite ?? legacyCacheWrite ?? 0;
+      : (canonicalCacheWrite ?? legacyCacheWrite ?? 0);
   const output = value["output_tokens"];
   const reasoning = value["reasoning_output_tokens"] ?? 0;
   if (

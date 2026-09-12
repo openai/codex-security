@@ -472,6 +472,7 @@ test.each(["standard", "deep"] as const)(
         deep: { workers: 2, subagents_per_worker: 0 },
       },
       codex: { model: "gpt-5.6-terra" },
+      limits: { max_cost_usd_per_scan: 7 },
       policy: { fail_on_severity: "high" },
       output: { directory: "../component-results" },
     });
@@ -489,6 +490,12 @@ test.each(["standard", "deep"] as const)(
     );
     let selected: ScanOptions | undefined;
     const stdout = capture();
+    const stderr = capture();
+    const result = fakeResult(["high"], "complete", {
+      input_tokens: 1250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
     expect(
       await main(
         [
@@ -502,10 +509,11 @@ test.each(["standard", "deep"] as const)(
           "--json",
         ],
         stdout.stream,
-        capture().stream,
+        stderr.stream,
         dependencies({
           currentDirectory: input.root,
-          result: fakeResult(["high"]),
+          result,
+          costUpdates: [result.cost!],
           onTurn: (_repository, options) => {
             selected = options as ScanOptions;
           },
@@ -517,7 +525,9 @@ test.each(["standard", "deep"] as const)(
       target: ["lib"],
       scanPrompt: "Review synthetic boundaries.",
       failureSeverity: "high",
+      maxCostUsd: 7,
     });
+    expect(stderr.text()).toContain("Cost: $0.00488");
     if (mode === "deep")
       expect(selected).toMatchObject({ workers: 2, subagents: 0 });
     else
@@ -588,6 +598,7 @@ test("actual CLI parsing preserves file values when flags are absent", async () 
   expect(JSON.parse(stdout.text())).toMatchObject({
     manifest: { scan: { status: "completed" } },
   });
+  expect(stderr.text()).toContain("COST");
 });
 
 test("CLI values override matching file values, including native objects and lists", async () => {

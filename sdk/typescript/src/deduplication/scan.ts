@@ -45,8 +45,7 @@ export interface DeduplicateScanOptions {
   signal?: AbortSignal;
 }
 
-export interface DeduplicateScanDirectoryOptions
-  extends DeduplicateScanOptions {
+export interface DeduplicateScanDirectoryOptions extends DeduplicateScanOptions {
   /** Local repository checkout used to review duplicate candidates. */
   repository: string;
   /** Require the sealed artifacts to belong to this scan. */

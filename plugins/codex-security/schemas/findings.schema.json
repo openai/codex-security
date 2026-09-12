@@ -654,15 +654,6 @@
               "source"
             ],
             "properties": {
-              "candidateId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "mergedCandidateIds": {
-                "type": "array",
-                "items": { "type": "string", "minLength": 1 },
-                "description": "Original candidate IDs explicitly merged into this finding."
-              },
               "source": {
                 "type": "string",
                 "minLength": 1

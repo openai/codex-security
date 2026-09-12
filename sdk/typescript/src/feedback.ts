@@ -7,7 +7,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { readCodexHomeConfig } from "./auth.js";
+import { configuredCodexHome, readCodexHomeConfig } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   codexSecurityCredentialHome,
@@ -56,13 +56,27 @@ export async function sendFeedback(
   try {
     const extraLogFiles: string[] = [];
     if (includeLogs && scan !== undefined) {
-      const logs = await readSavedScanLogs(scan, codexHome);
-      directory = await mkdtemp(join(tmpdir(), "codex-security-feedback-"));
-      const path = join(directory, "scan-logs.json");
-      await writeFile(path, JSON.stringify(logs), { mode: 0o600 });
-      extraLogFiles.push(path);
+      try {
+        const logs = await readSavedScanLogs(
+          scan,
+          [codexHome, configuredCodexHome(environment)],
+          { allowMissingRoot: true },
+        );
+        if (logs.sessions.length > 0) {
+          directory = await mkdtemp(join(tmpdir(), "codex-security-feedback-"));
+          const path = join(directory, "scan-logs.json");
+          await writeFile(path, JSON.stringify(logs), { mode: 0o600 });
+          extraLogFiles.push(path);
+        }
+      } catch {
+        options.signal?.throwIfAborted();
+        console.warn(
+          "Codex Security could not attach saved scan logs; sending feedback with available Codex logs.",
+        );
+      }
     }
 
+    options.signal?.throwIfAborted();
     const command = resolveCodexCommand(environment);
     const child = startCodex(
       executablePathForSpawn(command.command),
@@ -108,7 +122,15 @@ export async function sendFeedback(
             params: {
               classification: "bug",
               reason: options.reason,
-              threadId: scan?.continuationThreadId,
+              // Codex also collects this thread's descendants. Shared owners
+              // belong only in the explicit attachment, not in that subtree.
+              threadId:
+                !includeLogs ||
+                scan?.executionThreadIds?.includes(
+                  scan.continuationThreadId ?? "",
+                )
+                  ? scan?.continuationThreadId
+                  : undefined,
               includeLogs,
               extraLogFiles,
               tags: {

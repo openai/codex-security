@@ -36,11 +36,16 @@ const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
 const CONFIGURED_WORKBENCH_STATE_DIR = process.env.CODEX_SECURITY_STATE_DIR?.trim();
 const PLUGIN_ROOT = resolve(__dirname, "..");
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
-const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set(["inspect-target", "inspect-setup"]);
+const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
+  "resolve-scan-root",
+  "inspect-target",
+  "inspect-setup",
+  "save-artifact",
+  "read-artifact"
+]);
 
 type JsonObject = Record<string, unknown>;
 
-let defaultScanRoot: Promise<string> | undefined;
 let fallbackWorkbenchStateDir: Promise<string> | undefined;
 let fallbackWorkbenchStateLogged = false;
 let persistentWorkbenchStateSucceeded = false;
@@ -80,11 +85,17 @@ const daybreakEntitlementContextSchema = z.object({
   })
 });
 
-function scanRoot(): Promise<string> {
-  if (CONFIGURED_SCAN_ROOT) return Promise.resolve(CONFIGURED_SCAN_ROOT);
-  // Agent turns can write OS temporary directories but cannot write protected Codex state.
-  defaultScanRoot ??= fs.mkdtemp(join(tmpdir(), "codex-security-scans-"));
-  return defaultScanRoot;
+async function scanRoot(): Promise<string> {
+  if (!CONFIGURED_SCAN_ROOT && !CONFIGURED_WORKBENCH_STATE_DIR && !persistentWorkbenchStateSucceeded && !fallbackWorkbenchStateDir) {
+    // Select the workbench state before choosing its default artifact directory.
+    await runWorkbench(["list-scans", "--limit", "1"]);
+  }
+  if (!CONFIGURED_SCAN_ROOT && fallbackWorkbenchStateDir) {
+    return join(await fallbackWorkbenchStateDir, "scans");
+  }
+  const result = await runWorkbench(["resolve-scan-root", ...optionalArg("--scan-root", CONFIGURED_SCAN_ROOT)]);
+  if (typeof result.scanRoot !== "string") throw new Error("Missing scan artifact root.");
+  return result.scanRoot;
 }
 
 interface WorkspaceState extends JsonObject {
@@ -428,9 +439,9 @@ export function createCodexSecurityServer(): McpServer {
       stale: snapshot.stale,
       ...(snapshot.enrollmentUrl ? { enrollmentUrl: snapshot.enrollmentUrl } : {})
     };
-    const warning = access.status === "granted"
-      ? ""
-      : " This check is advisory: a scan may run, but protected results may not be displayable.";
+    const warning = access.status === "not_granted"
+      ? " This check is advisory: a scan may run, but protected results may not be displayable."
+      : "";
     return {
       content: [{
         type: "text" as const,
@@ -785,7 +796,7 @@ export function createCodexSecurityServer(): McpServer {
       invocationFailure: toolErrorResult(deepScanInvocationFailureMessage(error))
     }));
     if ("invocationFailure" in preparation) return preparation.invocationFailure;
-    if ("immediate" in preparation) return preparation.immediate;
+    if (preparation.immediate) return preparation.immediate;
     const { begun, coordinator, joined } = preparation;
     if (joined) {
       logDeepScanEvent({ event: "coordinator_joined", scanId: begun.run.scanId });
@@ -1316,6 +1327,7 @@ export function createCodexSecurityServer(): McpServer {
   registerCompactArtifactTools(server, {
     runWorkbench,
     pluginRoot: PLUGIN_ROOT,
+    resolveScanRoot: scanRoot,
     resolveHandoffClaimToken: (scanId, requestContext) => {
       const claim = authenticatedArtifactClaims.get(scanId);
       return claim && claim.threadId === threadIdFromExtra(requestContext)
@@ -1620,7 +1632,7 @@ function logDeepScanEvent(event: {
 
 async function runWorkbench(
   args: string[],
-  input?: string
+  input?: string | Buffer
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
@@ -1643,7 +1655,7 @@ async function runWorkbench(
 async function executeWorkbenchWithStateSelection(
   pythonCommand: string,
   args: string[],
-  input?: string
+  input?: string | Buffer
 ): Promise<JsonObject> {
   if (WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "")) {
     return await executeWorkbench(pythonCommand, args, undefined, input);
@@ -1695,7 +1707,7 @@ async function executeWorkbench(
   pythonCommand: string,
   args: string[],
   stateDir?: string,
-  input?: string
+  input?: string | Buffer
 ): Promise<JsonObject> {
   const userContextIndex = args.indexOf("--user-context");
   const userContext = userContextIndex === -1 ? undefined : args[userContextIndex + 1];
@@ -1710,7 +1722,8 @@ async function executeWorkbench(
       ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
       : process.env,
     encoding: "utf8" as const,
-    maxBuffer: 4 * 1024 * 1024,
+    // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
+    maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
     timeout: [
       "begin-deep-scan",
       "claim-deep-scan-dedup",
@@ -1752,7 +1765,9 @@ async function executeWorkbench(
 
 async function pinFallbackWorkbenchStateDir(): Promise<string> {
   fallbackWorkbenchStateDir ??= (async () => {
-    const stateDir = join(await scanRoot(), "workbench-state");
+    const stateDir = CONFIGURED_SCAN_ROOT
+      ? join(await scanRoot(), "workbench-state")
+      : await fs.mkdtemp(join(tmpdir(), "codex-security-state-"));
     await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
     return stateDir;
   })();

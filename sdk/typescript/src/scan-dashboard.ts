@@ -56,6 +56,7 @@ interface ScanDashboardOptions {
   mode?: ScanMode;
   model?: ScanModelConfiguration;
   maxCostUsd?: number;
+  showCost?: boolean;
   clock: DashboardClock;
   color?: boolean;
   sanitize?: (value: string) => string;
@@ -621,7 +622,7 @@ export class ScanDashboard {
               ? []
               : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
             ...this.#tokenLines(),
-            `  COST     ${cost}`,
+            ...(this.#showCost ? [`  COST     ${cost}`] : []),
             ...(this.#budget === null
               ? []
               : [
@@ -645,7 +646,7 @@ export class ScanDashboard {
           const clean = fitLine(
             typeof line !== "string" && this.#view === "details"
               ? text
-              : this.#options.sanitize?.(text) ?? text,
+              : (this.#options.sanitize?.(text) ?? text),
             width,
           );
           const colored =
@@ -718,7 +719,7 @@ export class ScanDashboard {
   }
 
   #componentRows(): number {
-    return Math.max(1, (this.#stream.rows ?? 24) - 11);
+    return Math.max(1, (this.#stream.rows ?? 24) - (this.#showCost ? 11 : 10));
   }
 
   #componentFrame(): string {
@@ -731,7 +732,7 @@ export class ScanDashboard {
         this.#components.length - rows,
       ),
     );
-    const nameWidth = Math.max(10, width - 61);
+    const nameWidth = Math.max(10, width - (this.#showCost ? 61 : 52));
     const row = (
       marker: string,
       name: string,
@@ -740,7 +741,7 @@ export class ScanDashboard {
       findings: string,
       cost: string,
     ): string =>
-      `  ${marker} ${fitLine(this.#options.sanitize?.(name) ?? name, nameWidth).padEnd(nameWidth)} ${fitLine(status, 24).padEnd(24)} ${files.padStart(11)} ${findings.padStart(8)} ${cost.padStart(8)}`;
+      `  ${marker} ${fitLine(this.#options.sanitize?.(name) ?? name, nameWidth).padEnd(nameWidth)} ${fitLine(status, 24).padEnd(24)} ${files.padStart(11)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
     const table = this.#components
       .slice(first, first + rows)
       .map(({ receipt, dashboard }, index) => {
@@ -790,10 +791,20 @@ export class ScanDashboard {
       divider,
       `  SCOPE    ${selected?.paths.join(", ") ?? "waiting for component plan"}`,
       `  STATUS   ${selected?.error ?? findings}`,
-      `  COST     ${costs.length === 0 ? "waiting for usage" : formatUsd(costs.reduce((sum, value) => sum + value, 0))} · component scans only`,
+      ...(this.#showCost
+        ? [
+            `  COST     ${costs.length === 0 ? "waiting for usage" : formatUsd(costs.reduce((sum, value) => sum + value, 0))} · component scans only`,
+          ]
+        : []),
       `  STAGE    ${this.#stage}`,
       `  TIME     ${formatElapsed(Math.max(0, Math.floor((this.#options.clock.now() - this.#startedAt) / 1_000)))} · ↑↓ select · Enter activity · Ctrl+C cancel`,
     ]);
+  }
+
+  get #showCost(): boolean {
+    return (
+      this.#options.showCost === true || this.#options.maxCostUsd !== undefined
+    );
   }
 
   #width(): number {
@@ -809,7 +820,7 @@ export class ScanDashboard {
         (this.#options.presentation === "publication" ||
         this.#options.presentation === "verification"
           ? 0
-          : this.#tokenLines().length - 1) +
+          : this.#tokenLines().length - 1 - (this.#showCost ? 0 : 1)) +
         (this.#options.presentation === "publication"
           ? 2
           : this.#options.mode === "deep"

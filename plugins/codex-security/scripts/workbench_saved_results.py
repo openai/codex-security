@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import hashlib
 import json
 import os
 import re
+import sqlite3
 import stat
 import sys
 from collections.abc import Callable, Iterator
@@ -34,6 +36,7 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
+from workbench_constants import PHASES
 from workbench_validation import path_within_scope
 
 _PUBLISHED_OUTPUTS = (
@@ -46,6 +49,9 @@ _PUBLISHED_OUTPUTS = (
 )
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
+)
+_RESERVED_ARTIFACT_PATHS = json.loads(
+    Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
 )
 
 
@@ -453,16 +459,6 @@ def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
             )
 
 
-def _finding_candidate_ids(finding: dict[str, Any]) -> list[str]:
-    provenance = finding.get("provenance")
-    merged = provenance.get("mergedCandidateIds", []) if isinstance(provenance, dict) else []
-    return [
-        value
-        for value in [finding_candidate_id(finding), *(merged if isinstance(merged, list) else [])]
-        if isinstance(value, str) and value.strip()
-    ]
-
-
 def merge_saved_results(
     scan_dir: Path,
     scan_id: str,
@@ -731,9 +727,12 @@ def merge_saved_results(
     resolved: dict[tuple[str | None, str], str] = {}
     for owner, draft in current_drafts:
         for finding in draft["findings"]:
-            if isinstance(finding, dict) and valid_finding(finding):
-                for candidate_id in _finding_candidate_ids(finding):
-                    resolved.setdefault((owner, candidate_id), "reported")
+            if (
+                isinstance(finding, dict)
+                and valid_finding(finding)
+                and (candidate_id := finding_candidate_id(finding))
+            ):
+                resolved.setdefault((owner, candidate_id), "reported")
         for field in ("surfaces", "explicitExclusions"):
             items = draft["coverage"].get(field, [])
             for item in items if isinstance(items, list) else []:
@@ -991,35 +990,9 @@ def merge_saved_results(
                             history.append(copy.deepcopy(finding))
                 if (
                     isinstance(item, dict)
-                    and (worker_id, item.get("candidateId", item.get("id"))) in resolved
+                    and (worker_id, item.get("candidateId")) in resolved
                     and (field == "deferred" or item.get("disposition") == "needs_follow_up")
                 ):
-                    if relative == "parent":
-                        output.remove(item)
-                    candidate_id = item.get("candidateId", item.get("id"))
-                    for finding in findings:
-                        if candidate_id in _finding_candidate_ids(finding) and (
-                            worker_id is None
-                            or finding.get("provenance", {}).get("workerId") == worker_id
-                        ):
-                            if "candidate" in item:
-                                originals = finding["provenance"].setdefault(
-                                    "originalCandidates", []
-                                )
-                                if item["candidate"] not in originals:
-                                    originals.append(copy.deepcopy(item["candidate"]))
-                            break
-                    else:
-                        for surface in coverage.get("surfaces", []):
-                            if (
-                                isinstance(surface, dict)
-                                and surface.get("candidateId") == candidate_id
-                                and surface.get("disposition") in {"rejected", "not_applicable"}
-                            ):
-                                for key in ("candidate", "finding"):
-                                    if key in item:
-                                        surface.setdefault(key, copy.deepcopy(item[key]))
-                                break
                     continue
                 if isinstance(item, dict) and "id" not in item:
                     semantic_item = dict(item)
@@ -1367,6 +1340,49 @@ def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]
     return db.scan_context(connection, scan_id)
 
 
+def read_or_save_artifact(args: Any) -> dict[str, Any]:
+    """Read or publish supplemental bytes through verified filesystem handles."""
+    root = Path(args.artifact_root)
+    if args.command == "read-artifact":
+        descriptor = open_scan_local_file_descriptor(root, args.artifact_path, "Saved artifact")
+        with os.fdopen(descriptor, "rb") as source:
+            return {"content": base64.b64encode(source.read()).decode("ascii")}
+    write_scan_local_bytes(root, args.artifact_path, sys.stdin.buffer.read())
+    return {"path": str(root / args.artifact_path)}
+
+
+def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
+    """Publish supplemental bytes under the same lock as finalization and recovery."""
+    scan_id = db.require_uuid(args.scan_id, "scan-id")
+    with db.scan_completion_lock(scan_id):
+        scan = db.require_scan(connection, scan_id)
+        db.handoff.require_current_continuation(
+            scan,
+            args.claim_token,
+            error_message="Scan artifacts are owned by another continuation.",
+        )
+        if scan["status"] != "running" or scan["seal_manifest_digest"] is not None:
+            raise SystemExit("The scan stopped; its artifacts cannot be modified.")
+        scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+        manifest_path = db.artifact_path(scan_dir, "scan-manifest.json", required=False)
+        if manifest_path is not None:
+            manifest = db.read_json_object(manifest_path).get("scan", {})
+            if manifest.get("sealedAt") is not None or manifest.get("artifacts") is not None:
+                raise SystemExit("The scan is sealed; its artifacts cannot be modified.")
+        output = args.artifact_path
+        key = output.lower()
+        if not (
+            key.startswith(("artifacts/", "findings/", "hardening/"))
+            or key == "report_validation.md"
+        ) or any(
+            key == reserved or key.startswith(reserved + "/")
+            for reserved in _RESERVED_ARTIFACT_PATHS
+        ):
+            raise SystemExit("Use the typed scan tools for canonical artifacts and checkpoints.")
+        write_scan_local_bytes(scan_dir, output, sys.stdin.buffer.read())
+    return {"scanId": scan_id, "path": str(scan_dir / output)}
+
+
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
@@ -1438,6 +1454,29 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 filename,
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
+        # Accepted Standard drafts are evidence of review or report assembly,
+        # even when the parent omitted its explicit progress call.
+        if scan["mode"] == "standard":
+            phase = "discovery" if manifest["scan"].get("complete") is False else "reporting"
+            earlier = PHASES[: PHASES.index(phase)]
+            placeholders = ",".join("?" for _ in earlier)
+            timestamp = db.now()
+            try:
+                with connection:
+                    changed = connection.execute(
+                        "UPDATE scans SET phase = ?, updated_at = ? "
+                        f"WHERE id = ? AND status = 'running' AND phase IN ({placeholders})",
+                        (phase, timestamp, scan_id, *earlier),
+                    )
+                    if changed.rowcount:
+                        connection.execute(
+                            "UPDATE scan_progress SET phase_items_total = 0, "
+                            "phase_items_completed = 0, phase_progress_unit = NULL, updated_at = ? "
+                            "WHERE scan_id = ?",
+                            (timestamp, scan_id),
+                        )
+            except sqlite3.Error as exc:
+                print(f"Could not save scan progress: {exc}", file=sys.stderr)
     return {"scanId": scan_id, "status": "draft_written"}
 
 

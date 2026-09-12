@@ -122,8 +122,11 @@ test.each([
         write(chunk, _encoding, callback) {
           const request = JSON.parse(chunk.toString());
           // Inspect the native task without making a model request.
-          if (request.method === "turn/start") {
-            inspectedThreadId = request.params.threadId;
+          if (
+            request.method === "turn/start" ||
+            request.method === "command/exec"
+          ) {
+            inspectedThreadId = request.params.threadId ?? inspectedThreadId;
             child.stdin.write(
               `${JSON.stringify({
                 id: 6,
@@ -140,17 +143,18 @@ test.each([
       async function* events(): AsyncGenerator<string> {
         for await (const line of createInterface({ input: child.stdout })) {
           const event = JSON.parse(line);
+          if (event.id === 2) inspectedThreadId = event.result?.thread.id;
           if (event.id === 6) {
             analyticsEnabled = event.result?.config?.analytics?.enabled;
             child.stdin.write(
               `${JSON.stringify({
-                id: 5,
+                id: 7,
                 method: "mcpServerStatus/list",
                 params: { threadId: inspectedThreadId },
               })}\n`,
             );
           }
-          if (event.id === 5) {
+          if (event.id === 7) {
             servers = event.result?.data.map(
               (server: { name: string }) => server.name,
             );
@@ -266,7 +270,7 @@ test.each(["openai", undefined])(
         const request = JSON.parse(chunk.toString());
         // Inspect authentication before the first model request.
         child.stdin.write(
-          request.method === "turn/start"
+          request.method === "turn/start" || request.method === "command/exec"
             ? JSON.stringify({
                 id: "inspect",
                 method: "account/read",

@@ -40,11 +40,18 @@ import {
   type ScanDraftInput
 } from "../artifact-scan-draft.js";
 
+import {
+  readArtifactInputSchema, readCodexSecurityArtifact,
+  saveArtifactInputSchema, saveCodexSecurityArtifact,
+  standaloneArtifactContext, type ArtifactLocation
+} from "../artifact-storage.js";
+
 type JsonRecord = Record<string, unknown>;
 
 export interface CompactArtifactToolOptions {
   runWorkbench: RunArtifactWorkbench;
   pluginRoot: string;
+  resolveScanRoot: () => Promise<string>;
   resolveHandoffClaimToken?: (
     scanId: string,
     requestContext: unknown
@@ -196,7 +203,7 @@ export function registerScanDraftTools(
   registerCompactTool(server, {
     name: "record_codex_security_scan_draft",
     title: "Record Codex Security Scan Draft",
-    description: "Save semantic findings and coverage as an unsealed draft. Use complete:false for progress checkpoints, then complete:true for the final result; keep unvalidated candidates in coverage.deferred. Report coverage from the saved response.",
+    description: "Save semantic findings and coverage as an unsealed draft. Use complete:false for progress checkpoints, then complete:true for the final result; keep unvalidated candidates in coverage.deferred.",
     inputSchema: scanDraftInputSchema,
     readOnly: false,
     handler: async (value, requestContext) => {
@@ -242,6 +249,43 @@ export function registerCompactArtifactTools(
   registerCandidateValidationTools(server, options);
   registerCandidateAttackPathTools(server, options);
   registerScanDraftTools(server, options);
+  registerCompactTool(server, {
+    name: "save_codex_security_artifact",
+    title: "Save Codex Security Artifact",
+    description: "Save a supplemental document or evidence file with temporary or persistent storage. Use scanId for a running scan, or targetPath for standalone documents and shared threat models. Omit path/content/sourcePath to prepare and return the selected directory. Otherwise provide a portable relative path under artifacts/, findings/ or hardening/ and either exact text content or a sourcePath inside the returned temporary directory. Canonical scan files and recovery checkpoints use the existing typed scan tools. Does not edit completed scans or source/configuration files.",
+    inputSchema: saveArtifactInputSchema,
+    readOnly: false,
+    handler: async (value, requestContext) => {
+      const input = saveArtifactInputSchema.parse(value);
+      return saveCodexSecurityArtifact(await supplementalContext(input, options, true, requestContext), input, options.runWorkbench);
+    }
+  });
+  registerCompactTool(server, {
+    name: "read_codex_security_artifact",
+    title: "Read Codex Security Artifact",
+    description: "Read a saved supplemental artifact from temporary or persistent storage, including after an MCP restart. Use the same scanId or standalone targetPath, storage and relative path used to save it.",
+    inputSchema: readArtifactInputSchema,
+    readOnly: true,
+    handler: async (value, requestContext) => {
+      const input = readArtifactInputSchema.parse(value);
+      return readCodexSecurityArtifact(await supplementalContext(input, options, false, requestContext), input, options.runWorkbench);
+    }
+  });
+}
+
+async function supplementalContext(
+  input: ArtifactLocation,
+  options: CompactArtifactToolOptions,
+  write: boolean,
+  requestContext: unknown
+): Promise<ArtifactContext> {
+  if ((input.scanId === undefined) === (input.targetPath === undefined)) {
+    throw new Error("Provide exactly one scanId or standalone targetPath.");
+  }
+  if (input.scanId !== undefined) return scanContext({ ...input, scanId: input.scanId }, options, write, requestContext);
+  if (input.handoffClaimToken !== undefined) throw new Error("A handoff claim requires a scanId.");
+  const root = await options.resolveScanRoot();
+  return standaloneArtifactContext(input.targetPath!, options.runWorkbench, write, root, input.storage);
 }
 
 /** Expose only the operations appropriate to the inherited worker phase. */
@@ -253,7 +297,7 @@ export function registerCompactWorkerArtifactTools(
     registerCompactTool(server, {
       name: "record_codex_security_scan_draft",
       title: "Record Codex Security Scan Draft",
-      description: "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred. Report coverage from the saved response.",
+      description: "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred.",
       inputSchema: scanDraftInputSchema,
       readOnly: false,
       handler: async (value) => recordCodexSecurityWorkerScanDraft(

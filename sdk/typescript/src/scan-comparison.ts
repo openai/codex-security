@@ -159,13 +159,7 @@ export interface ReadOnlyCodexOptions {
   environment?: NodeJS.ProcessEnv;
   model?: string;
   reasoningEffort?:
-    | "minimal"
-    | "low"
-    | "medium"
-    | "high"
-    | "xhigh"
-    | "max"
-    | "ultra";
+    "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   signal?: AbortSignal;
   workingDirectory?: string;
 }
@@ -176,8 +170,10 @@ export interface ScanComparisonOptions extends ReadOnlyCodexOptions {
   onProgress?: (progress: ScanComparisonProgress) => void;
 }
 
-interface CompletedScanMatchingOptions
-  extends Pick<ScanComparisonOptions, "environment" | "model" | "signal"> {
+interface CompletedScanMatchingOptions extends Pick<
+  ScanComparisonOptions,
+  "environment" | "model" | "signal"
+> {
   scanId: string;
   repository: string;
   previousFindings: readonly Record<string, unknown>[];
@@ -796,9 +792,8 @@ function reconcileComparison(
       group.map(({ occurrenceId }) => [occurrenceId, index] as const),
     ),
   );
-  const semanticGroups = Map.groupBy(
-    response.matches,
-    (match) => groupByOccurrence.get(match.beforeOccurrenceIds[0]!)!,
+  const semanticGroups = Map.groupBy(response.matches, (match) =>
+    groupByOccurrence.get(match.beforeOccurrenceIds[0]!)!,
   );
   const orderedGroups = new Set([...semanticGroups.keys(), ...groups.keys()]);
   const matches = [...orderedGroups].flatMap((index) => {

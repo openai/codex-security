@@ -121,6 +121,18 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
       `${runtimeLabel}: authenticate compact diff owner`
     );
 
+    for (const reserved of [
+      "artifacts/02_discovery/candidate_ledger.jsonl",
+      "artifacts/02_discovery/in_scope_files.txt",
+      "artifacts/01_context/false_positive_feedback.json"
+    ]) {
+      const rejected = await call("save_codex_security_artifact", {
+        scanId, handoffClaimToken, storage: "persistent",
+        path: `${reserved}/note.txt`, content: "must not block typed writers"
+      });
+      assert.equal(rejected.isError, true, `${runtimeLabel}: reject a canonical file used as a directory`);
+    }
+
     const inventory = requireSuccessfulTool(
       await call("prepare_codex_security_review_items", { scanId, handoffClaimToken }),
       `${runtimeLabel}: prepare exact compact diff inventory`
@@ -526,27 +538,37 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       );
     }
 
-    const mergedCandidates = ["candidate-query-a", "candidate-query-b"].map((candidateId) => ({
-      candidateId,
-      evidence: `Saved source evidence for ${candidateId}`
+    const progress = async () => requireSuccessfulTool(await call(
+      "get_codex_security_scan_context", { scanId, handoffClaimToken }
+    )).scan.progress;
+    assert.equal((await progress()).phase, "preflight");
+    requireSuccessfulTool(await call("update_codex_security_scan_progress", {
+      scanId, handoffClaimToken, phaseItemsTotal: 1, phaseItemsCompleted: 1,
+      phaseProgressUnit: "checks"
     }));
-    requireSuccessfulTool(await call("record_codex_security_scan_draft", {
+    const checkpoint = {
       scanId,
       handoffClaimToken,
       complete: false,
-      findings: [],
-      coverage: {
-        completeness: "partial",
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: mergedCandidates.map((candidate) => ({
-          candidateId: candidate.candidateId,
-          reason: "Parent validation is pending.",
-          candidate
-        }))
-      }
-    }), `${runtimeLabel}: save candidates before merging them`);
-    finding.provenance.mergedCandidateIds = mergedCandidates.map((candidate) => candidate.candidateId);
+      findings: [finding],
+      coverage: { ...coverage, completeness: "partial" }
+    };
+    requireSuccessfulTool(await call("record_codex_security_scan_draft", checkpoint));
+    const discovery = await progress();
+    assert.equal(discovery.status, "running");
+    assert.equal(discovery.phase, "discovery");
+    assert.deepEqual(discovery.phaseProgress, { completed: 0, total: 0, unit: null });
+
+    requireSuccessfulTool(await call("update_codex_security_scan_progress", {
+      scanId, handoffClaimToken, phase: "validation", phaseItemsTotal: 2,
+      phaseItemsCompleted: 1, phaseProgressUnit: "candidate_findings"
+    }));
+    requireSuccessfulTool(await call("record_codex_security_scan_draft", checkpoint));
+    const validation = await progress();
+    assert.equal(validation.phase, "validation");
+    assert.deepEqual(validation.phaseProgress, {
+      completed: 1, total: 2, unit: "candidate_findings"
+    });
 
     const drafted = requireSuccessfulTool(await call(
       "record_codex_security_scan_draft",
@@ -561,11 +583,13 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
-      coverageCompleteness: "partial",
-      deferredCount: coverage.deferred.length,
       operation: "replace",
       status: "draft_written"
     });
+    const reporting = await progress();
+    assert.equal(reporting.phase, "reporting");
+    assert.equal(reporting.status, "running");
+    assert.deepEqual(reporting.phaseProgress, { completed: 0, total: 0, unit: null });
 
     const completed = requireSuccessfulTool(await call(
       "complete_codex_security_scan",
@@ -585,10 +609,7 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
     assert.equal(results.findings.findings.length, 1);
     assert.equal(results.findings.findings[0].ruleId, finding.ruleId);
     assert.deepEqual(results.findings.findings[0].taxonomy, finding.taxonomy);
-    assert.deepEqual(results.findings.findings[0].provenance, {
-      ...finding.provenance,
-      originalCandidates: mergedCandidates
-    });
+    assert.deepEqual(results.findings.findings[0].provenance, finding.provenance);
     assert.equal(results.findings.findings[0].remediation, finding.remediation);
     assert.deepEqual(results.findings.findings[0].remediationTests, finding.remediationTests);
     assert.deepEqual(results.findings.findings[0].preventiveControls, finding.preventiveControls);
@@ -1119,8 +1140,6 @@ async function testDiscoveryWorkerToolList(bundle) {
       scanId,
       findingCount: 0,
       surfaceCount: 0,
-      coverageCompleteness: "complete",
-      deferredCount: 0,
       operation: "replace",
       status: "draft_written"
     });

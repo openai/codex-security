@@ -149,6 +149,7 @@ describe("CLI", () => {
           maxTimeHours: { type: "number", maximum: 96 },
           model: { type: "string" },
           verbose: { type: "boolean" },
+          showCost: { type: "boolean", default: false },
           effort: {
             enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
           },
@@ -1990,8 +1991,10 @@ describe("CLI", () => {
         "Scan phase: reviewing files (2 workers).",
       );
       expect(stderr.text()).toContain(
-        "Running scan: reviewing files | Workers: 2/2 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total | Cost: $0.00488",
+        "Running scan: reviewing files | Workers: 2/2 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
       );
+      expect(stderr.text()).not.toContain("Cost:");
+      expect(stderr.text()).not.toContain("COST");
       expect(stderr.text()).not.toContain("CODEX SECURITY");
       expect(stderr.text()).not.toContain("\u001B");
       expect(stderr.text()).not.toContain("\r");
@@ -2249,7 +2252,7 @@ describe("CLI", () => {
     expect(text).not.toContain("0 / 1,258 reviewed");
     expect(text).toContain("worker 1 · read routes/login.ts");
     expect(text).toContain("TOKENS");
-    expect(text).toContain("COST");
+    expect(text).not.toContain("COST");
     expect(text).toContain("TIME");
   });
 
@@ -2357,6 +2360,7 @@ describe("CLI", () => {
     expect(help.text()).toContain("--verbose");
     expect(help.text()).toContain("--path <array>");
     expect(help.text()).toContain("--max-cost <number>");
+    expect(help.text()).toContain("--show-cost");
     expect(help.text()).toContain("--workers <number>");
     expect(help.text()).toContain("--subagents <number>");
     expect(help.text()).toContain("--stop-after-no-new <number>");
@@ -4270,7 +4274,6 @@ describe("CLI", () => {
         "  COVERAGE  complete",
         "  ELAPSED   6m 37s",
         "  TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
-        "  COST      $0.00488 (standard, short context)",
         "  RESULTS   /tmp/scan",
       ].join("\n"),
     );
@@ -4695,7 +4698,7 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("synthetic-parent");
   });
 
-  test("shows live stage, files, workers, tokens, and cost without a budget", async () => {
+  test("shows live stage, files, workers, tokens, and opt-in cost without a budget", async () => {
     const stdout = capture();
     const stderr = capture();
     const result = fakeResult([], "complete", {
@@ -4706,7 +4709,7 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scan", ".", "--json"],
+        ["scan", ".", "--show-cost", "--json"],
         stdout.stream,
         stderr.stream,
         dependencies({
@@ -4782,7 +4785,7 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scan", ".", "--json"],
+        ["scan", ".", "--show-cost", "--json"],
         stdout.stream,
         stderr.stream,
         dependencies({
@@ -4888,6 +4891,7 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
     expect(stderr.text()).toContain("codex-security: debug: cost.updated");
     expect(stderr.text()).toContain("cache_write_input_tokens=200");
+    expect(stderr.text()).not.toContain("estimated_usd=");
   });
 
   test("reports and classifies a scan stopped when its live cost exceeds the limit", async () => {

@@ -146,10 +146,6 @@ For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repe
 
 For Standard and diff scans, use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
 
-Close each saved candidate by its original ID. A validated finding keeps `provenance.candidateId`; when combining candidates, list every other original ID in `provenance.mergedCandidateIds`. A rejected candidate keeps its `candidateId` on a `rejected` coverage surface, with source-backed counterevidence in `notes`. Saved evidence stays attached to the finding or rejection. Omitting a pending candidate does not close it.
-
-`record_codex_security_scan_draft` returns `coverageCompleteness` and `deferredCount` after reconciling saved history. `complete: true` marks the final submission; it does not establish complete source coverage. Resolve remaining candidates or report the saved partial coverage.
-
 Map detailed ledger closure into completed surface summaries in this order:
 
 | Completed surface condition                                            | Disposition       |

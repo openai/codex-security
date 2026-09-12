@@ -68,9 +68,7 @@ const PROJECT_SETTING_KEYS = {
 type SettingProvenanceKey =
   (typeof PROJECT_SETTING_KEYS)[keyof typeof PROJECT_SETTING_KEYS];
 export type ScopeProvenanceKey =
-  | "scan.scope"
-  | "scan.scope.diff.head"
-  | "scan.scope.working_tree.base";
+  "scan.scope" | "scan.scope.diff.head" | "scan.scope.working_tree.base";
 export type ProvenanceKey =
   | SettingProvenanceKey
   | ScopeProvenanceKey

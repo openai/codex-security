@@ -5,6 +5,8 @@ description: Develop evidence-backed structural and architectural security harde
 
 # Propose Security Hardening
 
+Before choosing paths or saving retained output, read `../../references/artifact-storage.md` and follow its storage policy.
+
 ## Objective
 
 Turn a collection of security evidence into a decision-ready portfolio of structural or architectural hardening opportunities. The evidence may be a Codex Security scan that is still in final reporting or is already complete,

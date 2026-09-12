@@ -97,10 +97,7 @@ export interface MultiscanOptions extends ScanPromptSettings {
   onProgress?(event: {
     repository: string;
     status:
-      | "started"
-      | "completed"
-      | "completed_with_incomplete_coverage"
-      | "failed";
+      "started" | "completed" | "completed_with_incomplete_coverage" | "failed";
     attempt: number;
     error?: string;
     warning?: string;
@@ -269,7 +266,7 @@ async function runCampaign(
       }
       const coverage =
         receipt.status === "completed_with_incomplete_coverage"
-          ? receipt.coverage ?? "unknown"
+          ? (receipt.coverage ?? "unknown")
           : await legacyIncompleteCoverage({
               ...receipt,
               outputDir: artifactOutput,
@@ -338,8 +335,7 @@ async function runCampaign(
         try {
           await ensureOutputDirectory(artifactRoot);
           let result:
-            | Pick<ScanResult, "coverage" | "cost" | "findings">
-            | undefined;
+            Pick<ScanResult, "coverage" | "cost" | "findings"> | undefined;
           if (options.recoverScan !== undefined && retry === 0 && attempt > 0) {
             const existing = await lstat(scanDir).catch(
               (error: NodeJS.ErrnoException) => {

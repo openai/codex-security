@@ -1380,7 +1380,7 @@ describe("skill authentication", () => {
             ? "Authentication failed using a stored API key"
             : "Authentication failed using OPENAI_API_KEY",
         );
-      else expect(stderr.text()).toBe("");
+      else expect(stderr.text()).toBe("Patch applied. Files changed: 1.\n");
       const requests = (await readFile(requestLog, "utf8"))
         .trim()
         .split("\n")
@@ -1397,7 +1397,7 @@ describe("skill authentication", () => {
         "notifications/initialized",
         ...(usesSessionKey ? ["account/login/start"] : []),
         ...(loginFailure && usesSessionKey ? [] : ["thread/start"]),
-        ...(loginFailure ? [] : ["turn/start"]),
+        ...(loginFailure ? [] : ["command/exec", "turn/start"]),
       ]);
       expect(await readFile(join(credentialHome, "auth.json"), "utf8")).toBe(
         stored,

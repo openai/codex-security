@@ -492,10 +492,9 @@ def test_frozen_stopped_results_ignore_late_foreign_checkpoint_warning(tmp_path:
     assert (scan_dir / "scan-manifest.json").read_bytes() == seal
 
 
-@pytest.mark.parametrize("disposition", ["reported", "rejected", "provenance-reported", "merged"])
-@pytest.mark.parametrize("pending_location", ["checkpoint", "canonical"])
+@pytest.mark.parametrize("disposition", ["reported", "rejected", "provenance-reported"])
 def test_final_candidate_disposition_supersedes_pending_checkpoint(
-    tmp_path: Path, disposition: str, pending_location: str
+    tmp_path: Path, disposition: str
 ) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -518,53 +517,33 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
             "completeness": "partial",
             "surfaces": [],
             "explicitExclusions": [],
-            "deferred": [
-                {
-                    "candidateId": "candidate-x",
-                    "reason": "Validation is pending.",
-                    "candidate": {
-                        "candidateId": "candidate-x",
-                        "evidence": "Saved source evidence.",
-                    },
-                }
-            ],
+            "deferred": [{"candidateId": "candidate-x", "reason": "Validation is pending."}],
         },
     }
     write_checkpoint(scan_dir / "checkpoints", pending)
     findings = json.loads((scan_dir / "findings.json").read_text())
     if disposition == "provenance-reported":
         findings["findings"][0]["provenance"]["candidateId"] = "candidate-x"
-    elif disposition == "merged":
-        findings["findings"][0]["provenance"]["candidateId"] = "candidate-final"
-        findings["findings"][0]["provenance"]["mergedCandidateIds"] = ["candidate-x"]
     elif disposition == "reported":
         findings["findings"][0]["extensions"] = {"candidateId": "candidate-x"}
     else:
         findings["findings"] = []
     (scan_dir / "findings.json").write_text(json.dumps(findings))
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    if disposition in {"reported", "rejected"}:
-        coverage["surfaces"][0]["candidateId"] = "candidate-x"
-    disposition = "reported" if disposition == "merged" else disposition.removeprefix("provenance-")
+    disposition = disposition.removeprefix("provenance-")
     coverage["surfaces"][0].update(
-        disposition=disposition, notes="Final source review disposition."
+        candidateId="candidate-x", disposition=disposition, notes="Final source review disposition."
     )
-    if pending_location == "canonical":
-        coverage["deferred"] = [{"id": "candidate-x", **pending["coverage"]["deferred"][0]}]
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     final_coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert completed["progress"]["status"] == "complete"
     assert final_coverage["completeness"] == "complete"
     assert not any(item.get("candidateId") == "candidate-x" for item in final_coverage["deferred"])
-    assert any(item["disposition"] == disposition for item in final_coverage["surfaces"])
-    if pending_location == "canonical":
-        original = pending["coverage"]["deferred"][0]["candidate"]
-        if disposition == "rejected":
-            assert final_coverage["surfaces"][0]["candidate"] == original
-        else:
-            sealed_findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
-            assert sealed_findings[0]["provenance"]["originalCandidates"] == [original]
+    assert any(
+        item.get("candidateId") == "candidate-x" and item["disposition"] == disposition
+        for item in final_coverage["surfaces"]
+    )
 
 
 def test_incomplete_parent_checkpoint_cannot_complete_scan(tmp_path: Path) -> None:

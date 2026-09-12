@@ -38,8 +38,6 @@ export interface ScanDraftResult {
   scanId: string;
   findingCount: number;
   surfaceCount: number;
-  coverageCompleteness: string;
-  deferredCount: number;
   operation: "replace";
   status: "draft_written";
 }
@@ -151,8 +149,6 @@ export async function recordCodexSecurityScanDraft(
         scanId: reconciled.scanId,
         findingCount: findings.length,
         surfaceCount: (coverage.surfaces as unknown[]).length,
-        coverageCompleteness: coverage.completeness as string,
-        deferredCount: (coverage.deferred as unknown[]).length,
         operation: "replace",
         status: "draft_written",
       };
@@ -269,8 +265,6 @@ export async function recordCodexSecurityWorkerScanDraft(
     scanId: parsed.scanId,
     findingCount: scoped.findings.length,
     surfaceCount: (scoped.coverage.surfaces as unknown[]).length,
-    coverageCompleteness: scoped.coverage.completeness as string,
-    deferredCount: (scoped.coverage.deferred as unknown[]).length,
     operation: "replace",
     status: "draft_written",
   };
@@ -336,7 +330,14 @@ async function preserveScanDraft(
     result.threatModel = structuredClone(retainedThreatModel);
   }
 
-  const resolvedCandidateIds = closedCandidateIds(result);
+  const resolvedCandidateIds = new Set([
+    ...result.findings.map(findingCandidateId),
+    ...(result.coverage.surfaces as JsonObject[])
+      .filter((surface) => (
+        surface.disposition === "rejected" || surface.disposition === "not_applicable"
+      ))
+      .map((surface) => surface.candidateId),
+  ].filter((value): value is string => typeof value === "string"));
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
     const pending = source.coverage.deferred as JsonObject[];
     if (pending.length === 0 || pending.some((item) => {
@@ -356,7 +357,25 @@ async function preserveScanDraft(
     ));
     const candidateRows = [...deferred, ...dispositions];
     for (const pending of source.coverage.deferred as JsonObject[]) {
-      preservePendingCandidate(result, pending);
+      const candidateId = pending.candidateId ?? pending.id;
+      if (typeof candidateId !== "string") continue;
+      const finding = result.findings.find((item) => findingCandidateId(item) === candidateId);
+      if (finding) {
+        const provenance = finding.provenance as JsonObject;
+        if (pending.candidate !== undefined) provenance.originalCandidates = exactUnion(
+          Array.isArray(provenance.originalCandidates) ? provenance.originalCandidates : [], [pending.candidate],
+        );
+        if (isObject(pending.finding)) preserveFindingDetails(finding, pending.finding);
+      } else {
+        const candidateRow = candidateRows.find((item) => (
+          item.candidateId === candidateId || item.id === candidateId
+        ));
+        if (candidateRow) {
+          for (const field of ["candidate", "finding"] as const) {
+            if (pending[field] !== undefined) candidateRow[field] ??= structuredClone(pending[field]);
+          }
+        }
+      }
     }
     for (const finding of source.findings) {
       const candidateId = findingCandidateId(finding);
@@ -365,13 +384,6 @@ async function preserveScanDraft(
       ));
       if (disposition) {
         disposition.finding ??= structuredClone(finding);
-        continue;
-      }
-      const merged = result.findings.find((current) => candidateId !== undefined
-        && candidateId !== findingCandidateId(current)
-        && findingCandidateIds(current).includes(candidateId));
-      if (merged) {
-        preserveFindingDetails(merged, finding);
         continue;
       }
       const matches = result.findings.filter((current) => sameSavedFinding(current, finding));
@@ -384,7 +396,7 @@ async function preserveScanDraft(
       }
     }
     const resolvedIds = new Set([
-      ...result.findings.flatMap(findingCandidateIds),
+      ...result.findings.map(findingCandidateId),
       ...candidateRows.map((item) => item.candidateId ?? item.id),
     ].filter((value): value is string => typeof value === "string"));
     const previousCoverage = {
@@ -415,50 +427,8 @@ async function preserveScanDraft(
     };
     result.coverage = preserveScanCoverage(result.coverage, [previousCoverage], false);
   }
-  const closed = closedCandidateIds(result);
-  for (const pending of result.coverage.deferred as JsonObject[]) preservePendingCandidate(result, pending);
-  result.coverage.deferred = (result.coverage.deferred as JsonObject[])
-    .filter((item) => !closed.has(item.candidateId ?? item.id));
-  result.coverage.surfaces = (result.coverage.surfaces as JsonObject[])
-    .filter((item) => item.disposition !== "needs_follow_up" || !closed.has(item.candidateId ?? item.id));
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
-}
-
-function closedCandidateIds(result: ScanDraftInput): Set<unknown> {
-  return new Set<unknown>([
-    ...result.findings.flatMap(findingCandidateIds),
-    ...(result.coverage.surfaces as JsonObject[])
-      .filter((surface) => (
-        surface.disposition === "rejected" || surface.disposition === "not_applicable"
-      ))
-      .map((surface) => surface.candidateId),
-  ].filter((value): value is string => typeof value === "string"));
-}
-
-function preservePendingCandidate(result: ScanDraftInput, pending: JsonObject): void {
-  const candidateId = pending.candidateId ?? pending.id;
-  if (typeof candidateId !== "string") return;
-  const finding = result.findings.find((item) => findingCandidateIds(item).includes(candidateId));
-  if (finding) {
-    const provenance = finding.provenance as JsonObject;
-    if (pending.candidate !== undefined) provenance.originalCandidates = exactUnion(
-      Array.isArray(provenance.originalCandidates) ? provenance.originalCandidates : [], [pending.candidate],
-    );
-    if (isObject(pending.finding)) preserveFindingDetails(finding, pending.finding);
-    return;
-  }
-  const dispositions = (result.coverage.surfaces as JsonObject[]).filter((surface) => (
-    surface.disposition === "rejected" || surface.disposition === "not_applicable"
-  ));
-  const candidateRow = [...dispositions, ...(result.coverage.deferred as JsonObject[])].find((item) => (
-    item.candidateId === candidateId || item.id === candidateId
-  ));
-  if (candidateRow) {
-    for (const field of ["candidate", "finding"] as const) {
-      if (pending[field] !== undefined) candidateRow[field] ??= structuredClone(pending[field]);
-    }
-  }
 }
 
 async function readCurrentCheckpoints(
@@ -823,7 +793,7 @@ export function preserveFindingDetails(current: JsonObject, previous: JsonObject
   }
   const provenance = requireObject(current.provenance, "saved finding provenance");
   const oldProvenance = isObject(previous.provenance) ? previous.provenance : {};
-  for (const field of ["sourceFindingIds", "sourceFindings", "previousFindings", "originalCandidates", "mergedCandidateIds"] as const) {
+  for (const field of ["sourceFindingIds", "sourceFindings", "previousFindings", "originalCandidates"] as const) {
     const values = exactUnion(
       Array.isArray(provenance[field]) ? provenance[field] : [],
       Array.isArray(oldProvenance[field]) ? oldProvenance[field] : [],
@@ -952,12 +922,6 @@ function findingCandidateId(finding: JsonObject): string | undefined {
     }
   }
   return undefined;
-}
-
-function findingCandidateIds(finding: JsonObject): string[] {
-  const merged = isObject(finding.provenance) ? finding.provenance.mergedCandidateIds : [];
-  return [findingCandidateId(finding), ...(Array.isArray(merged) ? merged : [])]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
 }
 
 /** Return the existing sealed documents only after workbench completion succeeds. */
