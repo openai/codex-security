@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import type { ThreadEvent } from "@openai/codex-sdk";
+import { ScanCostLimitExceededError } from "../src/errors.js";
 import {
   prepareScanArtifactRestorer,
   runWorkbench,
@@ -99,6 +100,7 @@ for (const { outcome, budgetCompletionFault } of cases) {
       budgetCompletionFault === "lost-and-canceled";
     let budgetTriggered = false;
     let acceptedReport = "";
+    let completedArtifacts: Buffer<ArrayBuffer>[] = [];
     const modelInputs: string[] = [];
     const commands: string[] = [];
     const usagePath = join(
@@ -158,10 +160,16 @@ for (const { outcome, budgetCompletionFault } of cases) {
               budgetReceiptLost
             ) {
               budgetReceiptLost = false;
-              if (budgetCompletionFault === "lost-and-canceled")
+              if (budgetCompletionFault === "lost-and-canceled") {
+                completedArtifacts = await Promise.all(
+                  ["report.md", "scan-manifest.json"].map((name) =>
+                    readFile(join(scanDir, name)),
+                  ),
+                );
                 cancellation.abort(
                   "Synthetic cancellation after budget completion",
                 );
+              }
               throw Object.assign(
                 new Error("Synthetic lost budget completion response"),
                 { code: "ETIMEDOUT" },
@@ -441,7 +449,9 @@ for (const { outcome, budgetCompletionFault } of cases) {
             budgetCompletionFault === "before-commit" ||
             budgetCompletionFault === "lost-and-canceled"
           ) {
-            await expect(running).rejects.toThrow();
+            await expect(running).rejects.toBeInstanceOf(
+              ScanCostLimitExceededError,
+            );
             expect(
               commands.filter(
                 (command) => command === "complete-budget-exhausted-scan",
@@ -463,6 +473,16 @@ for (const { outcome, budgetCompletionFault } of cases) {
               findingCount: 1,
               reportAvailable: true,
             });
+            if (budgetCompletionFault === "lost-and-canceled") {
+              expect(commands).not.toContain("cancel-scan");
+              expect(
+                await Promise.all(
+                  ["report.md", "scan-manifest.json"].map((name) =>
+                    readFile(join(scanDir, name)),
+                  ),
+                ),
+              ).toEqual(completedArtifacts);
+            }
             return;
           }
           const result = await running;
