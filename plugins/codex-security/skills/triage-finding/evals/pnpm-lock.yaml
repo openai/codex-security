@@ -7,7 +7,7 @@ settings:
 overrides:
   '@openai/codex': 0.154.0
   '@openai/codex-sdk': 0.154.0
-  '@opencode-ai/sdk': 1.18.28
+  '@opencode-ai/sdk': 1.18.29
 
 importers:
 
@@ -17,8 +17,8 @@ importers:
         specifier: 0.154.0
         version: 0.154.0
       '@opencode-ai/sdk':
-        specifier: 1.18.28
-        version: 1.18.28
+        specifier: 1.18.29
+        version: 1.18.29
       promptfoo:
         specifier: 0.122.2
         version: 0.122.2(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.62.1)(socks@2.8.10)
@@ -1434,8 +1434,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@opencode-ai/sdk@1.18.28':
-    resolution: {integrity: sha512-laFCPzeeYVVjr4WiXdA9t7YGguhEsSJDcteiL2H2zH0KDfGOgHXlYoZNRS9QKkucExpN7MDW9RzrsZoJbEXRzw==}
+  '@opencode-ai/sdk@1.18.29':
+    resolution: {integrity: sha512-4CS+FoLPkymTlcga8jxivGDDb2AbWMIIl3b8+myoe2wtv/1ANYCErslgz1xy5hTVHymWE6CtVNKzRuPU0ED57A==}
 
   '@opentelemetry/api-logs@0.221.0':
     resolution: {integrity: sha512-OlanaW1vv7ufTqQ3/fPLI4arGt5ZoM+P8abOMki6uEYnpRazepSWDwDnnw+la7kE26SHVC18//SMccrDvLKOXQ==}
@@ -5761,7 +5761,7 @@ snapshots:
   '@openai/codex@0.154.0-win32-x64':
     optional: true
 
-  '@opencode-ai/sdk@1.18.28':
+  '@opencode-ai/sdk@1.18.29':
     dependencies:
       cross-spawn: 7.0.6
 
@@ -8153,7 +8153,7 @@ snapshots:
       '@openai/agents': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)
       '@openai/codex-sdk': 0.154.0
       '@openai/codex-security': 0.1.27(@types/node@25.9.1)(graphql@17.0.2)
-      '@opencode-ai/sdk': 1.18.28
+      '@opencode-ai/sdk': 1.18.29
       '@playwright/browser-chromium': 1.62.1
       '@rollup/rollup-linux-x64-gnu': 4.63.1
       '@slack/web-api': 8.1.1
