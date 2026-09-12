@@ -74,6 +74,7 @@ const deniedWorkerPermissionProfile = {
 try {
   await testOpenAiCredentialsReachWorker();
   await testWorkerReasoningSummaries();
+  if (process.platform !== "win32") await testNullUsageCompletion();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
@@ -734,6 +735,30 @@ async function testOpenAiCredentialsReachWorker() {
       syncBuiltinESMExports();
       for (const [name, value] of Object.entries(previousEnvironment)) restoreEnv(name, value);
     }
+  }
+}
+
+async function testNullUsageCompletion() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    await writeFile(promptPath, "NULL_USAGE\n");
+    for (const kind of ["discovery", "dedup"]) {
+      for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
+        const result = await new CodexSdkWorkerExecutor({
+          parentSandbox: trustedParentSandbox
+        }).run({
+          kind, promptPath, workingDirectory: fixture.root, subagents: 0,
+          resumeThreadId, signal: new AbortController().signal
+        });
+        assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
+        assert.equal(result.finalResponse, "fixture final response");
+      }
+    }
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
   }
 }
 
@@ -1562,7 +1587,7 @@ async function fakeCodexFixture(
     "  console.log(JSON.stringify({ type: 'item.completed', item }));",
     "}",
     "console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture final response' } }));",
-    "console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));",
+    "console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));",
     "if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }",
     "}",
     ""

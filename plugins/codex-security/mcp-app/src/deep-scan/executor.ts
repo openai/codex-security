@@ -1,7 +1,10 @@
 import { accessSync, constants as fsConstants, existsSync, promises as fs, readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
-import { Codex } from "@openai/codex-sdk";
+import {
+  CodexSession,
+  readCodexSessionTurn
+} from "../../../../../sdk/typescript/src/codex-session.js";
 import { parse as parseToml } from "smol-toml";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
@@ -76,7 +79,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         signal: request.signal
       });
       const prompt = await fs.readFile(request.promptPath, "utf8");
-      const codex = new Codex({
+      const codex = new CodexSession({
         codexPathOverride: executablePathForSpawn(codexPath),
         env: childEnv,
         // Codex exec reads CODEX_API_KEY; the SDK maps apiKey to that variable.
@@ -110,7 +113,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         workingDirectory: request.workingDirectory
       } as const;
       const thread = request.resumeThreadId
-        ? codex.resumeThread(request.resumeThreadId, threadOptions)
+        ? codex.resumeThread!(request.resumeThreadId, threadOptions)
         : codex.startThread(threadOptions);
       const input = request.resumeThreadId
         ? request.continuationPrompt ?? prompt
@@ -125,51 +128,44 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
 
       try {
         const { events } = await thread.runStreamed(input, { signal: controller.signal });
-        let finalResponse = "";
-        let threadId: string | undefined;
-        let turnCompleted = false;
-        let lastStreamError: string | undefined;
         const diagnostics: CodexWorkerDiagnostic[] = [];
-        for await (const event of events) {
-          if (event.type === "thread.started") {
-            threadId = event.thread_id;
-            await request.onThreadStarted?.(threadId);
-          } else if (event.type === "item.completed") {
-            const fallbackError = event.item.type === "error"
-              ? deepScanPermissionProfileFallbackError(event.item.message)
-              : undefined;
-            if (fallbackError) {
-              controller.abort(fallbackError);
-              throw fallbackError;
-            }
-            if (event.item.type === "agent_message") {
-              finalResponse = event.item.text;
-            } else {
+        const turn = await readCodexSessionTurn({
+          thread,
+          events,
+          stopOnCompletion: true,
+          onEvent: async (event) => {
+            if (event.type === "thread.started" && typeof event.thread_id === "string") {
+              await request.onThreadStarted?.(event.thread_id);
+            } else if (event.type === "item.completed" && isRecord(event.item)) {
+              const fallbackError = event.item.type === "error" && typeof event.item.message === "string"
+                ? deepScanPermissionProfileFallbackError(event.item.message)
+                : undefined;
+              if (fallbackError) {
+                controller.abort(fallbackError);
+                throw fallbackError;
+              }
               appendSafeItemDiagnostic(diagnostics, event.item);
+            } else if (event.type === "turn.completed") {
+              request.signal.removeEventListener("abort", forwardAbort);
+            } else if (event.type === "turn.failed") {
+              throw new Error((event.error as { message: string }).message);
+            } else if (event.type === "error" && typeof event.message === "string") {
+              const fallbackError = deepScanPermissionProfileFallbackError(event.message);
+              if (fallbackError) {
+                controller.abort(fallbackError);
+                throw fallbackError;
+              }
+              // Codex exec emits retry-in-progress notifications as error events.
             }
-          } else if (event.type === "turn.completed") {
-            turnCompleted = true;
-            request.signal.removeEventListener("abort", forwardAbort);
-            break;
-          } else if (event.type === "turn.failed") {
-            throw new Error(event.error.message);
-          } else if (event.type === "error") {
-            const fallbackError = deepScanPermissionProfileFallbackError(event.message);
-            if (fallbackError) {
-              controller.abort(fallbackError);
-              throw fallbackError;
-            }
-            // Codex exec currently emits retry-in-progress notifications as error events.
-            lastStreamError = event.message;
           }
-        }
-        if (!turnCompleted) {
-          const detail = lastStreamError ? `: ${lastStreamError}` : "";
+        });
+        if (turn.status !== "completed") {
+          const detail = turn.lastStreamError ? `: ${turn.lastStreamError}` : "";
           throw new Error(`Codex worker stream ended before turn.completed${detail}`);
         }
         return {
-          finalResponse,
-          threadId: threadId ?? thread.id ?? undefined,
+          finalResponse: turn.finalResponse,
+          threadId: turn.threadId ?? thread.id ?? undefined,
           ...(diagnostics.length > 0 ? { diagnostics } : {})
         };
       } finally {
