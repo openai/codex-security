@@ -619,7 +619,10 @@ describe("CodexSecurity orchestration", () => {
       OPENAI_API_KEY: "synthetic-transient-key",
     };
     const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT },
+      {
+        pluginPath: PLUGIN_ROOT,
+        codexOverrides: { cli_auth_credentials_store: "file" },
+      },
       {
         environment,
         resolvePluginPython: async () => "/managed/python",
