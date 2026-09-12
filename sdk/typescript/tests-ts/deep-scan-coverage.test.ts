@@ -14,13 +14,14 @@ const fixtureUrl = new URL(
 );
 
 test.each([
-  ["partial", false],
-  ["unknown", false],
-  ["complete", false],
-  ["partial", true],
+  ["partial", false, false],
+  ["unknown", false, false],
+  ["complete", false, false],
+  ["partial", true, false],
+  ["partial", true, true],
 ] as const)(
-  "publishes %s source coverage through CLI results (resume: %p)",
-  async (completeness, resume) => {
+  "publishes %s source coverage through CLI results (resume: %p, continued: %p)",
+  async (completeness, resume, continueAfterResume) => {
     const root = await mkdtemp(join(tmpdir(), "deep-coverage-publication-"));
     try {
       await mkdir(join(root, "fixture"), { mode: 0o700 });
@@ -32,6 +33,7 @@ test.each([
           join(root, "fixture"),
           completeness,
           String(resume),
+          String(continueAfterResume),
         ],
         { stdout: "pipe", stderr: "pipe" },
       );

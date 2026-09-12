@@ -81,6 +81,7 @@ export interface ReducerRequest {
   label: string;
   consumed: AcceptedDiscovery[];
   previousReducerResultPath?: string;
+  previousSourceCoverage?: DeepReductionInput["sourceCoverage"];
 }
 
 export interface DeepScanWorkerRunnerOptions {
@@ -261,7 +262,8 @@ export class DeepScanWorkerRunner {
       id: reducerId,
       label: reducerLabel,
       consumed,
-      previousReducerResultPath
+      previousReducerResultPath,
+      previousSourceCoverage
     } = request;
     const { artifacts, run } = this.options;
     const reducerRoot = join(artifacts.dedupRoot, reducerLabel);
@@ -306,6 +308,9 @@ export class DeepScanWorkerRunner {
     // Snapshot inputs before execution: direct file output has the same
     // conservation checks as the MCP writer without rereading consumed sources.
     const sources = await readDeepReductionSources(artifactContext);
+    if (sources.previous && previousSourceCoverage !== undefined) {
+      sources.previous.sourceCoverage = structuredClone(previousSourceCoverage);
+    }
     let reducerValidation: ReducerArtifactValidation | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId: reducerId,

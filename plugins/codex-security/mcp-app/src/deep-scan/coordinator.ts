@@ -3,15 +3,13 @@ import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import {
   createDeepScanArtifacts,
-  ensureDeepScanDirectories,
-  writeJsonAtomic
+  ensureDeepScanDirectories
 } from "./artifacts.js";
 import { aggregateSourceCoverage, deepReductionToScanDraft, validateDiscoveryArtifacts, validateReducerArtifacts, type DeepReductionInput } from "./artifact-validation.js";
 import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
   scanDraftInputSchema,
   type DeepScanPublication,
-  saveScanDraftCheckpoint,
   type ScanDraftInput
 } from "../artifact-scan-draft.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
@@ -767,7 +765,8 @@ export class DeepScanCoordinator {
             id: randomUUID(),
             label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
             consumed,
-            previousReducerResultPath
+            previousReducerResultPath,
+            previousSourceCoverage: latestResult?.sourceCoverage,
           }));
           observe(reducer);
         }
@@ -985,8 +984,6 @@ export class DeepScanCoordinator {
         };
         const sources = await readDeepReductionSources(context);
         result.sourceCoverage = aggregateSourceCoverage(sources.discoveries, latestResult ?? null);
-        await saveScanDraftCheckpoint(context, result);
-        await writeJsonAtomic(worker.resultManifestPath, result);
       }
       latestResult = result;
       noNewStreak = newFindings > 0 ? 0 : noNewStreak + accepted.length;

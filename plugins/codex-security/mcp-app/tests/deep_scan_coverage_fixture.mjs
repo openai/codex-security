@@ -17,15 +17,16 @@ const bundled = await build({
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
       'export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";',
+      'export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts";',
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
   },
   format: "esm", platform: "node", loader: { ".md": "text" }, write: false,
 });
-export async function publishCoverageFixture(root, completeness, { resume = false } = {}) {
+export async function publishCoverageFixture(root, completeness, { resume = false, continueAfterResume = false } = {}) {
   const runtimePath = path.join(root, "fixture-runtime.mjs");
   await writeFile(runtimePath, bundled.outputFiles[0].contents);
-  const { DeepScanCoordinator, WorkbenchDeepScanStore, createScanArtifactContext, recordCodexSecurityScanDraftViaWorkbench } = await import(pathToFileURL(runtimePath).href);
+  const { DeepScanCoordinator, WorkbenchDeepScanStore, createScanArtifactContext, recordCodexSecurityScanDraftViaWorkbench, recordCodexSecurityDeepReduction } = await import(pathToFileURL(runtimePath).href);
   const targetPath = path.join(root, "target");
   const codexHome = path.join(root, "codex-home");
   const scanRoot = path.join(root, "scans");
@@ -67,7 +68,8 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
   };
   if (resume) {
     const workers = [];
-    for (const index of statuses.keys()) {
+    const seeded = continueAfterResume ? statuses.slice(0, -1) : statuses;
+    for (const index of seeded.keys()) {
       const workerRoot = path.join(run.scanDir, "artifacts", "deep_discovery", "workers", `discovery-${String(index + 1).padStart(4, "0")}`);
       const artifactDir = path.join(workerRoot, "output");
       const worker = { id: randomUUID(), scanId: run.scanId, kind: "discovery", promptPath: path.join(workerRoot, "prompt.md"), artifactDir, attempt: index === 0 ? 2 : 1 };
@@ -87,13 +89,14 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
     const resultManifestPath = path.join(artifactDir, "result.json");
     // Legacy accepted reducers omitted coverage entirely.
     await writeFile(resultManifestPath, JSON.stringify({ scanId: run.scanId, findings: [] }));
+    rawSources.set(resultManifestPath, await readFile(resultManifestPath, "utf8"));
     await store.commitDedup({ id, scanId: run.scanId, newFindings: 0, resultManifestPath });
     run = await store.get(run.scanId, threadId);
   }
   let discoveryCalls = 0;
   const executor = {
     async run(request) {
-      assert.equal(resume, false, "accepted legacy sources should resume without new model work");
+      assert.equal(resume && !continueAfterResume, false, "accepted legacy sources should resume without new model work");
       const thread = request.resumeThreadId ?? randomUUID();
       await request.onThreadStarted?.(thread);
       if (request.kind === "discovery") {
@@ -102,7 +105,7 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
         if (index === 0 && !request.resumeThreadId) return { threadId: thread, finalResponse: "Continue the unfinished audit." };
         await writeDiscovery(request.artifactContext.root, index);
       } else {
-        await writeFile(path.join(request.artifactContext.root, "result.json"), JSON.stringify({ scanId: run.scanId, findings: [] }));
+        await recordCodexSecurityDeepReduction({ ...request.artifactContext, repoRoot: targetPath, scanId: run.scanId }, { scanId: run.scanId, findings: [] });
       }
       return { threadId: thread, finalResponse: "Audit finished." };
     },
@@ -117,13 +120,13 @@ export async function publishCoverageFixture(root, completeness, { resume = fals
   const terminal = await coordinator.wait(undefined, 30_000);
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(terminal.noNewStreak, statuses.length, "source coverage must not change stopping policy");
-  assert.equal(discoveryCalls, resume ? 0 : statuses.length + 1);
+  assert.equal(discoveryCalls, resume ? (continueAfterResume ? 1 : 0) : statuses.length + 1);
   await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
   for (const [file, bytes] of rawSources) assert.equal(await readFile(file, "utf8"), bytes);
   return { scanDir: run.scanDir, threadId, terminal };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const result = await publishCoverageFixture(process.argv[2], process.argv[3], { resume: process.argv[4] === "true" });
+  const result = await publishCoverageFixture(process.argv[2], process.argv[3], { resume: process.argv[4] === "true", continueAfterResume: process.argv[5] === "true" });
   process.stdout.write(JSON.stringify(result));
 }
