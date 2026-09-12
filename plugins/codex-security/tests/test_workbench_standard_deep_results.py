@@ -47,8 +47,10 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     # The latest incomplete attempt need not be parseable for a saved checkpoint to survive.
     result_path.write_text("{incomplete")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        # This is new incomplete work, not a rewrite of the accepted attempt.
         connection.execute(
-            "UPDATE deep_scan_workers SET status = 'running' WHERE id = ?", (worker_id,)
+            "UPDATE deep_scan_workers SET status = 'running', attempt = 2 WHERE id = ?",
+            (worker_id,),
         )
     environment = {"CODEX_HOME": str(codex_home)}
     if termination == "canceled":
@@ -1401,6 +1403,7 @@ def test_failure_preserves_last_committed_reducer_without_parent_draft(tmp_path:
         state_dir, codex_home, scan_dir, scan_id, worker_id, result_path
     )
     reduced = json.loads(reducer_path.read_text())
+    accepted_summary = reduced["findings"][0]["summary"]
     reduced["findings"][0]["summary"] = (
         "The reducer retained additional independently reviewed evidence."
     )
@@ -1417,7 +1420,8 @@ def test_failure_preserves_last_committed_reducer_without_parent_draft(tmp_path:
     failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert failed["progress"]["status"] == "failed"
     assert failed["findingCount"] == 1
-    assert failed["findings"][0]["summary"] == reduced["findings"][0]["summary"]
+    assert failed["findings"][0]["summary"] == accepted_summary
+    assert json.loads(reducer_path.read_text()) == reduced
 
 
 def test_stopped_rejection_recovers_malformed_parent_surfaces(tmp_path: Path) -> None:
