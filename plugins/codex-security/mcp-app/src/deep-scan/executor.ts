@@ -5,6 +5,7 @@ import {
   CodexSession,
   readCodexSessionTurn
 } from "../../../../../sdk/typescript/src/codex-session.js";
+import type { CodexOptions } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
@@ -25,6 +26,8 @@ import type {
 } from "./types.js";
 
 export interface CodexSdkWorkerModelSettings {
+  /** Resolved by the execution owner, including when reconstructing a scan. */
+  codexOptions?: CodexOptions;
   model?: string;
   reasoningEffort?: string;
   artifactContext?: CodexSdkWorkerArtifactContext;
@@ -42,7 +45,7 @@ export interface CodexSdkWorkerArtifactContext {
 }
 
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
-  private runtimeReasoningSummary?: Promise<string | undefined>;
+  private runtimeModelConfig?: Promise<NonNullable<CodexOptions["config"]>>;
 
   constructor(private readonly modelSettings: CodexSdkWorkerModelSettings = {}) {}
 
@@ -55,15 +58,32 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         );
       }
       const workerProfile = workerPermissionProfile(parentSandbox);
-      const configOverrides = workerPermissionProfileConfigOverrides(workerProfile);
+      const resolved = this.modelSettings.codexOptions;
       const originalCwd = process.cwd();
-      const childEnv = await snapshotWorkerEnvironment();
-      // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
-      const reasoningSummary = await (this.runtimeReasoningSummary ??= workerReasoningSummary(childEnv));
+      const childEnv = await snapshotWorkerEnvironment(resolved?.env);
+      if (resolved?.apiKey !== undefined) childEnv.CODEX_API_KEY = resolved.apiKey;
+      // Snapshot per-scan selections once; a reconstructed owner can supply them.
+      // Native account credentials continue to refresh in the selected home.
+      const modelConfig: NonNullable<CodexOptions["config"]> = {
+        ...await (this.runtimeModelConfig ??= resolved?.config
+          ? Promise.resolve(resolved.config)
+          : workerModelConfig(childEnv)),
+        ...(this.modelSettings.model ? { model: this.modelSettings.model } : {}),
+        // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
+        ...(this.modelSettings.reasoningEffort
+          ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
+          : {})
+      };
+      const configOverrides = [
+        ...(resolved?.configOverrides ?? []),
+        ...workerPermissionProfileConfigOverrides(workerProfile)
+      ];
       const openAiApiKey = environmentVariable(childEnv, "OPENAI_API_KEY", process.platform)?.trim();
       const codexApiKey = environmentVariable(childEnv, "CODEX_API_KEY", process.platform)?.trim();
       const codexPath = resolveCodexPath(
-        childEnv,
+        resolved?.codexPathOverride === undefined
+          ? childEnv
+          : { ...childEnv, CODEX_CLI_PATH: resolved.codexPathOverride },
         process.platform,
         process.arch,
         originalCwd
@@ -72,7 +92,12 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         codexPath,
         cwd: request.workingDirectory,
         profileId: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-        configOverrides,
+        configOverrides: [
+          ...Object.entries(workerModelSelection(modelConfig))
+            .map(([key, value]) => `${key}=${tomlInlineValue(value)}`),
+          ...configOverrides,
+          ...(resolved?.baseUrl ? [`openai_base_url=${tomlString(resolved.baseUrl)}`] : [])
+        ],
         expectedProfile: workerProfile,
         env: childEnv,
         allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
@@ -80,26 +105,22 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       });
       const prompt = await fs.readFile(request.promptPath, "utf8");
       const codex = new CodexSession({
+        ...resolved,
         codexPathOverride: executablePathForSpawn(codexPath),
         env: childEnv,
         // Codex exec reads CODEX_API_KEY; the SDK maps apiKey to that variable.
         // Keep native credentials unless the worker has no configured account.
         ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
         config: {
-          ...(reasoningSummary === undefined
-            ? {}
-            : { model_reasoning_summary: reasoningSummary }),
-          // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
-          ...(this.modelSettings.reasoningEffort
-            ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
-            : {}),
+          ...modelConfig,
           mcp_servers: {
+            ...(isRecord(modelConfig.mcp_servers) ? modelConfig.mcp_servers : {}),
             // Discovery workers use the bundled skills and artifacts, not the parent workbench MCP.
             // A disabled server still needs a valid transport while Codex resolves plugin configuration.
             "codex-security": { command: "node", enabled: false },
             ...this.compactArtifactServer(request)
           },
-          ...workerSubagentConfig(request.subagents)
+          ...workerSubagentConfig(request.subagents, modelConfig)
         },
         // Structured SDK config cannot preserve literal filesystem keys such as
         // ":root" or "/repo/.env"; raw overrides keep this inline TOML intact.
@@ -242,13 +263,16 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   }
 }
 
-function workerSubagentConfig(subagents: number) {
+function workerSubagentConfig(subagents: number, config: NonNullable<CodexOptions["config"]>) {
   return {
     // V1 counts children; V2 counts the root plus its children. Keeping its
     // feature disabled lets the model choose either runtime without rejecting
     // inherited agents.max_threads configuration.
-    ...(subagents > 0 ? { agents: { max_threads: subagents } } : {}),
+    ...(subagents > 0
+      ? { agents: { ...(isRecord(config.agents) ? config.agents : {}), max_threads: subagents } }
+      : {}),
     features: {
+      ...(isRecord(config.features) ? config.features : {}),
       multi_agent_v2: {
         enabled: false,
         max_concurrent_threads_per_session: subagents + 1
@@ -264,7 +288,7 @@ function workerSubagentConfig(subagents: number) {
   };
 }
 
-type TomlValue = string | number | boolean | TomlObject;
+type TomlValue = string | number | boolean | TomlValue[] | TomlObject;
 type TomlObject = { [key: string]: TomlValue };
 
 function workerPermissionProfile(
@@ -303,6 +327,7 @@ function tomlInlineValue(value: TomlValue): string {
   if (typeof value === "string") return tomlString(value);
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "true" : "false";
+  if (Array.isArray(value)) return `[${value.map(tomlInlineValue).join(",")}]`;
   return `{${Object.entries(value)
     .map(([key, entry]) => `${tomlKey(key)}=${tomlInlineValue(entry)}`)
     .join(",")}}`;
@@ -379,30 +404,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function workerReasoningSummary(environment: Record<string, string>): Promise<string | undefined> {
+// These are the existing non-secret selections written by the SDK preflight
+// adapter. Reading only summary left provider selection in a shared home.
+function workerModelSelection(config: NonNullable<CodexOptions["config"]>): TomlObject {
+  const result: TomlObject = {};
+  for (const key of ["model", "model_provider", "model_reasoning_effort", "model_reasoning_summary", "service_tier", "model_providers"]) {
+    const value = config[key];
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
+}
+
+async function workerModelConfig(environment: Record<string, string>): Promise<NonNullable<CodexOptions["config"]>> {
   const configPath = environmentVariable(environment, "CODEX_SECURITY_CONFIG_PATH", process.platform);
-  if (!configPath) return undefined;
+  if (!configPath) return {};
   const config = parseToml(await fs.readFile(configPath, "utf8"));
   const profiles = config.profiles;
   const profile = typeof config.profile === "string" && isRecord(profiles)
     ? profiles[config.profile]
     : undefined;
-  const summary = isRecord(profile) && profile.model_reasoning_summary !== undefined
-    ? profile.model_reasoning_summary
-    : config.model_reasoning_summary;
-  return typeof summary === "string" ? summary : undefined;
+  return workerModelSelection({ ...config, ...(isRecord(profile) ? profile : {}) } as NonNullable<CodexOptions["config"]>);
 }
 
-async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
+async function snapshotWorkerEnvironment(source: NodeJS.ProcessEnv = process.env): Promise<Record<string, string>> {
   const environment = Object.fromEntries(
-    Object.entries(process.env)
+    Object.entries(source)
       .filter((entry): entry is [string, string] => entry[1] !== undefined)
   ) as Record<string, string>;
   if (process.platform === "win32") {
     // process.env is case-insensitive on Windows; a plain object is not.
     // Keep its selected values while giving the child one spelling per key.
     for (const name of ["CODEX_CLI_PATH", "CODEX_HOME", "CODEX_MANAGED_PACKAGE_ROOT", "LOCALAPPDATA"]) {
-      const value = process.env[name];
+      const value = environmentVariable(source, name, process.platform);
       for (const key of Object.keys(environment)) {
         if (key.toUpperCase() === name) delete environment[key];
       }
