@@ -27,8 +27,9 @@ def saved_selection(connection, scan, accepted, omitted=None, *, reason="saturat
     with connection:
         connection.execute(
             "UPDATE deep_scan_runs SET workflow_version = 'deep-security-scan/v2', "
-            "finalization_input_json = ? WHERE scan_id = ?",
-            (json.dumps(selection), scan.scan_id),
+            "finalization_input_json = ?, terminal_reason = ?, phase = 'terminal' "
+            "WHERE scan_id = ?",
+            (json.dumps(selection), reason, scan.scan_id),
         )
     return selection
 
@@ -188,6 +189,8 @@ def test_stop_and_publication_keep_the_winning_terminal_outcome(
                 "Scan stopped after reaching the configured cost limit."
             )
         assert json.loads(run["finalization_input_json"] or "null") == selection
+        if selection is not None:
+            assert run["terminal_reason"] == selection["terminalReason"]
         if cut != "sealed" and cause == "cancel":
             assert run["status"] == "canceled"
         if cut in {"published", "sealed"}:
@@ -289,6 +292,7 @@ def test_stopped_publication_process_loss_keeps_frozen_rejection_and_original_se
         run = dict(connection.execute("SELECT * FROM deep_scan_runs").fetchone())
         workers = [dict(row) for row in connection.execute("SELECT * FROM deep_scan_workers")]
         assert json.loads(run["finalization_input_json"]) == selection
+        assert run["terminal_reason"] == selection["terminalReason"]
         assert run["status"] == ("canceled" if cause == "cancel" else "failed")
         # The replacement process sees a different live head, but replays the
         # already committed stopped selection instead of restoring the candidate.
@@ -338,8 +342,8 @@ def test_interrupted_selection_recovery_fences_observers_and_keeps_original_dead
             (scan.scan_id,),
         )
         workbench_db.execute(
-            "UPDATE deep_scan_runs SET status = 'running', phase = 'reducing', "
-            "terminal_reason = NULL, completed_at = NULL, max_time_hours = 1, "
+            "UPDATE deep_scan_runs SET status = 'running', "
+            "completed_at = NULL, max_time_hours = 1, "
             "created_at = '2000-01-01T00:00:00Z', updated_at = '2000-01-01T00:00:00Z' "
             "WHERE scan_id = ?",
             (scan.scan_id,),
@@ -389,7 +393,8 @@ def test_interrupted_selection_recovery_fences_observers_and_keeps_original_dead
         assert replayed["deepScan"]["finalizationInput"] == selection
         assert replayed["deepScan"]["createdAt"] == "2000-01-01T00:00:00Z"
         assert replayed["deepScan"]["config"]["maxTimeHours"] == 1
-        assert replayed["deepScan"]["phase"] == "reducing"
+        assert replayed["deepScan"]["phase"] == "terminal"
+        assert replayed["deepScan"]["terminalReason"] == selection["terminalReason"]
         assert deep.deep_scan_deadline_reached(
             connection.execute("SELECT * FROM deep_scan_runs").fetchone()
         )
