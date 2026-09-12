@@ -664,6 +664,26 @@ def effective_deep_scan_config(args: argparse.Namespace) -> dict[str, int | floa
     return resolve_deep_scan_config(available_parallelism)
 
 
+def read_deep_scan_execution_settings(scan_dir: Path) -> dict[str, Any]:
+    relative_path = "artifacts/deep_discovery/execution-settings.json"
+    if not (scan_dir / relative_path).exists():
+        raise SystemExit(
+            "This Deep Scan has no recorded original execution settings; "
+            "its executable and Codex home cannot be recovered."
+        )
+    saved = _read_scan_local_json(scan_dir, relative_path, "Deep Scan execution settings")
+    if saved.get("version") != 1:
+        raise SystemExit("This Deep Scan uses an unsupported execution settings version.")
+    settings = saved.get("settings")
+    if not isinstance(settings, dict) or not all(
+        isinstance(settings.get(key), str) for key in ("codexPath", "codexHome")
+    ):
+        raise SystemExit(
+            "Deep Scan execution settings are missing the recorded executable or Codex home."
+        )
+    return settings
+
+
 def ensure_deep_scan_run(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -688,16 +708,14 @@ def ensure_deep_scan_run(
         scan_dir = Path(scan["scan_dir"])
         relative_path = "artifacts/deep_discovery/execution-settings.json"
         if (scan_dir / relative_path).exists():
-            saved = _read_scan_local_json(scan_dir, relative_path, "Deep Scan execution settings")
-            if saved.get("version") != 1:
-                raise SystemExit("This Deep Scan uses an unsupported execution settings version.")
+            saved = read_deep_scan_execution_settings(scan_dir)
             # A managed scan directory can survive a rolled-back creation.
             # Keep its saved selections and the returned scan model consistent.
             connection.execute(
                 "UPDATE scans SET model = ?, reasoning_effort = ? WHERE id = ?",
                 (
-                    saved["settings"].get("model"),
-                    saved["settings"].get("reasoningEffort"),
+                    saved.get("model"),
+                    saved.get("reasoningEffort"),
                     scan["id"],
                 ),
             )
@@ -1183,10 +1201,20 @@ def claim_deep_scan_coordinator_locked(
             }
         else:
             adopted = run["coordinator_generation"] > 1 or run["phase"] != "setup"
-            if adopted:
-                recover_expired_coordinator(connection, run, timestamp)
             disposition = "adopted" if adopted else "claimed"
 
+        if (
+            getattr(args, "require_execution_settings", False)
+            and deep_scan_finalization_input(run) is None
+        ):
+            scan_dir = Path(scan["scan_dir"])
+            if (
+                run["workflow_version"] == DEEP_SCAN_WORKFLOW_VERSION
+                or (scan_dir / "artifacts/deep_discovery/execution-settings.json").exists()
+            ):
+                read_deep_scan_execution_settings(scan_dir)
+        if disposition == "adopted":
+            recover_expired_coordinator(connection, run, timestamp)
         connection.execute(
             """
             UPDATE deep_scan_runs

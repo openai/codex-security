@@ -395,11 +395,13 @@ def parse_args(description: str, *, execution_settings: bool = False) -> argpars
         arguments[index] = "--user-context=" + sys.stdin.buffer.read().decode("utf-8")
     args = parser.parse_args(arguments)
     if execution_settings:
-        # Private MCP creation input shares stdin with the user's unchanged context.
-        payload = json.load(sys.stdin)
-        args.execution_settings = payload["executionSettings"]
-        args.user_context = payload.get("userContext")
-        args.user_context_stdin = False
+        args.require_execution_settings = True
+        if args.command == "begin-deep-scan":
+            # Private MCP creation input shares stdin with the user's unchanged context.
+            payload = json.load(sys.stdin)
+            args.execution_settings = payload["executionSettings"]
+            args.user_context = payload.get("userContext")
+            args.user_context_stdin = False
     return args
 
 

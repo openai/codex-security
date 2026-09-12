@@ -18,6 +18,7 @@ const { WorkbenchDeepScanStore, parseDeepScan } = await import(
 
 await testBeginProtocolAndParsing();
 await testBeginCarriesOriginalSettingsWithUserContext();
+await testClaimChecksOriginalSettingsInsideTheTransaction();
 await testCanonicalCommitProtocol();
 await testTerminalProtocol();
 testCanonicalNullAndPartialParsing();
@@ -51,9 +52,9 @@ async function testBeginCarriesOriginalSettingsWithUserContext() {
   const executionSettings = { codexPath: "/fixture/codex", codexHome: "/fixture/home",
     model: "original-model", reasoningSummary: "concise" };
   const userContext = "Review the parser.\nKeep this second line.";
-  const runner = async (args, input, selectFinalization, beginWithExecutionSettings) => {
+  const runner = async (args, input, selectFinalization, withExecutionSettings) => {
     assert.equal(selectFinalization, false);
-    assert.equal(beginWithExecutionSettings, true);
+    assert.equal(withExecutionSettings, true);
     assert.deepEqual(JSON.parse(input), { executionSettings, userContext });
     assert.equal(args.includes("--user-context-stdin"), false,
       "the private structured input carries context without a second stdin consumer");
@@ -63,6 +64,19 @@ async function testBeginCarriesOriginalSettingsWithUserContext() {
   };
   await new WorkbenchDeepScanStore(runner).begin({ targetPath: "/fixture/repository",
     threadId: "fixture-thread", scanRoot: "/fixture/scans", userContext, executionSettings });
+}
+
+async function testClaimChecksOriginalSettingsInsideTheTransaction() {
+  const scanId = randomUUID();
+  const store = new WorkbenchDeepScanStore(async (args, input, selectFinalization, withExecutionSettings) => {
+    assert.equal(args[0], "claim-deep-scan-coordinator");
+    assert.equal(input, undefined);
+    assert.equal(selectFinalization, false);
+    assert.equal(withExecutionSettings, true);
+    return { ...stateResult(scanId, { deepScan: { coordinatorGeneration: 2 } }),
+      coordinatorDisposition: "claimed" };
+  });
+  assert.equal((await store.claimCoordinator({ scanId, threadId: "fixture-thread" })).acquired, true);
 }
 
 async function testBeginProtocolAndParsing() {

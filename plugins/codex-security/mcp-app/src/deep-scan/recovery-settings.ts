@@ -26,6 +26,11 @@ export interface DeepScanExecutionSettings {
   parentSandbox?: DeepWorkerParentSandbox;
 }
 
+export interface DeepScanLegacySettingsContext {
+  config?: JsonObject;
+  usageOwner?: DeepScanRunState["usageOwner"];
+}
+
 export async function captureDeepScanExecutionSettings(
   original: Pick<DeepScanRunState, "model" | "reasoningEffort" | "usageOwner">,
   parentSandbox: DeepWorkerParentSandbox,
@@ -133,8 +138,10 @@ async function originalParentSettings(
 /** New runs save settings in their creation transaction, before any coordinator claim. */
 export async function loadDeepScanExecutionSettings(
   scanDir: string,
-  original?: Pick<DeepScanRunState, "model" | "reasoningEffort" | "usageOwner" | "createdAt">
-): Promise<DeepScanExecutionSettings> {
+  original?: Pick<DeepScanRunState, "model" | "reasoningEffort" | "usageOwner" | "createdAt" | "workflowVersion">,
+  readLegacyContext?: () => Promise<DeepScanLegacySettingsContext>,
+  environment: NodeJS.ProcessEnv = process.env
+): Promise<Partial<DeepScanExecutionSettings>> {
   const path = join(scanDir, "artifacts", "deep_discovery", "execution-settings.json");
   let settings: DeepScanExecutionSettings;
   try {
@@ -145,6 +152,28 @@ export async function loadDeepScanExecutionSettings(
     settings = executionSettings(saved.settings);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (original?.workflowVersion === "deep-security-scan/v1" || original?.workflowVersion === "deep-scan-mcp/v1") {
+      // Legacy runs predate this file. Their saved recipe and recorded owner
+      // can recover selections, but cannot establish an original executable or
+      // home. Leave those unknown and retain the existing native launch behavior.
+      const context = await readLegacyContext?.();
+      const selected = scanPreflightCodexConfig(resolveCodexProfile(context?.config ?? {}));
+      const owner = original.usageOwner ?? context?.usageOwner;
+      const home = environment.CODEX_HOME || join(homedir(), ".codex");
+      const native = !owner?.threadId ? {} : await originalParentSettings(home, {
+        ...owner, threadId: owner.threadId, startedAt: original.createdAt ?? owner.startedAt
+      });
+      return {
+        model: original.model ?? (selected.model as string | undefined) ?? native.model,
+        reasoningEffort: original.reasoningEffort ?? (selected.model_reasoning_effort as string | undefined) ?? native.reasoningEffort,
+        modelProvider: (selected.model_provider as string | undefined) ?? native.modelProvider,
+        reasoningSummary: (selected.model_reasoning_summary as string | undefined) ?? native.reasoningSummary,
+        serviceTier: (selected.service_tier as string | undefined) ?? native.serviceTier,
+        ...(selected.service_tier === undefined && native.nativeServiceTierAbsent
+          ? { nativeServiceTierAbsent: true as const } : {}),
+        providerConfig: selected.model_providers as JsonObject | undefined
+      };
+    }
     throw new Error("This Deep Scan has no recorded original execution settings; its executable and Codex home cannot be recovered.");
   }
   if (!original || (settings.model !== undefined && settings.reasoningEffort !== undefined
@@ -173,7 +202,7 @@ export async function loadDeepScanExecutionSettings(
 }
 
 export function restoredDeepScanWorkerSettings(
-  settings: DeepScanExecutionSettings,
+  settings: Partial<DeepScanExecutionSettings>,
   currentParentSandbox: DeepWorkerParentSandbox,
   environment: () => NodeJS.ProcessEnv = () => process.env
 ): {
@@ -204,7 +233,9 @@ export function restoredDeepScanWorkerSettings(
       // The executor reads this property for each launch. API keys can refresh;
       // only the original account home and non-secret selections are bound.
       get env() {
-        return Object.fromEntries(Object.entries({ ...environment(), CODEX_CLI_PATH: settings.codexPath, CODEX_HOME: settings.codexHome })
+        return Object.fromEntries(Object.entries({ ...environment(),
+          ...(settings.codexPath === undefined ? {} : { CODEX_CLI_PATH: settings.codexPath }),
+          ...(settings.codexHome === undefined ? {} : { CODEX_HOME: settings.codexHome }) })
           .filter((entry): entry is [string, string] => entry[1] !== undefined));
       },
       config: {

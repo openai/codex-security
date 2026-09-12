@@ -228,7 +228,7 @@ def test_internal_settings_input_preserves_public_user_context_and_shape(tmp_pat
             "-c",
             (
                 "import runpy, sys; script = sys.argv.pop(1); "
-                "runpy.run_path(script)['main'](begin_with_execution_settings=True)"
+                "runpy.run_path(script)['main'](with_execution_settings=True)"
             ),
             str(SCRIPT),
             *begin_args(tmp_path),

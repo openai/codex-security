@@ -136,6 +136,30 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(unavailableParent.serviceTier, undefined);
   assert.equal(unavailableParent.nativeServiceTierAbsent, undefined, "missing history does not prove native absence");
   const originalOwner = { threadId: "fixture-parent", turnId: "original-turn", startedAt: "2026-01-01T00:00:00Z" };
+  for (const workflowVersion of ["deep-security-scan/v1", "deep-scan-mcp/v1"]) {
+    const legacyDir = join(root, workflowVersion.replaceAll("/", "-"));
+    const legacy = await loadSettings(legacyDir, {
+      workflowVersion, model: "recorded-model", reasoningEffort: "ultra",
+      createdAt: "2026-01-01T00:01:00Z", usageOwner: null
+    }, async () => ({ config: { model_reasoning_summary: "concise", service_tier: "flex" },
+      usageOwner: originalOwner }), parentEnvironment);
+    assert.equal(legacy.model, "recorded-model");
+    assert.equal(legacy.reasoningSummary, "concise", "recorded recipe retains precedence");
+    assert.equal(legacy.modelProvider, "openai", "recorded original owner supplies native selections");
+    assert.equal(legacy.serviceTier, "flex");
+    assert.equal(legacy.codexPath, undefined, "legacy metadata did not record an executable");
+    assert.equal(legacy.codexHome, undefined, "a history lookup home is not recorded execution provenance");
+    const restoredLegacy = restoreSettings(legacy, { filesystemDenies: ["/fixture/current-deny"] },
+      () => ({ CODEX_HOME: "/fixture/runtime-home", CODEX_CLI_PATH: "/fixture/runtime-codex",
+        CODEX_API_KEY: "synthetic-live-key" }));
+    assert.equal(restoredLegacy.codexOptions.env.CODEX_HOME, "/fixture/runtime-home");
+    assert.equal(restoredLegacy.codexOptions.env.CODEX_CLI_PATH, "/fixture/runtime-codex");
+    assert.equal(restoredLegacy.codexOptions.config.model_reasoning_summary, "concise");
+    await assert.rejects(readFile(join(legacyDir, "artifacts/deep_discovery/execution-settings.json")),
+      { code: "ENOENT" });
+  }
+  await assert.rejects(loadSettings(join(root, "missing-v2"), { workflowVersion: "deep-security-scan/v2" },
+    async () => assert.fail("missing promised v2 settings must not become legacy recovery")), /no recorded original/);
   const [rebound, unboundLegacy] = await Promise.all([
     captureSettings({ usageOwner: originalOwner }, { filesystemDenies: [] }, parentEnvironment,
       { threadId: "fixture-other", startedAt: "2026-01-01T00:03:00Z" }),

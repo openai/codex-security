@@ -818,9 +818,9 @@ async function testIsolatedReconstructedWorkers() {
       const targetPath = path.join(fixture.root, "target");
       await mkdir(targetPath);
       const workbenchPath = fileURLToPath(new URL("../../scripts/workbench_db.py", import.meta.url));
-      const runWorkbench = async (args, input, _selectFinalization, beginWithExecutionSettings) => {
-        const pythonArgs = beginWithExecutionSettings ? ["-c",
-          "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](begin_with_execution_settings=True)",
+      const runWorkbench = async (args, input, _selectFinalization, withExecutionSettings) => {
+        const pythonArgs = withExecutionSettings ? ["-c",
+          "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](with_execution_settings=True)",
           workbenchPath, ...args] : [workbenchPath, ...args];
         const result = spawnSync(process.env.PYTHON?.trim() || "python3", pythonArgs, {
           env: { ...process.env, CODEX_HOME: codexHome,

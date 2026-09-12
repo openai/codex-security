@@ -22,7 +22,7 @@ import {
   DeepScanStartLock,
   startOrJoinDeepScanCoordinator
 } from "./src/deep-scan/registry.js";
-import { captureDeepScanExecutionSettings, loadDeepScanExecutionSettings, restoredDeepScanWorkerSettings } from "./src/deep-scan/recovery-settings.js";
+import { captureDeepScanExecutionSettings, loadDeepScanExecutionSettings, restoredDeepScanWorkerSettings, type DeepScanLegacySettingsContext } from "./src/deep-scan/recovery-settings.js";
 import { CodexSdkWorkerExecutor } from "./src/deep-scan/executor.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
@@ -759,7 +759,12 @@ export function createCodexSecurityServer(): McpServer {
           store: deepScanStore,
           prepareExecutor: async (run) => new CodexSdkWorkerExecutor({
             ...restoredDeepScanWorkerSettings(
-              await loadDeepScanExecutionSettings(run.scanDir, run),
+              await loadDeepScanExecutionSettings(run.scanDir, run, async () => {
+                const context = await runWorkbench(["get-scan", "--scan-id", run.scanId]);
+                const recipe = context.recipe as Pick<DeepScanLegacySettingsContext, "config"> | undefined;
+                const scan = context.scan as { executionAttribution?: { owner: DeepScanRunState["usageOwner"] } };
+                return { config: recipe?.config, usageOwner: scan.executionAttribution?.owner };
+              }),
               parentSandbox
             ),
             artifactContext: {
@@ -1668,12 +1673,12 @@ async function runWorkbench(
   args: string[],
   input?: string | Buffer,
   selectFinalization = false,
-  beginWithExecutionSettings = false,
+  withExecutionSettings = false,
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
-    return await executeWorkbenchWithStateSelection(pythonCommand, args, input, selectFinalization, beginWithExecutionSettings);
+    return await executeWorkbenchWithStateSelection(pythonCommand, args, input, selectFinalization, withExecutionSettings);
   } catch (error) {
     const launchError = pythonCommand
       ? missingPythonHelperMessage(error, pythonCommand)
@@ -1693,36 +1698,36 @@ async function executeWorkbenchWithStateSelection(
   args: string[],
   input?: string | Buffer,
   selectFinalization = false,
-  beginWithExecutionSettings = false,
+  withExecutionSettings = false,
 ): Promise<JsonObject> {
   if (WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "")) {
-    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, beginWithExecutionSettings);
+    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, withExecutionSettings);
   }
   if (CONFIGURED_WORKBENCH_STATE_DIR) {
-    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, beginWithExecutionSettings);
+    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, withExecutionSettings);
   }
   if (fallbackWorkbenchStateDir) {
-    return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input, selectFinalization, beginWithExecutionSettings);
+    return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input, selectFinalization, withExecutionSettings);
   }
   if (persistentWorkbenchStateSucceeded) {
-    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, beginWithExecutionSettings);
+    return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, withExecutionSettings);
   }
   return await withWorkbenchStateSelectionLock(async () => {
     if (fallbackWorkbenchStateDir) {
-      return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input, selectFinalization, beginWithExecutionSettings);
+      return await executeWorkbench(pythonCommand, args, await fallbackWorkbenchStateDir, input, selectFinalization, withExecutionSettings);
     }
     if (persistentWorkbenchStateSucceeded) {
-      return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, beginWithExecutionSettings);
+      return await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, withExecutionSettings);
     }
     try {
-      const result = await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, beginWithExecutionSettings);
+      const result = await executeWorkbench(pythonCommand, args, undefined, input, selectFinalization, withExecutionSettings);
       persistentWorkbenchStateSucceeded = true;
       return result;
     } catch (error) {
       if (!isUnwritableSqliteOpenError(error)) throw error;
       const fallbackStateDir = await pinFallbackWorkbenchStateDir();
       logWorkbenchStateFallback();
-      return await executeWorkbench(pythonCommand, args, fallbackStateDir, input, selectFinalization, beginWithExecutionSettings);
+      return await executeWorkbench(pythonCommand, args, fallbackStateDir, input, selectFinalization, withExecutionSettings);
     }
   });
 }
@@ -1747,7 +1752,7 @@ async function executeWorkbench(
   stateDir?: string,
   input?: string | Buffer,
   selectFinalization = false,
-  beginWithExecutionSettings = false,
+  withExecutionSettings = false,
 ): Promise<JsonObject> {
   const userContextIndex = args.indexOf("--user-context");
   const userContext = userContextIndex === -1 ? undefined : args[userContextIndex + 1];
@@ -1757,7 +1762,7 @@ async function executeWorkbench(
   }
   const workbenchInput = input ?? userContext;
   const internalInvocation = selectFinalization ? "select_finalization=True"
-    : beginWithExecutionSettings ? "begin_with_execution_settings=True" : undefined;
+    : withExecutionSettings ? "with_execution_settings=True" : undefined;
   const pythonArgs = internalInvocation
     ? ["-c", `import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](${internalInvocation})`, workbenchScriptPath(), ...workbenchArgs]
     : [workbenchScriptPath(), ...workbenchArgs];

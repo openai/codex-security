@@ -3,17 +3,194 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 
 import pytest
-from workbench_test_support import run_workbench
+from workbench_test_support import SCRIPT, run_workbench
 
 
 def snapshot(state_dir: Path) -> str:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         return "\n".join(connection.iterdump())
+
+
+def claim_requiring_original_settings(
+    state: Path, scan_id: str
+) -> subprocess.CompletedProcess[str]:
+    # Exercise the private MCP requirement against both the parent and fixed
+    # workbench, without adding a public CLI argument.
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                [
+                    "import runpy, sys",
+                    "script = sys.argv.pop(1)",
+                    "main = runpy.run_path(script)['main']",
+                    "namespace = main.__globals__",
+                    "parse = namespace['parse_args']",
+                    "def parse_with_requirement(*args, **kwargs):",
+                    "    result = parse(*args, **kwargs)",
+                    "    result.require_execution_settings = True",
+                    "    return result",
+                    "namespace['parse_args'] = parse_with_requirement",
+                    "main()",
+                ]
+            ),
+            str(SCRIPT),
+            "claim-deep-scan-coordinator",
+            "--scan-id",
+            scan_id,
+            "--thread-id",
+            "fixture-thread",
+        ],
+        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow,settings_version",
+    [
+        ("deep-security-scan/v1", 99),
+        ("deep-scan-mcp/v1", 99),
+        ("deep-security-scan/v2", 99),
+        ("deep-security-scan/v2", None),
+    ],
+)
+def test_missing_or_unsupported_settings_reject_before_takeover(
+    tmp_path: Path, workflow: str, settings_version: int | None
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    run = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--thread-id",
+        "fixture-thread",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(tmp_path / "scans"),
+        "--workflow-version",
+        workflow,
+    )["deepScan"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET coordinator_generation = 2, "
+            "phase = 'discovery', updated_at = '2000-01-01T00:00:00Z'"
+        )
+    settings_path = Path(run["scanDir"]) / "artifacts/deep_discovery/execution-settings.json"
+    saved = None
+    if settings_version is not None:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        saved = json.dumps(
+            {
+                "version": settings_version,
+                "settings": {"codexPath": "/fixture/codex", "codexHome": "/fixture/home"},
+            }
+        ).encode()
+        settings_path.write_bytes(saved)
+    before = snapshot(state)
+    result = claim_requiring_original_settings(state, run["scanId"])
+    assert snapshot(state) == before, (
+        "settings rejection must precede ownership and worker recovery"
+    )
+    assert result.returncode != 0
+    assert "execution settings" in result.stderr
+    assert (settings_path.read_bytes() if settings_path.exists() else None) == saved
+
+
+@pytest.mark.parametrize("workflow", ["deep-security-scan/v1", "deep-scan-mcp/v1"])
+def test_legacy_takeover_does_not_require_or_create_a_new_snapshot(
+    tmp_path: Path, workflow: str
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    run = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--thread-id",
+        "fixture-thread",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(tmp_path / "scans"),
+        "--workflow-version",
+        workflow,
+    )["deepScan"]
+    result = claim_requiring_original_settings(state, run["scanId"])
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)["deepScan"]
+    assert observed["workflowVersion"] == workflow
+    assert observed["config"] == run["config"]
+    assert not (Path(run["scanDir"]) / "artifacts/deep_discovery/execution-settings.json").exists()
+
+
+@pytest.mark.parametrize("completion_only", [False, True])
+def test_observation_and_selected_completion_do_not_require_worker_settings(
+    tmp_path: Path, completion_only: bool
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    run = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--thread-id",
+        "fixture-thread",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )["deepScan"]
+    claim = run_workbench(
+        state,
+        "claim-deep-scan-coordinator",
+        "--scan-id",
+        run["scanId"],
+        "--thread-id",
+        "fixture-thread",
+    )
+    if completion_only:
+        selection = {
+            "version": 1,
+            "resultPath": None,
+            "resultSha256": None,
+            "terminalReason": "capped",
+            "omittedWorkerIds": [],
+            "selectedAt": run["createdAt"],
+        }
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET finalization_input_json = ?, "
+                "updated_at = '2000-01-01T00:00:00Z'",
+                (json.dumps(selection),),
+            )
+    before = snapshot(state)
+    result = claim_requiring_original_settings(state, run["scanId"])
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    if completion_only:
+        assert observed["coordinatorDisposition"] == "adopted"
+        assert observed["deepScan"]["finalizationInput"] == selection
+    else:
+        assert observed["coordinatorDisposition"] == "observing"
+        assert (
+            observed["deepScan"]["coordinatorGeneration"]
+            == claim["deepScan"]["coordinatorGeneration"]
+        )
+        assert snapshot(state) == before
 
 
 @pytest.mark.parametrize(

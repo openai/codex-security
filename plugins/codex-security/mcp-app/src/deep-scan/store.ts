@@ -31,7 +31,7 @@ export type WorkbenchRunner = (
   args: string[],
   input?: string,
   selectFinalization?: boolean,
-  beginWithExecutionSettings?: boolean,
+  withExecutionSettings?: boolean,
 ) => Promise<JsonObject>;
 
 const WORKFLOW_VERSION = "deep-security-scan/v2";
@@ -183,7 +183,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
       input.threadId,
       ...this.coordinatorLeaseArgs(input.scanId),
       ...(input.handoffClaimToken ? ["--claim-token", input.handoffClaimToken] : [])
-    ]);
+    ], false, undefined, false, true);
     const run = parseDeepScan(result);
     const disposition = result.coordinatorDisposition;
     if (disposition !== "claimed" && disposition !== "adopted" && disposition !== "observing") {
@@ -444,13 +444,13 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
     retryTransientFailure = false,
     input?: string,
     selectFinalization = false,
-    beginWithExecutionSettings = false,
+    withExecutionSettings = false,
   ): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {
         return retryTransientFailure
           ? await this.runIdempotentPersistence(args, input, selectFinalization)
-          : await this.runWorkbench(args, input, selectFinalization, beginWithExecutionSettings);
+          : await this.runWorkbench(args, input, selectFinalization, withExecutionSettings);
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");
         if (scanId && isStaleCoordinatorGenerationError(error)) {
