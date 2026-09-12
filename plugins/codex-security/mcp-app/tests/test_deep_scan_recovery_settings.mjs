@@ -83,6 +83,44 @@ http_headers = { Authorization = "synthetic-secret" }
   assert.equal(captured.serviceTier, "flex");
   assert.equal(captured.providerConfig, undefined);
   assert.equal(JSON.stringify(captured).includes("synthetic-secret"), false);
+  for (const modelProvider of ["openrouter", "fireworks", "amazon-bedrock"]) {
+    await writeFile(configPath, `model_provider = ${JSON.stringify(modelProvider)}
+[model_providers.${modelProvider}.aws]
+region = "us-west-2"
+profile = "fixture-profile"
+access_key_id = "synthetic-secret"
+`);
+    const selected = await captureSettings({}, { filesystemDenies: [] }, {
+      CODEX_CLI_PATH: process.execPath, CODEX_HOME: root, CODEX_SECURITY_CONFIG_PATH: configPath
+    });
+    assert.equal(selected.modelProvider, modelProvider);
+    const expectedProvider = modelProvider === "amazon-bedrock"
+      ? { "amazon-bedrock": { aws: { region: "us-west-2", profile: "fixture-profile" } } } : undefined;
+    assert.deepEqual(selected.providerConfig, expectedProvider,
+      "saved selections exclude catalog definitions and retain Bedrock selectors");
+    const providerDir = join(root, modelProvider);
+    await writeSnapshot(providerDir, selected);
+    const path = join(providerDir, "artifacts", "deep_discovery", "execution-settings.json");
+    const bytes = await readFile(path, "utf8");
+    assert.equal(bytes.includes("synthetic-secret"), false);
+    const restoredProvider = restoreSettings(await loadSettings(providerDir), { filesystemDenies: [] })
+      .codexOptions.config.model_providers;
+    if (expectedProvider) assert.deepEqual(restoredProvider, expectedProvider);
+    else assert.deepEqual(Object.keys(restoredProvider[modelProvider]).sort(),
+      ["base_url", "env_key", "name", "wire_api"]);
+    assert.equal(await readFile(path, "utf8"), bytes);
+    // Older snapshots can contain catalog definitions. Reading them must not
+    // rewrite their bytes or prevent the existing launch projection.
+    if (!expectedProvider) {
+      await writeSnapshot(providerDir, { ...selected, providerConfig: restoredProvider });
+      const legacyBytes = await readFile(path, "utf8");
+      const legacy = await loadSettings(providerDir);
+      assert.equal(legacy.providerConfig, undefined);
+      assert.deepEqual(restoreSettings(legacy, { filesystemDenies: [] }).codexOptions.config.model_providers,
+        restoredProvider);
+      assert.equal(await readFile(path, "utf8"), legacyBytes);
+    }
+  }
   let credential = "synthetic-first";
   const restored = restoreSettings(captured, { filesystemDenies: ["/fixture/current-deny"] }, () => ({
     CODEX_API_KEY: credential, CODEX_HOME: "/fixture/observer-home", CODEX_CLI_PATH: "/fixture/observer-codex"

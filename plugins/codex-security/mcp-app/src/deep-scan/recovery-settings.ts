@@ -171,7 +171,8 @@ export async function loadDeepScanExecutionSettings(
         serviceTier: (selected.service_tier as string | undefined) ?? native.serviceTier,
         ...(selected.service_tier === undefined && native.nativeServiceTierAbsent
           ? { nativeServiceTierAbsent: true as const } : {}),
-        providerConfig: selected.model_providers as JsonObject | undefined
+        providerConfig: selected.model_provider === "amazon-bedrock"
+          ? selected.model_providers as JsonObject | undefined : undefined
       };
     }
     throw new Error("This Deep Scan has no recorded original execution settings; its executable and Codex home cannot be recovered.");
@@ -238,23 +239,25 @@ export function restoredDeepScanWorkerSettings(
           ...(settings.codexHome === undefined ? {} : { CODEX_HOME: settings.codexHome }) })
           .filter((entry): entry is [string, string] => entry[1] !== undefined));
       },
-      config: {
+      config: scanPreflightCodexConfig({
         ...(settings.model === undefined ? {} : { model: settings.model }),
         ...(settings.reasoningEffort === undefined ? {} : { model_reasoning_effort: settings.reasoningEffort }),
         ...(settings.modelProvider === undefined ? {} : { model_provider: settings.modelProvider }),
         ...(settings.reasoningSummary === undefined ? {} : { model_reasoning_summary: settings.reasoningSummary }),
         ...(settings.serviceTier === undefined ? {} : { service_tier: settings.serviceTier }),
-        ...(settings.providerConfig === undefined ? {} : { model_providers: settings.providerConfig as NonNullable<CodexOptions["config"]>[string] })
-      }
+        ...(settings.providerConfig === undefined ? {} : { model_providers: settings.providerConfig })
+      }) as NonNullable<CodexOptions["config"]>
     }
   };
 }
 
 function executionSettings(value: DeepScanExecutionSettings): DeepScanExecutionSettings {
-  const provider = scanPreflightCodexConfig({
+  // Catalog provider definitions are reconstructed by the existing launch
+  // projection. Only Bedrock's per-scan AWS selectors need persistence.
+  const provider = value.modelProvider === "amazon-bedrock" ? scanPreflightCodexConfig({
     ...(value.modelProvider === undefined ? {} : { model_provider: value.modelProvider }),
     ...(value.providerConfig === undefined ? {} : { model_providers: value.providerConfig })
-  }).model_providers as JsonObject | undefined;
+  }).model_providers as JsonObject | undefined : undefined;
   const settings: DeepScanExecutionSettings = {
     codexPath: value.codexPath,
     codexHome: value.codexHome,
