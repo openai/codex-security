@@ -18,7 +18,8 @@ import {
   requireFinding,
 } from "./deduplication-reviewer.js";
 import {
-  reviewSubmissionInstructions,
+  DEFAULT_RESULT_TOOL_NAMESPACE,
+  reviewSubmissionInstructionsFor,
   reviewErrorInstructions,
   sourceReviewInstructions,
 } from "./deduplication-prompts.js";
@@ -42,6 +43,8 @@ export interface DeduplicationSourceTool {
 /** Serializable model assignment; the SDK retains all result validation. */
 export interface DeduplicationReviewRequest {
   checkpointKey: string;
+  /** Model-visible namespace for submit_decisions and submit_error. */
+  resultToolNamespace: string;
   stage: DeduplicationReviewStage;
   model: string;
   effort: string;
@@ -92,6 +95,8 @@ export interface DeduplicateRecordsOptions {
   /** Isolate review checkpoints and prior decisions belonging to separate corpora. */
   scopeKey: string;
   settingsDigest?: string;
+  /** Model-visible result-tool namespace; defaults to review_validator. */
+  resultToolNamespace?: string;
   checkpointStore?: DeduplicationCheckpointStore;
   priorDecisions?: readonly PriorDeduplicationDecision[];
   /** Defaults to the existing SDK dedupe concurrency (8). */
@@ -109,7 +114,7 @@ export interface DeduplicateRecordsResult extends DetailedDeduplicationResult {
 }
 
 // Changes to record review semantics invalidate saved host review bindings.
-const RECORD_REVIEW_CONTRACT_VERSION = 1;
+const RECORD_REVIEW_CONTRACT_VERSION = 2;
 
 function freeze<T>(value: T): T {
   if (value !== null && typeof value === "object") {
@@ -133,14 +138,28 @@ export async function deduplicateRecords(
       "A record deduplication scopeKey is required.",
     );
 
+  const resultToolNamespace =
+    options.resultToolNamespace ?? DEFAULT_RESULT_TOOL_NAMESPACE;
+  if (
+    typeof resultToolNamespace !== "string" ||
+    !/^[A-Za-z_][A-Za-z0-9_]*$/.test(resultToolNamespace)
+  )
+    throw new CodexSecurityError(
+      "The result tool namespace must be a single identifier.",
+    );
+
   const sourceManifest = freeze(structuredClone(options.sourceManifest));
   const sourceTools = freeze(structuredClone(options.sourceTools ?? []));
   const toolNames = new Set<string>();
   for (const tool of sourceTools) {
     const key = JSON.stringify([tool.namespace, tool.name]);
-    if (tool.namespace === "review_validator" || toolNames.has(key))
+    if (
+      tool.namespace === DEFAULT_RESULT_TOOL_NAMESPACE ||
+      tool.namespace === resultToolNamespace ||
+      toolNames.has(key)
+    )
       throw new CodexSecurityError(
-        "Source tools must have distinct names outside review_validator.",
+        "Source tools must have distinct names outside the reserved result namespaces.",
       );
     toolNames.add(key);
   }
@@ -158,6 +177,7 @@ export async function deduplicateRecords(
     sdkVersion: VERSION,
     scopeKey: options.scopeKey,
     settingsDigest: options.settingsDigest,
+    resultToolNamespace,
     sourceManifest,
     sourceTools,
   });
@@ -202,13 +222,14 @@ export async function deduplicateRecords(
     async run<T>(review: CodexReview<T>): Promise<T> {
       await assertSourceUnchanged();
       const request = {
+        resultToolNamespace,
         stage: review.stage,
         model: review.model,
         effort: review.effort,
         prompt: review.prompt,
         schema: review.schema,
         instructions: {
-          submission: reviewSubmissionInstructions,
+          submission: reviewSubmissionInstructionsFor(resultToolNamespace),
           source: sourceReviewInstructions,
           error: reviewErrorInstructions,
         },
@@ -248,7 +269,7 @@ export async function deduplicateRecords(
         return { finding, potentialDuplicates: [...neighbors.values()] };
       },
     },
-    new CodexDeduplicationReviewer(runner),
+    new CodexDeduplicationReviewer(runner, resultToolNamespace),
     options.signal,
     concurrency,
   );

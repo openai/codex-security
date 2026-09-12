@@ -2036,6 +2036,14 @@ and explicitly configured source tools. The host registers those tools in the
 runtime that performs the review and executes source operations under its own
 authorization. Tool handlers and credentials stay with the host. It returns the
 raw submission; the SDK validates both fresh submissions and checkpoint hits.
+Set `resultToolNamespace` when the runtime exposes result tools under a different
+namespace, such as `mcp__review_validator`. It defaults to `review_validator`;
+`submit_decisions` and `submit_error` keep their fixed names. The SDK supplies the
+resolved namespace in each request and renders its instructions accordingly,
+without changing finding evidence. The host must register those exact tools.
+Changing the namespace invalidates checkpoint and prior-pair bindings. The CLI
+keeps its existing namespace and behavior.
+
 Required source or execution failures must throw rather than invent a verdict.
 SAME/DISTINCT compares corrections and is separate from vulnerability validation.
 

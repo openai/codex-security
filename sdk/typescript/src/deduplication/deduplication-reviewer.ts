@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import type { Finding } from "../models.js";
 import type { CodexReviewRunner } from "./codex-review.js";
-import { pairReviewPrompt, screeningPrompt } from "./deduplication-prompts.js";
+import {
+  DEFAULT_RESULT_TOOL_NAMESPACE,
+  pairReviewPrompt,
+  screeningPrompt,
+} from "./deduplication-prompts.js";
 
 const rationale = z.string().refine((value) => value.trim().length > 0);
 const sameSchema = z.object({
@@ -156,14 +160,17 @@ function screeningToolSchema(neighborCount: number): object {
 }
 
 export class CodexDeduplicationReviewer implements DeduplicationReviewer {
-  constructor(private readonly runner: Pick<CodexReviewRunner, "run">) {}
+  constructor(
+    private readonly runner: Pick<CodexReviewRunner, "run">,
+    private readonly resultToolNamespace = DEFAULT_RESULT_TOOL_NAMESPACE,
+  ) {}
 
   async screen(findings: readonly Finding[]): Promise<ScreeningResult> {
     return await this.runner.run({
       stage: "screening",
       model: "gpt-5.6-luna",
       effort: "xhigh",
-      prompt: screeningPrompt(findings),
+      prompt: screeningPrompt(findings, this.resultToolNamespace),
       schema: screeningToolSchema(findings.length - 1),
       validate: (value) => validateScreening(value, findings),
     });
@@ -174,7 +181,7 @@ export class CodexDeduplicationReviewer implements DeduplicationReviewer {
       stage: "pair-review",
       model: "gpt-5.6-sol",
       effort: "high",
-      prompt: pairReviewPrompt(findings),
+      prompt: pairReviewPrompt(findings, this.resultToolNamespace),
       schema: {
         type: "object",
         ...z.toJSONSchema(reviewSchema, { target: "openapi-3.0" }),

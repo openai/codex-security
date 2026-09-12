@@ -603,3 +603,113 @@ test("detailed outcomes preserve input order when screening completion order cha
   }
   expect(await run([1, 0])).toEqual(await run([0, 1]));
 });
+
+test("injected result namespaces render SDK instructions without changing finding evidence", async () => {
+  const records = [finding(1), finding(2)];
+  records[0]!.extensions = {
+    originalEvidence: {
+      literal: "review_validator.submit_error is source evidence",
+    },
+  };
+  const input = options(records);
+  input.resultToolNamespace = "mcp__review_validator";
+  input.checkpointStore = new Checkpoints();
+  const requests: DeduplicationReviewRequest[] = [];
+  input.reviewRunner = {
+    async run(request) {
+      requests.push(request);
+      expect(request.resultToolNamespace).toBe("mcp__review_validator");
+      expect(request.instructions.submission).toContain(
+        "mcp__review_validator.submit_decisions",
+      );
+      expect(request.instructions.submission).toContain(
+        "mcp__review_validator.submit_error",
+      );
+      const authored = request.prompt.slice(
+        0,
+        request.prompt.lastIndexOf("\n\n"),
+      );
+      expect(authored).toContain("mcp__review_validator.submit_error");
+      expect(authored).not.toMatch(/\breview_validator\./);
+      for (const value of assigned(request))
+        expect(value).toEqual(
+          records.find((record) => record.findingId === value.findingId)!,
+        );
+      return submission(request);
+    },
+  };
+  const first = await deduplicateRecords(input);
+  expect(first.uniqueFindingIds).toHaveLength(1);
+  expect(requests).toHaveLength(3);
+  expect(await deduplicateRecords(input)).toEqual(first);
+  expect(requests).toHaveLength(3);
+});
+
+test("result namespace changes invalidate checkpoints and prior pair bindings", async () => {
+  const input = options();
+  input.checkpointStore = new Checkpoints();
+  let reviews = 0;
+  input.reviewRunner = {
+    async run(request) {
+      reviews++;
+      return submission(request);
+    },
+  };
+  const first = await deduplicateRecords(input);
+  expect(reviews).toBe(3);
+  input.resultToolNamespace = "review_validator";
+  expect(await deduplicateRecords(input)).toEqual(first);
+  expect(reviews).toBe(3);
+  input.resultToolNamespace = "mcp__review_validator";
+  input.priorDecisions = first.pairOutcomes.map((outcome) => ({
+    findingIds: outcome.findingIds,
+    decision: "SAME",
+    bindingDigest: outcome.bindingDigest,
+  }));
+  await expect(deduplicateRecords(input)).rejects.toThrow(
+    "current record/source binding",
+  );
+  expect(reviews).toBe(3);
+  input.priorDecisions = [];
+  const changed = await deduplicateRecords(input);
+  expect(reviews).toBe(6);
+  expect(changed.checkpointKeys).not.toEqual(first.checkpointKeys);
+  expect(changed.pairOutcomes[0]!.bindingDigest).not.toBe(
+    first.pairOutcomes[0]!.bindingDigest,
+  );
+});
+
+test("invalid or colliding result namespaces fail before source access", async () => {
+  for (const namespace of [
+    "",
+    "review.validator",
+    " leading",
+    "review\nvalidator",
+  ]) {
+    const input = options();
+    input.resultToolNamespace = namespace;
+    input.verifySource = async () => {
+      throw new Error("Source must not be accessed");
+    };
+    await expect(deduplicateRecords(input)).rejects.toThrow(
+      "single identifier",
+    );
+  }
+  const input = options();
+  input.resultToolNamespace = "mcp__review_validator";
+  input.sourceTools = [
+    {
+      namespace: input.resultToolNamespace,
+      name: "read_source",
+      description: "Synthetic source operation",
+      inputSchema: { type: "object" },
+      version: "1",
+    },
+  ];
+  input.verifySource = async () => {
+    throw new Error("Source must not be accessed");
+  };
+  await expect(deduplicateRecords(input)).rejects.toThrow(
+    "reserved result namespaces",
+  );
+});
