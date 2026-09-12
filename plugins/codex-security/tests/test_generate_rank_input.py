@@ -869,121 +869,6 @@ def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: s
     assert {row["path"]: row["preview"] for row in read_jsonl(output)} == expected
 
 
-def test_copy_and_select_deep_review_inputs(tmp_path: Path) -> None:
-    rank_input = tmp_path / "rank_input.jsonl"
-    write_jsonl(
-        rank_input,
-        [
-            {"path": "a.py", "area": "core", "preview": "a"},
-            {"path": "b.py", "area": "api", "preview": "b"},
-        ],
-    )
-    copied = tmp_path / "copied.jsonl"
-    run_cli(
-        "copy-deep-review-input",
-        "--rank-input",
-        str(rank_input),
-        "--out",
-        str(copied),
-    )
-    assert read_jsonl(copied) == [
-        {"path": "a.py", "area": "core"},
-        {"path": "b.py", "area": "api"},
-    ]
-
-    rank_output = tmp_path / "rank_output.jsonl"
-    write_jsonl(
-        rank_output,
-        [
-            {"path": "c.py", "area": "api", "score": 8, "include": True, "reason": "c"},
-            {"path": "a.py", "area": "core", "score": 10, "include": True, "reason": "a"},
-            {"path": "b.py", "area": "api", "score": 8, "include": True, "reason": "b"},
-            {"path": "d.py", "area": "core", "score": 2, "include": False, "reason": "d"},
-        ],
-    )
-    selected = tmp_path / "selected.jsonl"
-    run_cli(
-        "select-deep-review-input",
-        "--rank-output",
-        str(rank_output),
-        "--top-percent",
-        "67",
-        "--out",
-        str(selected),
-    )
-    assert read_jsonl(selected) == [
-        {"path": "a.py", "area": "core"},
-        {"path": "b.py", "area": "api"},
-    ]
-
-
-def test_select_honors_explicit_top_percent_20(tmp_path: Path) -> None:
-    rank_output = tmp_path / "rank_output.jsonl"
-    rows = make_rank_rows(5)
-    write_jsonl(
-        rank_output,
-        [rank_result(row, score=10 - index) for index, row in enumerate(rows)],
-    )
-    selected = tmp_path / "selected.jsonl"
-
-    run_cli(
-        "select-deep-review-input",
-        "--rank-output",
-        str(rank_output),
-        "--top-percent",
-        "20",
-        "--out",
-        str(selected),
-    )
-
-    assert read_jsonl(selected) == [{"path": "src/file_00.py", "area": "src"}]
-
-
-def test_select_defaults_to_top_percent_100(tmp_path: Path) -> None:
-    rank_output = tmp_path / "rank_output.jsonl"
-    rows = make_rank_rows(5)
-    write_jsonl(
-        rank_output,
-        [rank_result(row, score=10 - index) for index, row in enumerate(rows)],
-    )
-    selected = tmp_path / "selected.jsonl"
-
-    run_cli(
-        "select-deep-review-input",
-        "--rank-output",
-        str(rank_output),
-        "--out",
-        str(selected),
-    )
-
-    assert len(read_jsonl(selected)) == 5
-
-
-def test_select_falls_back_to_all_rows_when_workers_exclude_everything(tmp_path: Path) -> None:
-    rank_output = tmp_path / "rank_output.jsonl"
-    write_jsonl(
-        rank_output,
-        [
-            {"path": "b.py", "area": "api", "score": 2, "include": False, "reason": "b"},
-            {"path": "a.py", "area": "core", "score": 9, "include": False, "reason": "a"},
-        ],
-    )
-    selected = tmp_path / "selected.jsonl"
-
-    run_cli(
-        "select-deep-review-input",
-        "--rank-output",
-        str(rank_output),
-        "--out",
-        str(selected),
-    )
-
-    assert read_jsonl(selected) == [
-        {"path": "a.py", "area": "core"},
-        {"path": "b.py", "area": "api"},
-    ]
-
-
 def test_make_rank_shards_is_deterministic_and_bounded(tmp_path: Path) -> None:
     rank_input = tmp_path / "rank_input.jsonl"
     rows = make_rank_rows(312)
@@ -1152,16 +1037,6 @@ def test_empty_rank_input_closes_with_zero_shards_and_workers(tmp_path: Path) ->
     )
     assert merge_result.stdout == f"Merged 0 ranking rows into {rank_output}\n"
     assert rank_output.read_bytes() == b""
-
-    deep_review_input = tmp_path / "deep_review_input.jsonl"
-    run_cli(
-        "select-deep-review-input",
-        "--rank-output",
-        str(rank_output),
-        "--out",
-        str(deep_review_input),
-    )
-    assert deep_review_input.read_bytes() == b""
 
 
 def test_make_rank_pool_plan_requires_sibling_rank_shards_directory(tmp_path: Path) -> None:
