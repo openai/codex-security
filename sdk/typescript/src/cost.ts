@@ -1,4 +1,4 @@
-import { open, readdir } from "node:fs/promises";
+import { open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   estimateScanCost,
@@ -256,24 +256,52 @@ export class ScanCostTracker {
       this.#attribution = attribution;
     }
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
-      let session = this.#sessions.get(path);
-      if (session === undefined) {
-        session = createSessionUsage();
-        this.#sessions.set(path, session);
-      }
+    const homes = new Set([this.#options.codexHome]);
+    if (this.#options.scanDirectory !== undefined) {
       try {
-        await readSessionUsage(
-          path,
-          session,
-          this.#options.repository,
-          this.#attribution,
+        const saved: unknown = JSON.parse(
+          await readFile(
+            join(
+              this.#options.scanDirectory,
+              "artifacts",
+              "deep_discovery",
+              "execution-settings.json",
+            ),
+            "utf8",
+          ),
         );
+        if (
+          isRecord(saved) &&
+          saved["version"] === 1 &&
+          isRecord(saved["settings"])
+        ) {
+          const home = saved["settings"]["codexHome"];
+          if (typeof home === "string" && home !== "") homes.add(home);
+        }
       } catch (error) {
-        if (session.threadId === null) throw error;
-        unreadable.push({ session, error });
+        if (!isMissingFile(error)) throw error;
+      }
+    }
+    // Recovery restores workers to their recorded home; the SDK parent can
+    // continue in the current home. Apply the same scan membership to both.
+    for (const home of homes) {
+      for await (const path of sessionFiles(join(home, "sessions"))) {
+        let session = this.#sessions.get(path);
+        if (session === undefined) {
+          session = createSessionUsage();
+          this.#sessions.set(path, session);
+        }
+        try {
+          await readSessionUsage(
+            path,
+            session,
+            this.#options.repository,
+            this.#attribution,
+          );
+        } catch (error) {
+          if (session.threadId === null) throw error;
+          unreadable.push({ session, error });
+        }
       }
     }
 

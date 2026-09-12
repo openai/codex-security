@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   realpath,
+  readFile,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -2258,4 +2259,133 @@ describe("live scan cost tracking", () => {
       else expect(snapshot.cost?.inputTokens).toBe(1_500);
     },
   );
+});
+
+describe("recorded Deep worker homes", () => {
+  test("keeps resumed worker usage and current parent usage isolated per scan", async () => {
+    const currentHome = await codexHome();
+    const firstHome = await codexHome();
+    const secondHome = await codexHome();
+    const at = "2026-09-01T00:00:02Z";
+    const trackers: ScanCostTracker[] = [];
+    const fixture = async (home: string, id: string, count: number) => {
+      const path = await writeSession(home, id, {});
+      await appendFile(
+        path,
+        [
+          {
+            type: "turn_context",
+            timestamp: at,
+            payload: { turn_id: "scan-turn", model: "gpt-5.6-sol" },
+          },
+          {
+            type: "token_usage_record",
+            timestamp: at,
+            payload: {
+              thread_id: id,
+              turn_id: "scan-turn",
+              response_id: `${id}-response`,
+              model: "gpt-5.6-sol",
+              usage: { input_tokens: count, output_tokens: 0 },
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+      return path;
+    };
+    try {
+      const cases = [
+        { id: "one", home: firstHome, parent: 10, discovery: 20, reducer: 30 },
+        { id: "two", home: secondHome, parent: 11, discovery: 21, reducer: 31 },
+      ];
+      for (const row of cases) {
+        const scanDirectory = join(currentHome, "scans", row.id);
+        const settingsDirectory = join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+        );
+        await mkdir(settingsDirectory, { recursive: true });
+        await writeFile(
+          join(settingsDirectory, "execution-settings.json"),
+          JSON.stringify({
+            version: 1,
+            settings: { codexHome: row.home },
+          }),
+        );
+        await fixture(currentHome, `${row.id}-parent`, row.parent);
+        const discovery = await fixture(
+          row.home,
+          `${row.id}-discovery`,
+          row.discovery,
+        );
+        await fixture(row.home, `${row.id}-reducer`, row.reducer);
+        await fixture(row.home, `${row.id}-unrelated`, 10_000);
+        // Repeated receipt identity after reconnect must remain one charge.
+        const duplicate = (await readFile(discovery, "utf8"))
+          .trim()
+          .split("\n")
+          .at(-1)!;
+        await appendFile(discovery, duplicate + "\n");
+        const attribution = {
+          formatVersion: 1 as const,
+          executionThreadIds: [`${row.id}-discovery`, `${row.id}-reducer`],
+          owner: {
+            threadId: `${row.id}-parent`,
+            turnId: "scan-turn",
+            startedAt: at,
+          },
+          startedAt: at,
+          completedAt: null,
+        };
+        const tracker = new ScanCostTracker({
+          codexHome: currentHome,
+          scanDirectory,
+          model: "gpt-5.6-sol",
+        });
+        tracker.setAttributionReader(async () => attribution);
+        tracker.start(`${row.id}-parent`);
+        trackers.push(tracker);
+      }
+      const initial = await Promise.all(
+        trackers.map((tracker) => tracker.refresh()),
+      );
+      expect(
+        initial.map((snapshot) => tokenUsage(snapshot.usage)?.input_tokens),
+      ).toEqual([60, 63]);
+      expect(initial.map((snapshot) => snapshot.cost?.inputTokens)).toEqual([
+        60, 63,
+      ]);
+      const firstDirectory = join(currentHome, "scans", "one");
+      const rebuilt = new ScanCostTracker({
+        codexHome: currentHome,
+        scanDirectory: firstDirectory,
+        model: "gpt-5.6-sol",
+      });
+      rebuilt.setAttributionReader(async () => ({
+        formatVersion: 1,
+        executionThreadIds: [
+          "one-discovery",
+          "one-reducer",
+          "one-missing-attempt",
+        ],
+        owner: { threadId: "one-parent", turnId: "scan-turn", startedAt: at },
+        startedAt: at,
+        completedAt: null,
+      }));
+      rebuilt.start("one-parent");
+      trackers.push(rebuilt);
+      expect((await rebuilt.refresh()).usage).toMatchObject({
+        input_tokens: 60,
+        coverage: "partial",
+      });
+      await fixture(firstHome, "one-missing-attempt", 7);
+      expect((await rebuilt.refresh()).cost?.inputTokens).toBe(67);
+      expect((await trackers[1]!.refresh()).cost?.inputTokens).toBe(63);
+    } finally {
+      await Promise.all(trackers.map((tracker) => tracker.stop()));
+    }
+  });
 });
