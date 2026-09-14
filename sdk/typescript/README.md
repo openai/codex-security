@@ -572,9 +572,10 @@ Working-tree snapshots include files from untracked nested Git repositories.
 Initialized submodules must be clean and checked out at the commit recorded by
 the parent repository.
 
-Repeat `--knowledge-base PATH` for Markdown, text, PDF, or Word (`.docx`) files.
-Directories are searched recursively. Bulk scans share these documents with
-every repository.
+Repeat `--knowledge-base PATH` for UTF-8 text files with any extension (including
+JSON and SARIF), PDF, or Word (`.docx`) files. Directories are searched recursively,
+skipping other binary files. Explicitly supplied unsupported binary files are rejected.
+Bulk scans share these documents with every repository.
 
 Use an empty output directory outside the scanned directory and enclosing Git
 worktree. On macOS/Linux, existing directories must be private to you
@@ -1277,7 +1278,7 @@ Omitting `--rubric` inherits each finding's existing severity without a model ca
 
 `--rubric PATH` supplies the classification policy. Repeat `--knowledge-base PATH`
 to provide supporting architecture, deployment, or business context. Both accept
-the same Markdown, text, PDF, DOCX, and directory inputs as scan knowledge bases.
+the same UTF-8 text, PDF, DOCX, and directory inputs as scan knowledge bases.
 Rubric classification uses the full supplied report and context in a separate
 read-only Codex turn per finding, without source inspection, tools, or new
 validation. `--model` and `--effort` select the classification model and reasoning

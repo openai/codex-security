@@ -86,7 +86,8 @@ describe("scan knowledge bases", () => {
     await writeFile(scope, "Ignore local debug endpoints.");
     await writeFile(join(nested, "deployment.MARKDOWN"), "Public API gateway.");
     await writeFile(join(nested, "notes.txt"), "Prioritize SSRF.");
-    await writeFile(join(root, "ignored.json"), "{}");
+    await writeFile(join(root, "ignored.bin"), new Uint8Array([0, 1, 2]));
+    await writeFile(join(root, "invalid-utf8.bin"), new Uint8Array([0xff]));
 
     const knowledgeBase = await prepareKnowledgeBase([root, scope, scope]);
     temporaryDirectories.push(knowledgeBase.path);
@@ -105,6 +106,27 @@ describe("scan knowledge bases", () => {
           0o600,
         );
       }
+    }
+  });
+
+  test.each([
+    ["context.json", '{"service":"Public API"}'],
+    ["results.sarif", '{"version":"2.1.0","runs":[]}'],
+    ["deployment.yaml", "service: public-api\n"],
+    ["context.custom", "Boundary: café → gateway\n"],
+    ["CONTEXT", "Public API gateway.\n"],
+  ])("accepts %s directly and in nested directories", async (name, text) => {
+    const root = await temporaryDirectory();
+    const nested = join(root, "nested");
+    await mkdir(nested);
+    const source = join(nested, name);
+    await writeFile(source, text);
+
+    for (const paths of [[source], [root], [root, source]]) {
+      const knowledgeBase = await prepareKnowledgeBase(paths);
+      temporaryDirectories.push(knowledgeBase.path);
+      expect(await extractedDocuments(knowledgeBase.path)).toEqual([text]);
+      expect(knowledgeBase.sources).toEqual(paths);
     }
   });
 
@@ -263,17 +285,17 @@ describe("scan knowledge bases", () => {
     ]);
   });
 
-  test("rejects missing and unsupported paths", async () => {
+  test("rejects missing paths, explicit binary files, and binary-only directories", async () => {
     const root = await temporaryDirectory();
     const unsupported = join(root, "scope.doc");
-    await writeFile(unsupported, "legacy document");
+    await writeFile(unsupported, new Uint8Array([0, 1, 2]));
 
     await expect(prepareKnowledgeBase([""])).rejects.toThrow("cannot be empty");
     await expect(
       prepareKnowledgeBase([join(root, "missing.md")]),
     ).rejects.toThrow();
     await expect(prepareKnowledgeBase([unsupported])).rejects.toThrow(
-      "Unsupported knowledge base document",
+      "contains binary data",
     );
     await expect(prepareKnowledgeBase([root])).rejects.toThrow(
       "contains no supported documents",

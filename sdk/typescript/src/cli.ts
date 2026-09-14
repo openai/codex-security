@@ -3184,7 +3184,7 @@ export async function main(
           .array(optionValue("--knowledge-base"))
           .default([])
           .describe(
-            "Add architecture or security-context files; repeat for multiple paths.",
+            "Add UTF-8 text (any extension), PDF, DOCX, or directories; repeat for multiple paths.",
           ),
         outputDir: optionValue("--output-dir")
           .optional()
@@ -3402,7 +3402,7 @@ export async function main(
             .optional()
             .meta({ default: [] })
             .describe(
-              "Add security-context files or directories; repeat for multiple paths.",
+              "Add UTF-8 text (any extension), PDF, DOCX, or directories; repeat for multiple paths.",
             ),
           scanPromptFile: optionValue("--scan-prompt-file")
             .optional()
@@ -3742,7 +3742,7 @@ export async function main(
           .array(optionValue("--knowledge-base"))
           .default([])
           .describe(
-            "Supporting security context; repeat for more files or directories.",
+            "Supporting UTF-8 text (any extension), PDF, DOCX, or directories; repeat for multiple paths.",
           ),
         findingId: z
           .array(optionValue("--finding-id"))
@@ -3973,7 +3973,9 @@ export async function main(
             .array(optionValue("--knowledge-base"))
             .optional()
             .meta({ default: [] })
-            .describe("Read shared security docs for every component."),
+            .describe(
+              "Share UTF-8 text (any extension), PDF, DOCX, or directories with every component.",
+            ),
           scanPromptFile: optionValue("--scan-prompt-file")
             .optional()
             .describe("Append instructions from FILE to every scan."),
@@ -4231,7 +4233,9 @@ export async function main(
           .array(optionValue("--knowledge-base"))
           .optional()
           .meta({ default: [] })
-          .describe("Read shared security docs for every repository."),
+          .describe(
+            "Share UTF-8 text (any extension), PDF, DOCX, or directories with every repository.",
+          ),
         workers: z
           .number()
           .int()
