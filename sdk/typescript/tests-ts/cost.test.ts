@@ -228,9 +228,10 @@ describe("scan cost", () => {
       cacheWriteInputTokens: 300_000,
       outputTokens: 100_000,
       estimatedUsd: 13.95,
+      estimatedUsdRange: { min: 13.95, max: 25.4, context: "unknown" },
       pricing: {
         source: "https://developers.openai.com/api/docs/pricing",
-        asOf: "2026-09-09",
+        asOf: "2026-09-14",
         serviceTier: "standard",
         context: "short",
         usdPerMillionTokens: {
@@ -238,6 +239,12 @@ describe("scan cost", () => {
           cacheRead: 1,
           cacheWrite: 12.5,
           output: 50,
+        },
+        longContextUsdPerMillionTokens: {
+          input: 20,
+          cacheRead: 2,
+          cacheWrite: 25,
+          output: 75,
         },
       },
     });

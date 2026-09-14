@@ -1,7 +1,7 @@
 import type { CodexSecurity, ScanAuthMode } from "./api.js";
 import type { BulkScanPrompt } from "./bulk-scan-discovery.js";
 import type { CodexSecurityConfig } from "./config.js";
-import { formatUsd } from "./cost.js";
+import { formatScanCost } from "./cost-model.js";
 import { safeErrorMessage } from "./errors.js";
 import {
   formatSecurityPolicyText as display,
@@ -199,7 +199,7 @@ export async function runPolicyCommand(
     }
     const seconds = Math.max(0, (dependencies.now() - started) / 1000);
     write(
-      `Policy generation finished in ${seconds.toFixed(1)}s${cost === null ? "" : ` (${formatUsd(cost.estimatedUsd)} estimated)`}.`,
+      `Policy generation finished in ${seconds.toFixed(1)}s${cost === null ? "" : ` (estimated cost: ${formatScanCost(cost)})`}.`,
     );
     return {
       exitCode: 0,

@@ -115,7 +115,11 @@ import {
   type JsonValue,
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
-import { formatScanCostTokens, formatTokenUsage } from "./cost-model.js";
+import {
+  formatScanCost,
+  formatScanCostTokens,
+  formatTokenUsage,
+} from "./cost-model.js";
 import {
   isOutsidePath,
   readRegularInputFile,
@@ -8112,8 +8116,7 @@ async function executeScan(
       }
       if (runningCost !== null) {
         details.push(`Tokens: ${formatScanCostTokens(runningCost)}`);
-        if (showCost)
-          details.push(`Cost: ${formatUsd(runningCost.estimatedUsd)}`);
+        if (showCost) details.push(`Cost: ${formatScanCost(runningCost)}`);
       }
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
     };
@@ -8159,6 +8162,7 @@ async function executeScan(
         diagnostic("cost.updated", {
           model: cost.model,
           estimated_usd: showCost ? cost.estimatedUsd : undefined,
+          cost_estimate: showCost ? formatScanCost(cost) : undefined,
           input_tokens: cost.inputTokens,
           cached_input_tokens: cost.cachedInputTokens,
           cache_write_input_tokens: cost.cacheWriteInputTokens,
@@ -8173,11 +8177,11 @@ async function executeScan(
         progress?.stopTimer();
         if (maxCostUsd === undefined) {
           progress?.stage(
-            `Tokens: ${formatScanCostTokens(cost)}.${showCost ? ` Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.` : ""}`,
+            `Tokens: ${formatScanCostTokens(cost)}.${showCost ? ` Estimated cost: ${formatScanCost(cost)}.` : ""}`,
           );
         } else {
           progress?.stage(
-            `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(maxCostUsd)} limit`,
+            `Estimated cost: ${formatScanCost(cost)}; short-context budget baseline: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(maxCostUsd)} limit`,
           );
         }
         if (maxCostUsd === undefined || cost.estimatedUsd <= maxCostUsd) {
@@ -8441,6 +8445,10 @@ async function executeScan(
       partial_output: scanDir !== null,
       max_cost_usd: costLimitFailure?.maxCostUsd,
       estimated_usd: costLimitFailure?.cost.estimatedUsd,
+      cost_estimate:
+        costLimitFailure === undefined
+          ? undefined
+          : formatScanCost(costLimitFailure.cost),
     });
     errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {
@@ -8538,6 +8546,10 @@ async function executeScan(
       findings: findings.length,
       scan_id: result.manifest.scan.id,
       estimated_usd: showCost ? result.cost?.estimatedUsd : undefined,
+      cost_estimate:
+        showCost && result.cost !== null
+          ? formatScanCost(result.cost)
+          : undefined,
       exit_code: exitCode,
     });
     progress?.stopTimer();
@@ -8972,7 +8984,7 @@ function printScanSummary(
     const costSummary =
       result.cost === null
         ? "unavailable (model pricing or usage missing)"
-        : `${formatUsd(result.cost.estimatedUsd)} (standard, short context)`;
+        : formatScanCost(result.cost);
     errorOutput.write(`  ${paint("COST", 1)}      ${costSummary}\n`);
   }
   errorOutput.write(
@@ -8994,7 +9006,7 @@ function componentScanEventLine(
   }
   if (event.type !== "cost") return null;
   const cost = event.value;
-  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)}${showCost ? ` | Cost: ${formatUsd(cost.estimatedUsd)}` : ""}\n`;
+  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)}${showCost ? ` | Cost: ${formatScanCost(cost)}` : ""}\n`;
 }
 
 function protectedRootErrorMessage(
