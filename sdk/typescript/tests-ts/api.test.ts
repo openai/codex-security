@@ -4892,7 +4892,7 @@ describe("CodexSecurity orchestration", () => {
       "--scan-id",
       "scan_example_001",
       "--message",
-      `Scan stopped: estimated cost $0.00488 exceeded the $0.004 limit; partial output remains at ${scanDir}.`,
+      `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
       "--cost-json",
       JSON.stringify(cost),
     ]);
@@ -5025,7 +5025,7 @@ describe("CodexSecurity orchestration", () => {
           expect(recovered.threadId).toBe("scan-thread");
           expect(recovered.cost?.estimatedUsd).toBe(0.00488);
           expect(warnings).toEqual([
-            `Scan stopped: estimated cost $0.00488 exceeded the $0.004 limit; partial output remains at ${scanDir}.`,
+            `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
         }
