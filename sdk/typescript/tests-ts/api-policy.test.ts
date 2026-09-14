@@ -1245,6 +1245,12 @@ describe("CodexSecurity policy API", () => {
     expect(f.configuration()?.env?.["CODEX_SECURITY_SCAN_ID"]).toBeUndefined();
     expect(result.cost?.inputTokens).toBe(300);
     expect(result.cost?.outputTokens).toBe(30);
+    expect(result.cost?.estimatedUsdRange).toEqual({
+      min: 0.0018,
+      max: 0.0033,
+      context: "unknown",
+    });
+    expect(result.cost?.pricing?.longContextUsdPerMillionTokens?.input).toBe(8);
     expect(costs).toHaveLength(3);
     expect(costs.at(-1)).toBe(result.cost?.estimatedUsd);
     expect(await readFile(result.draftPath, "utf8")).toBe(POLICY);

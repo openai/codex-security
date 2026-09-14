@@ -4727,12 +4727,12 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
     expect(stderr.text()).toContain(
-      "Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total. Estimated cost: $0.00488 USD.",
+      "Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total. Estimated cost: $0.00488–$0.01156 (standard, context unknown, cache writes unknown).",
     );
     expect(stderr.text()).toContain("Scan phase: reviewing files (0/8 files).");
     expect(stderr.text()).toContain("Scan phase: reviewing files (3/8 files).");
     expect(stderr.text()).toContain(
-      "Running scan: reviewing files | Workers: 4/6 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total | Cost: $0.00488",
+      "Running scan: reviewing files | Workers: 4/6 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total | Cost: $0.00488–$0.01156",
     );
   });
 
@@ -4805,7 +4805,9 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
     );
-    expect(stderr.text()).toContain("COST      $0.00488");
+    expect(stderr.text()).toContain(
+      "COST      $0.00488–$0.01156 (standard, context unknown, cache writes unknown)",
+    );
     expect(stderr.text()).toContain(`REPORT    ${result.reportPath}`);
     expect(stderr.text()).toContain("RESULTS   /tmp/scan");
     expect(stderr.text()).not.toContain("Next:");
@@ -4848,7 +4850,7 @@ describe("CLI", () => {
     },
   );
 
-  test("reports the running cost against the scan budget", async () => {
+  test("reports a cost range while preserving the short-context scan budget", async () => {
     const stdout = capture();
     const stderr = capture();
     const result = fakeResult([], "complete", {
@@ -4859,14 +4861,20 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scan", ".", "--json", "--max-cost", "0.01"],
+        ["scan", ".", "--verbose", "--json", "--max-cost", "0.01"],
         stdout.stream,
         stderr.stream,
         dependencies({ result, costUpdates: [result.cost!] }),
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-    expect(stderr.text()).toContain("Estimated cost: $0.00488 of $0.01 limit");
+    expect(stderr.text()).toContain("Estimated cost: $0.00488–$0.01156");
+    expect(stderr.text()).toContain(
+      "short-context budget baseline: $0.00488 of $0.01 limit",
+    );
+    expect(stderr.text()).toContain(
+      'estimated_usd=0.00488 cost_estimate="$0.00488–$0.01156 (standard, context unknown, cache writes unknown)"',
+    );
   });
 
   test("includes cache-write tokens in verbose cost diagnostics", async () => {
@@ -4892,6 +4900,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("codex-security: debug: cost.updated");
     expect(stderr.text()).toContain("cache_write_input_tokens=200");
     expect(stderr.text()).not.toContain("estimated_usd=");
+    expect(stderr.text()).not.toContain("cost_estimate=");
   });
 
   test("reports and classifies a scan stopped when its live cost exceeds the limit", async () => {
@@ -4918,7 +4927,7 @@ describe("CLI", () => {
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain(
-      "Scan stopped: estimated cost $0.00488 exceeded the $0.004 limit; partial output remains at /tmp/scan.",
+      "Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at /tmp/scan.",
     );
     expect(stderr.text()).toMatch(
       /scan\.configuration[^\n]*max_cost_usd=0\.004/u,
