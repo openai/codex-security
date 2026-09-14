@@ -13,6 +13,8 @@ concurrency:
 jobs:
   native:
     if: github.repository == 'openai/codex-security'
+    permissions:
+      contents: read
     uses: ./.github/workflows/native-artifacts.yml
 
   verify:

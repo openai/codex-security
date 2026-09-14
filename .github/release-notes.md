@@ -38,6 +38,7 @@
 - upgrade Stryker with compatible mutation tooling ([#912](https://github.com/openai/codex-security/pull/912))
 - limit fix-finding to security vulnerabilities ([#923](https://github.com/openai/codex-security/pull/923))
 - accept text knowledge-base files with any extension ([#924](https://github.com/openai/codex-security/pull/924))
+- declare native release workflow permissions ([#925](https://github.com/openai/codex-security/pull/925))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
