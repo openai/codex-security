@@ -1,11 +1,91 @@
 import assert from "node:assert/strict";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export async function testDeepScanPublication({
   fixtureRun, FakeStore, FakeExecutor, DeepScanCoordinator, deferred,
   immediateClock, eventually,
 }) {
+  async function testSelectedFinalizationOwner() {
+    for (const failure of [undefined, "draft", "finish", "parent", "replacement"]) {
+      const fixture = await fixtureRun({ workers: 1, subagents: 0, stopAfterNoNew: 1, maxDiscoveryRuns: 1 });
+      fixture.run.workflowVersion = "deep-security-scan/v2";
+      fixture.run.coordinatorGeneration = 3;
+      fixture.run.finalizationInput = {
+        version: 1, resultPath: null, resultSha256: null, terminalReason: "capped",
+        omittedWorkerIds: [], selectedAt: "2026-01-01T00:00:00Z",
+      };
+      const store = new FakeStore(fixture.run);
+      const finishStarted = deferred();
+      const releaseFinish = deferred();
+      const parentStarted = deferred();
+      const releaseParent = deferred();
+      const calls = [];
+      const events = [];
+      store.finish = async () => {
+        calls.push("finish");
+        finishStarted.resolve();
+        await releaseFinish.promise;
+        if (failure === "finish") throw new Error("injected selected finish failure");
+        if (failure === "replacement") {
+          store.run = { ...store.run, status: "succeeded", coordinatorGeneration: 4 };
+          throw new Error("Deep Scan coordinator generation is stale.");
+        }
+        store.run = { ...store.run, status: "succeeded", terminalReason: "capped" };
+        return structuredClone(store.run);
+      };
+      const coordinator = new DeepScanCoordinator({
+        run: fixture.run, store, pluginRoot: fixture.pluginRoot,
+        executor: { run: async () => assert.fail("Selected finalization cannot start model work") },
+        threadId: "selected-owner", log: (event) => events.push(event),
+        onComplete: async () => {
+          calls.push("draft");
+          if (failure === "draft") throw new Error("injected selected draft failure");
+        },
+        onFinalized: async (run) => {
+          calls.push("parent");
+          assert.equal(run.status, "succeeded");
+          assert.equal(run.coordinatorGeneration, 3);
+          parentStarted.resolve();
+          await releaseParent.promise;
+          if (failure === "parent") throw new Error("injected selected parent failure");
+        },
+      });
+      // Rejections stay observed even when the user detaches their only waiter.
+      const settled = coordinator.settled();
+      settled.catch(() => {});
+      const observer = new AbortController();
+      coordinator.start();
+      const detached = coordinator.wait(observer.signal);
+      observer.abort();
+      await assert.rejects(detached, { name: "AbortError" });
+      if (failure !== "draft") {
+        await finishStarted.promise;
+        assert.deepEqual(calls, ["draft", "finish"]);
+        assert.equal(await coordinator.wait(undefined, 10), undefined);
+        releaseFinish.resolve();
+      }
+      if (failure === undefined || failure === "parent") {
+        await parentStarted.promise;
+        assert.equal(await coordinator.wait(undefined, 10), undefined, "wait includes enclosing completion");
+        releaseParent.resolve();
+      }
+      if (failure && failure !== "replacement") {
+        await assert.rejects(settled, new RegExp(`injected selected ${failure} failure`));
+        assert.equal(store.failCalls, 0, "publication errors retain the original selected stop");
+        assert.equal(events.some((event) => event.event === "coordinator_publication_pending"), true);
+        assert.equal(store.run.status, failure === "parent" ? "succeeded" : "running");
+      } else {
+        assert.equal((await settled).status, "succeeded");
+      }
+      assert.deepEqual(calls, failure === "draft" ? ["draft"]
+        : failure === "finish" || failure === "replacement" ? ["draft", "finish"]
+        : ["draft", "finish", "parent"]);
+      assert.deepEqual(store.run.finalizationInput, fixture.run.finalizationInput);
+    }
+  }
+
   async function testSaturationOmitsWorkerAcceptedDuringCancellation() {
     const fixture = await fixtureRun({ workers: 3, subagents: 0, stopAfterNoNew: 2, maxDiscoveryRuns: 3 });
     const store = new FakeStore(fixture.run);
@@ -55,7 +135,7 @@ export async function testDeepScanPublication({
     assert.deepEqual(completed[0].findings, [], "late worker findings are not appended to the saturated aggregate");
   }
 
-  async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
+  async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
     const fixture = await fixtureRun({ workers: 2, subagents: 0, stopAfterNoNew: 2, maxDiscoveryRuns: 2 });
     const store = new FakeStore(fixture.run);
     const executor = new FakeExecutor();
@@ -87,9 +167,16 @@ export async function testDeepScanPublication({
     const terminal = await coordinator.wait(undefined, 5_000);
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     assert.equal(completed.length, 1);
-    assert.deepEqual(completed[0].coverage, {
-      completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [],
-    });
+    assert.equal(completed[0].coverage.completeness, "partial");
+    assert.equal(completed[0].coverage.deferred.length, 2);
+    assert.equal(completed[0].coverage.surfaces.length, 4);
+    assert.equal(completed[0].coverage.reviews.length, 2);
+    assert.deepEqual(new Set(completed[0].coverage.reviews.map((review) => review.completeness)),
+      new Set(["partial", "unknown"]));
+    for (const item of completed[0].coverage.deferred) {
+      assert.equal(item.provenance.attempt, 1);
+      assert.ok(store.workers.has(item.provenance.workerId));
+    }
     for (const worker of store.workers.values()) {
       if (worker.kind !== "discovery") continue;
       const draft = JSON.parse(await readFile(worker.resultManifestPath, "utf8"));
@@ -101,7 +188,21 @@ export async function testDeepScanPublication({
 
   async function testSaturationIgnoresDiscoveryCancellationWriteFailure() {
     const fixture = await fixtureRun({ workers: 2, subagents: 0, stopAfterNoNew: 2, maxDiscoveryRuns: 6 });
+    fixture.run.workflowVersion = "deep-security-scan/v2";
     const store = new FakeStore(fixture.run);
+    store.selectFinalization = async (input) => {
+      const checkpointRoot = path.join(path.dirname(input.resultPath), "checkpoints");
+      const [name] = await readdir(checkpointRoot);
+      const checkpoint = path.join(checkpointRoot, name);
+      const bytes = await readFile(checkpoint);
+      store.run.finalizationInput = {
+        version: 1, resultPath: path.relative(fixture.run.scanDir, checkpoint),
+        resultSha256: createHash("sha256").update(bytes).digest("hex"),
+        terminalReason: input.reason, omittedWorkerIds: input.omittedWorkerIds,
+        selectedAt: "2026-01-01T00:00:00Z",
+      };
+      return structuredClone(store.run);
+    };
     const executor = new FakeExecutor({ blockDedup: true, blockDiscoveryAfterCalls: 2 });
     const updateWorker = store.updateWorker.bind(store);
     const rejectedCancellations = new Set();
@@ -142,7 +243,7 @@ export async function testDeepScanPublication({
     ));
     const { coverage, ...publishedReduction } = completed[0];
     assert.deepEqual(
-      publishedReduction,
+      { ...publishedReduction, sourceCoverage: coverage },
       JSON.parse(await readFile(acceptedReducer.resultManifestPath, "utf8")),
       "the accepted aggregate still reaches publication when redundant cancellation writes fail",
     );
@@ -150,6 +251,7 @@ export async function testDeepScanPublication({
 
   async function testPublicationUsesAcceptedReducerSnapshot() {
     const fixture = await fixtureRun({ workers: 1, subagents: 0, stopAfterNoNew: 1, maxDiscoveryRuns: 1 });
+    fixture.run.coordinatorGeneration = 3;
     const store = new FakeStore(fixture.run);
     const commitDedup = store.commitDedup.bind(store);
     store.commitDedup = async (commit) => {
@@ -163,21 +265,31 @@ export async function testDeepScanPublication({
       return structuredClone(store.run);
     };
     const completed = [];
+    const published = [];
     const coordinator = new DeepScanCoordinator({
       run: fixture.run, store,
       executor: new FakeExecutor({ discoveryCandidateId: "accepted-finding" }),
       pluginRoot: fixture.pluginRoot, clock: immediateClock,
-      onComplete: async (draft) => completed.push(structuredClone(draft)),
+      onComplete: async (draft, _signal, publication) => {
+        completed.push(structuredClone(draft));
+        published.push(publication);
+      },
     });
     coordinator.start();
     const terminal = await coordinator.wait(undefined, 5_000);
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     assert.equal(completed[0].findings[0].provenance.candidateId, "accepted-finding");
     assert.equal(completed[0].coverage.completeness, "complete");
+    const reducer = [...store.workers.values()].find((worker) => worker.kind === "dedup");
+    assert.deepEqual(published, [{
+      coordinatorGeneration: 3,
+      resultPath: reducer.resultManifestPath,
+    }]);
   }
 
+  await testSelectedFinalizationOwner();
   await testSaturationOmitsWorkerAcceptedDuringCancellation();
-  await testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus();
+  await testSuccessfulDeepCoveragePreservesWorkerReviewStatus();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure();
   await testPublicationUsesAcceptedReducerSnapshot();
 }

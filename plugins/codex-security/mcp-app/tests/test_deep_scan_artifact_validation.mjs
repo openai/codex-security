@@ -20,6 +20,7 @@ const bundle = await build({
   write: false
 });
 const {
+  readDiscoveryAuditDraft,
   validateDiscoveryArtifacts,
   validateReducerArtifacts
 } = await import(
@@ -34,11 +35,62 @@ try {
   await testDiscoveryValidation(root);
   await testReducerValidation(root);
   await testEmptyDiscoveryAndReduction(root);
+  await testWriteupReferences(root);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
 
 console.log("deep scan artifact validation tests passed");
+
+async function testWriteupReferences(root) {
+  const artifacts = await createLayout(path.join(root, "writeups"));
+  const reportPath = "findings/example/example.md";
+  const result = draft([{
+    ...finding("example", "src/a.js"),
+    writeup: { reportPath },
+  }]);
+  const worker = await createWorker(artifacts, "discovery-0001", "worker-001", result);
+  const artifactDir = path.join(artifacts.dedupRoot, "dedup-0001", "output");
+  const resultPath = path.join(artifactDir, "result.json");
+  await mkdir(artifactDir, { recursive: true });
+  const { coverage: _coverage, ...reduction } = result;
+  await writeResult(resultPath, reduction);
+  const validateDiscovery = () => validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId);
+  const validateReducer = () => validateReducerArtifacts({
+    artifacts, artifactDir, resultPath, reducerId: "dedup-0001",
+    sources: { discoveries: [{ workerId: worker.id, result: reduction }], previous: null },
+  }, scanId);
+
+  for (const validate of [validateDiscovery, validateReducer]) {
+    await assert.rejects(validate(), /findings\[0\]\.writeup\.reportPath/);
+  }
+  assert.deepEqual(JSON.parse(await readFile(resultPath, "utf8")), reduction,
+    "rejected results remain available as original attempt evidence");
+
+  await writeResult(worker.resultPath, { ...result, complete: false });
+  assert.equal((await readDiscoveryAuditDraft(artifacts, worker.resultPath, scanId)).complete, false);
+  await writeResult(worker.resultPath, result);
+
+  const workerReport = path.join(path.dirname(worker.resultPath), reportPath);
+  await mkdir(path.dirname(workerReport), { recursive: true });
+  await writeFile(workerReport, "# Worker-local report\n");
+  await assert.rejects(validateDiscovery(), /writeup\.reportPath/,
+    "publication resolves report paths from the parent scan directory");
+
+  const parentReport = path.join(artifacts.scanDir, reportPath);
+  await mkdir(path.dirname(parentReport), { recursive: true });
+  await writeFile(parentReport, "");
+  assert.deepEqual((await validateDiscovery()).findings[0].writeup, { reportPath });
+  assert.deepEqual((await validateReducer()).result.findings[0].writeup, { reportPath },
+    "valid references are retained, including empty regular files accepted by publication");
+
+  if (process.platform !== "win32") {
+    await rm(parentReport);
+    await symlink(workerReport, parentReport);
+    await assert.rejects(validateDiscovery(), /writeup\.reportPath/);
+    await assert.rejects(validateReducer(), /writeup\.reportPath/);
+  }
+}
 
 async function testDiscoveryValidation(root) {
   const artifacts = await createLayout(path.join(root, "discovery"));
@@ -217,8 +269,9 @@ async function testReducerValidation(root) {
     discoveries: [{ workerId: first.id, result: draft([firstFinding, secondFinding]) }],
     previous: null,
   };
-  const validateSnapshot = () => validateReducerArtifacts({
+  const validateSnapshot = (persistSourceCoverage = false) => validateReducerArtifacts({
     artifacts, artifactDir, resultPath, reducerId: "dedup-0001", sources,
+    persistSourceCoverage,
   }, scanId);
   await assert.rejects(validateSnapshot(), /unaccounted source findings/);
   await writeResult(resultPath, draft([firstFinding, secondFinding]));
@@ -226,11 +279,15 @@ async function testReducerValidation(root) {
   const validatedSnapshot = await validateSnapshot();
   assert.equal(validatedSnapshot.newFindings, 2);
   const admitted = JSON.parse(await readFile(resultPath, "utf8"));
+  const { sourceCoverage, ...legacySnapshot } = validatedSnapshot.result;
+  assert.equal(sourceCoverage.completeness, "unknown");
   assert.deepEqual(
-    validatedSnapshot.result,
+    legacySnapshot,
     admitted,
-    "validation returns the same reconciled result that was accepted on disk",
+    "v1 preserves host coverage in memory while retaining the legacy persisted shape",
   );
+  const versionedSnapshot = await validateSnapshot(true);
+  assert.deepEqual(versionedSnapshot.result, JSON.parse(await readFile(resultPath, "utf8")), "v2 persists the full host projection");
   assert.equal(Object.hasOwn(admitted, "coverage"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, ["worker-001:1"]);
   sources.previous = structuredClone(admitted);

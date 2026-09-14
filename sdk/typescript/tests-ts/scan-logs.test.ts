@@ -82,6 +82,274 @@ function commandEvent(command: string, id: string, timestamp?: string) {
 }
 
 describe("saved scan logs", () => {
+  test.each(
+    ["sessions", "archived_sessions"].flatMap((directory) =>
+      ["prefix only", "unrelated owner turn"].map((tail) => [directory, tail]),
+    ),
+  )(
+    "reads the complete same-thread recorded copy from %s after %s",
+    async (directory, tail) => {
+      const current = await temporaryHome();
+      const original = await temporaryHome();
+      const scanDir = await temporaryHome();
+      const settings = join(scanDir, "artifacts", "deep_discovery");
+      await mkdir(settings, { recursive: true });
+      await writeFile(
+        join(settings, "execution-settings.json"),
+        JSON.stringify({ version: 1, settings: { codexHome: original } }),
+      );
+      const timestamp = "2026-08-11T12:01:00.000Z";
+      const prefix = [
+        { type: "turn_context", timestamp, payload: { turn_id: "scan-turn" } },
+        commandEvent("prefix", "prefix-call", timestamp),
+      ];
+      const suffix = commandEvent("saved suffix", "suffix-call", timestamp);
+      await writeSession(current, "owner", [
+        ...prefix,
+        ...(tail === "unrelated owner turn"
+          ? [
+              {
+                type: "turn_context",
+                timestamp,
+                payload: { turn_id: "other-turn" },
+              },
+              commandEvent(
+                "unrelated first copy",
+                "other-first-call",
+                timestamp,
+              ),
+            ]
+          : []),
+      ]);
+      const currentPath = join(
+        current,
+        "sessions",
+        "2026",
+        "08",
+        "11",
+        "rollout-owner.jsonl",
+      );
+      await writeFile(
+        currentPath,
+        (await readFile(currentPath, "utf8")) + '\n\n42\n{"type":',
+      );
+      await writeSession(original, "owner", [
+        ...prefix,
+        suffix,
+        suffix,
+        { type: "turn_context", timestamp, payload: { turn_id: "other-turn" } },
+        commandEvent("unrelated turn", "other-call", timestamp),
+      ]);
+      if (directory === "archived_sessions") {
+        await rename(join(original, "sessions"), join(original, directory));
+      }
+      const result = await readSavedScanLogs(
+        {
+          scanId: "scan-1",
+          mode: "deep",
+          scanDir,
+          continuationThreadId: "owner",
+          executionAttribution: {
+            formatVersion: 1,
+            executionThreadIds: [],
+            owner: {
+              threadId: "owner",
+              turnId: "scan-turn",
+              startedAt: timestamp,
+            },
+            startedAt: timestamp,
+            completedAt: timestamp,
+          },
+        },
+        current,
+      );
+      expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
+        "owner",
+      ]);
+      expect(result.events.map(({ event }) => event)).toEqual([
+        { type: "session_meta", payload: { id: "owner" } },
+        ...prefix,
+        suffix,
+        suffix,
+      ]);
+      expect(result.sessions[0]?.path).toStartWith(join(original, directory!));
+    },
+  );
+
+  test.each(["equal", "shorter", "divergent"])(
+    "keeps the first rollout when attributed occurrences are %s",
+    async (copy) => {
+      const first = await temporaryHome();
+      const second = await temporaryHome();
+      const timestamp = "2026-08-11T12:01:00.000Z";
+      const turn = {
+        type: "turn_context",
+        timestamp,
+        payload: { turn_id: "scan-turn" },
+      };
+      const prefix = commandEvent("first", "first-call", timestamp);
+      const suffix = commandEvent("complete", "complete-call", timestamp);
+      const unrelated = {
+        type: "turn_context",
+        timestamp,
+        payload: { turn_id: "other-turn" },
+      };
+      await writeSession(first, "owner", [turn, prefix, suffix, unrelated]);
+      await writeSession(second, "owner", [
+        turn,
+        ...(copy === "equal"
+          ? [prefix, suffix]
+          : copy === "shorter"
+            ? [prefix]
+            : [
+                prefix,
+                commandEvent("different", "different-call", timestamp),
+                suffix,
+              ]),
+        unrelated,
+        commandEvent("more unrelated work", "other-call", timestamp),
+      ]);
+      const result = await readScanLogs({
+        scanId: "scan-1",
+        threadId: "owner",
+        codexHome: [first, second],
+        executionAttribution: {
+          formatVersion: 1,
+          executionThreadIds: [],
+          owner: {
+            threadId: "owner",
+            turnId: "scan-turn",
+            startedAt: timestamp,
+          },
+          startedAt: timestamp,
+          completedAt: timestamp,
+        },
+      });
+      expect(result.sessions[0]?.path).toStartWith(first);
+      expect(result.events.map(({ event }) => event)).toEqual([
+        { type: "session_meta", payload: { id: "owner" } },
+        turn,
+        prefix,
+        suffix,
+      ]);
+    },
+  );
+
+  test.each(["equal", "shorter", "divergent"])(
+    "keeps the first rollout when a later copy is %s",
+    async (copy) => {
+      const first = await temporaryHome();
+      const second = await temporaryHome();
+      const prefix = commandEvent("first", "first-call");
+      const suffix = commandEvent("complete", "complete-call");
+      await writeSession(first, "owner", [prefix, suffix]);
+      await writeSession(
+        second,
+        "owner",
+        copy === "equal"
+          ? [prefix, suffix]
+          : copy === "shorter"
+            ? [prefix]
+            : [prefix, commandEvent("different", "different-call"), suffix],
+      );
+      const result = await readScanLogs({
+        scanId: "scan-1",
+        threadId: "owner",
+        codexHome: [first, second],
+      });
+      expect(result.sessions[0]?.path).toStartWith(first);
+      expect(result.events.map(({ event }) => event)).toEqual([
+        { type: "session_meta", payload: { id: "owner" } },
+        prefix,
+        suffix,
+      ]);
+    },
+  );
+
+  test.each(["current", "original"])(
+    "reads recovered Deep workers from the recorded home with the owner in the %s home",
+    async (ownerHome) => {
+      const current = await temporaryHome();
+      const original = await temporaryHome();
+      const scanDir = await temporaryHome();
+      const settingsDirectory = join(scanDir, "artifacts", "deep_discovery");
+      await mkdir(settingsDirectory, { recursive: true });
+      await writeFile(
+        join(settingsDirectory, "execution-settings.json"),
+        JSON.stringify({
+          version: 1,
+          settings: { codexHome: original, codexPath: join(original, "codex") },
+        }),
+      );
+      const startedAt = "2026-08-11T12:00:00.000Z";
+      const timestamp = "2026-08-11T12:01:00.000Z";
+      await writeSession(
+        ownerHome === "current" ? current : original,
+        "owner",
+        [
+          {
+            type: "turn_context",
+            timestamp,
+            payload: { turn_id: "scan-turn" },
+          },
+          commandEvent("scan owner", "owner-call", timestamp),
+          {
+            type: "turn_context",
+            timestamp,
+            payload: { turn_id: "later-turn" },
+          },
+          commandEvent("unrelated owner turn", "other-turn", timestamp),
+        ],
+      );
+      for (const id of ["discovery", "resumed-discovery", "reducer"]) {
+        await writeSession(original, id, [commandEvent(id, id, timestamp)]);
+      }
+      await writeSession(
+        original,
+        "worker-child",
+        [commandEvent("worker child", "child-call", timestamp)],
+        "discovery",
+      );
+      // Keep the existing first-home preference for duplicate active rollouts.
+      await writeSession(current, "reducer", [
+        commandEvent("current reducer", "current-reducer-call", timestamp),
+      ]);
+      for (const home of [current, original]) {
+        await writeSession(home, "unrelated", [
+          commandEvent("unrelated scan", "unrelated-call", timestamp),
+        ]);
+      }
+      const result = await readSavedScanLogs(
+        {
+          scanId: "scan-1",
+          mode: "deep",
+          scanDir,
+          continuationThreadId: "owner",
+          executionAttribution: {
+            formatVersion: 1,
+            executionThreadIds: ["discovery", "resumed-discovery", "reducer"],
+            owner: { threadId: "owner", turnId: "scan-turn", startedAt },
+            startedAt,
+            completedAt: "2026-08-11T12:02:00.000Z",
+          },
+        },
+        current,
+      );
+      expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual([
+        "discovery",
+        "owner",
+        "reducer",
+        "resumed-discovery",
+        "worker-child",
+      ]);
+      expect(
+        result.events.filter(({ threadId }) => threadId === "reducer"),
+      ).toHaveLength(2);
+      expect(JSON.stringify(result)).toContain("current reducer");
+      expect(JSON.stringify(result)).not.toContain("unrelated");
+    },
+  );
+
   test("collects known desktop and CLI threads across active and archived homes without duplicates", async () => {
     const desktop = await temporaryHome();
     const cli = await temporaryHome();
@@ -304,6 +572,7 @@ describe("saved scan logs", () => {
 
   test("excludes inherited parent history from worker logs", async () => {
     const home = await temporaryHome();
+    const current = await temporaryHome();
     await writeSession(home, "parent", []);
     const startedAt = "2026-08-11T12:02:00.900Z";
     await writeSession(
@@ -347,10 +616,31 @@ describe("saved scan logs", () => {
       startedAt,
     );
 
+    const path = join(
+      home,
+      "sessions",
+      "2026",
+      "08",
+      "11",
+      "rollout-worker.jsonl",
+    );
+    const currentPath = join(current, "sessions", "rollout-worker.jsonl");
+    await mkdir(join(current, "sessions"), { recursive: true });
+    await writeFile(
+      currentPath,
+      (await readFile(path, "utf8"))
+        .split("\n")
+        .slice(0, 4)
+        .join("\n")
+        .replace(
+          "PRIVATE PRE-SCAN CONVERSATION",
+          "OTHER PRE-SCAN CONVERSATION",
+        ),
+    );
     const result = await readScanLogs({
       scanId: "scan-1",
       threadId: "parent",
-      codexHome: home,
+      codexHome: [current, home],
     });
     expect(JSON.stringify(result)).toContain("Reviewing authorization");
     expect(JSON.stringify(result)).not.toContain("PRIVATE PRE-SCAN");
@@ -525,11 +815,16 @@ describe("saved scan logs", () => {
 
   test("does not parse event bodies from unrelated saved sessions", async () => {
     const home = await temporaryHome();
+    const other = await temporaryHome();
     await writeSession(home, "parent", [
       commandEvent("included", "parent-call"),
     ]);
     await writeSession(home, "unrelated", [
       commandEvent("UNRELATED_PRIVATE_EVENT_BODY", "unrelated-call"),
+    ]);
+    await writeSession(other, "unrelated", [
+      commandEvent("UNRELATED_PRIVATE_EVENT_BODY", "unrelated-call"),
+      commandEvent("UNRELATED_PRIVATE_EVENT_BODY", "later-call"),
     ]);
     const originalParse = JSON.parse;
     let unrelatedBodies = 0;
@@ -544,7 +839,7 @@ describe("saved scan logs", () => {
       const result = await readScanLogs({
         scanId: "scan-1",
         threadId: "parent",
-        codexHome: home,
+        codexHome: [home, other],
       });
       expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
         "parent",

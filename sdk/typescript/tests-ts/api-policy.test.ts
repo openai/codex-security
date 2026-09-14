@@ -1532,6 +1532,93 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
+  test.each(["architecture", "threat_model"] as const)(
+    "enforces priced policy usage despite an unpriced remainder in %s",
+    async (crossingStage) => {
+      const costs: number[] = [];
+      const f = await setup({
+        config: { codexOverrides: { model: "gpt-5.6-sol" } },
+        stream: async function* (stage, signal) {
+          if (stage !== crossingStage) {
+            yield* events(stage);
+            return;
+          }
+          const directory = join(f.root, "codex-home", "sessions");
+          await mkdir(directory, { recursive: true });
+          const thread = `policy-${stage}`;
+          const input = stage === "architecture" ? 1_200 : 1_000;
+          for (const [id, model, parent, inputTokens] of [
+            [thread, "gpt-5.6-sol", undefined, input],
+            ["unpriced-policy-worker", "synthetic-unpriced-model", thread, 100],
+          ] as const) {
+            await writeFile(
+              join(directory, `${id}.jsonl`),
+              [
+                JSON.stringify({
+                  type: "session_meta",
+                  payload: {
+                    id,
+                    ...(parent === undefined
+                      ? {}
+                      : { parent_thread_id: parent }),
+                  },
+                }),
+                JSON.stringify({ type: "turn_context", payload: { model } }),
+                JSON.stringify({
+                  type: "event_msg",
+                  payload: {
+                    type: "token_count",
+                    info: {
+                      total_token_usage: {
+                        input_tokens: inputTokens,
+                        output_tokens: 0,
+                      },
+                    },
+                  },
+                }),
+                "",
+              ].join("\n"),
+            );
+          }
+          yield { type: "thread.started", thread_id: thread };
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            else
+              signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          throw signal.reason;
+        },
+      });
+      const keepAlive = setTimeout(() => {}, 10_000);
+      try {
+        await expect(
+          f.security.generatePolicy(f.repository, {
+            outputDir: f.outputDir,
+            maxCostUsd: 0.0045,
+            signal: AbortSignal.timeout(5_000),
+            onCost: (cost) => costs.push(cost.estimatedUsd),
+          }),
+        ).rejects.toThrow("exceeded its $0.0045 cost limit");
+        expect(f.threads).toHaveLength(
+          crossingStage === "architecture" ? 1 : 2,
+        );
+        if (crossingStage === "architecture") expect(costs).toEqual([]);
+        else {
+          expect(costs.length).toBeGreaterThan(0);
+          for (const cost of costs) expect(cost).toBeCloseTo(0.0006, 12);
+        }
+        if (crossingStage === "threat_model") {
+          expect(
+            await readFile(join(f.outputDir, "project-spec.md"), "utf8"),
+          ).toContain("src/service.ts:1");
+        }
+      } finally {
+        clearTimeout(keepAlive);
+        await f.security.close();
+      }
+    },
+  );
+
   test("enforces one cost budget across stages and preserves completed evidence", async () => {
     const f = await setup();
     await expect(

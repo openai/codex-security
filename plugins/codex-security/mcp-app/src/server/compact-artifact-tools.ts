@@ -203,7 +203,7 @@ export function registerScanDraftTools(
   registerCompactTool(server, {
     name: "record_codex_security_scan_draft",
     title: "Record Codex Security Scan Draft",
-    description: "Save semantic findings and coverage as an unsealed draft. Use complete:false for progress checkpoints, then complete:true for the final result; keep unvalidated candidates in coverage.deferred.",
+    description: "Save semantic findings and coverage as an unsealed draft. Use complete:false for progress checkpoints, then complete:true for the final result; keep unvalidated candidates in coverage.deferred. Provide the required top-level scanId. The workbench supplies the following fields; omit them from your draft: findingId, occurrenceId, and fingerprints within each finding; includePaths and excludePaths within scope; and documentType, schemaVersion, scanId, mode, includePaths, excludePaths, receiptRefs, and inventoryStrategy within coverage.",
     inputSchema: scanDraftInputSchema,
     readOnly: false,
     handler: async (value, requestContext) => {
@@ -297,7 +297,7 @@ export function registerCompactWorkerArtifactTools(
     registerCompactTool(server, {
       name: "record_codex_security_scan_draft",
       title: "Record Codex Security Scan Draft",
-      description: "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred.",
+      description: "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred. Provide the required top-level scanId. The workbench supplies the following fields; omit them from your draft: findingId, occurrenceId, and fingerprints within each finding; includePaths and excludePaths within scope; and documentType, schemaVersion, scanId, mode, includePaths, excludePaths, receiptRefs, and inventoryStrategy within coverage.",
       inputSchema: scanDraftInputSchema,
       readOnly: false,
       handler: async (value) => recordCodexSecurityWorkerScanDraft(

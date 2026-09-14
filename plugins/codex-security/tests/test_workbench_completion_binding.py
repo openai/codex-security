@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import pytest
 from workbench_test_support import (
     create_saved_workspace,
     initialize_git_repository,
@@ -67,6 +68,40 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
     mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     return state_dir, scan_id, scan_dir
+
+
+@pytest.mark.parametrize("completeness", ["partial", "complete", "unknown"])
+def test_deep_completion_returns_sealed_coverage_on_replay(
+    tmp_path: Path, completeness: str
+) -> None:
+    state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["completeness"] = completeness
+    coverage["deferred"] = (
+        [{"id": "external-control", "reason": "Deployment configuration is unavailable."}]
+        if completeness == "partial"
+        else []
+    )
+    coverage_path.write_text(json.dumps(coverage))
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    canonical = json.loads(coverage_path.read_text())
+    assert canonical["completeness"] == completeness
+    assert len(canonical["deferred"]) == (1 if completeness == "partial" else 0)
+    expected = {
+        "completeness": canonical["completeness"],
+        "surfaceCount": len(canonical["surfaces"]),
+        "deferredCount": len(canonical["deferred"]),
+        "explicitExclusionCount": len(canonical["explicitExclusions"]),
+    }
+    artifacts = ["scan-manifest.json", "findings.json", "coverage.json", "report.md"]
+    sealed = [(scan_dir / name).read_bytes() for name in artifacts]
+    replayed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    for result in (completed, replayed):
+        assert result["scan"]["progress"]["status"] == "complete"
+        assert result["coverageSummary"] == expected
+        assert result["scan"]["usage"] == completed["scan"]["usage"]
+    assert [(scan_dir / name).read_bytes() for name in artifacts] == sealed
 
 
 def register_cli_scan(state_dir: Path, target: Path, scan_dir: Path) -> dict[str, Any]:

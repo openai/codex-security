@@ -2,7 +2,9 @@
   "sources": [
     "https://github.com/openai/codex-security/actions/runs/33215429477",
     "https://github.com/openai/codex-security/actions/runs/33227512538",
-    "https://github.com/openai/codex-security/actions/runs/33233690024"
+    "https://github.com/openai/codex-security/actions/runs/33233690024",
+    "https://github.com/openai/codex-security/actions/runs/34813432568",
+    "https://github.com/openai/codex-security/actions/runs/34822813350"
   ],
   "unix": {
     "api-attribution-concurrency.test.ts": 0.372,
@@ -158,6 +160,7 @@
     "cost.test.ts": 1.574,
     "custom-publish.test.ts": 0.582,
     "custom-validation.test.ts": 20.415,
+    "deep-finalization.test.ts": 212.524,
     "deep-progress.test.ts": 0.007,
     "deep-scan-parent-denials.test.ts": 0.013,
     "deep-scan-reducer-recovery.test.ts": 0.527,
@@ -209,6 +212,7 @@
     "scan-history-renderer.test.ts": 0.005,
     "scan-logs.test.ts": 0.139,
     "scan-recovery.test.ts": 62.302,
+    "scan-resume.test.ts": 207.628,
     "skeleton.test.ts": 0.03,
     "stopped-scan-results.test.ts": 15.814,
     "targets-large-output.test.ts": 11.48,

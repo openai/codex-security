@@ -808,6 +808,15 @@ try {
   );
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "fixtures", "package-deep-scan.mjs"),
+      installedRoot,
+    ],
+    { cwd: consumer },
+  );
+
   console.log(
     `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, dashboard assets, and a nested worker without global codex.`,
   );

@@ -1,4 +1,98 @@
+import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
+
+export async function recordedScanCodexHome(
+  scanDirectory: string,
+): Promise<string | undefined> {
+  try {
+    const saved: unknown = JSON.parse(
+      await readFile(
+        join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "execution-settings.json",
+        ),
+        "utf8",
+      ),
+    );
+    if (
+      isRecord(saved) &&
+      saved["version"] === 1 &&
+      isRecord(saved["settings"])
+    ) {
+      const home = saved["settings"]["codexHome"];
+      if (typeof home === "string" && home !== "") return home;
+    }
+  } catch (error) {
+    if (!isRecord(error) || error["code"] !== "ENOENT") throw error;
+  }
+  return undefined;
+}
+
+export interface ScanExecutionAttribution {
+  formatVersion: 1;
+  legacy?: true;
+  executionThreadIds: string[];
+  owner: {
+    threadId: string | null;
+    turnId: string | null;
+    startedAt: string;
+    dedicated?: boolean;
+  };
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export function attributedScanThreads(
+  sessions: Iterable<{
+    threadId: string | null;
+    parentThreadId: string | null;
+  }>,
+  attribution: ScanExecutionAttribution,
+): Set<string> {
+  const included = new Set(attribution.executionThreadIds);
+  const pending = [...included];
+  const all = [...sessions];
+  for (const parent of pending) {
+    for (const session of all) {
+      if (
+        session.threadId !== null &&
+        session.parentThreadId === parent &&
+        !included.has(session.threadId)
+      ) {
+        included.add(session.threadId);
+        pending.push(session.threadId);
+      }
+    }
+  }
+  if (attribution.owner.threadId) included.add(attribution.owner.threadId);
+  return included;
+}
+
+export function isAttributedScanEvent(
+  attribution: ScanExecutionAttribution,
+  threadId: string,
+  turnId: string | null,
+  timestamp: unknown,
+): boolean {
+  const time = sessionStartedAt(timestamp);
+  if (
+    time === null ||
+    time < Date.parse(attribution.startedAt) ||
+    (attribution.completedAt !== null &&
+      time > Date.parse(attribution.completedAt))
+  )
+    return false;
+  if (
+    threadId !== attribution.owner.threadId ||
+    attribution.executionThreadIds.includes(threadId)
+  )
+    return true;
+  return (
+    attribution.owner.turnId !== null && turnId === attribution.owner.turnId
+  );
+}
 
 export function sessionStartedAt(timestamp: unknown): number | null {
   const startedAt =

@@ -41,6 +41,7 @@ export async function buildMcpApp({ output }) {
         loader: { ".md": "text" },
         logLevel: "info",
         logOverride: { "empty-import-meta": "silent" },
+        nodePaths: [join(root, "node_modules")],
         outfile: bundle,
         platform: "node",
         target: "node20"
@@ -108,5 +109,6 @@ const runtimeModule = new Module(loaderPath);
 runtimeModule.filename = loaderPath;
 runtimeModule.paths = Module._nodeModulePaths(dirname(loaderPath));
 runtimeModule._compile(runtimeSource, loaderPath);
+export default runtimeModule.exports;
 `;
 }

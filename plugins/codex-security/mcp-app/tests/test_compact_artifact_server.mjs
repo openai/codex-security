@@ -203,10 +203,8 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
       }),
       `${runtimeLabel}: record compact diff canonical semantics`
     );
-    requireSuccessfulTool(
-      await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
-      `${runtimeLabel}: complete compact diff scan`
-    );
+    const completion = await call("complete_codex_security_scan", { scanId, handoffClaimToken });
+    requireSuccessfulTool(completion, `${runtimeLabel}: complete compact diff scan`);
     const completed = requireSuccessfulTool(
       await call("get_codex_security_completed_scan", { scanId, handoffClaimToken }),
       `${runtimeLabel}: read completed compact diff scan`
@@ -219,6 +217,9 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
     );
     assert.equal(completed.coverage.inventoryStrategy, "diff");
     assert.equal(completed.findings.findings.length, 0);
+    await assertCompletionCoverageAndReplay(
+      call, { scanId, handoffClaimToken }, completion, completed.coverage
+    );
   } finally {
     await client.close();
   }
@@ -591,10 +592,13 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
     assert.equal(reporting.status, "running");
     assert.deepEqual(reporting.phaseProgress, { completed: 0, total: 0, unit: null });
 
-    const completed = requireSuccessfulTool(await call(
+    const completion = await call(
       "complete_codex_security_scan",
       { scanId, handoffClaimToken }
-    ), `${runtimeLabel}: finalize the accepted draft exactly once`);
+    );
+    const completed = requireSuccessfulTool(
+      completion, `${runtimeLabel}: finalize the accepted draft exactly once`
+    );
     assert.equal(completed.scan.progress.status, "complete");
     assert.equal(completed.scan.reportAvailable, true);
 
@@ -623,6 +627,9 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
     assert.equal(results.manifest.scan.target.kind, "directory_snapshot");
     assert.equal(results.coverage.inventoryStrategy, "directory");
     assert.equal(results.coverage.completeness, "partial");
+    await assertCompletionCoverageAndReplay(
+      call, { scanId, handoffClaimToken }, completion, results.coverage
+    );
     assert.deepEqual(results.coverage.includePaths, ["."]);
     assert.deepEqual(results.coverage.excludePaths, []);
     assert.equal(results.coverage.surfaces[0].disposition, "reported");
@@ -674,6 +681,33 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
   } finally {
     await client.close();
   }
+}
+
+async function assertCompletionCoverageAndReplay(call, identity, completion, coverage) {
+  const expected = {
+    completeness: coverage.completeness,
+    surfaceCount: coverage.surfaces.length,
+    deferredCount: coverage.deferred.length,
+    explicitExclusionCount: coverage.explicitExclusions.length
+  };
+  const scan = requireSuccessfulTool(completion).scan;
+  const snapshot = () => Promise.all([
+    "scan-manifest.json", "findings.json", "coverage.json", "report.md"
+  ].map((name) => readFile(path.join(scan.scanDir, name), "utf8")));
+  const sealed = await snapshot();
+  const replay = await call("complete_codex_security_scan", identity);
+  for (const result of [completion, replay]) {
+    const structured = requireSuccessfulTool(result);
+    assert.equal(structured.scan.progress.status, "complete");
+    assert.equal(result.content[0].type, "text");
+    assert.match(result.content[0].text, new RegExp(`Canonical coverage: ${expected.completeness}\\b`));
+    assert.match(result.content[0].text, new RegExp(`\\b${expected.surfaceCount} surfaces\\b`));
+    assert.match(result.content[0].text, new RegExp(`\\b${expected.deferredCount} deferred items\\b`));
+    assert.match(result.content[0].text, new RegExp(`\\b${expected.explicitExclusionCount} explicit exclusions\\b`));
+    assert.deepEqual(structured.coverageSummary, expected);
+    assert.deepEqual(structured.scan.usage, scan.usage);
+  }
+  assert.deepEqual(await snapshot(), sealed, "completion replay preserves sealed artifacts");
 }
 
 async function snapshotScanDraft(scanDirectory) {
@@ -1109,6 +1143,18 @@ async function testDiscoveryWorkerToolList(bundle) {
       }
     };
 
+    for (const arguments_ of [
+      { ...input, scope: { includePaths: ["src"], excludePaths: [] } },
+      { ...input, coverage: { ...input.coverage, scanId } }
+    ]) {
+      requireToolError(
+        await client.callTool({ name: tool.name, arguments: arguments_ }),
+        /expected never/,
+        "The draft description must not change rejection of workbench-owned metadata."
+      );
+      await assert.rejects(readFile(resultPath), { code: "ENOENT" });
+    }
+
     requireToolError(
       await client.callTool({
         name: tool.name,
@@ -1229,6 +1275,7 @@ async function testReducerWorkerToolList(bundle) {
 async function bundleEntrypoint(entrypoint, outfile) {
   await build({
     bundle: true,
+    nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
     define: {
       __dirname: JSON.stringify(applicationRoot),
       "import.meta.url": "__filename"
