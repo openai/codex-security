@@ -13,7 +13,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expandHome } from "./runtime.js";
 
-const SUPPORTED_EXTENSIONS = new Set([
+const DOCUMENT_EXTENSIONS = new Set([
   ".md",
   ".markdown",
   ".txt",
@@ -60,9 +60,6 @@ export async function prepareKnowledgeBase(
       );
     }
     for (const document of selected) {
-      if (!SUPPORTED_EXTENSIONS.has(extname(document).toLowerCase())) {
-        throw new Error(`Unsupported knowledge base document: ${document}`);
-      }
       documents.add(document);
     }
     sources.add(source);
@@ -133,10 +130,18 @@ async function discover(
       for (const document of await discover(path, signal)) {
         documents.push(document);
       }
-    } else if (
-      entry.isFile() &&
-      SUPPORTED_EXTENSIONS.has(extname(path).toLowerCase())
-    ) {
+    } else if (entry.isFile()) {
+      if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
+        const bytes = await readFile(path, {
+          flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+          signal,
+        });
+        try {
+          decodeText(path, bytes);
+        } catch {
+          continue;
+        }
+      }
       documents.push(path);
     }
   }
@@ -144,6 +149,9 @@ async function discover(
 }
 
 function decodeText(path: string, bytes: Uint8Array): string {
+  if (bytes.includes(0)) {
+    throw new Error(`Knowledge base document contains binary data: ${path}`);
+  }
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (error) {

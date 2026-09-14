@@ -37,6 +37,7 @@
 - upgrade actions/setup-python to 7.0.0 ([#909](https://github.com/openai/codex-security/pull/909))
 - upgrade Stryker with compatible mutation tooling ([#912](https://github.com/openai/codex-security/pull/912))
 - limit fix-finding to security vulnerabilities ([#923](https://github.com/openai/codex-security/pull/923))
+- accept text knowledge-base files with any extension ([#924](https://github.com/openai/codex-security/pull/924))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

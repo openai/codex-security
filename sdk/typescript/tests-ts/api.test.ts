@@ -1083,15 +1083,15 @@ describe("CodexSecurity orchestration", () => {
   test("validates knowledge-base documents before initializing the runtime", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
-    const knowledgeBase = join(root, "threat-model.md");
+    const knowledgeBase = join(root, "context.json");
     const invalidDocument = join(root, "broken.pdf");
     const unsupportedDocument = join(root, "unsupported.exe");
     const emptyDirectory = join(root, "empty");
     await mkdir(repository);
     await mkdir(emptyDirectory);
-    await writeFile(knowledgeBase, "# Threat model\nPublic API is in scope.\n");
+    await writeFile(knowledgeBase, '{"scope":"Public API"}');
     await writeFile(invalidDocument, "not a PDF");
-    await writeFile(unsupportedDocument, "not a supported document");
+    await writeFile(unsupportedDocument, new Uint8Array([0, 1, 2]));
     let runtimeStarted = false;
     const client = new TestClient(
       {},
@@ -1109,7 +1109,7 @@ describe("CodexSecurity orchestration", () => {
     ).resolves.toMatchObject({ knowledgeBasePaths: [knowledgeBase] });
     const invalidDocuments: Array<[string, string]> = [
       [join(root, "missing.md"), "ENOENT"],
-      [unsupportedDocument, "Unsupported knowledge base document"],
+      [unsupportedDocument, "contains binary data"],
       [invalidDocument, "Cannot extract text from knowledge base PDF"],
       [
         emptyDirectory,
