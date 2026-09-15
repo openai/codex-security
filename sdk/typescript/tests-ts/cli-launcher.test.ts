@@ -18,6 +18,33 @@ import { runCommand } from "./support/shell.js";
 const packageRoot = join(import.meta.dir, "..");
 
 describe("CLI launcher", () => {
+  test("requires a runtime outside the target worktree when installing a hook", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-hook-runtime-"));
+    try {
+      const initialized = await runCommand("git", ["init", "-q", root], {
+        timeout: 10_000,
+      });
+      expect(initialized.status, initialized.stderr).toBe(0);
+      const runtime = join(
+        root,
+        process.platform === "win32" ? "bun.exe" : "bun",
+      );
+      await copyFile(process.execPath, runtime);
+      const result = await runCommand(
+        runtime,
+        [join(packageRoot, "src", "cli.ts"), "install-hook", root],
+        { timeout: 30_000 },
+      );
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stderr).toContain("outside this repository");
+      await expect(
+        readFile(join(root, ".git", "hooks", "pre-commit")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("runs through an installed npm-style bin symlink", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-bin-"));
     try {
@@ -153,6 +180,26 @@ describe("CLI launcher", () => {
       expect(child.status).toBe(0);
       expect(child.stderr).toBe("");
       expect(child.stdout).toBe(`${VERSION}\n`);
+
+      const initialized = await runCommand("git", ["init", "-q", root], {
+        timeout: 10_000,
+      });
+      expect(initialized.status, initialized.stderr).toBe(0);
+      const subdirectory = join(root, "source");
+      await mkdir(subdirectory);
+      const install = await runCommand(
+        "node",
+        [bin, "install-hook", subdirectory],
+        {
+          env: launchEnvironment,
+          timeout: 30_000,
+        },
+      );
+      expect(install.status, install.stderr).toBe(2);
+      expect(install.stderr).toContain("outside this repository");
+      await expect(
+        readFile(join(root, ".git", "hooks", "pre-commit")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
 
       const preload = join(root, "unavailable-cwd.mjs");
       await writeFile(
