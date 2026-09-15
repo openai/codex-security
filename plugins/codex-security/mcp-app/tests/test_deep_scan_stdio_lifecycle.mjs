@@ -10,7 +10,10 @@ import { build } from "esbuild";
 
 const execFileAsync = promisify(execFile);
 const mcpAppRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const pluginRoot = path.resolve(mcpAppRoot, "..");
+const installedPluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT;
+const pluginRoot = installedPluginRoot
+  ? path.resolve(installedPluginRoot)
+  : path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const parentSandboxState = {
   permissionProfile: {
@@ -55,7 +58,7 @@ async function testDeepScanStdioLifecycle() {
   const serverBundlePath = path.join(
     pluginRoot,
     "mcp",
-    `.deep-scan-stdio-test-${randomUUID()}.cjs`
+    installedPluginRoot ? "server.mjs" : `.deep-scan-stdio-test-${randomUUID()}.cjs`
   );
   const threadId = "deep-scan-stdio-lifecycle-thread";
 
@@ -86,7 +89,7 @@ async function testDeepScanStdioLifecycle() {
     ''
   ].join('\n'));
   await writePythonWrapper(pythonWrapperPath);
-  await bundleServer(serverBundlePath);
+  if (!installedPluginRoot) await bundleServer(serverBundlePath);
 
   const environment = {
     ...process.env,
@@ -429,7 +432,16 @@ async function testDeepScanStdioLifecycle() {
       "the MCP server must remain responsive after canceling one scan"
     );
 
-    const resumedThreadId = "deep-scan-stdio-resumed-thread";
+    const originalThreadId = "deep-scan-stdio-resumed-thread";
+    await mkdir(path.join(codexHome, "sessions"), { recursive: true });
+    await writeFile(path.join(codexHome, "sessions", "original-owner.jsonl"), [
+      { type: "session_meta", timestamp: "2026-01-01T00:00:00Z",
+        payload: { id: originalThreadId, cli_version: "0.154.0", model_provider: "openai" } },
+      { type: "event_msg", timestamp: "2026-01-01T00:00:01Z",
+        payload: { type: "thread_settings_applied", thread_id: originalThreadId,
+          thread_settings: { reasoning_summary: "none", model_provider_id: "openai" } } }
+    ].map(JSON.stringify).join("\n") + "\n");
+    let resumedThreadId = originalThreadId;
     const opened = await server.request(24, "tools/call", toolCall(
       "open_codex_security_workspace",
       { targetPath, scope: ".", mode: "deep" },
@@ -439,7 +451,7 @@ async function testDeepScanStdioLifecycle() {
     const sessionId = opened.result.structuredContent.workspace.id;
     assertNoError(await server.request(25, "tools/call", toolCall(
       "submit_codex_security_setup",
-      { sessionId, targetPath, scope: ".", mode: "deep" },
+      { sessionId, targetPath, scope: ".", mode: "deep", userContext: "Original discovery focus" },
       resumedThreadId
     )));
     const started = await server.request(26, "tools/call", toolCall(
@@ -450,7 +462,7 @@ async function testDeepScanStdioLifecycle() {
     assertNoError(started);
     const resumedScan = started.result.structuredContent.workspace.results;
     const resumedScanId = resumedScan.scanId;
-    const handoffClaimToken = randomUUID();
+    let handoffClaimToken = randomUUID();
     for (const [id, name, arguments_] of [
       [27, "claim_codex_security_scan_handoff_delivery", {
         scanId: resumedScanId, claimToken: handoffClaimToken
@@ -484,8 +496,15 @@ async function testDeepScanStdioLifecycle() {
     const completedDraft = JSON.parse(await readFile(completedWorker.resultManifestPath, "utf8"));
     assert.equal(completedDraft.scanId, resumedScanId);
     assert.deepEqual(completedDraft.findings, []);
+    assert.equal(partial.workflowVersion, "deep-security-scan/v1", "the prior reader starts the legacy workflow");
+    assert.equal(partial.userContext, "Original discovery focus");
+    const settingsPath = path.join(resumedScan.scanDir, "artifacts", "deep_discovery", "execution-settings.json");
+    await assert.rejects(readFile(settingsPath), { code: "ENOENT" });
     await server.stop();
     assert.throws(() => process.kill(server.pid, 0), "the original MCP server must have exited");
+    // A worker can be marked running before its process appends the start log.
+    // Capture the original process set after shutdown has settled those launches.
+    const originalWorkerPids = new Set((await readJsonLines(startLogPath)).slice(restartStartIndex).map((execution) => execution.pid));
     const paused = await runWorkbench(environment, ["get-scan", "--scan-id", resumedScanId]);
     assert.deepEqual([paused.scan.progress.status, paused.scan.progress.phase], ["running", "discovery"]);
     assert.deepEqual(paused.scan.progress.independentReviews, {
@@ -512,6 +531,18 @@ async function testDeepScanStdioLifecycle() {
       path.join(stateDir, "workbench.sqlite3"),
       resumedScanId
     ]);
+    await runWorkbench(environment, [
+      "release-handoff-delivery", "--scan-id", resumedScanId, "--claim-token", handoffClaimToken
+    ]);
+    handoffClaimToken = randomUUID();
+    resumedThreadId = "deep-scan-stdio-replacement-thread";
+    await runWorkbench(environment, [
+      "claim-handoff-delivery", "--scan-id", resumedScanId, "--claim-token", handoffClaimToken
+    ]);
+    await runWorkbench(environment, [
+      "attach-scan-continuation-thread", "--scan-id", resumedScanId,
+      "--claim-token", handoffClaimToken, "--thread-id", resumedThreadId
+    ]);
     await writeFile(restartControlPath, "after-restart");
 
     const restartedServer = startServer(serverBundlePath, environment);
@@ -537,8 +568,13 @@ async function testDeepScanStdioLifecycle() {
         environment, scanId: resumedScanId, threadId: resumedThreadId
       });
       assert.equal(finished.status, "succeeded");
+      assert.equal(finished.workflowVersion, partial.workflowVersion);
       assert.equal(finished.coordinatorGeneration, partial.coordinatorGeneration + 1);
       assert.equal(finished.dispatchedCount, 2);
+      assert.equal(finished.userContext, partial.userContext);
+      assert.equal(finished.createdAt, partial.createdAt, "recovery retains the original deadline origin");
+      assert.equal(finished.config.maxTimeHours, partial.config.maxTimeHours);
+      await assert.rejects(readFile(settingsPath), { code: "ENOENT" });
       const successfulDiscoveries = finished.workers.filter((worker) => (
         worker.kind === "discovery" && worker.status === "succeeded"
       ));
@@ -556,7 +592,12 @@ async function testDeepScanStdioLifecycle() {
       );
       const executions = (await readJsonLines(startLogPath)).slice(restartStartIndex);
       for (const execution of executions) {
-        assert.equal(execution.argv.includes('model_reasoning_summary="none"'), true);
+        const summary = execution.argv.find((argument) => argument.startsWith("model_reasoning_summary="));
+        // Baseline native handoff replaces its owner binding. Without a saved
+        // recipe or snapshot, the old summary is unavailable after that handoff.
+        assert.equal(summary, originalWorkerPids.has(execution.pid) ? 'model_reasoning_summary="none"' : undefined);
+        const context = discoveryPromptContext(execution.stdin);
+        if (context.workerLabel) assert.equal(context.userContext, "Original discovery focus");
       }
       assert.equal(executions.filter((execution) => (
         discoveryPromptContext(execution.stdin).workerLabel === "discovery-0001"
@@ -569,7 +610,7 @@ async function testDeepScanStdioLifecycle() {
     throw error;
   } finally {
     await server.stop();
-    await rm(serverBundlePath, { force: true });
+    if (!installedPluginRoot) await rm(serverBundlePath, { force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
   }
 }
@@ -577,6 +618,7 @@ async function testDeepScanStdioLifecycle() {
 async function bundleServer(outfile) {
   await build({
     bundle: true,
+    nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
     define: { "import.meta.url": "__filename" },
     entryPoints: [path.join(mcpAppRoot, "main.ts")],
     external: ["fsevents"],

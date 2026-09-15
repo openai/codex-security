@@ -1,4 +1,6 @@
 import type { DeepReducerContext } from "../artifact-io.js";
+import type { ScanExecutionAttribution } from "../../../../../sdk/typescript/src/scan-sessions.js";
+import type { DeepScanExecutionSettingsSnapshot } from "./recovery-settings.js";
 
 export type DeepScanTerminalReason = "saturated" | "capped";
 
@@ -37,8 +39,22 @@ export interface DeepScanCanonicalArtifacts {
 
 export type DeepScanReducerArtifacts = DeepScanCanonicalArtifacts;
 
+export interface DeepScanFinalizationInput {
+  version: number;
+  resultPath: string | null;
+  resultSha256: string | null;
+  terminalReason: DeepScanTerminalReason;
+  omittedWorkerIds: string[];
+  selectedAt: string;
+}
+
 export interface DeepScanRunState {
   scanId: string;
+  schemaVersion?: number;
+  workflowVersion?: string;
+  finalizationInput?: DeepScanFinalizationInput;
+  usageOwner?: ScanExecutionAttribution["owner"] | null;
+  executionSettings?: DeepScanExecutionSettingsSnapshot | null;
   status: DeepScanRunStatus;
   phase?: "setup" | "discovery" | "reducing" | "terminal";
   coordinatorGeneration?: number;
@@ -47,6 +63,8 @@ export interface DeepScanRunState {
   targetPath: string;
   scope: string;
   userContext?: string;
+  model?: string;
+  reasoningEffort?: string;
   scanDir: string;
   config: DeepScanConfig;
   dispatchedCount: number;
@@ -58,12 +76,29 @@ export interface DeepScanRunState {
   error?: string;
   persistedWorkers?: PersistedDeepScanWorker[];
   persistedDedupInputs?: PersistedDeepScanDedupInput[];
+  persistedMergeClaims?: PersistedDeepScanMergeClaim[];
+  committedMerge?: {
+    workerId: string;
+    resultManifestPath: string;
+    resultManifestSha256: string;
+    newFindings: number;
+  };
+}
+
+export interface PersistedDeepScanMergeClaim {
+  workerId: string;
+  previousWorkerId?: string;
+  previousResultPath?: string;
+  previousResultSha256?: string;
 }
 
 export interface PersistedDeepScanDedupInput {
   dedupWorkerId: string;
   discoveryWorkerId: string;
   inputOrder: number;
+  resultManifestPath?: string;
+  resultManifestSha256?: string;
+  attempt?: number;
 }
 
 export interface BeginDeepScanResult {
@@ -112,6 +147,7 @@ export interface PersistedDeepScanWorker {
   attempt: number;
   threadId?: string;
   resultManifestPath?: string;
+  acceptedResultPath?: string;
   completionSequence?: number;
   consecutiveErrors?: number;
   mergeState: DeepScanMergeState;
@@ -151,10 +187,19 @@ export interface DeepScanStore {
     workerIds: string[];
     promptPath: string;
     artifactDir: string;
-  }): Promise<void>;
+  }): Promise<DeepScanRunState | void>;
   commitDedup(commit: DedupCommit): Promise<DeepScanRunState>;
+  selectFinalization?(input: {
+    scanId: string;
+    coordinatorGeneration?: number;
+    reason: DeepScanTerminalReason;
+    manifestPath: string;
+    resultPath?: string;
+    omittedWorkerIds: string[];
+  }): Promise<DeepScanRunState>;
   finish(input: {
     scanId: string;
+    coordinatorGeneration?: number;
     reason: DeepScanTerminalReason;
     manifestPath: string;
     stagedManifestPath?: string;

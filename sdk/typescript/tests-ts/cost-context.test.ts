@@ -129,3 +129,42 @@ test("component totals preserve uncertainty and label legacy records without rep
     ]),
   ).toContain("at least $8.00");
 });
+
+test.each([false, true])(
+  "attributed model totals retain context bounds and partial coverage (%s)",
+  (unknownUpper) => {
+    const first = {
+      model: "gpt-5.6-sol",
+      input_tokens: 1_000_000,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+    };
+    const second = {
+      ...first,
+      model: unknownUpper ? "gpt-daybreak-red-latest" : "gpt-5.6-terra",
+    };
+    const cost = estimateScanCost("gpt-6-astra", {
+      input_tokens: 2_000_000,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+      modelUsage: [first, second],
+      coverage: "partial",
+    })!;
+    expect(cost.coverage).toBe("partial");
+    expect(cost.modelCosts?.map((part) => part.model)).toEqual([
+      first.model,
+      second.model,
+    ]);
+    expect(cost.estimatedUsd).toBe(unknownUpper ? 16.5 : 6);
+    expect(cost.estimatedUsdRange).toEqual({
+      min: cost.estimatedUsd,
+      max: unknownUpper ? null : 12,
+      context: "unknown",
+    });
+    expect(formatScanCost(cost)).toContain(
+      unknownUpper ? "upper estimate unavailable" : "context unknown",
+    );
+  },
+);
