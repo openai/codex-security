@@ -448,7 +448,14 @@ async function runCampaign(
             warning = `Scan coverage is ${coverage}; results may be incomplete.`;
           }
         } catch (error) {
-          if (options.signal?.aborted === true) options.signal.throwIfAborted();
+          if (options.signal?.aborted === true) {
+            if (checkout !== undefined) {
+              await rm(checkout, { recursive: true, force: true }).catch(
+                () => undefined,
+              );
+            }
+            options.signal.throwIfAborted();
+          }
           if (error instanceof ScanCostLimitExceededError) {
             cost = error.cost;
             exhaustedBudget = true;
@@ -459,9 +466,17 @@ async function runCampaign(
                 `Bulk attempt directory is not empty: ${scanDir}. Existing artifacts and checkout were preserved. Run the same bulk-scan command with --recover to recover interrupted scans or retry failed scans in new attempt directories.`,
               )
             : safeErrorMessage(error);
-        } finally {
-          if (options.recoverScan === undefined && checkout !== undefined) {
+        }
+        if (options.recoverScan === undefined && checkout !== undefined) {
+          try {
             await rm(checkout, { recursive: true, force: true });
+          } catch (error) {
+            notifyProgress(options, {
+              repository: task.id,
+              attempt,
+              status: "started",
+              warning: `Failed to remove checkout directory: ${safeErrorMessage(error)}`,
+            });
           }
         }
         const status =
@@ -491,7 +506,16 @@ async function runCampaign(
           failure === undefined &&
           checkout !== undefined
         ) {
-          await rm(checkout, { recursive: true, force: true });
+          try {
+            await rm(checkout, { recursive: true, force: true });
+          } catch (error) {
+            notifyProgress(options, {
+              repository: task.id,
+              attempt,
+              status: "started",
+              warning: `Failed to remove checkout directory: ${safeErrorMessage(error)}`,
+            });
+          }
         }
         notifyProgress(options, {
           repository: task.id,
