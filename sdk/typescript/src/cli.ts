@@ -775,11 +775,12 @@ class PublicationProgressPresenter {
   }
 }
 
-class VerificationProgressPresenter {
+class FindingProgressPresenter {
   readonly #stream: Writable;
   readonly #dependencies: CliDependencies;
   readonly #repository: string;
   readonly #total: number;
+  readonly #progress: Progress;
   readonly #seenActivities = new Set<string>();
   readonly #reasoning = new Map<string, string>();
   #dashboard: ScanDashboard | null = null;
@@ -789,19 +790,23 @@ class VerificationProgressPresenter {
     dependencies: CliDependencies,
     repository: string,
     total: number,
+    interactive = true,
   ) {
     this.#stream = stream;
     this.#dependencies = dependencies;
     this.#repository = repository;
     this.#total = total;
+    this.#progress = new Progress(
+      stream,
+      dependencies,
+      interactive &&
+        dependencies.environment["CI"] === undefined &&
+        dependencies.environment["TERM"] !== "dumb",
+    );
   }
 
-  public start(): void {
-    if (
-      this.#stream.isTTY === true &&
-      this.#dependencies.environment["CI"] === undefined &&
-      this.#dependencies.environment["TERM"] !== "dumb"
-    ) {
+  public startVerification(): void {
+    if (this.#progress.interactive) {
       const dashboard = new ScanDashboard(this.#stream, {
         repository: this.#repository,
         presentation: "verification",
@@ -825,6 +830,16 @@ class VerificationProgressPresenter {
     this.#write(
       `Verifying ${this.#total} finding${this.#total === 1 ? "" : "s"} against the current checkout.`,
     );
+  }
+
+  public startPatch(finding: Finding, index: number): void {
+    try {
+      this.#progress.startTimer(
+        `Patching ${index + 1}/${this.#total} · ${safePatchText(finding.title)}`,
+      );
+    } catch {
+      this.stop();
+    }
   }
 
   public observe(event: Readonly<Record<string, unknown>>): void {
@@ -917,6 +932,7 @@ class VerificationProgressPresenter {
 
   public stop(): void {
     try {
+      this.#progress.stopTimer();
       this.#dashboard?.stop();
     } catch {}
     this.#dashboard = null;
@@ -924,7 +940,9 @@ class VerificationProgressPresenter {
 
   #write(message: string): void {
     try {
-      this.#stream.write(`${safePatchText(message)}\n`);
+      this.#progress.writeAboveTimer(() => {
+        this.#stream.write(`${safePatchText(message)}\n`);
+      });
     } catch {}
   }
 }
@@ -4782,13 +4800,13 @@ export async function main(
                 return true;
               },
             };
-            const progress = new VerificationProgressPresenter(
+            const progress = new FindingProgressPresenter(
               errorOutput,
               dependencies,
               repository,
               identifiers.length,
             );
-            progress.start();
+            progress.startVerification();
             try {
               exitCode = await runSkill(
                 "verify-fix",
@@ -6970,6 +6988,7 @@ async function runFindingPatches(
   stderr: Writable,
   dependencies: CliDependencies,
   options: Omit<SkillRunOptions, "directory" | "findings"> = {},
+  interactive = true,
 ): Promise<FindingPatch[]> {
   if (selected.findings.length === 0) {
     stderr.write("No matching open findings to patch.\n");
@@ -6990,6 +7009,14 @@ async function runFindingPatches(
       },
     };
     const instruction = options.findingInstructions?.[finding.occurrenceId];
+    const progress = new FindingProgressPresenter(
+      stderr,
+      dependencies,
+      selected.repository,
+      selected.findings.length,
+      interactive,
+    );
+    progress.startPatch(finding, patches.length);
     const status = await runSkill(
       "fix-finding",
       [],
@@ -7005,8 +7032,9 @@ async function runFindingPatches(
         findingInstructions: instruction?.trim()
           ? { [finding.occurrenceId]: instruction }
           : undefined,
+        onEvent: progress.observe.bind(progress),
       },
-    );
+    ).finally(() => progress.stop());
     if (status === 130 || status === 143) {
       throw new CodexSecurityError("Patch operation was interrupted.");
     }
@@ -8638,6 +8666,7 @@ async function executeScan(
           auth,
           findingInstructions: patchSelection?.instructions,
         },
+        progress?.interactive === true,
       );
       scanData = { ...scanData, patchSeverity: patchThreshold, patches };
       if (
