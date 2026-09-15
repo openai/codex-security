@@ -150,6 +150,7 @@ export async function testDeepScanPublication({
 
   async function testPublicationUsesAcceptedReducerSnapshot() {
     const fixture = await fixtureRun({ workers: 1, subagents: 0, stopAfterNoNew: 1, maxDiscoveryRuns: 1 });
+    fixture.run.coordinatorGeneration = 3;
     const store = new FakeStore(fixture.run);
     const commitDedup = store.commitDedup.bind(store);
     store.commitDedup = async (commit) => {
@@ -163,17 +164,26 @@ export async function testDeepScanPublication({
       return structuredClone(store.run);
     };
     const completed = [];
+    const published = [];
     const coordinator = new DeepScanCoordinator({
       run: fixture.run, store,
       executor: new FakeExecutor({ discoveryCandidateId: "accepted-finding" }),
       pluginRoot: fixture.pluginRoot, clock: immediateClock,
-      onComplete: async (draft) => completed.push(structuredClone(draft)),
+      onComplete: async (draft, _signal, publication) => {
+        completed.push(structuredClone(draft));
+        published.push(publication);
+      },
     });
     coordinator.start();
     const terminal = await coordinator.wait(undefined, 5_000);
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     assert.equal(completed[0].findings[0].provenance.candidateId, "accepted-finding");
     assert.equal(completed[0].coverage.completeness, "complete");
+    const reducer = [...store.workers.values()].find((worker) => worker.kind === "dedup");
+    assert.deepEqual(published, [{
+      coordinatorGeneration: 3,
+      resultPath: reducer.resultManifestPath,
+    }]);
   }
 
   await testSaturationOmitsWorkerAcceptedDuringCancellation();

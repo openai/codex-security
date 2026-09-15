@@ -765,7 +765,7 @@ export function createCodexSecurityServer(): McpServer {
           log: logDeepScanEvent,
           handoffClaimToken,
           threadId,
-          onComplete: async (draft, signal) => {
+          onComplete: async (draft, signal, publication) => {
             const context = await createScanArtifactContext(
               begun.run.scanId,
               runWorkbench,
@@ -779,7 +779,7 @@ export function createCodexSecurityServer(): McpServer {
             await recordCodexSecurityScanDraftViaWorkbench(context, {
               ...draft,
               ...(handoffClaimToken === undefined ? {} : { handoffClaimToken })
-            }, runWorkbench, signal);
+            }, runWorkbench, signal, publication);
           },
           onStopped: async (run) => {
             await runWorkbench([

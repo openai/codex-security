@@ -1547,8 +1547,10 @@ def complete_scan_locked(
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
-        if wrote or (
+        # Replay a validated Deep aggregate after an output write fails.
+        if (wrote and scan["mode"] != "deep") or (
             scan["mode"] == "deep"
+            and not wrote
             and not already_sealed
             and not isinstance(exc, RecoverableContractError)
         ):
