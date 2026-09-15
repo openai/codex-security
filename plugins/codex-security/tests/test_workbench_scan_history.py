@@ -64,6 +64,7 @@ def save_scan_matches(
     after: dict[str, Any],
     *matches: dict[str, Any],
     uncertain: tuple[dict[str, Any], ...] = (),
+    related: tuple[dict[str, Any], ...] = (),
 ) -> dict[str, Any]:
     return run_workbench(
         state_dir,
@@ -73,7 +74,7 @@ def save_scan_matches(
         "--after-scan-id",
         after["scanId"],
         "--matches-json",
-        json.dumps({"matches": matches, "uncertain": uncertain}),
+        json.dumps({"matches": matches, "uncertain": uncertain, "related": related}),
     )
 
 
@@ -932,6 +933,173 @@ def test_scan_comparison_matches_equivalent_findings_across_standard_and_deep_sc
     )
     assert uncertain["summary"]["persisting"] == 1
     assert uncertain["summary"]["unknown"] == 0
+
+
+def create_scan_with_finding_locations(
+    state_dir: Path, root: Path, repository: Path, findings: list[tuple[str, str]]
+) -> dict[str, Any]:
+    scan = create_cli_scan(state_dir, root, repository, complete=False)
+    scan_dir = Path(scan["scanDir"])
+    write_completed_contract(scan_dir, scan["scanId"], repository)
+    findings_path = scan_dir / "findings.json"
+    document = json.loads(findings_path.read_text())
+    template = document["findings"][0]
+    document["findings"] = []
+    for anchor, path in findings:
+        finding = copy.deepcopy(template)
+        finding["identity"]["anchor"] = anchor
+        for location in finding["locations"]:
+            location["path"] = path
+        document["findings"].append(finding)
+    findings_path.write_text(json.dumps(document))
+    subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
+    run_workbench(state_dir, "complete-scan", "--scan-id", scan["scanId"])
+    return scan
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("through_history", [False, True])
+def test_equivalent_locations_preserve_confirmed_groups(
+    tmp_path: Path, reverse: bool, through_history: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    root = tmp_path / "results"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    before = create_scan_with_finding_locations(
+        state_dir, root, repository, [("original-control", "src/extract.py")]
+    )
+    after = create_scan_with_finding_locations(
+        state_dir,
+        root,
+        repository,
+        [("moved-control", "src/helper.py"), ("independent-control", "src/extract.py")],
+    )
+    if reverse:
+        before, after = after, before
+    inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
+        "matchingInputs"
+    ]
+    by_anchor = {
+        finding["identity"]["anchor"]: finding["occurrenceId"]
+        for side in inputs.values()
+        for finding in side
+    }
+    previous, current = by_anchor["original-control"], by_anchor["moved-control"]
+    if reverse:
+        previous, current = current, previous
+    if through_history:
+        middle = create_cli_scan(
+            state_dir,
+            root,
+            repository,
+            identity_anchor="historical-control",
+            relative_path="src/history.py",
+        )
+        middle_id = compare_scan_pair(state_dir, before, middle, "--include-matching-inputs")[
+            "matchingInputs"
+        ]["after"][0]["occurrenceId"]
+        save_scan_matches(state_dir, before, middle, confirmed_match(previous, middle_id))
+        save_scan_matches(state_dir, middle, after, confirmed_match(middle_id, current))
+        compared = compare_scan_pair(state_dir, before, after)
+    else:
+        compared = save_scan_matches(state_dir, before, after, confirmed_match(previous, current))
+    assert compared["summary"] == {
+        "new": 0 if reverse else 1,
+        "persisting": 1,
+        "resolved": 1 if reverse else 0,
+        "reopened": 0,
+        "unknown": 0,
+    }
+    persisting = next(
+        finding for finding in compared["findings"] if finding["status"] == "persisting"
+    )
+    assert persisting["beforeOccurrenceId"] == previous
+    assert persisting["afterOccurrenceId"] == current
+    assert compare_scan_pair(state_dir, before, after) == compared
+
+
+@pytest.mark.parametrize("alias_shape", ["none", "endpoints", "chain"])
+def test_equivalent_locations_preserve_related_findings(tmp_path: Path, alias_shape: str) -> None:
+    state_dir = tmp_path / "state"
+    root = tmp_path / "results"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    before_specs = [("member-control", "src/extract.py")]
+    after_specs = [("symlink-control", "src/extract.py")]
+    alias_groups = []
+    related_anchors = ("member-control", "symlink-control")
+    if alias_shape == "endpoints":
+        before_specs.append(("member-alias", "src/member.py"))
+        after_specs.append(("symlink-alias", "src/symlink.py"))
+        alias_groups = [
+            ("before", [anchor for anchor, _ in before_specs]),
+            ("after", [anchor for anchor, _ in after_specs]),
+        ]
+        related_anchors = ("member-alias", "symlink-alias")
+    elif alias_shape == "chain":
+        # Three location links could bridge the related endpoints through two alias groups.
+        before_specs.extend(
+            [("middle-before-one", "src/middle.py"), ("middle-before-two", "src/symlink.py")]
+        )
+        after_specs = [
+            ("middle-after-one", "src/extract.py"),
+            ("middle-after-two", "src/middle.py"),
+            ("symlink-control", "src/symlink.py"),
+        ]
+        alias_groups = [
+            ("before", ["middle-before-one", "middle-before-two"]),
+            ("after", ["middle-after-one", "middle-after-two"]),
+        ]
+    before_specs.append(("independent-before", "src/independent.py"))
+    after_specs.append(("independent-after", "src/independent.py"))
+    before = create_scan_with_finding_locations(state_dir, root, repository, before_specs)
+    after = create_scan_with_finding_locations(state_dir, root, repository, after_specs)
+    inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
+        "matchingInputs"
+    ]
+    by_anchor = {
+        finding["identity"]["anchor"]: finding["occurrenceId"]
+        for side in inputs.values()
+        for finding in side
+    }
+    for side, anchors in alias_groups:
+        scan = before if side == "before" else after
+        historical = create_cli_scan(
+            state_dir,
+            root,
+            repository,
+            identity_anchor=f"historical-{side}",
+            relative_path="src/history.py",
+        )
+        historical_id = compare_scan_pair(state_dir, scan, historical, "--include-matching-inputs")[
+            "matchingInputs"
+        ]["after"][0]["occurrenceId"]
+        save_scan_matches(
+            state_dir,
+            scan,
+            historical,
+            confirmed_match([by_anchor[anchor] for anchor in anchors], historical_id),
+        )
+    related = {
+        "beforeOccurrenceId": by_anchor[related_anchors[0]],
+        "afterOccurrenceId": by_anchor[related_anchors[1]],
+        "reason": "Member-name validation and existing-symlink traversal need different fixes.",
+    }
+    compared = save_scan_matches(state_dir, before, after, related=(related,))
+    assert compared["summary"] == {
+        "new": 2 if alias_shape == "chain" else 1,
+        "persisting": 1,
+        "resolved": 2 if alias_shape == "chain" else 1,
+        "reopened": 0,
+        "unknown": 0,
+    }
+    persisting = next(item for item in compared["findings"] if item["status"] == "persisting")
+    assert persisting["beforeOccurrenceId"] == by_anchor["independent-before"]
+    assert persisting["afterOccurrenceId"] == by_anchor["independent-after"]
+    assert len(compared["related"]) == 1
+    assert all(compared["related"][0][key] == value for key, value in related.items())
+    assert compare_scan_pair(state_dir, before, after) == compared
 
 
 @pytest.mark.parametrize(

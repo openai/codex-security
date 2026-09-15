@@ -1512,7 +1512,9 @@ or excludes their original scope. With one ID, `scans compare` compares it
 to the latest completed scan. When two scans reviewed identical content, such
 as Standard and Deep scans of the same revision, comparisons group findings
 that unambiguously share a vulnerability class and identical locations even
-when their recorded identities differ.
+when their recorded identities differ. Saved confirmed groups and explicit related
+decisions take precedence over this fallback; uncertain pairs can still be grouped
+by these criteria.
 
 Use `scans match --all --force` to rebuild comparisons chronologically while
 retaining stable finding identities. Ctrl-C keeps comparisons already saved.

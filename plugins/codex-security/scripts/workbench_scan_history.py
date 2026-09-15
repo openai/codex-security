@@ -607,6 +607,22 @@ def compare_scans(
         row["id"]: row for row in chain(before_findings.values(), after_findings.values())
     }
     aliases = _confirmed_finding_aliases(connection, occurrences)
+    before_identities = {aliases.get(finding_id, finding_id) for finding_id in before_findings}
+    after_identities = {aliases.get(finding_id, finding_id) for finding_id in after_findings}
+    related_identities = (
+        {
+            tuple(
+                aliases.get(
+                    occurrences[pair[key]]["finding_id"], occurrences[pair[key]]["finding_id"]
+                )
+                for key in ("beforeOccurrenceId", "afterOccurrenceId")
+            )
+            for pair in matches.get("related", [])
+        }
+        if matches is not None
+        else set()
+    )
+    # Deterministic links must preserve confirmed groups and explicit root-cause distinctions.
     equivalent = [
         (previous, current)
         for previous, current in (
@@ -614,8 +630,21 @@ def compare_scans(
             if _same_reviewed_content(before, after)
             else []
         )
-        if aliases.get(previous, previous) != aliases.get(current, current)
+        if aliases.get(previous, previous) not in after_identities
+        and aliases.get(current, current) not in before_identities
     ]
+    if equivalent and related_identities:
+        combined = _finding_aliases(chain(aliases.items(), equivalent))
+        conflicts = {
+            combined.get(previous, previous)
+            for previous, current in related_identities
+            if combined.get(previous, previous) == combined.get(current, current)
+        }
+        equivalent = [
+            (previous, current)
+            for previous, current in equivalent
+            if combined[previous] not in conflicts
+        ]
     if equivalent:
         aliases = _finding_aliases(chain(aliases.items(), equivalent))
         saved_matches = [
