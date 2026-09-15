@@ -389,12 +389,18 @@ describe("compact diff scan", () => {
       inventory,
     ];
 
-    expect(python("normalize_candidates.py", ...args).status).toBe(2);
-    const accepted = python(
-      "normalize_candidates.py",
-      ...args,
-      "--allow-missing-in-scope",
-    );
+    const normalize = (...options: string[]) =>
+      spawnSync(
+        process.execPath,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "normalize-candidates",
+          ...options,
+        ],
+        { encoding: "utf8" },
+      );
+    expect(normalize(...args).status).toBe(2);
+    const accepted = normalize(...args, "--allow-missing-in-scope");
     expect(accepted.status, accepted.stderr).toBe(0);
     const contents = readFileSync(output, "utf8");
     expect(contents).toContain("Résumé: missing guard");
@@ -408,11 +414,7 @@ describe("compact diff scan", () => {
     ]);
 
     writeFileSync(inventory, "../escaped.py\nsrc/handler.py\n");
-    const escaped = python(
-      "normalize_candidates.py",
-      ...args,
-      "--allow-missing-in-scope",
-    );
+    const escaped = normalize(...args, "--allow-missing-in-scope");
     expect(escaped.status).toBe(2);
     expect(escaped.stderr).toContain("in-scope file row 1");
   });

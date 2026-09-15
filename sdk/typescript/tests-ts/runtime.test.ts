@@ -827,61 +827,88 @@ describe("plugin runtime preparation", () => {
         expect(projection.exitCode).toBe(0);
         bundledPlugin = join(packageRoot, "_bundled_plugin");
       }
-      const normalizer = join(
-        bundledPlugin,
-        "scripts",
-        "normalize_candidates.py",
-      );
+      const normalizer = join(bundledPlugin, "mcp", "helpers.mjs");
       expect(await readFile(normalizer, "utf8")).toBe(
-        await readFile(
-          join(sourcePlugin, "scripts", "normalize_candidates.py"),
-          "utf8",
-        ),
+        await readFile(join(sourcePlugin, "mcp", "helpers.mjs"), "utf8"),
       );
+      const locations: (Record<string, unknown> | null)[] = [];
+      for (const item of cases) {
+        const input = join(root, "candidate-input.jsonl");
+        const output = join(root, "candidate-output.jsonl");
+        await writeFile(
+          input,
+          JSON.stringify({
+            cwe_ids: ["CWE-89"],
+            locations: [{ path: item.path, start_line: 1, role: "entrypoint" }],
+            summary: "Test finding",
+            evidence: "Test evidence",
+          }) + "\n",
+        );
+        const normalized = Bun.spawnSync([
+          process.execPath,
+          normalizer,
+          "normalize-candidates",
+          "--input",
+          input,
+          "--out",
+          output,
+          "--repo-root",
+          root,
+          "--in-scope-files",
+          scopePath,
+        ]);
+        const safe =
+          item.path.trim().length > 0 &&
+          !item.path.includes(":") &&
+          !item.path.includes("\\");
+        expect(normalized.exitCode).toBe(safe ? 0 : 2);
+        if (safe) {
+          const row = JSON.parse(await readFile(output, "utf8")) as {
+            locations: Record<string, unknown>[];
+          };
+          expect(row.locations[0]?.["path"]).toBe(item.path);
+          expect(
+            await readFile(
+              join(root, row.locations[0]!["path"] as string),
+              "utf8",
+            ),
+          ).toBe(item.contents);
+          locations.push(row.locations[0]!);
+        } else locations.push(null);
+      }
       const result = Bun.spawnSync([
         python!,
         "-I",
         "-B",
         "-c",
         [
-          "import json, pathlib, runpy, sys",
-          "module = runpy.run_path(sys.argv[1])",
-          "root = pathlib.Path(sys.argv[2])",
-          "scope = module['read_scope'](pathlib.Path(sys.argv[3]), root)",
-          "finalizer = runpy.run_path(sys.argv[5])",
+          "import json, runpy, sys",
+          "finalizer = runpy.run_path(sys.argv[1])",
           "results = []",
-          "for value in json.loads(sys.argv[4]):",
-          "    path, source = module['relative_file'](value, root)",
-          "    candidate = {'cwe_ids': ['CWE-89'], 'locations': [{'path': value, 'start_line': 1, 'role': 'entrypoint'}], 'summary': 'Test finding', 'evidence': 'Test evidence'}",
+          "for location in json.loads(sys.argv[2]):",
           "    try:",
-          "        normalized = module['normalize_candidate'](candidate, root, scope, {})",
-          "        location = normalized['locations'][0]",
+          "        if location is None: raise ValueError('rejected candidate')",
           "        finalizer['_validate_location']({'path': location['path'], 'startLine': location['start_line'], 'endLine': location['end_line'], 'role': location['role']}, 'candidate.locations[0]')",
           "    except ValueError:",
           "        contract_valid = False",
           "    else:",
           "        contract_valid = True",
-          "    results.append({'path': path, 'contents': source.read_text(encoding='utf-8'), 'inScope': path in scope, 'contractValid': contract_valid})",
+          "    results.append(contract_valid)",
           "print(json.dumps(results))",
         ].join("\n"),
-        normalizer,
-        root,
-        scopePath,
-        JSON.stringify(cases.map((item) => item.path)),
         join(bundledPlugin, "scripts", "finalize_scan_contract.py"),
+        JSON.stringify(locations),
       ]);
 
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual(
-        cases.map((item) => ({
-          ...item,
-          inScope: true,
-          contractValid:
+        cases.map(
+          (item) =>
             item.path.trim().length > 0 &&
             !/^[A-Za-z]:/.test(item.path) &&
             !item.path.includes("\\") &&
             !/[\u0000-\u001f]/u.test(item.path),
-        })),
+        ),
       );
     },
   );
