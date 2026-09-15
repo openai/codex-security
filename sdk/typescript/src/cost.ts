@@ -330,6 +330,7 @@ export class ScanCostTracker {
       return;
     }
     for (const progress of session.progress.splice(0)) {
+      if (progress.filesTotal === 0) continue;
       const expectedFilesTotal = this.#expectedFilesTotal;
       if (
         (expectedFilesTotal !== undefined &&
