@@ -135,6 +135,131 @@ async function runWorkflow(
 }
 
 describe("scan and patch workflow", () => {
+  test("shows each patch and live activity before it finishes, with clean JSON output", async () => {
+    for (const args of [
+      ["scan", "--patch", "--patch-severity", "high"],
+      ["patch", "--scan", "scan-1", "--json"],
+    ]) {
+      const result = resultWithFindings(["high", "high"]);
+      const stdout = capture();
+      const stderr = capture(true);
+      let now = 0;
+      let index = 0;
+      const timers = new Map<NodeJS.Timeout, () => void>();
+      const current = dependencies({
+        result,
+        onWorkbench: () => savedScan(result),
+        onCodex: (args, output) => {
+          index += 1;
+          const label = `Patching ${index}/2 · Finding ${index}`;
+          expect(stderr.text()).toContain(label);
+          expect(stderr.text()).not.toContain(`VERIFIED  Finding ${index}`);
+          output!.appServer!.onEvent!({
+            method: "item/reasoning/summaryTextDelta",
+            params: { itemId: "reasoning-1", delta: "Checking the fix." },
+          });
+          expect(stderr.text()).toContain("Codex: Checking the fix.");
+          now += 84_000;
+          for (const tick of [...timers.values()]) tick();
+          expect(stderr.text()).toContain(`[01:24] ${label}`);
+          completePatches(args, output);
+          return 0;
+        },
+      });
+      current.now = () => now;
+      current.setInterval = (callback) => {
+        const timer = {} as NodeJS.Timeout;
+        timers.set(timer, callback);
+        return timer;
+      };
+      current.clearInterval = (timer) => {
+        timers.delete(timer);
+      };
+
+      expect(
+        await main(args, stdout.stream, stderr.stream, current),
+        stderr.text(),
+      ).toBe(0);
+      expect(index).toBe(2);
+      expect(timers.size).toBe(0);
+      const progress = stderr.text();
+      expect(progress.indexOf("VERIFIED  Finding 1")).toBeLessThan(
+        progress.indexOf("Patching 2/2"),
+      );
+      expect(progress).toContain("VERIFIED  Finding 2");
+      expect(progress.match(/Codex: Checking the fix\./gu)).toHaveLength(2);
+      if (args.includes("--json")) {
+        expect(JSON.parse(stdout.text()).patches).toMatchObject([
+          { occurrenceId: "occ_1", status: "verified" },
+          { occurrenceId: "occ_2", status: "verified" },
+        ]);
+      }
+      expect(stdout.text()).not.toContain("\u001B");
+    }
+  });
+
+  test("uses plain patch progress for noninteractive runs", async () => {
+    const saved = ["patch", "--scan", "scan-1", "--json"];
+    for (const [interactive, environment, args] of [
+      [false, {}, saved],
+      [true, { CI: "1" }, saved],
+      [true, { TERM: "dumb" }, saved],
+      [true, {}, ["scan", "--patch", "--headless"]],
+      [true, {}, ["scan", "--patch", "--json"]],
+    ] as const) {
+      const result = resultWithFindings(["high"]);
+      const outcome = await runWorkflow(
+        [...args],
+        {
+          result,
+          environment,
+          onWorkbench: () => savedScan(result),
+        },
+        { interactive },
+      );
+      expect(outcome.exitCode).toBe(0);
+      expect(outcome.stderr).toContain("Patching 1/1 · Finding 1");
+      expect(outcome.stderr).not.toContain("\u001B");
+    }
+  });
+
+  test("stops patch progress on interruption or an agent error", async () => {
+    for (const status of [130, "error"] as const) {
+      const result = resultWithFindings(["high", "high"]);
+      let timers = 0;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--json"],
+        {
+          result,
+          onWorkbench: () => savedScan(result),
+          onCodex: () => {
+            if (status === "error") throw new Error("Agent failed");
+            return status;
+          },
+        },
+        {
+          interactive: true,
+          configure: (current) => {
+            current.setInterval = () => {
+              timers += 1;
+              return {} as NodeJS.Timeout;
+            };
+            current.clearInterval = () => {
+              timers -= 1;
+            };
+          },
+        },
+      );
+      expect(outcome.exitCode).not.toBe(0);
+      expect(timers).toBe(0);
+      expect(outcome.stderr).toContain("\u001B[?25h");
+      expect(outcome.stderr).not.toContain("Patching 2/2");
+      expect(outcome.stderr).toContain(
+        status === "error" ? "Agent failed" : "Patch operation was interrupted",
+      );
+    }
+  });
+
   test("assesses patch risk only when the patch flag is selected", async () => {
     for (const enabled of [false, true]) {
       const result = resultWithFindings(["high"]);
