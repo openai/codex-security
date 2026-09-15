@@ -41,6 +41,7 @@
 - declare native release workflow permissions ([#925](https://github.com/openai/codex-security/pull/925))
 - report context-aware estimate ranges ([#926](https://github.com/openai/codex-security/pull/926))
 - update vulnerable image and archive dependencies ([#927](https://github.com/openai/codex-security/pull/927))
+- update Inquirer prompts and Node/Bun types ([#929](https://github.com/openai/codex-security/pull/929))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
