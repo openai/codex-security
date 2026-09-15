@@ -36,7 +36,10 @@ export function childPath(directory: string, name: string): string {
   );
 }
 
-function shardNames(directory: string, kind: "input" | "output"): string[] {
+export function shardNames(
+  directory: string,
+  kind: "input" | "output",
+): string[] {
   const matches = (name: string) => {
     // Python's Unicode case-insensitive globbing includes these ASCII equivalents.
     const matched =
@@ -68,7 +71,7 @@ function shardNames(directory: string, kind: "input" | "output"): string[] {
   }
 }
 
-function discoverInputShards(directory: string): string[] {
+export function discoverInputShards(directory: string): string[] {
   let isDirectory = false;
   try {
     isDirectory = (
@@ -102,7 +105,10 @@ function discoverInputShards(directory: string): string[] {
   return expected.map((name) => childPath(directory, name));
 }
 
-function validateShard(input: string, output: string): [RankRow[], RankRow[]] {
+export function validateShard(
+  input: string,
+  output: string,
+): [RankRow[], RankRow[]] {
   const inputs = loadRankRows(input, false);
   requireUniquePaths(inputs, `Rank input shard ${basename(input)}`);
   const outputs = loadRankRows(output, true);
