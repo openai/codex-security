@@ -23,13 +23,15 @@ import {
   resolve,
   sep,
 } from "node:path";
-import {
-  Codex,
-  type CodexOptions,
-  type ThreadOptions,
-  type TurnOptions,
-} from "@openai/codex-sdk";
+import { type CodexOptions, type ThreadOptions } from "@openai/codex-sdk";
 import { z } from "incur";
+import {
+  createCodexClient,
+  readCodexSessionTurn,
+  type CodexSessionClient as CodexClientLike,
+  type CodexSessionThread as CodexThreadLike,
+  type CodexSessionEvent as ScanEvent,
+} from "./codex-session.js";
 import {
   CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
@@ -215,24 +217,6 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
-
-interface CodexThreadLike {
-  readonly id: string | null;
-  runStreamed(
-    input: string,
-    options: TurnOptions,
-  ): Promise<{ events: AsyncGenerator<ScanEvent> }>;
-}
-
-interface ScanEvent {
-  readonly type: string;
-  readonly [key: string]: unknown;
-}
-
-interface CodexClientLike {
-  startThread(options: ThreadOptions): CodexThreadLike;
-  resumeThread?(threadId: string, options: ThreadOptions): CodexThreadLike;
-}
 
 interface PreparedRuntime {
   codexHome: string;
@@ -453,7 +437,7 @@ interface ClientDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
-  createCodex: (options) => new Codex(options),
+  createCodex: createCodexClient,
   environment: process.env,
 };
 
@@ -3798,61 +3782,28 @@ async function readCodexTurn(options: {
   usage: unknown;
   lastStreamError: string | null;
 }> {
-  let threadId = options.thread.id;
-  let status: "in_progress" | "completed" = "in_progress";
-  let finalResponse = "";
-  let usage: unknown = null;
-  let lastStreamError: string | null = null;
-  for await (const event of eventsWithOptionalUsage(options.events)) {
-    await options.onEvent?.(event);
-    if (
-      event.type === "thread.started" &&
-      typeof event["thread_id"] === "string"
-    ) {
-      threadId = event["thread_id"];
-    } else if (
-      event.type === "item.completed" &&
-      isRecord(event["item"]) &&
-      event["item"]["type"] === "agent_message" &&
-      typeof event["item"]["text"] === "string"
-    ) {
-      finalResponse = event["item"]["text"];
-    } else if (event.type === "turn.completed") {
-      status = "completed";
-      usage = event["usage"];
-    } else if (event.type === "turn.failed") {
-      throw new CodexSecurityError(turnFailureMessage(event["error"]));
-    } else if (event.type === "error" && typeof event["message"] === "string") {
-      const message = event["message"];
-      const classification = classifyConnectionFailure(message);
-      if (classification === "unauthorized" || classification === "forbidden") {
-        throw new CodexSecurityError(message);
+  return readCodexSessionTurn({
+    ...options,
+    onEvent: async (event) => {
+      await options.onEvent?.(event);
+      if (event.type === "turn.failed") {
+        throw new CodexSecurityError(turnFailureMessage(event["error"]));
       }
-      const reconnect = reconnectAttempt(message);
-      if (reconnect === null) throw new CodexSecurityError(message);
-      lastStreamError = message;
-      options.onReconnect?.(message, reconnect);
-    }
-  }
-  return { threadId, status, finalResponse, usage, lastStreamError };
-}
-
-async function* eventsWithOptionalUsage(
-  events: AsyncGenerator<ScanEvent>,
-): AsyncGenerator<ScanEvent> {
-  try {
-    yield* events;
-  } catch (error) {
-    if (
-      error instanceof TypeError &&
-      /\b(?:null|undefined)\b/u.test(error.message) &&
-      /\bcache_write_input_tokens\b/u.test(error.message)
-    ) {
-      yield { type: "turn.completed", usage: null };
-      return;
-    }
-    throw error;
-  }
+      if (event.type === "error" && typeof event["message"] === "string") {
+        const message = event["message"];
+        const classification = classifyConnectionFailure(message);
+        if (
+          classification === "unauthorized" ||
+          classification === "forbidden"
+        ) {
+          throw new CodexSecurityError(message);
+        }
+        const reconnect = reconnectAttempt(message);
+        if (reconnect === null) throw new CodexSecurityError(message);
+        options.onReconnect?.(message, reconnect);
+      }
+    },
+  });
 }
 
 function trustedAccessStatusFromEvent(

@@ -175,6 +175,7 @@ const distFiles = new Set(
     "severity-store",
     "cloud-publish",
     "codex-prompt",
+    "codex-session",
     "component-plan",
     "component-scan",
     "config",

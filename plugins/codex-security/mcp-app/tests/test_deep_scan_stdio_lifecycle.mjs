@@ -10,7 +10,10 @@ import { build } from "esbuild";
 
 const execFileAsync = promisify(execFile);
 const mcpAppRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const pluginRoot = path.resolve(mcpAppRoot, "..");
+const installedPluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT;
+const pluginRoot = installedPluginRoot
+  ? path.resolve(installedPluginRoot)
+  : path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const parentSandboxState = {
   permissionProfile: {
@@ -55,7 +58,7 @@ async function testDeepScanStdioLifecycle() {
   const serverBundlePath = path.join(
     pluginRoot,
     "mcp",
-    `.deep-scan-stdio-test-${randomUUID()}.cjs`
+    installedPluginRoot ? "server.mjs" : `.deep-scan-stdio-test-${randomUUID()}.cjs`
   );
   const threadId = "deep-scan-stdio-lifecycle-thread";
 
@@ -86,7 +89,7 @@ async function testDeepScanStdioLifecycle() {
     ''
   ].join('\n'));
   await writePythonWrapper(pythonWrapperPath);
-  await bundleServer(serverBundlePath);
+  if (!installedPluginRoot) await bundleServer(serverBundlePath);
 
   const environment = {
     ...process.env,
@@ -569,7 +572,7 @@ async function testDeepScanStdioLifecycle() {
     throw error;
   } finally {
     await server.stop();
-    await rm(serverBundlePath, { force: true });
+    if (!installedPluginRoot) await rm(serverBundlePath, { force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
   }
 }
@@ -577,6 +580,7 @@ async function testDeepScanStdioLifecycle() {
 async function bundleServer(outfile) {
   await build({
     bundle: true,
+    nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
     define: { "import.meta.url": "__filename" },
     entryPoints: [path.join(mcpAppRoot, "main.ts")],
     external: ["fsevents"],
