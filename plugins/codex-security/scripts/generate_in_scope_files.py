@@ -128,17 +128,24 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     ],
                     cwd=repository,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                     check=False,
                 )
-            except OSError:
-                tracked = None
-            if tracked is not None and tracked.returncode == 0:
-                prefix = b"./" if scope == "." or scope.startswith("./") else b""
-                for path in tracked.stdout.split(b"\0"):
-                    candidate = repository / os.fsdecode(path)
-                    if path and candidate.is_file() and not candidate.is_symlink():
-                        inventory.write(prefix + path + b"\n")
+            except OSError as error:
+                raise InventoryError(f"could not run git ls-files: {error}") from error
+
+            if tracked.returncode != 0:
+                detail = tracked.stderr.decode("utf-8", errors="replace").strip()
+                message = f"git ls-files exited with status {tracked.returncode}"
+                if detail:
+                    message = f"{message}: {detail}"
+                raise InventoryError(message)
+
+            prefix = b"./" if scope == "." or scope.startswith("./") else b""
+            for path in tracked.stdout.split(b"\0"):
+                candidate = repository / os.fsdecode(path)
+                if path and candidate.is_file() and not candidate.is_symlink():
+                    inventory.write(prefix + path + b"\n")
 
         inventory.seek(0)
         rows = sorted(inventory)
