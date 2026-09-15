@@ -1628,6 +1628,188 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
+  test("keeps an active coordinator's cwd usable across same-version bootstraps", async () => {
+    const root = await temporaryDirectory();
+    const selected = await plugin(root);
+    const home = join(root, "home");
+    const output = join(root, "output");
+    await mkdir(home);
+    await mkdir(output);
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      WINDIR: process.env["WINDIR"],
+      HOME: home,
+      USERPROFILE: home,
+      CODEX_HOME: home,
+      TMPDIR: root,
+      TMP: root,
+      TEMP: root,
+    };
+    const codexCommand = resolveCodexCommand(environment);
+    const options = { codexCommand, environment };
+    const first = await bootstrapPlugin(home, selected, options);
+    const identity = await stat(first.installedRoot, { bigint: true });
+    // The coordinator stays alive in the installed directory while a second
+    // scan bootstraps. Its later worker inherits that cwd even with --cd.
+    const coordinator = childProcess.spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+          const { spawnSync } = require("node:child_process");
+          process.stdin.once("data", () => {
+            const result = spawnSync(${JSON.stringify(codexCommand.command)},
+              ["exec", "--skip-git-repo-check", "--cd", ${JSON.stringify(output)}],
+              { input: "", encoding: "utf8", timeout: 10000 });
+            console.log(JSON.stringify({ status: result.status, stderr: result.stderr, error: result.error?.message }));
+          });
+          console.log("ready");
+        `,
+      ],
+      { cwd: first.installedRoot, env: environment, stdio: "pipe" },
+    );
+    const completion = once(coordinator, "close");
+    try {
+      await once(coordinator.stdout, "data");
+      const second = await bootstrapPlugin(home, selected, options);
+      expect(second.installedRoot).toBe(first.installedRoot);
+      const current = await stat(second.installedRoot, { bigint: true });
+      expect([current.dev, current.ino]).toEqual([identity.dev, identity.ino]);
+      let output = "";
+      coordinator.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+        output += chunk;
+      });
+      coordinator.stdin.end("start worker\n");
+      expect((await completion)[0]).toBe(0);
+      const result = JSON.parse(output) as {
+        status: number;
+        stderr: string;
+        error?: string;
+      };
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(1);
+      // Empty stdin stops before authentication or any model request.
+      expect(result.stderr).toContain("No prompt provided via stdin");
+      expect(result.stderr).not.toContain("os error 2");
+    } finally {
+      coordinator.kill();
+      await completion;
+    }
+  });
+
+  test.each([
+    "unchanged contents",
+    "runtime-generated files",
+    "relocated source",
+    "changed source file",
+    "removed source file",
+    "missing installed directory",
+    "missing installed helper",
+    "changed installed helper",
+    "disabled plugin",
+    "missing marketplace registration",
+    "interrupted install record",
+  ])("bootstraps a cached plugin with %s", async (change) => {
+    const root = await temporaryDirectory();
+    let selected = await plugin(root);
+    const home = join(root, "home");
+    const marketplace = join(home, "sdk-marketplace");
+    // Codex owns the cache layout; only its returned path identifies the install.
+    const installed = join(home, "codex-managed-install");
+    const configPath = join(home, "config.toml");
+    await mkdir(home);
+    let installs = 0;
+    const registration = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
+    const configuration = `${registration}\n[plugins."codex-security@codex-security-sdk"]\nenabled = true\n`;
+    const options = {
+      codexCommand: { command: "/codex" },
+      runCodex: async (_command: unknown, args: readonly string[]) => {
+        if (args[1] === "marketplace") {
+          await writeFile(configPath, registration);
+          return "";
+        }
+        installs += 1;
+        await rm(installed, { recursive: true, force: true });
+        await fsPromises.cp(
+          join(marketplace, "plugins", "codex-security"),
+          installed,
+          { recursive: true },
+        );
+        await writeFile(configPath, configuration);
+        return JSON.stringify({ installedPath: installed, version: "1.2.3" });
+      },
+    };
+    await bootstrapPlugin(home, selected, options);
+
+    switch (change) {
+      case "runtime-generated files":
+        await mkdir(join(installed, "scripts", "__pycache__"));
+        await writeFile(
+          join(installed, "scripts", "__pycache__", "helper.pyc"),
+          "generated",
+        );
+        break;
+      case "relocated source":
+        selected = await plugin(join(root, "relocated"));
+        break;
+      case "changed source file":
+        await writeFile(
+          join(selected, "scripts", "helper.py"),
+          "print('hi')\n",
+        );
+        break;
+      case "removed source file":
+        await rm(join(selected, "scripts", "helper.py"));
+        break;
+      case "missing installed directory":
+        await rm(installed, { recursive: true });
+        break;
+      case "missing installed helper":
+        await rm(join(installed, "scripts", "helper.py"));
+        break;
+      case "changed installed helper":
+        await writeFile(
+          join(installed, "scripts", "helper.py"),
+          "print('no')\n",
+        );
+        break;
+      case "disabled plugin":
+        await writeFile(
+          configPath,
+          configuration.replace("enabled = true", "enabled = false"),
+        );
+        break;
+      case "missing marketplace registration":
+        await writeFile(configPath, "");
+        break;
+      case "interrupted install record":
+        await writeFile(join(marketplace, "installed-plugin.json"), "{");
+        break;
+    }
+
+    const result = await bootstrapPlugin(home, selected, options);
+    expect(result.installedRoot).toBe(installed);
+    expect(result.pluginRoot).toBe(selected);
+    expect(installs).toBe(
+      [
+        "unchanged contents",
+        "runtime-generated files",
+        "relocated source",
+      ].includes(change)
+        ? 1
+        : 2,
+    );
+    if (change === "removed source file") {
+      expect(existsSync(join(installed, "scripts", "helper.py"))).toBe(false);
+    } else {
+      expect(
+        await readFile(join(installed, "scripts", "helper.py"), "utf8"),
+      ).toBe(await readFile(join(selected, "scripts", "helper.py"), "utf8"));
+    }
+    expect(await readFile(configPath, "utf8")).toBe(configuration);
+  });
+
   test("does not preserve a different marketplace when numeric identities collide", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
