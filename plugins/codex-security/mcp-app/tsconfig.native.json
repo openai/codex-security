@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "noEmitOnError": true,
+    "rootDir": "../native",
+    "typeRoots": ["./node_modules/@types"]
+  },
+  "include": ["../native/*.mts"]
+}
