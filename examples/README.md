@@ -18,6 +18,10 @@ Examples and templates for using Codex Security:
   validation script against a deliberately vulnerable API using synthetic data.
   Follow the demo's setup instructions, and do not deploy the example app.
 
+- [Azure Pipelines with Amazon Bedrock](azure-pipelines/README.md): centrally run
+  manual full or committed-diff scans against Azure Repos, with OIDC credentials,
+  report artifacts, and optional native SARIF publishing.
+
 ## npm package
 
 This top-level `examples/` directory is available in the repository only; it is
