@@ -1548,7 +1548,10 @@ describe("scan and patch workflow", () => {
             }
             expect(command).toBe(client);
             publicationCommands.push(args);
-            return args[1] === "create" ? url : "";
+            if (args[1] !== "create") return "";
+            return client === "glab"
+              ? `!14 fix: patch verified security findings (codex-security/patch-scan-1)\n${url}`
+              : url;
           },
         },
         {
