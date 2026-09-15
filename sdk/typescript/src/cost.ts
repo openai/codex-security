@@ -108,6 +108,7 @@ function createSessionUsage(): SessionUsage {
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
   readonly #sessions = new Map<string, SessionUsage>();
+  readonly #receipts = new Map<string, ScanTokenUsage | null>();
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
@@ -115,7 +116,7 @@ export class ScanCostTracker {
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
-  #lastCost: number | null = null;
+  #lastCost: string | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -126,6 +127,13 @@ export class ScanCostTracker {
 
   public setExpectedFilesTotal(filesTotal: number): void {
     this.#expectedFilesTotal = filesTotal;
+  }
+
+  public recordUsage(usage: unknown, threadId = this.#threadId): void {
+    const normalized = tokenUsage(usage);
+    if (threadId !== null) {
+      this.#receipts.set(threadId, normalized);
+    }
   }
 
   public start(threadId: string): void {
@@ -179,8 +187,10 @@ export class ScanCostTracker {
       clearInterval(this.#timer);
       this.#timer = null;
     }
+    if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
     await this.refresh();
-    if (this.#snapshot.usage !== null) return this.#snapshot;
+    if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
+      return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
     this.#reportCost(cost);
@@ -206,7 +216,7 @@ export class ScanCostTracker {
       }
     }
 
-    const included = new Set([this.#threadId]);
+    const included = new Set([this.#threadId, ...this.#receipts.keys()]);
     if (this.#options.scanDirectory !== undefined) {
       const scanStartedAt =
         [...this.#sessions.values()].find(
@@ -252,7 +262,7 @@ export class ScanCostTracker {
       if (included.has(session.threadId!)) throw error;
     }
 
-    let usage: ScanTokenUsage | null = null;
+    const usages = new Map(this.#receipts);
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
@@ -290,9 +300,24 @@ export class ScanCostTracker {
         }
         this.#reportWorkerProgress(session);
       }
-      if (session.usage !== null) {
-        usage = addTokenUsage(usage, session.usage);
+      const receipt = usages.get(threadId);
+      if (
+        session.usage !== null &&
+        (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
+          // The SDK inserts zero when the final receipt omits cache writes.
+          (session.usage.total_tokens === receipt?.total_tokens &&
+            receipt.cache_write_input_tokens === 0))
+      ) {
+        usages.set(threadId, session.usage);
       }
+    }
+    let usage: ScanTokenUsage | null = null;
+    for (const value of usages.values()) {
+      if (value === null) {
+        this.#snapshot = { usage: null, cost: null };
+        return;
+      }
+      usage = addTokenUsage(usage, value);
     }
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
@@ -341,8 +366,10 @@ export class ScanCostTracker {
   }
 
   #reportCost(cost: ScanCost | null): void {
-    if (cost === null || cost.estimatedUsd === this.#lastCost) return;
-    this.#lastCost = cost.estimatedUsd;
+    if (cost === null) return;
+    const signature = JSON.stringify(cost);
+    if (signature === this.#lastCost) return;
+    this.#lastCost = signature;
     this.#options.onCost?.(cost);
   }
 }
@@ -476,14 +503,20 @@ function readSessionEvent(
       const usage = tokenUsage(payload["info"]["total_token_usage"]);
       if (usage !== null) session.inheritedUsage = usage;
     }
-    if (
-      payload["type"] === "task_started" &&
-      typeof payload["started_at"] === "number" &&
-      session.startedAt !== null &&
-      payload["started_at"] >= Math.floor(session.startedAt / 1_000)
-    ) {
-      session.replaying = false;
-      session.events?.push(event);
+    if (payload["type"] === "task_started") {
+      // Fresh Codex worker thread/turn IDs share a same-process monotonic UUIDv7 generator.
+      const threadOrder = uuid7Order(session.threadId);
+      const turnOrder = uuid7Order(payload["turn_id"]);
+      const owned =
+        threadOrder === null
+          ? typeof payload["started_at"] === "number" &&
+            session.startedAt !== null &&
+            payload["started_at"] >= Math.floor(session.startedAt / 1_000)
+          : turnOrder !== null && turnOrder >= threadOrder;
+      if (owned) {
+        session.replaying = false;
+        session.events?.push(event);
+      }
     }
     return;
   }
@@ -628,6 +661,18 @@ function readSessionEvent(
   if (ownUsage !== null) session.usage = ownUsage;
 }
 
+function uuid7Order(value: unknown): bigint | null {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      value,
+    )
+  ) {
+    return null;
+  }
+  return BigInt(`0x${value.replaceAll("-", "")}`);
+}
+
 function readSessionReasoning(
   event: Readonly<Record<string, unknown>>,
   payload: Readonly<Record<string, unknown>>,
@@ -760,18 +805,15 @@ function addTokenUsage(
       previous.cached_input_tokens + next.cached_input_tokens,
     cache_write_input_tokens:
       previous.cache_write_input_tokens + next.cache_write_input_tokens,
+    ...(previous.cache_write_input_tokens_reported === false ||
+    next.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
     output_tokens: previous.output_tokens + next.output_tokens,
     reasoning_output_tokens:
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
     total_tokens: previous.total_tokens + next.total_tokens,
   };
-}
-
-/** @internal Sum complete turn receipts when session usage is unavailable. */
-export function sumTokenUsage(first: unknown, second: unknown): unknown {
-  const left = tokenUsage(first);
-  const right = tokenUsage(second);
-  return left === null || right === null ? null : addTokenUsage(left, right);
 }
 
 function subtractTokenUsage(
@@ -784,6 +826,10 @@ function subtractTokenUsage(
       usage.cached_input_tokens - inherited.cached_input_tokens,
     cache_write_input_tokens:
       usage.cache_write_input_tokens - inherited.cache_write_input_tokens,
+    ...(usage.cache_write_input_tokens_reported === false ||
+    inherited.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
     output_tokens: usage.output_tokens - inherited.output_tokens,
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,

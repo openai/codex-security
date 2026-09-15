@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import { constants, type BigIntStats, type Stats } from "node:fs";
 import {
   lstat,
   open,
@@ -535,6 +535,25 @@ export async function requireScanFile(
   return (
     await requireCheckedScanFile(scanDirectory, relativePath, context, signal)
   ).path;
+}
+
+export async function readScanFile(
+  scanDirectory: string,
+  relativePath: string,
+  context: string,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const file = await openCheckedScanFile(
+    scanDirectory,
+    relativePath,
+    context,
+    signal,
+  );
+  try {
+    return await file.readFile({ signal });
+  } finally {
+    await file.close();
+  }
 }
 
 async function requireCheckedScanFile(
@@ -1136,8 +1155,8 @@ async function openCheckedScanFile(
 
 export async function sameCheckedFileDevice(
   file: FileHandle,
-  checked: CheckedScanFile,
-  opened: Stats,
+  checked: { path: string; metadata: Pick<Stats | BigIntStats, "dev" | "ino"> },
+  opened: Pick<Stats | BigIntStats, "dev" | "ino">,
   platform: NodeJS.Platform = process.platform,
   openReference: (path: string, flags: number) => Promise<FileHandle> = open,
 ): Promise<boolean> {

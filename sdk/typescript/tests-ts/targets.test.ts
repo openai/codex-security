@@ -119,7 +119,12 @@ describe("scan target normalization", () => {
       paths: [],
     });
     expect(
-      await normalizeTarget(repo, ["src", join(repo, "src", "app.ts")]),
+      await normalizeTarget(repo, [
+        "src",
+        join(repo, "src", "app.ts"),
+        join(repo, "src"),
+        "src/app.ts",
+      ]),
     ).toEqual({
       kind: "paths",
       paths: ["src", "src/app.ts"],

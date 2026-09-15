@@ -140,7 +140,7 @@ async function* responseEvents(
   value: unknown,
   activity?: string,
 ): AsyncGenerator<ThreadEvent> {
-  for await (const event of completedEvents()) {
+  for await (const event of completedEvents("validation-thread")) {
     if (
       event.type === "item.completed" &&
       event.item.type === "agent_message"
@@ -352,6 +352,8 @@ describe("custom validation", () => {
         );
       }
       const workflow = "Run the synthetic validation script, then clean up.";
+      const workflowFile = join(root, "validation.md");
+      if (scenario === "standard") await writeFile(workflowFile, workflow);
       const falsePositive = {
         reason: "The fixture is not included in the deployed application.",
       };
@@ -402,7 +404,10 @@ describe("custom validation", () => {
                 expect(threadOptions.threadSource).toBe("security_scan");
                 workingDirectories.push(threadOptions.workingDirectory);
                 return {
-                  id: "thread-1",
+                  id:
+                    workingDirectories.length === 1
+                      ? "thread-1"
+                      : "validation-thread",
                   async runStreamed(prompt, turnOptions) {
                     turns += 1;
                     if (turns === 1) {
@@ -515,7 +520,9 @@ describe("custom validation", () => {
       );
       try {
         const pending = client.run(repository, {
-          validationPrompt: workflow,
+          ...(scenario === "standard"
+            ? { validationPromptFile: workflowFile }
+            : { validationPrompt: workflow }),
           onActivity: (activity) => activities.push(activity),
           ...(diff ? { target: DiffTarget.workingTree({}) } : {}),
         });

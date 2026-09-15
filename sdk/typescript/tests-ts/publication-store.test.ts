@@ -96,6 +96,7 @@ async function publicationFixture(
   };
   const fixture = { environment, publication, python, stateDirectory };
   if (options.createDatabase !== false) {
+    await mkdir(stateDirectory, { mode: 0o700 });
     await runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, [
       "database-info",
     ]);
@@ -209,10 +210,12 @@ describe("read-only publication history", () => {
         "-c",
         [
           "import sys",
+          "from dataclasses import replace",
           "from pathlib import PureWindowsPath",
           "from urllib.parse import unquote, urlsplit",
           "sys.path.insert(0, sys.argv[1])",
           "import workbench_db as workbench",
+          "import workbench_publication as publication",
           "class Captured(Exception): pass",
           "def capture(filename, **options):",
           "    parsed = urlsplit(filename)",
@@ -220,12 +223,12 @@ describe("read-only publication history", () => {
           "    assert unquote(parsed.path) == str(path)",
           "    assert parsed.query == 'mode=ro' and options == {'uri': True, 'timeout': 5}",
           "    raise Captured",
-          "workbench.sqlite3.connect = capture",
-          "workbench.linear_publication_input = lambda *_args, **_options: ({}, {}, [])",
+          "publication.sqlite3.connect = capture",
+          "publication.linear_publication_input = lambda *_args, **_options: ({}, {}, [])",
           "for value in ['C:/state/history.sqlite3', '//server/share/state/history.sqlite3', '//?/C:/state/history.sqlite3', '//?/UNC/server/share/history.sqlite3']:",
           "    path = PureWindowsPath(value)",
-          "    workbench.database_path = lambda: path",
-          "    try: workbench.inspect_linear_publication(None)",
+          "    context = replace(workbench._WORKBENCH_PUBLICATION_CONTEXT, database_path=lambda path=path: path)",
+          "    try: publication.inspect_linear_publication(context, None)",
           "    except Captured: pass",
           "    else: raise AssertionError('SQLite connection was not attempted')",
         ].join("\n"),
@@ -246,6 +249,7 @@ describe("read-only publication history", () => {
       destination: "linear" as const,
       teamId: "team-example",
       projectId: "project-example",
+      environment: fixture.environment,
     };
     const original = await prepareScanPublication(scanDirectory, options);
     seedPublicationScan(fixture, original);
@@ -393,9 +397,11 @@ describe("read-only publication history", () => {
 
     const fixture = await publicationFixture();
     databaseRows(fixture, "DROP TABLE finding_publications");
-    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version >= ?", [
-      29,
-    ]);
+    databaseRows(
+      fixture,
+      "DELETE FROM schema_migrations WHERE version >= ?",
+      [29],
+    );
     const database = join(fixture.stateDirectory, "workbench.sqlite3");
     const before = await readFile(database);
     const mode = (await stat(database)).mode;
@@ -679,9 +685,11 @@ connection.close()
       fixture,
       "ALTER TABLE deep_scan_runs DROP COLUMN publication_error_message",
     );
-    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version >= ?", [
-      31,
-    ]);
+    databaseRows(
+      fixture,
+      "DELETE FROM schema_migrations WHERE version BETWEEN ? AND ?",
+      [31, 32],
+    );
 
     await expect(
       preparePublicationStore(fixture.publication, fixture.environment),
@@ -690,8 +698,8 @@ connection.close()
     expect(
       databaseRows(
         fixture,
-        "SELECT version, name FROM schema_migrations WHERE version >= ? ORDER BY version",
-        [31],
+        "SELECT version, name FROM schema_migrations WHERE version BETWEEN ? AND ? ORDER BY version",
+        [31, 32],
       ),
     ).toEqual([
       { version: 31, name: "freeze stopped scan source digests" },
@@ -728,9 +736,11 @@ connection.close()
       fixture,
       "DROP INDEX finding_publications_team_only_external_issue",
     );
-    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version = ?", [
-      30,
-    ]);
+    databaseRows(
+      fixture,
+      "DELETE FROM schema_migrations WHERE version = ?",
+      [30],
+    );
 
     await expect(
       preparePublicationStore(fixture.publication, fixture.environment),

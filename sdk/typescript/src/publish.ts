@@ -39,6 +39,7 @@ import {
   type LinearPublicationDestination,
   type PreparedPublicationIssue,
   type PreparedScanPublication,
+  type PrepareScanPublicationOptions,
 } from "./publication.js";
 import {
   collectPublicationEvents,
@@ -58,11 +59,14 @@ import {
 } from "./publication-store.js";
 import {
   codexSecurityStateDirectory,
+  executablePathForSpawn,
   resolveCodexCommand,
   type CodexCommand,
 } from "./runtime.js";
 
 export interface PublishScanOptions {
+  findingIds?: PrepareScanPublicationOptions["findingIds"];
+  classification?: PrepareScanPublicationOptions["classification"];
   expectedScanId?: string;
   destination: "linear";
   teamId: string;
@@ -133,6 +137,8 @@ export type CheckScanPublicationOptions = Pick<
   | "linearApiKey"
   | "assigneeId"
   | "signal"
+  | "findingIds"
+  | "classification"
 >;
 
 export interface CheckScanPublicationResult {
@@ -209,8 +215,7 @@ type PublicationHandoffEvidence = {
 );
 
 type PublicationEvidence =
-  | PublicationEventEvidence
-  | PublicationHandoffEvidence;
+  PublicationEventEvidence | PublicationHandoffEvidence;
 
 type CompletedPublicationEvent = Extract<
   PublicationEventEvidence,
@@ -271,7 +276,7 @@ export async function publishScanInternal(
 
   const preparedScan = await (dependencies.prepare ?? prepareScanPublication)(
     scanDirectory,
-    options,
+    { ...options, environment },
   );
   let prepared = preparedScan;
   options.signal?.throwIfAborted();
@@ -585,7 +590,7 @@ export async function checkScanPublicationInternal(
   const linearApiKey = publicationApiKey(options, environment);
   const prepared = await (dependencies.prepare ?? prepareScanPublication)(
     scanDirectory,
-    options,
+    { ...options, environment },
   );
   options.signal?.throwIfAborted();
   const recorded = await (
@@ -1527,7 +1532,7 @@ async function runPublicationCodex(
 ): Promise<PublicationCodexResult> {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(command.command, [...args], {
+    const child = spawn(executablePathForSpawn(command.command), [...args], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -1598,7 +1603,7 @@ async function runPublicationCodex(
         }
         cleanup();
         resolve({
-          exitCode: terminationSignal === null ? code ?? 1 : 1,
+          exitCode: terminationSignal === null ? (code ?? 1) : 1,
           stdout,
           stderr,
           ...(terminationSignal === null ? {} : { terminatedBySignal: true }),

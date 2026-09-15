@@ -4,11 +4,14 @@ import { estimateScanCost, formatUsd, tokenUsage } from "../src/cost-model.js";
 import { propertyOptions } from "./support/property.js";
 
 const rates = [
-  ["gpt-5.6", 5000n, 500n, 6250n, 30000n],
-  ["gpt-5.6-sol", 5000n, 500n, 6250n, 30000n],
+  ["gpt-5.5", 5000n, 500n, 5000n, 30000n],
+  ["gpt-5.5-2026-04-23", 5000n, 500n, 5000n, 30000n],
+  ["gpt-6-astra", 10000n, 1000n, 12500n, 50000n],
+  ["gpt-5.6", 4000n, 400n, 5000n, 20000n],
+  ["gpt-5.6-sol", 4000n, 400n, 5000n, 20000n],
   ["gpt-5.6-terra", 2000n, 200n, 2500n, 12000n],
   ["gpt-5.6-luna", 200n, 20n, 250n, 1200n],
-  ["gpt-daybreak-blue-latest", 5000n, 500n, 6250n, 30000n],
+  ["gpt-daybreak-blue-latest", 4000n, 400n, 5000n, 20000n],
   ["gpt-daybreak-red-latest", 12500n, 1250n, 15625n, 75000n],
 ] as const;
 const count = fc.integer({ min: 0, max: 1_000_000_000 });
@@ -66,7 +69,7 @@ describe("cost-model invariants", () => {
             BigInt(parts.written) * writeRate +
             BigInt(parts.output) * outputRate;
           for (const selected of [model, `openai.${model}`]) {
-            expect(estimateScanCost(selected, tokens)).toEqual({
+            expect(estimateScanCost(selected, tokens)).toMatchObject({
               model: selected,
               inputTokens: tokens.input_tokens,
               cachedInputTokens: parts.cached,
@@ -170,7 +173,7 @@ describe("cost-model invariants", () => {
       fc.property(
         fc.integer({ min: 0, max: Number.MAX_SAFE_INTEGER }),
         (input) => {
-          const nanos = BigInt(input) * 5000n;
+          const nanos = BigInt(input) * 4000n;
           const result = estimateScanCost("gpt-5.6-sol", {
             input_tokens: input,
             output_tokens: 0,

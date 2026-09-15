@@ -120,7 +120,11 @@ describe("CLI skill commands", () => {
           "\\\\server\\share\\issue.txt",
         ]);
         expect(stdout.text()).toBe("");
-        expect(stderr.text()).toBe("");
+        expect(stderr.text()).toBe(
+          command === "patch"
+            ? "codex-security: Patch command exited with status 7.\n"
+            : "",
+        );
 
         const help = capture();
         expect(
@@ -140,6 +144,7 @@ describe("CLI skill commands", () => {
         expect(help.text()).toContain("--codex <array>");
         expect(help.text()).toContain('model="gpt-5.6-terra"');
         expect(help.text()).toContain('model_reasoning_effort="high"');
+        expect(help.text()).toContain("analytics.enabled=false");
         expect(help.text()).not.toContain("--provider");
       }
     } finally {
@@ -786,7 +791,9 @@ describe("CLI skill commands", () => {
       ).toBe(0);
       expect(invocation).toContain('model="gpt-5.6-custom"');
       expect(invocation).toContain('model_reasoning_effort="high"');
-      expect(stderr.text()).toBe("");
+      expect(stderr.text()).toBe(
+        command === "patch" ? "Patch applied. Files changed: 1.\n" : "",
+      );
     }
 
     const longLiteral =
@@ -837,6 +844,89 @@ describe("CLI skill commands", () => {
     }
   });
 
+  test.each(["validate", "patch", "verify-fix"] as const)(
+    "passes explicit analytics settings to %s",
+    async (command) => {
+      for (const override of [
+        "analytics.enabled=false",
+        "analytics.enabled=true",
+        "analytics={enabled=false}",
+      ]) {
+        let invocation: readonly string[] = [];
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              command,
+              "Synthetic finding",
+              "--effort",
+              "high",
+              "--codex",
+              override,
+            ],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              onCodex: (args, output) => {
+                invocation = args;
+                if (command === "verify-fix") {
+                  output?.stdout.write(
+                    JSON.stringify({
+                      results: [
+                        {
+                          id: "finding-1",
+                          status: "fixed",
+                          evidence: "The original issue no longer reproduces.",
+                        },
+                      ],
+                    }),
+                  );
+                }
+                return 0;
+              },
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(invocation).toContain(override);
+        expect(invocation).toContain('model_reasoning_effort="high"');
+      }
+
+      for (const override of [
+        'model_provider="synthetic"',
+        "features.goals=false",
+        "analytics.unrelated=false",
+        "analytics.enabled=false",
+      ]) {
+        let started = false;
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              command,
+              "Synthetic finding",
+              "--codex",
+              override,
+              ...(override === "analytics.enabled=false"
+                ? ["--codex", "analytics.enabled=true"]
+                : []),
+            ],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              onCodex: () => {
+                started = true;
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toContain("codex-security:");
+        expect(started).toBe(false);
+      }
+    },
+  );
+
   test("selects reasoning effort directly for validation and patching", async () => {
     for (const command of ["validate", "patch"] as const) {
       let invocation: readonly string[] = [];
@@ -864,7 +954,9 @@ describe("CLI skill commands", () => {
       ).toBe(0);
       expect(invocation).toContain('model="gpt-5.6-terra"');
       expect(invocation).toContain('model_reasoning_effort="max"');
-      expect(stderr.text()).toBe("");
+      expect(stderr.text()).toBe(
+        command === "patch" ? "Patch applied. Files changed: 1.\n" : "",
+      );
 
       for (const [options, message] of [
         [
@@ -997,6 +1089,46 @@ describe("CLI skill commands", () => {
     expect(stderr.text()).toBe("");
   });
 
+  test("preserves the selected Codex home from copied Windows environments", async () => {
+    const configuredHome = "./synthetic home with spaces";
+    const source = `
+process.stdout.write(JSON.stringify({
+  type: "item.completed",
+  item: {
+    type: "agent_message",
+    text: JSON.stringify({
+      home: process.env.CODEX_HOME ?? null,
+      homeKeys: Object.keys(process.env).filter((name) => name.toUpperCase() === "CODEX_HOME"),
+      other: process.env.SYNTHETIC_OTHER,
+    }),
+  },
+}) + "\\n");
+`;
+    for (const name of ["CODEX_HOME", "codex_home", "Codex_Home"]) {
+      const environment = Object.freeze({
+        [name]: configuredHome,
+        SYNTHETIC_OTHER: "preserved",
+      });
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+          environment,
+        ),
+      ).toBe(0);
+      const selected = process.platform === "win32" || name === "CODEX_HOME";
+      expect(JSON.parse(stdout.text())).toEqual({
+        home: selected ? resolve(configuredHome) : null,
+        homeKeys: selected ? ["CODEX_HOME"] : [],
+        other: "preserved",
+      });
+      expect(stderr.text()).toBe("");
+    }
+  });
+
   test("extracts the final skill response without exposing intermediate events", async () => {
     async function* events(): AsyncGenerator<Buffer> {
       yield Buffer.from(
@@ -1048,7 +1180,7 @@ describe("CLI skill commands", () => {
   test("accepts skill events and responses larger than 16 MiB", async () => {
     let drained = false;
     async function* oversizedLine(): AsyncGenerator<Buffer> {
-      for (let remaining = 1_024 * 1_024 + 1; remaining > 0; ) {
+      for (let remaining = 1_024 * 1_024 + 1; remaining > 0;) {
         const length = Math.min(64 * 1_024, remaining);
         yield Buffer.alloc(length, 0x78);
         remaining -= length;
@@ -1120,6 +1252,36 @@ describe("CLI skill commands", () => {
     }
   });
 
+  test("keeps unknown credential failures neutral", () => {
+    for (const authentication of [
+      null,
+      { method: "stored_credentials", verified: false } as const,
+    ]) {
+      const message = skillCommandFailure(
+        "patch",
+        1,
+        "401 Unauthorized",
+        authentication,
+      );
+      expect(message).toContain("Authentication failed");
+      expect(message).not.toContain("ChatGPT");
+      expect(message).not.toContain("--auth chatgpt");
+    }
+  });
+
+  test.each(["FIREWORKS_API_KEY", "OPENROUTER_API_KEY"] as const)(
+    "external-provider failures recommend the selected key (%s)",
+    (source) => {
+      const message = skillCommandFailure("patch", 1, "401 Unauthorized", {
+        method: "api_key",
+        source,
+        verified: false,
+      });
+      expect(message).toContain(source);
+      expect(message).not.toContain("--auth chatgpt");
+    },
+  );
+
   test("forwards only completed skill output and redacts subprocess diagnostics", async () => {
     const cases = [
       {
@@ -1189,7 +1351,11 @@ lines.on("line", (line) => {
   } else if (request.method === "thread/start") {
     assert.equal(process.cwd(), ${JSON.stringify(process.cwd())});
     assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write" });
-    send({ id: 2, result: { thread: { id: "parent", source: "vscode", ephemeral: false } } });
+    send({ id: 2, result: { thread: { id: "parent", source: "vscode", ephemeral: false }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } } });
+  } else if (request.method === "command/exec") {
+    assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");
+    assert.deepEqual(request.params.command, [process.execPath, "-e", ""]);
+    send({ id: request.id, result: { exitCode: 0, stdout: "", stderr: "" } });
   } else if (request.method === "turn/start") {
     assert.equal(request.params.threadId, "parent");
     assert.equal(request.params.input[0].text, "Fix the synthetic finding");
@@ -1353,6 +1519,7 @@ lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "initialize") send({ id: 1, result: {} });
   if (request.method === "thread/start") send({ id: 2, result: { thread: { id: "parent" } } });
+  if (request.method === "command/exec") send({ id: request.id, result: { exitCode: 0 } });
   if (request.method === "turn/start") process.stdout.write(${JSON.stringify(events.map((event) => JSON.stringify(event)).join("\n") + "\n")}, () => process.exit(0));
 });
 `;

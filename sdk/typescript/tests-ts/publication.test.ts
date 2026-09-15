@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { prepareScanPublication } from "../src/publication.js";
 import type {
@@ -24,12 +24,17 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const temporaryDirectories: string[] = [];
-const DESTINATION = {
-  destination: "linear",
-  teamId: "team_example",
-  projectId: "project_example",
-  uploadedAt: "2026-06-01T10:30:00Z",
-} as const;
+function publicationOptions(scanDirectory: string) {
+  return {
+    destination: "linear",
+    teamId: "team_example",
+    projectId: "project_example",
+    uploadedAt: "2026-06-01T10:30:00Z",
+    environment: {
+      CODEX_SECURITY_STATE_DIR: join(dirname(scanDirectory), "state"),
+    },
+  } as const;
+}
 
 afterEach(async () => {
   await Promise.all(
@@ -76,7 +81,7 @@ describe("scan publication preparation", () => {
 
     await expect(
       prepareScanPublication(scanDirectory, {
-        ...DESTINATION,
+        ...publicationOptions(scanDirectory),
         signal: controller.signal,
       }),
     ).rejects.toBe(reason);
@@ -86,7 +91,7 @@ describe("scan publication preparation", () => {
     const scanDirectory = await copyExample();
     await expect(
       prepareScanPublication(scanDirectory, {
-        ...DESTINATION,
+        ...publicationOptions(scanDirectory),
         expectedScanId: "another-scan",
       }),
     ).rejects.toThrow(
@@ -95,7 +100,7 @@ describe("scan publication preparation", () => {
     expect(
       (
         await prepareScanPublication(scanDirectory, {
-          ...DESTINATION,
+          ...publicationOptions(scanDirectory),
           expectedScanId: "scan_example_001",
         })
       ).scanId,
@@ -106,7 +111,7 @@ describe("scan publication preparation", () => {
     const scanDirectory = await copyExample();
     const publication = await prepareScanPublication(
       scanDirectory,
-      DESTINATION,
+      publicationOptions(scanDirectory),
     );
 
     expect(publication).toMatchObject({
@@ -150,7 +155,59 @@ describe("scan publication preparation", () => {
     expect(issue.description).toContain("**Uploaded:** 2026-06-01T10:30:00Z");
     expect(issue.description).toContain("without containment validation");
     expect(issue.description).toContain("Normalize destinations");
+    expect(
+      issue.description.indexOf("without containment validation"),
+    ).toBeLessThan(issue.description.indexOf("**Scan ID:**"));
+    expect(issue.description.indexOf("Normalize destinations")).toBeLessThan(
+      issue.description.indexOf("**Scan ID:**"),
+    );
     expect(issue.description).not.toContain("/blob/deadbeef/");
+  });
+
+  test("keeps the reproduction and validation limits ahead of scan metadata", async () => {
+    const scanDirectory = await copyExample();
+    const findingsPath = join(scanDirectory, "findings.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const finding = findings.findings[0]!;
+    const reproduction =
+      "Import an archive containing ../escape.txt. The importer should reject it; source review shows it writing outside the selected directory. This was not run.";
+    const unrun = "No runtime reproduction was run.";
+    const attackPath = {
+      summary: reproduction,
+      limitations: [unrun, "Files must be writable by the importing process."],
+    };
+    const validation = {
+      method: "Source review",
+      summary: "The importer passes the entry name to the filesystem write.",
+      limitations: [unrun],
+      counterEvidence: ["The user must first choose to import the archive."],
+    };
+    finding.attackPath = attackPath;
+    finding.validation = validation;
+    await writeJson(findingsPath, findings);
+    await reseal(scanDirectory);
+
+    const { description } = (
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
+    ).issues[0]!;
+
+    const metadata = description.indexOf("**Scan ID:**");
+    for (const text of [
+      finding.summary,
+      reproduction,
+      validation.summary,
+      validation.method,
+      ...validation.limitations,
+      ...validation.counterEvidence,
+      ...attackPath.limitations,
+    ]) {
+      expect(description).toContain(text);
+      expect(description.indexOf(text)).toBeLessThan(metadata);
+    }
+    expect(description.split(unrun)).toHaveLength(2);
   });
 
   test("uses the canonical scan directory beneath an aliased parent", async () => {
@@ -161,7 +218,7 @@ describe("scan publication preparation", () => {
     const parent = join(root, "actual-parent");
     const alias = join(root, "aliased-parent");
     const scanDirectory = join(parent, "scan");
-    await mkdir(parent);
+    await mkdir(parent, { mode: 0o700 });
     await cp(EXAMPLE, scanDirectory, { recursive: true });
     if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
     await symlink(
@@ -172,7 +229,7 @@ describe("scan publication preparation", () => {
 
     const publication = await prepareScanPublication(
       join(alias, "scan"),
-      DESTINATION,
+      publicationOptions(scanDirectory),
     );
 
     expect(publication.scanDirectory).toBe(await realpath(scanDirectory));
@@ -197,7 +254,10 @@ describe("scan publication preparation", () => {
       await reseal(scanDirectory);
 
       const { description } = (
-        await prepareScanPublication(scanDirectory, DESTINATION)
+        await prepareScanPublication(
+          scanDirectory,
+          publicationOptions(scanDirectory),
+        )
       ).issues[0]!;
 
       expect(description).toContain(`**Coverage mode:** ${mode}`);
@@ -212,6 +272,7 @@ describe("scan publication preparation", () => {
       destination: "linear",
       teamId: "team_example",
       uploadedAt: "2026-06-01T10:30:00Z",
+      environment: publicationOptions(scanDirectory).environment,
     });
 
     expect(publication.destination).toEqual({
@@ -276,7 +337,10 @@ describe("scan publication preparation", () => {
     await reseal(scanDirectory);
 
     const { description } = (
-      await prepareScanPublication(scanDirectory, DESTINATION)
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
     ).issues[0]!;
 
     expect(description).toContain("**Root control:** `src/archive.py:12`");
@@ -313,7 +377,10 @@ describe("scan publication preparation", () => {
     await writeJson(manifestPath, manifest);
 
     const { description } = (
-      await prepareScanPublication(scanDirectory, DESTINATION)
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
     ).issues[0]!;
 
     expect(description).toContain(
@@ -336,7 +403,10 @@ describe("scan publication preparation", () => {
     await writeJson(manifestPath, manifest);
 
     const { description } = (
-      await prepareScanPublication(scanDirectory, DESTINATION)
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
     ).issues[0]!;
 
     expect(description).toContain("**Remote:** ssh://github.com/example/repo");
@@ -381,7 +451,10 @@ describe("scan publication preparation", () => {
     await reseal(scanDirectory);
 
     const { description } = (
-      await prepareScanPublication(scanDirectory, DESTINATION)
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
     ).issues[0]!;
 
     expect(description).toContain(
@@ -410,8 +483,12 @@ describe("scan publication preparation", () => {
       await writeJson(findingsPath, findings);
       await reseal(scanDirectory);
 
-      const issue = (await prepareScanPublication(scanDirectory, DESTINATION))
-        .issues[0]!;
+      const issue = (
+        await prepareScanPublication(
+          scanDirectory,
+          publicationOptions(scanDirectory),
+        )
+      ).issues[0]!;
       expect(issue.title).toStartWith(
         `[Codex Security][${severity.toUpperCase()}] `,
       );
@@ -429,7 +506,12 @@ describe("scan publication preparation", () => {
     await reseal(scanDirectory);
 
     expect(
-      (await prepareScanPublication(scanDirectory, DESTINATION)).issues,
+      (
+        await prepareScanPublication(
+          scanDirectory,
+          publicationOptions(scanDirectory),
+        )
+      ).issues,
     ).toEqual([]);
   });
 
@@ -441,7 +523,7 @@ describe("scan publication preparation", () => {
     await writeJson(findingsPath, findings);
 
     await expect(
-      prepareScanPublication(scanDirectory, DESTINATION),
+      prepareScanPublication(scanDirectory, publicationOptions(scanDirectory)),
     ).rejects.toThrow();
   });
 });

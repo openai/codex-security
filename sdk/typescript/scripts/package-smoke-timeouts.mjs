@@ -3,6 +3,7 @@ export function packageSmokeTimeouts(platform = process.platform) {
 
   return {
     commandTimeoutMs,
-    processTimeoutMs: commandTimeoutMs + 30_000,
+    // Installation and verification run sequentially; allow both plus cleanup.
+    processTimeoutMs: commandTimeoutMs * 2 + 30_000,
   };
 }

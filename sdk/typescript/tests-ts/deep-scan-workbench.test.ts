@@ -258,6 +258,16 @@ test.each([
       "deep-scan-mcp/v1",
     ]);
     const deepScan = begun["deepScan"] as Record<string, unknown>;
+    const running = await command(["get-scan", "--scan-id", scanId]);
+    expect(running["scan"]).toMatchObject({
+      progress: {
+        independentReviews: {
+          active: 0,
+          completed: 0,
+          maximum: 40,
+        },
+      },
+    });
 
     const templates =
       /\/\/ templates\/deep-scan\/discovery\.md\n([\s\S]*?)\/\/ src\/deep-scan\/worker-runner\.ts/u.exec(

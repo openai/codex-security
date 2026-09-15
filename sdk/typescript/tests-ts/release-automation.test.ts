@@ -5,13 +5,14 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
-import { bashCommand } from "./support/shell.js";
+import { bashCommand, runCommand } from "./support/shell.js";
 
 type ReleaseMetadata = Record<string, unknown>;
 
@@ -158,6 +159,7 @@ const releaseRepository = "openai/codex-security";
 const releaseTagTimeout = process.platform === "win32" ? 20_000 : 10_000;
 
 const bash = bashCommand();
+
 const jqMock = [
   "jq() {",
   '  node -e \'const fs=require("node:fs");const filter=process.argv.at(-1);const value=JSON.parse(fs.readFileSync(0,"utf8"));if(filter==="[.object.type, .object.sha] | @tsv"){const fields=[value.object?.type,value.object?.sha];if(fields.some((field)=>typeof field!=="string"))process.exit(1);process.stdout.write(fields.join("\\t")+"\\n");}else if(filter===".status // empty"){if(value.status!=null)process.stdout.write(String(value.status)+"\\n");}else process.exit(64);\' -- "$@"',
@@ -494,7 +496,7 @@ describe("reviewed release note helpers", () => {
     );
   });
 
-  test("rejects NUL bytes before shell composition", () => {
+  test("rejects NUL bytes before shell composition", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "release-notes-nul-"));
     try {
       const taggedNotes = join(workspace, "tagged-notes.md");
@@ -502,7 +504,7 @@ describe("reviewed release note helpers", () => {
       writeFileSync(taggedNotes, "<!-- release-version: 1.2.3 -->\n\0\n");
       writeFileSync(generatedNotes, "Generated release notes\n");
 
-      const result = spawnSync(
+      const result = await runCommand(
         bash,
         [
           "-c",
@@ -513,7 +515,6 @@ describe("reviewed release note helpers", () => {
           ].join("\n"),
         ],
         {
-          encoding: "utf8",
           env: {
             ...process.env,
             AUTOMATION_SCRIPT: fileURLToPath(automationScript),
@@ -1663,6 +1664,20 @@ describe("GitHub release workflow safeguards", () => {
   );
   const checkedOutTag = `npm-v${checkedOutVersion}`;
 
+  test("stops reading inherited pipes when a command times out", async () => {
+    const result = await runCommand(
+      bash,
+      [
+        "-c",
+        "(sleep 1; printf 'late stdout'; printf 'late stderr' >&2) & wait",
+      ],
+      { timeout: 100 },
+    );
+    expect(result.status).toBeNull();
+    expect(result.stdout).not.toContain("late stdout");
+    expect(result.stderr).not.toContain("late stderr");
+  });
+
   test("rejects unsupported jq mock filters", () => {
     const result = spawnSync(
       bash,
@@ -1742,7 +1757,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "validates $scenario before protected npm publication",
-    ({ summary, status, message }) => {
+    async ({ summary, status, message }) => {
       const script = workflowStepShell(
         protectedReleaseWorkflow,
         "Validate reviewed release notes",
@@ -1753,9 +1768,8 @@ describe("GitHub release workflow safeguards", () => {
         "  printf '%s\\n' \"$MOCK_RELEASE_SUMMARY\"",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-        encoding: "utf8",
         env: {
           ...process.env,
           GITHUB_SHA: releaseCommit,
@@ -1850,7 +1864,7 @@ describe("GitHub release workflow safeguards", () => {
     ).toBe(scenario.expected);
   });
 
-  test("executes the manual release cut against all published versions", () => {
+  test("executes the manual release cut against all published versions", async () => {
     const script = workflowStepShell(
       releaseCutWorkflow,
       "Resolve the stable package version",
@@ -1864,9 +1878,8 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "npm() { printf '%s\\n' '[\"0.1.1\",\"999999999999999999999999.0.0\"]'; }",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-      encoding: "utf8",
       env: {
         ...process.env,
         BEFORE_SHA: "",
@@ -1919,7 +1932,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "resolves $scenario against its published npm history",
-    ({
+    async ({
       event,
       previousVersion,
       currentVersion,
@@ -1960,9 +1973,8 @@ describe("GitHub release workflow safeguards", () => {
 
       try {
         const outputPath = join(workspace, "outputs");
-        const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+        const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
           cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-          encoding: "utf8",
           env: {
             ...process.env,
             GITHUB_EVENT_NAME: event,
@@ -2009,7 +2021,7 @@ describe("GitHub release workflow safeguards", () => {
       summary: "<!-- release-version: 0.1.6 -->\n   ",
       message: "Release notes must start with <!-- release-version: 0.1.6 -->",
     },
-  ])("rejects $scenario before cutting a tag", ({ summary, message }) => {
+  ])("rejects $scenario before cutting a tag", async ({ summary, message }) => {
     const script = workflowStepShell(
       releaseCutWorkflow,
       "Resolve the stable package version",
@@ -2031,9 +2043,8 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "npm() { printf '%s\\n' 'npm history must not be queried' >&2; return 70; }",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-      encoding: "utf8",
       env: {
         ...process.env,
         GITHUB_EVENT_NAME: "workflow_dispatch",
@@ -2090,7 +2101,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "handles $errorCode during $workflow npm-history validation for $version",
-    ({ workflow, version, errorCode, status }) => {
+    async ({ workflow, version, errorCode, status }) => {
       const cutting = workflow === "release cut";
       const script = workflowStepShell(
         cutting ? releaseCutWorkflow : protectedReleaseWorkflow,
@@ -2119,9 +2130,8 @@ describe("GitHub release workflow safeguards", () => {
         "  return 1",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+      const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-        encoding: "utf8",
         env: {
           ...process.env,
           BEFORE_SHA: "",
@@ -2148,7 +2158,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("creates the release tag at the successful CI commit", () => {
+  test("creates the release tag at the successful CI commit", async () => {
     const script = workflowStepShell(
       releaseCutWorkflow,
       "Create the exact merged release tag",
@@ -2171,8 +2181,7 @@ describe("GitHub release workflow safeguards", () => {
       "  printf 'created tag at %s\\n' \"$RELEASE_SHA\"",
       "}",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_REPOSITORY: "test/codex-security",
@@ -2214,7 +2223,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "handles $kind safely before cutting a release",
-    ({ lookupResponse, lookupHttpStatus, status }) => {
+    async ({ lookupResponse, lookupHttpStatus, status }) => {
       const script = workflowStepShell(
         releaseCutWorkflow,
         "Create the exact merged release tag",
@@ -2240,8 +2249,7 @@ describe("GitHub release workflow safeguards", () => {
         "  printf 'created exact release tag\\n'",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -2289,7 +2297,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "resolves an $kind to its exact commit before cutting a release",
-    ({ tagType, tagObject, peeledCommit, status }) => {
+    async ({ tagType, tagObject, peeledCommit, status }) => {
       const script = workflowStepShell(
         releaseCutWorkflow,
         "Create the exact merged release tag",
@@ -2317,8 +2325,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -2389,7 +2396,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "revalidates the authoritative $kind immediately before npm publication",
-    ({ tagType, tagObject, peeledCommit, status }) => {
+    async ({ tagType, tagObject, peeledCommit, status }) => {
       const script = workflowStepShell(
         protectedReleaseWorkflow,
         "Revalidate protected release tag",
@@ -2410,8 +2417,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_REF: `refs/tags/${checkedOutTag}`,
@@ -2439,7 +2445,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("rejects manually publishing a tag older than npm latest", () => {
+  test("rejects manually publishing a tag older than npm latest", async () => {
     const script = workflowStepShell(
       protectedReleaseWorkflow,
       "Validate release tag",
@@ -2448,9 +2454,8 @@ describe("GitHub release workflow safeguards", () => {
       "git() { return 0; }",
       "sfw() { printf '%s\\n' '[\"0.1.1\",\"999999999999999999999999.0.0\"]'; }",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-      encoding: "utf8",
       env: {
         ...process.env,
         GITHUB_OUTPUT: "/dev/null",
@@ -2468,7 +2473,7 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("allows the exact already-published release to enter verified recovery", () => {
+  test("allows the exact already-published release to enter verified recovery", async () => {
     const script = workflowStepShell(
       protectedReleaseWorkflow,
       "Validate release tag",
@@ -2477,9 +2482,8 @@ describe("GitHub release workflow safeguards", () => {
       "git() { return 0; }",
       `sfw() { printf '%s\\n' '["0.1.0","${checkedOutVersion}"]'; }`,
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-      encoding: "utf8",
       env: {
         ...process.env,
         GITHUB_OUTPUT: "/dev/null",
@@ -2540,14 +2544,13 @@ describe("GitHub release workflow safeguards", () => {
     expect(githubReleaseWorkflow).not.toContain("TRIGGER_RUN_ID");
   });
 
-  test("dispatches the exact protected run and release tag from trusted main", () => {
+  test("dispatches the exact protected run and release tag from trusted main", async () => {
     const script = workflowStepShell(
       protectedReleaseWorkflow,
       "Dispatch the verified GitHub release",
     );
     const mock = "gh() { printf '%s\\n' \"$@\"; }";
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_REPOSITORY: releaseRepository,
@@ -2598,7 +2601,7 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each(["queued", "in_progress"])(
     "waits for a %s protected npm release to finish before publishing notes",
-    (pendingStatus) => {
+    async (pendingStatus) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Resolve the successful protected release",
@@ -2629,8 +2632,7 @@ describe("GitHub release workflow safeguards", () => {
       ].join("\n");
 
       try {
-        const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
-          encoding: "utf8",
+        const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
           env: {
             ...process.env,
             GITHUB_OUTPUT: "/dev/null",
@@ -2650,7 +2652,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("rejects a pending npm release for a different tagged commit", () => {
+  test("rejects a pending npm release for a different tagged commit", async () => {
     const script = workflowStepShell(
       githubReleaseWorkflow,
       "Resolve the successful protected release",
@@ -2672,8 +2674,7 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "sleep() { return 99; }",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_OUTPUT: "/dev/null",
@@ -2690,7 +2691,7 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("times out safely if a protected npm release never completes", () => {
+  test("times out safely if a protected npm release never completes", async () => {
     const script = workflowStepShell(
       githubReleaseWorkflow,
       "Resolve the successful protected release",
@@ -2711,8 +2712,7 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "sleep() { :; }",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_OUTPUT: "/dev/null",
@@ -2729,7 +2729,7 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("rejects a release-shaped branch before resolving its commit", () => {
+  test("rejects a release-shaped branch before resolving its commit", async () => {
     const script = workflowStepShell(
       githubReleaseWorkflow,
       "Resolve the successful protected release",
@@ -2752,8 +2752,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_OUTPUT: "/dev/null",
@@ -2779,7 +2778,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "resolves the exact $kind tag when a same-named branch exists",
-    ({ tagType, objectSha }) => {
+    async ({ tagType, objectSha }) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Resolve the successful protected release",
@@ -2815,8 +2814,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_OUTPUT: "/dev/null",
@@ -2837,7 +2835,7 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each(["0", "01", "000123"])(
     "rejects the noncanonical protected GitHub release run ID %j",
-    (runId) => {
+    async (runId) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Resolve the successful protected release",
@@ -2857,8 +2855,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_OUTPUT: "/dev/null",
@@ -2951,7 +2948,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "revalidates the $description immediately before creating its GitHub release",
-    ({ existingLookup, tagType, tagObject, peeledCommit, status }) => {
+    async ({ existingLookup, tagType, tagObject, peeledCommit, status }) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Publish GitHub Release and generated notes",
@@ -3000,10 +2997,9 @@ describe("GitHub release workflow safeguards", () => {
         "  fi",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, [], {
+      const result = await runCommand(bash, [], {
         input: `${mocks}\n${script}`,
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-        encoding: "utf8",
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -3113,7 +3109,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "binds GitHub release provenance to $description",
-    ({ exact, recoveryConclusion, originalCommit, status, message }) => {
+    async ({ exact, recoveryConclusion, originalCommit, status, message }) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Verify the public npm package and signed provenance",
@@ -3172,9 +3168,8 @@ describe("GitHub release workflow safeguards", () => {
           "  esac",
           "}",
         ].join("\n");
-        const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
+        const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
           cwd: workspace,
-          encoding: "utf8",
           env: {
             ...process.env,
             GITHUB_OUTPUT: "/dev/null",
@@ -3534,7 +3529,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "reconciles $description notes on an existing verified GitHub release",
-    ({
+    async ({
       existingNotes,
       generatedNotes = "Generated release notes\n",
       generatedNotesBase64,
@@ -3687,10 +3682,9 @@ describe("GitHub release workflow safeguards", () => {
         '  command node "$@"',
         "}",
       ].join("\n");
-      const result = spawnSync(bash, [], {
+      const result = await runCommand(bash, [], {
         input: `${mocks}\n${script}`,
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-        encoding: "utf8",
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -3803,7 +3797,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   ])(
     "passes $description to release-note composition under nounset",
-    ({ arraySetup, optionalArguments }) => {
+    async ({ arraySetup, optionalArguments }) => {
       const publishStep = workflowStepShell(
         githubReleaseWorkflow,
         "Publish GitHub Release and generated notes",
@@ -3813,7 +3807,7 @@ describe("GitHub release workflow safeguards", () => {
       )?.groups?.["command"];
       expect(composeCommand).toBeDefined();
 
-      const result = spawnSync(bash, [], {
+      const result = await runCommand(bash, [], {
         input: [
           "set -u",
           arraySetup,
@@ -3821,7 +3815,6 @@ describe("GitHub release workflow safeguards", () => {
           "node() { printf '<%s>\\n' \"$@\"; }",
           composeCommand ?? "exit 70",
         ].join("\n"),
-        encoding: "utf8",
         env: { ...process.env, RELEASE_VERSION: "0.1.2" },
         timeout: 10_000,
       });
@@ -3869,7 +3862,7 @@ describe("GitHub release workflow safeguards", () => {
       'gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER"',
     );
     expect(releaseLabelsWorkflow).toContain(
-      'label="$(release_note_label "$type" "$breaking_marker")"',
+      'label="$(release_note_label "$type" "$breaking_marker" "$scope")"',
     );
     expect(releaseLabelsWorkflow).toContain(
       "breaking-change | enhancement | bug | documentation | skip-release-notes)",
@@ -3894,16 +3887,9 @@ describe("GitHub release workflow safeguards", () => {
       "types: [opened, edited, reopened, synchronize]",
     );
     expect(nodeCiWorkflow).toContain("needs: validate-title");
-    expect(nodeCiWorkflow).toContain(
-      "needs: [validate-title, windows-test, windows-verify]",
-    );
   });
 
-  test("isolates body-only edits from full CI names and concurrency", () => {
-    const metadataOnly =
-      "github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null";
-    const metadataPrefix =
-      "${{ " + metadataOnly + " && 'metadata-only / ' || '' }}";
+  test("keeps required contexts stable across reduced CI", () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3914,72 +3900,145 @@ describe("GitHub release workflow safeguards", () => {
         {
           name: string;
           if?: string;
+          "timeout-minutes"?: number;
           strategy?: { matrix: Record<string, string[]> };
-          steps: Array<{ if?: string }>;
+          steps: Array<{
+            if?: string;
+            name?: string;
+            run?: string;
+          }>;
         }
       >;
     };
 
     expect(workflow.concurrency.group).toBe(
-      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}-${{ " +
-        metadataOnly +
-        " && 'metadata-only' || 'full' }}",
+      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
     );
     expect(workflow.concurrency["cancel-in-progress"]).toBe(
-      "${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.title != null || github.event.changes.base != null) }}",
+      "${{ github.event_name == 'pull_request' }}",
     );
-    for (const job of Object.values(workflow.jobs)) {
-      expect(job.name.startsWith(metadataPrefix), job.name).toBe(true);
-    }
+    expect(workflow.jobs["validate-title"]?.["timeout-minutes"]).toBe(10);
+    expect(
+      workflow.jobs["validate-title"]?.steps.find(
+        ({ name }) =>
+          name === "Checkout pull request for change classification",
+      )?.if,
+    ).toContain("github.event.changes.base == null");
 
-    const fullCiCondition =
-      "needs.validate-title.outputs.run-full-ci == 'true'";
-    for (const job of ["test", "windows-test", "windows-verify"]) {
+    const fullCiCondition = "needs.validate-title.outputs.ci-mode == 'full'";
+    for (const job of [
+      "static-checks",
+      "package",
+      "test",
+      "compatibility",
+      "mcp",
+      "plugin-source",
+      "windows-test",
+      "windows-verify",
+    ]) {
       expect(workflow.jobs[job]?.if).toBe(fullCiCondition);
     }
-    const requiredJobCondition = `always() && !(${metadataOnly})`;
+    expect(workflow.jobs["markdown-checks"]).toBeUndefined();
+    const validationSteps = workflow.jobs["validate-title"]?.steps ?? [];
+    expect(
+      validationSteps.find(
+        ({ name }) => name === "Check plugin source compatibility",
+      )?.if,
+    ).toBe("steps.scope.outputs.ci-mode == 'markdown'");
+    const markdownCommand =
+      validationSteps.find(({ name }) => name === "Check Markdown formatting")
+        ?.run ?? "";
+    expect(markdownCommand).toContain(
+      "git diff --no-renames --name-only -z HEAD^1 HEAD",
+    );
+    expect(markdownCommand).toContain("! -L");
+    expect(markdownCommand).toContain(
+      "pnpm --dir sdk/typescript exec prettier --check",
+    );
+    expect(markdownCommand).not.toContain("--ignore-path");
+    const requiredJobCondition = "always()";
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
-    expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || needs.test.result != 'success'",
-    );
-    expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'",
-    );
+    for (const [ciMode, validation, upstream, gateFailure] of [
+      ["full", "success", "success", false],
+      ["full", "success", "skipped", true],
+      ["markdown", "success", "skipped", false],
+      ["markdown", "failure", "skipped", true],
+      ["skip", "success", "skipped", true],
+      ["unknown", "success", "skipped", true],
+    ] as const) {
+      const values = {
+        "needs.static-checks.result": upstream,
+        "needs.plugin-source.result": upstream,
+        "needs.package.result": upstream,
+        "needs.compatibility.result": upstream,
+        "needs.mcp.result": upstream,
+        "needs.test.result": upstream,
+        "needs.validate-title.outputs.ci-mode": ciMode,
+        "needs.validate-title.result": validation,
+        "needs.windows-test.result": upstream,
+        "needs.windows-verify.result": upstream,
+      };
+      for (const job of ["required-test", "windows"]) {
+        expect(
+          evaluateWorkflowCondition(
+            workflow.jobs[job]?.steps[0]?.if ?? "",
+            values,
+          ),
+          `${job}: ${ciMode}/${validation}/${upstream}`,
+        ).toBe(gateFailure);
+      }
+    }
 
-    const renderName = (
-      template: string,
-      values: Record<string, string>,
-      metadata: boolean,
-    ) => {
-      let name = template.replace(
-        metadataPrefix,
-        metadata ? "metadata-only / " : "",
-      );
+    for (const [gate, dependencies] of Object.entries({
+      "required-test": [
+        "static-checks",
+        "package",
+        "test",
+        "compatibility",
+        "mcp",
+        "plugin-source",
+      ],
+      windows: ["static-checks", "windows-test", "windows-verify"],
+    })) {
+      for (const dependency of dependencies) {
+        for (const result of ["failure", "cancelled", "skipped"]) {
+          expect(
+            evaluateWorkflowCondition(workflow.jobs[gate]?.steps[0]?.if ?? "", {
+              "needs.validate-title.result": "success",
+              "needs.validate-title.outputs.ci-mode": "full",
+              ...Object.fromEntries(
+                dependencies.map((job) => [
+                  `needs.${job}.result`,
+                  job === dependency ? result : "success",
+                ]),
+              ),
+            }),
+            `${gate}: ${dependency}/${result}`,
+          ).toBe(true);
+        }
+      }
+      expect(workflow.jobs[gate]?.steps[0]?.run).toBe("exit 1");
+    }
+
+    const renderName = (template: string, values: Record<string, string>) => {
+      let name = template;
       for (const [key, value] of Object.entries(values)) {
         name = name.replaceAll("${{ matrix." + key + " }}", value);
       }
       return name.replace(
         "${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
-        values["node"] === "22.13.0" ? "22" : values["node"] ?? "",
+        values["node"] === "22.13.0" ? "22" : (values["node"] ?? ""),
       );
     };
     const unixJob = workflow.jobs["required-test"];
     const windowsJob = workflow.jobs["windows"];
     const fullNames = [
       ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob?.name ?? "", { os }, false),
+        renderName(unixJob?.name ?? "", { os }),
       ),
       ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob?.name ?? "", { node }, false),
-      ),
-    ];
-    const metadataNames = [
-      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob?.name ?? "", { os }, true),
-      ),
-      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob?.name ?? "", { node }, true),
+        renderName(windowsJob?.name ?? "", { node }),
       ),
     ];
     const requiredContexts = new Set([
@@ -3991,189 +4050,210 @@ describe("GitHub release workflow safeguards", () => {
     expect(
       fullNames.filter((name) => requiredContexts.has(name)).sort(),
     ).toEqual([...requiredContexts].sort());
-    expect(metadataNames.some((name) => requiredContexts.has(name))).toBe(
-      false,
-    );
-    expect(
-      metadataNames.every((name) => name.startsWith("metadata-only / ")),
-    ).toBe(true);
   });
 
   test.each([
-    {
-      name: "body-only edit with a valid title",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: false,
-      baseChanged: false,
-      title: "docs: clarify release notes",
-      fullCi: false,
-      titleValid: true,
-      upstream: "skipped",
-      gateFailure: false,
-      cancellation: false,
-    },
-    {
-      name: "body-only edit with an invalid title",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: false,
-      baseChanged: false,
-      title: "Docs: invalid title ",
-      fullCi: false,
-      titleValid: false,
-      upstream: "skipped",
-      gateFailure: false,
-      cancellation: false,
-    },
-    {
-      name: "title edit",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: true,
-      baseChanged: false,
-      title: "ci: update title",
-      fullCi: true,
-      titleValid: true,
-      upstream: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "base edit",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: false,
-      baseChanged: true,
-      title: "ci: update base",
-      fullCi: true,
-      titleValid: true,
-      upstream: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "code synchronization",
-      eventName: "pull_request",
-      action: "synchronize",
-      titleChanged: false,
-      baseChanged: false,
-      title: "ci: update code",
-      fullCi: true,
-      titleValid: true,
-      upstream: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "push",
-      eventName: "push",
-      action: "none",
-      titleChanged: false,
-      baseChanged: false,
-      title: "",
-      fullCi: true,
-      titleValid: true,
-      upstream: "success",
-      gateFailure: false,
-      cancellation: false,
-    },
-    {
-      name: "full CI with skipped upstream jobs",
-      eventName: "pull_request",
-      action: "synchronize",
-      titleChanged: false,
-      baseChanged: false,
-      title: "ci: update code",
-      fullCi: true,
-      titleValid: true,
-      upstream: "skipped",
-      gateFailure: true,
-      cancellation: true,
-    },
-  ])(
-    "keeps required contexts truthful for $name",
-    ({
-      eventName,
-      action,
-      titleChanged,
-      baseChanged,
-      title,
-      fullCi,
-      titleValid,
-      upstream,
-      gateFailure,
-      cancellation,
-    }) => {
-      const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
-        concurrency: { "cancel-in-progress": string };
-        jobs: Record<string, { steps: Array<{ if?: string }> }>;
-      };
-      const scopeScript = workflowStepShell(
-        nodeCiWorkflow,
-        "Decide whether full CI is needed",
-      );
-      const titleScript = workflowStepShell(
-        nodeCiWorkflow,
-        "Require a Conventional Commit pull request title",
-      );
+    [
+      "Markdown-only PR",
+      "pull_request",
+      false,
+      ["README.md", "docs/guide.md"],
+      "markdown",
+      true,
+    ],
+    [
+      "generated-plugin Markdown-only PR",
+      "pull_request",
+      false,
+      ["sdk/typescript/_bundled_plugin/skills/example/SKILL.md"],
+      "full",
+      true,
+    ],
+    [
+      "authored-plugin skill Markdown-only PR",
+      "pull_request",
+      false,
+      ["plugins/codex-security/skills/example/SKILL.md"],
+      "full",
+      true,
+    ],
+    [
+      "authored-plugin reference Markdown-only PR",
+      "pull_request",
+      false,
+      ["plugins/codex-security/skills/example/references/contract.md"],
+      "full",
+      true,
+    ],
+    ["base retarget", "pull_request", true, ["README.md"], "full", false],
+    [
+      "mixed PR",
+      "pull_request",
+      false,
+      ["README.md", "src/index.ts"],
+      "full",
+      false,
+    ],
+    [
+      "source-to-Markdown rename",
+      "pull_request",
+      false,
+      ["src/index.ts", "docs/index.md"],
+      "full",
+      false,
+    ],
+    ["empty merge diff", "pull_request", false, [], "full", false],
+    ["push", "push", false, ["README.md"], "full", false],
+  ] as const)(
+    "selects CI and formatting checks for %s",
+    (_name, eventName, baseChanged, changedPaths, ciMode, checkMarkdown) => {
       const workspace = mkdtempSync(join(tmpdir(), "release-ci-scope-"));
       const output = join(workspace, "output");
+      const script = workflowStepShell(nodeCiWorkflow, "Decide CI mode");
+      const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
+        jobs: Record<string, { steps: Array<{ name?: string; if?: string }> }>;
+      };
+      const validationSteps = workflow.jobs["validate-title"]!.steps;
+      const gitMock = `git() {
+      [[ "$*" == "diff --no-renames --name-only -z HEAD^1 HEAD" ]] || return 64
+      while IFS= read -r path; do
+        [[ -z "$path" ]] || printf '%s\\0' "$path"
+      done <<< "$MOCK_CHANGED_FILES"
+    }`;
       try {
-        const scope = spawnSync(bash, ["-c", scopeScript], {
+        const result = spawnSync(bash, ["-c", `${gitMock}\n${script}`], {
           env: {
             ...process.env,
             BASE_CHANGED: String(baseChanged),
-            EVENT_ACTION: action === "none" ? "" : action,
             EVENT_NAME: eventName,
             GITHUB_OUTPUT: output,
-            TITLE_CHANGED: String(titleChanged),
+            MOCK_CHANGED_FILES: changedPaths.join("\n"),
           },
         });
-        expect(scope.status).toBe(0);
-        expect(readFileSync(output, "utf8")).toBe(
-          `run-full-ci=${String(fullCi)}\n`,
+        expect(result.status).toBe(0);
+        const outputs: Record<string, string> = Object.fromEntries(
+          readFileSync(output, "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => line.split("=")),
         );
-
-        const validation =
-          eventName === "pull_request"
-            ? spawnSync(bash, ["-c", titleScript], {
-                env: { ...process.env, PR_TITLE: title },
-              }).status === 0
-              ? "success"
-              : "failure"
-            : "success";
-        expect(validation === "success").toBe(titleValid);
-
-        const values = {
-          "needs.test.result": upstream,
-          "needs.validate-title.result": validation,
-          "needs.windows-test.result": upstream,
-          "needs.windows-verify.result": upstream,
-        };
-        const unixGate = workflow.jobs["required-test"]?.steps[0]?.if ?? "";
-        const windowsGate = workflow.jobs["windows"]?.steps[0]?.if ?? "";
-        if (fullCi) {
-          expect(evaluateWorkflowCondition(unixGate, values)).toBe(gateFailure);
-          expect(evaluateWorkflowCondition(windowsGate, values)).toBe(
-            gateFailure,
+        expect(outputs["ci-mode"]).toBe(ciMode);
+        const values = Object.fromEntries(
+          Object.entries(outputs).map(([key, value]) => [
+            `steps.scope.outputs.${key}`,
+            value,
+          ]),
+        );
+        for (const stepName of [
+          "Set up pnpm",
+          "Set up Node.js",
+          "Install dependencies",
+          "Check Markdown formatting",
+        ]) {
+          const condition =
+            validationSteps.find(({ name }) => name === stepName)?.if ?? "";
+          expect(evaluateWorkflowCondition(condition, values), stepName).toBe(
+            checkMarkdown,
           );
-        } else {
-          expect(unixGate).toBeDefined();
-          expect(windowsGate).toBeDefined();
         }
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
 
-        expect(
-          evaluateWorkflowCondition(
-            workflow.concurrency["cancel-in-progress"],
-            {
-              "github.event.changes.base": baseChanged ? "changed" : "null",
-              "github.event.changes.title": titleChanged ? "changed" : "null",
-              "github.event.action": action,
-              "github.event_name": eventName,
+  test.skipIf(process.platform === "win32")(
+    "rejects oversized plugin Markdown in reduced CI",
+    async () => {
+      const workspace = mkdtempSync(
+        join(tmpdir(), "release-ci-plugin-source-"),
+      );
+      const pluginRoot = join(workspace, "plugins", "codex-security");
+      mkdirSync(pluginRoot, { recursive: true });
+      writeFileSync(join(pluginRoot, "README.md"), "x".repeat(150_001));
+      spawnSync("git", ["init", "--quiet", workspace]);
+      spawnSync("git", [
+        "-C",
+        workspace,
+        "add",
+        "--",
+        "plugins/codex-security/README.md",
+      ]);
+      try {
+        const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+        const build = await runCommand(
+          "node",
+          [
+            join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
+            "--project",
+            join(packageRoot, "tsconfig.ci.json"),
+            "--outDir",
+            workspace,
+          ],
+          { timeout: 30_000 },
+        );
+        expect(build.status, build.stdout + build.stderr).toBe(0);
+        const result = spawnSync(
+          bash,
+          [
+            "-c",
+            workflowStepShell(
+              nodeCiWorkflow,
+              "Check plugin source compatibility",
+            ),
+          ],
+          { cwd: workspace, encoding: "utf8" },
+        );
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          "README.md: file is 150001 bytes; maximum is 150000 bytes",
+        );
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "formats every changed regular non-symlink Markdown file",
+    () => {
+      const workspace = mkdtempSync(join(tmpdir(), "release-ci-markdown-"));
+      const argsFile = join(workspace, "prettier-args");
+      const guide = join(workspace, "docs", "guide with spaces.md");
+      const readme = join(workspace, "README.md");
+      mkdirSync(join(workspace, "docs"));
+      writeFileSync(guide, "# Guide\n");
+      writeFileSync(readme, "# Readme\n");
+      symlinkSync(readme, join(workspace, "docs", "link.md"));
+      const mocks = `git() {
+      printf '%s\\0' README.md 'docs/guide with spaces.md' docs/link.md deleted.md
+    }
+    pnpm() { printf '%s\\n' "$@" > "$MOCK_PNPM_ARGS"; }`;
+      try {
+        const result = spawnSync(
+          bash,
+          [
+            "-c",
+            `${mocks}\n${workflowStepShell(nodeCiWorkflow, "Check Markdown formatting")}`,
+          ],
+          {
+            env: {
+              ...process.env,
+              GITHUB_WORKSPACE: workspace,
+              MOCK_PNPM_ARGS: argsFile,
             },
-          ),
-        ).toBe(cancellation);
+          },
+        );
+        expect(result.status).toBe(0);
+        expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual([
+          "--dir",
+          "sdk/typescript",
+          "exec",
+          "prettier",
+          "--check",
+          readme,
+          guide,
+        ]);
       } finally {
         rmSync(workspace, { recursive: true, force: true });
       }
@@ -4246,7 +4326,7 @@ describe("GitHub release workflow safeguards", () => {
     "fix: generated title\n<!-- codex-security-release-summary:start -->\nUnreviewed injected highlight\n<!-- codex-security-release-summary:end -->",
     "fix: preserve a trailing line feed\n",
     "fix: preserve a trailing carriage return\r",
-  ])("rejects nonconventional pull request title %s", (title) => {
+  ])("rejects nonconventional pull request title %s", async (title) => {
     const script = workflowStepShell(
       releaseLabelsWorkflow,
       "Categorize pull request without checking out its code",
@@ -4263,8 +4343,7 @@ describe("GitHub release workflow safeguards", () => {
       "  return 70",
       "}",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_REPOSITORY: "test/codex-security",
@@ -4291,7 +4370,7 @@ describe("GitHub release workflow safeguards", () => {
     { title: "chore: retitle an internal change", expectedLabel: null },
   ])(
     "preserves a manually excluded release and reconciles its category after retitling to $title",
-    ({ title, expectedLabel }) => {
+    async ({ title, expectedLabel }) => {
       const script = workflowStepShell(
         releaseLabelsWorkflow,
         "Categorize pull request without checking out its code",
@@ -4337,8 +4416,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -4369,7 +4447,7 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("preserves the latest unattributed skip label after earlier automation", () => {
+  test("preserves the latest unattributed skip label after earlier automation", async () => {
     const script = workflowStepShell(
       releaseLabelsWorkflow,
       "Categorize pull request without checking out its code",
@@ -4410,8 +4488,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_REPOSITORY: "test/codex-security",
@@ -4433,11 +4510,12 @@ describe("GitHub release workflow safeguards", () => {
     { title: "fix: publish a customer fix", label: "bug" },
     { title: "docs: publish customer documentation", label: "documentation" },
     { title: "chore: stop excluding an internal change", label: null },
+    { title: "chore(deps): upgrade a dependency", label: null },
     { title: "security: publish a security fix", label: null },
     { title: "deps: upgrade a dependency", label: null },
   ])(
     "reconciles an automatic skip label after retitling to $title",
-    ({ title, label }) => {
+    async ({ title, label }) => {
       const script = workflowStepShell(
         releaseLabelsWorkflow,
         "Categorize pull request without checking out its code",
@@ -4473,8 +4551,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-        encoding: "utf8",
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
@@ -4507,6 +4584,7 @@ describe("GitHub release workflow safeguards", () => {
     { title: "fix!: breaking fix", label: "breaking-change" },
     { title: "fix(api)!: breaking fix", label: "breaking-change" },
     { title: "docs!: breaking documentation", label: "breaking-change" },
+    { title: "chore(release)!: require migration", label: "breaking-change" },
     {
       title: "docs(api)!: breaking documentation",
       label: "breaking-change",
@@ -4515,7 +4593,7 @@ describe("GitHub release workflow safeguards", () => {
       title: "security(api)!: breaking security change",
       label: "breaking-change",
     },
-  ])("categorizes breaking-change title $title", ({ title, label }) => {
+  ])("categorizes breaking-change title $title", async ({ title, label }) => {
     const script = workflowStepShell(
       releaseLabelsWorkflow,
       "Categorize pull request without checking out its code",
@@ -4548,8 +4626,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
+    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
       env: {
         ...process.env,
         GITHUB_REPOSITORY: "test/codex-security",
@@ -4563,63 +4640,70 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.stdout).toContain(`labels[]=${label}`);
   });
 
-  test("executes and recovers from concurrent skip-label creation", () => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
-    );
-    const mock = [
-      "skip_label_exists=0",
-      "gh() {",
-      '  if [[ "$1" != "api" ]]; then return 64; fi',
-      "  shift",
-      "  local method=GET",
-      '  if [[ "${1:-}" == "--method" ]]; then',
-      '    method="$2"',
-      "    shift 2",
-      "  fi",
-      '  local endpoint="$1"',
-      '  case "$method $endpoint" in',
-      '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' 'release: automate published notes' | base64",
-      "      ;;",
-      '    "GET repos/test/codex-security/issues/17/labels")',
-      "      return 0",
-      "      ;;",
-      '    "GET repos/test/codex-security/labels/skip-release-notes")',
-      '      [[ "$skip_label_exists" == 1 ]]',
-      "      ;;",
-      '    "POST repos/test/codex-security/labels")',
-      "      skip_label_exists=1",
-      "      return 1",
-      "      ;;",
-      '    "POST repos/test/codex-security/issues/17/labels")',
-      '      if [[ "$skip_label_exists" != 1 ]]; then return 65; fi',
-      "      printf '%s\\n' 'applied skip-release-notes'",
-      "      ;;",
-      "    *) return 66 ;;",
-      "  esac",
-      "}",
-    ].join("\n");
-    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        GITHUB_REPOSITORY: "test/codex-security",
-        PR_NUMBER: "17",
-      },
-      timeout: 10_000,
-    });
+  test.each([
+    "chore(release): 0.1.24",
+    "release: automate published notes",
+    "test: extend coverage",
+  ])(
+    "excludes %s and recovers from concurrent skip-label creation",
+    async (title) => {
+      const script = workflowStepShell(
+        releaseLabelsWorkflow,
+        "Categorize pull request without checking out its code",
+      );
+      const mock = [
+        "skip_label_exists=0",
+        "gh() {",
+        '  if [[ "$1" != "api" ]]; then return 64; fi',
+        "  shift",
+        "  local method=GET",
+        '  if [[ "${1:-}" == "--method" ]]; then',
+        '    method="$2"',
+        "    shift 2",
+        "  fi",
+        '  local endpoint="$1"',
+        '  case "$method $endpoint" in',
+        '    "GET repos/test/codex-security/issues/17")',
+        "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+        "      ;;",
+        '    "GET repos/test/codex-security/issues/17/labels")',
+        "      return 0",
+        "      ;;",
+        '    "GET repos/test/codex-security/labels/skip-release-notes")',
+        '      [[ "$skip_label_exists" == 1 ]]',
+        "      ;;",
+        '    "POST repos/test/codex-security/labels")',
+        "      skip_label_exists=1",
+        "      return 1",
+        "      ;;",
+        '    "POST repos/test/codex-security/issues/17/labels")',
+        '      if [[ "$skip_label_exists" != 1 ]]; then return 65; fi',
+        "      printf '%s\\n' 'applied skip-release-notes'",
+        "      ;;",
+        "    *) return 66 ;;",
+        "  esac",
+        "}",
+      ].join("\n");
+      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
+        env: {
+          ...process.env,
+          GITHUB_REPOSITORY: "test/codex-security",
+          MOCK_PR_TITLE: title,
+          PR_NUMBER: "17",
+        },
+        timeout: 10_000,
+      });
 
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain("applied skip-release-notes");
-  });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("applied skip-release-notes");
+    },
+  );
 
-  test("documents JSON stdin for every verification command", () => {
-    const result = spawnSync(
+  test("documents JSON stdin for every verification command", async () => {
+    const result = await runCommand(
       "node",
       [fileURLToPath(automationScript), "unknown"],
-      { encoding: "utf8", timeout: 10_000 },
+      { timeout: 10_000 },
     );
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("published npm versions JSON from stdin");

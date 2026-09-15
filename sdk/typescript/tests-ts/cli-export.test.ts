@@ -409,22 +409,17 @@ describe("CLI", () => {
           const sarif = JSON.parse(contents);
           expect(sarif.version).toBe("2.1.0");
           const run = sarif.runs[0];
-          expect(run.invocations).toHaveLength(1);
-          const invocation = run.invocations[0];
-          expect(invocation.executionSuccessful).toBe(
-            completeness === "complete",
-          );
           expect(run.properties.codexSecurityCoverageCompleteness).toBe(
             completeness === "complete" ? undefined : completeness,
           );
           if (completeness === "complete") {
-            expect(invocation.toolExecutionNotifications).toBeUndefined();
+            expect(run.invocations).toBeUndefined();
           } else {
-            const reasons = hasDeferred
-              ? coverage.deferred.map((item) => item.reason)
-              : [expect.stringContaining(completeness)];
+            expect(run.invocations).toHaveLength(1);
+            const invocation = run.invocations[0];
+            expect(invocation.executionSuccessful).toBe(true);
             expect(invocation.toolExecutionNotifications).toEqual(
-              reasons.map((text) => ({
+              coverage.deferred.map(({ reason: text }) => ({
                 level: "warning",
                 message: { text },
               })),
