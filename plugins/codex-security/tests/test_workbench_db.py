@@ -4180,19 +4180,15 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
         target_kind="git_revision",
         target_revision=revision,
     )
-    failed = run_workbench(
-        state_dir,
-        "complete-scan",
-        "--scan-id",
-        scan_id,
-        check=False,
+    # A draft that inferred git_revision from the checkout seals with the
+    # registered worktree kind and digest instead of discarding the scan.
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    assert completed["scan"]["progress"]["status"] == "complete"
+    manifest = json.loads(
+        (Path(str(started["results"]["scanDir"])) / "scan-manifest.json").read_text()
     )
-    assert failed["returncode"] != 0
-    assert "scan.target.kind" in str(failed["stderr"])
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["status"]
-        == "running"
-    )
+    assert manifest["scan"]["target"]["kind"] == "git_worktree"
+    assert manifest["scan"]["target"]["snapshotDigest"] == snapshot_digest
 
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
