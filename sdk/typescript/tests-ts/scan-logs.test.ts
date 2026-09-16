@@ -441,6 +441,103 @@ describe("saved scan logs", () => {
     expect(JSON.stringify(result)).not.toContain("PRIVATE PRE-SCAN");
   });
 
+  test.each([
+    ["completed", "2026-08-21T12:02:00.000Z", true],
+    ["running", null, false],
+    ["missing completion", undefined, false],
+    ["invalid completion", "not-a-timestamp", false],
+  ] as const)(
+    "projects the complete saved copy at the completion boundary: %s",
+    async (_label, completedAt, bounded) => {
+      const homes = [await temporaryHome(), await temporaryHome()];
+      const before = commandEvent(
+        "during scan",
+        "before",
+        "2026-08-21T12:01:00Z",
+      );
+      const after = commandEvent("post scan", "after", "2026-08-21T12:03:00Z");
+      const retained = [
+        before,
+        commandEvent("at completion", "equal", "2026-08-21T12:02:00Z"),
+        before,
+        commandEvent("legacy event", "undated"),
+        commandEvent("invalid timestamp", "invalid", "not-a-timestamp"),
+        {
+          ...commandEvent("non-string timestamp", "non-string"),
+          timestamp: 42,
+        },
+      ];
+      // A later timestamp is not the end of the file's scan activity.
+      const activity = [after, ...retained];
+      for (const [index, home] of homes.entries()) {
+        for (const threadId of ["parent", "worker"]) {
+          await writeSession(
+            home,
+            threadId,
+            index === 0 ? [after] : activity,
+            threadId === "worker" ? "parent" : undefined,
+          );
+        }
+      }
+      await rename(
+        join(homes[1]!, "sessions"),
+        join(homes[1]!, "archived_sessions"),
+      );
+      const result = await readScanLogs({
+        scanId: "scan-1",
+        threadId: "parent",
+        codexHome: homes,
+        completedAt,
+      });
+      expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
+        "parent",
+        "worker",
+      ]);
+      for (const session of result.sessions) {
+        expect(session.path).toBe(
+          join(
+            homes[1]!,
+            "archived_sessions",
+            "2026",
+            "08",
+            "11",
+            `rollout-${session.threadId}.jsonl`,
+          ),
+        );
+        const events = result.events
+          .filter(({ threadId }) => threadId === session.threadId)
+          .map(({ event }) => event);
+        expect(events[0]).toMatchObject({ type: "session_meta" });
+        expect(events.slice(1)).toEqual(bounded ? retained : activity);
+      }
+    },
+  );
+
+  test.each(["complete", "failed", "canceled", "running"])(
+    "uses saved %s progress for the event boundary",
+    async (status) => {
+      const home = await temporaryHome();
+      const before = commandEvent(
+        "during scan",
+        "before",
+        "2026-08-21T12:01:00Z",
+      );
+      const after = commandEvent("post scan", "after", "2026-08-21T12:03:00Z");
+      await writeSession(home, "parent", [before, after]);
+      const result = await readSavedScanLogs(
+        {
+          scanId: "scan-1",
+          continuationThreadId: "parent",
+          progress: { status, updatedAt: "2026-08-21T12:02:00Z" },
+        },
+        home,
+      );
+      expect(result.events.slice(1).map(({ event }) => event)).toEqual(
+        status === "running" ? [before, after] : [before],
+      );
+    },
+  );
+
   test("includes independent Deep workers without crossing scan boundaries", async () => {
     const home = await temporaryHome();
     const scanDirectory = join(home, "scans", "current");

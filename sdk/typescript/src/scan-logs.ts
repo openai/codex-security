@@ -165,13 +165,7 @@ export async function readScanLogs(options: ScanLogOptions) {
     }
     sessions.push(session);
   }
-  const parsedCompletedAt =
-    options.completedAt === undefined || options.completedAt === null
-      ? Number.NaN
-      : Date.parse(options.completedAt);
-  const completedAt = Number.isFinite(parsedCompletedAt)
-    ? parsedCompletedAt
-    : null;
+  const completedAt = Date.parse(options.completedAt ?? "");
   const events: Record<string, unknown>[] = [];
   for (const session of sessions) {
     let replaying = false;
@@ -193,9 +187,12 @@ export async function readScanLogs(options: ScanLogOptions) {
         }
         replaying = false;
       }
-      if (completedAt !== null && typeof event["timestamp"] === "string") {
-        const timestamp = Date.parse(event["timestamp"]);
-        if (Number.isFinite(timestamp) && timestamp > completedAt) continue;
+      if (
+        Number.isFinite(completedAt) &&
+        typeof event["timestamp"] === "string" &&
+        Date.parse(event["timestamp"]) > completedAt
+      ) {
+        continue;
       }
       events.push({ threadId: session.threadId, event });
     }
