@@ -5025,9 +5025,9 @@ export async function main(
               options.severity,
               dependencies,
             );
-            const { validationPrompt } = await resolveScanPrompts(
-              { validationPromptFile: options.validationPromptFile },
-              [selected.repository, dependencies.currentDirectory()],
+            const validationPrompt = await resolvePatchValidationPrompt(
+              options.validationPromptFile,
+              selected.repository,
               dependencies.currentDirectory(),
             );
             const patchRiskBase = options.assessPatchRisk
@@ -5121,8 +5121,8 @@ export async function main(
             );
           }
           const repository = dependencies.currentDirectory();
-          const { validationPrompt } = await resolveScanPrompts(
-            { validationPromptFile: options.validationPromptFile },
+          const validationPrompt = await resolvePatchValidationPrompt(
+            options.validationPromptFile,
             repository,
             repository,
           );
@@ -7010,6 +7010,26 @@ async function snapshotPatchTree(
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function resolvePatchValidationPrompt(
+  file: string | undefined,
+  repository: string,
+  directory: string,
+): Promise<string | undefined> {
+  if (file === undefined) return undefined;
+  const roots = new Set([repository, directory]);
+  for (const root of [...roots]) {
+    for (const enclosing of await enclosingGitWorktreeRoots(root)) {
+      roots.add(enclosing);
+    }
+  }
+  const { validationPrompt } = await resolveScanPrompts(
+    { validationPromptFile: file },
+    [...roots],
+    directory,
+  );
+  return validationPrompt;
 }
 
 async function runFindingPatches(

@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
@@ -277,26 +277,40 @@ describe("scan and patch workflow", () => {
     }
   });
 
-  test.each(["linked", "explicit"])(
-    "checks the invocation checkout boundary for a %s saved-patch prompt",
-    async (kind) => {
+  test.each([
+    ["linked", "root"],
+    ["explicit", "root"],
+    ["linked", "subdirectory"],
+    ["explicit", "subdirectory"],
+    ["linked", "nested-worktree"],
+    ["explicit", "nested-worktree"],
+  ])(
+    "checks the invocation checkout boundary for %s prompts from a %s",
+    async (kind, invocation) => {
       const root = await mkdtemp(join(tmpdir(), "patch-prompt-boundary-"));
-      const directory = join(root, "invocation");
+      const checkout = join(root, "invocation");
+      const directory =
+        invocation === "root" ? checkout : join(checkout, "nested", "cwd");
       const repository = join(root, "repository");
       const outside = join(root, "outside");
       const result = resultWithFindings(["high"]);
       let started = false;
       try {
         await Promise.all(
-          [directory, repository, outside].map((path) => mkdir(path)),
+          [directory, repository, outside].map((path) =>
+            mkdir(path, { recursive: true }),
+          ),
         );
+        execFileSync("git", ["init", "--quiet", checkout]);
+        if (invocation === "nested-worktree")
+          execFileSync("git", ["init", "--quiet", dirname(directory)]);
         await writeFile(
           join(outside, "validation.md"),
           "Run the synthetic regression test.",
         );
         await symlink(
           outside,
-          join(directory, "validation"),
+          join(checkout, "validation"),
           process.platform === "win32" ? "junction" : "dir",
         );
         const outcome = await runWorkflow(
@@ -306,7 +320,10 @@ describe("scan and patch workflow", () => {
             "scan-1",
             "--validation-prompt-file",
             kind === "linked"
-              ? join("validation", "validation.md")
+              ? relative(
+                  directory,
+                  join(checkout, "validation", "validation.md"),
+                )
               : join(outside, "validation.md"),
             "--json",
           ],
