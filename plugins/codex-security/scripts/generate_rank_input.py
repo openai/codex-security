@@ -17,9 +17,6 @@ This script stays deliberately model-free:
   coordinator accepts it.
 - `validate-rank-pool` validates the pool plan and every assigned shard output.
 - `merge-rank-outputs` validates and combines worker-local shard outputs.
-- `copy-deep-review-input` copies every candidate into the deep-review worklist
-  for exhaustive mode.
-- `select-deep-review-input` selects the ranked rows for deep review.
 """
 
 from __future__ import annotations
@@ -263,25 +260,6 @@ def parse_args() -> argparse.Namespace:
     merge.add_argument("--shard-dir", required=True, help="Directory of input and output shards.")
     merge.add_argument("--out", required=True, help="Output rank_output.jsonl path.")
 
-    copy = subparsers.add_parser(
-        "copy-deep-review-input",
-        help="Create deep_review_input.jsonl directly from rank_input.jsonl.",
-    )
-    copy.add_argument("--rank-input", required=True, help="Deterministic rank input JSONL.")
-    copy.add_argument("--out", required=True, help="Output deep_review_input.jsonl path.")
-
-    select = subparsers.add_parser(
-        "select-deep-review-input",
-        help="Create deep_review_input.jsonl from worker-produced rank_output.jsonl.",
-    )
-    select.add_argument("--rank-output", required=True, help="Worker ranking output JSONL.")
-    select.add_argument("--out", required=True, help="Output deep_review_input.jsonl path.")
-    select.add_argument(
-        "--top-percent",
-        type=int,
-        default=100,
-        help="Percent of included files to keep for deep review.",
-    )
     return parser.parse_args()
 
 
@@ -1139,33 +1117,6 @@ def merge_rank_outputs(args: argparse.Namespace) -> None:
     print(f"Merged {len(merged)} ranking rows into {output}")
 
 
-def copy_deep_review_input(args: argparse.Namespace) -> None:
-    rank_input = Path(args.rank_input).expanduser()
-    rows = load_jsonl(rank_input, "Rank input", validate_rank_input_row)
-    require_unique_paths(rows, "Rank input")
-    selected = [{"path": row["path"], "area": row["area"]} for row in rows]
-
-    output = Path(args.out).expanduser()
-    write_jsonl(output, selected)
-    print(f"Copied {len(selected)} rows into {output}")
-
-
-def select_deep_review_input(args: argparse.Namespace) -> None:
-    rank_output = Path(args.rank_output).expanduser()
-    rows = load_jsonl(rank_output, "Rank output", validate_rank_output_row)
-    require_unique_paths(rows, "Rank output")
-
-    included = [row for row in rows if row["include"]]
-    base_rows = included if included else rows
-    base_rows.sort(key=lambda row: (-int(row["score"]), str(row["path"])))
-    keep = max(1, int(len(base_rows) * (args.top_percent / 100.0))) if base_rows else 0
-    selected = [{"path": row["path"], "area": row["area"]} for row in base_rows[:keep]]
-
-    output = Path(args.out).expanduser()
-    write_jsonl(output, selected)
-    print(f"Selected {len(selected)} of {len(base_rows)} rows into {output}")
-
-
 def main() -> None:
     args = parse_args()
     if args.command == "make-repo-rank-input":
@@ -1188,10 +1139,6 @@ def main() -> None:
         validate_rank_pool_command(args)
     elif args.command == "merge-rank-outputs":
         merge_rank_outputs(args)
-    elif args.command == "copy-deep-review-input":
-        copy_deep_review_input(args)
-    elif args.command == "select-deep-review-input":
-        select_deep_review_input(args)
     else:
         raise SystemExit(f"Unknown command: {args.command}")
 
