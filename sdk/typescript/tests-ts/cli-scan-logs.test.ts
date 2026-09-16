@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Cli, Formatter, z } from "incur";
 import { main } from "../src/cli.js";
 import { scanLogsJson } from "../src/cli-scan-logs-json.js";
@@ -67,6 +67,21 @@ function withoutDuration(text: string) {
 }
 
 describe("saved logs JSON output", () => {
+  let dataHome: string;
+  let previousDataHome: string | undefined;
+
+  beforeEach(async () => {
+    previousDataHome = process.env["XDG_DATA_HOME"];
+    dataHome = await mkdtemp(join(tmpdir(), "saved-logs-data-"));
+    process.env["XDG_DATA_HOME"] = dataHome;
+  });
+
+  afterEach(async () => {
+    if (previousDataHome === undefined) delete process.env["XDG_DATA_HOME"];
+    else process.env["XDG_DATA_HOME"] = previousDataHome;
+    await rm(dataHome, { recursive: true, force: true });
+  });
+
   test("preserves the stale installed-skills CTA after saved logs", async () => {
     const f = await fixture();
     const previousDataHome = process.env["XDG_DATA_HOME"];
