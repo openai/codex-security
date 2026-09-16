@@ -5027,7 +5027,7 @@ export async function main(
             );
             const { validationPrompt } = await resolveScanPrompts(
               { validationPromptFile: options.validationPromptFile },
-              selected.repository,
+              [selected.repository, dependencies.currentDirectory()],
               dependencies.currentDirectory(),
             );
             const patchRiskBase = options.assessPatchRisk

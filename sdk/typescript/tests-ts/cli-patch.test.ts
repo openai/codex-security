@@ -2,7 +2,14 @@ import { parse as parseToml } from "smol-toml";
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
@@ -269,6 +276,65 @@ describe("scan and patch workflow", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  test.each(["linked", "explicit"])(
+    "checks the invocation checkout boundary for a %s saved-patch prompt",
+    async (kind) => {
+      const root = await mkdtemp(join(tmpdir(), "patch-prompt-boundary-"));
+      const directory = join(root, "invocation");
+      const repository = join(root, "repository");
+      const outside = join(root, "outside");
+      const result = resultWithFindings(["high"]);
+      let started = false;
+      try {
+        await Promise.all(
+          [directory, repository, outside].map((path) => mkdir(path)),
+        );
+        await writeFile(
+          join(outside, "validation.md"),
+          "Run the synthetic regression test.",
+        );
+        await symlink(
+          outside,
+          join(directory, "validation"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "--scan",
+            "scan-1",
+            "--validation-prompt-file",
+            kind === "linked"
+              ? join("validation", "validation.md")
+              : join(outside, "validation.md"),
+            "--json",
+          ],
+          {
+            currentDirectory: directory,
+            onWorkbench: () => ({
+              scan: {
+                scanId: "scan-1",
+                targetPath: repository,
+                findings: result.findings.findings as unknown as JsonObject[],
+              },
+            }),
+            onCodex: (args, output) => {
+              started = true;
+              completePatches(args, output);
+              return 0;
+            },
+          },
+        );
+        expect(started).toBe(kind === "explicit");
+        expect(outcome.exitCode).toBe(kind === "explicit" ? 0 : 2);
+        if (kind === "linked")
+          expect(outcome.stderr).toContain("directory links outside");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test.each(["missing", "empty", "directory"])(
     "rejects a %s validation prompt before starting a patch",
