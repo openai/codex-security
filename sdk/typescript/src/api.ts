@@ -163,6 +163,7 @@ import {
   type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
+import { recordScanLogTurn } from "./scan-logs.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
@@ -1916,13 +1917,29 @@ export class CodexSecurity {
         await chmod(targetPathsFile, 0o400);
       }
       checkOpen();
+      const runOwnedTurn = async (input: string) => {
+        const run = () => thread.runStreamed(input, { signal });
+        return thread.id === null
+          ? run()
+          : {
+              events: recordScanLogTurn(
+                { scanId, threadId: thread.id, codexHome: runtime.codexHome },
+                run,
+                (error) =>
+                  notifyObserver(
+                    "onWarning",
+                    options.onWarning,
+                    options.onObserverError,
+                    `Could not save scan log attribution: ${safeErrorMessage(error)}`,
+                  ),
+              ),
+            };
+      };
       const postScanPrompt = options.postScanPrompt;
       if (postScanPrompt?.trim()) {
-        runPostScan = () => thread.runStreamed(postScanPrompt, { signal });
+        runPostScan = () => runOwnedTurn(postScanPrompt);
       }
-      const { events } = await thread.runStreamed(prompt, {
-        signal,
-      });
+      const { events } = await runOwnedTurn(prompt);
       checkOpen();
 
       const result = await runScanEvents({

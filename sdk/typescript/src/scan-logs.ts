@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { appendFile, mkdir } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
@@ -60,6 +62,76 @@ export function readSavedScanLogs(
           ? (scan.progress.updatedAt ?? "")
           : "",
   });
+}
+
+// The SDK owns these calls even when a scan was sealed before they started.
+// Record observed rollout task IDs separately from canonical scan artifacts.
+export async function* recordScanLogTurn<T extends { readonly type: string }>(
+  options: { scanId: string; threadId: string; codexHome: string },
+  run: () => Promise<{ events: AsyncGenerator<T> }>,
+  onError: (error: unknown) => void,
+): AsyncGenerator<T> {
+  const taskIds = async () => {
+    const session = await findScanSession(options.codexHome, options.threadId);
+    const ids = new Set<string>();
+    if (session !== null) {
+      for await (const event of sessionEvents(session.path)) {
+        const payload = event["payload"];
+        if (
+          event["type"] === "event_msg" &&
+          isRecord(payload) &&
+          payload["type"] === "task_started" &&
+          typeof payload["turn_id"] === "string"
+        )
+          ids.add(payload["turn_id"]);
+      }
+    }
+    return ids;
+  };
+  let seen: Set<string> | undefined;
+  try {
+    seen = await taskIds();
+  } catch (error) {
+    onError(error);
+  }
+  const record = async () => {
+    if (seen === undefined) return;
+    try {
+      const added = [...(await taskIds())].filter((id) => !seen!.has(id));
+      if (added.length === 0) return;
+      const path = scanLogTurnsPath(options.codexHome, options.scanId);
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      await appendFile(
+        path,
+        added
+          .map(
+            (turnId) =>
+              JSON.stringify({ threadId: options.threadId, turnId }) + "\n",
+          )
+          .join(""),
+        { mode: 0o600 },
+      );
+      for (const id of added) seen.add(id);
+    } catch (error) {
+      onError(error);
+    }
+  };
+  try {
+    for await (const event of (await run()).events) {
+      if (event.type === "turn.started") await record();
+      yield event;
+    }
+  } finally {
+    await record();
+  }
+}
+
+function scanLogTurnsPath(codexHome: string, scanId: string): string {
+  return join(
+    codexHome,
+    "scan-log-turns",
+    createHash("sha256").update(scanId).digest("hex") + ".jsonl",
+  );
 }
 
 interface SessionLog {
@@ -165,6 +237,21 @@ export async function readScanLogs(options: ScanLogOptions) {
     }
     sessions.push(session);
   }
+  const ownedTurns = new Map<string, Set<string>>();
+  for (const home of homes) {
+    for await (const record of sessionEvents(
+      scanLogTurnsPath(home, options.scanId),
+    )) {
+      if (
+        typeof record["threadId"] !== "string" ||
+        typeof record["turnId"] !== "string"
+      )
+        continue;
+      const turns = ownedTurns.get(record["threadId"]) ?? new Set<string>();
+      turns.add(record["turnId"]);
+      ownedTurns.set(record["threadId"], turns);
+    }
+  }
   const completedAt = Date.parse(options.completedAt ?? "");
   const events: Record<string, unknown>[] = [];
   for (const session of sessions) {
@@ -198,7 +285,10 @@ export async function readScanLogs(options: ScanLogOptions) {
         payload["type"] === "task_started"
       ) {
         // Completion is recorded before the terminal tool result and reply.
-        scanTurn = timestamp <= completedAt;
+        scanTurn =
+          timestamp <= completedAt ||
+          (typeof payload["turn_id"] === "string" &&
+            ownedTurns.get(session.threadId)?.has(payload["turn_id"]) === true);
       }
       if (!scanTurn && timestamp > completedAt) {
         continue;
