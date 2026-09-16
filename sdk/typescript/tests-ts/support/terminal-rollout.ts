@@ -54,7 +54,6 @@ export const terminalScanEvents: Record<string, unknown>[] = [
     payload: {
       type: "message",
       role: "assistant",
-      channel: "final",
       content: [{ type: "output_text", text: "The scan is complete." }],
     },
   },
