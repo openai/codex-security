@@ -169,6 +169,7 @@ export async function readScanLogs(options: ScanLogOptions) {
   const events: Record<string, unknown>[] = [];
   for (const session of sessions) {
     let replaying = false;
+    let scanTurn = false;
     for await (const event of sessionEvents(session.path)) {
       const payload = event["payload"];
       if (event["type"] === "session_meta" && isRecord(payload)) {
@@ -187,11 +188,19 @@ export async function readScanLogs(options: ScanLogOptions) {
         }
         replaying = false;
       }
+      const timestamp =
+        typeof event["timestamp"] === "string"
+          ? Date.parse(event["timestamp"])
+          : NaN;
       if (
-        Number.isFinite(completedAt) &&
-        typeof event["timestamp"] === "string" &&
-        Date.parse(event["timestamp"]) > completedAt
+        event["type"] === "event_msg" &&
+        isRecord(payload) &&
+        payload["type"] === "task_started"
       ) {
+        // Completion is recorded before the terminal tool result and reply.
+        scanTurn = timestamp <= completedAt;
+      }
+      if (!scanTurn && timestamp > completedAt) {
         continue;
       }
       events.push({ threadId: session.threadId, event });

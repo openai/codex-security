@@ -12,6 +12,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { readSavedScanLogs, readScanLogs } from "../src/scan-logs.js";
+import {
+  completedAt,
+  terminalScanEvents,
+  laterTurnEvents,
+} from "./support/terminal-rollout.js";
 
 const directories: string[] = [];
 
@@ -510,6 +515,86 @@ describe("saved scan logs", () => {
         expect(events[0]).toMatchObject({ type: "session_meta" });
         expect(events.slice(1)).toEqual(bounded ? retained : activity);
       }
+    },
+  );
+
+  test.each(["standard", "deep"])(
+    "retains the terminal %s scan turn from the complete archive",
+    async (mode) => {
+      const homes = [await temporaryHome(), await temporaryHome()];
+      const activity = [...terminalScanEvents, ...laterTurnEvents];
+      const scanDir = join(homes[0]!, "scan");
+      for (const [index, home] of homes.entries()) {
+        for (const threadId of ["parent", "worker"]) {
+          await writeSession(
+            home,
+            threadId,
+            index === 0 ? terminalScanEvents.slice(0, 2) : activity,
+            threadId === "worker" && mode === "standard" ? "parent" : undefined,
+            threadId === "parent"
+              ? "2026-08-21T12:00:00Z"
+              : "2026-08-21T12:01:59Z",
+            threadId === "parent"
+              ? scanDir
+              : join(
+                  scanDir,
+                  "artifacts",
+                  "deep_discovery",
+                  "workers",
+                  "worker",
+                  "output",
+                ),
+          );
+        }
+      }
+      await rename(
+        join(homes[1]!, "sessions"),
+        join(homes[1]!, "archived_sessions"),
+      );
+      const scan = {
+        scanId: "scan-1",
+        continuationThreadId: "parent",
+        executionThreadIds: ["parent"],
+        mode,
+        scanDir,
+        progress: { status: "complete", updatedAt: completedAt },
+      };
+      const result = await readSavedScanLogs(scan, homes);
+      expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
+        "parent",
+        "worker",
+      ]);
+      for (const session of result.sessions) {
+        const path = join(
+          homes[1]!,
+          "archived_sessions",
+          "2026",
+          "08",
+          "11",
+          `rollout-${session.threadId}.jsonl`,
+        );
+        expect(session.path).toBe(path);
+        expect(
+          result.events
+            .filter(({ threadId }) => threadId === session.threadId)
+            .slice(1)
+            .map(({ event }) => event),
+        ).toEqual(terminalScanEvents);
+        const saved = (await readFile(path, "utf8"))
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(saved.slice(1)).toEqual(activity);
+      }
+      const running = await readSavedScanLogs(
+        { ...scan, progress: { ...scan.progress, status: "running" } },
+        homes,
+      );
+      expect(
+        running.events
+          .filter(({ threadId }) => threadId === "parent")
+          .slice(1)
+          .map(({ event }) => event),
+      ).toEqual(activity);
     },
   );
 
