@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
@@ -596,6 +596,7 @@ async function readArchivedWorkerCheckpoints(
   }
 
   const archived: ScanDraftInput[] = [];
+  const archivePrefix = `artifacts/deep_discovery/workers/${basename(workerRoot)}/attempts/`;
   const attempts = (await fs.readdir(canonicalAttemptsRoot, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
     .sort((left, right) => archivedAttemptNumber(right.name) - archivedAttemptNumber(left.name)
@@ -704,8 +705,18 @@ async function readArchivedWorkerCheckpoints(
     drafts.sort((left, right) => right.modifiedMs - left.modifiedMs
       || Number(right.result) - Number(left.result)
       || right.name.localeCompare(left.name));
-    if (checkpointHead !== undefined) archived.push(checkpointHead);
-    archived.push(...drafts.map((draft) => draft.input));
+    const inputs = [...(checkpointHead ? [checkpointHead] : []), ...drafts.map((draft) => draft.input)];
+    for (const input of inputs) {
+      // The archive moved the receipts with this attempt. Rebase only the
+      // retained projection; the original checkpoint bytes remain unchanged.
+      for (const surface of input.coverage.surfaces as JsonObject[]) {
+        if (!Array.isArray(surface.receiptRefs)) continue;
+        surface.receiptRefs = (surface.receiptRefs as string[]).map((ref) => (
+          ref.startsWith(archivePrefix) ? ref : `${archivePrefix}${attempt.name}/${ref}`
+        ));
+      }
+      archived.push(input);
+    }
   }
   return archived;
 }
