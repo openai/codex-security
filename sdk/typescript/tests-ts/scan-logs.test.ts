@@ -609,7 +609,7 @@ describe("saved scan logs", () => {
   });
 
   test.each([false, true])(
-    "does not parse event bodies from unrelated saved sessions (copied: %s)",
+    "does not parse event bodies from unrelated saved sessions (copied: %p)",
     async (copied) => {
       const home = await temporaryHome();
       await writeSession(home, "parent", [
