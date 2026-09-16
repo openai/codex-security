@@ -4,7 +4,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
-import { sessionFiles } from "./cost.js";
+import { sessionFiles, type ScanCostTracker } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import {
@@ -64,116 +64,90 @@ export function readSavedScanLogs(
   });
 }
 
-// The SDK owns these calls even when a scan was sealed before they started.
-// Record observed rollout task IDs separately from canonical scan artifacts.
+interface ScanLogInvocation {
+  turns: () => Promise<{ threadId: string; turnId: string }[]>;
+  write?: Promise<void>;
+}
+
+const scanLogInvocations = new Map<string, Set<ScanLogInvocation>>();
+
+// Capture byte boundaries before returning control to callers that can resume
+// the same thread. Resolve native task IDs on the existing incremental reader.
 export async function* recordScanLogTurn<T extends { readonly type: string }>(
-  options: { scanId: string; threadId: () => string | null; codexHome: string },
+  options: {
+    scanId: string;
+    threadId: () => string | null;
+    codexHome: string;
+    tracker: ScanCostTracker;
+    pendingWrites: Set<Promise<void>>;
+  },
   run: () => Promise<{ events: AsyncGenerator<T> }>,
   onError: (error: unknown) => void,
 ): AsyncGenerator<T> {
-  const record = async () => {
+  const warn = (error: unknown) => {
     try {
-      const rootId = options.threadId();
-      if (rootId === null) return;
-      const sessions: SessionLog[] = [];
-      for await (const session of scanSessions(options.codexHome))
-        sessions.push(session);
-      const root = sessions.find((session) => session.threadId === rootId);
-      if (root === undefined) return;
-
-      let rootTurn: { turnId: string; startedAt: number | null } | null = null;
-      for await (const event of sessionEvents(root.path)) {
-        const task = taskStarted(event);
-        if (task !== null) rootTurn = task;
-      }
-      if (rootTurn === null) return;
-
-      const included = new Set([rootId]);
-      const pending = [rootId];
-      for (const parentId of pending) {
-        for (const session of sessions) {
-          if (
-            included.has(session.threadId) ||
-            session.parentThreadId !== parentId ||
-            (rootTurn.startedAt !== null &&
-              session.startedAt !== null &&
-              session.startedAt < rootTurn.startedAt)
-          ) {
-            continue;
-          }
-          included.add(session.threadId);
-          pending.push(session.threadId);
-        }
-      }
-
-      const added = [{ threadId: rootId, turnId: rootTurn.turnId }];
-      for (const session of sessions) {
-        if (session.threadId === rootId || !included.has(session.threadId))
-          continue;
-        for await (const event of sessionEvents(session.path)) {
-          const task = taskStarted(event);
-          if (
-            task !== null &&
-            (rootTurn.startedAt === null ||
-              task.startedAt === null ||
-              task.startedAt >= rootTurn.startedAt)
-          ) {
-            added.push({ threadId: session.threadId, turnId: task.turnId });
-          }
-        }
-      }
-
-      const path = scanLogTurnsPath(options.codexHome, options.scanId);
-      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-      await appendFile(
-        path,
-        added.map((turn) => JSON.stringify(turn) + "\n").join(""),
-        { mode: 0o600 },
-      );
-    } catch (error) {
       onError(error);
-    }
+    } catch {}
   };
-
-  let recording: Promise<void> | null = null;
-  const scheduleRecord = () => {
-    recording ??= record();
+  const before = await options.tracker.sessionOffsets().catch(warn);
+  let after: Map<string, number> | undefined;
+  const path = scanLogTurnsPath(options.codexHome, options.scanId);
+  const invocations =
+    scanLogInvocations.get(path) ?? new Set<ScanLogInvocation>();
+  const invocation: ScanLogInvocation = {
+    turns: async () => {
+      const threadId = options.threadId();
+      if (threadId === null || before === undefined) return [];
+      return await options.tracker.logTurns(
+        threadId,
+        before,
+        after ?? (await options.tracker.sessionOffsets()),
+      );
+    },
+  };
+  invocations.add(invocation);
+  scanLogInvocations.set(path, invocations);
+  const forget = () => {
+    invocations.delete(invocation);
+    if (invocations.size === 0) scanLogInvocations.delete(path);
   };
   try {
-    for await (const event of (await run()).events) {
-      if (event.type === "turn.completed" || event.type === "turn.failed")
-        scheduleRecord();
-      yield event;
-    }
+    yield* (await run()).events;
   } finally {
-    scheduleRecord();
-    await recording;
+    if (options.threadId() === null || before === undefined) {
+      forget();
+    } else {
+      after = (await options.tracker.sessionOffsets().catch(warn)) ?? undefined;
+      if (after === undefined) {
+        forget();
+      } else {
+        const write = invocation
+          .turns()
+          .then(async (turns) => {
+            if (turns.length === 0) return;
+            await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+            await appendFile(
+              path,
+              turns.map((turn) => JSON.stringify(turn) + "\n").join(""),
+              { mode: 0o600 },
+            );
+          })
+          .catch(warn)
+          .finally(() => {
+            forget();
+            options.pendingWrites.delete(write);
+          });
+        invocation.write = write;
+        options.pendingWrites.add(write);
+      }
+    }
   }
 }
 
-function taskStarted(
-  event: Readonly<Record<string, unknown>>,
-): { turnId: string; startedAt: number | null } | null {
-  const payload = event["payload"];
-  if (
-    event["type"] !== "event_msg" ||
-    !isRecord(payload) ||
-    payload["type"] !== "task_started" ||
-    typeof payload["turn_id"] !== "string"
-  ) {
-    return null;
-  }
-  const startedAt =
-    typeof payload["started_at"] === "number" &&
-    Number.isFinite(payload["started_at"])
-      ? payload["started_at"] * 1_000
-      : typeof event["timestamp"] === "string"
-        ? Date.parse(event["timestamp"])
-        : Number.NaN;
-  return {
-    turnId: payload["turn_id"],
-    startedAt: Number.isFinite(startedAt) ? startedAt : null,
-  };
+export async function settleScanLogTurns(
+  pendingWrites: ReadonlySet<Promise<void>>,
+): Promise<void> {
+  await Promise.all(pendingWrites);
 }
 
 function scanLogTurnsPath(codexHome: string, scanId: string): string {
@@ -253,9 +227,19 @@ export async function readScanLogs(options: ScanLogOptions) {
 
   const ownedTurns = new Map<string, Set<string>>();
   for (const home of homes) {
-    for await (const record of sessionEvents(
-      scanLogTurnsPath(home, options.scanId),
-    )) {
+    const path = scanLogTurnsPath(home, options.scanId);
+    const invocations =
+      scanLogInvocations.get(path) ?? new Set<ScanLogInvocation>();
+    await Promise.all([...invocations].map((invocation) => invocation.write));
+    const records: Record<string, unknown>[] = (
+      await Promise.all(
+        [...invocations].map((invocation) =>
+          invocation.turns().catch(() => []),
+        ),
+      )
+    ).flat();
+    for await (const record of sessionEvents(path)) records.push(record);
+    for (const record of records) {
       if (
         typeof record["threadId"] !== "string" ||
         typeof record["turnId"] !== "string"

@@ -1,4 +1,4 @@
-import { open, readdir } from "node:fs/promises";
+import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   estimateScanCost,
@@ -38,6 +38,7 @@ interface SessionReasoning {
 
 interface SessionUsage {
   offset: number;
+  turns: Map<string, number>;
   pendingLine: Buffer[];
   pendingLineBytes: number;
   unreadable: boolean;
@@ -84,6 +85,7 @@ const SESSION_READ_SIZE = 64 * 1_024;
 function createSessionUsage(): SessionUsage {
   return {
     offset: 0,
+    turns: new Map(),
     pendingLine: [],
     pendingLineBytes: 0,
     unreadable: false,
@@ -182,6 +184,49 @@ export class ScanCostTracker {
     return this.#snapshot;
   }
 
+  public async sessionOffsets(): Promise<Map<string, number>> {
+    const offsets = new Map<string, number>();
+    for await (const path of sessionFiles(
+      join(this.#options.codexHome, "sessions"),
+    )) {
+      offsets.set(path, (await stat(path)).size);
+    }
+    return offsets;
+  }
+
+  public async logTurns(
+    threadId: string,
+    before: ReadonlyMap<string, number>,
+    after: ReadonlyMap<string, number>,
+  ): Promise<{ threadId: string; turnId: string }[]> {
+    const update = this.#pending.then(async () => {
+      await this.#readSessions(after, false);
+      const included = new Set([threadId]);
+      for (const parent of included) {
+        for (const session of this.#sessions.values()) {
+          if (session.threadId !== null && session.parentThreadId === parent)
+            included.add(session.threadId);
+        }
+      }
+      const turns: { threadId: string; turnId: string }[] = [];
+      for (const [path, end] of after) {
+        const session = this.#sessions.get(path);
+        if (session?.threadId == null || !included.has(session.threadId))
+          continue;
+        for (const [turnId, offset] of session.turns) {
+          if (offset >= (before.get(path) ?? 0) && offset < end)
+            turns.push({ threadId: session.threadId, turnId });
+        }
+      }
+      return turns;
+    });
+    this.#pending = update.then(
+      () => {},
+      () => {},
+    );
+    return await update;
+  }
+
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
     if (this.#timer !== null) {
       clearInterval(this.#timer);
@@ -197,23 +242,36 @@ export class ScanCostTracker {
     return this.#snapshot;
   }
 
-  async #readSessions(): Promise<void> {
-    if (this.#threadId === null) return;
+  async #readSessions(
+    offsets?: ReadonlyMap<string, number>,
+    report = true,
+  ): Promise<void> {
+    if (this.#threadId === null && report) return;
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
+    for await (const path of offsets?.keys() ??
+      sessionFiles(join(this.#options.codexHome, "sessions"))) {
       let session = this.#sessions.get(path);
       if (session === undefined) {
         session = createSessionUsage();
         this.#sessions.set(path, session);
       }
       try {
-        await readSessionUsage(path, session, this.#options.repository);
+        await readSessionUsage(
+          path,
+          session,
+          this.#options.repository,
+          offsets?.get(path),
+        );
       } catch (error) {
         if (session.threadId === null) throw error;
         unreadable.push({ session, error });
       }
+    }
+
+    // Follow-up attribution shares the cursor without reopening settled cost/progress.
+    if (!report) {
+      if (unreadable.length > 0) throw unreadable[0]!.error;
+      return;
     }
 
     const included = new Set([this.#threadId, ...this.#receipts.keys()]);
@@ -396,6 +454,7 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
   repository?: string,
+  end = Infinity,
 ): Promise<void> {
   if (session.unreadable) return;
   let file;
@@ -408,14 +467,14 @@ async function readSessionUsage(
   try {
     const buffer = Buffer.alloc(SESSION_READ_SIZE);
     while (true) {
+      if (session.offset >= end) return;
       const { bytesRead } = await file.read(
         buffer,
         0,
-        buffer.length,
+        Math.min(buffer.length, end - session.offset),
         session.offset,
       );
       if (bytesRead === 0) return;
-      session.offset += bytesRead;
       try {
         readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
       } catch (error) {
@@ -424,6 +483,7 @@ async function readSessionUsage(
         session.pendingLineBytes = 0;
         throw error;
       }
+      session.offset += bytesRead;
     }
   } finally {
     await file.close();
@@ -451,12 +511,18 @@ function readSessionChunk(
     }
 
     if (session.pendingLineBytes === 0) {
-      readSessionEvent(fragment.toString("utf8"), session, repository);
+      readSessionEvent(
+        fragment.toString("utf8"),
+        session,
+        session.offset + lineStart,
+        repository,
+      );
     } else {
       if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
       readSessionEvent(
         Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
         session,
+        session.offset + lineStart - session.pendingLineBytes,
         repository,
       );
       session.pendingLine = [];
@@ -469,6 +535,7 @@ function readSessionChunk(
 function readSessionEvent(
   line: string,
   session: SessionUsage,
+  offset: number,
   repository?: string,
 ): void {
   if (line.length === 0) return;
@@ -516,10 +583,18 @@ function readSessionEvent(
       if (owned) {
         session.replaying = false;
         session.events?.push(event);
+        if (typeof payload["turn_id"] === "string")
+          session.turns.set(payload["turn_id"], offset);
       }
     }
     return;
   }
+  if (
+    event["type"] === "event_msg" &&
+    payload["type"] === "task_started" &&
+    typeof payload["turn_id"] === "string"
+  )
+    session.turns.set(payload["turn_id"], offset);
   session.events?.push(event);
   if (event["type"] === "response_item") {
     session.progress.push(...sessionProgressUpdates(payload));
