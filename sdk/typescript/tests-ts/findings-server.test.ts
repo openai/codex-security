@@ -134,13 +134,15 @@ test("dashboard serves only findings and groups, and never calls an embedding pr
       throw new Error("Read-only dashboard called embeddings");
     },
   });
-  const redirect = await fetch(`${base}/dashboard`, { redirect: "manual" });
-  expect(redirect.status).toBe(308);
-  for (const prefix of ["", "/service"]) {
-    expect(
-      new URL(redirect.headers.get("location")!, `${base}${prefix}/dashboard`)
-        .pathname,
-    ).toBe(`${prefix}/dashboard/`);
+  for (const path of ["/", "/dashboard"]) {
+    const redirect = await fetch(`${base}${path}`, { redirect: "manual" });
+    expect(redirect.status).toBe(308);
+    for (const prefix of ["", "/service"]) {
+      expect(
+        new URL(redirect.headers.get("location")!, `${base}${prefix}${path}`)
+          .pathname,
+      ).toBe(`${prefix}/dashboard/`);
+    }
   }
   for (const view of ["findings", "groups"]) {
     const result = await dashboard(base, { view });

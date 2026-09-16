@@ -2353,7 +2353,8 @@ CODEX_SECURITY_STATE_DIR="$HOME/.codex-security-findings" codex-security serve -
 ```
 
 `--port` overrides `PORT` (default: `3000`). Open
-`http://127.0.0.1:3000/dashboard`. Stop with Ctrl+C or SIGTERM.
+`http://127.0.0.1:3000/` to reach the dashboard (also available at `/dashboard`).
+Stop with Ctrl+C or SIGTERM.
 
 Export `OPENAI_API_KEY` or `CODEX_API_KEY` to import findings with embeddings.
 Startup and listing need no key. The service does not load `.env` or authenticate

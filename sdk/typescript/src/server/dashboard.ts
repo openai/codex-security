@@ -15,7 +15,7 @@ export async function serveDashboard(
   path: string,
   response: ServerResponse,
 ): Promise<boolean> {
-  if (path === "/dashboard") {
+  if (path === "/" || path === "/dashboard") {
     response.writeHead(308, { Location: "dashboard/" });
     response.end();
     return true;
