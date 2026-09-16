@@ -170,6 +170,7 @@ const distFiles = new Set(
     "auth",
     "bulk-scan-discovery",
     "cli",
+    "cli-scan-logs-json",
     "classify-severity",
     "classify-scan-severity",
     "severity-store",
