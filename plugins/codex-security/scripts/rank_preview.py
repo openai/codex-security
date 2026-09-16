@@ -56,6 +56,7 @@ TEXT_CODE_EXTENSIONS = {
     ".sh",
     ".sql",
     ".swift",
+    ".tf",
     ".toml",
     ".ts",
     ".tsx",
