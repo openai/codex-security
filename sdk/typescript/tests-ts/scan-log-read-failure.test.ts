@@ -70,7 +70,10 @@ for (const fault of ["ENOTDIR", "EACCES"] as const) {
             await chmod(sidecar, 0);
           }
           await expect(readFile(sidecar)).rejects.toMatchObject({
-            code: fault,
+            code:
+              fault === "ENOTDIR" && process.platform === "win32"
+                ? "ENOENT"
+                : fault,
           });
           if (boundary === "saved logs") {
             expect(await readSavedScanLogs(scan, home)).toEqual(expected);
