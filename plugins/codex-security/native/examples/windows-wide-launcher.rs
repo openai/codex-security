@@ -233,7 +233,111 @@ fn main() -> std::io::Result<()> {
                 ));
             }
         }
-        println!("{{\"policyHelperRawPaths\":true,\"directoryIdentity\":true}}");
+        let input_name = raw("input-", 0xd800);
+        let scope_name = raw("scope-files-", 0xdc80);
+        fs::write(repo.join("source.py"), "source line\n")?;
+        fs::write(repo.join(&scope_name), "source.py\ndeleted.py\n")?;
+        fs::write(repo.join(raw("scope-files-", 0xfffd)), "wrong.py\n")?;
+        fs::write(
+            repo.join(raw("input-", 0xfffd)),
+            "invalid replacement input",
+        )?;
+        fs::write(
+            repo.join(&input_name),
+            concat!(
+                "{\"cwe_ids\":[\"CWE-89\"],\"locations\":[{\"path\":\"source.py\",",
+                "\"start_line\":1,\"role\":\"entrypoint\"}],\"summary\":\"wide paths\",",
+                "\"evidence\":\"source evidence\"}\n",
+            ),
+        )?;
+        let output_link = "i\u{0307}.jsonl";
+        std::os::windows::fs::symlink_file(&output_name, repo.join(output_link))?;
+        std::os::windows::fs::symlink_file(output_link, repo.join("İ.jsonl"))?;
+        let expected = concat!(
+            "{\"candidate_id\":\"candidate-a69fa65a28ed4e55\",\"cwe_ids\":[\"CWE-89\"],",
+            "\"evidence\":\"source evidence\",\"locations\":[{\"end_line\":1,",
+            "\"path\":\"source.py\",\"role\":\"entrypoint\",\"start_line\":1}],",
+            "\"summary\":\"wide paths\"}\r\n",
+        );
+        let candidate = |repo_arg: &Path, input: &Path, scope: &Path, output: &Path| {
+            Command::new(&node)
+                .arg(&script)
+                .args(["--helper", "normalize-candidates", "--repo-root"])
+                .arg(repo_arg)
+                .arg("--input")
+                .arg(input)
+                .arg("--in-scope-files")
+                .arg(scope)
+                .arg("--out")
+                .arg(output)
+                .arg("--allow-missing-in-scope")
+                .current_dir(&repo)
+                .env("USERPROFILE", &repo)
+                .output()
+        };
+        for (index, prefix) in [repo.clone(), PathBuf::from("~"), PathBuf::from(".")]
+            .into_iter()
+            .enumerate()
+        {
+            if index == 0 {
+                fs::write(&output, "previous output")?;
+            }
+            let child = candidate(
+                &prefix,
+                &prefix.join(&input_name),
+                &prefix.join(&scope_name),
+                &prefix.join(if index == 0 {
+                    output_name.clone()
+                } else {
+                    OsString::from("İ.jsonl")
+                }),
+            )?;
+            if !child.status.success()
+                || !child.stderr.is_empty()
+                || fs::read(&output)? != expected.as_bytes()
+            {
+                return Err(io::Error::other(format!(
+                    "Wide candidate helper failed: {}",
+                    String::from_utf8_lossy(&child.stderr)
+                )));
+            }
+            fs::remove_file(&output)?;
+        }
+        fs::create_dir(repo.join("blocked-output"))?;
+        let child = candidate(
+            Path::new("."),
+            Path::new(&input_name),
+            Path::new(&scope_name),
+            Path::new("blocked-output"),
+        )?;
+        if child.status.code() != Some(2) || !repo.join("blocked-output").is_dir() {
+            return Err(io::Error::other(
+                "Candidate replacement failure was not preserved",
+            ));
+        }
+        for entry in fs::read_dir(&repo)? {
+            if entry?
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".blocked-output.")
+            {
+                return Err(io::Error::other(
+                    "Candidate temporary output was not removed",
+                ));
+            }
+        }
+        for cwd in &cwds {
+            for repository in &repos {
+                if fs::read(root.join(cwd).join(repository).join(&replacement_output))?
+                    != b"output sentinel"
+                {
+                    return Err(io::Error::other(
+                        "Candidate helper changed a replacement output",
+                    ));
+                }
+            }
+        }
+        println!("{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"directoryIdentity\":true}}");
         Ok(())
     }
 
