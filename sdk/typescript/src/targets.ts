@@ -275,12 +275,13 @@ export async function isGitMetadataDirectory(
   }
   if (!head.isFile() && !head.isSymbolicLink()) return false;
   try {
-    // This resolver validates Git directories without loading their configuration.
+    // Resolve from outside the candidate so Git does not load its configuration.
     const directory = await gitOutput(
       repository,
       ["rev-parse", "--resolve-git-dir", repository],
       signal,
       { LC_ALL: "C" },
+      dirname(repository),
     );
     return (
       relative(await realpath(directory), await realpath(repository)) === ""
@@ -724,6 +725,7 @@ async function gitOutput(
   args: readonly string[],
   signal?: AbortSignal,
   environment: NodeJS.ProcessEnv = {},
+  workingDirectory = repository,
 ): Promise<string> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
@@ -736,7 +738,7 @@ async function gitOutput(
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
-    ["-c", "core.fsmonitor=false", "-C", repository, ...args],
+    ["-c", "core.fsmonitor=false", "-C", workingDirectory, ...args],
     {
       encoding: "utf8",
       signal,
