@@ -45,6 +45,7 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
+import { scanLogsJson } from "./cli-scan-logs-json.js";
 import { parse as parseToml } from "smol-toml";
 import {
   classifyConnectionFailure,
@@ -1777,6 +1778,7 @@ export async function main(
   let exitCode = 0;
   let frameworkExit: number | undefined;
   let frameworkOutput = "";
+  let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
   let renderedPolicy: string | undefined;
@@ -2124,18 +2126,33 @@ export async function main(
           .describe("Scan identifier or unique prefix (default: latest)."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args }) {
+      async run({ args, format }) {
         const scanId =
           args.scanId ?? (await latestScans(1, "any"))?.[0]?.scanId;
         if (scanId === undefined) return;
-        return await history(
+        const result = await history(
           ["get-scan", "--scan-id", scanId],
-          async (value) =>
-            (await readSavedScanLogs(
+          async (value) => {
+            const logs = await readSavedScanLogs(
               value["scan"] as ScanLogSource,
               codexSecurityCredentialHome(dependencies.environment),
-            )) as unknown as JsonObject,
+            );
+            // Incur owns filtering, envelopes and token controls. Keep those
+            // requests on its formatter; plain JSON needs no aggregate string.
+            if (
+              format === "json" &&
+              !argv.some((argument) =>
+                /^--(?:filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u.test(
+                  argument,
+                ),
+              )
+            ) {
+              streamedLogs = logs;
+            }
+            return logs as unknown as JsonObject;
+          },
         );
+        return streamedLogs === undefined ? result : undefined;
       },
     })
     .command("resume", {
@@ -5686,11 +5703,21 @@ export async function main(
       return 2;
     }
   }
-  if (frameworkOutput.length === 0) return exitCode;
+  if (frameworkOutput.length === 0 && streamedLogs === undefined)
+    return exitCode;
   try {
+    // Incur can add a stale-skills CTA after the logs handler returns.
+    const logOutput =
+      streamedLogs === undefined
+        ? undefined
+        : scanLogsJson(
+            streamedLogs,
+            frameworkOutput ? JSON.parse(frameworkOutput).cta : undefined,
+          );
     await writeCliOutput(
       output,
-      renderedPolicy ??
+      logOutput ??
+        renderedPolicy ??
         renderedPatch ??
         renderedPublication ??
         renderedHistory ??
