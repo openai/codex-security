@@ -30,6 +30,8 @@ import {
   windowsFileSystem,
 } from "../../../native/windows-files.mjs";
 
+import { object } from "./python-json";
+
 const trim = (value: string) =>
   value.replace(
     /^[\p{White_Space}\u001c-\u001f]+|[\p{White_Space}\u001c-\u001f]+$/gu,
@@ -76,10 +78,6 @@ function compare(left: string, right: string): number {
     if (a[index] !== b[index]) return a[index]! - b[index]!;
   }
   return a.length - b.length;
-}
-
-function object(value: unknown): value is Row {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function stableJson(value: unknown): string {

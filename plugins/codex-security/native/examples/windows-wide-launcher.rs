@@ -337,7 +337,46 @@ fn main() -> std::io::Result<()> {
                 }
             }
         }
-        println!("{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"directoryIdentity\":true}}");
+        let assessment_name = raw("assessment-", 0xd800);
+        let assessment_path = repo.join(&assessment_name);
+        let replacement_assessment = repo.join(raw("assessment-", 0xfffd));
+        let assessment = r#"{
+            "schemaVersion":1,
+            "patch":{"repository":"example/project","sourceType":"patch_file","base":"base","head":"head","changedFiles":["src/example.ts"],"sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+            "recommendation":"no_op","workflowLabel":"no_op",
+            "impact":{"rating":"low","rationale":"No active path changes."},
+            "regressionLikelihood":{"rating":"low","rationale":"No live effect."},
+            "regressionProtection":{"rating":"strong","rationale":"Fixture validated.","exactHeadChecksPassed":true},
+            "recoverability":{"rating":"easy","rationale":"Local change."},
+            "confidence":{"rating":"high","rationale":"Known fixture."},
+            "applicability":{"status":"no_live_effect","rationale":"Synthetic input."},
+            "statusQuoRisk":{"rating":"low","rationale":"No live effect."},
+            "autoMergeExclusions":[],"affectedRuntimeRoots":[],"materialBoundaries":[],
+            "validation":[{"name":"fixture","status":"passed","protects":"Validator input."}],
+            "unknowns":[],"evidencePlan":[]
+        }"#;
+        fs::write(&assessment_path, assessment)?;
+        fs::write(&replacement_assessment, "replacement assessment sentinel")?;
+        for input in [assessment_path.clone(), PathBuf::from(&assessment_name)] {
+            let child = Command::new(&node)
+                .arg(&script)
+                .args(["--helper", "validate-patch-risk-assessment"])
+                .arg(input)
+                .current_dir(&repo)
+                .output()?;
+            if !child.status.success() || !child.stdout.is_empty() || !child.stderr.is_empty() {
+                return Err(io::Error::other(format!(
+                    "Wide assessment helper failed: {}",
+                    String::from_utf8_lossy(&child.stderr)
+                )));
+            }
+        }
+        if fs::read(&assessment_path)? != assessment.as_bytes()
+            || fs::read(&replacement_assessment)? != b"replacement assessment sentinel"
+        {
+            return Err(io::Error::other("Assessment validation changed its input"));
+        }
+        println!("{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"directoryIdentity\":true}}");
         Ok(())
     }
 
