@@ -2,9 +2,11 @@
 
 These bindings supply OS operations that Node does not expose. The `resolve-security-md` helper uses native account lookup on Unix and native path, file, and directory operations on Windows.
 
-The nine Node-API 8 functions are typed in `binding.mts`. Paths remain byte buffers. `statAt` never follows the final symlink; device and inode numbers are decimal strings so JavaScript does not round them. `openAt` and `duplicate` create descriptors with close-on-exec set. Node owns subsequent reads, writes, `fstat`, `fsync`, and close calls. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git.
+The ten Node-API 8 functions are typed in `binding.mts`. Paths remain byte buffers. `statAt` never follows the final symlink; device and inode numbers are decimal strings so JavaScript does not round them. `openAt` and `duplicate` create descriptors with close-on-exec set. Node owns subsequent reads, writes, `fstat`, `fsync`, and close calls. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git.
 
-`openAt` and `fileLock` retry EINTR, matching the current Python helpers. Other operations return their native errno. `readDescriptor` retries one interrupted Node read without losing earlier chunks. Blocking locks must run outside the main JavaScript event loop; a process that holds a lock releases it on close or exit. A Python signal handler can raise during a blocked call, so later routing must preserve cancellation through the worker lifecycle.
+`directoryEntries` returns raw names in filesystem order. With `withTypes: true`, it uses cached directory and symlink types where available and returns any individual type-query errno beside that entry. Symlinks are not followed. With `withTypes: false`, it never queries entry metadata; the unused type flags are false and entry errnos are zero. A directory-open or iteration failure returns its errno and an empty array. Rust closes the directory on success or failure.
+
+`openAt` and `fileLock` retry EINTR, matching the current Python helpers. Other descriptor operations return their native errno. Directory enumeration uses the Rust standard library's OS behavior. `readDescriptor` retries one interrupted Node read without losing earlier chunks. Blocking locks must run outside the main JavaScript event loop; a process that holds a lock releases it on close or exit. A Python signal handler can raise during a blocked call, so later routing must preserve cancellation through the worker lifecycle.
 
 Install the pinned Rust toolchain and the existing TypeScript dependencies, then run from the repository root:
 
@@ -17,7 +19,7 @@ cargo +1.97.1 fmt --check --manifest-path plugins/codex-security/native/Cargo.to
 cargo +1.97.1 clippy --locked --manifest-path plugins/codex-security/native/Cargo.toml -- -D warnings
 ```
 
-The proof runs without Python. It checks directory replacement, byte paths, unreadable-file metadata, long raw symlinks, descriptor duplication, Node descriptor I/O, account lookup, contention, unlock, and process-death release. Linux exercises undecodable filename bytes; macOS uses valid UTF-8 filenames required by APFS. CI invokes it with an empty `PATH`. During migration, the same protocol can compare the existing Python lock helper:
+The proof runs without Python. It checks directory replacement, byte paths, unreadable-file metadata, long raw symlinks, descriptor duplication, Node descriptor I/O, account lookup, directory names and types, names-only enumeration, nonsearchable directories, contention, unlock, and process-death release. Linux exercises undecodable filename bytes; macOS uses valid UTF-8 filenames required by APFS. CI invokes it with an empty `PATH`. During migration, the same protocol can compare the existing Python lock helper:
 
 ```sh
 node plugins/codex-security/native/proof.mjs python3 plugins/codex-security/scripts
