@@ -71,53 +71,58 @@ export async function* recordScanLogTurn<T extends { readonly type: string }>(
   run: () => Promise<{ events: AsyncGenerator<T> }>,
   onError: (error: unknown) => void,
 ): AsyncGenerator<T> {
-  const taskIds = async () => {
-    const rootId = options.threadId();
-    const tasks = new Map<string, Set<string>>();
-    if (rootId === null) return tasks;
-    const sessions = [];
-    for await (const session of scanSessions(options.codexHome))
-      sessions.push(session);
-    const included = new Set([rootId]);
-    for (const parentId of included) {
-      for (const session of sessions) {
-        if (session.parentThreadId === parentId) included.add(session.threadId);
-      }
-    }
-    for (const session of sessions) {
-      if (!included.has(session.threadId)) continue;
-      const ids = tasks.get(session.threadId) ?? new Set<string>();
-      for await (const event of sessionEvents(session.path)) {
-        const payload = event["payload"];
-        if (
-          event["type"] === "event_msg" &&
-          isRecord(payload) &&
-          payload["type"] === "task_started" &&
-          typeof payload["turn_id"] === "string"
-        )
-          ids.add(payload["turn_id"]);
-      }
-      tasks.set(session.threadId, ids);
-    }
-    return tasks;
-  };
-  let seen: Map<string, Set<string>> | undefined;
-  try {
-    seen = await taskIds();
-  } catch (error) {
-    onError(error);
-  }
   const record = async () => {
-    if (seen === undefined) return;
     try {
-      const added = [];
-      for (const [threadId, ids] of await taskIds()) {
-        for (const turnId of ids) {
-          if (!seen.get(threadId)?.has(turnId))
-            added.push({ threadId, turnId });
+      const rootId = options.threadId();
+      if (rootId === null) return;
+      const sessions: SessionLog[] = [];
+      for await (const session of scanSessions(options.codexHome))
+        sessions.push(session);
+      const root = sessions.find((session) => session.threadId === rootId);
+      if (root === undefined) return;
+
+      let rootTurn: { turnId: string; startedAt: number | null } | null = null;
+      for await (const event of sessionEvents(root.path)) {
+        const task = taskStarted(event);
+        if (task !== null) rootTurn = task;
+      }
+      if (rootTurn === null) return;
+
+      const included = new Set([rootId]);
+      const pending = [rootId];
+      for (const parentId of pending) {
+        for (const session of sessions) {
+          if (
+            included.has(session.threadId) ||
+            session.parentThreadId !== parentId ||
+            (rootTurn.startedAt !== null &&
+              session.startedAt !== null &&
+              session.startedAt < rootTurn.startedAt)
+          ) {
+            continue;
+          }
+          included.add(session.threadId);
+          pending.push(session.threadId);
         }
       }
-      if (added.length === 0) return;
+
+      const added = [{ threadId: rootId, turnId: rootTurn.turnId }];
+      for (const session of sessions) {
+        if (session.threadId === rootId || !included.has(session.threadId))
+          continue;
+        for await (const event of sessionEvents(session.path)) {
+          const task = taskStarted(event);
+          if (
+            task !== null &&
+            (rootTurn.startedAt === null ||
+              task.startedAt === null ||
+              task.startedAt >= rootTurn.startedAt)
+          ) {
+            added.push({ threadId: session.threadId, turnId: task.turnId });
+          }
+        }
+      }
+
       const path = scanLogTurnsPath(options.codexHome, options.scanId);
       await mkdir(dirname(path), { recursive: true, mode: 0o700 });
       await appendFile(
@@ -125,23 +130,50 @@ export async function* recordScanLogTurn<T extends { readonly type: string }>(
         added.map((turn) => JSON.stringify(turn) + "\n").join(""),
         { mode: 0o600 },
       );
-      for (const { threadId, turnId } of added) {
-        const ids = seen.get(threadId) ?? new Set<string>();
-        ids.add(turnId);
-        seen.set(threadId, ids);
-      }
     } catch (error) {
       onError(error);
     }
   };
+
+  let recording: Promise<void> | null = null;
+  const scheduleRecord = () => {
+    recording ??= record();
+  };
   try {
     for await (const event of (await run()).events) {
-      if (event.type === "turn.started") await record();
+      if (event.type === "turn.completed" || event.type === "turn.failed")
+        scheduleRecord();
       yield event;
     }
   } finally {
-    await record();
+    scheduleRecord();
+    await recording;
   }
+}
+
+function taskStarted(
+  event: Readonly<Record<string, unknown>>,
+): { turnId: string; startedAt: number | null } | null {
+  const payload = event["payload"];
+  if (
+    event["type"] !== "event_msg" ||
+    !isRecord(payload) ||
+    payload["type"] !== "task_started" ||
+    typeof payload["turn_id"] !== "string"
+  ) {
+    return null;
+  }
+  const startedAt =
+    typeof payload["started_at"] === "number" &&
+    Number.isFinite(payload["started_at"])
+      ? payload["started_at"] * 1_000
+      : typeof event["timestamp"] === "string"
+        ? Date.parse(event["timestamp"])
+        : Number.NaN;
+  return {
+    turnId: payload["turn_id"],
+    startedAt: Number.isFinite(startedAt) ? startedAt : null,
+  };
 }
 
 function scanLogTurnsPath(codexHome: string, scanId: string): string {
@@ -219,14 +251,32 @@ export async function readScanLogs(options: ScanLogOptions) {
     );
   }
 
-  const included = new Set([
+  const ownedTurns = new Map<string, Set<string>>();
+  for (const home of homes) {
+    for await (const record of sessionEvents(
+      scanLogTurnsPath(home, options.scanId),
+    )) {
+      if (
+        typeof record["threadId"] !== "string" ||
+        typeof record["turnId"] !== "string"
+      )
+        continue;
+      const turns = ownedTurns.get(record["threadId"]) ?? new Set<string>();
+      turns.add(record["turnId"]);
+      ownedTurns.set(record["threadId"], turns);
+    }
+  }
+
+  const explicitlyIncluded = new Set([
     ...(options.threadId ? [options.threadId] : []),
     ...(options.threadIds ?? []),
     ...(options.executionThreadIds ?? []),
   ]);
+  const included = new Set([...explicitlyIncluded, ...ownedTurns.keys()]);
   // A Desktop owner can contain other work. Include its log without treating
-  // the whole conversation tree as part of this scan.
-  const traversed = new Set(options.executionThreadIds ?? included);
+  // the whole conversation tree as part of this scan. Directly attributed
+  // threads are selected too, but do not widen descendant traversal.
+  const traversed = new Set(options.executionThreadIds ?? explicitlyIncluded);
   const pending = [...traversed];
   for (const parentId of pending) {
     const parent = logs.get(parentId)?.[0];
@@ -254,21 +304,6 @@ export async function readScanLogs(options: ScanLogOptions) {
       if (await extendsSessionLog(session.path, copy.path)) session = copy;
     }
     sessions.push(session);
-  }
-  const ownedTurns = new Map<string, Set<string>>();
-  for (const home of homes) {
-    for await (const record of sessionEvents(
-      scanLogTurnsPath(home, options.scanId),
-    )) {
-      if (
-        typeof record["threadId"] !== "string" ||
-        typeof record["turnId"] !== "string"
-      )
-        continue;
-      const turns = ownedTurns.get(record["threadId"]) ?? new Set<string>();
-      turns.add(record["turnId"]);
-      ownedTurns.set(record["threadId"], turns);
-    }
   }
   const completedAt = Date.parse(options.completedAt ?? "");
   const events: Record<string, unknown>[] = [];

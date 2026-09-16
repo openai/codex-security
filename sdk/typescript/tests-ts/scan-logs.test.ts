@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -261,6 +262,101 @@ describe("saved scan logs", () => {
       }
     },
   );
+
+  test("includes directly attributed owner children without traversing unrelated owner work", async () => {
+    const home = await temporaryHome();
+    const scanId = "scan-direct-attribution";
+    await writeSession(home, "desktop-owner", [
+      commandEvent("owner history", "owner-history", "2026-08-11T12:00:00Z"),
+    ]);
+    await writeSession(home, "worker", [
+      commandEvent("scan worker", "worker-call", "2026-08-11T12:01:00Z"),
+    ]);
+    await writeSession(
+      home,
+      "worker-child",
+      [
+        commandEvent(
+          "worker child",
+          "worker-child-call",
+          "2026-08-11T12:01:30Z",
+        ),
+      ],
+      "worker",
+    );
+    await writeSession(
+      home,
+      "follow-up-child",
+      [
+        {
+          timestamp: "2026-08-11T12:03:00Z",
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "follow-up-child-turn",
+            started_at: Date.parse("2026-08-11T12:03:00Z") / 1_000,
+          },
+        },
+        commandEvent(
+          "owned follow-up child",
+          "follow-up-call",
+          "2026-08-11T12:03:01Z",
+        ),
+      ],
+      "desktop-owner",
+      "2026-08-11T12:03:00Z",
+    );
+    await writeSession(
+      home,
+      "unrelated-owner-child",
+      [
+        commandEvent(
+          "private unrelated owner work",
+          "private-call",
+          "2026-08-11T12:03:01Z",
+        ),
+      ],
+      "desktop-owner",
+      "2026-08-11T12:03:00Z",
+    );
+    const attributionDirectory = join(home, "scan-log-turns");
+    await mkdir(attributionDirectory, { recursive: true });
+    await writeFile(
+      join(
+        attributionDirectory,
+        `${createHash("sha256").update(scanId).digest("hex")}.jsonl`,
+      ),
+      `${JSON.stringify({
+        threadId: "follow-up-child",
+        turnId: "follow-up-child-turn",
+      })}\n`,
+    );
+
+    const result = await readSavedScanLogs(
+      {
+        scanId,
+        continuationThreadId: "desktop-owner",
+        threadIds: ["desktop-owner", "worker"],
+        executionThreadIds: ["worker"],
+        progress: {
+          status: "complete",
+          updatedAt: "2026-08-11T12:02:00Z",
+        },
+      },
+      home,
+    );
+
+    expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual([
+      "desktop-owner",
+      "follow-up-child",
+      "worker",
+      "worker-child",
+    ]);
+    expect(JSON.stringify(result)).toContain("owned follow-up child");
+    expect(JSON.stringify(result)).not.toContain(
+      "private unrelated owner work",
+    );
+  });
 
   test("feedback returns an empty log set when no scan threads are recorded", async () => {
     const home = await temporaryHome();
