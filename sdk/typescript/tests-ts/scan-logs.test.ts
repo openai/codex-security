@@ -608,37 +608,48 @@ describe("saved scan logs", () => {
     );
   });
 
-  test("does not parse event bodies from unrelated saved sessions", async () => {
-    const home = await temporaryHome();
-    await writeSession(home, "parent", [
-      commandEvent("included", "parent-call"),
-    ]);
-    await writeSession(home, "unrelated", [
-      commandEvent("UNRELATED_PRIVATE_EVENT_BODY", "unrelated-call"),
-    ]);
-    const originalParse = JSON.parse;
-    let unrelatedBodies = 0;
-    const parseSpy = spyOn(JSON, "parse").mockImplementation(
-      (text, reviver) => {
-        if (text.includes("UNRELATED_PRIVATE_EVENT_BODY")) unrelatedBodies++;
-        return originalParse(text, reviver);
-      },
-    );
-
-    try {
-      const result = await readScanLogs({
-        scanId: "scan-1",
-        threadId: "parent",
-        codexHome: home,
-      });
-      expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
-        "parent",
+  test.each([false, true])(
+    "does not parse event bodies from unrelated saved sessions (copied: %s)",
+    async (copied) => {
+      const home = await temporaryHome();
+      await writeSession(home, "parent", [
+        commandEvent("included", "parent-call"),
       ]);
-      expect(unrelatedBodies).toBe(0);
-    } finally {
-      parseSpy.mockRestore();
-    }
-  });
+      const unrelated = commandEvent(
+        "UNRELATED_PRIVATE_EVENT_BODY",
+        "unrelated-call",
+      );
+      await writeSession(home, "unrelated", [unrelated]);
+      const homes = [home];
+      if (copied) {
+        const copyHome = await temporaryHome();
+        await writeSession(copyHome, "unrelated", [unrelated, unrelated]);
+        homes.push(copyHome);
+      }
+      const originalParse = JSON.parse;
+      let unrelatedBodies = 0;
+      const parseSpy = spyOn(JSON, "parse").mockImplementation(
+        (text, reviver) => {
+          if (text.includes("UNRELATED_PRIVATE_EVENT_BODY")) unrelatedBodies++;
+          return originalParse(text, reviver);
+        },
+      );
+
+      try {
+        const result = await readScanLogs({
+          scanId: "scan-1",
+          threadId: "parent",
+          codexHome: homes,
+        });
+        expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
+          "parent",
+        ]);
+        expect(unrelatedBodies).toBe(0);
+      } finally {
+        parseSpy.mockRestore();
+      }
+    },
+  );
 
   test("preserves large selected events and skips malformed metadata prefixes", async () => {
     const home = await temporaryHome();
