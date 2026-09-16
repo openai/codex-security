@@ -23,9 +23,11 @@ export async function resolveTrustedExecutable(
   const root = await realpath(protectedRoot).catch(() =>
     resolve(protectedRoot),
   );
-  const path = Object.entries(environment).find(
-    ([name]) => name.toUpperCase() === "PATH",
-  )?.[1];
+  const path =
+    environment["PATH"] ??
+    Object.entries(environment).find(
+      ([name]) => name.toUpperCase() === "PATH",
+    )?.[1];
   const entries: string[] = [];
   for (let entry of path?.split(delimiter) ?? []) {
     if (

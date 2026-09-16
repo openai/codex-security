@@ -1,5 +1,7 @@
-import { resolve } from "node:path";
-import { loadContract, type LoadedContract } from "./contract.js";
+import {
+  loadContractWithScanDirectory,
+  type LoadedContract,
+} from "./contract.js";
 import type {
   Finding,
   FindingCodeEvidence,
@@ -8,6 +10,18 @@ import type {
   SeverityLevel,
 } from "./models.js";
 import { bundledPluginRoot } from "./runtime.js";
+import { CodexSecurityError } from "./errors.js";
+import {
+  severityClassificationSchema,
+  validateSeverityClassification,
+  type SeverityClassification,
+  type SeverityAssessment,
+} from "./classify-severity.js";
+import {
+  readScanSeverityClassification,
+  selectClassificationFindings,
+  type ScanSeverityClassification,
+} from "./classify-scan-severity.js";
 
 export interface LinearPublicationDestination {
   type: "linear";
@@ -20,6 +34,13 @@ export interface PrepareScanPublicationOptions {
   teamId: string;
   projectId?: string;
   uploadedAt?: string;
+  environment?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  expectedScanId?: string;
+  /** Publish only these finding IDs (for example dedupe's uniqueFindingIds). */
+  findingIds?: readonly string[];
+  /** Use this assessment; otherwise use the scan's saved classification when present. */
+  classification?: SeverityClassification | ScanSeverityClassification;
 }
 
 export interface PreparedPublicationIssue {
@@ -36,6 +57,29 @@ export interface PreparedScanPublication {
   scanDirectory: string;
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
+  /** Complete sealed membership, retained when only some findings become issues. */
+  sourceFindings?: Pick<
+    PreparedPublicationIssue,
+    "findingId" | "occurrenceId"
+  >[];
+}
+
+export function linearPublicationArguments(
+  destination: LinearPublicationDestination,
+  issue: PreparedPublicationIssue,
+): Pick<PreparedPublicationIssue, "title" | "description" | "priority"> & {
+  team: string;
+  project?: string;
+} {
+  return {
+    team: destination.teamId,
+    ...(destination.projectId === undefined
+      ? {}
+      : { project: destination.projectId }),
+    title: issue.title,
+    description: issue.description,
+    ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+  };
 }
 
 const LINEAR_PRIORITIES = {
@@ -50,16 +94,67 @@ export async function prepareScanPublication(
   scanDirectory: string,
   options: PrepareScanPublicationOptions,
 ): Promise<PreparedScanPublication> {
-  const contract = await loadContract(scanDirectory, {
-    pluginRoot: await bundledPluginRoot(),
-  });
+  const { contract, scanDirectory: canonicalScanDirectory } =
+    await loadContractWithScanDirectory(scanDirectory, {
+      pluginRoot: await bundledPluginRoot(),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      expectedScanId: options.expectedScanId,
+    });
   const uploadedAt = options.uploadedAt ?? new Date().toISOString();
   const scanId = contract.manifest.scan.id;
+  let classification: SeverityClassification | undefined;
+  if (options.classification !== undefined) {
+    const { scanId: assessedScanId, ...assessment } =
+      options.classification as ScanSeverityClassification;
+    if (assessedScanId !== undefined && assessedScanId !== scanId) {
+      throw new CodexSecurityError(
+        "Severity classification belongs to a different scan.",
+      );
+    }
+    classification = validateSeverityClassification(
+      severityClassificationSchema.parse(assessment),
+      contract.findings.findings,
+    );
+  } else {
+    classification = await readScanSeverityClassification(
+      canonicalScanDirectory,
+      scanId,
+      contract.findings.findings,
+      options.signal,
+      options.environment,
+    );
+  }
+  const assessments = new Map(
+    classification?.assessments.map((assessment) => [
+      assessment.findingId,
+      assessment,
+    ]),
+  );
+  const selected = selectClassificationFindings(
+    contract.findings.findings,
+    options.findingIds ??
+      classification?.assessments.map(({ findingId }) => findingId),
+  );
+  if (
+    classification &&
+    selected.some(({ findingId }) => !assessments.has(findingId))
+  ) {
+    throw new CodexSecurityError(
+      "Selected findings are missing from the severity classification. Classify the selection before publishing.",
+    );
+  }
 
   return {
     scanId,
     uploadId: scanId,
-    scanDirectory: resolve(scanDirectory),
+    scanDirectory: canonicalScanDirectory,
+    ...(classification === undefined && options.findingIds === undefined
+      ? {}
+      : {
+          sourceFindings: contract.findings.findings.map(
+            ({ findingId, occurrenceId }) => ({ findingId, occurrenceId }),
+          ),
+        }),
     destination: {
       type: options.destination,
       teamId: options.teamId,
@@ -67,16 +162,27 @@ export async function prepareScanPublication(
         ? {}
         : { projectId: options.projectId }),
     },
-    issues: contract.findings.findings.map((finding) => {
-      const priority = LINEAR_PRIORITIES[finding.severity.level];
-      return {
-        findingId: finding.findingId,
-        occurrenceId: finding.occurrenceId,
-        title: `[Codex Security][${finding.severity.level.toUpperCase()}] ${finding.title}`,
-        description: renderFindingDescription(contract, finding, uploadedAt),
-        ...(priority === undefined ? {} : { priority }),
-      };
-    }),
+    issues: selected
+      .filter(
+        ({ findingId }) => assessments.get(findingId)?.decision !== "excluded",
+      )
+      .map((finding) => {
+        const assessment = assessments.get(finding.findingId);
+        const level = assessment?.level ?? finding.severity.level;
+        const priority = LINEAR_PRIORITIES[level];
+        return {
+          findingId: finding.findingId,
+          occurrenceId: finding.occurrenceId,
+          title: `[Codex Security][${level.toUpperCase()}] ${finding.title}`,
+          description: renderFindingDescription(
+            contract,
+            finding,
+            uploadedAt,
+            assessment,
+          ),
+          ...(priority === undefined ? {} : { priority }),
+        };
+      }),
   };
 }
 
@@ -84,10 +190,70 @@ function renderFindingDescription(
   contract: LoadedContract,
   finding: Finding,
   uploadedAt: string,
+  assessment?: SeverityAssessment,
 ): string {
   const { coverage } = contract;
   const { scan } = contract.manifest;
-  const lines = [
+  const lines = ["## Summary", "", finding.summary];
+  if (assessment?.source === "rubric") {
+    lines.push(
+      "",
+      "",
+      "## Severity classification",
+      "",
+      `**Assessed severity:** ${assessment.level}`,
+      `**Rubric label:** ${assessment.rubricLabel}`,
+      "",
+      assessment.rationale,
+    );
+    if (assessment.confidence !== null)
+      lines.push("", `**Classification confidence:** ${assessment.confidence}`);
+    if (assessment.reviewTrigger !== null)
+      lines.push("", `**Review trigger:** ${assessment.reviewTrigger}`);
+  }
+
+  if (finding.attackPath?.summary !== undefined) {
+    lines.push("", "## Reproduction summary", "", finding.attackPath.summary);
+  }
+
+  const rootCause = finding.rootCause;
+  if (typeof rootCause === "string") {
+    lines.push("", "## Root cause", "", rootCause);
+  } else if (rootCause !== undefined) {
+    lines.push("", "## Root cause", "", rootCause.summary);
+    if (rootCause.code !== undefined) {
+      lines.push("", fencedCode(rootCause.code, rootCause.language));
+    }
+  }
+
+  lines.push("", "## Remediation", "", finding.remediation);
+
+  const validation = finding.validation;
+  const limits = [
+    ...new Set([
+      ...(validation?.limitations ?? []),
+      ...(validation?.counterEvidence ?? []),
+      ...(finding.attackPath?.limitations ?? []),
+    ]),
+  ];
+  if (validation?.summary || validation?.method || limits.length > 0) {
+    lines.push("", "## Validation", "");
+    if (validation?.summary) lines.push(validation.summary, "");
+    if (validation?.method) lines.push(`**Method:** ${validation.method}`, "");
+    lines.push(...limits.map((limit) => `- ${limit}`));
+  }
+
+  if (finding.codeEvidence !== undefined && finding.codeEvidence.length > 0) {
+    lines.push("", "## Source-code evidence");
+    for (const evidence of finding.codeEvidence) {
+      lines.push("", ...renderCodeEvidence(scan.target, evidence));
+    }
+  }
+
+  lines.push(
+    "",
+    "---",
+    "",
     "## Codex Security finding",
     "",
     `**Scan ID:** ${scan.id}`,
@@ -123,30 +289,7 @@ function renderFindingDescription(
     ...finding.locations.map((location) =>
       renderLocation(scan.target, location),
     ),
-    "",
-    "## Summary",
-    "",
-    finding.summary,
-  ];
-
-  const rootCause = finding.rootCause;
-  if (typeof rootCause === "string") {
-    lines.push("", "## Root cause", "", rootCause);
-  } else if (rootCause !== undefined) {
-    lines.push("", "## Root cause", "", rootCause.summary);
-    if (rootCause.code !== undefined) {
-      lines.push("", fencedCode(rootCause.code, rootCause.language));
-    }
-  }
-
-  if (finding.codeEvidence !== undefined && finding.codeEvidence.length > 0) {
-    lines.push("", "## Source-code evidence");
-    for (const evidence of finding.codeEvidence) {
-      lines.push("", ...renderCodeEvidence(scan.target, evidence));
-    }
-  }
-
-  lines.push("", "## Remediation", "", finding.remediation);
+  );
   return `${lines.join("\n")}\n`;
 }
 

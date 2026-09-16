@@ -129,6 +129,34 @@ function runPythonProbe(
 }
 
 describe("bundled workbench canonical paths", () => {
+  test("reads Unicode commit subjects regardless of locale or Git log encoding", async () => {
+    const repository = await temporaryDirectory();
+    expect(
+      runPythonProbe(
+        [
+          "import json, subprocess, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_target as target",
+          "repository = Path(sys.argv[2])",
+          "def git(*args):",
+          "    subprocess.run(['git', '-C', str(repository), *args], check=True, capture_output=True)",
+          "git('init', '-q')",
+          "subjects = [('UTF-8', 'docs: \\u65e5\\u672c\\u8a9e \\ud55c\\uad6d\\uc5b4 \\U0001f527'), ('ISO-8859-1', 'docs: caf\\u00e9')]",
+          "for log_encoding, subject in subjects:",
+          "    git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', subject)",
+          "    git('config', 'i18n.logOutputEncoding', log_encoding)",
+          "    for encoding in ('cp932', 'cp949'):",
+          "        subprocess._text_encoding = lambda: encoding",
+          "        assert target.git_target_metadata(repository)['commitSubject'] == subject",
+          "        assert target.git_bytes(repository, 'show', '-s', '--format=%s', 'HEAD') == (subject + '\\n').encode('utf-8')",
+          "print(json.dumps({'subjects': len(subjects), 'locales': 2}))",
+        ].join("\n"),
+        repository,
+      ),
+    ).toEqual({ subjects: 2, locales: 2 });
+  });
+
   testPosix(
     "rejects private scan directories under insecure shared parents",
     async () => {

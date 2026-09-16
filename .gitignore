@@ -1,5 +1,9 @@
 node_modules/
+/reports/
 dist/
+__pycache__/
+.pytest_cache/
+*.egg-info/
 .env
 .DS_Store
 /*.csv
@@ -10,6 +14,15 @@ dist/
 /codex-security.json
 /findings.json
 /*.sarif
+.pnpm-store/
 
 # Never publish internal-only plugin data.
 .internal/
+
+# Emitted by sdk/typescript's build:ci script.
+/.github/scripts/check_plugin_source_compatibility.mjs
+/.github/scripts/test_check_plugin_source_compatibility.mjs
+
+# Emitted by sdk/typescript's build:examples script.
+/examples/custom-validation/app.mjs
+/examples/custom-validation/validate.mjs

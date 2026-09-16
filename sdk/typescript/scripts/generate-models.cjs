@@ -4,13 +4,9 @@ const { compile } = require("json-schema-to-typescript");
 const { format } = require("prettier");
 
 const packageRoot = resolve(__dirname, "..");
-const schemas = [
-  join(packageRoot, "_bundled_plugin", "schemas"),
-  resolve(packageRoot, "../../plugins/codex-security/schemas"),
-].find(existsSync);
+const schemas = resolve(packageRoot, "../../plugins/codex-security/schemas");
 
-if (schemas === undefined)
-  throw new Error("Could not find the plugin schemas.");
+if (!existsSync(schemas)) throw new Error("Could not find the plugin schemas.");
 
 function withoutAllOf(value) {
   if (Array.isArray(value)) return value.map(withoutAllOf);
@@ -70,8 +66,8 @@ async function generate() {
       'export type FindingRootCause = Extract<Finding["rootCause"], object>;',
       'export type FindingValidation = NonNullable<Finding["validation"]>;',
       'export type FindingAttackPath = NonNullable<Finding["attackPath"]>;',
-      "export type AttackPathDataflow = ContractObject;",
-      "export type AttackPathReachability = ContractObject;",
+      'export type AttackPathDataflow = Extract<NonNullable<FindingAttackPath["dataFlow"]>, object>;',
+      'export type AttackPathReachability = Extract<NonNullable<FindingAttackPath["reachability"]>, object>;',
       'export type FindingProvenance = Finding["provenance"];',
       'export type CoverageMode = CoverageDocument["mode"];',
       'export type CoverageCompleteness = CoverageDocument["completeness"];',

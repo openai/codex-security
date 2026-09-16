@@ -1,0 +1,18 @@
+- description: "Bare skill invocation prompts for a finding"
+  metadata:
+    case_id: missing-finding-input
+    source_type: none
+  vars:
+    case_id: missing-finding-input
+    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    source_type_under_test: none
+    finding_input: ""
+    invocation_preamble: "Use $codex-security:triage-finding with no finding supplied."
+    eval_instructions: |-
+      This is an automated eval. No finding was supplied. Follow the
+      $codex-security:triage-finding missing-input behavior.
+  options:
+    disableDefaultAsserts: true
+  assert:
+    - type: javascript
+      value: file://./assertions/missing-input.js

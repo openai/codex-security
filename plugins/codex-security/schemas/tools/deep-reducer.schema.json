@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/tools/deep-reducer.schema.json",
+  "title": "Codex Security Deep Scan semantic reducer operations",
+  "$ref": "#/$defs/reductionInput",
+  "$defs": {
+    "reducerInputs": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "reductionInput": {
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean",
+          "description": "Omit or set true when submitting the finished aggregate."
+        },
+        "scanId": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanId"
+        },
+        "handoffClaimToken": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/handoffClaimToken"
+        },
+        "scope": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scope"
+        },
+        "threatModel": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/threatModel"
+        },
+        "findings": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanDraftInput/properties/findings"
+        }
+      },
+      "required": [
+        "scanId",
+        "findings"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

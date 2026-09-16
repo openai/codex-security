@@ -190,10 +190,20 @@ export function dependencies(
     onRun?: () => void;
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
-    onCodex?: (...args: Parameters<MainDependencies["runCodex"]>) => number;
+    onCodex?: (
+      ...arguments_: Parameters<MainDependencies["runCodex"]>
+    ) => number | Promise<number>;
     linearClient?: MainDependencies["linearClient"];
+    importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
+    onRepositoryCommand?: (
+      ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
+    ) => string | Promise<string>;
     bulkScan?: MainDependencies["bulkScan"];
-    onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
+    onWorkbench?: (
+      args: readonly string[],
+      input?: string,
+      signal?: AbortSignal,
+    ) => JsonObject | Promise<JsonObject>;
     onMatch?: MainDependencies["matchFindings"];
     onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
@@ -254,15 +264,28 @@ export function dependencies(
       signals.remove(signal, listener),
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
-    runCodex: async (...args) => options.onCodex?.(...args) ?? 0,
+    runCodex: async (...args) => (await options.onCodex?.(...args)) ?? 0,
+    runRepositoryCommand: async (command, args, repository, commandOptions) =>
+      (await options.onRepositoryCommand?.(
+        command,
+        args,
+        repository,
+        commandOptions,
+      )) ?? (args.includes("--name-only") ? "src/finding-1.ts\0" : ""),
     ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
-    runWorkbench: async (args) =>
-      (await options.onWorkbench?.(args)) ?? { scans: [] },
-    matchFindings: async (input) =>
-      (await options.onMatch?.(input)) ?? { matches: [], uncertain: [] },
+    ...(options.importGitHubAlerts === undefined
+      ? {}
+      : { importGitHubAlerts: options.importGitHubAlerts }),
+    runWorkbench: async (args, input, signal) =>
+      (await options.onWorkbench?.(args, input, signal)) ?? { scans: [] },
+    matchFindings: async (input, comparisonOptions) =>
+      (await options.onMatch?.(input, comparisonOptions)) ?? {
+        matches: [],
+        uncertain: [],
+      },
     exportFindings: async (arguments_) =>
       new TextEncoder().encode(
         arguments_.format === "csv"

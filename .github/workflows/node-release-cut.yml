@@ -20,6 +20,7 @@ jobs:
       github.repository == 'openai/codex-security' &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'))
     name: cut release tag
     runs-on: ubuntu-latest
@@ -31,14 +32,14 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24.15.0"
           package-manager-cache: false
@@ -65,6 +66,15 @@ jobs:
           fi
 
           version="$(node sdk/typescript/scripts/release-automation.mjs version sdk/typescript/package.json)"
+          release_notes_file="$(mktemp)"
+          trap 'rm -f "$release_notes_file"' EXIT
+          if ! git show "$RELEASE_SHA:.github/release-notes.md" \
+            > "$release_notes_file" 2>/dev/null; then
+            echo "The tagged commit must include .github/release-notes.md." >&2
+            exit 1
+          fi
+          node sdk/typescript/scripts/release-automation.mjs \
+            validate-release-notes "$version" "$release_notes_file" >/dev/null
 
           if ! published_versions="$(
             npm view @openai/codex-security versions \
