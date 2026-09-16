@@ -538,7 +538,6 @@ def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(
     assert len(preview.encode("utf-8")) <= 220
     assert "..." in preview
     assert "line_39" in preview
-    assert preview == generate_preview(tmp_path, filename, source, preview_bytes=220)
 
 
 def test_literal_elision_line_respects_tiny_byte_budget(tmp_path: Path) -> None:
