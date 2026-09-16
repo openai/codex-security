@@ -148,14 +148,6 @@ def parse_args() -> argparse.Namespace:
     )
     scoped.add_argument("--out", required=True, help="Output scoped-source-input.jsonl path.")
 
-    bind = subparsers.add_parser(
-        "bind-repo-scopes",
-        help="Copy SDK scoped-path targets into the unsealed manifest and coverage documents.",
-    )
-    bind.add_argument("--scopes-file", required=True, help="JSON array of requested scopes.")
-    bind.add_argument("--manifest", required=True, help="Unsealed scan-manifest.json path.")
-    bind.add_argument("--coverage", required=True, help="Unsealed coverage.json path.")
-
     diff = subparsers.add_parser(
         "make-diff-rank-input",
         help="Create rank_input.jsonl from Git changed source-like files.",
@@ -412,34 +404,6 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
     print(f"Wrote {len(rows)} scoped paths to {output}")
 
 
-def bind_repo_scopes(args: argparse.Namespace) -> None:
-    scopes = load_scopes_file(Path(args.scopes_file).expanduser())
-    manifest_path = Path(args.manifest).expanduser()
-    coverage_path = Path(args.coverage).expanduser()
-    try:
-        manifest: object = json.loads(manifest_path.read_text(encoding="utf-8"))
-        coverage: object = json.loads(coverage_path.read_text(encoding="utf-8"))
-        if not isinstance(manifest, dict) or not isinstance(coverage, dict):
-            raise ValueError("expected JSON objects")
-        scan = manifest.get("scan")
-        if not isinstance(scan, dict):
-            raise ValueError("manifest.scan must be an object")
-        scope = scan.get("scope")
-        if not isinstance(scope, dict):
-            raise ValueError("manifest.scan.scope must be an object")
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-        raise SystemExit("Unable to bind requested scopes into the scan contract") from exc
-    scope["includePaths"] = scopes
-    coverage["includePaths"] = scopes
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"
-    )
-    coverage_path.write_text(
-        json.dumps(coverage, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"
-    )
-    print(f"Bound {len(scopes)} requested scopes into the scan contract")
-
-
 def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
     result = subprocess.run(
         [
@@ -562,8 +526,6 @@ def main() -> None:
         make_repo_rank_input(args)
     elif args.command == "make-repo-scope-input":
         make_repo_scope_input(args)
-    elif args.command == "bind-repo-scopes":
-        bind_repo_scopes(args)
     elif args.command == "make-diff-rank-input":
         make_diff_rank_input(args)
     else:
