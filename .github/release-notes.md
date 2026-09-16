@@ -5,6 +5,7 @@
 
 - stream large saved scan JSON output ([#932](https://github.com/openai/codex-security/pull/932))
 - prefer complete saved rollout copies ([#933](https://github.com/openai/codex-security/pull/933))
+- support custom patch validation prompts ([#940](https://github.com/openai/codex-security/pull/940))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
