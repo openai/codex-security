@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
@@ -187,14 +188,16 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         ["drafts", `${randomUUID()}.json`],
         "staged scan draft",
       );
+      const acceptanceName = `${basename(draftPath, ".json")}.accepted.json`;
       try {
         const { handoffClaimToken: _claim, ...snapshot } = checkpoint;
+        const stagedDraft = {
+          ...draft,
+          ...(publication === undefined ? {} : { deepScanPublication: publication }),
+        };
         await Promise.all([
           replaceArtifactJson(checkpointPath, snapshot),
-          replaceArtifactJson(draftPath, {
-            ...draft,
-            ...(publication === undefined ? {} : { deepScanPublication: publication }),
-          }),
+          replaceArtifactJson(draftPath, stagedDraft),
         ]);
         const arguments_ = [
           "write-scan-draft",
@@ -214,6 +217,18 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         try {
           await runWorkbench(arguments_);
         } catch (error) {
+          if (context.mode === "deep" && publication !== undefined) {
+            const accepted = await readArtifactJsonObject(
+              context, ["drafts", acceptanceName], "accepted scan draft",
+            ).catch(() => undefined);
+            if (isDeepStrictEqual(accepted, JSON.parse(JSON.stringify({
+              status: "draft_written", input: { ...stagedDraft, checkpoint: snapshot },
+            })))) {
+              signal?.throwIfAborted();
+              await runWorkbench(arguments_);
+              return;
+            }
+          }
           if (!workbenchScanDraftConflict(error)) throw error;
           throw Object.assign(
             new Error(
@@ -226,6 +241,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         await Promise.all([
           fs.rm(checkpointPath, { force: true }),
           fs.rm(draftPath, { force: true }),
+          fs.rm(join(dirname(draftPath), acceptanceName), { force: true }),
         ]);
       }
     },

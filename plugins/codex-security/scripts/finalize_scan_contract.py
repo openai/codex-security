@@ -83,6 +83,10 @@ class ContractError(ValueError):
     """Raised when a completed scan does not satisfy the additive contract."""
 
 
+class ScanLocalIOError(ContractError):
+    """Raised when scan-local storage I/O fails, distinct from path validation."""
+
+
 class RecoverableContractError(ContractError):
     """Raised when report projection can safely be retried before publication."""
 
@@ -536,15 +540,18 @@ def write_scan_local_bytes(
     if not _descriptor_relative_writes_available():
         if not _is_windows():
             raise ContractError("scan-local output requires descriptor-relative file operations")
+        backend = _windows_scan_local_files()
         try:
-            _windows_scan_local_files().atomic_write(
+            backend.atomic_write(
                 scan_dir,
                 relative_path,
                 payload,
                 expected_root_identity=expected_root_identity,
             )
-        except OSError as exc:
+        except backend.WindowsScanLocalPathError as exc:
             raise ContractError(f"{relative_path}: {exc}") from exc
+        except OSError as exc:
+            raise ScanLocalIOError(f"{relative_path}: {exc}") from exc
         return
     root_fd: int | None = None
     parent_fd: int | None = None

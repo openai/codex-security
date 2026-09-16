@@ -202,7 +202,7 @@ async function createFixture(t, paths = {}) {
   transport.stderr?.resume();
   await client.connect(transport);
   return {
-    run, store, runWorkbench, instant,
+    run, store, runWorkbench, instant, environment,
     setTime(offset) { now = new Date(Date.parse(instant) + offset * 1_000).toISOString(); },
     call(name, args) {
       return client.callTool({ name, arguments: args, _meta: { "openai/threadId": owner } });
@@ -219,7 +219,8 @@ async function commitReducers(fixture, offsets, ids) {
       const id = `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
       const label = `discovery-${String(index).padStart(4, "0")}`;
       const artifact = await workerArtifact(run, "workers", label);
-      const update = { id, scanId: run.scanId, kind: "discovery", status: "running", attempt: 1, ...artifact };
+      const update = { id, scanId: run.scanId, kind: "discovery", status: "running", attempt: 1,
+        threadId: `session-${label}`, ...artifact };
       await store.updateWorker(update);
       const resultManifestPath = path.join(artifact.artifactDir, "result.json");
       await writeFile(resultManifestPath, JSON.stringify({ scanId: run.scanId, findings: [], coverage }));
@@ -230,7 +231,8 @@ async function commitReducers(fixture, offsets, ids) {
     const artifact = await workerArtifact(run, "dedup", label);
     const id = ids[batch];
     await store.claimDedup({ id, scanId: run.scanId, workerIds, ...artifact });
-    await store.updateWorker({ id, scanId: run.scanId, kind: "dedup", status: "running", attempt: 1, ...artifact });
+    await store.updateWorker({ id, scanId: run.scanId, kind: "dedup", status: "running", attempt: 1,
+      threadId: `session-${label}`, ...artifact });
     const resultManifestPath = path.join(artifact.artifactDir, "result.json");
     await writeFile(resultManifestPath, JSON.stringify({ scanId: run.scanId, findings: [], threatModel: { summary: label } }));
     fixture.setTime(offsets[batch]);
@@ -282,4 +284,227 @@ function assertSuccess(result) {
 function assertToolError(result, pattern) {
   assert.equal(result.isError, true, JSON.stringify(result));
   if (pattern) assert.match(JSON.stringify(result), pattern);
+}
+
+async function publicationFixture(t, workflow = "deep-scan-mcp/v1") {
+  const fixture = await createFixture(t);
+  const { run, store, runWorkbench, environment } = fixture;
+  const database = path.join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3");
+  const sql = async (script, ...args) => (await execFileAsync(python,
+    ["-c", script, database, run.scanId, ...args], { env: environment })).stdout;
+  await sql(`import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as c:
+    c.execute("UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?", (sys.argv[3], sys.argv[2]))
+`, workflow);
+  const claim = await store.claimCoordinator({ scanId: run.scanId, threadId: owner });
+  assert.equal(claim.run.coordinatorGeneration, 2);
+  const results = await commitReducers(fixture, [1, 2], [highId, lowId]);
+  await mkdir(path.join(run.scanDir, "checkpoints"), { recursive: true });
+  const draft = { ...JSON.parse(await readFile(results[1], "utf8")), coverage };
+  const context = await createScanArtifactContext(run.scanId, runWorkbench, { requireRunning: true });
+  return {
+    ...fixture, sql, results, draft,
+    publish: (runner = runWorkbench) => recordCodexSecurityScanDraftViaWorkbench(
+      context, draft, runner, undefined, { coordinatorGeneration: 2, resultPath: results[1] },
+    ),
+    workers: async () => JSON.parse(await sql(`import json, sqlite3, sys
+c = sqlite3.connect(sys.argv[1]); c.row_factory = sqlite3.Row
+print(json.dumps({
+    "workflow": c.execute("SELECT workflow_version FROM deep_scan_runs WHERE scan_id = ?", (sys.argv[2],)).fetchone()[0],
+    "owner": dict(c.execute("SELECT workspace_id, deep_scan_owner_thread_id, continuation_thread_id, handoff_claim_token FROM scans WHERE id = ?", (sys.argv[2],)).fetchone()),
+    "workers": [dict(r) for r in c.execute("SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY id", (sys.argv[2],))],
+    "inputs": [dict(r) for r in c.execute("SELECT * FROM deep_scan_dedup_inputs WHERE dedup_worker_id IN (SELECT id FROM deep_scan_workers WHERE scan_id = ?) ORDER BY dedup_worker_id, discovery_worker_id", (sys.argv[2],))],
+}))`)),
+  };
+}
+
+function publicationRunner(fixture, { before, after } = {}) {
+  const requests = [];
+  let writes = 0;
+  const run = async (args, input) => {
+    if (args[0] !== "write-scan-draft") return fixture.runWorkbench(args, input);
+    const draftPath = args[args.indexOf("--draft-path") + 1];
+    const checkpointPath = args[args.indexOf("--checkpoint-path") + 1];
+    requests.push({ args: [...args], input,
+      draft: await readFile(draftPath, "utf8"), checkpoint: await readFile(checkpointPath, "utf8") });
+    await before?.(requests.length, { draftPath, checkpointPath });
+    const result = await fixture.runWorkbench(args, input);
+    writes++;
+    await after?.(requests.length, { draftPath, checkpointPath });
+    return result;
+  };
+  return { run, requests, writes: () => writes };
+}
+
+for (const workflow of ["deep-scan-mcp/v1", "deep-security-scan/v1"]) {
+  for (const [loseResponse, receiptIoFailure] of [[false, false], [true, false], [false, true]]) {
+    test(`${workflow} finishes accepted publication (lost=${loseResponse}, receipt I/O failure=${receiptIoFailure})`, async (t) => {
+      const f = await publicationFixture(t, workflow);
+      if (receiptIoFailure) f.environment.TEST_WORKBENCH_RECEIPT_IO_FAILURE = "1";
+      const before = await f.workers();
+      const sources = await Promise.all(f.results.map((file) => readFile(file)));
+      let accepted;
+      const runner = publicationRunner(f, { after: async (attempt, { draftPath }) => {
+        if (attempt === 1) accepted = await snapshot(f.run);
+        else assert.deepEqual(await snapshot(f.run), accepted);
+        if (receiptIoFailure) {
+          await assert.rejects(readFile(draftPath.replace(/\.json$/, ".accepted.json")), { code: "ENOENT" });
+        }
+        if (loseResponse && attempt === 1) throw new Error("Synthetic accepted publication response loss");
+      } });
+      let publications = 0;
+      const coordinator = new DeepScanCoordinator({
+        run: await f.store.get(f.run.scanId, owner), store: f.store, pluginRoot,
+        executor: { run() { assert.fail("Publication recovery cannot dispatch workers"); } },
+        clock: { now: () => Date.parse(f.instant), sleep: async () => {} },
+        onComplete: async (draft, signal, publication) => {
+          publications++;
+          assert.deepEqual(draft, f.draft);
+          assert.deepEqual(publication, { coordinatorGeneration: 2, resultPath: f.results[1] });
+          const context = await createScanArtifactContext(f.run.scanId, runner.run, { requireRunning: true });
+          await recordCodexSecurityScanDraftViaWorkbench(context, draft, runner.run, signal, publication);
+        },
+      });
+      coordinator.start();
+      const terminal = await coordinator.settled();
+      assert.equal(terminal.status, "succeeded", terminal.error);
+      assert.equal(terminal.terminalReason, "saturated");
+      assert.equal((await f.workers()).workflow, workflow);
+      assert.equal(terminal.coordinatorGeneration, 2);
+      assert.equal(publications, 1);
+      assert.equal(runner.requests.length, loseResponse ? 2 : 1);
+      assert.equal(runner.writes(), loseResponse ? 2 : 1);
+      if (loseResponse) assert.deepEqual(runner.requests[1], runner.requests[0]);
+      assert.deepEqual(await f.workers(), before);
+      assert.deepEqual(await Promise.all(f.results.map((file) => readFile(file))), sources);
+      const parent = await f.runWorkbench(["complete-scan", "--scan-id", f.run.scanId]);
+      assert.equal(parent.scan.progress.status, "complete");
+      assert.deepEqual(await f.workers(), before);
+      assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
+    });
+  }
+}
+
+test("receipt I/O failure cannot authorize replay after response loss", async (t) => {
+  const f = await publicationFixture(t);
+  f.environment.TEST_WORKBENCH_RECEIPT_IO_FAILURE = "1";
+  const workers = await f.workers();
+  const lost = new Error("Synthetic accepted publication response loss");
+  let accepted;
+  const runner = publicationRunner(f, { after: async (_attempt, { draftPath }) => {
+    accepted = await snapshot(f.run);
+    await assert.rejects(readFile(draftPath.replace(/\.json$/, ".accepted.json")), { code: "ENOENT" });
+    throw lost;
+  } });
+  await assert.rejects(f.publish(runner.run), (error) => error === lost);
+  assert.equal(runner.requests.length, 1);
+  assert.equal(runner.writes(), 1);
+  assert.deepEqual(await snapshot(f.run), accepted);
+  assert.deepEqual(await f.workers(), workers);
+  assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
+});
+
+for (const code of ["EACCES", "ECONNRESET"]) {
+  for (const matching of [false, true]) {
+    test(`publication ${code} before acceptance is one attempt (matching=${matching})`, async (t) => {
+      const f = await publicationFixture(t);
+      if (matching) await f.publish();
+      const before = await snapshot(f.run);
+      const workers = await f.workers();
+      const original = Object.assign(new Error(`Synthetic precommit ${code}`), { code });
+      const runner = publicationRunner(f, { before() { throw original; } });
+      await assert.rejects(f.publish(runner.run), (error) => error === original);
+      assert.equal(runner.requests.length, 1);
+      assert.equal(runner.writes(), 0);
+      assert.deepEqual(await snapshot(f.run), before);
+      assert.deepEqual(await f.workers(), workers);
+      assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
+    });
+  }
+}
+
+for (const takeover of ["coordinator", "continuation"]) {
+  test(`accepted publication replay rejects a replacement ${takeover}`, async (t) => {
+    const f = await publicationFixture(t);
+    const workers = await f.workers();
+    let accepted;
+    const runner = publicationRunner(f, { after: async (attempt) => {
+      assert.equal(attempt, 1, "A stale replay must not commit");
+      accepted = await snapshot(f.run);
+      if (takeover === "coordinator") {
+        f.setTime(120);
+        const replacement = new WorkbenchDeepScanStore(f.runWorkbench);
+        const claim = await replacement.claimCoordinator({ scanId: f.run.scanId, threadId: owner });
+        assert.equal(claim.acquired, true);
+        assert.equal(claim.run.coordinatorGeneration, 3);
+      } else {
+        await f.sql(`import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as c:
+    c.execute("UPDATE scans SET handoff_claim_token = ?, continuation_thread_id = ? WHERE id = ?", ("00000000-0000-4000-8000-000000000099", "new-owner", sys.argv[2]))
+`);
+        workers.owner.handoff_claim_token = "00000000-0000-4000-8000-000000000099";
+        workers.owner.continuation_thread_id = "new-owner";
+      }
+      throw new Error("Synthetic response loss after takeover");
+    } });
+    await assert.rejects(f.publish(runner.run), takeover === "coordinator" ? /newer generation/ : /another continuation/);
+    assert.equal(runner.requests.length, 2);
+    assert.equal(runner.writes(), 1);
+    assert.deepEqual(runner.requests[1], runner.requests[0]);
+    assert.deepEqual(await snapshot(f.run), accepted);
+    assert.deepEqual(await f.workers(), workers);
+    assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
+  });
+}
+
+test("a failed accepted publication replay has no third attempt", async (t) => {
+  const f = await publicationFixture(t);
+  let accepted;
+  const failure = new Error("Synthetic replay failure");
+  const runner = publicationRunner(f, {
+    before(attempt) { if (attempt === 2) throw failure; },
+    async after() { accepted = await snapshot(f.run); throw new Error("Synthetic accepted response loss"); },
+  });
+  await assert.rejects(f.publish(runner.run), (error) => error === failure);
+  assert.equal(runner.requests.length, 2);
+  assert.equal(runner.writes(), 1);
+  assert.deepEqual(runner.requests[1], runner.requests[0]);
+  assert.deepEqual(await snapshot(f.run), accepted);
+  assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
+});
+
+test("raw publication repeats the same staged paths without changing their bytes", async (t) => {
+  const f = await publicationFixture(t);
+  const workers = await f.workers();
+  await f.publish(async (args, input) => {
+    const stagedPaths = ["--draft-path", "--checkpoint-path"].map((flag) => args[args.indexOf(flag) + 1]);
+    const staged = await Promise.all(stagedPaths.map((file) => readFile(file)));
+    const first = await f.runWorkbench(args, input);
+    const accepted = await snapshot(f.run);
+    assert.deepEqual(await Promise.all(stagedPaths.map((file) => readFile(file))), staged);
+    assert.deepEqual(await f.runWorkbench(args, input), first);
+    assert.deepEqual(await Promise.all(stagedPaths.map((file) => readFile(file))), staged);
+    assert.deepEqual(await snapshot(f.run), accepted);
+  });
+  assert.deepEqual(await f.workers(), workers);
+  assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
+});
+
+for (const changed of ["draftPath", "checkpointPath"]) {
+  test(`publication acknowledgment must match the original ${changed}`, async (t) => {
+    const f = await publicationFixture(t);
+    const lost = new Error("Synthetic response loss after different staged input");
+    const runner = publicationRunner(f, {
+      async before(attempt, paths) {
+        const document = JSON.parse(await readFile(paths[changed], "utf8"));
+        document.threatModel = { summary: "Different staged input" };
+        await writeFile(paths[changed], JSON.stringify(document));
+      },
+      after() { throw lost; },
+    });
+    await assert.rejects(f.publish(runner.run), (error) => error === lost);
+    assert.equal(runner.requests.length, 1);
+    assert.equal(runner.writes(), 1);
+    assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
+  });
 }
