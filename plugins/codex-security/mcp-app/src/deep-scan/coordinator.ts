@@ -5,7 +5,8 @@ import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories
 } from "./artifacts.js";
-import { validateDiscoveryArtifacts, validateReducerArtifacts, type DeepReductionInput } from "./artifact-validation.js";
+import { aggregateSourceCoverage, deepReductionToScanDraft, validateDiscoveryArtifacts, validateReducerArtifacts, type DeepReductionInput } from "./artifact-validation.js";
+import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
   scanDraftInputSchema,
   type ScanDraftInput
@@ -293,17 +294,7 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) return;
       this.phase = "terminal";
       const draft = schedulerResult.result
-        ? {
-            ...structuredClone(schedulerResult.result),
-            // Readers require coverage.json. The coordinator has accepted this
-            // result, so mark it complete and leave review notes empty.
-            coverage: {
-              completeness: "complete",
-              surfaces: [],
-              explicitExclusions: [],
-              deferred: []
-            }
-          }
+        ? deepReductionToScanDraft(schedulerResult.result)
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
@@ -809,7 +800,8 @@ export class DeepScanCoordinator {
             id: randomUUID(),
             label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
             consumed,
-            previousReducerResultPath
+            previousReducerResultPath,
+            previousSourceCoverage: latestResult?.sourceCoverage,
           }));
           observe(reducer);
         }
@@ -1029,6 +1021,22 @@ export class DeepScanCoordinator {
         reducerId: worker.id,
         previousReducerResultPath: outcomes.at(-1)?.resultPath
       }, this.state.scanId);
+      if (result.sourceCoverage === undefined) {
+        const context = {
+          root: worker.artifactDir,
+          repoRoot: this.state.targetPath,
+          scanId: this.state.scanId,
+          layout: "reducer" as const,
+          deepReducer: {
+            scanRoot: this.artifacts.scanDir,
+            claimedWorkers: accepted.map((source) => ({
+              id: source.id, resultPath: source.resultPath, attempt: source.attempt,
+            })),
+          },
+        };
+        const sources = await readDeepReductionSources(context);
+        result.sourceCoverage = aggregateSourceCoverage(sources.discoveries, latestResult ?? null);
+      }
       latestResult = result;
       noNewStreak = newFindings > 0 ? 0 : noNewStreak + accepted.length;
       const evidence = await persistedWorkerEvidence(worker);

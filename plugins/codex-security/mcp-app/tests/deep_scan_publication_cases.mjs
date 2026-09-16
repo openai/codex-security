@@ -55,7 +55,7 @@ export async function testDeepScanPublication({
     assert.deepEqual(completed[0].findings, [], "late worker findings are not appended to the saturated aggregate");
   }
 
-  async function testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus() {
+  async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
     const fixture = await fixtureRun({ workers: 2, subagents: 0, stopAfterNoNew: 2, maxDiscoveryRuns: 2 });
     const store = new FakeStore(fixture.run);
     const executor = new FakeExecutor();
@@ -87,9 +87,16 @@ export async function testDeepScanPublication({
     const terminal = await coordinator.wait(undefined, 5_000);
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     assert.equal(completed.length, 1);
-    assert.deepEqual(completed[0].coverage, {
-      completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [],
-    });
+    assert.equal(completed[0].coverage.completeness, "partial");
+    assert.equal(completed[0].coverage.deferred.length, 2);
+    assert.equal(completed[0].coverage.surfaces.length, 4);
+    assert.equal(completed[0].coverage.reviews.length, 2);
+    assert.deepEqual(new Set(completed[0].coverage.reviews.map((review) => review.completeness)),
+      new Set(["partial", "unknown"]));
+    for (const item of completed[0].coverage.deferred) {
+      assert.equal(item.provenance.attempt, 1);
+      assert.ok(store.workers.has(item.provenance.workerId));
+    }
     for (const worker of store.workers.values()) {
       if (worker.kind !== "discovery") continue;
       const draft = JSON.parse(await readFile(worker.resultManifestPath, "utf8"));
@@ -101,6 +108,7 @@ export async function testDeepScanPublication({
 
   async function testSaturationIgnoresDiscoveryCancellationWriteFailure() {
     const fixture = await fixtureRun({ workers: 2, subagents: 0, stopAfterNoNew: 2, maxDiscoveryRuns: 6 });
+    fixture.run.workflowVersion = "deep-security-scan/v2";
     const store = new FakeStore(fixture.run);
     const executor = new FakeExecutor({ blockDedup: true, blockDiscoveryAfterCalls: 2 });
     const updateWorker = store.updateWorker.bind(store);
@@ -142,7 +150,7 @@ export async function testDeepScanPublication({
     ));
     const { coverage, ...publishedReduction } = completed[0];
     assert.deepEqual(
-      publishedReduction,
+      { ...publishedReduction, sourceCoverage: coverage },
       JSON.parse(await readFile(acceptedReducer.resultManifestPath, "utf8")),
       "the accepted aggregate still reaches publication when redundant cancellation writes fail",
     );
@@ -177,7 +185,7 @@ export async function testDeepScanPublication({
   }
 
   await testSaturationOmitsWorkerAcceptedDuringCancellation();
-  await testSuccessfulDeepCoverageIgnoresWorkerAndReducerReviewStatus();
+  await testSuccessfulDeepCoveragePreservesWorkerReviewStatus();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure();
   await testPublicationUsesAcceptedReducerSnapshot();
 }
