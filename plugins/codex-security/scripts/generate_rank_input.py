@@ -8,24 +8,15 @@ This script stays deliberately model-free:
 - `make-diff-rank-input` creates the deterministic diff-scoped JSONL candidate
   worklist from Git changed paths. It supports committed revision diffs and
   local working-tree patches.
-- `make-rank-pool-plan` assigns those shards to a deterministic bounded worker
-  pool.
-- `validate-rank-worker` validates one worker slot and emits a content-bound
-  completion receipt.
-- `validate-rank-pool` validates the pool plan and every assigned shard output.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
-from collections import Counter
-from collections.abc import Callable
 from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
@@ -114,16 +105,8 @@ EXCLUDED_FILENAMES = {
     "yarn.lock",
 }
 
-SHARD_INPUT_GLOB = "rank-shard-*.input.jsonl"
-SHARD_OUTPUT_GLOB = "rank-shard-*.output.jsonl"
-SHARD_INPUT_PATTERN = re.compile(r"^rank-shard-([0-9]{4,})\.input\.jsonl$")
 DIRECT_SCOPE_PREVIEW_READ_BYTES = 64 * 1024
-RANK_POOL_PLAN_SCHEMA_VERSION = 1
-RANK_POOL_STRATEGY = "round_robin"
-RANK_POOL_WORKER_CAP = 6
 JsonRow = dict[str, object]
-RowValidator = Callable[[JsonRow, Path, int], None]
-RankWorkerAssignment = tuple[int, list[str], list[str]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -194,39 +177,6 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_PREVIEW_BYTES,
         help=f"Maximum UTF-8 bytes in each preview. Defaults to {DEFAULT_PREVIEW_BYTES}.",
     )
-
-    pool_plan = subparsers.add_parser(
-        "make-rank-pool-plan",
-        help="Assign rank shards to a deterministic bounded worker pool.",
-    )
-    pool_plan.add_argument("--shard-dir", required=True, help="Directory of rank shards.")
-    pool_plan.add_argument(
-        "--usable-worker-slots",
-        required=True,
-        type=int,
-        help="Usable ranking-worker slots reported by capability preflight; capped at 6.",
-    )
-    pool_plan.add_argument("--out", required=True, help="Output rank_worker_assignments.json path.")
-
-    validate_worker = subparsers.add_parser(
-        "validate-rank-worker",
-        help="Validate one assigned ranking-worker slot and emit its completion receipt.",
-    )
-    validate_worker.add_argument("--plan", required=True, help="Rank pool plan JSON path.")
-    validate_worker.add_argument("--shard-dir", required=True, help="Directory of rank shards.")
-    validate_worker.add_argument(
-        "--slot",
-        required=True,
-        type=int,
-        help="One-based ranking-worker slot from the rank pool plan.",
-    )
-
-    validate_pool = subparsers.add_parser(
-        "validate-rank-pool",
-        help="Validate a rank pool plan and every assigned shard output.",
-    )
-    validate_pool.add_argument("--plan", required=True, help="Rank pool plan JSON path.")
-    validate_pool.add_argument("--shard-dir", required=True, help="Directory of rank shards.")
 
     return parser.parse_args()
 
@@ -309,14 +259,6 @@ def write_jsonl(output: Path, rows: list[JsonRow]) -> None:
             handle.write("\n")
 
 
-def write_json(output: Path, payload: dict[str, object]) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-
 def load_scopes_file(scopes_file: Path) -> list[str]:
     try:
         loaded: object = json.loads(scopes_file.read_text(encoding="utf-8"))
@@ -329,82 +271,6 @@ def load_scopes_file(scopes_file: Path) -> list[str]:
     ):
         raise SystemExit(f"Scopes file must contain a non-empty JSON string array: {scopes_file}")
     return loaded
-
-
-def load_jsonl(path: Path, label: str, validator: RowValidator) -> list[JsonRow]:
-    if not path.exists():
-        raise SystemExit(f"{label} missing: {path}")
-
-    rows: list[JsonRow] = []
-    with path.open(encoding="utf-8") as handle:
-        for line_number, raw_line in enumerate(handle, start=1):
-            if not raw_line.strip():
-                raise SystemExit(f"{path}:{line_number}: blank JSONL rows are not allowed")
-            try:
-                parsed: object = json.loads(raw_line)
-            except json.JSONDecodeError as exc:
-                raise SystemExit(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
-            if not isinstance(parsed, dict):
-                raise SystemExit(f"{path}:{line_number}: expected a JSON object")
-            row = {str(key): value for key, value in parsed.items()}
-            validator(row, path, line_number)
-            rows.append(row)
-    return rows
-
-
-def require_exact_fields(row: JsonRow, expected: set[str], path: Path, line_number: int) -> None:
-    actual = set(row)
-    if actual != expected:
-        missing = sorted(expected - actual)
-        unexpected = sorted(actual - expected)
-        details: list[str] = []
-        if missing:
-            details.append(f"missing fields {missing}")
-        if unexpected:
-            details.append(f"unexpected fields {unexpected}")
-        raise SystemExit(f"{path}:{line_number}: {'; '.join(details)}")
-
-
-def require_string(
-    row: JsonRow, field: str, path: Path, line_number: int, *, allow_empty: bool
-) -> None:
-    value = row[field]
-    if not isinstance(value, str) or (not allow_empty and not value.strip()):
-        requirement = "a string" if allow_empty else "a non-empty string"
-        raise SystemExit(f"{path}:{line_number}: {field} must be {requirement}")
-
-
-def validate_rank_input_row(row: JsonRow, path: Path, line_number: int) -> None:
-    require_exact_fields(row, {"path", "area", "preview"}, path, line_number)
-    require_string(row, "path", path, line_number, allow_empty=False)
-    require_string(row, "area", path, line_number, allow_empty=True)
-    require_string(row, "preview", path, line_number, allow_empty=True)
-
-
-def validate_rank_output_row(row: JsonRow, path: Path, line_number: int) -> None:
-    require_exact_fields(row, {"path", "area", "score", "include", "reason"}, path, line_number)
-    require_string(row, "path", path, line_number, allow_empty=False)
-    require_string(row, "area", path, line_number, allow_empty=True)
-    score = row["score"]
-    if isinstance(score, bool) or not isinstance(score, int):
-        raise SystemExit(f"{path}:{line_number}: score must be an integer from 1 through 10")
-    if not 1 <= score <= 10:
-        raise SystemExit(f"{path}:{line_number}: score must be from 1 through 10")
-    if not isinstance(row["include"], bool):
-        raise SystemExit(f"{path}:{line_number}: include must be a boolean")
-    require_string(row, "reason", path, line_number, allow_empty=False)
-
-
-def require_unique_paths(rows: list[JsonRow], label: str) -> None:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for row in rows:
-        path = str(row["path"])
-        if path in seen:
-            duplicates.add(path)
-        seen.add(path)
-    if duplicates:
-        raise SystemExit(f"{label} contains duplicate paths: {sorted(duplicates)}")
 
 
 def make_repo_rank_input(args: argparse.Namespace) -> None:
@@ -690,326 +556,6 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     print(f"Wrote {len(rows)} rows to {output}")
 
 
-def discover_input_shards(shard_dir: Path) -> list[Path]:
-    if not shard_dir.is_dir():
-        raise SystemExit(f"Rank shard directory missing: {shard_dir}")
-
-    numbered_shards: list[tuple[int, Path]] = []
-    for path in shard_dir.glob(SHARD_INPUT_GLOB):
-        match = SHARD_INPUT_PATTERN.fullmatch(path.name)
-        if match is None:
-            raise SystemExit(f"Rank input shard has invalid name: {path.name}")
-        numbered_shards.append((int(match.group(1)), path))
-    numbered_shards.sort(key=lambda item: (item[0], item[1].name))
-    input_shards = [path for _, path in numbered_shards]
-    expected_names = [
-        f"rank-shard-{index:04d}.input.jsonl" for index in range(1, len(input_shards) + 1)
-    ]
-    actual_names = [path.name for path in input_shards]
-    if actual_names != expected_names:
-        raise SystemExit(
-            "Rank input shards must use contiguous canonical names; "
-            f"expected={expected_names}; actual={actual_names}"
-        )
-    return input_shards
-
-
-def output_name_for(input_name: str) -> str:
-    return input_name.replace(".input.jsonl", ".output.jsonl")
-
-
-def require_plan_shard_dir(plan_path: Path, shard_dir: Path) -> None:
-    expected = plan_path.parent / "rank_shards"
-    if shard_dir.resolve() != expected.resolve():
-        raise SystemExit(
-            "Rank shard directory must be the assignment plan's sibling rank_shards "
-            f"directory; expected={expected}; actual={shard_dir}"
-        )
-
-
-def require_no_misplaced_rank_shards(plan_path: Path) -> None:
-    misplaced = sorted(
-        (
-            *plan_path.parent.glob(SHARD_INPUT_GLOB),
-            *plan_path.parent.glob(SHARD_OUTPUT_GLOB),
-        ),
-        key=lambda path: path.name,
-    )
-    if misplaced:
-        raise SystemExit(
-            "Rank shard artifacts must be stored in the assignment plan's sibling "
-            f"rank_shards directory; misplaced={[path.name for path in misplaced]}"
-        )
-
-
-def make_rank_pool_plan(args: argparse.Namespace) -> None:
-    if args.usable_worker_slots < 1:
-        raise SystemExit("--usable-worker-slots must be at least 1")
-
-    shard_dir = Path(args.shard_dir).expanduser()
-    output = Path(args.out).expanduser()
-    require_plan_shard_dir(output, shard_dir)
-    input_shards = discover_input_shards(shard_dir)
-    worker_count = min(len(input_shards), args.usable_worker_slots, RANK_POOL_WORKER_CAP)
-    workers: list[dict[str, object]] = []
-    for worker_index in range(worker_count):
-        assigned_inputs = [path.name for path in input_shards[worker_index::worker_count]]
-        workers.append(
-            {
-                "slot": worker_index + 1,
-                "input_shards": assigned_inputs,
-                "output_shards": [output_name_for(name) for name in assigned_inputs],
-            }
-        )
-
-    plan: dict[str, object] = {
-        "schema_version": RANK_POOL_PLAN_SCHEMA_VERSION,
-        "strategy": RANK_POOL_STRATEGY,
-        "shard_count": len(input_shards),
-        "ranking_worker_count": worker_count,
-        "workers": workers,
-    }
-    write_json(output, plan)
-    print(f"Assigned {len(input_shards)} rank shards to {worker_count} ranking workers in {output}")
-
-
-def load_rank_pool_plan(plan_path: Path) -> tuple[dict[str, object], bytes]:
-    if not plan_path.exists():
-        raise SystemExit(f"Rank pool plan missing: {plan_path}")
-    plan_bytes = plan_path.read_bytes()
-    try:
-        payload: object = json.loads(plan_bytes)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"{plan_path}: invalid JSON: {exc.msg}") from exc
-    if not isinstance(payload, dict):
-        raise SystemExit(f"{plan_path}: expected a JSON object")
-    return {str(key): value for key, value in payload.items()}, plan_bytes
-
-
-def require_integer(value: object, label: str, *, minimum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise SystemExit(f"{label} must be an integer of at least {minimum}")
-    return value
-
-
-def require_string_list(value: object, label: str) -> list[str]:
-    if not isinstance(value, list) or not value:
-        raise SystemExit(f"{label} must be a non-empty list")
-    if any(not isinstance(item, str) or not item for item in value):
-        raise SystemExit(f"{label} entries must be non-empty strings")
-    return [item for item in value if isinstance(item, str)]
-
-
-def assignment_differences(
-    assigned_names: list[str], expected_names: list[str]
-) -> tuple[list[str], list[str], list[str]]:
-    counts = Counter(assigned_names)
-    duplicates = sorted(name for name, count in counts.items() if count > 1)
-    assigned = set(assigned_names)
-    expected = set(expected_names)
-    return sorted(expected - assigned), duplicates, sorted(assigned - expected)
-
-
-def validate_rank_pool_plan(
-    plan_path: Path, shard_dir: Path
-) -> tuple[list[Path], list[str], list[RankWorkerAssignment], bytes]:
-    require_plan_shard_dir(plan_path, shard_dir)
-    require_no_misplaced_rank_shards(plan_path)
-    input_shards = discover_input_shards(shard_dir)
-    input_names = [path.name for path in input_shards]
-    output_names = [output_name_for(name) for name in input_names]
-    plan, plan_bytes = load_rank_pool_plan(plan_path)
-    expected_fields = {
-        "schema_version",
-        "strategy",
-        "shard_count",
-        "ranking_worker_count",
-        "workers",
-    }
-    actual_fields = set(plan)
-    if actual_fields != expected_fields:
-        raise SystemExit(
-            f"{plan_path}: rank pool plan fields do not match schema; "
-            f"missing={sorted(expected_fields - actual_fields)}; "
-            f"unexpected={sorted(actual_fields - expected_fields)}"
-        )
-    schema_version = require_integer(
-        plan["schema_version"], f"{plan_path}: schema_version", minimum=1
-    )
-    if schema_version != RANK_POOL_PLAN_SCHEMA_VERSION:
-        raise SystemExit(f"{plan_path}: schema_version must be {RANK_POOL_PLAN_SCHEMA_VERSION}")
-    if plan["strategy"] != RANK_POOL_STRATEGY:
-        raise SystemExit(f"{plan_path}: strategy must be {RANK_POOL_STRATEGY}")
-
-    shard_count = require_integer(plan["shard_count"], f"{plan_path}: shard_count", minimum=0)
-    if shard_count != len(input_shards):
-        raise SystemExit(
-            f"{plan_path}: shard_count does not match input shards; "
-            f"plan={shard_count}; actual={len(input_shards)}"
-        )
-    worker_count = require_integer(
-        plan["ranking_worker_count"], f"{plan_path}: ranking_worker_count", minimum=0
-    )
-    if shard_count > 0 and worker_count == 0:
-        raise SystemExit(
-            f"{plan_path}: ranking_worker_count must be at least 1 when input shards exist"
-        )
-    if worker_count > shard_count:
-        raise SystemExit(f"{plan_path}: ranking_worker_count cannot exceed shard_count")
-    if worker_count > RANK_POOL_WORKER_CAP:
-        raise SystemExit(f"{plan_path}: ranking_worker_count cannot exceed {RANK_POOL_WORKER_CAP}")
-
-    workers = plan["workers"]
-    if not isinstance(workers, list) or len(workers) != worker_count:
-        raise SystemExit(
-            f"{plan_path}: workers must contain exactly {worker_count} worker assignments"
-        )
-
-    assigned_inputs: list[str] = []
-    assigned_outputs: list[str] = []
-    parsed_workers: list[RankWorkerAssignment] = []
-    worker_fields = {"slot", "input_shards", "output_shards"}
-    for worker_index, raw_worker in enumerate(workers):
-        label = f"{plan_path}: workers[{worker_index}]"
-        if not isinstance(raw_worker, dict):
-            raise SystemExit(f"{label} must be a JSON object")
-        worker = {str(key): value for key, value in raw_worker.items()}
-        if set(worker) != worker_fields:
-            raise SystemExit(
-                f"{label} fields do not match schema; "
-                f"missing={sorted(worker_fields - set(worker))}; "
-                f"unexpected={sorted(set(worker) - worker_fields)}"
-            )
-        slot = require_integer(worker["slot"], f"{label}.slot", minimum=1)
-        if slot != worker_index + 1:
-            raise SystemExit(f"{label}.slot must be {worker_index + 1}")
-        worker_inputs = require_string_list(worker["input_shards"], f"{label}.input_shards")
-        worker_outputs = require_string_list(worker["output_shards"], f"{label}.output_shards")
-        if len(worker_inputs) != len(worker_outputs):
-            raise SystemExit(f"{label} input_shards and output_shards lengths must match")
-        expected_worker_outputs = [output_name_for(name) for name in worker_inputs]
-        if worker_outputs != expected_worker_outputs:
-            raise SystemExit(f"{label}.output_shards do not match its input_shards")
-        assigned_inputs.extend(worker_inputs)
-        assigned_outputs.extend(worker_outputs)
-        parsed_workers.append((slot, worker_inputs, worker_outputs))
-
-    missing, duplicates, unexpected = assignment_differences(assigned_inputs, input_names)
-    if missing or duplicates or unexpected:
-        raise SystemExit(
-            f"{plan_path}: pool plan must assign each input shard exactly once; "
-            f"missing={missing}; duplicates={duplicates}; unexpected={unexpected}"
-        )
-    missing, duplicates, unexpected = assignment_differences(assigned_outputs, output_names)
-    if missing or duplicates or unexpected:
-        raise SystemExit(
-            f"{plan_path}: pool plan must assign each output shard exactly once; "
-            f"missing={missing}; duplicates={duplicates}; unexpected={unexpected}"
-        )
-
-    for worker_index, (_, worker_inputs, worker_outputs) in enumerate(parsed_workers):
-        expected_inputs = input_names[worker_index::worker_count]
-        expected_outputs = output_names[worker_index::worker_count]
-        if worker_inputs != expected_inputs or worker_outputs != expected_outputs:
-            raise SystemExit(
-                f"{plan_path}: worker slot {worker_index + 1} does not match the deterministic "
-                f"{RANK_POOL_STRATEGY} assignment"
-            )
-    return input_shards, output_names, parsed_workers, plan_bytes
-
-
-def validate_rank_worker_command(args: argparse.Namespace) -> None:
-    plan_path = Path(args.plan).expanduser()
-    shard_dir = Path(args.shard_dir).expanduser()
-    _, _, workers, plan_bytes = validate_rank_pool_plan(plan_path, shard_dir)
-
-    slot = require_integer(args.slot, "--slot", minimum=1)
-    worker_count = len(workers)
-    if slot > worker_count:
-        raise SystemExit(f"--slot must be at most {worker_count}")
-
-    assigned_slot, input_names, output_names = workers[slot - 1]
-    if assigned_slot != slot:
-        raise SystemExit(f"{plan_path}: worker assignment for slot {slot} is inconsistent")
-
-    row_count = 0
-    outputs_digest = hashlib.sha256()
-    for input_name, output_name in zip(input_names, output_names, strict=True):
-        input_shard = shard_dir / input_name
-        output_shard = shard_dir / output_name
-        _, output_rows = validate_rank_shard(input_shard, output_shard)
-        output_bytes = output_shard.read_bytes()
-        row_count += len(output_rows)
-        outputs_digest.update(output_name.encode("utf-8"))
-        outputs_digest.update(b"\0")
-        outputs_digest.update(output_bytes)
-        outputs_digest.update(b"\0")
-
-    receipt: dict[str, object] = {
-        "schema_version": 1,
-        "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
-        "slot": slot,
-        "ranking_worker_count": worker_count,
-        "output_shards": len(output_names),
-        "rows": row_count,
-        "outputs_sha256": outputs_digest.hexdigest(),
-        "status": "complete",
-    }
-    print("RANK_WORKER_RECEIPT " + json.dumps(receipt, sort_keys=True, separators=(",", ":")))
-
-
-def validate_rank_pool_command(args: argparse.Namespace) -> None:
-    plan_path = Path(args.plan).expanduser()
-    shard_dir = Path(args.shard_dir).expanduser()
-    input_shards, expected_output_names, workers, _ = validate_rank_pool_plan(plan_path, shard_dir)
-
-    actual_output_names = {path.name for path in shard_dir.glob(SHARD_OUTPUT_GLOB)}
-    expected_outputs = set(expected_output_names)
-    if actual_output_names != expected_outputs:
-        missing = sorted(expected_outputs - actual_output_names)
-        unexpected = sorted(actual_output_names - expected_outputs)
-        raise SystemExit(
-            "Rank pool outputs are incomplete; "
-            f"missing output shards={missing}; unexpected output shards={unexpected}"
-        )
-
-    row_count = 0
-    for input_shard in input_shards:
-        output_shard = input_shard.with_name(output_name_for(input_shard.name))
-        _, shard_outputs = validate_rank_shard(input_shard, output_shard)
-        row_count += len(shard_outputs)
-    print(
-        f"Validated {len(workers)} ranking workers, "
-        f"{len(input_shards)} shards, and {row_count} ranking rows"
-    )
-
-
-def validate_rank_shard(
-    input_shard: Path, output_shard: Path
-) -> tuple[list[JsonRow], list[JsonRow]]:
-    shard_inputs = load_jsonl(input_shard, "Rank input shard", validate_rank_input_row)
-    require_unique_paths(shard_inputs, f"Rank input shard {input_shard.name}")
-    shard_outputs = load_jsonl(output_shard, "Rank output shard", validate_rank_output_row)
-    require_unique_paths(shard_outputs, f"Rank output shard {output_shard.name}")
-
-    expected_paths = {str(row["path"]) for row in shard_inputs}
-    actual_paths = {str(row["path"]) for row in shard_outputs}
-    if expected_paths != actual_paths:
-        missing = sorted(expected_paths - actual_paths)
-        unknown = sorted(actual_paths - expected_paths)
-        raise SystemExit(
-            f"{output_shard}: paths do not match its input shard; "
-            f"missing={missing}; unknown={unknown}"
-        )
-
-    area_by_path = {str(row["path"]): row["area"] for row in shard_inputs}
-    for row in shard_outputs:
-        row_path = str(row["path"])
-        if row["area"] != area_by_path[row_path]:
-            raise SystemExit(f"{output_shard}: area does not match rank input for {row_path}")
-    return shard_inputs, shard_outputs
-
-
 def main() -> None:
     args = parse_args()
     if args.command == "make-repo-rank-input":
@@ -1020,12 +566,6 @@ def main() -> None:
         bind_repo_scopes(args)
     elif args.command == "make-diff-rank-input":
         make_diff_rank_input(args)
-    elif args.command == "make-rank-pool-plan":
-        make_rank_pool_plan(args)
-    elif args.command == "validate-rank-worker":
-        validate_rank_worker_command(args)
-    elif args.command == "validate-rank-pool":
-        validate_rank_pool_command(args)
     else:
         raise SystemExit(f"Unknown command: {args.command}")
 

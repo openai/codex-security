@@ -529,7 +529,71 @@ fn main() -> std::io::Result<()> {
                 "Wide shard discovery or replacement paths changed",
             ));
         }
-        println!("{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"rankShardHelperRawPaths\":true,\"directoryIdentity\":true}}");
+        fs::remove_file(shards.join(&malformed_name))?;
+        let pool_name = raw("pool-", 0xd800);
+        let plan_name = raw("plan-", 0xdfff);
+        let pool = repo.join(&pool_name);
+        let pool_shards = pool.join("rank_shards");
+        fs::create_dir(&pool)?;
+        fs::rename(&shards, &pool_shards)?;
+        let plan = pool.join(&plan_name);
+        let plan_sentinel = pool.join(raw("plan-", 0xfffd));
+        fs::write(&plan_sentinel, "replacement plan sentinel")?;
+        let made_plan = shard_command(
+            "make-rank-pool-plan",
+            &[
+                "--shard-dir".into(),
+                Path::new("~").join(&pool_name).join("rank_shards"),
+                "--usable-worker-slots".into(),
+                "2".into(),
+                "--out".into(),
+                Path::new(&pool_name).join(&plan_name),
+            ],
+        )?;
+        if !made_plan.status.success() || !made_plan.stderr.is_empty() {
+            return Err(io::Error::other(format!(
+                "Wide pool plan creation failed: {}",
+                String::from_utf8_lossy(&made_plan.stderr)
+            )));
+        }
+        let plan_bytes = fs::read(&plan)?;
+        let expected_plan = concat!(
+            "{\r\n  \"ranking_worker_count\": 2,\r\n  \"schema_version\": 1,\r\n",
+            "  \"shard_count\": 2,\r\n  \"strategy\": \"round_robin\",\r\n  \"workers\": [\r\n",
+            "    {\r\n      \"input_shards\": [\r\n        \"rank-shard-0001.input.jsonl\"\r\n      ],\r\n",
+            "      \"output_shards\": [\r\n        \"rank-shard-0001.output.jsonl\"\r\n      ],\r\n      \"slot\": 1\r\n    },\r\n",
+            "    {\r\n      \"input_shards\": [\r\n        \"rank-shard-0002.input.jsonl\"\r\n      ],\r\n",
+            "      \"output_shards\": [\r\n        \"rank-shard-0002.output.jsonl\"\r\n      ],\r\n      \"slot\": 2\r\n    }\r\n  ]\r\n}\r\n",
+        );
+        if plan_bytes != expected_plan.as_bytes() {
+            return Err(io::Error::other("Wide pool assignment bytes changed"));
+        }
+        let pool_args = [
+            "--plan".into(),
+            plan.clone(),
+            "--shard-dir".into(),
+            Path::new(".").join(&pool_name).join("rank_shards"),
+        ];
+        let mut worker_args = pool_args.to_vec();
+        worker_args.extend(["--slot".into(), "1".into()]);
+        let worker = shard_command("validate-rank-worker", &worker_args)?;
+        let complete = shard_command("validate-rank-pool", &pool_args)?;
+        if !worker.status.success()
+            || !worker.stderr.is_empty()
+            || !worker.stdout.starts_with(b"RANK_WORKER_RECEIPT ")
+            || !complete.status.success()
+            || !complete.stderr.is_empty()
+            || complete.stdout != b"Validated 2 ranking workers, 2 shards, and 2 ranking rows\r\n"
+            || fs::read(&plan)? != plan_bytes
+            || fs::read(&plan_sentinel)? != b"replacement plan sentinel"
+        {
+            return Err(io::Error::other(format!(
+                "Wide pool validation failed: {}{}",
+                String::from_utf8_lossy(&worker.stderr),
+                String::from_utf8_lossy(&complete.stderr)
+            )));
+        }
+        println!("{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"rankShardHelperRawPaths\":true,\"rankPoolHelperRawPaths\":true,\"directoryIdentity\":true}}");
         Ok(())
     }
 
