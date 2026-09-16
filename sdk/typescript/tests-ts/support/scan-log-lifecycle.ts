@@ -14,13 +14,17 @@ const feedbackFixture = fileURLToPath(
   new URL("../fixtures/feedback.mjs", import.meta.url),
 );
 
-export function savedLogTurn(input: {
-  environment: NodeJS.ProcessEnv;
-  threadId: string;
-  turnId: string;
-  outcome: "completed" | "failed";
-  draft?: boolean;
-}) {
+export function savedLogTurn(
+  input: {
+    environment: NodeJS.ProcessEnv;
+    threadId: string;
+    turnId: string;
+    outcome: "completed" | "failed";
+    draft?: boolean;
+    delegate?: boolean;
+  },
+  onThreadStarted?: (threadId: string) => void,
+) {
   return {
     events: (async function* () {
       const child = spawn(process.execPath, [childFixture], {
@@ -34,8 +38,15 @@ export function savedLogTurn(input: {
         stderr += data;
       });
       child.stdin.end(JSON.stringify(input));
-      for await (const line of createInterface({ input: child.stdout }))
-        yield JSON.parse(line) as { type: string; [key: string]: unknown };
+      for await (const line of createInterface({ input: child.stdout })) {
+        const event = JSON.parse(line) as {
+          type: string;
+          [key: string]: unknown;
+        };
+        if (event.type === "thread.started")
+          onThreadStarted?.(event["thread_id"] as string);
+        yield event;
+      }
       expect(await exited, stderr).toBe(0);
     })(),
   };
@@ -47,45 +58,71 @@ export async function checkSavedProjection(
   root: string,
   threadId: string,
   turnIds: string[],
+  delegated = false,
 ) {
   const home = environment["CODEX_HOME"]!;
-  const path = join(home, "sessions", `rollout-${threadId}.jsonl`);
-  const original = await readFile(path, "utf8");
   const cutoff = Date.parse(scan.progress!.updatedAt!);
-  const raw = original
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  for (const turnId of turnIds.filter((id) => id !== "main")) {
-    expect(
-      Date.parse(
-        raw.find((event) => event.payload.turn_id === turnId).timestamp,
-      ),
-    ).toBeGreaterThan(cutoff);
-  }
-  const later = [
-    {
-      type: "event_msg",
-      timestamp: new Date(cutoff + 60_000).toISOString(),
-      payload: { type: "task_started", turn_id: "unrelated" },
-    },
-    {
-      type: "response_item",
-      timestamp: new Date(cutoff + 60_001).toISOString(),
-      payload: {
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: "unrelated reply" }],
-      },
-    },
+  const threads = [
+    { threadId, turnIds },
+    ...(delegated
+      ? turnIds.map((turnId) => ({
+          threadId: `${threadId}-child-${turnId}`,
+          turnIds: [`${turnId}-child`],
+        }))
+      : []),
   ];
-  await appendFile(
-    path,
-    later.map((event) => JSON.stringify(event) + "\n").join(""),
-  );
-  const before = await readFile(path);
+  const expected = [];
+  for (const thread of threads) {
+    const path = join(home, "sessions", `rollout-${thread.threadId}.jsonl`);
+    const raw = (await readFile(path, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    for (const turnId of thread.turnIds.filter(
+      (id) =>
+        id !== "main" &&
+        (id !== "main-child" || scan.progress?.status === "complete"),
+    )) {
+      expect(
+        Date.parse(
+          raw.find((event) => event.payload.turn_id === turnId).timestamp,
+        ),
+      ).toBeGreaterThan(cutoff);
+    }
+    const later = [
+      {
+        type: "event_msg",
+        timestamp: new Date(cutoff + 60_000).toISOString(),
+        payload: { type: "task_started", turn_id: "unrelated" },
+      },
+      {
+        type: "response_item",
+        timestamp: new Date(cutoff + 60_001).toISOString(),
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "unrelated reply" }],
+        },
+      },
+    ];
+    await appendFile(
+      path,
+      later.map((event) => JSON.stringify(event) + "\n").join(""),
+    );
+    const before = await readFile(path);
+    let selected = false;
+    const events = raw.filter((event) => {
+      if (event.type === "event_msg" && event.payload.type === "task_started")
+        selected = thread.turnIds.includes(event.payload.turn_id);
+      return (
+        selected ||
+        event.timestamp === undefined ||
+        Date.parse(event.timestamp) <= cutoff
+      );
+    });
+    expected.push({ ...thread, path, before, events });
+  }
   const logs = await readSavedScanLogs(scan, home);
-  const events = logs.events.map(({ event }) => event);
   const requestFile = join(root, "feedback-request.json");
   await sendFeedback(
     {
@@ -104,19 +141,16 @@ export async function checkSavedProjection(
   );
   const { attachments } = JSON.parse(await readFile(requestFile, "utf8"));
   expect(JSON.parse(attachments[0].content)).toEqual(logs);
-  expect(await readFile(path)).toEqual(before);
-  // Complete raw projection, including failure output, with no later conversation.
-  let selected = true;
-  const expected = raw.filter((event) => {
-    if (event.type === "event_msg" && event.payload.type === "task_started") {
-      selected = turnIds.includes(event.payload.turn_id);
-    }
-    return selected;
-  });
-  expect(events).toEqual(expected);
-  expect(
-    events
-      .filter((event: any) => event.payload.type === "task_started")
-      .map((event: any) => event.payload.turn_id),
-  ).toEqual(turnIds);
+  for (const thread of expected) {
+    expect(await readFile(thread.path)).toEqual(thread.before);
+    const events = logs.events
+      .filter((row) => row["threadId"] === thread.threadId)
+      .map(({ event }) => event);
+    expect(events).toEqual(thread.events);
+    expect(
+      events
+        .filter((event: any) => event.payload.type === "task_started")
+        .map((event: any) => event.payload.turn_id),
+    ).toEqual(thread.turnIds);
+  }
 }

@@ -67,14 +67,26 @@ export function readSavedScanLogs(
 // The SDK owns these calls even when a scan was sealed before they started.
 // Record observed rollout task IDs separately from canonical scan artifacts.
 export async function* recordScanLogTurn<T extends { readonly type: string }>(
-  options: { scanId: string; threadId: string; codexHome: string },
+  options: { scanId: string; threadId: () => string | null; codexHome: string },
   run: () => Promise<{ events: AsyncGenerator<T> }>,
   onError: (error: unknown) => void,
 ): AsyncGenerator<T> {
   const taskIds = async () => {
-    const session = await findScanSession(options.codexHome, options.threadId);
-    const ids = new Set<string>();
-    if (session !== null) {
+    const rootId = options.threadId();
+    const tasks = new Map<string, Set<string>>();
+    if (rootId === null) return tasks;
+    const sessions = [];
+    for await (const session of scanSessions(options.codexHome))
+      sessions.push(session);
+    const included = new Set([rootId]);
+    for (const parentId of included) {
+      for (const session of sessions) {
+        if (session.parentThreadId === parentId) included.add(session.threadId);
+      }
+    }
+    for (const session of sessions) {
+      if (!included.has(session.threadId)) continue;
+      const ids = tasks.get(session.threadId) ?? new Set<string>();
       for await (const event of sessionEvents(session.path)) {
         const payload = event["payload"];
         if (
@@ -85,10 +97,11 @@ export async function* recordScanLogTurn<T extends { readonly type: string }>(
         )
           ids.add(payload["turn_id"]);
       }
+      tasks.set(session.threadId, ids);
     }
-    return ids;
+    return tasks;
   };
-  let seen: Set<string> | undefined;
+  let seen: Map<string, Set<string>> | undefined;
   try {
     seen = await taskIds();
   } catch (error) {
@@ -97,21 +110,26 @@ export async function* recordScanLogTurn<T extends { readonly type: string }>(
   const record = async () => {
     if (seen === undefined) return;
     try {
-      const added = [...(await taskIds())].filter((id) => !seen!.has(id));
+      const added = [];
+      for (const [threadId, ids] of await taskIds()) {
+        for (const turnId of ids) {
+          if (!seen.get(threadId)?.has(turnId))
+            added.push({ threadId, turnId });
+        }
+      }
       if (added.length === 0) return;
       const path = scanLogTurnsPath(options.codexHome, options.scanId);
       await mkdir(dirname(path), { recursive: true, mode: 0o700 });
       await appendFile(
         path,
-        added
-          .map(
-            (turnId) =>
-              JSON.stringify({ threadId: options.threadId, turnId }) + "\n",
-          )
-          .join(""),
+        added.map((turn) => JSON.stringify(turn) + "\n").join(""),
         { mode: 0o600 },
       );
-      for (const id of added) seen.add(id);
+      for (const { threadId, turnId } of added) {
+        const ids = seen.get(threadId) ?? new Set<string>();
+        ids.add(turnId);
+        seen.set(threadId, ids);
+      }
     } catch (error) {
       onError(error);
     }

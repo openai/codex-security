@@ -47,6 +47,7 @@ for (const outcome of ["completed", "failed"] as const) {
       let scanId = "";
       let turns = 0;
       const threadId = randomUUID();
+      let activeThreadId: string | null = null;
       const warnings: string[] = [];
       const names = [
         "scan-manifest.json",
@@ -64,7 +65,9 @@ for (const outcome of ["completed", "failed"] as const) {
           resolvePluginPython: async () => python,
           createCodex: (options) => ({
             startThread: () => ({
-              id: threadId,
+              get id() {
+                return activeThreadId;
+              },
               async runStreamed() {
                 scanId = options.env!["CODEX_SECURITY_SCAN_ID"]!;
                 turns++;
@@ -79,13 +82,19 @@ for (const outcome of ["completed", "failed"] as const) {
                       names.map((name) => readFile(join(scanDir, name))),
                     );
                 }
-                return savedLogTurn({
-                  environment: options.env!,
-                  threadId,
-                  turnId: turns === 1 ? "main" : "follow-up",
-                  outcome: turns === 1 ? outcome : "failed",
-                  draft: turns === 1 && outcome === "completed",
-                });
+                return savedLogTurn(
+                  {
+                    environment: options.env!,
+                    threadId,
+                    turnId: turns === 1 ? "main" : "follow-up",
+                    outcome: turns === 1 ? outcome : "failed",
+                    draft: turns === 1 && outcome === "completed",
+                    delegate: true,
+                  },
+                  (id) => {
+                    activeThreadId = id;
+                  },
+                );
               },
             }),
           }),
@@ -133,6 +142,7 @@ for (const outcome of ["completed", "failed"] as const) {
         root,
         threadId,
         followUp === "none" ? ["main"] : ["main", "follow-up"],
+        true,
       );
       expect(
         JSON.stringify(

@@ -1091,6 +1091,7 @@ test("saved logs retain the finishing task of an already-sealed running resume",
                     threadId,
                     turnId: "finishing",
                     outcome: "completed",
+                    delegate: true,
                   });
                 },
               };
@@ -1112,9 +1113,14 @@ test("saved logs retain the finishing task of an already-sealed running resume",
   expect(
     await Promise.all(names.map((name) => readFile(join(f.scanDir, name)))),
   ).toEqual(originals);
-  await checkSavedProjection(scan, f.environment, f.root, f.threadId, [
-    "finishing",
-  ]);
+  await checkSavedProjection(
+    scan,
+    f.environment,
+    f.root,
+    f.threadId,
+    ["finishing"],
+    true,
+  );
   expect(
     await Promise.all(names.map((name) => readFile(join(f.scanDir, name)))),
   ).toEqual(originals);

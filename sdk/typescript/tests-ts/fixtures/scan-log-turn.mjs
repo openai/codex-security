@@ -1,6 +1,7 @@
 import { appendFile, cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // Synthetic Codex child: real workbench state and native-shaped saved records.
 // No model requests, scan analysis, or mocked workbench ownership.
@@ -10,6 +11,8 @@ const {
   turnId,
   outcome,
   draft,
+  delegate,
+  parentThreadId,
 } = JSON.parse(await readFile(0, "utf8"));
 const home = env.CODEX_HOME;
 const scanDir = env.CODEX_SECURITY_SCAN_DIR;
@@ -29,6 +32,13 @@ try {
     id: threadId,
     cwd: scanDir,
     timestamp: new Date().toISOString(),
+    ...(parentThreadId === undefined
+      ? {}
+      : {
+          source: {
+            subagent: { thread_spawn: { parent_thread_id: parentThreadId } },
+          },
+        }),
   });
 }
 await record("event_msg", {
@@ -75,6 +85,17 @@ if (draft) {
     type: "function_call_output",
     call_id: `${turnId}-completion`,
     output: completed,
+  });
+}
+if (delegate) {
+  execFileSync(process.execPath, [fileURLToPath(import.meta.url)], {
+    input: JSON.stringify({
+      environment: env,
+      threadId: `${threadId}-child-${turnId}`,
+      turnId: `${turnId}-child`,
+      parentThreadId: threadId,
+      outcome: "completed",
+    }),
   });
 }
 await record("response_item", {

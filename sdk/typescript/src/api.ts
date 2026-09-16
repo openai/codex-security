@@ -1917,24 +1917,19 @@ export class CodexSecurity {
         await chmod(targetPathsFile, 0o400);
       }
       checkOpen();
-      const runOwnedTurn = async (input: string) => {
-        const run = () => thread.runStreamed(input, { signal });
-        return thread.id === null
-          ? run()
-          : {
-              events: recordScanLogTurn(
-                { scanId, threadId: thread.id, codexHome: runtime.codexHome },
-                run,
-                (error) =>
-                  notifyObserver(
-                    "onWarning",
-                    options.onWarning,
-                    options.onObserverError,
-                    `Could not save scan log attribution: ${safeErrorMessage(error)}`,
-                  ),
-              ),
-            };
-      };
+      const runOwnedTurn = async (input: string) => ({
+        events: recordScanLogTurn(
+          { scanId, threadId: () => thread.id, codexHome: runtime.codexHome },
+          () => thread.runStreamed(input, { signal }),
+          (error) =>
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              `Could not save scan log attribution: ${safeErrorMessage(error)}`,
+            ),
+        ),
+      });
       const postScanPrompt = options.postScanPrompt;
       if (postScanPrompt?.trim()) {
         runPostScan = () => runOwnedTurn(postScanPrompt);
