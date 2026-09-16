@@ -238,7 +238,11 @@ export async function readScanLogs(options: ScanLogOptions) {
         ),
       )
     ).flat();
-    for await (const record of sessionEvents(path)) records.push(record);
+    try {
+      for await (const record of sessionEvents(path)) records.push(record);
+    } catch {
+      // Attribution is optional; native logs still use the completion boundary.
+    }
     for (const record of records) {
       if (
         typeof record["threadId"] !== "string" ||
