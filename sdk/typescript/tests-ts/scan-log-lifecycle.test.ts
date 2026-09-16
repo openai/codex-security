@@ -55,7 +55,7 @@ for (const outcome of ["completed", "failed"] as const) {
         "report.md",
       ];
       let beforeFollowUp: Buffer<ArrayBuffer>[] | undefined;
-      let beforeFollowUpCost: ScanLogSource["cost"];
+      let beforeFollowUpCost: ScanLogSource["cost"] | undefined;
       await using client = new CodexSecurity(
         {},
         {
