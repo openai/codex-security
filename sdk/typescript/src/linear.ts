@@ -83,9 +83,12 @@ export async function importLinearIssues(options: {
         );
       }
 
-      const page = await projects.nodes[0]!.issues({ first: 50, filter });
-      while (page.pageInfo.hasNextPage) await page.fetchNext();
-      issues.push(...page.nodes);
+      let page = await projects.nodes[0]!.issues({ first: 50, filter });
+      while (true) {
+        issues.push(...page.nodes);
+        if (!page.pageInfo.hasNextPage) break;
+        page = await page.fetchNext();
+      }
       if (issues.length === 0) {
         throw new CodexSecurityError(
           `No open Linear issues matched project "${options.project}" and its filter.`,
