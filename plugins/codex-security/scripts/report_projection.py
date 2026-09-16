@@ -523,6 +523,41 @@ def _surface_notes(surface: dict[str, Any]) -> str:
     return _cell(f"{notes} Evidence: {evidence}")
 
 
+def _remediation_section(finding: dict[str, Any]) -> list[str]:
+    remediation = _text(finding.get("remediation"), "No canonical remediation was recorded.")
+    lines = ["", "#### Remediation", "", remediation]
+    seen = {remediation}
+    sources = finding.get("provenance", {}).get("sourceFindings", [])
+    originals = (
+        [
+            source
+            for source in sources
+            if isinstance(source, dict) and isinstance(source.get("finding"), dict)
+        ]
+        if isinstance(sources, list)
+        else []
+    )
+    for source in originals:
+        text = _text(source["finding"].get("remediation"), "")
+        if text and text not in seen:
+            seen.add(text)
+            lines.extend(["", f"Source {_text(source.get('id'), 'finding')}: {text}"])
+    for field, label in (
+        ("remediationTests", "Tests"),
+        ("preventiveControls", "Preventive controls"),
+    ):
+        values = list(
+            dict.fromkeys(
+                value
+                for original in [finding, *(source["finding"] for source in originals)]
+                for value in _strings(original.get(field))
+            )
+        )
+        if values:
+            lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
+    return lines
+
+
 def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
     _, raw_root_cause = merged_root_cause(finding)
@@ -616,8 +651,6 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         severity.get("changeConditions"),
         "Additional runtime or deployment evidence could raise or lower this severity.",
     )
-    remediation_tests = _strings(finding.get("remediationTests"))
-    preventive_controls = _strings(finding.get("preventiveControls"))
     attack_steps = _strings(attack_path.get("steps"))
     cwes = ", ".join(finding["taxonomy"]["cwe"]) or "none"
     title = _text(finding["title"], "Untitled finding")
@@ -736,18 +769,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
             lines.extend(
                 ["", f"{label} assessment:", *(f"- **{name}:** {value}" for name, value in details)]
             )
-    lines.extend(
-        [
-            "",
-            "#### Remediation",
-            "",
-            _text(finding["remediation"], "No canonical remediation was recorded."),
-        ]
-    )
-    if remediation_tests:
-        lines.extend(["", "Tests:", *_bullets(remediation_tests, "No tests recorded.")])
-    if preventive_controls:
-        lines.extend(["", "Preventive controls:", *_bullets(preventive_controls, "None recorded.")])
+    lines.extend(_remediation_section(finding))
     return lines
 
 
@@ -769,8 +791,12 @@ def _linked_finding_section(number: int, finding: dict[str, Any], report_path: s
         f"| CWE | {_cell(cwes)} |",
         f"| Affected lines | {_cell(_locations(finding))} |",
     ]
-    for heading in ("Summary", "Validation", "Dataflow", "Reachability", "Severity", "Remediation"):
+    for heading in ("Summary", "Validation", "Dataflow", "Reachability", "Severity"):
         lines.extend(["", f"#### {heading}", "", f"See the {link}."])
+    if finding.get("provenance", {}).get("sourceFindings"):
+        lines.extend(_remediation_section(finding))
+    else:
+        lines.extend(["", "#### Remediation", "", f"See the {link}."])
     return lines
 
 
