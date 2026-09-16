@@ -82,6 +82,91 @@ function commandEvent(command: string, id: string, timestamp?: string) {
 }
 
 describe("saved scan logs", () => {
+  test.each([
+    ["prefix first", [0], [0, 1, 1, 2], 1, false],
+    ["complete first", [0, 1, 1, 2], [0], 0, false],
+    ["identical copies", [0, 1, 1, 2], [0, 1, 1, 2], 0, false],
+    ["longer divergent copy", [0, 2], [0, 1, 1, 2], 0, false],
+    ["shorter divergent copy", [0, 1, 1, 2], [0, 2], 0, false],
+    ["equal-length divergent copy", [0, 1], [0, 2], 0, false],
+    ["complete archived copy", [0], [0, 1, 1, 2], 1, true],
+    ["prefix archived copy", [0, 1, 1, 2], [0], 0, true],
+    ["identical archived copy", [0, 1, 1, 2], [0, 1, 1, 2], 0, true],
+    ["divergent archived copy", [0, 2], [0, 1, 1, 2], 0, true],
+  ] as const)(
+    "retains complete copied rollout events and precedence: %s",
+    async (_label, first, second, selected, archived) => {
+      const homes = [await temporaryHome(), await temporaryHome()];
+      const activity = [
+        commandEvent("first", "first-call", "2026-08-11T12:00:03Z"),
+        commandEvent("repeated", "repeat-call", "2026-08-11T12:00:01Z"),
+        commandEvent("last", "last-call", "2026-08-11T12:00:02Z"),
+      ];
+      const copies = [first, second];
+      for (const [index, home] of homes.entries()) {
+        await writeSession(home, "parent", []);
+        await writeSession(
+          home,
+          "worker",
+          copies[index]!.map((event) => activity[event]!),
+          "parent",
+        );
+      }
+      if (archived) {
+        await rename(
+          join(homes[1]!, "sessions"),
+          join(homes[1]!, "archived_sessions"),
+        );
+      }
+      const result = await readSavedScanLogs(
+        {
+          scanId: "scan-1",
+          continuationThreadId: "parent",
+          executionThreadIds: ["parent"],
+        },
+        archived ? [...homes].reverse() : homes,
+      );
+      expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
+        "parent",
+        "worker",
+      ]);
+      expect(result.sessions[1]!.path).toBe(
+        join(
+          homes[selected]!,
+          archived && selected === 1 ? "archived_sessions" : "sessions",
+          "2026",
+          "08",
+          "11",
+          "rollout-worker.jsonl",
+        ),
+      );
+      expect(
+        result.events
+          .filter(({ threadId }) => threadId === "worker")
+          .slice(1)
+          .map(({ event }) => event),
+      ).toEqual(copies[selected]!.map((event) => activity[event]!));
+    },
+  );
+
+  test("keeps first-copy ownership when a longer copy has different session metadata", async () => {
+    const first = await temporaryHome();
+    const second = await temporaryHome();
+    const event = commandEvent("scan work", "scan-call");
+    await writeSession(first, "parent", []);
+    await writeSession(first, "worker", [event], "unrelated");
+    await writeSession(second, "worker", [event, event], "parent");
+    const result = await readSavedScanLogs(
+      {
+        scanId: "scan-1",
+        continuationThreadId: "parent",
+        executionThreadIds: ["parent"],
+      },
+      [first, second],
+    );
+    expect(result.sessions.map(({ threadId }) => threadId)).toEqual(["parent"]);
+  });
+
   test("collects known desktop and CLI threads across active and archived homes without duplicates", async () => {
     const desktop = await temporaryHome();
     const cli = await temporaryHome();

@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
+import { isDeepStrictEqual } from "node:util";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
@@ -114,7 +115,13 @@ export async function readScanLogs(options: ScanLogOptions) {
   for (const directory of ["sessions", "archived_sessions"]) {
     for (const home of homes) {
       for await (const session of scanSessions(home, directory)) {
-        if (!logs.has(session.threadId)) logs.set(session.threadId, session);
+        const previous = logs.get(session.threadId);
+        if (
+          previous === undefined ||
+          (await extendsSessionLog(previous.path, session.path))
+        ) {
+          logs.set(session.threadId, session);
+        }
       }
     }
   }
@@ -236,6 +243,24 @@ function belongsToScan(
     }
   }
   return false;
+}
+
+// Prefer a longer copy only when it preserves every event in the earlier copy.
+// Identical or divergent copies keep the existing home/archive precedence.
+async function extendsSessionLog(
+  previousPath: string,
+  path: string,
+): Promise<boolean> {
+  const events = sessionEvents(path);
+  try {
+    for await (const previous of sessionEvents(previousPath)) {
+      const next = await events.next();
+      if (next.done || !isDeepStrictEqual(previous, next.value)) return false;
+    }
+    return !(await events.next()).done;
+  } finally {
+    await events.return();
+  }
 }
 
 async function* sessionEvents(
