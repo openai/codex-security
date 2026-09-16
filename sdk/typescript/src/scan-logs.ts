@@ -260,7 +260,7 @@ async function extendsSessionLog(
     }
     return !(await events.next()).done;
   } finally {
-    await events.return();
+    await events.return(undefined);
   }
 }
 
