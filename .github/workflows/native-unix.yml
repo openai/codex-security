@@ -61,6 +61,7 @@ jobs:
           pnpm --dir sdk/typescript run build:ci
       - name: Set up Rust
         run: |
+          # Rustup 1.29 retries component downloads, but not manifest checksums.
           for attempt in 1 2 3; do
             if rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy; then
               break
