@@ -24,6 +24,7 @@
 - keep model-authored runtime status out of finalized reports ([#703](https://github.com/openai/codex-security/pull/703))
 - show progress while patching findings ([#931](https://github.com/openai/codex-security/pull/931))
 - deduplicate string-form openQuestions in merge\_saved\_results ([#951](https://github.com/openai/codex-security/pull/951))
+- emit structured JSON errors for failed scans ([#709](https://github.com/openai/codex-security/pull/709))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
