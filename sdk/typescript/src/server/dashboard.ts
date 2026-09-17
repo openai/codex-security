@@ -1,6 +1,11 @@
 import { readFile } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
-import type { DashboardQuery, DashboardView } from "./dashboard-types.js";
+import type {
+  DashboardQuery,
+  DashboardSort,
+  DashboardSortDirection,
+  DashboardView,
+} from "./dashboard-types.js";
 import { FindingsError } from "./errors.js";
 import { pagination } from "./validation.js";
 
@@ -39,19 +44,43 @@ export async function serveDashboard(
 export function dashboardQuery(parameters: URLSearchParams): DashboardQuery {
   const view = parameters.get("view") ?? "findings";
   const sort = parameters.get("sort") ?? "activity";
+  const direction = parameters.get("direction") ?? "desc";
   if (!["findings", "groups"].includes(view))
     throw new FindingsError("invalid_request", "Unknown dashboard view.");
-  if (sort !== "activity" && sort !== "newest")
+  if (
+    ![
+      "activity",
+      "newest",
+      "title",
+      "repository",
+      "severity",
+      "members",
+    ].includes(sort)
+  )
     throw new FindingsError(
       "invalid_request",
-      "sort must be activity or newest.",
+      "sort must be activity, newest, title, repository, severity, or members.",
+    );
+  if (
+    (view === "findings" && sort === "members") ||
+    (view === "groups" && sort === "severity")
+  )
+    throw new FindingsError(
+      "invalid_request",
+      `Cannot sort ${view} by ${sort}.`,
+    );
+  if (direction !== "asc" && direction !== "desc")
+    throw new FindingsError(
+      "invalid_request",
+      "direction must be asc or desc.",
     );
   return {
     view: view as DashboardView,
     ...pagination(parameters),
     query: parameters.get("query") ?? "",
     repository: parameters.get("repository") ?? "",
-    sort,
+    sort: sort as DashboardSort,
+    direction: direction as DashboardSortDirection,
     ...(parameters.has("id") ? { id: parameters.get("id")! } : {}),
   };
 }
