@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from test_workbench_db import (
     SCRIPT,
     create_saved_workspace,
@@ -75,6 +76,25 @@ def start_headless_standard_scan(
         "--scan-root",
         str(scan_root),
     )
+
+
+def test_create_scan_directory_propagates_missing_root_error() -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="missing_scan_root_test")
+    root = mock.Mock(spec=Path)
+    root.parent = root
+    root.exists.side_effect = [False, AssertionError("Missing root was revisited.")]
+    failure = FileNotFoundError("Synthetic unavailable drive root.")
+    root.mkdir.side_effect = failure
+    directory = mock.Mock(spec=Path)
+    directory.parent = root
+    directory.exists.return_value = False
+
+    with pytest.raises(FileNotFoundError) as raised:
+        namespace["create_scan_directory"](directory)
+
+    assert raised.value is failure
+    root.mkdir.assert_called_once_with(mode=0o700, exist_ok=True)
+    directory.mkdir.assert_not_called()
 
 
 def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> None:

@@ -4,14 +4,14 @@ import { build } from "esbuild";
 
 const bundle = await build({
   bundle: true,
-  entryPoints: [fileURLToPath(new URL("../src/deep-scan/parent-sandbox.ts", import.meta.url))],
+  entryPoints: [fileURLToPath(new URL("../src/native-permissions.ts", import.meta.url))],
   format: "esm",
   platform: "node",
   write: false
 });
 const {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
-  resolveDeepWorkerParentSandbox
+  resolveNativeParentSandbox
 } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
@@ -27,23 +27,23 @@ const pinnedReadOnly = {
 };
 
 assert.equal(CODEX_SANDBOX_STATE_META_CAPABILITY, "codex/sandbox-state-meta");
-assert.deepEqual(resolveDeepWorkerParentSandbox(extra(pinnedReadOnly)), {
+assert.deepEqual(resolveNativeParentSandbox(extra(pinnedReadOnly)), {
   filesystemDenies: []
 });
-assert.deepEqual(resolveDeepWorkerParentSandbox(extra({
+assert.deepEqual(resolveNativeParentSandbox(extra({
   ...pinnedReadOnly,
   network: "enabled"
 })), {
   filesystemDenies: []
 });
-assert.deepEqual(resolveDeepWorkerParentSandbox(extra({
+assert.deepEqual(resolveNativeParentSandbox(extra({
   type: "managed",
   file_system: { type: "unrestricted" },
   network: "restricted"
 })), {
   filesystemDenies: []
 });
-assert.deepEqual(resolveDeepWorkerParentSandbox(extra({
+assert.deepEqual(resolveNativeParentSandbox(extra({
   ...pinnedReadOnly,
   file_system: {
     type: "restricted",
@@ -62,7 +62,7 @@ assert.deepEqual(resolveDeepWorkerParentSandbox(extra({
 })), {
   filesystemDenies: []
 });
-assert.deepEqual(resolveDeepWorkerParentSandbox(extra({
+assert.deepEqual(resolveNativeParentSandbox(extra({
   ...pinnedReadOnly,
   file_system: {
     type: "restricted",
@@ -98,7 +98,7 @@ assert.deepEqual(resolveDeepWorkerParentSandbox(extra({
 });
 
 assert.throws(
-  () => resolveDeepWorkerParentSandbox(extra({
+  () => resolveNativeParentSandbox(extra({
     ...pinnedReadOnly,
     file_system: {
       type: "restricted",
@@ -114,29 +114,29 @@ assert.throws(
       ]
     }
   })),
-  (error) => error.name === "DeepScanNonRetryableError"
+  (error) => error.name === "Error"
     && /symbolic project-roots denial metadata/i.test(error.message)
 );
 
 const pinnedFileUri = extra(pinnedReadOnly, "file:///tmp/codex-security-parent");
-assert.deepEqual(resolveDeepWorkerParentSandbox(pinnedFileUri), {
+assert.deepEqual(resolveNativeParentSandbox(pinnedFileUri), {
   filesystemDenies: []
 });
-assert.deepEqual(resolveDeepWorkerParentSandbox(extra(pinnedReadOnly, "/tmp/codex-security-parent")), {
+assert.deepEqual(resolveNativeParentSandbox(extra(pinnedReadOnly, "/tmp/codex-security-parent")), {
   filesystemDenies: []
 });
-assert.deepEqual(resolveDeepWorkerParentSandbox({
+assert.deepEqual(resolveNativeParentSandbox({
   requestInfo: pinnedFileUri
 }), {
   filesystemDenies: []
 });
-assert.deepEqual(resolveDeepWorkerParentSandbox({
+assert.deepEqual(resolveNativeParentSandbox({
   _meta: pinnedFileUri._meta,
   requestInfo: pinnedFileUri
 }), {
   filesystemDenies: []
 });
-assert.deepEqual(resolveDeepWorkerParentSandbox(extra({
+assert.deepEqual(resolveNativeParentSandbox(extra({
   ...pinnedReadOnly
 }, "file:///tmp/codex-security-parent", { type: "readOnly" })), {
   filesystemDenies: []
@@ -273,9 +273,9 @@ for (const invalid of [
   }
 ]) {
   assert.throws(
-    () => resolveDeepWorkerParentSandbox(invalid),
-    (error) => error.name === "DeepScanNonRetryableError"
-      && error.message.startsWith("Deep Scan cannot safely start a read-only worker:")
+    () => resolveNativeParentSandbox(invalid),
+    (error) => error.name === "Error"
+      && error.message.startsWith("Deep Scan cannot preserve the parent sandbox:")
   );
 }
 

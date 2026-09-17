@@ -26,18 +26,10 @@ import {
   recordCodexSecurityCandidateAttackPaths
 } from "../artifact-attack-path.js";
 import {
-  deepReducerInputsInputSchema,
-  deepReductionInputSchema,
-  getCodexSecurityDeepReducerInputs,
-  recordCodexSecurityDeepReduction
-} from "../artifact-deep-reducer.js";
-import {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
   recordCodexSecurityScanDraftViaWorkbench,
-  recordCodexSecurityWorkerScanDraft,
-  scanDraftInputSchema,
-  type ScanDraftInput
+  scanDraftInputSchema
 } from "../artifact-scan-draft.js";
 
 import {
@@ -286,52 +278,6 @@ async function supplementalContext(
   if (input.handoffClaimToken !== undefined) throw new Error("A handoff claim requires a scanId.");
   const root = await options.resolveScanRoot();
   return standaloneArtifactContext(input.targetPath!, options.runWorkbench, write, root, input.storage);
-}
-
-/** Expose only the operations appropriate to the inherited worker phase. */
-export function registerCompactWorkerArtifactTools(
-  server: McpServer,
-  context: ArtifactContext
-): void {
-  if (context.layout === "worker") {
-    registerCompactTool(server, {
-      name: "record_codex_security_scan_draft",
-      title: "Record Codex Security Scan Draft",
-      description: "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred.",
-      inputSchema: scanDraftInputSchema,
-      readOnly: false,
-      handler: async (value) => recordCodexSecurityWorkerScanDraft(
-        context,
-        value as ScanDraftInput
-      )
-    });
-    return;
-  }
-
-  if (context.layout !== "reducer") {
-    throw new Error("The lightweight artifact server requires a bound discovery or reducer worker.");
-  }
-
-  registerCompactTool(server, {
-    name: "get_codex_security_deep_reducer_inputs",
-    title: "Get Codex Security Deep Reducer Inputs",
-    description: "Read the assigned findings, context, and previous aggregate.",
-    inputSchema: deepReducerInputsInputSchema,
-    readOnly: true,
-    handler: async () => getCodexSecurityDeepReducerInputs(context)
-  });
-
-  registerCompactTool(server, {
-    name: "record_codex_security_deep_reduction",
-    title: "Record Codex Security Deep Reduction",
-    description: "Record the merged findings and context for this Deep scan.",
-    inputSchema: deepReductionInputSchema,
-    readOnly: false,
-    handler: async (value) => recordCodexSecurityDeepReduction(
-      context,
-      value
-    )
-  });
 }
 
 interface CompactToolRegistration {

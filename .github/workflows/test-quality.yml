@@ -99,6 +99,7 @@ jobs:
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
       - name: Test runner mode
         env:
+          CODEX_SECURITY_TEST_TIMEOUT_MS: ${{ runner.os == 'Windows' && '120000' || '30000' }}
           TEMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
           TMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
           TMPDIR: ${{ steps.windows-temp.outputs.path || runner.temp }}

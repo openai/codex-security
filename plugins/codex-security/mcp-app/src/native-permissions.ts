@@ -1,22 +1,17 @@
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { DeepScanNonRetryableError } from "./errors.js";
 
 export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
 
-export type DeepWorkerParentSandbox = {
-  /**
-   * Validated path and glob keys copied into the worker's stricter root-read
-   * profile. Grants are intentionally not transported because Deep Scan
-   * workers never inherit parent write access.
-   */
+export type NativeParentSandbox = {
+  /** Trusted parent denials retained by the ordinary scan permission profile. */
   readonly filesystemDenies: readonly string[];
   readonly globScanMaxDepth?: number;
 };
 
 /** Resolve the effective host policy, never a model-supplied scan argument. */
-export function resolveDeepWorkerParentSandbox(extra: unknown): DeepWorkerParentSandbox {
+export function resolveNativeParentSandbox(extra: unknown): NativeParentSandbox {
   const state = trustedSandboxState(extra);
   validateSandboxCwd(state.sandboxCwd);
 
@@ -125,7 +120,7 @@ export function resolveDeepWorkerParentSandbox(extra: unknown): DeepWorkerParent
 
   if (!hasRootRead) {
     throw unsupportedParentSandbox(
-      "the parent restricts readable paths beyond the supported read-only worker sandbox"
+      "the parent restricts readable paths beyond the supported ordinary scan sandbox"
     );
   }
 
@@ -247,8 +242,8 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function unsupportedParentSandbox(reason: string): DeepScanNonRetryableError {
-  return new DeepScanNonRetryableError(
-    `Deep Scan cannot safely start a read-only worker: ${reason}.`
+function unsupportedParentSandbox(reason: string): Error {
+  return new Error(
+    `Deep Scan cannot preserve the parent sandbox: ${reason}.`
   );
 }

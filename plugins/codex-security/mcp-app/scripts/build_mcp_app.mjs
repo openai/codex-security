@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
 
 const root = resolve(import.meta.dirname, "..");
+const sdkRequire = createRequire(join(root, "../../../sdk/typescript/package.json"));
 const maxChunkBytes = 140_000;
 
 export async function buildMcpApp({ output }) {
@@ -34,8 +36,10 @@ export async function buildMcpApp({ output }) {
     try {
       await build({
         bundle: true,
-        define: { "import.meta.url": "__filename" },
+        banner: { js: "const __codexSecurityModuleUrl = require('node:url').pathToFileURL(__filename).href;" },
+        define: { "import.meta.url": "__codexSecurityModuleUrl" },
         entryPoints: [join(root, entryPoint)],
+        inject: name === "server" ? [sdkRequire.resolve("pdfjs-dist/legacy/build/pdf.worker.mjs")] : [],
         external: ["fsevents"],
         format: "cjs",
         loader: { ".md": "text" },

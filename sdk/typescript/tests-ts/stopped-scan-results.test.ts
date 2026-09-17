@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { fileURLToPath } from "node:url";
+
+const PLUGIN_ROOT = fileURLToPath(
+  new URL("../../../plugins/codex-security/", import.meta.url),
+);
 
 const temporaryDirectories: string[] = [];
 
@@ -16,7 +20,7 @@ afterEach(() => {
 const stoppedScanProbe = [
   "import argparse, hashlib, json, os, pathlib, shutil, sqlite3, subprocess, sys, uuid",
   "plugin = pathlib.Path(sys.argv[1])",
-  "root = pathlib.Path(sys.argv[2])",
+  "root = pathlib.Path(sys.argv[2]).resolve()",
   "source = sys.argv[3]",
   "terminal_status = sys.argv[4] if len(sys.argv) > 4 else 'failed'",
   "state = root / 'state'",
@@ -31,35 +35,38 @@ const stoppedScanProbe = [
   "environment = {**os.environ, 'CODEX_SECURITY_STATE_DIR': str(state), 'CODEX_HOME': str(home)}",
   "script = plugin / 'scripts' / 'workbench_db.py'",
   "def run(*arguments):",
-  "    completed = subprocess.run([sys.executable, '-I', '-B', str(script), *arguments], check=True, capture_output=True, text=True, env=environment)",
+  "    completed = subprocess.run([sys.executable, '-I', '-B', str(script), *arguments], capture_output=True, text=True, env=environment)",
+  "    assert completed.returncode == 0, completed.stderr",
   "    return json.loads(completed.stdout)",
-  "started = run('begin-deep-scan', '--thread-id', 'stopped-result-owner', '--target-path', str(target), '--scope', '.', '--scan-root', str(root / 'scans'), '--available-parallelism', '4')['deepScan']",
+  "scan_dir = root / 'scans' / 'parent'",
+  "scan_dir.parent.mkdir(mode=0o700)",
+  "scan_dir.mkdir(mode=0o700)",
+  "recipe = {'repository': str(target), 'target': {'kind':'repository','paths':[]}, 'mode':'deep','config':{'model':'synthetic-model'}}",
+  "started = run('register-cli-scan', '--repository', str(target), '--scan-dir', str(scan_dir), '--recipe-json', json.dumps(recipe))",
   "scan_id = started['scanId']",
-  "scan_dir = pathlib.Path(started['scanDir'])",
-  "worker_id = str(uuid.uuid4())",
-  "artifact_dir = scan_dir / 'artifacts' / 'deep_discovery' / source",
-  "artifact_dir.mkdir(parents=True)",
-  "prompt_path = artifact_dir / 'prompt.md'",
-  "prompt_path.write_text('Review the fixture.\\n', encoding='utf-8')",
-  "result_path = artifact_dir / 'result.json'",
-  "base = ('upsert-deep-scan-worker', '--scan-id', scan_id, '--worker-id', worker_id, '--kind', 'discovery', '--prompt-path', str(prompt_path), '--artifact-dir', str(artifact_dir), '--attempt', '1')",
-  "run(*base, '--status', 'running')",
+  "run('set-scan-thread', '--scan-id', scan_id, '--thread-id', 'stopped-result-owner')",
+  "artifact_dir = scan_dir / 'artifacts' / 'deep-scan' / 'passes' / 'pass-1'",
+  "for directory in (scan_dir / 'artifacts', scan_dir / 'artifacts' / 'deep-scan', artifact_dir.parent, artifact_dir): directory.mkdir(mode=0o700)",
+  "child = run('register-cli-scan', '--repository', str(target), '--scan-dir', str(artifact_dir), '--parent-scan-id', scan_id, '--recipe-json', json.dumps({**recipe,'mode':'standard'}))",
+  "result_path = scan_dir / 'result.json'",
   "finding = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text(encoding='utf-8'))['findings'][0]",
+  "for field in ('findingId','occurrenceId','fingerprints'): finding.pop(field, None)",
   "finding.setdefault('provenance', {})['candidateId'] = 'checkpoint-candidate'",
   "payload = {'scanId': scan_id, 'findings': [finding], 'coverage': {'completeness': 'partial', 'surfaces': [], 'explicitExclusions': [], 'deferred': [{'candidateId': 'pending-validation', 'reason': 'Validation stopped with the scan.', 'paths': ['src/extract.py']}]}, 'threatModel': {'summary': 'Synthetic stopped-scan threat model.'}}",
   "if source == 'accepted':",
   "    result_path.write_text(json.dumps(payload), encoding='utf-8')",
-  "    run(*base, '--status', 'succeeded', '--result-manifest-path', str(result_path))",
+
   "else:",
   "    checkpoint = {**payload, 'complete': False}",
-  "    checkpoint_dir = artifact_dir / 'checkpoints'",
+  "    checkpoint_dir = scan_dir / 'checkpoints'",
   "    checkpoint_dir.mkdir()",
   "    if source == 'refined-checkpoint':",
   "        earlier = json.loads(json.dumps(checkpoint))",
   "        earlier['findings'][0]['locations'][0].update({'startLine': 21, 'endLine': 26})",
   "        later = json.loads(json.dumps(checkpoint))",
   "        later['findings'][0]['locations'][0].update({'startLine': 24, 'endLine': 26})",
-  "        for document in (earlier, later):",
+  "        later['findings'][0]['provenance']['previousFindings'] = earlier['findings']",
+  "        for document in (later,):",
   "            encoded = json.dumps(document).encode()",
   "            (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
   "        result_path.write_text(json.dumps(later), encoding='utf-8')",
@@ -73,6 +80,20 @@ const stoppedScanProbe = [
   "        encoded = json.dumps(checkpoint).encode()",
   "        (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
   "        result_path.write_text('{incomplete', encoding='utf-8')",
+  "documents = {name: json.loads((plugin / 'examples' / 'completed-scan' / name).read_text()) for name in ('scan-manifest.json','findings.json','coverage.json')}",
+  "child_findings = later['findings'] if source == 'refined-checkpoint' else checkpoint['findings'] if source == 'distinct-instances' else payload['findings']",
+  "manifest = documents['scan-manifest.json']['scan']",
+  "for field in ('id','producer','startedAt','completedAt','sealedAt','artifacts','status'): manifest.pop(field, None)",
+  "manifest['target'] = {'kind': child['contract']['target']['allowedKinds'][0]}",
+  "manifest['scope'] = {'includePaths':['.'],'excludePaths':[]}",
+  "documents['findings.json'].update(scanId=child['scanId'], findings=child_findings)",
+  "documents['coverage.json'].update(scanId=child['scanId'], surfaces=[], deferred=[], mode='repository')",
+  "for name, document in documents.items(): (artifact_dir / name).write_text(json.dumps(document))",
+  "run('prepare-scan-completion', '--scan-id', child['scanId'])",
+  "run('complete-scan', '--scan-id', child['scanId'])",
+  "aggregate = later if source == 'refined-checkpoint' else checkpoint if source != 'accepted' else payload",
+  "composition = {'version':2,'startedAt':'2026-01-01T00:00:00Z','passes':[{'directory':'artifacts/deep-scan/passes/pass-1','scanId':child['scanId']}],'mergedScanIds':[child['scanId']],'aggregate':aggregate,'noNewStreak':0,'consecutiveErrors':0}",
+  "(scan_dir / 'artifacts' / 'deep-scan' / 'checkpoint.json').write_text(json.dumps(composition))",
   "if source == 'cancel-io-retry':",
   "    os.environ.update(environment)",
   "    sys.path.insert(0, str(plugin / 'scripts'))",
@@ -91,9 +112,12 @@ const stoppedScanProbe = [
   "        frozen = database.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings), 'frozen': json.loads(frozen) if frozen else None}))",
   "    raise SystemExit(0)",
-  "run('fail-deep-scan', '--scan-id', scan_id, '--message', 'Synthetic worker stopped.', '--deep-status', terminal_status)",
+  "if terminal_status == 'canceled': run('cancel-scan', '--scan-id', scan_id)",
+  "else: run('fail-scan', '--scan-id', scan_id, '--message', 'Synthetic ordinary scan stopped.')",
   "if source == 'legacy-seal-io-retry':",
   "    shutil.rmtree(artifact_dir)",
+  "    shutil.rmtree(scan_dir / 'checkpoints', ignore_errors=True)",
+  "    (scan_dir / 'artifacts' / 'deep-scan' / 'checkpoint.json').unlink()",
   "    manifest_path = scan_dir / 'scan-manifest.json'",
   "    legacy_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
   "    legacy_manifest['scan']['status'] = 'completed'",
@@ -170,7 +194,7 @@ test.each(["accepted", "checkpoint"] as const)(
   30_000,
 );
 
-test("keeps refined checkpoints as one finding with retained history", () => {
+test("keeps ordinary scan refinement history when the parent stops", () => {
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
   const root = mkdtempSync(
@@ -200,8 +224,8 @@ test("keeps refined checkpoints as one finding with retained history", () => {
   });
 }, 30_000);
 
-test.each(["failed", "interrupted"] as const)(
-  "keeps the first %s seal immutable when a worker writes late",
+test.each(["failed", "canceled"] as const)(
+  "keeps the first %s seal immutable when a late checkpoint arrives",
   (terminalStatus) => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
@@ -266,7 +290,7 @@ test("retries a legacy stopped seal after transient publication failure", () => 
   expect(checkpointPath).toBe(`checkpoints/${checkpointDigest}.json`);
 }, 30_000);
 
-test("preserves distinct instances from one worker candidate", () => {
+test("preserves distinct instances from one ordinary scan candidate", () => {
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
   const root = mkdtempSync(

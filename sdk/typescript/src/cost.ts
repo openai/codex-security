@@ -71,6 +71,7 @@ interface ScanCostTrackerOptions {
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onError?: (error: unknown) => void;
+  workerNumber?: (threadId: string) => number;
 }
 
 interface ScanCostSnapshot {
@@ -127,6 +128,13 @@ export class ScanCostTracker {
 
   public setExpectedFilesTotal(filesTotal: number): void {
     this.#expectedFilesTotal = filesTotal;
+  }
+
+  public workerNumber(threadId: string): number {
+    if (this.#options.workerNumber) return this.#options.workerNumber(threadId);
+    const worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
+    this.#workers.set(threadId, worker);
+    return worker;
   }
 
   public recordUsage(usage: unknown, threadId = this.#threadId): void {
@@ -277,11 +285,10 @@ export class ScanCostTracker {
         await readSessionUsage(path, session, this.#options.repository);
         this.#sessions.set(path, session);
       }
-      let worker: number | undefined;
-      if (threadId !== this.#threadId) {
-        worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
-        this.#workers.set(threadId, worker);
-      }
+      const worker =
+        threadId === this.#threadId
+          ? this.#options.workerNumber?.(threadId)
+          : this.workerNumber(threadId);
       for (const event of session.events?.splice(0) ?? []) {
         this.#options.onSessionEvent?.({
           threadId,
@@ -290,7 +297,7 @@ export class ScanCostTracker {
           event,
         });
       }
-      if (worker !== undefined) {
+      if (threadId !== this.#threadId) {
         for (const activity of session.activities.splice(0)) {
           this.#options.onActivity?.({
             ...activity,

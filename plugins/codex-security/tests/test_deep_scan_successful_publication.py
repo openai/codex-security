@@ -15,21 +15,6 @@ from workbench_test_support import write_checkpoint, write_completed_contract
 def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
-    deep = workbench_api["deep_scan"]
-    monkeypatch.setattr(
-        deep,
-        "_dependencies",
-        deep.DeepScanDependencies(
-            **{
-                name: workbench_api[
-                    "preserve_stopped_results_after_transition"
-                    if name == "preserve_stopped_results"
-                    else name
-                ]
-                for name in deep.DeepScanDependencies.__dataclass_fields__
-            }
-        ),
-    )
 
     def create(*, mode="deep", scope="."):
         target = tmp_path / "target"

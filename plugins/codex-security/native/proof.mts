@@ -318,7 +318,7 @@ async function nativeLockWorker(path: string): Promise<void> {
 const pythonOracle = String.raw`
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
-from workbench_db import acquire_completion_file_lock, release_completion_file_lock, posix_file_lock
+from workbench.storage import acquire_completion_file_lock, release_completion_file_lock, posix_file_lock
 fd = os.open(sys.argv[2], os.O_RDWR | os.O_CREAT, 0o600)
 try:
     if sys.argv[3] == "try":

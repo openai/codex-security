@@ -658,10 +658,32 @@ def atomic_write(
                 raise
 
 
-def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
+def prepare_directory(
+    scan_dir: Path,
+    relative_path: str,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> None:
+    with _locked_parent(
+        scan_dir,
+        relative_path + "/.directory",
+        create=True,
+        expected_root_identity=expected_root_identity,
+    ):
+        pass
+
+
+def unlink_if_exists(
+    scan_dir: Path,
+    relative_path: str,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> None:
     """Delete a scan-local regular file or reparse-point leaf without following it."""
 
-    with _locked_parent(scan_dir, relative_path, create=False) as (parent_path, leaf_name):
+    with _locked_parent(
+        scan_dir, relative_path, create=False, expected_root_identity=expected_root_identity
+    ) as (parent_path, leaf_name):
         path = parent_path / leaf_name
         handle = _create_file(
             path,

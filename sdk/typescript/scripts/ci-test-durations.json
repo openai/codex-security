@@ -2,11 +2,13 @@
   "sources": [
     "https://github.com/openai/codex-security/actions/runs/33215429477",
     "https://github.com/openai/codex-security/actions/runs/33227512538",
-    "https://github.com/openai/codex-security/actions/runs/33233690024"
+    "https://github.com/openai/codex-security/actions/runs/33233690024",
+    "https://github.com/openai/codex-security/actions/runs/35092711898"
   ],
   "unix": {
     "api-attribution-concurrency.test.ts": 0.372,
     "api-credentials.test.ts": 0.892,
+    "api-deep-composition.test.ts": 165.542,
     "api-environment.test.ts": 0.0,
     "api-events.test.ts": 2.277,
     "api-integration.test.ts": 0.0,
@@ -98,6 +100,7 @@
     "scan-history-renderer.test.ts": 0.004,
     "scan-logs.test.ts": 0.039,
     "scan-recovery.test.ts": 25.336,
+    "scan-resume.test.ts": 219.99,
     "skeleton.test.ts": 0.024,
     "stopped-scan-results.test.ts": 7.685,
     "targets-large-output.test.ts": 0.486,
@@ -120,6 +123,7 @@
   "windows": {
     "api-attribution-concurrency.test.ts": 18.599,
     "api-credentials.test.ts": 56.214,
+    "api-deep-composition.test.ts": 198.831,
     "api-environment.test.ts": 0.0,
     "api-events.test.ts": 2.999,
     "api-post-scan.test.ts": 11.43,
@@ -209,6 +213,7 @@
     "scan-history-renderer.test.ts": 0.005,
     "scan-logs.test.ts": 0.139,
     "scan-recovery.test.ts": 62.302,
+    "scan-resume.test.ts": 347.827,
     "skeleton.test.ts": 0.03,
     "stopped-scan-results.test.ts": 15.814,
     "targets-large-output.test.ts": 11.48,

@@ -29,7 +29,8 @@ async function testWorkbenchStateFallback() {
   await writeFakePython(fakePythonPath);
   await build({
     bundle: true,
-    define: { "import.meta.url": "__filename" },
+    banner: { js: "const __codexSecurityModuleUrl = require('node:url').pathToFileURL(__filename).href;" },
+    define: { "import.meta.url": "__codexSecurityModuleUrl" },
     entryPoints: [path.join(mcpAppRoot, "main.ts")],
     external: ["fsevents"],
     format: "cjs",

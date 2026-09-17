@@ -5,7 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench_scan_start import composition_child_ids
 
 
 def upsert_finding(
@@ -13,6 +18,8 @@ def upsert_finding(
     finding: dict[str, Any],
     timestamp: str,
     repository_id: str | None = None,
+    *,
+    publish: bool = True,
 ) -> None:
     connection.execute(
         """
@@ -27,6 +34,7 @@ def upsert_finding(
             identity_instance = excluded.identity_instance,
             details_json = excluded.details_json,
             updated_at = excluded.updated_at
+        WHERE ?
         """,
         (
             finding["findingId"],
@@ -34,12 +42,13 @@ def upsert_finding(
             finding["ruleId"],
             finding["identity"]["anchor"],
             finding["identity"].get("instance"),
-            json.dumps(finding, allow_nan=False, sort_keys=True),
+            json.dumps(finding, allow_nan=False, sort_keys=True) if publish else None,
             timestamp,
             timestamp,
+            publish,
         ),
     )
-    if repository_id is not None:
+    if publish and repository_id is not None:
         connection.execute(
             "INSERT OR IGNORE INTO finding_repositories (repository_id, finding_id) VALUES (?, ?)",
             (repository_id, finding["findingId"]),
@@ -58,12 +67,13 @@ def index_findings(
     repository_id = connection.execute(
         "SELECT target_id FROM scans WHERE id = ?", (scan_id,)
     ).fetchone()["target_id"]
+    publish = scan_id not in composition_child_ids(connection)
     for finding in findings:
         if not isinstance(finding, dict):
             raise SystemExit("findings.json entries must be objects.")
         severity = finding["severity"]
         confidence = finding["confidence"]
-        upsert_finding(connection, finding, timestamp, repository_id)
+        upsert_finding(connection, finding, timestamp, repository_id, publish=publish)
         connection.execute(
             """
             INSERT INTO finding_occurrences (

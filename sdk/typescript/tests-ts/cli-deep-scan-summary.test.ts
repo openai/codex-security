@@ -5,12 +5,10 @@ import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 
 const cappedState: JsonObject = {
   terminalReason: "capped",
-  dispatchedCount: 40,
-  completionSequence: 40,
+  passes: Array.from({ length: 40 }, () => ({})),
+  mergedScanIds: ["child"],
   noNewStreak: 0,
-  config: { maxDiscoveryRuns: 40, maxTimeHours: 96 },
-  createdAt: "2026-01-01T00:00:00Z",
-  completedAt: "2026-01-01T01:00:00Z",
+  startedAt: "2026-01-01T00:00:00Z",
 };
 
 async function summary(
@@ -55,7 +53,7 @@ describe("deep scan completion summary", () => {
     [
       "time limit",
       {
-        dispatchedCount: 3,
+        passes: [{}, {}, {}],
         config: { maxDiscoveryRuns: 40, maxTimeHours: 0.5 },
       },
       "0.5-hour time limit",
@@ -63,27 +61,32 @@ describe("deep scan completion summary", () => {
     ],
     [
       "maximum time limit",
-      { dispatchedCount: 3, completedAt: "2026-01-05T00:00:00Z" },
+      { passes: [{}, {}, {}], startedAt: "2025-12-28T01:00:00Z" },
       "96-hour time limit",
       "rerun with --path",
     ],
     [
       "another early stop",
-      { dispatchedCount: 3 },
+      { passes: [{}, {}, {}] },
       "Stopped before the review finished",
       null,
     ],
   ] as const)("explains %s", async (_name, overrides, reason, next) => {
+    const result = fakeResult(["high"], "partial");
+    result.manifest.scan.completedAt = "2026-01-01T01:00:00Z";
     const text = await summary({
+      result,
       onWorkbench: (args) => {
-        expect(args).toEqual([
-          "get-deep-scan",
-          "--scan-id",
-          "scan",
-          "--thread-id",
-          "thread-1",
-        ]);
-        return { deepScan: { ...cappedState, ...overrides } };
+        expect(args).toEqual(["get-scan", "--scan-id", "scan"]);
+        return {
+          compositionCheckpoint: { ...cappedState, ...overrides },
+          recipe: {
+            deepScan:
+              "config" in overrides
+                ? overrides.config
+                : { maxDiscoveryRuns: 40, maxTimeHours: 96 },
+          },
+        };
       },
     });
     expect(text).toContain("STOPPED");

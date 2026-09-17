@@ -292,3 +292,148 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     assert second["latestScan"]["scanId"] == latest_second["scanId"]
     assert second["openFindingsCount"] == 1
     assert second["scanCount"] == 1
+
+
+def test_composition_occurrences_only_publish_through_parent_or_explicit_import(
+    tmp_path: Path, workbench_db, workbench_api
+) -> None:
+    connection = workbench_db
+    timestamp = "2026-08-01T00:00:00Z"
+    later = "2026-08-02T00:00:00Z"
+    parent_dir = tmp_path / "parent"
+    with connection:
+        for repository in ("scan-repository", "import-repository"):
+            connection.execute(
+                "INSERT INTO security_targets (id, current_path, display_name, created_at, "
+                "updated_at) VALUES (?, ?, ?, ?, ?)",
+                (repository, str(tmp_path / repository), repository, timestamp, timestamp),
+            )
+        connection.execute(
+            "INSERT INTO workspaces (id, target_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("workspace", "scan-repository", timestamp, timestamp),
+        )
+        for scan_id, mode, parent_id, directory in (
+            ("parent", "deep", None, parent_dir),
+            ("child", "standard", "parent", parent_dir / "artifacts/deep-scan/passes/1"),
+            ("rerun", "standard", "parent", tmp_path / "ordinary-rerun"),
+        ):
+            connection.execute(
+                "INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, "
+                "scope, mode, scan_dir, status, phase, parent_scan_id, started_at, created_at, "
+                "updated_at) VALUES (?, 'workspace', 'scan-repository', ?, 'synthetic', '.', "
+                "?, ?, ?, 'discovery', ?, ?, ?, ?)",
+                (
+                    scan_id,
+                    str(tmp_path / "scan-repository"),
+                    mode,
+                    str(directory),
+                    "running" if scan_id == "parent" else "complete",
+                    parent_id,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+    example = json.loads(
+        (Path(__file__).parents[1] / "examples/completed-scan/findings.json").read_text()
+    )["findings"][0]
+
+    def finding(identity, scan_id, summary):
+        return {
+            **example,
+            "findingId": identity,
+            "occurrenceId": f"{scan_id}-{identity}",
+            "identity": {"anchor": identity},
+            "fingerprints": {"algorithm": "synthetic", "primary": f"synthetic:{identity}"},
+            "summary": summary,
+        }
+
+    def index(scan_id, findings):
+        with connection:
+            workbench_api["index_findings"](connection, scan_id, {"findings": findings}, later)
+
+    def assert_published(documents):
+        expected = {document["findingId"]: document for document in documents}
+        stored = workbench_api["list_stored_findings"](connection, limit=100, offset=0)
+        assert {document["findingId"]: document for document in stored["findings"]} == expected
+        assert stored["total"] == len(expected)
+        dashboard = workbench_api["dashboard"](
+            connection, {"view": "findings", "sort": "newest", "limit": 100, "offset": 0}
+        )
+        assert {item["id"] for item in dashboard["items"]} == set(expected)
+        assert dashboard["overview"]["findings"] == len(expected)
+        assert dashboard["total"] == len(expected)
+        return dashboard
+
+    independent = finding("independent", "import", "Independently reviewed document")
+    embedding = {"model": "synthetic-model", "vector": [0.25, 0.75]}
+    assert workbench_api["store_findings"](
+        connection,
+        [{"finding": independent, "embedding": embedding}],
+        timestamp,
+        "import-repository",
+    ) == {"findingIds": ["independent"]}
+    original = dict(
+        connection.execute("SELECT * FROM findings WHERE id = 'independent'").fetchone()
+    )
+    original_embedding = dict(connection.execute("SELECT * FROM finding_embeddings").fetchone())
+    child_only = finding("child-only", "child", "Internal pass evidence")
+    dropped = finding("dropped-duplicate", "child", "Duplicate excluded from the aggregate")
+    later_child = finding("independent", "child", "Different internal pass summary")
+    index("child", [child_only, dropped, later_child])
+
+    dashboard = assert_published([independent])
+    assert dashboard["repositories"] == [{"id": "import-repository", "label": "import-repository"}]
+    assert (
+        dict(connection.execute("SELECT * FROM findings WHERE id = 'independent'").fetchone())
+        == original
+    )
+    assert (
+        dict(connection.execute("SELECT * FROM finding_embeddings").fetchone())
+        == original_embedding
+    )
+    assert [tuple(row) for row in connection.execute("SELECT * FROM finding_repositories")] == [
+        ("import-repository", "independent")
+    ]
+    occurrences = connection.execute(
+        "SELECT details_json FROM finding_occurrences WHERE scan_id = 'child'"
+    ).fetchall()
+    assert {json.loads(row[0])["findingId"]: json.loads(row[0]) for row in occurrences} == {
+        item["findingId"]: item for item in (child_only, dropped, later_child)
+    }
+    assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone()[0] == 3
+
+    rerun = finding("ordinary-rerun", "rerun", "An ordinary linked rerun remains public")
+    index("rerun", [rerun])
+    assert_published([independent, rerun])
+    merged = finding("merged", "parent", "Published parent aggregate")
+    index("parent", [merged])
+    with connection:
+        connection.execute("UPDATE scans SET status = 'complete' WHERE id = 'parent'")
+    assert_published([independent, rerun, merged])
+    assert (
+        connection.execute(
+            "SELECT details_json FROM findings WHERE id = 'dropped-duplicate'"
+        ).fetchone()[0]
+        is None
+    )
+
+    explicitly_imported = {**child_only, "summary": "Explicitly published after review"}
+    assert workbench_api["store_findings"](
+        connection,
+        [{"finding": explicitly_imported, "embedding": embedding}],
+        later,
+        "scan-repository",
+    ) == {"findingIds": ["child-only"]}
+    assert_published([independent, rerun, merged, explicitly_imported])
+    assert (
+        json.loads(
+            connection.execute(
+                "SELECT details_json FROM finding_occurrences WHERE id = ?",
+                (child_only["occurrenceId"],),
+            ).fetchone()[0]
+        )
+        == child_only
+    )
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

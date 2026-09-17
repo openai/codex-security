@@ -620,21 +620,53 @@ def write_scan_local_bytes(
             os.close(root_fd)
 
 
-def _remove_scan_local_file_if_exists(scan_dir: Path, relative_path: str) -> None:
+def prepare_scan_local_directory(
+    scan_dir: Path,
+    relative_path: str,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> None:
+    scan_dir = _require_scan_directory(scan_dir)
+    relative_path = _require_portable_relative_path(relative_path, "scan-local directory path")
+    if not _descriptor_relative_writes_available():
+        if not _is_windows():
+            raise ContractError("scan-local output requires descriptor-relative file operations")
+        _windows_scan_local_files().prepare_directory(
+            scan_dir, relative_path, expected_root_identity=expected_root_identity
+        )
+        return
+    root_fd = _open_verified_scan_directory(scan_dir, expected_root_identity)
+    try:
+        directory_fd = _open_scan_local_directory(
+            root_fd, PurePosixPath(relative_path).parts, create=True
+        )
+        os.close(directory_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _remove_scan_local_file_if_exists(
+    scan_dir: Path,
+    relative_path: str,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> None:
     scan_dir = _require_scan_directory(scan_dir)
     relative_path = _require_portable_relative_path(relative_path, "scan-local cleanup path")
     if not _descriptor_relative_writes_available():
         if not _is_windows():
             raise ContractError("scan-local cleanup requires descriptor-relative file operations")
         try:
-            _windows_scan_local_files().unlink_if_exists(scan_dir, relative_path)
+            _windows_scan_local_files().unlink_if_exists(
+                scan_dir, relative_path, expected_root_identity=expected_root_identity
+            )
         except OSError as exc:
             raise ContractError(f"{relative_path}: {exc}") from exc
         return
     root_fd: int | None = None
     parent_fd: int | None = None
     try:
-        root_fd = _open_verified_scan_directory(scan_dir)
+        root_fd = _open_verified_scan_directory(scan_dir, expected_root_identity)
         parts = PurePosixPath(relative_path).parts
         parent_fd = _open_scan_local_directory(root_fd, parts[:-1], create=False)
         try:

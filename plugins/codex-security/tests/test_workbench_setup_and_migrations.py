@@ -100,6 +100,38 @@ def test_windows_completion_lock_retries_and_unlocks(tmp_path: Path) -> None:
     assert lock_path.stat().st_size == 1
 
 
+def test_completion_lock_reentry_is_scoped_to_the_state_directory(
+    tmp_path: Path, workbench_api
+) -> None:
+    completion_lock = workbench_api["scan_completion_lock"]
+    lock_globals = completion_lock.__wrapped__.__globals__
+    scan_id = str(uuid.uuid4())
+    with (
+        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(tmp_path / "first")}),
+        mock.patch.dict(
+            lock_globals,
+            acquire_completion_file_lock=mock.Mock(),
+            release_completion_file_lock=mock.Mock(),
+        ),
+    ):
+        acquire = lock_globals["acquire_completion_file_lock"]
+        release = lock_globals["release_completion_file_lock"]
+        with completion_lock(scan_id):
+            with pytest.raises(RuntimeError, match="nested failure"), completion_lock(scan_id):
+                raise RuntimeError("nested failure")
+            assert acquire.call_count == 1
+            release.assert_not_called()
+            with (
+                mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(tmp_path / "second")}),
+                completion_lock(scan_id),
+            ):
+                assert acquire.call_count == 2
+            assert release.call_count == 1
+        with completion_lock(scan_id):
+            assert acquire.call_count == 3
+        assert release.call_count == 3
+
+
 def test_workbench_does_not_run_textconv_during_diff_setup(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"

@@ -17,46 +17,10 @@ const testCaseSensitive = process.platform === "linux" ? test : test.skip;
 const testPosix = process.platform === "win32" ? test.skip : test;
 const testWindows = process.platform === "win32" ? test : test.skip;
 
-const simulatedPathProbe = [
-  "import json, ntpath, os, posixpath, sys",
-  "from pathlib import PurePosixPath, PureWindowsPath",
-  "from types import SimpleNamespace",
-  "sys.path.insert(0, sys.argv[1])",
-  "import deep_scan_workbench as deep_scan",
-  "mode = sys.argv[2]",
-  "if mode == 'windows':",
-  "    path_type, path_module = PureWindowsPath, ntpath",
-  "    root, supplied, resolved = 'D:/Scan', 'd:/sCaN/pRoMpT', 'D:/Scan/Prompt'",
-  "else:",
-  "    path_type, path_module = PurePosixPath, posixpath",
-  "    root, supplied, resolved = '/scan', '/scan/prompt', '/scan/Prompt'",
-  "class SimulatedPath(path_type):",
-  "    def expanduser(self):",
-  "        return self",
-  "    def absolute(self):",
-  "        return self",
-  "    def resolve(self, strict=False):",
-  "        return type(self)(resolved)",
-  "    def is_file(self):",
-  "        return True",
-  "deep_scan.Path = SimulatedPath",
-  "deep_scan.os = SimpleNamespace(path=path_module)",
-  "deep_scan.require_canonical_scan_directory = lambda path: path",
-  "try:",
-  "    result = deep_scan.deep_scan_path({'scan_dir': root}, supplied, 'Worker prompt path', kind='file')",
-  "except SystemExit:",
-  "    accepted = False",
-  "    result = None",
-  "else:",
-  "    accepted = True",
-  "print(json.dumps({'accepted': accepted, 'nativePathEquality': path_type(supplied) == path_type(resolved), 'resolvedPath': result}))",
-].join("\n");
-
 const realFilesystemProbe = [
   "import json, sys",
   "from pathlib import Path",
   "sys.path.insert(0, sys.argv[1])",
-  "import deep_scan_workbench as deep_scan",
   "import finalize_scan_contract as finalizer",
   "import workbench_db as workbench",
   "mode = sys.argv[2]",
@@ -65,13 +29,10 @@ const realFilesystemProbe = [
   "    alias_scan_dir = Path(str(scan_dir).swapcase())",
   "    alias_directory = alias_scan_dir / 'pRoMpTs'",
   "    artifact_name = 'pRoMpTs/PrOmPt.TxT'",
-  "    candidate_name = 'PrOmPt.TxT'",
   "else:",
   "    alias_scan_dir = Path(sys.argv[4])",
   "    alias_directory = scan_dir / 'prompts'",
   "    artifact_name = 'prompts/prompt.txt'",
-  "    candidate_name = 'prompt.txt'",
-  "deep_scan.require_canonical_scan_directory = workbench.require_canonical_scan_directory",
   "def accepted(action):",
   "    try:",
   "        action()",
@@ -79,7 +40,6 @@ const realFilesystemProbe = [
   "        return False",
   "    return True",
   "checks = {",
-  "    'deepScanPath': accepted(lambda: deep_scan.deep_scan_path({'scan_dir': str(scan_dir)}, str(alias_directory / candidate_name), 'Worker prompt path', kind='file')),",
   "    'finalizerScanDirectory': accepted(lambda: finalizer._require_scan_directory(alias_scan_dir)),",
   "    'finalizerOutputParent': accepted(lambda: finalizer._validate_scan_local_output_path(scan_dir, alias_directory / 'output.json', f'{alias_directory.name}/output.json')),",
   "    'workbenchArtifact': accepted(lambda: workbench.artifact_path(scan_dir, artifact_name, required=True)),",
@@ -192,20 +152,6 @@ describe("bundled workbench canonical paths", () => {
     },
   );
 
-  test("preserves native Windows case-insensitive path comparison", () => {
-    expect(runPythonProbe(simulatedPathProbe, "windows")).toMatchObject({
-      accepted: true,
-      nativePathEquality: true,
-    });
-  });
-
-  test("rejects case-differing POSIX symlink resolution", () => {
-    expect(runPythonProbe(simulatedPathProbe, "posix")).toMatchObject({
-      accepted: false,
-      nativePathEquality: false,
-    });
-  });
-
   testCaseSensitive(
     "rejects case-differing symlinks at every workbench and finalizer boundary",
     async () => {
@@ -227,7 +173,6 @@ describe("bundled workbench canonical paths", () => {
           join(aliasParent, "Scan"),
         ),
       ).toEqual({
-        deepScanPath: false,
         finalizerScanDirectory: false,
         finalizerOutputParent: false,
         workbenchArtifact: false,
@@ -248,7 +193,6 @@ describe("bundled workbench canonical paths", () => {
       expect(
         runPythonProbe(realFilesystemProbe, "windows", scanDirectory),
       ).toEqual({
-        deepScanPath: true,
         finalizerScanDirectory: true,
         finalizerOutputParent: true,
         workbenchArtifact: true,

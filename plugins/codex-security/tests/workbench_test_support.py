@@ -210,21 +210,59 @@ def create_saved_git_workspace(state_dir: Path, target: Path) -> dict[str, objec
     )
 
 
-def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
-    manifest = scan_dir / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"status":"succeeded"}\n')
+def mark_deep_aggregate_ready(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
+    checkpoint = scan_dir / "artifacts" / "deep-scan" / "checkpoint.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    document = (
+        json.loads(checkpoint.read_text())
+        if checkpoint.exists()
+        else {
+            "version": 2,
+            "startedAt": "2026-01-01T00:00:00Z",
+            "passes": [],
+            "mergedScanIds": [],
+            "aggregate": [],
+            "noNewStreak": 4,
+            "consecutiveErrors": 0,
+        }
+    )
+    document["terminalReason"] = "saturated"
+    checkpoint.write_text(json.dumps(document))
+    return checkpoint
+
+
+def begin_legacy_scan(
+    state_dir: Path, codex_home: Path, target: Path, scan_root: Path, *, thread_id: str
+) -> dict[str, object]:
+    """Seed a v1 saved scan to test historical artifact/usage readers without its retired engine."""
+    started = run_workbench(
+        state_dir,
+        "begin-deep-scan",
+        "--thread-id",
+        thread_id,
+        "--target-path",
+        str(target),
+        "--scope",
+        ".",
+        "--scan-root",
+        str(scan_root),
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    scan = started["scan"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
-            """
-            UPDATE deep_scan_runs
-            SET status = 'succeeded', phase = 'terminal', terminal_reason = 'saturated',
-                manifest_path = ?, completed_at = updated_at
-            WHERE scan_id = ?
-            """,
-            (str(manifest), scan_id),
+            "UPDATE scans SET handoff_claim_token = NULL, continuation_thread_id = NULL WHERE id = ?",
+            (scan["scanId"],),
         )
-    return manifest
+        connection.execute(
+            "INSERT INTO deep_scan_runs (scan_id,schema_version,workflow_version,status,phase,workers,"
+            "subagents,stop_after_no_new,max_discovery_runs,created_at,updated_at) "
+            "SELECT id,1,'deep-security-scan/v1','running','discovery',4,3,4,8,started_at,updated_at "
+            "FROM scans WHERE id = ?",
+            (scan["scanId"],),
+        )
+    scan["createdAt"] = scan["updatedAt"]
+    return {"deepScan": scan}
 
 
 def write_completed_contract(

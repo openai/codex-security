@@ -195,9 +195,9 @@ for (const artifact of ["findings.json", "coverage.json", "scan-manifest.json"])
 }
 assert.match(
   deepPrompt,
-  /Leave progress in preflight until start_codex_security_deep_scan begins discovery/
+  /Leave progress updates to that runner/
 );
-assert.match(deepPrompt, /Pass the scanId and handoffClaimToken to that tool/);
+assert.match(deepPrompt, /call start_codex_security_deep_scan with the scanId and handoffClaimToken/);
 assert.doesNotMatch(deepPrompt, /starts preflight without an item count/);
 for (const parentPhaseTool of [
   "list_codex_security_review_items",
@@ -215,5 +215,8 @@ for (const parentPhaseTool of [
 assert.ok(
   deepPrompt.indexOf("start_codex_security_deep_scan")
     < deepPrompt.indexOf("complete_codex_security_scan"),
-  "Deep handoff must complete exactly once after the coordinator provides its canonical manifest"
+  "Deep handoff must describe the completed parent after its scan call"
 );
+
+assert.match(deepPrompt, /do not call complete_codex_security_scan/);
+assert.match(deepPrompt, /sealed parent manifest/);

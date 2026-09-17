@@ -116,6 +116,10 @@ export async function saveCodexSecurityArtifact(
     throw new Error("Omit path to prepare the directory, or provide path and exactly one of content or sourcePath.");
   }
   const parts = input.path === undefined ? undefined : supplementalPath(input, context);
+  // Deep Scan runtime state belongs to the host.
+  if (input.storage === "persistent" && parts?.slice(0, 2).join("/").toLowerCase() === "artifacts/deep-scan") {
+    throw new Error("Use the existing scan tools for canonical artifacts, ledgers and checkpoints.");
+  }
   const selected = await storageContext(context, input.storage, true);
   selected.root = await requireArtifactRoot(selected.root, "Artifact storage");
   if (!parts) return { storage: input.storage, directory: selected.root };

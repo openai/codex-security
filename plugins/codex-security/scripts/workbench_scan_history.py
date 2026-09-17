@@ -16,8 +16,14 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import ContractError, _prepare_scan_finalization
 from report_projection import SEVERITY_ORDER
+from workbench.handoff import require_current_continuation
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
-from workbench_scan_start import scan_target_identity
+from workbench_scan_start import (
+    composition_child_ids,
+    composition_children,
+    read_composition_checkpoint,
+    scan_target_identity,
+)
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
 from workbench_validation import reject_non_finite_json
@@ -50,7 +56,6 @@ def preserve_sealed_completion(
 def cli_scan_resume(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
-    workspace: sqlite3.Row,
     *,
     parse_scan_recipe: Callable[[str, Path], dict[str, Any]],
     scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
@@ -58,29 +63,17 @@ def cli_scan_resume(
     artifact_path: Callable[..., Path | None],
     read_json_object: Callable[[Path], dict[str, Any]],
     workbench_completion_binding: Callable[..., dict[str, Any]],
+    claim_token: str | None = None,
 ) -> dict[str, Any]:
-    if scan["mode"] != "deep" or scan["recipe_json"] is None:
-        raise SystemExit("Resume requires a Deep Scan with a saved CLI launch recipe.")
+    if scan["recipe_json"] is None:
+        raise SystemExit("Resume requires a scan with a saved launch recipe.")
     if scan["status"] != "running" or scan["canceled_at"] is not None:
         raise SystemExit(
             "Resume requires a running scan; completed, failed, and canceled scans cannot resume."
         )
-    thread_id = scan["continuation_thread_id"]
-    owner = scan["deep_scan_owner_thread_id"] or workspace["thread_id"]
-    if (
-        not thread_id
-        or (owner is not None and owner != thread_id)
-        or scan["handoff_status"] != "delivered"
-        or scan["handoff_claim_token"] is not None
-    ):
-        raise SystemExit("Resume requires the original owning CLI session.")
-    run = connection.execute(
-        "SELECT status, cancel_requested FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
-    ).fetchone()
-    if run is not None and (
-        run["status"] not in {"running", "succeeded"} or run["cancel_requested"]
-    ):
-        raise SystemExit("This Deep Scan has stopped and cannot resume.")
+    require_current_continuation(
+        scan, claim_token, error_message="Resume requires the original owning CLI session."
+    )
     try:
         repository = require_scan_target_identity(scan)
     except SystemExit as exc:
@@ -96,43 +89,144 @@ def cli_scan_resume(
         raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
     recipe = parse_scan_recipe(scan["recipe_json"], repository)
     scan_dir = require_scan_directory(Path(scan["scan_dir"]))
+    result = scan_registration(connection, scan, scan_contract)
+    result["recipe"] = recipe
+    if (
+        scan["mode"] == "deep"
+        and read_composition_checkpoint(scan) is None
+        and connection.execute(
+            "SELECT 1 FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
+        ).fetchone()
+        is not None
+    ):
+        result["threadId"] = None
+    # A process can stop after sealing files but before committing completion.
+    manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
+    if manifest_path is not None:
+        manifest = read_json_object(manifest_path)
+        manifest_scan = manifest.get("scan")
+        if isinstance(manifest_scan, dict) and (
+            manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") is not None
+        ):
+            try:
+                binding = workbench_completion_binding(scan, scan["started_at"], manifest)
+                _prepare_scan_finalization(
+                    scan_dir,
+                    expected_coverage_mode=binding["coverageMode"],
+                    completion_binding=binding,
+                )
+                result["sealedProducerVersion"] = manifest_scan["producer"]["version"]
+            except ContractError as exc:
+                raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
+    return result
+
+
+def scan_registration(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
+) -> dict[str, Any]:
     progress = connection.execute(
         "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?", (scan["id"],)
     ).fetchone()
-    result = {
+    return {
         "contract": scan_contract(scan),
-        "recipe": recipe,
-        "scanDir": str(scan_dir),
+        "recipe": json.loads(scan["recipe_json"]),
+        "scanDir": scan["scan_dir"],
         "scanId": scan["id"],
         "scopeFileCount": progress["scope_file_count"],
         "startedAt": scan["started_at"],
         "targetId": scan["target_id"],
         "targetRevision": scan["target_revision"],
-        "threadId": thread_id,
+        "threadId": scan["continuation_thread_id"],
+        "claimToken": scan["handoff_claim_token"],
         "userContext": scan["user_context"],
     }
-    # Active coordinators may still be writing drafts. Validate sealed results
-    # before attaching to a coordinator that has finished.
-    if run is not None and run["status"] == "succeeded":
-        manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-        if manifest_path is not None:
-            manifest = read_json_object(manifest_path)
-            manifest_scan = manifest.get("scan")
-            if isinstance(manifest_scan, dict) and (
-                manifest_scan.get("sealedAt") is not None
-                or manifest_scan.get("artifacts") is not None
-            ):
-                try:
-                    binding = workbench_completion_binding(scan, scan["started_at"], manifest)
-                    _prepare_scan_finalization(
-                        scan_dir,
-                        expected_coverage_mode=binding["coverageMode"],
-                        completion_binding=binding,
-                    )
-                    result["sealedProducerVersion"] = manifest_scan["producer"]["version"]
-                except ContractError as exc:
-                    raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
-    return result
+
+
+def require_composition_complete(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
+    if scan["mode"] != "deep":
+        return
+    checkpoint = read_composition_checkpoint(scan)
+    if checkpoint is not None:
+        if checkpoint.get("terminalReason") in {"saturated", "capped"}:
+            return
+    else:
+        legacy = connection.execute(
+            "SELECT status, manifest_path FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
+        ).fetchone()
+        if legacy is not None and legacy["status"] == "succeeded" and legacy["manifest_path"]:
+            return
+    raise SystemExit("Deep Scan must finish and save its aggregate before the parent can complete.")
+
+
+def independent_review_progress(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> dict[str, Any] | None:
+    run = connection.execute(
+        "SELECT completion_sequence, updated_at, max_discovery_runs FROM deep_scan_runs WHERE scan_id = ?",
+        (scan["id"],),
+    ).fetchone()
+    checkpoint = read_composition_checkpoint(scan)
+    if checkpoint is not None:
+        children = composition_children(connection, scan)
+        recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else {}
+        legacy = run if checkpoint.get("legacy") is not None else None
+        return {
+            "active": sum(child["status"] == "running" for child in children),
+            "completed": sum(child["status"] == "complete" for child in children)
+            + (legacy["completion_sequence"] if legacy is not None else 0),
+            "maximum": recipe.get("deepScan", {}).get(
+                "maxDiscoveryRuns",
+                legacy["max_discovery_runs"] if legacy is not None else len(checkpoint["passes"]),
+            ),
+            "consolidating": any(
+                child["status"] == "complete" and child["id"] not in checkpoint["mergedScanIds"]
+                for child in children
+            ),
+            "updatedAt": max([scan["updated_at"], *(child["updated_at"] for child in children)]),
+        }
+    if run is None:
+        return None
+    return {
+        "active": 0,
+        "completed": run["completion_sequence"],
+        "maximum": run["max_discovery_runs"],
+        "consolidating": False,
+        "updatedAt": run["updated_at"],
+    }
+
+
+def existing_deep_scan_for_target(
+    connection: sqlite3.Connection, thread_id: str, target_path: str, scope: str
+) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT scans.* FROM scans JOIN workspaces ON workspaces.id = scans.workspace_id "
+        "WHERE COALESCE(scans.deep_scan_owner_thread_id, workspaces.thread_id) = ? "
+        "AND scans.target_path = ? AND scans.scope = ? AND scans.mode = 'deep' "
+        "AND scans.status = 'running' ORDER BY scans.updated_at DESC LIMIT 1",
+        (thread_id, target_path, scope),
+    ).fetchone()
+
+
+def other_running_deep_scans(
+    connection: sqlite3.Connection, current_scan_id: str
+) -> list[dict[str, str]]:
+    return [
+        {
+            "scanId": row["id"],
+            "targetPath": row["target_path"],
+            "phase": row["phase"],
+            "startedAt": row["started_at"],
+            "updatedAt": row["updated_at"],
+        }
+        for row in connection.execute(
+            "SELECT id, target_path, phase, started_at, updated_at FROM scans "
+            "WHERE mode = 'deep' AND status = 'running' AND id != ? "
+            "ORDER BY updated_at DESC, started_at DESC, id",
+            (current_scan_id,),
+        )
+    ]
 
 
 def _windows_path_key(value: str) -> str:
@@ -205,6 +299,9 @@ def list_scans(
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
     clauses: list[str] = []
     values: list[Any] = []
+    if args is None or not args.scan_root:
+        clauses.append("scans.id NOT IN (SELECT value FROM json_each(?))")
+        values.append(json.dumps(sorted(composition_child_ids(connection))))
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
         requested_repository = connection.execute(
@@ -367,12 +464,13 @@ def list_unmatched_scan_pairs(
         """,
         (str(repository), str(repository)),
     ).fetchone()
+    child_ids = composition_child_ids(connection)
     selected = [
         scan
         for scan in connection.execute(
             "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
         )
-        if _same_repository(scan, requested)
+        if scan["id"] not in child_ids and _same_repository(scan, requested)
     ]
 
     available = []
@@ -981,6 +1079,9 @@ def finding_matches(
             (occurrence_id,),
         )
     )
+    child_ids = composition_child_ids(connection) - {scan_id}
+    linked_rows = [row for row in linked_rows if row["scan_id"] not in child_ids]
+    rows = [row for row in rows if row["scan_id"] not in child_ids]
     known_scans = sorted(
         {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows}
     )
