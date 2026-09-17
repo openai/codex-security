@@ -760,6 +760,7 @@ try {
   try {
     const base = `http://127.0.0.1:${dashboardServer.address().port}`;
     for (const [path, contentType] of [
+      ["/", "text/html"],
       ["/dashboard", "text/html"],
       ["/dashboard/app.js", "text/javascript"],
       ["/dashboard/app.css", "text/css"],

@@ -11,6 +11,8 @@
 - seal drafts with empty artifact lists ([#941](https://github.com/openai/codex-security/pull/941))
 - include Terraform files in scan inventories ([#944](https://github.com/openai/codex-security/pull/944))
 - run README CLI commands with npx ([#945](https://github.com/openai/codex-security/pull/945))
+- resolve Git metadata outside its config ([#935](https://github.com/openai/codex-security/pull/935))
+- redirect findings service root to dashboard ([#948](https://github.com/openai/codex-security/pull/948))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

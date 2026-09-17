@@ -314,25 +314,32 @@ describe("security policy generation", () => {
     }
   });
 
-  test.each(["detached", "explicit worktree", "malformed config"])(
-    "excludes %s Git metadata without a worktree marker",
-    async (kind) => {
-      const f = await fixture();
-      const metadata = join(f.repository, "saved-metadata");
-      policyGit(f.repository, "init", "--quiet", "--bare", metadata);
-      policyGit(metadata, "config", "core.bare", "false");
-      if (kind === "explicit worktree")
-        policyGit(metadata, "config", "core.worktree", f.repository);
-      if (kind === "malformed config")
-        await writeFile(join(metadata, "config"), "[malformed config\n");
-      await writeFile(join(metadata, "SECURITY.md"), "Git metadata fixture");
-      const inventory = await inspectSecurityPolicySources(
-        await resolveSecurityPolicyTarget(f.repository),
-      );
-      expect(inventory.policyPaths).toEqual([]);
-      expect(inventory.gitMetadataPaths).toContain(metadata);
-    },
-  );
+  test.each([
+    "detached",
+    "explicit worktree",
+    "malformed config",
+    "malformed config in checkout",
+  ])("excludes %s Git metadata without a worktree marker", async (kind) => {
+    const f = await fixture();
+    const metadata = join(f.repository, "saved-metadata");
+    if (kind === "malformed config in checkout")
+      policyGit(f.repository, "init", "--quiet");
+    policyGit(f.repository, "init", "--quiet", "--bare", metadata);
+    policyGit(metadata, "config", "core.bare", "false");
+    if (kind === "explicit worktree")
+      policyGit(metadata, "config", "core.worktree", f.repository);
+    if (kind.startsWith("malformed config"))
+      await writeFile(join(metadata, "config"), "[malformed config\n");
+    const originalConfig = await readFile(join(metadata, "config"));
+    await writeFile(join(f.repository, "SECURITY.md"), POLICY);
+    await writeFile(join(metadata, "SECURITY.md"), "Git metadata fixture");
+    const inventory = await inspectSecurityPolicySources(
+      await resolveSecurityPolicyTarget(f.repository),
+    );
+    expect(inventory.policyPaths).toEqual(["SECURITY.md"]);
+    expect(inventory.gitMetadataPaths).toContain(metadata);
+    expect(await readFile(join(metadata, "config"))).toEqual(originalConfig);
+  });
 
   test("excludes copied linked-worktree metadata", async () => {
     const f = await fixture();
