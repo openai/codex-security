@@ -425,7 +425,111 @@ fn main() -> std::io::Result<()> {
                 "Deep-review helper changed a replacement path",
             ));
         }
-        println!("{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"directoryIdentity\":true}}");
+        let shards_name = raw("shards-", 0xdc80);
+        let shards = repo.join(&shards_name);
+        let replacement_shards = repo.join(raw("shards-", 0xfffd));
+        fs::create_dir(&replacement_shards)?;
+        let shard_sentinel = replacement_shards.join("rank-shard-0001.input.jsonl");
+        fs::write(&shard_sentinel, "replacement shard sentinel")?;
+        let merge_parent = raw("merged-", 0xd800);
+        let merged = repo.join(&merge_parent).join(&output_name);
+        let merge_sentinel = repo.join(raw("merged-", 0xfffd)).join(&replacement_output);
+        fs::create_dir_all(merge_sentinel.parent().unwrap())?;
+        fs::write(&merge_sentinel, "replacement merge sentinel")?;
+        let input_rows = [
+            "{\"path\":\"first.py\",\"area\":\"src\",\"preview\":\"first\"}\r\n",
+            "{\"path\":\"second.py\",\"area\":\"src\",\"preview\":\"second\"}\r\n",
+        ];
+        let output_rows = [
+            "{\"path\":\"first.py\",\"area\":\"src\",\"score\":5,\"include\":true,\"reason\":\"review\"}\r\n",
+            "{\"path\":\"second.py\",\"area\":\"src\",\"score\":6,\"include\":true,\"reason\":\"review\"}\r\n",
+        ];
+        fs::write(repo.join(&input_name), input_rows.concat())?;
+        let shard_command = |command: &str, args: &[PathBuf]| {
+            Command::new(&node)
+                .arg(&script)
+                .args(["--helper", command])
+                .args(args)
+                .current_dir(&repo)
+                .env("USERPROFILE", &repo)
+                .output()
+        };
+        let made = shard_command(
+            "make-rank-shards",
+            &[
+                "--rank-input".into(),
+                repo.join(&input_name),
+                "--out-dir".into(),
+                Path::new("~").join(&shards_name),
+                "--max-rows".into(),
+                "1".into(),
+            ],
+        )?;
+        if !made.status.success() || !made.stderr.is_empty() {
+            return Err(io::Error::other(format!(
+                "Wide shard creation failed: {}",
+                String::from_utf8_lossy(&made.stderr)
+            )));
+        }
+        for (index, input_row) in input_rows.iter().enumerate() {
+            let stem = format!("rank-shard-{:04}", index + 1);
+            if fs::read(shards.join(format!("{stem}.input.jsonl")))? != input_row.as_bytes() {
+                return Err(io::Error::other("Wide input shard bytes changed"));
+            }
+            fs::write(
+                shards.join(format!("{stem}.output.jsonl")),
+                output_rows[index],
+            )?;
+        }
+        let validated = shard_command(
+            "validate-rank-shard",
+            &[
+                "--input".into(),
+                Path::new(&shards_name).join("rank-shard-0001.input.jsonl"),
+                "--output".into(),
+                Path::new(&shards_name).join("rank-shard-0001.output.jsonl"),
+            ],
+        )?;
+        let merge_args = [
+            "--rank-input".into(),
+            Path::new(".").join(&input_name),
+            "--shard-dir".into(),
+            shards.clone(),
+            "--out".into(),
+            Path::new("~").join(&merge_parent).join(&output_name),
+        ];
+        let merge_result = shard_command("merge-rank-outputs", &merge_args)?;
+        if !validated.status.success()
+            || !validated.stderr.is_empty()
+            || !merge_result.status.success()
+            || !merge_result.stderr.is_empty()
+            || fs::read(&merged)? != output_rows.concat().as_bytes()
+        {
+            return Err(io::Error::other(format!(
+                "Wide shard validation/merge failed: {}{}",
+                String::from_utf8_lossy(&validated.stderr),
+                String::from_utf8_lossy(&merge_result.stderr)
+            )));
+        }
+        let mut malformed_name = raw("rank-shard-", 0xdfff);
+        malformed_name.push(".input.jsonl");
+        fs::write(shards.join(&malformed_name), "")?;
+        let malformed = shard_command("merge-rank-outputs", &merge_args)?;
+        if malformed.status.code() != Some(1)
+            || !String::from_utf8_lossy(&malformed.stderr)
+                .contains("Rank input shards must use contiguous canonical names")
+            || !String::from_utf8_lossy(&malformed.stderr)
+                .contains("rank-shard-\\udfff.input.jsonl")
+            || fs::read(&merged)? != output_rows.concat().as_bytes()
+            || fs::read(&shard_sentinel)? != b"replacement shard sentinel"
+            || fs::read(&merge_sentinel)? != b"replacement merge sentinel"
+            || fs::read(repo.join(raw("input-", 0xfffd)))? != b"invalid replacement input"
+        {
+            return Err(io::Error::other(
+                "Wide shard discovery or replacement paths changed",
+            ));
+        }
+        println!("{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"rankShardHelperRawPaths\":true,\"directoryIdentity\":true}}");
         Ok(())
     }
 
