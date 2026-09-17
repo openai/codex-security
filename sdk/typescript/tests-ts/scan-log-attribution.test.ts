@@ -77,7 +77,12 @@ test("attribution write failures preserve scan errors and cancellation", async (
               rollout,
               JSON.stringify({
                 type: "event_msg",
-                payload: { type: "task_started", turn_id: `turn-${cancel}` },
+                timestamp: new Date().toISOString(),
+                payload: {
+                  type: "task_started",
+                  turn_id: `turn-${cancel}`,
+                  started_at: Date.now() / 1_000,
+                },
               }) + "\n",
             );
             yield { type: "turn.started" };
@@ -105,8 +110,13 @@ test("concurrent scans retain active and saved root/child turns without later wo
   const copy = await mkdtemp(join(tmpdir(), "scan-log-copy-"));
   const pendingWrites = new Set<Promise<void>>();
   const now = Date.parse("2026-08-21T12:00:00Z");
-  const clock = spyOn(Date, "now").mockImplementation(() => now);
-  const session = async (id: string, parent?: string) => {
+  let currentNow = now;
+  const clock = spyOn(Date, "now").mockImplementation(() => currentNow);
+  const session = async (
+    id: string,
+    scanDirectory: string,
+    parent?: string,
+  ) => {
     await mkdir(join(home, "sessions"), { recursive: true });
     await writeFile(
       join(home, "sessions", `${id}.jsonl`),
@@ -114,6 +124,8 @@ test("concurrent scans retain active and saved root/child turns without later wo
         type: "session_meta",
         payload: {
           id,
+          cwd: scanDirectory,
+          timestamp: new Date(now - 10_000).toISOString(),
           source: parent
             ? { subagent: { thread_spawn: { parent_thread_id: parent } } }
             : "cli",
@@ -127,12 +139,16 @@ test("concurrent scans retain active and saved root/child turns without later wo
       [
         {
           type: "event_msg",
-          timestamp: new Date(now).toISOString(),
-          payload: { type: "task_started", turn_id: turnId },
+          timestamp: new Date(currentNow).toISOString(),
+          payload: {
+            type: "task_started",
+            turn_id: turnId,
+            started_at: currentNow / 1_000,
+          },
         },
         {
           type: "response_item",
-          timestamp: new Date(now).toISOString(),
+          timestamp: new Date(currentNow).toISOString(),
           payload: { type: "message", text: turnId },
         },
       ]
@@ -161,15 +177,20 @@ test("concurrent scans retain active and saved root/child turns without later wo
   try {
     const generators = [];
     for (const id of ["one", "two"]) {
-      await session(id);
-      await session(`${id}-child`, id);
+      const scanDirectory = join(home, `scan-${id}`);
+      await session(id, scanDirectory);
+      await session(`${id}-child`, scanDirectory, id);
       const events = recordScanLogTurn(
         {
           scanId: id,
           threadId: () => id,
           codexHome: home,
           pendingWrites,
-          tracker: new ScanCostTracker({ codexHome: home, model: "gpt-5" }),
+          tracker: new ScanCostTracker({
+            codexHome: home,
+            model: "gpt-5",
+            scanDirectory,
+          }),
         },
         async () => ({
           events: (async function* () {
@@ -192,6 +213,7 @@ test("concurrent scans retain active and saved root/child turns without later wo
       ]);
 
     await Promise.all(generators.map((events) => events.next()));
+    currentNow = now + 1_000;
 
     for (const id of ["one", "two"]) {
       await task(id, "unrelated");
@@ -212,40 +234,179 @@ test("concurrent scans retain active and saved root/child turns without later wo
   }
 });
 
-test("captured byte ranges select native tasks after the shared reader advances", async () => {
-  const home = await mkdtemp(join(tmpdir(), "scan-log-cursor-"));
-  const tracker = new ScanCostTracker({ codexHome: home, model: "gpt-5" });
-  const path = join(home, "sessions", "root.jsonl");
-  const task = (turnId: string) =>
-    JSON.stringify({
-      type: "event_msg",
-      payload: { type: "task_started", turn_id: turnId },
-    }) + "\n";
+test("log reads discover child sessions created while active attribution settles", async () => {
+  const home = await mkdtemp(join(tmpdir(), "scan-log-active-child-"));
+  const scanDirectory = join(home, "scan");
+  const pendingWrites = new Set<Promise<void>>();
+  const tracker = new ScanCostTracker({
+    codexHome: home,
+    model: "gpt-5",
+    scanDirectory,
+  });
+  const scanId = "scan-active-child";
+  const ownerPath = join(home, "sessions", "owner.jsonl");
   try {
-    await mkdir(join(home, "sessions"));
+    await mkdir(join(home, "sessions"), { recursive: true });
     await writeFile(
-      path,
-      JSON.stringify({ type: "session_meta", payload: { id: "root" } }) +
-        "\n" +
-        task("previous"),
-    );
-    const before = await tracker.sessionOffsets();
-    // Exercise byte offsets across UTF-8 and the reader's chunk/partial-line boundary.
-    await appendFile(
-      path,
+      ownerPath,
       JSON.stringify({
-        type: "response_item",
-        payload: { text: "é".repeat(40_000) },
-      }) +
-        "\n" +
-        task("owned"),
+        type: "session_meta",
+        payload: {
+          id: "owner",
+          cwd: scanDirectory,
+          timestamp: "2026-09-16T12:00:00Z",
+        },
+      }) + "\n",
     );
-    const after = await tracker.sessionOffsets();
-    await appendFile(path, task("later"));
-    tracker.start("root");
-    await tracker.refresh();
-    expect(await tracker.logTurns("root", before, after)).toEqual([
-      { threadId: "root", turnId: "owned" },
+    const events = recordScanLogTurn(
+      {
+        scanId,
+        threadId: () => "owner",
+        codexHome: home,
+        pendingWrites,
+        tracker,
+      },
+      async () => ({
+        events: (async function* () {
+          yield { type: "turn.started" };
+        })(),
+      }),
+      (error) => {
+        throw error;
+      },
+    );
+    expect((await events.next()).value?.type).toBe("turn.started");
+
+    const logTurns = spyOn(tracker, "logTurns").mockImplementation(async () => {
+      const childPath = join(home, "sessions", "child.jsonl");
+      await writeFile(
+        childPath,
+        [
+          {
+            type: "session_meta",
+            payload: {
+              id: "child",
+              cwd: scanDirectory,
+              timestamp: "2026-09-16T12:03:00Z",
+              source: {
+                subagent: { thread_spawn: { parent_thread_id: "owner" } },
+              },
+            },
+          },
+          {
+            type: "event_msg",
+            timestamp: "2026-09-16T12:03:00Z",
+            payload: {
+              type: "task_started",
+              turn_id: "child-owned",
+              started_at: Date.parse("2026-09-16T12:03:00Z") / 1_000,
+            },
+          },
+          {
+            type: "response_item",
+            timestamp: "2026-09-16T12:03:01Z",
+            payload: { type: "message", text: "owned child reply" },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+      return [{ threadId: "child", turnId: "child-owned" }];
+    });
+
+    const logs = await readSavedScanLogs(
+      {
+        scanId,
+        continuationThreadId: "owner",
+        executionThreadIds: ["owner"],
+        progress: { status: "complete", updatedAt: "2026-09-16T12:02:00Z" },
+      },
+      home,
+    );
+    expect(logs.sessions.map(({ threadId }) => threadId)).toContain("child");
+    expect(JSON.stringify(logs)).toContain("owned child reply");
+
+    logTurns.mockRestore();
+    expect((await events.next()).done).toBe(true);
+    await settleScanLogTurns(pendingWrites);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("turn windows include scan workers without claiming unrelated owner descendants", async () => {
+  const home = await mkdtemp(join(tmpdir(), "scan-log-window-"));
+  const scanDirectory = join(home, "scan");
+  const sessions = join(home, "sessions");
+  const start = Date.parse("2026-09-16T12:00:00Z");
+  const end = start + 2_000;
+  const writeSession = async (id: string, cwd: string, parent?: string) => {
+    await mkdir(sessions, { recursive: true });
+    await writeFile(
+      join(sessions, `${id}.jsonl`),
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id,
+          cwd,
+          timestamp: new Date(start - 10_000).toISOString(),
+          ...(parent === undefined
+            ? {}
+            : {
+                source: {
+                  subagent: { thread_spawn: { parent_thread_id: parent } },
+                },
+              }),
+        },
+      }) + "\n",
+    );
+  };
+  const task = async (id: string, turnId: string, at: number) => {
+    await appendFile(
+      join(sessions, `${id}.jsonl`),
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: new Date(at).toISOString(),
+        payload: {
+          type: "task_started",
+          turn_id: turnId,
+          started_at: at / 1_000,
+        },
+      }) + "\n",
+    );
+  };
+  const tracker = new ScanCostTracker({
+    codexHome: home,
+    model: "gpt-5",
+    scanDirectory,
+  });
+  try {
+    await writeSession("desktop-owner", join(home, "workspace"));
+    await writeSession(
+      "unrelated-child",
+      join(home, "workspace"),
+      "desktop-owner",
+    );
+    await writeSession(
+      "deep-worker",
+      join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "w1",
+        "output",
+      ),
+    );
+    await task("desktop-owner", "previous", start - 1_000);
+    await task("desktop-owner", "owned-owner", start + 500);
+    await task("unrelated-child", "private-child", start + 700);
+    await task("deep-worker", "owned-worker", start + 900);
+    await task("desktop-owner", "later", end + 1_000);
+
+    expect(await tracker.logTurns("desktop-owner", start, end)).toEqual([
+      { threadId: "desktop-owner", turnId: "owned-owner" },
+      { threadId: "deep-worker", turnId: "owned-worker" },
     ]);
   } finally {
     await tracker.stop();

@@ -1,4 +1,4 @@
-import { open, readdir, stat } from "node:fs/promises";
+import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
   estimateScanCost,
@@ -36,9 +36,13 @@ interface SessionReasoning {
   activity: ScanActivity | null;
 }
 
+interface SessionTurn {
+  startedAt: number | null;
+}
+
 interface SessionUsage {
   offset: number;
-  turns: Map<string, number>;
+  turns: Map<string, SessionTurn>;
   pendingLine: Buffer[];
   pendingLineBytes: number;
   unreadable: boolean;
@@ -184,38 +188,48 @@ export class ScanCostTracker {
     return this.#snapshot;
   }
 
-  public async sessionOffsets(): Promise<Map<string, number>> {
-    const offsets = new Map<string, number>();
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
-      offsets.set(path, (await stat(path)).size);
-    }
-    return offsets;
-  }
-
   public async logTurns(
     threadId: string,
-    before: ReadonlyMap<string, number>,
-    after: ReadonlyMap<string, number>,
+    startedAt: number,
+    endedAt: number,
   ): Promise<{ threadId: string; turnId: string }[]> {
     const update = this.#pending.then(async () => {
-      await this.#readSessions(after, false);
+      // Attribution is optional and runs after the owned turn has yielded back to
+      // its caller. Read native rollout state here rather than putting a full
+      // CODEX_HOME walk on the scan turn path.
+      await this.#readSessions(undefined, false);
+
       const included = new Set([threadId]);
-      for (const parent of included) {
+      const scanDirectory = this.#options.scanDirectory;
+      if (scanDirectory !== undefined) {
         for (const session of this.#sessions.values()) {
-          if (session.threadId !== null && session.parentThreadId === parent)
+          if (session.threadId === null || session.workingDirectory === null)
+            continue;
+          // The resumed/finishing owner can be a shared Desktop thread, so do
+          // not recursively claim all of its descendants. Scan workers are
+          // identifiable by the scan directory, including independent Deep Scan
+          // roots, while the owner itself is included explicitly above.
+          if (
+            session.workingDirectory === scanDirectory ||
+            isScanArtifactDirectory(scanDirectory, session.workingDirectory)
+          ) {
             included.add(session.threadId);
+          }
         }
       }
+
       const turns: { threadId: string; turnId: string }[] = [];
-      for (const [path, end] of after) {
-        const session = this.#sessions.get(path);
-        if (session?.threadId == null || !included.has(session.threadId))
+      for (const session of this.#sessions.values()) {
+        if (session.threadId === null || !included.has(session.threadId))
           continue;
-        for (const [turnId, offset] of session.turns) {
-          if (offset >= (before.get(path) ?? 0) && offset < end)
+        for (const [turnId, turn] of session.turns) {
+          if (
+            turn.startedAt !== null &&
+            turn.startedAt >= startedAt &&
+            turn.startedAt <= endedAt
+          ) {
             turns.push({ threadId: session.threadId, turnId });
+          }
         }
       }
       return turns;
@@ -511,18 +525,12 @@ function readSessionChunk(
     }
 
     if (session.pendingLineBytes === 0) {
-      readSessionEvent(
-        fragment.toString("utf8"),
-        session,
-        session.offset + lineStart,
-        repository,
-      );
+      readSessionEvent(fragment.toString("utf8"), session, repository);
     } else {
       if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
       readSessionEvent(
         Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
         session,
-        session.offset + lineStart - session.pendingLineBytes,
         repository,
       );
       session.pendingLine = [];
@@ -532,10 +540,29 @@ function readSessionChunk(
   }
 }
 
+function rememberTurn(
+  event: Record<string, unknown>,
+  payload: Record<string, unknown>,
+  session: SessionUsage,
+): void {
+  const turnId = payload["turn_id"];
+  if (typeof turnId !== "string") return;
+  const payloadStartedAt = payload["started_at"];
+  const timestamp = event["timestamp"];
+  const startedAt =
+    typeof payloadStartedAt === "number"
+      ? payloadStartedAt * 1_000
+      : typeof timestamp === "string"
+        ? Date.parse(timestamp)
+        : Number.NaN;
+  session.turns.set(turnId, {
+    startedAt: Number.isFinite(startedAt) ? startedAt : null,
+  });
+}
+
 function readSessionEvent(
   line: string,
   session: SessionUsage,
-  offset: number,
   repository?: string,
 ): void {
   if (line.length === 0) return;
@@ -583,18 +610,13 @@ function readSessionEvent(
       if (owned) {
         session.replaying = false;
         session.events?.push(event);
-        if (typeof payload["turn_id"] === "string")
-          session.turns.set(payload["turn_id"], offset);
+        rememberTurn(event, payload, session);
       }
     }
     return;
   }
-  if (
-    event["type"] === "event_msg" &&
-    payload["type"] === "task_started" &&
-    typeof payload["turn_id"] === "string"
-  )
-    session.turns.set(payload["turn_id"], offset);
+  if (event["type"] === "event_msg" && payload["type"] === "task_started")
+    rememberTurn(event, payload, session);
   session.events?.push(event);
   if (event["type"] === "response_item") {
     session.progress.push(...sessionProgressUpdates(payload));

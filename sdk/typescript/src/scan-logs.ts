@@ -71,8 +71,8 @@ interface ScanLogInvocation {
 
 const scanLogInvocations = new Map<string, Set<ScanLogInvocation>>();
 
-// Capture byte boundaries before returning control to callers that can resume
-// the same thread. Resolve native task IDs on the existing incremental reader.
+// Bound ownership to the streamed turn itself, then resolve native task IDs on
+// the existing incremental reader without blocking scan execution on log I/O.
 export async function* recordScanLogTurn<T extends { readonly type: string }>(
   options: {
     scanId: string;
@@ -89,19 +89,19 @@ export async function* recordScanLogTurn<T extends { readonly type: string }>(
       onError(error);
     } catch {}
   };
-  const before = await options.tracker.sessionOffsets().catch(warn);
-  let after: Map<string, number> | undefined;
+  const startedAt = Date.now();
+  let endedAt: number | undefined;
   const path = scanLogTurnsPath(options.codexHome, options.scanId);
   const invocations =
     scanLogInvocations.get(path) ?? new Set<ScanLogInvocation>();
   const invocation: ScanLogInvocation = {
     turns: async () => {
       const threadId = options.threadId();
-      if (threadId === null || before === undefined) return [];
+      if (threadId === null) return [];
       return await options.tracker.logTurns(
         threadId,
-        before,
-        after ?? (await options.tracker.sessionOffsets()),
+        startedAt,
+        endedAt ?? Date.now(),
       );
     },
   };
@@ -114,32 +114,31 @@ export async function* recordScanLogTurn<T extends { readonly type: string }>(
   try {
     yield* (await run()).events;
   } finally {
-    if (options.threadId() === null || before === undefined) {
+    if (options.threadId() === null) {
       forget();
     } else {
-      after = (await options.tracker.sessionOffsets().catch(warn)) ?? undefined;
-      if (after === undefined) {
-        forget();
-      } else {
-        const write = invocation
-          .turns()
-          .then(async (turns) => {
-            if (turns.length === 0) return;
-            await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-            await appendFile(
-              path,
-              turns.map((turn) => JSON.stringify(turn) + "\n").join(""),
-              { mode: 0o600 },
-            );
-          })
-          .catch(warn)
-          .finally(() => {
-            forget();
-            options.pendingWrites.delete(write);
-          });
-        invocation.write = write;
-        options.pendingWrites.add(write);
-      }
+      // End the ownership window synchronously, then move session discovery and
+      // attribution persistence fully off the scan turn path. Client cleanup and
+      // log reads explicitly settle these optional writes when they need them.
+      endedAt = Date.now();
+      const write = invocation
+        .turns()
+        .then(async (turns) => {
+          if (turns.length === 0) return;
+          await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+          await appendFile(
+            path,
+            turns.map((turn) => JSON.stringify(turn) + "\n").join(""),
+            { mode: 0o600 },
+          );
+        })
+        .catch(warn)
+        .finally(() => {
+          forget();
+          options.pendingWrites.delete(write);
+        });
+      invocation.write = write;
+      options.pendingWrites.add(write);
     }
   }
 }
@@ -202,29 +201,15 @@ export async function findScanSession(
 }
 
 export async function readScanLogs(options: ScanLogOptions) {
-  const logs = new Map<string, [SessionLog, ...SessionLog[]]>();
   const homes = new Set(
     typeof options.codexHome === "string"
       ? [options.codexHome]
       : options.codexHome,
   );
-  for (const directory of ["sessions", "archived_sessions"]) {
-    for (const home of homes) {
-      for await (const session of scanSessions(home, directory)) {
-        const copies = logs.get(session.threadId);
-        if (copies === undefined) logs.set(session.threadId, [session]);
-        else copies.push(session);
-      }
-    }
-  }
 
-  const root = options.threadId ? logs.get(options.threadId)?.[0] : undefined;
-  if (root === undefined && !options.allowMissingRoot) {
-    throw new CodexSecurityError(
-      `No saved session logs are available for scan ${options.scanId}.`,
-    );
-  }
-
+  // Active attribution can discover a child rollout that did not exist when the
+  // log read began. Settle/inspect it first, then discover sessions so directly
+  // attributed children are present in the selected log map.
   const ownedTurns = new Map<string, Set<string>>();
   for (const home of homes) {
     const path = scanLogTurnsPath(home, options.scanId);
@@ -253,6 +238,24 @@ export async function readScanLogs(options: ScanLogOptions) {
       turns.add(record["turnId"]);
       ownedTurns.set(record["threadId"], turns);
     }
+  }
+
+  const logs = new Map<string, [SessionLog, ...SessionLog[]]>();
+  for (const directory of ["sessions", "archived_sessions"]) {
+    for (const home of homes) {
+      for await (const session of scanSessions(home, directory)) {
+        const copies = logs.get(session.threadId);
+        if (copies === undefined) logs.set(session.threadId, [session]);
+        else copies.push(session);
+      }
+    }
+  }
+
+  const root = options.threadId ? logs.get(options.threadId)?.[0] : undefined;
+  if (root === undefined && !options.allowMissingRoot) {
+    throw new CodexSecurityError(
+      `No saved session logs are available for scan ${options.scanId}.`,
+    );
   }
 
   const explicitlyIncluded = new Set([
