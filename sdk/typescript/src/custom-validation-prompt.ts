@@ -56,6 +56,8 @@ export async function customDiscoveryPrompt(
       source(pluginRoot, "references/core-scan.md"),
     ]);
     const discovery = core
+      // The custom validator owns execution; discovery remains source-only.
+      .replace(/\n## Runtime Validation\n[\s\S]*?(?=\n## |$)/, "")
       .replace(
         /^7\. .+$/m,
         "7. Retain the combined source-backed candidates and their existing evidence. The SDK will run independent final validation in a separate turn.",

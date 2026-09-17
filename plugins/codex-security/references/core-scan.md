@@ -29,6 +29,10 @@ For a source-backed secret exposure, the disclosure path is a source reader obta
 
 Distinguish credential material from public keys or certificates, identifiers, environment or secret-store references, and demonstrable placeholders or dummy values. An opaque string alone is insufficient evidence. A test/example filename or an unused code path alone is insufficient counterevidence. Preserve material uncertainty in the existing coverage fields. Never use discovered credentials or contact a service to validate them. Retain the exact path and line, credential type, and relevant source context.
 
+## Runtime Validation
+
+The owner of this Standard audit may build and execute targeted tests or proof-of-concept harnesses when its effective permissions provide a writable validation workspace. In Deep Scan, each independent Standard worker owns this work before submitting its final result. Keep source-review subagents read-only. Put build copies, harnesses, generated files, and build caches in the permitted workspace; preserve the original target and cite its original source paths and lines. Use the actual application or library, rather than a separate reimplementation of the suspected bug. Record commands, observed results, and proof artifacts in the existing validation evidence. Respect retained filesystem denials and networking permissions; unavailable execution or dependencies leave an explicit proof gap and do not by themselves disprove a source-backed finding. Do not add another validation phase after completed Standard results are aggregated.
+
 ## Repository Security Policy
 
 Resolve and cache directory-specific security guidance with `<plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --scope <file_or_directory> --out -` (use `launch_codex_security_mcp.cmd` on Windows). Resolve once per distinct reviewed directory or investigation packet, pass the matching inherited policy to its worker, and let the closest nested `SECURITY.md` take precedence.

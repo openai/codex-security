@@ -7,8 +7,9 @@ import {
   statSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
+  basename,
   delimiter,
   dirname,
   isAbsolute,
@@ -38,7 +39,11 @@ import {
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
 } from "./permission-profile-preflight.js";
-import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
+import { resolveDeepWorkerScratchAccess } from "./parent-sandbox.js";
+import type {
+  DeepWorkerParentSandbox,
+  DeepWorkerScratchAccess,
+} from "./parent-sandbox.js";
 import type {
   CodexWorkerDiagnostic,
   CodexWorkerExecutor,
@@ -82,10 +87,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
         throw new DeepScanNonRetryableError(
-          "Deep Scan cannot start a read-only worker without verified parent sandbox metadata.",
+          "Deep Scan cannot start a worker without verified parent sandbox metadata.",
         );
       }
-      const workerProfile = workerPermissionProfile(parentSandbox);
+      const scratch = await this.workerScratchAccess(request, parentSandbox);
+      const workerProfile = workerPermissionProfile(parentSandbox, scratch);
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
@@ -149,6 +155,19 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
           signal: request.signal,
         });
+      if (scratch) {
+        // Verify the concrete profile before creating the worker's temporary
+        // workspace; preflight keeps the host's existing temporary directory.
+        await fs.mkdir(scratch.writePath, { recursive: true });
+        for (const name of ["TMPDIR", "TMP", "TEMP"]) {
+          if (process.platform === "win32") {
+            for (const key of Object.keys(childEnv)) {
+              if (key.toUpperCase() === name) delete childEnv[key];
+            }
+          }
+          childEnv[name] = scratch.writePath;
+        }
+      }
       const prompt = await fs.readFile(request.promptPath, "utf8");
       const codexOptions = {
         codexPathOverride: executablePathForSpawn(codexPath),
@@ -177,9 +196,15 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const thread = request.resumeThreadId
         ? codex.resumeThread(request.resumeThreadId, threadOptions)
         : codex.startThread(threadOptions);
-      const input = request.resumeThreadId
+      const baseInput = request.resumeThreadId
         ? (request.continuationPrompt ?? prompt)
         : prompt;
+      const input =
+        request.kind === "discovery" &&
+        this.modelSettings.artifactContext &&
+        request.artifactContext
+          ? `${baseInput.trimEnd()}\n\n${scratchInstructions(scratch)}\n`
+          : baseInput;
       const controller = new AbortController();
       const forwardAbort = () => controller.abort(request.signal.reason);
       if (request.signal.aborted) {
@@ -240,6 +265,38 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
     } catch (error) {
       throw classifyCodexWorkerError(error);
+    }
+  }
+
+  private async workerScratchAccess(
+    request: CodexWorkerRequest,
+    sandbox: DeepWorkerParentSandbox,
+  ): Promise<DeepWorkerScratchAccess | undefined> {
+    const scan = this.modelSettings.artifactContext;
+    const assigned = request.artifactContext;
+    if (request.kind !== "discovery" || !scan || assigned?.layout !== "worker")
+      return;
+
+    // Keep scratch stable across a worker's resumed turns and artifact retries.
+    // Canonical results remain in the coordinator-owned output directory.
+    const workerRoot = dirname(assigned.root);
+    const temporaryPath = join(
+      "codex-security-deep-scratch",
+      scan.scanId,
+      basename(workerRoot),
+    );
+    const candidates = new Set([
+      join(workerRoot, "scratch"),
+      join(tmpdir(), temporaryPath),
+      ...(process.platform === "win32" ? [] : [join("/tmp", temporaryPath)]),
+    ]);
+    for (const candidate of candidates) {
+      const access = await resolveDeepWorkerScratchAccess(
+        sandbox,
+        candidate,
+        scan.repoRoot,
+      );
+      if (access) return access;
     }
   }
 
@@ -338,13 +395,24 @@ function workerSubagentConfig(subagents: number, inheritedFeatures: unknown) {
   };
 }
 
-function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
+function workerPermissionProfile(
+  sandbox: DeepWorkerParentSandbox,
+  scratch?: DeepWorkerScratchAccess,
+) {
   return {
     extends: ":read-only",
     // Object.fromEntries preserves literal keys such as "__proto__" without
     // letting a denied path mutate the serializer object prototype.
     filesystem: Object.fromEntries([
       [":root", "read"],
+      ...(scratch
+        ? [
+            scratchFilesystemEntry(scratch.writePath, "write"),
+            ...scratch.readOnlyPaths.map((path) =>
+              scratchFilesystemEntry(path, "read"),
+            ),
+          ]
+        : []),
       ...Array.from(sandbox.filesystemDenies, (key) => [key, "deny"]),
       ...Array.from(sandbox.literalFilesystemDenies ?? [], (key) => [
         key,
@@ -356,6 +424,32 @@ function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
     ]),
     network: { enabled: false },
   };
+}
+
+function scratchFilesystemEntry(path: string, access: "read" | "write") {
+  // Preserve literal path components such as brackets using native point access.
+  return [path, /[*?\[]/.test(path) ? { ".": access } : access];
+}
+
+function scratchInstructions(
+  scratch: DeepWorkerScratchAccess | undefined,
+): string {
+  if (!scratch) {
+    return (
+      "This worker has no scratch write permission inherited from the parent. " +
+      "Keep validation source-backed and record any runtime proof gap; do not seek broader permissions."
+    );
+  }
+  return (
+    `The parent permits scratch work at ${JSON.stringify(scratch.writePath)}, subject to the retained filesystem denials. ` +
+    "Use it for validation harnesses, build copies, generated files, and local build caches. " +
+    "Keep the original target and canonical scan artifacts read-only, and report source locations against the original target. " +
+    "Perform targeted runtime validation within this worker before submitting its final result. " +
+    "Record reproduction commands, relevant proof inputs, and observed results in the existing validation evidence; " +
+    "scratch is disposable, so do not reference its files as retained canonical artifacts. " +
+    "Networking remains disabled; if existing permissions or unavailable dependencies prevent execution, record the exact proof gap. " +
+    "The scratch directory is reused on resumed turns and retries; check retained files against the current source before reusing them."
+  );
 }
 
 /** Retain SDK failure messages for a later deterministic artifact check. */
@@ -595,6 +689,9 @@ async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
       "CODEX_HOME",
       "CODEX_MANAGED_PACKAGE_ROOT",
       "LOCALAPPDATA",
+      "TMPDIR",
+      "TMP",
+      "TEMP",
     ]) {
       const value = process.env[name];
       for (const key of Object.keys(environment)) {
