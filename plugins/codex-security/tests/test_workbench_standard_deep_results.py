@@ -2511,3 +2511,99 @@ def test_budget_exhaustion_rejects_incomplete_standard_result_draft(tmp_path: Pa
     )
 
     assert "incomplete canonical scan draft" in str(rejected["stderr"])
+
+
+@pytest.mark.parametrize(
+    ("questions", "checkpoint_questions", "expected"),
+    [
+        pytest.param(
+            ["Q1", "Q2", "Q3"],
+            None,
+            [{"question": "Q1"}, {"question": "Q2"}, {"question": "Q3"}],
+            id="string-questions",
+        ),
+        pytest.param(
+            [{"question": "Which tests remain?", "followUpPrompt": "Run the Linux tests."}],
+            [{"question": "Which tests remain?", "followUpPrompt": "Run the Linux tests."}],
+            [{"question": "Which tests remain?", "followUpPrompt": "Run the Linux tests."}],
+            id="identical-follow-up",
+        ),
+        pytest.param(
+            [{"question": "Which tests remain?", "followUpPrompt": "Run the Linux tests."}],
+            [{"question": "Which tests remain?", "followUpPrompt": "Run the Windows tests."}],
+            [
+                {"question": "Which tests remain?", "followUpPrompt": "Run the Linux tests."},
+                {"question": "Which tests remain?", "followUpPrompt": "Run the Windows tests."},
+            ],
+            id="distinct-follow-ups",
+        ),
+    ],
+)
+def test_merge_saved_results_deduplicates_open_questions(
+    tmp_path: Path,
+    questions: list[str | dict[str, str]],
+    checkpoint_questions: list[dict[str, str]] | None,
+    expected: list[dict[str, str]],
+) -> None:
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import workbench_saved_results
+
+    scan_dir = tmp_path.resolve() / "scan"
+    scan_dir.mkdir()
+    scan_id = "test-scan-open-questions"
+
+    manifest = {
+        "scan": {
+            "id": scan_id,
+            "target": {"kind": "git_revision", "repository": "test", "revision": "head"},
+            "scope": {"includePaths": ["."], "excludePaths": []},
+            "status": "in_progress",
+            "complete": False,
+        }
+    }
+    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    (scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                "completeness": "partial",
+                "surfaces": [],
+                "explicitExclusions": [],
+                "deferred": [],
+                "openQuestions": questions,
+            }
+        )
+    )
+    if checkpoint_questions is not None:
+        write_checkpoint(
+            scan_dir / "checkpoints",
+            {
+                "scanId": scan_id,
+                "complete": False,
+                "findings": [],
+                "coverage": {
+                    "completeness": "partial",
+                    "surfaces": [],
+                    "explicitExclusions": [],
+                    "deferred": [],
+                    "openQuestions": checkpoint_questions,
+                },
+            },
+        )
+
+    binding = {
+        "status": "in_progress",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {"kind": "git_revision", "repository": "test", "revision": "head"},
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": "repository",
+    }
+
+    result = workbench_saved_results.merge_saved_results(
+        scan_dir, scan_id, binding, [], [], stopped=False, reason=""
+    )
+    assert result is not None
+    _, _, coverage = result
+    assert coverage.get("openQuestions") == expected
