@@ -20,6 +20,7 @@
 - bump @linear/sdk from 94.0.0 to 95.0.0 in /sdk/typescript ([#955](https://github.com/openai/codex-security/pull/955))
 - tolerate transient setup failures and slow Windows runners ([#953](https://github.com/openai/codex-security/pull/953))
 - patch verified security findings ([#961](https://github.com/openai/codex-security/pull/961))
+- bump the third-party group across 3 directories with 7 updates ([#954](https://github.com/openai/codex-security/pull/954))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
