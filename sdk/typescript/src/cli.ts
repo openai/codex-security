@@ -3881,7 +3881,18 @@ export async function main(
           scanId: z.string(),
           uniqueFindingIds: z.array(z.string()),
           duplicateGroups: z.array(z.array(z.string())),
-          deduplicationStatus: z.literal("completed"),
+          deduplicationStatus: z.enum(["completed", "completed_with_refusals"]),
+          refusals: z
+            .array(
+              z.object({
+                decision: z.literal("NO_DECISION"),
+                stage: z.enum(["screening", "pair-review"]),
+                model: z.string(),
+                findingIds: z.array(z.string()),
+                reason: z.string(),
+              }),
+            )
+            .optional(),
         })
         .optional(),
       async run({ options }) {
@@ -3901,7 +3912,7 @@ export async function main(
             throw new CodexSecurityError(
               "Deduplication requires --scan or --workflow-id.",
             );
-          return await (
+          const result = await (
             dependencies.deduplicateScan ?? deduplicateScanInternal
           )(
             scanId,
@@ -3920,6 +3931,16 @@ export async function main(
               runWorkbench: dependencies.runWorkbench,
             },
           );
+          for (const refusal of result.refusals ?? []) {
+            try {
+              errorOutput.write(
+                `codex-security: ${refusal.stage} refused by ${refusal.model} for ${refusal.findingIds.join(", ")}: ${refusal.reason} No decision was made; affected pairs were kept separate.\n`,
+              );
+            } catch {
+              // Optional diagnostics must not discard the completed result.
+            }
+          }
+          return result;
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(

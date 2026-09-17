@@ -1936,7 +1936,7 @@ console.log(receipt.repositoryId, receipt.findingIds);
 Publish the scan with `--to custom` (or import it through the bulk API with its
 `repositoryId`) before deduplicating. The
 workflow reads a completed saved scan, queries candidates by finding ID, and
-runs Luna and Sol in the calling SDK/CLI process. Once all reviews succeed,
+runs Luna and Sol in the calling SDK/CLI process. Once all reviews finish,
 it posts accepted groups to the service. It does not re-upload findings or
 change scan artifacts.
 
@@ -1957,7 +1957,14 @@ has finished and none voted `DISTINCT`. It can run while unrelated Luna
 screenings continue. Results are combined in input order so completion timing
 does not change the groups.
 
-If a job fails after its retries, queued jobs stop and already running jobs
+An explicit model refusal keeps the affected pairs separate and allows unrelated
+reviews to continue. It is recorded as `NO_DECISION`, not a reviewed `DISTINCT`
+verdict. A screening refusal applies to every anchor/candidate pair in that
+screening; a pair-review refusal applies only to its assigned pair. Neither pair
+can be merged indirectly through other findings. Recognized policy errors and
+explicit refusal responses are not retried or sent to another model.
+
+If another kind of job fails after its retries, queued jobs stop and already running jobs
 finish before the command reports the failure. No groups are posted from an
 incomplete review. To retain completed reviews across runs, use a
 `--workflow-id` as described below.
@@ -2020,6 +2027,19 @@ members of an accepted group, with its canonical finding first. The canonical
 has the highest reported severity; ties use finding ID. Results do not delete,
 merge, or change stored finding documents. Accepted groups are saved as durable
 associations in the service before `deduplicationStatus` becomes `completed`.
+
+When any review is refused, the result instead has
+`deduplicationStatus: "completed_with_refusals"` and a `refusals` array. Each
+entry contains `decision: "NO_DECISION"`, `stage`, `model`, `findingIds`, and
+`reason`. For screening, the first finding ID is the anchor and the remaining
+IDs are its candidates. The CLI logs each refusal to stderr and exits
+successfully after saving the accepted groups. SDK callers can inspect and log
+the same structured entries. Findings retained because of a refusal are not
+confirmed unique. Successful runs without refusals keep their existing output
+shape. No command, flag, or default changes are required.
+
+This behavior applies to post-scan Luna/Sol deduplication. Deep Scan's internal
+reducer uses a separate workflow.
 
 ### Stored duplicate groups
 
@@ -2122,9 +2142,15 @@ exponential backoff with jitter; HTTP retries honor `Retry-After`. Waiting to re
 occupies the job's concurrency slot.
 
 Cancellation, authentication or configuration errors, permanent HTTP errors, and
-required-source-access blockers are not retried. Exhausted retries fail deduplication;
+required-source-access blockers are not retried. Model refusals continue with
+`NO_DECISION` as described above. Other exhausted retries fail deduplication;
 invalid or unfinished reviews are not cached. Completed checkpoints remain
 available when the workflow resumes.
+
+Refusals are not saved as validated review checkpoints. A completed workflow
+retains its final `completed_with_refusals` result, including all refusal entries,
+and returns it on subsequent calls. To attempt those reviews again after
+resolving the refusal, run dedupe without that workflow ID or with a new one.
 
 Checkpoints bind to the exact original records and ordering, approved source path,
 Git revision and current file contents (including ignored files), repository scope,
