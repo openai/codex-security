@@ -583,10 +583,13 @@ def test_fallback_preview_omits_marker_when_no_lines_are_skipped(tmp_path: Path)
     assert "..." not in preview
 
 
-def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filename", ["styles.css", "main.tf"])
+def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(
+    tmp_path: Path, filename: str
+) -> None:
     source = "\n".join(f"line_{index:02d} {'😀' * 20}" for index in range(40))
 
-    preview = generate_preview(tmp_path, "styles.css", source, preview_bytes=220)
+    preview = generate_preview(tmp_path, filename, source, preview_bytes=220)
 
     assert len(preview.encode("utf-8")) <= 220
     assert "..." in preview

@@ -227,6 +227,38 @@ def test_rank_input_bounds_large_text_reads(
     assert rows[0]["preview"] == "function visible()"
 
 
+@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
+def test_rank_input_includes_terraform(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    infra = repo / "infra"
+    infra.mkdir(parents=True)
+    initialize_repo(repo)
+    source = infra / "main.tf"
+    source.write_text('variable "enabled" { default = false }\n', encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    changed = 'variable "enabled" { default = true }'
+    source.write_text(changed + "\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "infra"]
+    else:
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
+        if mode == "revisions":
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    assert read_jsonl(output) == [
+        {"path": "infra/main.tf", "area": "infra" if mode == "repo" else "diff", "preview": changed}
+    ]
+
+
 def test_make_repo_rank_input_rejects_scope_outside_repo(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
