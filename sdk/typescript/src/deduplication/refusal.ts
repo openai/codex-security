@@ -1,5 +1,13 @@
 /** Recognize policy blocks and explicit refusal responses, not ordinary review failures. */
-export function isReviewRefusal(message: string): boolean {
+export function isReviewRefusal(
+  message: string,
+  codexErrorInfo?: unknown,
+): boolean {
+  if (
+    codexErrorInfo === "cyberPolicy" ||
+    codexErrorInfo === "misalignmentPolicyViolation"
+  )
+    return true;
   return [
     /\bflagged for possible cybersecurity risk\b/iu,
     /\bflagged for potentially high-risk cyber activity\b/iu,

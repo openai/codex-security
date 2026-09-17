@@ -4,6 +4,10 @@ import { createInterface } from "node:readline";
 
 const [scenario, transcript, checkout] = process.argv.slice(2);
 const turnFailures = {
+  "policy-turn-code": {
+    message: "Request blocked.",
+    codexErrorInfo: "cyberPolicy",
+  },
   "policy-turn": {
     message: "Request flagged for possible cybersecurity risk.",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
@@ -70,19 +74,29 @@ for await (const line of createInterface({ input: process.stdin })) {
     send({ id: message.id, result: { type: "apiKey" } });
   } else if (message.method === "thread/start") {
     if (
-      ["request-error", "credential-error", "policy-request"].includes(scenario)
+      [
+        "request-error",
+        "credential-error",
+        "policy-request",
+        "policy-request-code",
+      ].includes(scenario)
     ) {
       send({
         id: message.id,
         error: {
           code: -32000,
           message:
-            scenario === "policy-request"
-              ? "Request rejected: cyber_policy."
-              : scenario === "credential-error"
-                ? "Authentication failed: Bearer synthetic-review-key"
-                : "Authentication required",
-          data: "Synthetic private response data",
+            scenario === "policy-request-code"
+              ? "Request blocked."
+              : scenario === "policy-request"
+                ? "Request rejected: cyber_policy."
+                : scenario === "credential-error"
+                  ? "Authentication failed: Bearer synthetic-review-key"
+                  : "Authentication required",
+          data:
+            scenario === "policy-request-code"
+              ? { codexErrorInfo: "cyberPolicy" }
+              : "Synthetic private response data",
         },
       });
       continue;

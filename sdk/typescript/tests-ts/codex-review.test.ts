@@ -28,6 +28,8 @@ const fixture = fileURLToPath(
 );
 
 const failureReasons: Record<string, string> = {
+  "policy-turn-code": "Request blocked.",
+  "policy-request-code": "Request blocked.",
   "policy-turn": "Request flagged for possible cybersecurity risk.",
   "policy-request": "Request rejected: cyber_policy.",
   "refusal-text": "I'm sorry, but I can't assist with that request.",
@@ -73,6 +75,7 @@ const recoveredScenarios: Record<string, string> = {
   "recover-no-submission": "text-only",
 };
 const modelFailures = new Set([
+  "policy-turn-code",
   "policy-turn",
   "failed-turn",
   "server-error",
@@ -475,6 +478,7 @@ for (const {
                       "request-error",
                       "credential-error",
                       "policy-request",
+                      "policy-request-code",
                     ].includes(scenario)
                   ? 0
                   : 1) * sessions,
@@ -509,6 +513,14 @@ test.each([
 ])("recognizes explicit review refusals: %s", (message) => {
   expect(isReviewRefusal(message)).toBe(true);
 });
+
+test.each(["cyberPolicy", "misalignmentPolicyViolation"])(
+  "recognizes structured policy refusal codes independently of message wording: %s",
+  (code) => {
+    expect(isReviewRefusal("Request blocked.", code)).toBe(true);
+    expect(isReviewRefusal("Request blocked.", "unauthorized")).toBe(false);
+  },
+);
 
 test.each([
   "Rate limit exceeded",

@@ -450,7 +450,10 @@ export class CodexReviewRunner {
               });
             }
           } else if (message.error !== undefined) {
-            const refused = isReviewRefusal(message.error.message);
+            const refused = isReviewRefusal(
+              message.error.message,
+              message.error.data?.codexErrorInfo,
+            );
             throw new ReviewAttemptError(
               refused ? "refusal" : "transport",
               message.error?.message ?? "Codex rejected the review request",
@@ -507,7 +510,10 @@ export class CodexReviewRunner {
               const reason =
                 params.turn.error?.message ??
                 `Codex review turn ${params.turn.status}`;
-              const refused = isReviewRefusal(reason);
+              const refused = isReviewRefusal(
+                reason,
+                params.turn.error?.codexErrorInfo,
+              );
               throw new ReviewAttemptError(
                 refused ? "refusal" : "model",
                 reason,
