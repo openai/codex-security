@@ -2,9 +2,16 @@ import { parse as parseToml } from "smol-toml";
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
@@ -259,6 +266,255 @@ describe("scan and patch workflow", () => {
       );
     }
   });
+  test("exposes the validation prompt in patch help and schema", async () => {
+    const help = await runWorkflow(["patch", "--help"]);
+    expect(help.exitCode).toBe(0);
+    expect(help.stdout).toContain("--validation-prompt-file");
+    const schema = await runWorkflow(["patch", "--schema", "--json"]);
+    expect(schema.exitCode).toBe(0);
+    expect(
+      JSON.parse(schema.stdout).options.properties.validationPromptFile,
+    ).toMatchObject({ type: "string" });
+  });
+
+  test.each(["literal", "file", "linear"])(
+    "passes custom validation instructions to the %s patch task",
+    async (source) => {
+      const repository = await mkdtemp(join(tmpdir(), "patch-validation-"));
+      const validation =
+        "Start the local app. Exercise the fix and a legitimate request. Stop the app.\n";
+      try {
+        await writeFile(join(repository, "validation.md"), validation);
+        await writeFile(
+          join(repository, "issues.md"),
+          "Synthetic security issue",
+        );
+        let calls = 0;
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            ...(source === "linear"
+              ? [
+                  "--linear-issue",
+                  "SEC-123",
+                  "--linear-api-key",
+                  "lin_api_SYNTHETIC",
+                ]
+              : [source === "file" ? "issues.md" : "Synthetic security issue"]),
+            "--validation-prompt-file",
+            "validation.md",
+            "--json",
+          ],
+          {
+            currentDirectory: repository,
+            linearClient: () =>
+              ({
+                issue: async () => ({
+                  identifier: "SEC-123",
+                  title: "Synthetic security issue",
+                  description: "Synthetic issue details",
+                  url: "https://linear.app/example/issue/SEC-123",
+                  comments: async () => ({
+                    nodes: [],
+                    pageInfo: { hasNextPage: false },
+                  }),
+                }),
+              }) as unknown as ReturnType<LinearClientFactory>,
+            onCodex: (_args, output) => {
+              calls++;
+              expect(output?.appServer?.directory).toBe(repository);
+              expect(output?.appServer?.prompt).toContain(
+                JSON.stringify(validation),
+              );
+              expect(output?.appServer?.prompt).toContain(
+                "$codex-security:fix-finding",
+              );
+              const issues = JSON.parse(
+                output!.appServer!.prompt.split("\n").at(-1)!,
+              );
+              expect(issues).toHaveLength(1);
+              expect(issues[0]).toContain("Synthetic security issue");
+              output?.stdout.write("Fixed; runtime validation passed.");
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode).toBe(0);
+        expect(calls).toBe(1);
+        expect(JSON.parse(outcome.stdout).report).toBe(
+          "Fixed; runtime validation passed.",
+        );
+      } finally {
+        await rm(repository, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("reads validation from the invocation directory once for all saved findings", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "saved-patch-validation-"));
+    const repository = join(directory, "repository");
+    const validation = "Build the app and run the regression tests.\n";
+    const result = resultWithFindings(["high", "medium"]);
+    let calls = 0;
+    try {
+      await mkdir(repository);
+      await writeFile(join(directory, "validation.md"), validation);
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "--scan",
+          "scan-1",
+          "--validation-prompt-file",
+          "validation.md",
+          "--json",
+        ],
+        {
+          currentDirectory: directory,
+          onWorkbench: () => ({
+            scan: {
+              scanId: "scan-1",
+              targetPath: repository,
+              findings: result.findings.findings as unknown as JsonObject[],
+            },
+          }),
+          onCodex: async (args, output) => {
+            calls++;
+            expect(output?.appServer?.directory).toBe(repository);
+            expect(output?.appServer?.prompt).toContain(
+              JSON.stringify(validation),
+            );
+            await rm(join(directory, "validation.md"), { force: true });
+            completePatches(args, output, calls === 1 ? "verified" : "blocked");
+            return 0;
+          },
+        },
+      );
+      expect(calls).toBe(2);
+      expect(outcome.exitCode).toBe(1);
+      expect(
+        JSON.parse(outcome.stdout).patches.map(
+          (patch: { status: string }) => patch.status,
+        ),
+      ).toEqual(["verified", "blocked"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["linked", "root"],
+    ["explicit", "root"],
+    ["linked", "subdirectory"],
+    ["explicit", "subdirectory"],
+    ["linked", "nested-worktree"],
+    ["explicit", "nested-worktree"],
+  ])(
+    "checks the invocation checkout boundary for %s prompts from a %s",
+    async (kind, invocation) => {
+      const root = await mkdtemp(join(tmpdir(), "patch-prompt-boundary-"));
+      const checkout = join(root, "invocation");
+      const directory =
+        invocation === "root" ? checkout : join(checkout, "nested", "cwd");
+      const repository = join(root, "repository");
+      const outside = join(root, "outside");
+      const result = resultWithFindings(["high"]);
+      let started = false;
+      try {
+        await Promise.all(
+          [directory, repository, outside].map((path) =>
+            mkdir(path, { recursive: true }),
+          ),
+        );
+        execFileSync("git", ["init", "--quiet", checkout]);
+        if (invocation === "nested-worktree")
+          execFileSync("git", ["init", "--quiet", dirname(directory)]);
+        await writeFile(
+          join(outside, "validation.md"),
+          "Run the synthetic regression test.",
+        );
+        await symlink(
+          outside,
+          join(checkout, "validation"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "--scan",
+            "scan-1",
+            "--validation-prompt-file",
+            kind === "linked"
+              ? relative(
+                  directory,
+                  join(checkout, "validation", "validation.md"),
+                )
+              : join(outside, "validation.md"),
+            "--json",
+          ],
+          {
+            currentDirectory: directory,
+            onWorkbench: () => ({
+              scan: {
+                scanId: "scan-1",
+                targetPath: repository,
+                findings: result.findings.findings as unknown as JsonObject[],
+              },
+            }),
+            onCodex: (args, output) => {
+              started = true;
+              completePatches(args, output);
+              return 0;
+            },
+          },
+        );
+        expect(started).toBe(kind === "explicit");
+        expect(outcome.exitCode).toBe(kind === "explicit" ? 0 : 2);
+        if (kind === "linked")
+          expect(outcome.stderr).toContain("directory links outside");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each(["missing", "empty", "directory"])(
+    "rejects a %s validation prompt before starting a patch",
+    async (kind) => {
+      const directory = await mkdtemp(
+        join(tmpdir(), "invalid-patch-validation-"),
+      );
+      try {
+        const path = join(directory, "validation.md");
+        if (kind === "empty") await writeFile(path, " \n");
+        if (kind === "directory") await mkdir(path);
+        let started = false;
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "Synthetic security issue",
+            "--validation-prompt-file",
+            path,
+            "--json",
+          ],
+          {
+            currentDirectory: directory,
+            onCodex: () => {
+              started = true;
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode).toBe(2);
+        expect(started).toBe(false);
+        expect(JSON.parse(outcome.stdout)).toMatchObject({
+          ok: false,
+          applied: false,
+        });
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("assesses patch risk only when the patch flag is selected", async () => {
     for (const enabled of [false, true]) {
@@ -1193,6 +1449,7 @@ describe("scan and patch workflow", () => {
       ["--linear-issue", "SEC-123"],
       ["--create-pr"],
       ["--assess-patch-risk"],
+      ["--validation-prompt-file", "validation.md"],
       ["--external-sandbox"],
       ["occ_1"],
     ]) {

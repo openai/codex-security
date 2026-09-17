@@ -8,7 +8,7 @@ overrides:
   '@huggingface/transformers@4.2.0>sharp': 0.35.4
   '@openai/codex': 0.154.0
   '@openai/codex-sdk': 0.154.0
-  '@opencode-ai/sdk': 1.18.29
+  '@opencode-ai/sdk': 1.18.30
   onnxruntime-node@1.24.3>adm-zip: 0.6.0
 
 importers:
@@ -19,11 +19,11 @@ importers:
         specifier: 0.154.0
         version: 0.154.0
       '@opencode-ai/sdk':
-        specifier: 1.18.29
-        version: 1.18.29
+        specifier: 1.18.30
+        version: 1.18.30
       promptfoo:
-        specifier: 0.122.2
-        version: 0.122.2(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.62.1)(socks@2.8.10)
+        specifier: 0.123.0
+        version: 0.123.0(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.62.1)(socks@2.8.10)
 
 packages:
 
@@ -47,60 +47,60 @@ packages:
     resolution: {integrity: sha512-3NX/MpTdroi0aKz134A6RC2Gb2iXVECN4QaAXnvCIxxIm3C3AVB1mkUe8NaaiyvOpDfsrqWhYtj+Q6a62RrTsw==}
     engines: {node: '>=18'}
 
-  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.234':
-    resolution: {integrity: sha512-6BJAbSOD5yGOzn1hU62ZfpybZhPlxcAe0r1w6qeGkAi/W3MD3Wl/TuVZ/y9/xvAwtfDmADDfbcHO0v6i0rjNIw==}
+  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.251':
+    resolution: {integrity: sha512-C23h+Dbddcc4gai95+lhm4/94am2IOq+bf3IdEDDS7EPqDQqajo2s5q1/ZSwq9rOc0RJLT7Ws72ZCzYJh67KSg==}
     cpu: [arm64]
     os: [darwin]
 
-  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.234':
-    resolution: {integrity: sha512-ixb6ta76uNqau9+Qj1TCdy/PbQ0hUF7XH1+hNhGGJueAAROkxt+LL+WiT+6LtYs2Cuyu6Wl+e7ZzVjzf2P48uQ==}
+  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.251':
+    resolution: {integrity: sha512-HrLnb3ggk+vMbymUvbosgPmxWp4W6Ot+0mNVjoBYDn5OZrTV3C3LRtbWf7jwcGyKMcg0xJf0AqiudQ2BRrlr8A==}
     cpu: [x64]
     os: [darwin]
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.234':
-    resolution: {integrity: sha512-VEvlLX6VTX221HzW2LP3sz7H+Ip+YKmfGbXp5UxfviQzvxrMfsAeKBmM9NJrAq/2UEqzLL6tEteIYF/aYW5cpQ==}
+  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.251':
+    resolution: {integrity: sha512-RTUf7TPBUkQ6oV3pDkEdcD47I0uH0ZpvmZlXHnrLGznFqyLr+7XHupOxUMJD0Jwm9v5qeqpNiPAYB0dL4RYiHg==}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.234':
-    resolution: {integrity: sha512-mWDXYZ5qe7zUK82ssBlsdIRMTBQdt11Kv9VvDVMxgXgSo1OxwZzb5Ukq2Xws3IvZGbJFOsYoxet820NGv91UZg==}
+  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.251':
+    resolution: {integrity: sha512-3E27F5j82EWOyEniRW7crmo0jWYYQmPDdP52jWq6Y6aytiyYIdUFMEGZZ6chVHNlZiU7GsjTa3teKk2xlQ68lQ==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.234':
-    resolution: {integrity: sha512-329GhW2Y+imBzl+Ian0wr2dJalzyp2JnpBZvSgQg8vf4drBTcCBCIr6ofdIL/6edM/l9hG6aKFrw8XgquqqFfA==}
+  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.251':
+    resolution: {integrity: sha512-SzXrdy7jjrjJIuTG+VMRAY0YZ3G/8w21WuhAozwnvnEUAPo6NDv6lgFinu7NO8J6CPE+MK2sGze6JeCF+ljgUg==}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.234':
-    resolution: {integrity: sha512-RAyjcz9IsSvooWxJWoM8nBuRtzAzuRqLVXk5/zVNFE2snxXT1ZayZjpITHaHTh7SEsuMe1j5EbgzvL3AAy4zQA==}
+  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.251':
+    resolution: {integrity: sha512-qCD87XPjcNM1u4ukqmcgpHDl3Y6l+cW8j7kPzH91Y5yLBYJ5xYZA2KtJ7AYNEPOteVyOGJw/efmva0S8CRr0fg==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.234':
-    resolution: {integrity: sha512-X/3baEzmSOhy36YM+V5D6UBTwXQOWxnHD1xiBkaRIhpL3jmCNc7KKeWy0FZEnKjINL75VHvZR7myRnQjPEiBHw==}
+  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.251':
+    resolution: {integrity: sha512-FH1ZLcyc97ie3h7CSlIxA1ppXILgf0V8sFQrWnHyKBrthJXQkMHXhsTq9OZV/2KhXslNf2hTe0gHpZ1nCL1Gmg==}
     cpu: [arm64]
     os: [win32]
 
-  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.234':
-    resolution: {integrity: sha512-YHprZwgq6jkf0pjOF6KU2A+7tY7NqeH4kZRwKK6TvzHQ6yVOMMFr3ebwmP4WiTD2n+I0fLhpOAf8C/Yvz5Ktpg==}
+  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.251':
+    resolution: {integrity: sha512-/jmtFIvfF0UFMxSZ8WV2Aus8aGA3+8Ft6AHvWuBJkY5jM2ubfqi6GnBjKCAL831TTllp2rKZlViANtWWRBvpvg==}
     cpu: [x64]
     os: [win32]
 
-  '@anthropic-ai/claude-agent-sdk@0.3.234':
-    resolution: {integrity: sha512-988d+JfICQoIIDwcnQm9ivJ3CXfKUhDJ43XSQXiwa4PMnc/+NwAK71JUnOipXgGJNVu+znfzk42CV+wUeX25dg==}
+  '@anthropic-ai/claude-agent-sdk@0.3.251':
+    resolution: {integrity: sha512-DqSi8mH2tQYRlVV0G+lJnQ/WbjJZ/a+8cJ3vPuYoqh8esIIvXHm1ZOXV1UPGsFYRnbBytEoiSGitguEXd+sQ+Q==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
       '@anthropic-ai/sdk': '>=0.93.0'
       '@modelcontextprotocol/sdk': ^1.29.0
       zod: ^4.0.0
 
-  '@anthropic-ai/sdk@0.117.1':
-    resolution: {integrity: sha512-Yn2QlXfyCiKJ5YGCOOay7ZE78ISvII2XY621WMCiflmG8IYgwx59IBwPExxki3Xk9jKUtnD/Sj6UvplWr0rZxg==}
+  '@anthropic-ai/sdk@0.122.0':
+    resolution: {integrity: sha512-GGPNftt0caaz9MDlmNQGHX8855Ojaduyy5pm9Sm1h7HalCn0cWNb5/bweadJF+4yzbal+QL6ztBa09WAAOzLmQ==}
     hasBin: true
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
@@ -303,6 +303,10 @@ packages:
 
   '@azure/msal-node@5.6.0':
     resolution: {integrity: sha512-uFY9NxrWHw8PwZx7gAX6PDn+9vdfS05+levc/kwkx77IkjfaldnQbbcQzzDIZ5Hq5Zdr6/z92oAIoRWKp6MnOA==}
+    engines: {node: '>=20'}
+
+  '@azure/msal-node@6.0.0':
+    resolution: {integrity: sha512-PU0l3CsEZVm2K8vZNFxvgmM5d0Yx/sVL/axWW0hJBoeyiB6Q/uv7hXORb7EdzlNxvehsWEF82/o+/sXlIo+UIw==}
     engines: {node: '>=20'}
 
   '@azure/openai-assistants@1.0.0-beta.6':
@@ -710,15 +714,6 @@ packages:
 
   '@inquirer/confirm@6.3.1':
     resolution: {integrity: sha512-HvnOHal39DTenOVoRpIy8Z+n4YYfNa3Qhi/P8zFqn9/d1crpmQG0DPx34rwOeOFvotgKr9Vov/14OmKR/Iwfjw==}
-    engines: {node: '>=23.5.0 || ^22.13.0 || ^20.17.0'}
-    peerDependencies:
-      '@types/node': '>=18'
-    peerDependenciesMeta:
-      '@types/node':
-        optional: true
-
-  '@inquirer/core@11.2.1':
-    resolution: {integrity: sha512-Qd6GJT1yVyrZZCfN8W2qKF5ApmqryXRhRKCuip8h01x2w/esJQ2XIYc6f9abMIHgKQdBfFTSOdbHRLAhuM09UA==}
     engines: {node: '>=23.5.0 || ^22.13.0 || ^20.17.0'}
     peerDependencies:
       '@types/node': '>=18'
@@ -1287,8 +1282,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@opencode-ai/sdk@1.18.29':
-    resolution: {integrity: sha512-4CS+FoLPkymTlcga8jxivGDDb2AbWMIIl3b8+myoe2wtv/1ANYCErslgz1xy5hTVHymWE6CtVNKzRuPU0ED57A==}
+  '@opencode-ai/sdk@1.18.30':
+    resolution: {integrity: sha512-uviJ+PZLc/D1szt33WGzzt/rqJ+IaNmRGBb+UcOXrcQANl8XXKJrp4CNQQ2UAnUJ3Ek+VqcamIwjtKHUW/OjOQ==}
 
   '@opentelemetry/api-logs@0.221.0':
     resolution: {integrity: sha512-OlanaW1vv7ufTqQ3/fPLI4arGt5ZoM+P8abOMki6uEYnpRazepSWDwDnnw+la7kE26SHVC18//SMccrDvLKOXQ==}
@@ -1649,9 +1644,6 @@ packages:
   '@types/node@18.19.80':
     resolution: {integrity: sha512-kEWeMwMeIvxYkeg1gTc01awpwLbfMRZXdIhwRcakd/KlK53jmRC26LqcbIt7fnAQTu5GzlnWmzA3H6+l1u6xxQ==}
 
-  '@types/node@22.20.1':
-    resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
-
   '@types/node@25.9.1':
     resolution: {integrity: sha512-xfrlY7UD5rMJk3ZVJP8BNzS28J36YJg+xp+LPXV1TdWxr8uMH5A860QNxYDGQe/ylDSgjxE52Q9VnO7p75tJxg==}
 
@@ -1770,6 +1762,10 @@ packages:
   argparse@2.0.1:
     resolution: {integrity: sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==}
 
+  arr-union@3.1.0:
+    resolution: {integrity: sha512-sKpyeERZ02v1FeCZT8lrfJq5u6goHCtpTAzPwJYe7c8SPFOboNjNg1vz2L4VTn9T4PQxEx13TbXLmYUcS6Ug7Q==}
+    engines: {node: '>=0.10.0'}
+
   asap@2.0.6:
     resolution: {integrity: sha512-BSHWgDSAiKs50o2Re8ppvp3seVHXSRM44cdSsT9FfNEUUZLOGWVCsiWaRPWM1Znn+mqZ1OfVZ3z3DWEzSp7hRA==}
 
@@ -1849,6 +1845,9 @@ packages:
 
   bowser@2.14.1:
     resolution: {integrity: sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg==}
+
+  brace-expansion@1.1.18:
+    resolution: {integrity: sha512-Edep/X9fGqVNmzKBVsDYIOtD+z1tuezV70LBjdCst9Tqu76lsnvRiZ6oTic1n+/BIwX6QDGAO94PN4N2SADvtw==}
 
   brace-expansion@2.1.4:
     resolution: {integrity: sha512-hGfVzPxthbf3+2yjg/RBs60cB0FhqBS/zvdV/4wn4/BmN0bNMMHPc4V/BbFieqf1TKAGGAHnY4eSjajCl0f2Xg==}
@@ -1946,6 +1945,10 @@ packages:
     resolution: {integrity: sha512-ouuZd4/dm2Sw5Gmqy6bGyNNNe1qt9RpmxveLSO7KcgsTnU7RXfsw+/bukWGo1abgBiMAic068rclZsO4IWmmxQ==}
     engines: {node: '>= 12'}
 
+  clone-deep@0.2.4:
+    resolution: {integrity: sha512-we+NuQo2DHhSl+DP6jlUiAhyAjBQrYnpOk15rN6c6JSPScjiCLh8IbSU+VTcph6YS3o7mASE8a0+gbZ7ChLpgg==}
+    engines: {node: '>=0.10.0'}
+
   cluster-key-slot@1.1.2:
     resolution: {integrity: sha512-RMr0FhtfXemyinomL4hrWcYJxmX6deFdCxpJzhDttxgO1+bcCnkk+9drydLVDmAMG7NE6aN/fl4F7ucU/90gAA==}
     engines: {node: '>=0.10.0'}
@@ -1981,9 +1984,9 @@ packages:
     resolution: {integrity: sha512-FQN4MRfuJeHf7cBbBMJFXhKSDq+2kAArBlmRBvcvFE5BB1HZKXtSFASDhdlz9zOYwxh8lDdnvmMOe/+5cdoEdg==}
     engines: {node: '>= 0.8'}
 
-  commander@14.0.3:
-    resolution: {integrity: sha512-H+y0Jo/T1RZ9qPP4Eh1pkcQcLRglraJaSLoyOtHxu6AapkjWVCy2Sit1QQ4x3Dng8qDlSsZEet7g5Pq06MvTgw==}
-    engines: {node: '>=20'}
+  commander@15.0.0:
+    resolution: {integrity: sha512-z67u4ZhzCL/Tydu1lJARtEZYWbWaN7oYLHbsuzocr6y4N6WZAagG3RQ4FW61V1/0+jImpj293XfrcYnd1qxtPg==}
+    engines: {node: '>=22.12.0'}
 
   commander@5.1.0:
     resolution: {integrity: sha512-P0CysNDQ7rtVw4QIQtm+MRxV66vKFSvlsQvGYXZWR3qFU0jlMKHZZZgw8e+8DSah4UDKMqnknRDQz+xuQXQ/Zg==}
@@ -1999,6 +2002,9 @@ packages:
   compression@1.8.1:
     resolution: {integrity: sha512-9mAqGPHLakhCLeNyxPkK4xVo746zQ/czLH1Ky+vkitMnWfWZps8r0qXuwhwizagCRttsL4lfG4pIOvaWLpAP0w==}
     engines: {node: '>= 0.8.0'}
+
+  concat-map@0.0.1:
+    resolution: {integrity: sha512-/Srv4dswyQNBfohGpz9o6Yb3Gz3SrUDqBH5rTuhGR7ahtlbYKnVxw2bCFMRljaA7EXHaXZ8wsHdodFvbkhKmqg==}
 
   content-disposition@1.1.0:
     resolution: {integrity: sha512-5jRCH9Z/+DRP7rkvY83B+yGIGX96OYdJmzngqnw2SBSxqCFPd0w2km3s5iawpGX8krnwSGmF0FW5Nhr0Hfai3g==}
@@ -2101,6 +2107,10 @@ packages:
   deep-extend@0.6.0:
     resolution: {integrity: sha512-LOHxIOaPYdHlJRtCQfDIVZtfw/ufM8+rVj649RIHzcm/vGwQRXFt6OPqIFWsm2XEMrNIEtWR64sY1LEKD2vAOA==}
     engines: {node: '>=4.0.0'}
+
+  deepmerge@4.3.1:
+    resolution: {integrity: sha512-3sUqbMEc77XqpdNO7FRyRog+eW3ph+GYCbj+rK+uYyRMuwsVy0rMiVtPn+QJlKFvWP/1PYpapqYn0Me2knFn+A==}
+    engines: {node: '>=0.10.0'}
 
   default-browser-id@5.0.1:
     resolution: {integrity: sha512-x1VCxdX4t+8wVfd1so/9w+vQ4vx7lKd2Qp5tDRutErwmR85OgmfX7RlLRMWafRMY7hbEiXIbudNrjOAPa/hL8Q==}
@@ -2498,6 +2508,18 @@ packages:
       debug:
         optional: true
 
+  for-in@0.1.8:
+    resolution: {integrity: sha512-F0to7vbBSHP8E3l6dCjxNOLuSFAACIxFy3UehTUlG7svlXi37HHsDkyVcHo0Pq8QwrE+pXvWSVX3ZT1T9wAZ9g==}
+    engines: {node: '>=0.10.0'}
+
+  for-in@1.0.2:
+    resolution: {integrity: sha512-7EwmXrOjyL+ChxMhmG5lnW9MPt1aIeZEwKhQzoBUdTV0N3zuwWDZYVJatDvZ2OyzPUvdIAZDsCetk3coyMfcnQ==}
+    engines: {node: '>=0.10.0'}
+
+  for-own@0.1.5:
+    resolution: {integrity: sha512-SKmowqGTJoPzLO1T0BBJpkfp3EMacCMOuH40hOUbrbzElVktk4DioXVM99QkLCyKoiuOmyjgcWMpVz2xjE7LZw==}
+    engines: {node: '>=0.10.0'}
+
   foreground-child@3.3.1:
     resolution: {integrity: sha512-gIXjKqtFuWEgzFRJA9WCQeSJLZDjgJUOMCMzxtvFq/37KojM1BFGufqsCy0r4qSQmYLsZYMeyRqzIWOMup03sw==}
     engines: {node: '>=14'}
@@ -2523,6 +2545,13 @@ packages:
 
   fs-constants@1.0.0:
     resolution: {integrity: sha512-y6OAwoSIf7FyjMIv94u+b5rdheZEjzR63GTyZJm5qh4Bi+2YgwLCcI/fPFZkL5PSixOt6ZNKm+w+Hfp/Bciwow==}
+
+  fs-extra@10.1.0:
+    resolution: {integrity: sha512-oRXApq54ETRj4eMiFzGnHWGy+zo5raudjuxN0b8H7s/RU2oW0Wvsx9O0ACRN/kRq9E8Vu/ReskGB5o3ji+FzHQ==}
+    engines: {node: '>=12'}
+
+  fs.realpath@1.0.0:
+    resolution: {integrity: sha512-OO0pH2lK6a0hZnAdau5ItzHPI6pUlvI7jMVnxUQRtw4owF2wk8lOSabtGDCTP4Ggrg2MbGnWO9X8K1t4+fGMDw==}
 
   fsevents@2.3.2:
     resolution: {integrity: sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==}
@@ -2588,6 +2617,10 @@ packages:
   glob@13.0.6:
     resolution: {integrity: sha512-Wjlyrolmm8uDpm/ogGyXZXb1Z+Ca2B8NbJwqBVg0axK9GbBeoS7yGV6vjXnYdGm6X53iehEuxxbyiKp8QmN4Vw==}
     engines: {node: 18 || 20 || >=22}
+
+  glob@7.2.3:
+    resolution: {integrity: sha512-nFR0zLpU2YCaRxwoCJvL6UvCH2JFyFVIvwTLsIf21AuHlMskA1hhTdk+LlYJtOlYt9v6dvszD2BGRqBL+iQK9Q==}
+    deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
 
   global-agent@3.0.0:
     resolution: {integrity: sha512-PT6XReJ+D07JvGoxQMkT6qji/jVNfX/h364XHZOWeRzy64sSFr+xJ5OX7LI3b4MPQzdL4H8Y8M0xzPpsVMwA8Q==}
@@ -2717,6 +2750,10 @@ packages:
     resolution: {integrity: sha512-m6FAo/spmsW2Ab2fU35JTYwtOKa2yAwXSwgjSv1TJzh4Mh7mC3lzAOVLBprb72XsTrgkEIsl7YrFNAiDiRhIGg==}
     engines: {node: '>=12'}
 
+  inflight@1.0.6:
+    resolution: {integrity: sha512-k92I/b08q4wvFscXCLvqfsHCrjrF7yiXsQuIVvVE7N82W3+aqpzuUdBbfhWcy/FZR3/4IgflMgKLOsvPDrGCJA==}
+    deprecated: This module is not supported, and leaks memory. Do not use it. Check out lru-cache if you want a good and tested way to coalesce async requests by a key value, which is much more comprehensive and powerful.
+
   inherits@2.0.4:
     resolution: {integrity: sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==}
 
@@ -2752,6 +2789,10 @@ packages:
     engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
     hasBin: true
 
+  is-extendable@0.1.1:
+    resolution: {integrity: sha512-5BMULNob1vgFX6EjQw5izWDxrecWK9AM72rugNr0TFldMOi0fj6Jk+zeKIt0xGj4cEfQIJth4w3OKWOJ4f+AFw==}
+    engines: {node: '>=0.10.0'}
+
   is-fullwidth-code-point@3.0.0:
     resolution: {integrity: sha512-zymm5+u+sCsSWyD9qNaejV3DFvhCKclKdizYaJUuHA83RLjb7nSuGnddCHGv0hk+KY7BMAlsWeK4Ueg6EV6XQg==}
     engines: {node: '>=8'}
@@ -2778,6 +2819,10 @@ packages:
     resolution: {integrity: sha512-+Pgi+vMuUNkJyExiMBt5IlFoMyKnr5zhJ4Uspz58WOhBF5QoIZkFyNHIbBAtHwzVAgk5RtndVNsDRN61/mmDqg==}
     engines: {node: '>=12'}
 
+  is-plain-object@2.0.4:
+    resolution: {integrity: sha512-h5PpgXkWitc38BBMYawTYMWJHFZJVnBquFE57xFpjB8pJFiF6gZ+bU+WyI/yqXiFR5mdLsgYNaPe8uao6Uv9Og==}
+    engines: {node: '>=0.10.0'}
+
   is-promise@4.0.0:
     resolution: {integrity: sha512-hvpoI6korhJMnej285dSg6nu1+e6uxs7zG3BYAm5byqDsgJNWwxzM6z6iZiAgQR4TJ30JmBTOwqZUw3WlyH3AQ==}
 
@@ -2802,6 +2847,10 @@ packages:
 
   isexe@2.0.0:
     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
+
+  isobject@3.0.1:
+    resolution: {integrity: sha512-WhB9zCku7EGTj/HQQRz5aUQEUeoQZH2bWcltRErOpymJ4boYE6wL9Tbr23krRPSZ+C5zqNSrSw+Cc7sZZ4b7vg==}
+    engines: {node: '>=0.10.0'}
 
   isstream@0.1.2:
     resolution: {integrity: sha512-Yljz7ffyPbrLpLngrMtZ7NduUgVvi6wG9RJ9IUcyCd59YQ911PBJphODUcbOVbqYfxe1wuYf/LJ8PauMRwsM/g==}
@@ -2831,10 +2880,6 @@ packages:
 
   js-tiktoken@1.0.21:
     resolution: {integrity: sha512-biOj/6M5qdgx5TKjDnFT1ymSpM5tbd3ylwDtrQvFQSu0Z7bBYko2dF+W/aUkXUPuk6IVpRxk/3Q2sHOzGlS36g==}
-
-  js-yaml@5.3.0:
-    resolution: {integrity: sha512-muutsYr+e2+d3rTgUGslq5rxbBlUy3cJ61IsHag2QNDQV+7zXWjkUpmALIajhrlLlrgRUiymj6U3zUr/TMK84Q==}
-    hasBin: true
 
   js-yaml@5.4.1:
     resolution: {integrity: sha512-28R/k+NAjeuf7+CKlTxWZVExJGwVVLwY06DgEnOMz2gEpfNkDcD7QvyiVPT0xy0XXhU8vHsd4Ot42OOPdJG7dQ==}
@@ -2867,6 +2912,9 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
+  jsonfile@6.2.1:
+    resolution: {integrity: sha512-zwOTdL3rFQ/lRdBnntKVOX6k5cKJwEc1HdilT71BWEu7J41gXIB2MRp+vxduPSwZJPWBxEzv4yH1wYLJGUHX4Q==}
+
   jsonwebtoken@9.0.3:
     resolution: {integrity: sha512-MT/xP0CrubFRNLNKvxJ2BYfy53Zkm++5bX9dtuPbqAeQpTVe0MQTFhao8+Cp//EmJp244xt6Drw/GVEGCUj40g==}
     engines: {node: '>=12', npm: '>=6'}
@@ -2887,8 +2935,24 @@ packages:
   keyv@5.6.0:
     resolution: {integrity: sha512-CYDD3SOtsHtyXeEORYRx2qBtpDJFjRTGXUtmNEMGyzYOKj1TE3tycdlho7kA1Ufx9OYWZzg52QFBGALTirzDSw==}
 
+  kind-of@2.0.1:
+    resolution: {integrity: sha512-0u8i1NZ/mg0b+W3MGGw5I7+6Eib2nx72S/QvXa0hYjEkjTknYmEYQJwGu3mLC0BrhtJjtQafTkyRUQ75Kx0LVg==}
+    engines: {node: '>=0.10.0'}
+
+  kind-of@3.2.2:
+    resolution: {integrity: sha512-NOW9QQXMoZGg/oqnVNoNTTIFEIid1627WCffUBJEdMxYApq7mNE7CpzucIPc+ZQg25Phej7IJSmX3hO+oblOtQ==}
+    engines: {node: '>=0.10.0'}
+
   kuler@2.0.0:
     resolution: {integrity: sha512-Xq9nH7KlWZmXAtodXDDRE7vs6DU1gTU8zYDHDiWLSip45Egwq3plLHzPn27NgvzL2r1LMPC1vdqh98sQxtqj4A==}
+
+  lazy-cache@0.2.7:
+    resolution: {integrity: sha512-gkX52wvU/R8DVMMt78ATVPFMJqfW8FPz1GZ1sVHBVQHmu/WvhIWE4cE1GBzhJNFicDeYhnwp6Rl35BcAIM3YOQ==}
+    engines: {node: '>=0.10.0'}
+
+  lazy-cache@1.0.4:
+    resolution: {integrity: sha512-RE2g0b5VGZsOCFOCgP7omTRYFqydmZkBwl5oNnQ1lDYC57uyO9KqNnNVxT7COSHTxrRCWVcAVOcbjk+tvh/rgQ==}
+    engines: {node: '>=0.10.0'}
 
   libsql@0.5.29:
     resolution: {integrity: sha512-8lMP8iMgiBzzoNbAPQ59qdVcj6UaE/Vnm+fiwX4doX4Narook0a4GPKWBEv+CR8a1OwbfkgL18uBfBjWdF0Fzg==}
@@ -2969,6 +3033,10 @@ packages:
   memory-pager@1.5.0:
     resolution: {integrity: sha512-ZS4Bp4r/Zoeq6+NLJpP+0Zzm0pR8whtGPf1XExKLJBAczGMnSi3It14OiNCStjQjM6NU1okjQGSxgEZN8eBYKg==}
 
+  merge-deep@3.0.3:
+    resolution: {integrity: sha512-qtmzAS6t6grwEkNrunqTBdn0qKwFgNWvlxUbAV8es9M7Ot1EbyApytCnvE0jALPa46ZpKDUo527kKiaWplmlFA==}
+    engines: {node: '>=0.10.0'}
+
   merge-descriptors@2.0.0:
     resolution: {integrity: sha512-Snk314V5ayFLhp3fkUREub6WtjBfPdCPY1Ln8/8munuLuiYhsABgBVWsozAG+MWMbVEvcdcpbi9R7ww22l9Q3g==}
     engines: {node: '>=18'}
@@ -3005,6 +3073,9 @@ packages:
     resolution: {integrity: sha512-vpLQEs+VLCr1nU0BXS07maYoFwlDAH0gngQuuttxIwutDFEMHq2blX+8vpgxDdK3J1PwjCJiep77OitTZ4Ll1A==}
     engines: {node: 18 || 20 || >=22}
 
+  minimatch@3.1.5:
+    resolution: {integrity: sha512-VgjWUsnnT6n+NUk6eZq77zeFdpW2LWDzP6zFGrCbHXiYNul5Dzqk2HHQ5uFH2DNW5Xbp8+jVzaeNt94ssEEl4w==}
+
   minimatch@9.0.9:
     resolution: {integrity: sha512-OBwBN9AL4dqmETlpS2zasx+vTeWclWzkblfZk7KTA5j3jeOONz/tRCnZomUyvNg83wL5Zv9Ss6HMJXAgL8R2Yg==}
     engines: {node: '>=16 || 14 >=14.17'}
@@ -3015,6 +3086,10 @@ packages:
   minipass@7.1.3:
     resolution: {integrity: sha512-tEBHqDnIoM/1rXME1zgka9g6Q2lcoCkxHLuc7ODJ5BxbP5d4c2Z5cGgtXAku59200Cx7diuHTOYfSBD8n6mm8A==}
     engines: {node: '>=16 || 14 >=14.17'}
+
+  mixin-object@2.0.1:
+    resolution: {integrity: sha512-ALGF1Jt9ouehcaXaHhn6t1yGWRqGaHkPFndtFVHfZXOvkIZ/yoGaSi0AHVTafb3ZBGg4dr/bDwnaEKqCXzchMA==}
+    engines: {node: '>=0.10.0'}
 
   mkdirp-classic@0.5.3:
     resolution: {integrity: sha512-gKLcREMhtuZRwRAfqP3RFW+TK4JqApVBtOIftVgjuABpAtpxhPGaDcfvbhNvD0B8iD1oUr/txX35NjcaY6Ns/A==}
@@ -3301,6 +3376,10 @@ packages:
     resolution: {integrity: sha512-enSlaiat05iasnzmgNxRj8reFdj3puY2QpNgP1aPIaVfT6nn9ICuPoFlKHk8EN22HcwewshO+mN2DGbkCEOtqQ==}
     engines: {node: '>=14.0.0'}
 
+  path-is-absolute@1.0.1:
+    resolution: {integrity: sha512-AVbw3UJ2e9bq64vSaS9Am0fje1Pa8pbGqTTsmXfaIiMpnr5DlDhfJOuLj9Sf95ZPVDAUerDfEk88MPmPe7UCQg==}
+    engines: {node: '>=0.10.0'}
+
   path-key@3.1.1:
     resolution: {integrity: sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q==}
     engines: {node: '>=8'}
@@ -3436,8 +3515,8 @@ packages:
   promise-limit@2.7.0:
     resolution: {integrity: sha512-7nJ6v5lnJsXwGprnGXga4wx6d1POjvi5Qmf1ivTRxTjH4Z/9Czja/UCMLVmB9N93GeWOU93XaFaEt6jbuoagNw==}
 
-  promptfoo@0.122.2:
-    resolution: {integrity: sha512-biyTIbtpH3ZNcnibhYkmvVe/N6VSmf0RumMrEgB+WRLOrUoEvgq7cXsxXguYmTlz44MWV1Un+TzIpkyqZ8DQgA==}
+  promptfoo@0.123.0:
+    resolution: {integrity: sha512-t2ADh6vU6OVGMu31hdcGZJLCfl4csqg+Ei8uRKzAaA2MZ/r9cTcsko43U8hdG6WfxqG+kqfx4Llplv6N0IfxZg==}
     engines: {node: '>=22.22.0'}
     hasBin: true
 
@@ -3479,6 +3558,54 @@ packages:
   punycode@2.3.1:
     resolution: {integrity: sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==}
     engines: {node: '>=6'}
+
+  puppeteer-extra-plugin-stealth@2.11.2:
+    resolution: {integrity: sha512-bUemM5XmTj9i2ZerBzsk2AN5is0wHMNE6K0hXBzBXOzP5m5G3Wl0RHhiqKeHToe/uIH8AoZiGhc1tCkLZQPKTQ==}
+    engines: {node: '>=8'}
+    peerDependencies:
+      playwright-extra: '*'
+      puppeteer-extra: '*'
+    peerDependenciesMeta:
+      playwright-extra:
+        optional: true
+      puppeteer-extra:
+        optional: true
+
+  puppeteer-extra-plugin-user-data-dir@2.4.1:
+    resolution: {integrity: sha512-kH1GnCcqEDoBXO7epAse4TBPJh9tEpVEK/vkedKfjOVOhZAvLkHGc9swMs5ChrJbRnf8Hdpug6TJlEuimXNQ+g==}
+    engines: {node: '>=8'}
+    peerDependencies:
+      playwright-extra: '*'
+      puppeteer-extra: '*'
+    peerDependenciesMeta:
+      playwright-extra:
+        optional: true
+      puppeteer-extra:
+        optional: true
+
+  puppeteer-extra-plugin-user-preferences@2.4.1:
+    resolution: {integrity: sha512-i1oAZxRbc1bk8MZufKCruCEC3CCafO9RKMkkodZltI4OqibLFXF3tj6HZ4LZ9C5vCXZjYcDWazgtY69mnmrQ9A==}
+    engines: {node: '>=8'}
+    peerDependencies:
+      playwright-extra: '*'
+      puppeteer-extra: '*'
+    peerDependenciesMeta:
+      playwright-extra:
+        optional: true
+      puppeteer-extra:
+        optional: true
+
+  puppeteer-extra-plugin@3.2.3:
+    resolution: {integrity: sha512-6RNy0e6pH8vaS3akPIKGg28xcryKscczt4wIl0ePciZENGE2yoaQJNd17UiEbdmh5/6WW6dPcfRWT9lxBwCi2Q==}
+    engines: {node: '>=9.11.2'}
+    peerDependencies:
+      playwright-extra: '*'
+      puppeteer-extra: '*'
+    peerDependenciesMeta:
+      playwright-extra:
+        optional: true
+      puppeteer-extra:
+        optional: true
 
   python-shell@5.0.0:
     resolution: {integrity: sha512-RUOOOjHLhgR1MIQrCtnEqz/HJ1RMZBIN+REnpSUrfft2bXqXy69fwJASVziWExfFXsR1bCY0TznnHooNsCo0/w==}
@@ -3560,6 +3687,11 @@ packages:
   rfdc@1.4.1:
     resolution: {integrity: sha512-q1b3N5QkRUWUl7iyylaaj3kOpIT0N2i9MqIEQXP73GVsN9cw3fdx8X63cEmWhJGi2PPCF23Ijp7ktmd39rawIA==}
 
+  rimraf@3.0.2:
+    resolution: {integrity: sha512-JZkJMZkAGFFPP2YqXZXPbMlMBgsxzE8ILs4lMIX/2o0L9UBw9O/Y3o6wFw/i9YLapcUJWwqbi3kdxIPdC62TIA==}
+    deprecated: Rimraf versions prior to v4 are no longer supported
+    hasBin: true
+
   rimraf@5.0.10:
     resolution: {integrity: sha512-l0OE8wL34P4nJH/H2ffoaniAokM2qSmrtXHmlpvYr5AVVX8msAyW0l8NVJFDxlSK4u3Uh/f41cQheDVdnYijwQ==}
     hasBin: true
@@ -3628,6 +3760,10 @@ packages:
 
   setprototypeof@1.2.0:
     resolution: {integrity: sha512-E5LDX7Wrp85Kil5bhZv46j8jOeboKq5JMmYM3gVGdGH8xFpPWXUMsNrlODCrkoxMEeNi/XZIwuRvY4XNwYMJpw==}
+
+  shallow-clone@0.1.2:
+    resolution: {integrity: sha512-J1zdXCky5GmNnuauESROVu31MQSnLoYvlyEn6j2Ztk6Q5EHFIhxkMhYcv6vuDzl2XEzoRr856QwzMgWM/TmZgw==}
+    engines: {node: '>=0.10.0'}
 
   sharp@0.35.4:
     resolution: {integrity: sha512-n++8XWcj+jCOr2IOl7h8LbKnGBDY4aPbmprMONBNFdn0ImXqpGVv5zliDs0V9HbmbCQLpbuo2ej9rAoOQTvMDA==}
@@ -3893,9 +4029,6 @@ packages:
   undici-types@5.26.5:
     resolution: {integrity: sha512-JlCMO+ehdEIKqlFxk6IfVoAUVmgz7cU7zD/h9XZ0qzeosSHmUJVOzSQvvYSYWXkFXC+IfLKSIffhv0sVZup6pA==}
 
-  undici-types@6.21.0:
-    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
-
   undici-types@7.24.6:
     resolution: {integrity: sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==}
 
@@ -3921,6 +4054,10 @@ packages:
   universalify@0.2.0:
     resolution: {integrity: sha512-CJ1QgKmNg3CwvAv/kOFmtnEN05f0D/cn9QntgNOQlQF9dgvVTHj3t+8JPdjqawCHk7V/KA+fbUqzZ9XWhcqPUg==}
     engines: {node: '>= 4.0.0'}
+
+  universalify@2.0.1:
+    resolution: {integrity: sha512-gptHNQghINnc/vTGIk0SOFGFNXw7JVrlRUtConJRlvaw6DuX0wO5Jeko9sWrMBhh+PsYAZ7oXAiOnf/UKogyiw==}
+    engines: {node: '>= 10.0.0'}
 
   unpipe@1.0.0:
     resolution: {integrity: sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ==}
@@ -4059,25 +4196,25 @@ packages:
     peerDependencies:
       zod: ^3.25.28 || ^4
 
-  zod@4.5.4:
-    resolution: {integrity: sha512-sC95tT5iHHH9gtpj6A81kh+NEaRAUFN+qlUPDUbRfOMvNf5QCBqsb3WgvnpVtK5Y+4UfA6KqufotuTvMGiTlsA==}
+  zod@4.6.1:
+    resolution: {integrity: sha512-341aRWQsve0rvronKNTqZpjmzdbUDlFuzHaI/XLg/Ej82qffDJRRfBTCuv7+9q/rMjB6LSLyEBnW4InJeMtt/Q==}
 
 snapshots:
 
-  '@ai-sdk/gateway@3.0.188(zod@4.5.4)':
+  '@ai-sdk/gateway@3.0.188(zod@4.6.1)':
     dependencies:
       '@ai-sdk/provider': 3.0.15
-      '@ai-sdk/provider-utils': 4.0.50(zod@4.5.4)
+      '@ai-sdk/provider-utils': 4.0.50(zod@4.6.1)
       '@vercel/oidc': 3.2.0
-      zod: 4.5.4
+      zod: 4.6.1
 
-  '@ai-sdk/provider-utils@4.0.50(zod@4.5.4)':
+  '@ai-sdk/provider-utils@4.0.50(zod@4.6.1)':
     dependencies:
       '@ai-sdk/provider': 3.0.15
       '@standard-schema/spec': 1.1.0
       eventsource-parser: 3.1.1
       undici: 6.28.1
-      zod: 4.5.4
+      zod: 4.6.1
 
   '@ai-sdk/provider@3.0.15':
     dependencies:
@@ -4089,52 +4226,52 @@ snapshots:
       is-fullwidth-code-point: 5.1.0
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.234':
+  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.251':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.234':
+  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.251':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.234':
+  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.251':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.234':
+  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.251':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.234':
+  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.251':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.234':
+  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.251':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.234':
+  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.251':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.234':
+  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.251':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk@0.3.234(@anthropic-ai/sdk@0.117.1(zod@4.5.4))(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(zod@4.5.4))(zod@4.5.4)':
+  '@anthropic-ai/claude-agent-sdk@0.3.251(@anthropic-ai/sdk@0.122.0(zod@4.6.1))(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(zod@4.6.1))(zod@4.6.1)':
     dependencies:
-      '@anthropic-ai/sdk': 0.117.1(zod@4.5.4)
-      '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(zod@4.5.4)
-      zod: 4.5.4
+      '@anthropic-ai/sdk': 0.122.0(zod@4.6.1)
+      '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(zod@4.6.1)
+      zod: 4.6.1
     optionalDependencies:
-      '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.234
-      '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.234
-      '@anthropic-ai/claude-agent-sdk-linux-arm64': 0.3.234
-      '@anthropic-ai/claude-agent-sdk-linux-arm64-musl': 0.3.234
-      '@anthropic-ai/claude-agent-sdk-linux-x64': 0.3.234
-      '@anthropic-ai/claude-agent-sdk-linux-x64-musl': 0.3.234
-      '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.234
-      '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.234
+      '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.251
+      '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.251
+      '@anthropic-ai/claude-agent-sdk-linux-arm64': 0.3.251
+      '@anthropic-ai/claude-agent-sdk-linux-arm64-musl': 0.3.251
+      '@anthropic-ai/claude-agent-sdk-linux-x64': 0.3.251
+      '@anthropic-ai/claude-agent-sdk-linux-x64-musl': 0.3.251
+      '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.251
+      '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.251
     optional: true
 
-  '@anthropic-ai/sdk@0.117.1(zod@4.5.4)':
+  '@anthropic-ai/sdk@0.122.0(zod@4.6.1)':
     dependencies:
       json-schema-to-ts: 3.1.1
       standardwebhooks: 1.1.1
     optionalDependencies:
-      zod: 4.5.4
+      zod: 4.6.1
 
   '@apidevtools/json-schema-ref-parser@16.0.1(@types/json-schema@7.0.15)':
     dependencies:
@@ -4431,7 +4568,7 @@ snapshots:
       tslib: 2.8.1
     optional: true
 
-  '@azure/ai-projects@2.6.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)':
+  '@azure/ai-projects@2.6.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)':
     dependencies:
       '@azure-rest/core-client': 2.9.0
       '@azure/abort-controller': 2.2.0
@@ -4445,7 +4582,7 @@ snapshots:
       '@azure/logger': 1.4.0
       '@azure/storage-blob': 12.33.0
       '@opentelemetry/api': 1.9.1
-      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)
+      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)
       tslib: 2.8.1
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
@@ -4591,6 +4728,12 @@ snapshots:
   '@azure/msal-node@5.6.0':
     dependencies:
       '@azure/msal-common': 16.13.0
+      jsonwebtoken: 9.0.3
+    optional: true
+
+  '@azure/msal-node@6.0.0':
+    dependencies:
+      '@azure/msal-common': 16.14.0
       jsonwebtoken: 9.0.3
     optional: true
 
@@ -4923,18 +5066,6 @@ snapshots:
     optionalDependencies:
       '@types/node': 25.9.1
 
-  '@inquirer/core@11.2.1(@types/node@25.9.1)':
-    dependencies:
-      '@inquirer/ansi': 2.0.8
-      '@inquirer/figures': 2.0.9
-      '@inquirer/type': 4.1.1(@types/node@25.9.1)
-      cli-width: 4.1.0
-      fast-wrap-ansi: 0.2.2
-      mute-stream: 3.0.0
-      signal-exit: 4.1.0
-    optionalDependencies:
-      '@types/node': 25.9.1
-
   '@inquirer/core@12.0.2(@types/node@25.9.1)':
     dependencies:
       '@inquirer/ansi': 2.0.8
@@ -5147,10 +5278,10 @@ snapshots:
 
   '@modelcontextprotocol/core@2.0.0':
     dependencies:
-      zod: 4.5.4
+      zod: 4.6.1
     optional: true
 
-  '@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(zod@4.5.4)':
+  '@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(zod@4.6.1)':
     dependencies:
       '@hono/node-server': 2.1.1(hono@4.13.5)
       ajv: 8.20.0
@@ -5167,8 +5298,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 4.5.4
-      zod-to-json-schema: 3.25.2(zod@4.5.4)
+      zod: 4.6.1
+      zod-to-json-schema: 3.25.2(zod@4.6.1)
     optionalDependencies:
       '@cfworker/json-schema': 4.1.1
     transitivePeerDependencies:
@@ -5178,7 +5309,7 @@ snapshots:
   '@modelcontextprotocol/server@2.0.0':
     dependencies:
       '@modelcontextprotocol/core': 2.0.0
-      zod: 4.5.4
+      zod: 4.6.1
     optional: true
 
   '@mongodb-js/saslprep@1.5.0':
@@ -5391,13 +5522,13 @@ snapshots:
       '@octokit/openapi-types': 29.0.1
     optional: true
 
-  '@openai/agents-core@0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)':
+  '@openai/agents-core@0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)':
     dependencies:
       debug: 4.4.3
-      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)
+      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)
     optionalDependencies:
-      '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(zod@4.5.4)
-      zod: 4.5.4
+      '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(zod@4.6.1)
+      zod: 4.6.1
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
       - '@cfworker/json-schema'
@@ -5407,12 +5538,12 @@ snapshots:
       - ws
     optional: true
 
-  '@openai/agents-openai@0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)':
+  '@openai/agents-openai@0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)':
     dependencies:
-      '@openai/agents-core': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)
+      '@openai/agents-core': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)
       debug: 4.4.3
-      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)
-      zod: 4.5.4
+      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)
+      zod: 4.6.1
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
       - '@cfworker/json-schema'
@@ -5422,13 +5553,13 @@ snapshots:
       - ws
     optional: true
 
-  '@openai/agents-realtime@0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(zod@4.5.4)':
+  '@openai/agents-realtime@0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(zod@4.6.1)':
     dependencies:
-      '@openai/agents-core': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)
+      '@openai/agents-core': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)
       '@types/ws': 8.18.1
       debug: 4.4.3
       ws: 8.21.3
-      zod: 4.5.4
+      zod: 4.6.1
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
       - '@cfworker/json-schema'
@@ -5439,14 +5570,14 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@openai/agents@0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)':
+  '@openai/agents@0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)':
     dependencies:
-      '@openai/agents-core': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)
-      '@openai/agents-openai': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)
-      '@openai/agents-realtime': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(zod@4.5.4)
+      '@openai/agents-core': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)
+      '@openai/agents-openai': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)
+      '@openai/agents-realtime': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(zod@4.6.1)
       debug: 4.4.3
-      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)
-      zod: 4.5.4
+      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)
+      zod: 4.6.1
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
       - '@cfworker/json-schema'
@@ -5518,7 +5649,7 @@ snapshots:
   '@openai/codex@0.154.0-win32-x64':
     optional: true
 
-  '@opencode-ai/sdk@1.18.29':
+  '@opencode-ai/sdk@1.18.30':
     dependencies:
       cross-spawn: 7.0.6
 
@@ -5708,7 +5839,7 @@ snapshots:
 
   '@slack/logger@5.0.0':
     dependencies:
-      '@types/node': 22.20.1
+      '@types/node': 25.9.1
     optional: true
 
   '@slack/types@3.1.0':
@@ -5718,7 +5849,7 @@ snapshots:
     dependencies:
       '@slack/logger': 5.0.0
       '@slack/types': 3.1.0
-      '@types/node': 22.20.1
+      '@types/node': 25.9.1
       '@types/retry': 0.12.5
       eventemitter3: 5.0.4
       p-queue: 6.6.2
@@ -5855,7 +5986,7 @@ snapshots:
 
   '@types/cors@2.8.19':
     dependencies:
-      '@types/node': 22.20.1
+      '@types/node': 25.9.1
 
   '@types/debug@4.1.12':
     dependencies:
@@ -5872,14 +6003,9 @@ snapshots:
       undici-types: 5.26.5
     optional: true
 
-  '@types/node@22.20.1':
-    dependencies:
-      undici-types: 6.21.0
-
   '@types/node@25.9.1':
     dependencies:
       undici-types: 7.24.6
-    optional: true
 
   '@types/pegjs@0.10.6':
     optional: true
@@ -5905,11 +6031,11 @@ snapshots:
 
   '@types/ws@8.18.1':
     dependencies:
-      '@types/node': 22.20.1
+      '@types/node': 25.9.1
 
   '@types/yauzl@2.10.3':
     dependencies:
-      '@types/node': 22.20.1
+      '@types/node': 25.9.1
     optional: true
 
   '@typespec/ts-http-runtime@0.3.9':
@@ -5955,13 +6081,13 @@ snapshots:
 
   agent-base@9.0.0: {}
 
-  ai@6.0.276(zod@4.5.4):
+  ai@6.0.276(zod@4.6.1):
     dependencies:
-      '@ai-sdk/gateway': 3.0.188(zod@4.5.4)
+      '@ai-sdk/gateway': 3.0.188(zod@4.6.1)
       '@ai-sdk/provider': 3.0.15
-      '@ai-sdk/provider-utils': 4.0.50(zod@4.5.4)
+      '@ai-sdk/provider-utils': 4.0.50(zod@4.6.1)
       '@opentelemetry/api': 1.9.1
-      zod: 4.5.4
+      zod: 4.6.1
 
   ajv-formats@3.0.1(ajv@8.20.0):
     optionalDependencies:
@@ -5999,6 +6125,9 @@ snapshots:
     optional: true
 
   argparse@2.0.1: {}
+
+  arr-union@3.1.0:
+    optional: true
 
   asap@2.0.6: {}
 
@@ -6092,6 +6221,12 @@ snapshots:
     optional: true
 
   bowser@2.14.1:
+    optional: true
+
+  brace-expansion@1.1.18:
+    dependencies:
+      balanced-match: 1.0.2
+      concat-map: 0.0.1
     optional: true
 
   brace-expansion@2.1.4:
@@ -6191,6 +6326,15 @@ snapshots:
 
   cli-width@4.1.0: {}
 
+  clone-deep@0.2.4:
+    dependencies:
+      for-own: 0.1.5
+      is-plain-object: 2.0.4
+      kind-of: 3.2.2
+      lazy-cache: 1.0.4
+      shallow-clone: 0.1.2
+    optional: true
+
   cluster-key-slot@1.1.2:
     optional: true
 
@@ -6227,7 +6371,7 @@ snapshots:
       delayed-stream: 1.0.0
     optional: true
 
-  commander@14.0.3: {}
+  commander@15.0.0: {}
 
   commander@5.1.0: {}
 
@@ -6248,6 +6392,9 @@ snapshots:
       vary: 1.1.2
     transitivePeerDependencies:
       - supports-color
+
+  concat-map@0.0.1:
+    optional: true
 
   content-disposition@1.1.0: {}
 
@@ -6312,6 +6459,9 @@ snapshots:
   dedent@1.7.2: {}
 
   deep-extend@0.6.0:
+    optional: true
+
+  deepmerge@4.3.1:
     optional: true
 
   default-browser-id@5.0.1:
@@ -6426,7 +6576,7 @@ snapshots:
   engine.io@6.6.10:
     dependencies:
       '@types/cors': 2.8.19
-      '@types/node': 22.20.1
+      '@types/node': 25.9.1
       '@types/ws': 8.18.1
       accepts: 1.3.8
       cookie: 0.7.2
@@ -6708,6 +6858,17 @@ snapshots:
       debug: 4.3.4
     optional: true
 
+  for-in@0.1.8:
+    optional: true
+
+  for-in@1.0.2:
+    optional: true
+
+  for-own@0.1.5:
+    dependencies:
+      for-in: 1.0.2
+    optional: true
+
   foreground-child@3.3.1:
     dependencies:
       cross-spawn: 7.0.6
@@ -6734,6 +6895,16 @@ snapshots:
   fresh@2.0.0: {}
 
   fs-constants@1.0.0:
+    optional: true
+
+  fs-extra@10.1.0:
+    dependencies:
+      graceful-fs: 4.2.11
+      jsonfile: 6.2.1
+      universalify: 2.0.1
+    optional: true
+
+  fs.realpath@1.0.0:
     optional: true
 
   fsevents@2.3.2:
@@ -6835,6 +7006,16 @@ snapshots:
       minimatch: 10.2.6
       minipass: 7.1.3
       path-scurry: 2.0.2
+
+  glob@7.2.3:
+    dependencies:
+      fs.realpath: 1.0.0
+      inflight: 1.0.6
+      inherits: 2.0.4
+      minimatch: 3.1.5
+      once: 1.4.0
+      path-is-absolute: 1.0.1
+    optional: true
 
   global-agent@3.0.0:
     dependencies:
@@ -7030,10 +7211,16 @@ snapshots:
       '@toon-format/toon': 2.3.1
       tokenx: 1.6.0
       yaml: 2.9.0
-      zod: 4.5.4
+      zod: 4.6.1
     optional: true
 
   indent-string@5.0.0:
+    optional: true
+
+  inflight@1.0.6:
+    dependencies:
+      once: 1.4.0
+      wrappy: 1.0.2
     optional: true
 
   inherits@2.0.4: {}
@@ -7084,6 +7271,9 @@ snapshots:
   is-docker@3.0.0:
     optional: true
 
+  is-extendable@0.1.1:
+    optional: true
+
   is-fullwidth-code-point@3.0.0: {}
 
   is-fullwidth-code-point@5.1.0:
@@ -7103,6 +7293,11 @@ snapshots:
 
   is-plain-obj@4.1.0: {}
 
+  is-plain-object@2.0.4:
+    dependencies:
+      isobject: 3.0.1
+    optional: true
+
   is-promise@4.0.0: {}
 
   is-stream@2.0.1: {}
@@ -7119,6 +7314,9 @@ snapshots:
     optional: true
 
   isexe@2.0.0: {}
+
+  isobject@3.0.1:
+    optional: true
 
   isstream@0.1.2:
     optional: true
@@ -7157,10 +7355,6 @@ snapshots:
       base64-js: 1.5.1
     optional: true
 
-  js-yaml@5.3.0:
-    dependencies:
-      argparse: 2.0.1
-
   js-yaml@5.4.1:
     dependencies:
       argparse: 2.0.1
@@ -7188,6 +7382,13 @@ snapshots:
     optional: true
 
   json5@2.2.3: {}
+
+  jsonfile@6.2.1:
+    dependencies:
+      universalify: 2.0.1
+    optionalDependencies:
+      graceful-fs: 4.2.11
+    optional: true
 
   jsonwebtoken@9.0.3:
     dependencies:
@@ -7228,7 +7429,23 @@ snapshots:
     dependencies:
       '@keyv/serialize': 1.1.1
 
+  kind-of@2.0.1:
+    dependencies:
+      is-buffer: 1.1.6
+    optional: true
+
+  kind-of@3.2.2:
+    dependencies:
+      is-buffer: 1.1.6
+    optional: true
+
   kuler@2.0.0: {}
+
+  lazy-cache@0.2.7:
+    optional: true
+
+  lazy-cache@1.0.4:
+    optional: true
 
   libsql@0.5.29:
     dependencies:
@@ -7326,6 +7543,13 @@ snapshots:
   memory-pager@1.5.0:
     optional: true
 
+  merge-deep@3.0.3:
+    dependencies:
+      arr-union: 3.1.0
+      clone-deep: 0.2.4
+      kind-of: 3.2.2
+    optional: true
+
   merge-descriptors@2.0.0: {}
 
   mime-db@1.52.0: {}
@@ -7352,6 +7576,11 @@ snapshots:
     dependencies:
       brace-expansion: 5.0.9
 
+  minimatch@3.1.5:
+    dependencies:
+      brace-expansion: 1.1.18
+    optional: true
+
   minimatch@9.0.9:
     dependencies:
       brace-expansion: 2.1.4
@@ -7361,6 +7590,12 @@ snapshots:
     optional: true
 
   minipass@7.1.3: {}
+
+  mixin-object@2.0.1:
+    dependencies:
+      for-in: 0.1.8
+      is-extendable: 0.1.1
+    optional: true
 
   mkdirp-classic@0.5.3:
     optional: true
@@ -7564,21 +7799,21 @@ snapshots:
       wsl-utils: 0.1.0
     optional: true
 
-  openai@6.49.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4):
+  openai@6.49.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1):
     optionalDependencies:
       '@aws-sdk/credential-provider-node': 3.972.82
       '@smithy/signature-v4': 5.7.3
       ws: 8.21.3
-      zod: 4.5.4
+      zod: 4.6.1
     optional: true
 
-  openai@7.15.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(undici@7.29.1)(ws@8.21.3)(zod@4.5.4):
+  openai@7.15.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(undici@7.29.1)(ws@8.21.3)(zod@4.6.1):
     optionalDependencies:
       '@aws-sdk/credential-provider-node': 3.972.82
       '@smithy/signature-v4': 5.7.3
       undici: 7.29.1
       ws: 8.21.3
-      zod: 4.5.4
+      zod: 4.6.1
 
   opener@1.5.2: {}
 
@@ -7654,6 +7889,9 @@ snapshots:
     optional: true
 
   path-expression-matcher@1.6.2: {}
+
+  path-is-absolute@1.0.1:
+    optional: true
 
   path-key@3.1.1: {}
 
@@ -7807,14 +8045,14 @@ snapshots:
 
   promise-limit@2.7.0: {}
 
-  promptfoo@0.122.2(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.62.1)(socks@2.8.10):
+  promptfoo@0.123.0(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.62.1)(socks@2.8.10):
     dependencies:
-      '@anthropic-ai/sdk': 0.117.1(zod@4.5.4)
+      '@anthropic-ai/sdk': 0.122.0(zod@4.6.1)
       '@apidevtools/json-schema-ref-parser': 16.0.1(@types/json-schema@7.0.15)
       '@hono/node-server': 2.1.1(hono@4.13.5)
       '@inquirer/checkbox': 5.2.4(@types/node@25.9.1)
       '@inquirer/confirm': 6.3.1(@types/node@25.9.1)
-      '@inquirer/core': 11.2.1(@types/node@25.9.1)
+      '@inquirer/core': 12.0.2(@types/node@25.9.1)
       '@inquirer/editor': 5.3.2(@types/node@25.9.1)
       '@inquirer/input': 5.1.5(@types/node@25.9.1)
       '@inquirer/search': 4.3.2(@types/node@25.9.1)
@@ -7828,7 +8066,7 @@ snapshots:
       '@opentelemetry/sdk-trace-node': 2.11.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/semantic-conventions': 1.43.0
       '@types/ws': 8.18.1
-      ai: 6.0.276(zod@4.5.4)
+      ai: 6.0.276(zod@4.6.1)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       async: 3.2.6
@@ -7838,7 +8076,7 @@ snapshots:
       chokidar: 5.0.0
       cli-progress: 3.12.0
       cli-table3: 0.6.5
-      commander: 14.0.3
+      commander: 15.0.0
       compression: 1.8.1
       cors: 2.8.6
       csv-parse: 7.0.2
@@ -7859,7 +8097,7 @@ snapshots:
       http-z: 8.1.1
       istextorbinary: 9.5.0
       js-rouge: 3.2.1
-      js-yaml: 5.3.0
+      js-yaml: 5.4.1
       json5: 2.2.3
       keyv: 5.6.0
       keyv-file: 5.3.5
@@ -7867,7 +8105,7 @@ snapshots:
       mathjs: 15.2.0
       minimatch: 10.2.6
       nunjucks: 3.2.4(chokidar@5.0.0)
-      openai: 7.15.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(undici@7.29.1)(ws@8.21.3)(zod@4.5.4)
+      openai: 7.15.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(undici@7.29.1)(ws@8.21.3)(zod@4.6.1)
       opener: 1.5.2
       ora: 9.4.1
       parse5: 8.0.1
@@ -7888,17 +8126,17 @@ snapshots:
       undici: 7.29.1
       winston: 3.19.0
       ws: 8.21.3
-      zod: 4.5.4
+      zod: 4.6.1
     optionalDependencies:
-      '@anthropic-ai/claude-agent-sdk': 0.3.234(@anthropic-ai/sdk@0.117.1(zod@4.5.4))(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(zod@4.5.4))(zod@4.5.4)
+      '@anthropic-ai/claude-agent-sdk': 0.3.251(@anthropic-ai/sdk@0.122.0(zod@4.6.1))(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(zod@4.6.1))(zod@4.6.1)
       '@aws-sdk/client-bedrock-agent-runtime': 3.1126.0
       '@aws-sdk/client-bedrock-runtime': 3.1126.0
       '@aws-sdk/client-s3': 3.1126.0
       '@aws-sdk/client-sagemaker-runtime': 3.1126.0
       '@aws-sdk/credential-provider-sso': 3.973.14
-      '@azure/ai-projects': 2.6.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)
+      '@azure/ai-projects': 2.6.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)
       '@azure/identity': 4.13.2
-      '@azure/msal-node': 5.6.0
+      '@azure/msal-node': 6.0.0
       '@azure/openai-assistants': 1.0.0-beta.6
       '@azure/storage-blob': 12.33.0
       '@fal-ai/client': 1.10.1
@@ -7906,11 +8144,11 @@ snapshots:
       '@huggingface/transformers': 4.2.0(@types/node@25.9.1)
       '@ibm-cloud/watsonx-ai': 1.7.16
       '@langfuse/client': 5.11.0(@opentelemetry/api@1.9.1)
-      '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(zod@4.5.4)
-      '@openai/agents': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.5.4)
+      '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(zod@4.6.1)
+      '@openai/agents': 0.11.8(@aws-sdk/credential-provider-node@3.972.82)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.1)
       '@openai/codex-sdk': 0.154.0
       '@openai/codex-security': 0.1.27(@types/node@25.9.1)(graphql@17.0.2)
-      '@opencode-ai/sdk': 1.18.29
+      '@opencode-ai/sdk': 1.18.30
       '@playwright/browser-chromium': 1.62.1
       '@rollup/rollup-linux-x64-gnu': 4.63.1
       '@slack/web-api': 8.1.1
@@ -7931,6 +8169,7 @@ snapshots:
       pem: 1.14.8
       playwright: 1.62.1
       playwright-extra: 4.3.6(playwright-core@1.62.1)(playwright@1.62.1)
+      puppeteer-extra-plugin-stealth: 2.11.2(playwright-extra@4.3.6(playwright-core@1.62.1)(playwright@1.62.1))
       read-excel-file: 9.3.10
       sharp: 0.35.4(@types/node@25.9.1)
     transitivePeerDependencies:
@@ -7977,6 +8216,7 @@ snapshots:
       - playwright-core
       - postgres
       - prisma
+      - puppeteer-extra
       - react-devtools-core
       - snappy
       - socks
@@ -7996,7 +8236,7 @@ snapshots:
       '@protobufjs/path': 1.1.2
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.2
-      '@types/node': 22.20.1
+      '@types/node': 25.9.1
       long: 5.3.2
     optional: true
 
@@ -8039,6 +8279,52 @@ snapshots:
     optional: true
 
   punycode@2.3.1:
+    optional: true
+
+  puppeteer-extra-plugin-stealth@2.11.2(playwright-extra@4.3.6(playwright-core@1.62.1)(playwright@1.62.1)):
+    dependencies:
+      debug: 4.4.3
+      puppeteer-extra-plugin: 3.2.3(playwright-extra@4.3.6(playwright-core@1.62.1)(playwright@1.62.1))
+      puppeteer-extra-plugin-user-preferences: 2.4.1(playwright-extra@4.3.6(playwright-core@1.62.1)(playwright@1.62.1))
+    optionalDependencies:
+      playwright-extra: 4.3.6(playwright-core@1.62.1)(playwright@1.62.1)
+    transitivePeerDependencies:
+      - supports-color
+    optional: true
+
+  puppeteer-extra-plugin-user-data-dir@2.4.1(playwright-extra@4.3.6(playwright-core@1.62.1)(playwright@1.62.1)):
+    dependencies:
+      debug: 4.4.3
+      fs-extra: 10.1.0
+      puppeteer-extra-plugin: 3.2.3(playwright-extra@4.3.6(playwright-core@1.62.1)(playwright@1.62.1))
+      rimraf: 3.0.2
+    optionalDependencies:
+      playwright-extra: 4.3.6(playwright-core@1.62.1)(playwright@1.62.1)
+    transitivePeerDependencies:
+      - supports-color
+    optional: true
+
+  puppeteer-extra-plugin-user-preferences@2.4.1(playwright-extra@4.3.6(playwright-core@1.62.1)(playwright@1.62.1)):
+    dependencies:
+      debug: 4.4.3
+      deepmerge: 4.3.1
+      puppeteer-extra-plugin: 3.2.3(playwright-extra@4.3.6(playwright-core@1.62.1)(playwright@1.62.1))
+      puppeteer-extra-plugin-user-data-dir: 2.4.1(playwright-extra@4.3.6(playwright-core@1.62.1)(playwright@1.62.1))
+    optionalDependencies:
+      playwright-extra: 4.3.6(playwright-core@1.62.1)(playwright@1.62.1)
+    transitivePeerDependencies:
+      - supports-color
+    optional: true
+
+  puppeteer-extra-plugin@3.2.3(playwright-extra@4.3.6(playwright-core@1.62.1)(playwright@1.62.1)):
+    dependencies:
+      '@types/debug': 4.1.12
+      debug: 4.4.3
+      merge-deep: 3.0.3
+    optionalDependencies:
+      playwright-extra: 4.3.6(playwright-core@1.62.1)(playwright@1.62.1)
+    transitivePeerDependencies:
+      - supports-color
     optional: true
 
   python-shell@5.0.0: {}
@@ -8133,6 +8419,11 @@ snapshots:
 
   rfdc@1.4.1: {}
 
+  rimraf@3.0.2:
+    dependencies:
+      glob: 7.2.3
+    optional: true
+
   rimraf@5.0.10:
     dependencies:
       glob: 10.5.0
@@ -8222,6 +8513,14 @@ snapshots:
       - supports-color
 
   setprototypeof@1.2.0: {}
+
+  shallow-clone@0.1.2:
+    dependencies:
+      is-extendable: 0.1.1
+      kind-of: 2.0.1
+      lazy-cache: 0.2.7
+      mixin-object: 2.0.1
+    optional: true
 
   sharp@0.35.4(@types/node@25.9.1):
     dependencies:
@@ -8573,10 +8872,7 @@ snapshots:
   undici-types@5.26.5:
     optional: true
 
-  undici-types@6.21.0: {}
-
-  undici-types@7.24.6:
-    optional: true
+  undici-types@7.24.6: {}
 
   undici@6.28.1: {}
 
@@ -8590,6 +8886,9 @@ snapshots:
     optional: true
 
   universalify@0.2.0:
+    optional: true
+
+  universalify@2.0.1:
     optional: true
 
   unpipe@1.0.0: {}
@@ -8719,9 +9018,9 @@ snapshots:
   yoga-layout@3.2.1:
     optional: true
 
-  zod-to-json-schema@3.25.2(zod@4.5.4):
+  zod-to-json-schema@3.25.2(zod@4.6.1):
     dependencies:
-      zod: 4.5.4
+      zod: 4.6.1
     optional: true
 
-  zod@4.5.4: {}
+  zod@4.6.1: {}

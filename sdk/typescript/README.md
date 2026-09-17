@@ -1623,6 +1623,26 @@ Use the SDK loop for a disposition per alert.
 files or literal text and work in the current directory. Pass a saved finding
 or occurrence ID to `patch` to use its original repository.
 
+Add `--validation-prompt-file PATH` to supply custom dynamic validation
+instructions, using the same UTF-8 prompt file format as `scan`. The patch task
+uses these instructions to set up the environment, build or start the application,
+exercise the fix, check legitimate behavior, and clean up. Include the commands,
+authorized targets, expected results, and cleanup steps for your environment.
+The task must report validation evidence or explain which checks failed or could
+not run before claiming the patch is fixed or verified.
+
+```bash
+npx @openai/codex-security patch OCCURRENCE_ID --validation-prompt-file validation.md
+npx @openai/codex-security patch issues.md --validation-prompt-file validation.md
+```
+
+The flag works with saved findings, issue text/files, and Linear inputs. Relative
+prompt paths resolve from the directory where you invoke the CLI, including when
+the saved finding belongs to another repository. The file is read once before
+patching; missing, empty, or non-regular files fail before the patch task starts.
+Without the flag, the usual fix-finding verification applies. The flag does not
+change sandbox permissions and cannot be combined with `--resume-pr`.
+
 Add `--assess-patch-risk` to a `patch` command to run the bundled patch-risk
 assessment skill once on the completed patch. The assessment is advisory and
 does not change the patch or its merge state. Human-readable commands print the
@@ -1775,6 +1795,12 @@ cancels, resumes, publishes, edits, or deduplicates anything.
 
 The dashboard opens on Findings, followed by Duplicate groups. Both views
 support search, repository filtering, sorting, pagination, and record details.
+Click any column header to sort all matching records; click it again to reverse
+the order. The arrow marks the active column and direction. Changing the sort
+returns to the first page, and automatic refreshes keep the selected order.
+By default, findings sort by last update descending, then severity descending,
+then ID ascending to break ties. Groups sort by last update descending and ID
+ascending.
 Findings show stored content and links to their duplicate groups. Groups link
 back to their member findings, preserving separate overlapping groups and the
 original finding records.
@@ -1791,7 +1817,10 @@ repository choices, a page of records, and optional selected-record details:
 
 - `view`: `findings` (default) or `groups`.
 - `query`, `repository`: optional search text and exact repository ID.
-- `sort`: `activity` (default; most recently updated first) or `newest`.
+- `sort`: `activity` (default; last update), `newest` (created), `title`,
+  `repository`, `severity` (findings only), or `members` (groups only).
+- `direction`: `asc` or `desc` (default). Text sorts alphabetically without
+  case sensitivity, severity by level, and member counts numerically.
 - `limit`, `offset`: existing pagination conventions, defaulting to 50 and 0.
 - `id`: optional exact record ID to include in `detail`; unknown IDs return
   `detail: null` without hiding the list.
