@@ -172,11 +172,13 @@ describe("TypeScript package skeleton", () => {
       "test",
       "compatibility",
       "mcp",
+      "plugin-host",
       "plugin-source",
     ]);
     expect(jobs["windows"]?.needs).toEqual([
       "validate-title",
       "static-checks",
+      "plugin-host",
       "windows-test",
       "windows-verify",
     ]);

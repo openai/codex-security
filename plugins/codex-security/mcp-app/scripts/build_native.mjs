@@ -1,16 +1,13 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import { build } from "esbuild";
 
-const root = fileURLToPath(new URL("../../native/", import.meta.url));
+const root = resolve(import.meta.dirname, "../../native");
 
 await build({
-  entryPoints: (await readdir(root))
-    .filter((name) => name.endsWith(".mts"))
-    .map((name) => join(root, name)),
+  absWorkingDir: root,
+  entryPoints: ["*.mts"],
   outdir: root,
   outExtension: { ".js": ".mjs" },
   format: "esm",
