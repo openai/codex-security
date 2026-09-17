@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Badge } from "@openai/apps-sdk-ui/components/Badge";
 import { Button } from "@openai/apps-sdk-ui/components/Button";
+import { ChevronDownVector } from "@openai/apps-sdk-ui/components/Icon";
 import { Input } from "@openai/apps-sdk-ui/components/Input";
 import type {
   DashboardDetail,
@@ -416,7 +417,7 @@ export function App() {
                 Search {current.label.toLowerCase()}
               </span>
               <Input
-                size="lg"
+                size="xl"
                 value={query}
                 placeholder={`Search ${current.label.toLowerCase()}…`}
                 onChange={(event) => filter(setQuery, event.target.value)}
@@ -424,27 +425,43 @@ export function App() {
             </label>
             <label>
               <span>Repository</span>
-              <select
-                value={repository}
-                onChange={(event) => filter(setRepository, event.target.value)}
-              >
-                <option value="">All repositories</option>
-                {(saved?.data.repositories ?? []).map((repo) => (
-                  <option key={repo.id} value={repo.id}>
-                    {repo.label}
-                  </option>
-                ))}
-              </select>
+              <span className="select-field">
+                <select
+                  value={repository}
+                  onChange={(event) =>
+                    filter(setRepository, event.target.value)
+                  }
+                >
+                  <option value="">All repositories</option>
+                  {(saved?.data.repositories ?? []).map((repo) => (
+                    <option key={repo.id} value={repo.id}>
+                      {repo.label}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDownVector
+                  className="select-caret"
+                  aria-hidden="true"
+                  focusable="false"
+                />
+              </span>
             </label>
             <label>
               <span>Sort</span>
-              <select
-                value={sort}
-                onChange={(event) => filter(setSort, event.target.value)}
-              >
-                <option value="activity">Recent activity</option>
-                <option value="newest">Newest first</option>
-              </select>
+              <span className="select-field">
+                <select
+                  value={sort}
+                  onChange={(event) => filter(setSort, event.target.value)}
+                >
+                  <option value="activity">Recent activity</option>
+                  <option value="newest">Newest first</option>
+                </select>
+                <ChevronDownVector
+                  className="select-caret"
+                  aria-hidden="true"
+                  focusable="false"
+                />
+              </span>
             </label>
           </div>
           {failure && (
