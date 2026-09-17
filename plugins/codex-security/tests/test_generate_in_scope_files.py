@@ -148,6 +148,33 @@ def test_inventory_keeps_ignored_tracked_files_without_ignored_untracked_files(
     assert "./app/ignored.skip" not in paths
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not allow CR/LF in filenames")
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n"])
+@pytest.mark.parametrize("ignored_tracked", [False, True])
+@pytest.mark.parametrize("scope_kind", ["repository", "directory", "file"])
+def test_inventory_rejects_line_breaks_before_serializing_paths(
+    tmp_path: Path, separator: str, ignored_tracked: bool, scope_kind: str
+) -> None:
+    repository = make_repository(tmp_path)
+    directory = "ignored" if ignored_tracked else "app"
+    name = f"{directory}/concealed.py{separator}phantom.py"
+    write_file(repository, name)
+    if ignored_tracked:
+        git(repository, "add", "--force", "--", name)
+    scope = {"repository": ".", "directory": f"./{directory}", "file": name}[scope_kind]
+    output = tmp_path / "in_scope_files.txt"
+    previous = b"previous.py\n"
+    output.write_bytes(previous)
+
+    result = run_inventory(repository, scope, output)
+
+    assert result.returncode == 2
+    assert "path that cannot fit in the file inventory" in result.stderr
+    assert result.stdout == ""
+    assert output.read_bytes() == previous
+    assert list(output.parent.glob(f".{output.name}.*.tmp")) == []
+
+
 def test_diff_inventory_includes_power_shell_files(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -334,7 +361,7 @@ def test_large_inventory_is_not_limited_by_a_subprocess_output_buffer(tmp_path: 
         f"#!{sys.executable}\n"
         "import sys\n"
         "for index in range(12000, 0, -1):\n"
-        "    sys.stdout.write(f\"./{'x' * 100}-{index:05d}.py\\n\")\n",
+        "    sys.stdout.write(f\"./{'x' * 100}-{index:05d}.py\\0\")\n",
         encoding="utf-8",
     )
     ripgrep.chmod(0o755)
