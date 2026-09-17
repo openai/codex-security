@@ -320,7 +320,8 @@ describe("TypeScript package skeleton", () => {
     ).toMatchObject({
       if: "matrix.shard == 3 && runner.environment == 'github-hosted'",
       env: { CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true" },
-      run: "bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts",
+      "timeout-minutes": 7,
+      run: "bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts",
     });
     const quality = await workflow("test-quality.yml");
     expect(Object.keys(quality.on).sort()).toEqual([

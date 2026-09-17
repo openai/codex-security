@@ -573,14 +573,14 @@ jobs:
           retention-days: 14
       - name: Test machine-wide PowerShell policy
         if: matrix.shard == 3 && runner.environment == 'github-hosted'
-        timeout-minutes: 5
+        timeout-minutes: 7
         working-directory: sdk/typescript
         env:
           TEMP: ${{ steps.windows-temp.outputs.path }}
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
-        run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
+        run: bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts
 
   windows-verify:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify

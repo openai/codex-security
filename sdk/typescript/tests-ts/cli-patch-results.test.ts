@@ -119,7 +119,7 @@ lines.on("line", (line) => {
   });
 
   test.each([false, true])(
-    "fails a no-op with full output %s and preserves local changes",
+    "fails a no-op with full output %j and preserves local changes",
     async (fullOutput) => {
       const fixture = await repositoryFixture();
       await writeFile(join(fixture.directory, "app.ts"), "staged change\n");
@@ -180,7 +180,7 @@ lines.on("line", (line) => {
   });
 
   test.each([false, true])(
-    "checks patch changes outside a Git repository: %s",
+    "checks patch changes outside a Git repository: %j",
     async (apply) => {
       const fixture = await repositoryFixture({ initializeGit: false });
       const outcome = await fixture.patch(["Synthetic issue"], {

@@ -17,6 +17,8 @@
 - align filter controls and dropdown carets ([#949](https://github.com/openai/codex-security/pull/949))
 - match filter control borders ([#957](https://github.com/openai/codex-security/pull/957))
 - make dashboard tables sortable ([#958](https://github.com/openai/codex-security/pull/958))
+- bump @linear/sdk from 94.0.0 to 95.0.0 in /sdk/typescript ([#955](https://github.com/openai/codex-security/pull/955))
+- tolerate transient setup failures and slow Windows runners ([#953](https://github.com/openai/codex-security/pull/953))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
