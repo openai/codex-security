@@ -806,6 +806,20 @@ try {
     ],
     { cwd: consumer },
   );
+  run(
+    process.execPath,
+    [
+      join(
+        packageRoot,
+        "scripts",
+        "fixtures",
+        "package-plugin-compatibility.mjs",
+      ),
+      installedRoot,
+      consumer,
+    ],
+    { cwd: consumer },
+  );
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   run(

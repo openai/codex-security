@@ -166,6 +166,7 @@ const allowedRoot = new Set([
 ]);
 const distFiles = new Set(
   [
+    "accepted-audit",
     "api",
     "auth",
     "bulk-scan-discovery",
@@ -182,6 +183,7 @@ const distFiles = new Set(
     "config",
     "config-path",
     "contract",
+    "contract-path",
     "cost",
     "cost-model",
     "custom-validation",

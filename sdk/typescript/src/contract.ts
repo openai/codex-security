@@ -7,9 +7,10 @@ import {
   realpath,
   type FileHandle,
 } from "node:fs/promises";
-import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import { ContractValidationError } from "./errors.js";
+import { isWellFormedUnicode, safeRelativePath } from "./contract-path.js";
 import type {
   CoverageDocument,
   FindingsDocument,
@@ -874,35 +875,6 @@ async function verifyScanRoot(
   }
 }
 
-function safeRelativePath(value: string, context: string): string {
-  const parts = value.split("/");
-  if (
-    value.trim().length === 0 ||
-    !isWellFormedUnicode(value) ||
-    value === "." ||
-    value.startsWith("/") ||
-    /^[A-Za-z]:/.test(value) ||
-    parts.includes("..") ||
-    value.includes("\\") ||
-    /[\u0000-\u001f]/u.test(value)
-  ) {
-    throw new ContractValidationError(
-      `${context}: expected a safe scan-relative POSIX path.`,
-    );
-  }
-  const normalized = posix.normalize(value).replace(/\/+$/, "");
-  if (
-    normalized === "." ||
-    normalized.startsWith("../") ||
-    isAbsolute(normalized)
-  ) {
-    throw new ContractValidationError(
-      `${context}: expected a safe scan-relative POSIX path.`,
-    );
-  }
-  return normalized;
-}
-
 function portableRelativePath(value: string, context: string): string {
   const normalized = safeRelativePath(value, context);
   if (value.split("/").some(isWindowsUnsafePathComponent)) {
@@ -1035,10 +1007,6 @@ function validateParsedJson(value: unknown, context: string): void {
       validateParsedJson(item, `${context}.<property>`);
     }
   }
-}
-
-function isWellFormedUnicode(value: string): boolean {
-  return Buffer.from(value, "utf8").toString("utf8") === value;
 }
 
 function createValidator(): Ajv2020 {
