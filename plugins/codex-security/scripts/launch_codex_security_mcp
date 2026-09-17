@@ -10,7 +10,11 @@ if [ "${1:-}" = "--helper" ]; then
   server_path=$launcher_dir/../mcp/helpers.mjs
   shift
   # Node decodes argv and HOME as UTF-8; preserve POSIX bytes first.
-  set -- --helper "$(printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | od -An -v -tx1 | tr -d ' \n')"
+  # A separate descriptor preserves stdin and avoids a single argument limit.
+  exec 3<<EOF
+$(printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | od -An -v -tx1 | tr -d ' \n')
+EOF
+  set -- --helper
 fi
 cache_root=${XDG_CACHE_HOME:-${HOME:-}/.cache}
 codex_resources=

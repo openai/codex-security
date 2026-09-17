@@ -34,6 +34,6 @@ For terminal scans without a `scanId`, generate the changed-file list with:
 <python_command> <plugin_dir>/scripts/generate_in_scope_files.py --repo <repo_root> --scope . --diff-base <base> --diff-head <head> --diff-mode <revisions|local-patch> --out <discovery_dir>/in_scope_files.txt
 ```
 
-Record candidates with `normalize_candidates.py --input <candidate-source> --out <discovery_dir>/candidate_ledger.jsonl --repo-root <repo_root> --in-scope-files <discovery_dir>/in_scope_files.txt --allow-missing-in-scope`. Add validation and attack-path decisions to that same file. Following `../../references/final-report.md`, assemble unsealed `scan-manifest.json`, `findings.json`, and `coverage.json` before running `finalize_scan_contract.py --scan-dir <scan_dir> --source-root <repo_root>`.
+Record candidates with `<plugin_dir>/scripts/launch_codex_security_mcp --helper normalize-candidates --input <candidate-source> --out <discovery_dir>/candidate_ledger.jsonl --repo-root <repo_root> --in-scope-files <discovery_dir>/in_scope_files.txt --allow-missing-in-scope`. Use the `.cmd` launcher on Windows. Add validation and attack-path decisions to that same file. Following `../../references/final-report.md`, assemble unsealed `scan-manifest.json`, `findings.json`, and `coverage.json` before running `finalize_scan_contract.py --scan-dir <scan_dir> --source-root <repo_root>`.
 
 Finish only after every changed file and candidate is accounted for. Return the generated report, actual coverage gaps, and Codex review comments for confirmed findings.
