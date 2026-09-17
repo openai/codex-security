@@ -1,5 +1,6 @@
 export function packageSmokeTimeouts(platform = process.platform) {
-  const commandTimeoutMs = platform === "win32" ? 180_000 : 120_000;
+  // Cold-cache npm installs can exceed three minutes on Windows CI.
+  const commandTimeoutMs = platform === "win32" ? 300_000 : 120_000;
 
   return {
     commandTimeoutMs,
