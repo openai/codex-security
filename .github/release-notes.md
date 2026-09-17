@@ -19,8 +19,9 @@
 - make dashboard tables sortable ([#958](https://github.com/openai/codex-security/pull/958))
 - bump @linear/sdk from 94.0.0 to 95.0.0 in /sdk/typescript ([#955](https://github.com/openai/codex-security/pull/955))
 - tolerate transient setup failures and slow Windows runners ([#953](https://github.com/openai/codex-security/pull/953))
-- patch verified security findings ([#961](https://github.com/openai/codex-security/pull/961))
+- reject line breaks in inventory paths. ([#961](https://github.com/openai/codex-security/pull/961))
 - bump the third-party group across 3 directories with 7 updates ([#954](https://github.com/openai/codex-security/pull/954))
+- keep model-authored runtime status out of finalized reports ([#703](https://github.com/openai/codex-security/pull/703))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
