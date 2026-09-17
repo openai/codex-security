@@ -178,15 +178,23 @@ p {
   height: var(--control-size-xl);
   padding: 0 var(--control-gutter-lg);
   padding-inline-end: calc(var(--control-gutter-lg) + 24px);
-  border: 1px solid var(--color-border);
+  border: 0;
   border-radius: var(--control-radius-lg);
   background: var(--color-surface);
+  box-shadow: 0 0 0 1px var(--input-outline-border-color) inset;
   color: var(--color-text);
   font-size: var(--control-font-size-lg);
+  transition: box-shadow var(--transition-duration-basic)
+    var(--transition-ease-basic);
 }
-.filters select:focus-visible {
-  outline: 2px solid var(--color-text);
-  outline-offset: 2px;
+@media (hover: hover) and (pointer: fine) {
+  .filters select:hover {
+    box-shadow: 0 0 0 1px var(--input-outline-border-color-hover) inset;
+  }
+}
+.filters select:focus {
+  outline: 0;
+  box-shadow: 0 0 0 1px var(--input-outline-border-color-focus) inset;
 }
 .content-layout {
   min-width: 0;
@@ -226,6 +234,23 @@ thead th {
   font-size: 12px;
   color: var(--color-text-secondary);
   white-space: nowrap;
+}
+.column-sort {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+.column-sort:hover,
+th[aria-sort] .column-sort {
+  color: var(--color-text);
+}
+.column-sort:focus-visible {
+  outline: 2px solid var(--color-text);
+  outline-offset: 4px;
+  border-radius: var(--radius-sm);
 }
 tbody th {
   font-weight: 400;
