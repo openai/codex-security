@@ -60,7 +60,16 @@ jobs:
           pnpm --dir sdk/typescript install --frozen-lockfile
           pnpm --dir sdk/typescript run build:ci
       - name: Set up Rust
-        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+        run: |
+          for attempt in 1 2 3; do
+            if rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$((attempt * 10))"
+          done
       - name: Check Rust source and fetch locked dependencies
         run: |
           cargo fmt --check

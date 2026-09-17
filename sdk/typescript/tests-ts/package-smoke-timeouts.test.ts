@@ -19,7 +19,7 @@ describe("npm package smoke timeouts", () => {
   });
 
   test("allows the Windows npm install to complete", () => {
-    expect(packageSmokeTimeouts("win32").commandTimeoutMs).toBe(180_000);
+    expect(packageSmokeTimeouts("win32").commandTimeoutMs).toBe(300_000);
   });
 
   test.each(["linux", "darwin", "win32"] as const)(
