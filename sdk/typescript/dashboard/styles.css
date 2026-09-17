@@ -157,17 +157,32 @@ p {
   flex: 1;
   max-width: none;
 }
+.select-field {
+  position: relative;
+  min-width: 0;
+}
+.select-caret {
+  position: absolute;
+  inset-inline-end: var(--control-gutter-lg);
+  top: 50%;
+  width: 11px;
+  height: 6px;
+  transform: translateY(-50%);
+  color: var(--color-text-secondary);
+  pointer-events: none;
+}
 .filters select {
-  appearance: auto;
+  appearance: none;
   min-width: 0;
   width: 100%;
-  height: 40px;
-  padding: 0 12px;
+  height: var(--control-size-xl);
+  padding: 0 var(--control-gutter-lg);
+  padding-inline-end: calc(var(--control-gutter-lg) + 24px);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--control-radius-lg);
   background: var(--color-surface);
   color: var(--color-text);
-  font-size: 14px;
+  font-size: var(--control-font-size-lg);
 }
 .filters select:focus-visible {
   outline: 2px solid var(--color-text);

@@ -14,6 +14,7 @@
 - resolve Git metadata outside its config ([#935](https://github.com/openai/codex-security/pull/935))
 - redirect findings service root to dashboard ([#948](https://github.com/openai/codex-security/pull/948))
 - bound source preview reads ([#947](https://github.com/openai/codex-security/pull/947))
+- align filter controls and dropdown carets ([#949](https://github.com/openai/codex-security/pull/949))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
