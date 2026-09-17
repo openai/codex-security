@@ -7,6 +7,8 @@ import type {
   DashboardDetail,
   DashboardItem,
   DashboardSnapshot,
+  DashboardSort,
+  DashboardSortDirection,
   DashboardView,
 } from "../src/server/dashboard-types.js";
 import { pollDashboard } from "./polling.js";
@@ -185,13 +187,28 @@ function Results({
   selected,
   navigate,
   now,
+  sort,
+  onSort,
+  emptyState,
 }: {
   view: DashboardView;
   items: DashboardItem[];
   selected: string;
   navigate: Navigate;
   now: number;
+  sort: { column: DashboardSort; direction: DashboardSortDirection };
+  onSort: (column: DashboardSort) => void;
+  emptyState: ReactNode;
 }) {
+  const columns: { sort: DashboardSort; label: string }[] = [
+    { sort: "title", label: view === "findings" ? "Finding" : "Group" },
+    { sort: "repository", label: "Repository" },
+    view === "findings"
+      ? { sort: "severity", label: "Severity" }
+      : { sort: "members", label: "Members" },
+    { sort: "newest", label: "Created" },
+    { sort: "activity", label: "Last update" },
+  ];
   return (
     <div className="table-scroll">
       <table>
@@ -200,15 +217,42 @@ function Results({
         </caption>
         <thead>
           <tr>
-            <th scope="col">{view === "findings" ? "Finding" : "Group"}</th>
-            <th scope="col">Repository</th>
-            {view === "findings" && <th scope="col">Severity</th>}
-            {view === "groups" && <th scope="col">Members</th>}
-            <th scope="col">Created</th>
-            <th scope="col">Last update</th>
+            {columns.map((column) => (
+              <th
+                key={column.sort}
+                scope="col"
+                aria-sort={
+                  sort.column === column.sort
+                    ? sort.direction === "asc"
+                      ? "ascending"
+                      : "descending"
+                    : undefined
+                }
+              >
+                <button
+                  type="button"
+                  className="column-sort"
+                  onClick={() => onSort(column.sort)}
+                >
+                  {column.label}
+                  <span aria-hidden="true">
+                    {sort.column === column.sort
+                      ? sort.direction === "asc"
+                        ? "↑"
+                        : "↓"
+                      : "↕"}
+                  </span>
+                </button>
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
+          {items.length === 0 && (
+            <tr>
+              <td colSpan={columns.length}>{emptyState}</td>
+            </tr>
+          )}
           {items.map((item) => (
             <tr key={item.id} data-selected={selected === item.id || undefined}>
               <th scope="row">
@@ -266,7 +310,10 @@ export function App() {
   const [view, setView] = useState<DashboardView>("findings");
   const [query, setQuery] = useState("");
   const [repository, setRepository] = useState("");
-  const [sort, setSort] = useState("activity");
+  const [sort, setSort] = useState<{
+    column: DashboardSort;
+    direction: DashboardSortDirection;
+  }>({ column: "activity", direction: "desc" });
   const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState("");
   const inspectorHeading = useRef<HTMLHeadingElement>(null);
@@ -285,7 +332,8 @@ export function App() {
     view,
     query,
     repository,
-    sort,
+    sort: sort.column,
+    direction: sort.direction,
     offset: String(offset),
   });
   if (selected) parameters.set("id", selected);
@@ -329,11 +377,28 @@ export function App() {
       setQuery("");
       setRepository("");
       setOffset(0);
+      if (sort.column === "severity" || sort.column === "members") {
+        setSort({ column: "activity", direction: "desc" });
+      }
     }
     setSelected(id ?? "");
   }
   function filter(setter: (value: string) => void, value: string) {
     setter(value);
+    setOffset(0);
+  }
+  function changeSort(column: DashboardSort) {
+    setSort({
+      column,
+      direction:
+        sort.column === column
+          ? sort.direction === "asc"
+            ? "desc"
+            : "asc"
+          : column === "title" || column === "repository"
+            ? "asc"
+            : "desc",
+    });
     setOffset(0);
   }
   const counts: Record<DashboardView, number | undefined> = {
@@ -446,23 +511,6 @@ export function App() {
                 />
               </span>
             </label>
-            <label>
-              <span>Sort</span>
-              <span className="select-field">
-                <select
-                  value={sort}
-                  onChange={(event) => filter(setSort, event.target.value)}
-                >
-                  <option value="activity">Recent activity</option>
-                  <option value="newest">Newest first</option>
-                </select>
-                <ChevronDownVector
-                  className="select-caret"
-                  aria-hidden="true"
-                  focusable="false"
-                />
-              </span>
-            </label>
           </div>
           {failure && (
             <div role="alert" className="error-message">
@@ -488,38 +536,41 @@ export function App() {
               tabIndex={-1}
               aria-busy={!data && !failure}
             >
-              {!data ? (
-                <div className="empty-state">
-                  <h2>
-                    {failure
-                      ? "Data unavailable"
-                      : `Loading ${current.label.toLowerCase()}…`}
-                  </h2>
-                </div>
-              ) : data.items.length ? (
-                <Results
-                  view={view}
-                  items={data.items}
-                  selected={selected}
-                  navigate={navigate}
-                  now={now}
-                />
-              ) : (
-                <div className="empty-state">
-                  <h2>
-                    {query || repository
-                      ? "No matching records"
-                      : `No ${current.label.toLowerCase()} yet`}
-                  </h2>
-                  <p>
-                    {query || repository
-                      ? "Try another search or filter."
-                      : view === "findings"
-                        ? "Published or imported findings will appear here."
-                        : "Accepted duplicate groups will appear here after they are saved."}
-                  </p>
-                </div>
-              )}
+              <Results
+                view={view}
+                items={data?.items ?? []}
+                selected={selected}
+                navigate={navigate}
+                now={now}
+                sort={sort}
+                onSort={changeSort}
+                emptyState={
+                  !data ? (
+                    <div className="empty-state">
+                      <h2>
+                        {failure
+                          ? "Data unavailable"
+                          : `Loading ${current.label.toLowerCase()}…`}
+                      </h2>
+                    </div>
+                  ) : (
+                    <div className="empty-state">
+                      <h2>
+                        {query || repository
+                          ? "No matching records"
+                          : `No ${current.label.toLowerCase()} yet`}
+                      </h2>
+                      <p>
+                        {query || repository
+                          ? "Try another search or filter."
+                          : view === "findings"
+                            ? "Published or imported findings will appear here."
+                            : "Accepted duplicate groups will appear here after they are saved."}
+                      </p>
+                    </div>
+                  )
+                }
+              />
               {data && (
                 <footer className="pagination">
                   <span>

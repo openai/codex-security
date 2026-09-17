@@ -16,6 +16,7 @@
 - bound source preview reads ([#947](https://github.com/openai/codex-security/pull/947))
 - align filter controls and dropdown carets ([#949](https://github.com/openai/codex-security/pull/949))
 - match filter control borders ([#957](https://github.com/openai/codex-security/pull/957))
+- make dashboard tables sortable ([#958](https://github.com/openai/codex-security/pull/958))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

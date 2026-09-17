@@ -159,6 +159,10 @@ test("dashboard serves only findings and groups, and never calls an embedding pr
     "view=scans",
     "view=workflows",
     "sort=unknown",
+    "direction=unknown",
+    "direction=ASC",
+    "view=findings&sort=members",
+    "view=groups&sort=severity",
     "offset=-1",
     "limit=0",
   ]) {
@@ -173,6 +177,179 @@ test("dashboard serves only findings and groups, and never calls an embedding pr
   expect((await fetch(`${base}/dashboard/not-a-bundled-asset`)).status).toBe(
     404,
   );
+});
+
+test("dashboard sorts findings across pages with stable ties and filters", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store);
+  const titles = [
+    "Zulu",
+    "alpha",
+    "Bravo",
+    "ALPHA",
+    "Éclair",
+    "éCLAIR",
+    "alpha",
+  ];
+  const severities: Finding["severity"]["level"][] = [
+    "low",
+    "critical",
+    "high",
+    "medium",
+    "informational",
+    "critical",
+    "critical",
+  ];
+  const repositories = [
+    ["zeta"],
+    ["zeta", "Alpha"],
+    ["beta"],
+    ["beta", "Alpha"],
+    ["équipe"],
+    ["ÉQUIPE"],
+    ["Alpha", "beta"],
+  ];
+  const findings = titles.map((title, index) => {
+    const value = finding(index + 1);
+    value.title = title;
+    value.severity.level = severities[index]!;
+    return value;
+  });
+  for (const [index, value] of findings.entries()) {
+    for (const repository of repositories[index]!) {
+      await store.insert(
+        [{ ...embedded(index + 1), finding: value }],
+        repository,
+      );
+    }
+  }
+  await database(
+    environment,
+    `with db:
+    db.executemany("UPDATE findings SET created_at = ?, updated_at = ? WHERE id = ?", json.load(sys.stdin))
+print("null")`,
+    findings.map((value, index) => [
+      `2026-01-0${[3, 1, 2, 1, 4, 4, 1][index]}T00:00:00Z`,
+      `2026-02-0${[1, 2, 2, 2, 3, 2, 2][index]}T00:00:00Z`,
+      value.findingId,
+    ]),
+  );
+  const ids = (indices: number[]) =>
+    indices.map((index) => findings[index - 1]!.findingId);
+  const orders = {
+    activity: { asc: [1, 2, 6, 7, 3, 4, 5], desc: [5, 2, 6, 7, 3, 4, 1] },
+    newest: { asc: [2, 4, 7, 3, 1, 5, 6], desc: [5, 6, 1, 3, 2, 4, 7] },
+    title: { asc: [2, 4, 7, 3, 1, 5, 6], desc: [5, 6, 1, 3, 2, 4, 7] },
+    repository: { asc: [4, 7, 2, 3, 1, 5, 6], desc: [5, 6, 1, 3, 2, 4, 7] },
+    severity: { asc: [5, 1, 4, 3, 2, 6, 7], desc: [2, 6, 7, 3, 4, 1, 5] },
+  };
+  for (const [sort, directions] of Object.entries(orders)) {
+    for (const [direction, indices] of Object.entries(directions)) {
+      const result = await dashboard(base, { sort, direction });
+      expect(result.items.map((item) => item.id)).toEqual(ids(indices));
+      const page = await dashboard(base, {
+        sort,
+        direction,
+        limit: "2",
+        offset: "2",
+      });
+      expect(page.items).toEqual(result.items.slice(2, 4));
+      expect(page.total).toBe(7);
+      expect(page.nextOffset).toBe(4);
+    }
+  }
+  for (const sort of ["activity", "newest"] as const) {
+    const result = await dashboard(base, { sort });
+    expect(result.items.map((item) => item.id)).toEqual(ids(orders[sort].desc));
+  }
+  const result = await dashboard(base);
+  expect(result.items.map((item) => item.id)).toEqual(
+    ids(orders.activity.desc),
+  );
+  expect(
+    result.items.find((item) => item.id === findings[1]!.findingId)!
+      .repositoryIds,
+  ).toEqual(["Alpha", "zeta"]);
+  const filtered = await dashboard(base, {
+    sort: "severity",
+    direction: "desc",
+    query: "ALPHA",
+    repository: "Alpha",
+    limit: "1",
+    offset: "1",
+  });
+  expect(filtered.items.map((item) => item.id)).toEqual(ids([7]));
+  expect(filtered.total).toBe(3);
+  expect(filtered.nextOffset).toBe(2);
+});
+
+test("dashboard sorts group columns by numeric members and displayed repositories", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store);
+  const entries = Array.from({ length: 12 }, (_, index) => embedded(index + 1));
+  await store.insert(entries, "zeta");
+  await store.insert([entries[0]!], "Alpha");
+  await store.insert([entries[1]!], "beta");
+  const groups = await store.storeDedupeGroups([
+    [entries[0]!, entries[2]!].map((entry) => entry.finding.findingId),
+    [entries[1]!, entries[2]!, entries[3]!].map(
+      (entry) => entry.finding.findingId,
+    ),
+    entries.slice(2).map((entry) => entry.finding.findingId),
+    [entries[0]!, entries[3]!].map((entry) => entry.finding.findingId),
+  ]);
+  await database(
+    environment,
+    `with db:
+    db.executemany("UPDATE finding_dedupe_groups SET created_at = ? WHERE id = ?", json.load(sys.stdin))
+print("null")`,
+    groups.map((group, index) => [
+      `2026-01-0${[2, 1, 3, 2][index]}T00:00:00Z`,
+      group.groupId,
+    ]),
+  );
+  const [first, second, third, fourth] = groups.map(
+    (group) => group.groupId,
+  ) as [string, string, string, string];
+  const tied = [first, fourth].sort();
+  const titles = groups.map((group) => group.groupId).sort();
+  const orders = {
+    activity: { asc: [second, ...tied, third], desc: [third, ...tied, second] },
+    newest: { asc: [second, ...tied, third], desc: [third, ...tied, second] },
+    title: { asc: titles, desc: [...titles].reverse() },
+    repository: {
+      asc: [...tied, second, third],
+      desc: [third, second, ...tied],
+    },
+    members: { asc: [...tied, second, third], desc: [third, second, ...tied] },
+  };
+  for (const [sort, directions] of Object.entries(orders)) {
+    for (const [direction, ids] of Object.entries(directions)) {
+      const result = await dashboard(base, { view: "groups", sort, direction });
+      expect(result.items.map((item) => item.id)).toEqual(ids);
+      const page = await dashboard(base, {
+        view: "groups",
+        sort,
+        direction,
+        limit: "2",
+        offset: "1",
+      });
+      expect(page.items).toEqual(result.items.slice(1, 3));
+      expect(page.nextOffset).toBe(3);
+    }
+  }
+  const filtered = await dashboard(base, {
+    view: "groups",
+    sort: "members",
+    direction: "desc",
+    repository: "Alpha",
+    limit: "1",
+    offset: "1",
+  });
+  expect(filtered.items.map((item) => item.id)).toEqual(tied.slice(1));
+  expect(filtered.items[0]!.repositoryIds).toEqual(["Alpha", "zeta"]);
+  expect(filtered.total).toBe(2);
+  expect(filtered.nextOffset).toBeNull();
 });
 
 test("dashboard browses imported findings and overlapping groups without local runs", async () => {
