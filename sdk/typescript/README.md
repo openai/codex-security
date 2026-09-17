@@ -1690,6 +1690,8 @@ its read-only Codex sandbox.
 to select findings and add patch instructions. Results include a `patches`
 entry per finding with status `verified`, `no_change`, `blocked`, or `failed`.
 Verified and already-fixed findings no longer fail `--fail-on-severity`.
+Patching shows each finding's position, elapsed time, and live Codex activity.
+Progress goes to stderr; completed results stay in the terminal history.
 
 `--create-pr` commits generated patch files and opens a draft GitHub pull request
 with `gh` or a draft GitLab merge request with `glab`. Install and authenticate
