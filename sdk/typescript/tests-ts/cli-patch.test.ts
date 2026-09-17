@@ -12,6 +12,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { Writable } from "node:stream";
+import { stripVTControlCharacters } from "node:util";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
@@ -142,6 +144,98 @@ async function runWorkflow(
 }
 
 describe("scan and patch workflow", () => {
+  test("puts patch runner diagnostics on a new line after the timer", async () => {
+    for (const status of [1, 2]) {
+      const result = resultWithFindings(["high"]);
+      const stdout = capture();
+      let errors = "";
+      const stderr = Object.assign(
+        new Writable({
+          write(chunk, _encoding, callback) {
+            errors += chunk.toString();
+            callback();
+          },
+        }),
+        { isTTY: true },
+      );
+      const current = dependencies({
+        result,
+        onWorkbench: () => savedScan(result),
+        onCodex: async (_args, output) => {
+          await new Promise<void>((resolve, reject) => {
+            output!.stderr.write(
+              "codex-security: Patch response failed.\n",
+              (error) => {
+                if (error) reject(error);
+                else resolve();
+              },
+            );
+          });
+          return status;
+        },
+      });
+
+      await main(
+        ["patch", "--scan", "scan-1", "--json"],
+        stdout.stream,
+        stderr,
+        current,
+      );
+
+      expect(stripVTControlCharacters(errors)).toContain(
+        "\ncodex-security: Patch response failed.\n",
+      );
+      expect(JSON.parse(stdout.text()).patches[0].status).toBe("failed");
+    }
+  });
+
+  test.each(["A long finding title ".repeat(12), "界".repeat(100)])(
+    "keeps a long patch timer on one terminal row: %s",
+    async (title) => {
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.title = title;
+      const stdout = capture();
+      const stderr = capture(true);
+      Object.assign(stderr.stream, { columns: 36 });
+      let now = 0;
+      let tick: (() => void) | undefined;
+      const current = dependencies({
+        result,
+        onWorkbench: () => savedScan(result),
+        onCodex: (args, output) => {
+          now = 84_000;
+          tick?.();
+          expect(completePatches(args, output)[0]!.title).toBe(title);
+          return 0;
+        },
+      });
+      current.now = () => now;
+      current.setInterval = (callback) => {
+        tick = callback;
+        return {} as NodeJS.Timeout;
+      };
+      current.clearInterval = () => {};
+
+      expect(
+        await main(
+          ["patch", "--scan", "scan-1", "--json"],
+          stdout.stream,
+          stderr.stream,
+          current,
+        ),
+      ).toBe(0);
+
+      const frames = stripVTControlCharacters(stderr.text())
+        .split(/[\r\n]/u)
+        .filter((line) => /^\[\d+:\d+\] Patching/u.test(line));
+      expect(frames).toHaveLength(2);
+      for (const frame of frames) {
+        expect(Bun.stringWidth(frame)).toBeLessThan(36);
+        expect(frame).toEndWith("…");
+      }
+    },
+  );
+
   test("shows each patch and live activity before it finishes, with clean JSON output", async () => {
     for (const args of [
       ["scan", "--patch", "--patch-severity", "high"],

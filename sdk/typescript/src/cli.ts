@@ -7086,13 +7086,19 @@ async function runFindingPatches(
       interactive,
     );
     progress.startPatch(finding, patches.length);
+    const patchErrors = new NodeWritable({
+      write(chunk, _encoding, callback) {
+        progress.stop();
+        void writeCliOutput(stderr, chunk).then(() => callback(), callback);
+      },
+    });
     const status = await runSkill(
       "fix-finding",
       [],
       codexOverrides,
       effort,
       stdout,
-      stderr,
+      patchErrors,
       dependencies,
       {
         ...options,
@@ -9516,9 +9522,20 @@ export class Progress {
   }
 
   #renderTimer(message: string): void {
-    this.#stream.write(
-      `${this.#timerLineActive ? "\r" : ""}${this.#line(message)}`,
-    );
+    let line = this.#line(message);
+    const width = Math.max(0, (this.#stream.columns ?? 80) - 1);
+    if (publicationDisplayWidth(line) > width) {
+      let visible = "";
+      let used = 0;
+      for (const { segment } of PUBLICATION_GRAPHEME_SEGMENTER.segment(line)) {
+        const segmentWidth = publicationDisplayWidth(segment);
+        if (used + segmentWidth >= width) break;
+        visible += segment;
+        used += segmentWidth;
+      }
+      line = width > 0 ? `${visible}…` : "";
+    }
+    this.#stream.write(`${this.#timerLineActive ? "\r\u001B[K" : ""}${line}`);
     this.#timerLineActive = true;
   }
 }
