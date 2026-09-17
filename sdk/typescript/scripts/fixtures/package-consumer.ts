@@ -5,6 +5,11 @@ import {
   classifyScanSeverity,
   classifyScanDirectorySeverity,
   deduplicateScan,
+  deduplicateRecords,
+  type DeduplicateRecordsInput,
+  type DeduplicateRecordsResult,
+  type DeduplicationReviewRequest,
+  type DeduplicationReviewRunner,
   estimateScanCost,
   loadProjectConfig,
   matchScanFindings,
@@ -218,3 +223,19 @@ export async function scanComponents(repository: string, outputDir: string) {
 
 // @ts-expect-error The model client is an internal test dependency.
 planComponents("synthetic-repository", { codex: {} });
+
+export async function dedupeRecords(
+  input: DeduplicateRecordsInput,
+  execute: (
+    request: DeduplicationReviewRequest,
+    signal?: AbortSignal,
+  ) => Promise<unknown>,
+  signal: AbortSignal,
+): Promise<DeduplicateRecordsResult> {
+  const reviewRunner: DeduplicationReviewRunner = {
+    run(request, options) {
+      return execute(request, options?.signal);
+    },
+  };
+  return await deduplicateRecords(input, { reviewRunner, signal });
+}

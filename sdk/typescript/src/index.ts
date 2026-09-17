@@ -120,6 +120,16 @@ export type {
   PublishScanToCustomOptions,
   CustomPublicationResult,
 } from "./custom-publish.js";
+export { deduplicateRecords } from "./deduplication/records.js";
+export type {
+  DeduplicateRecordsInput,
+  DeduplicateRecordsOptions,
+  DeduplicateRecordsResult,
+} from "./deduplication/records.js";
+export type {
+  DeduplicationReviewRequest,
+  DeduplicationReviewRunner,
+} from "./deduplication/review.js";
 export {
   deduplicateScan,
   deduplicateScanDirectory,

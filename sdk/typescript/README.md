@@ -2030,6 +2030,18 @@ has the highest reported severity; ties use finding ID. Results do not delete,
 merge, or change stored finding documents. Accepted groups are saved as durable
 associations in the service before `deduplicationStatus` becomes `completed`.
 
+### Host-provided records deduplication
+
+`codex-security dedupe --records` accepts a versioned JSON-RPC run over stdin
+and emits serial `review.run` requests on stdout for a host-provided model
+backend. It requires no saved scan or Findings API and performs no local model
+execution or persistence. The SDK exposes `deduplicateRecords(input,
+{ reviewRunner, signal })`. Results distinguish new groups, existing canonical
+matches, and unresolved observations.
+
+See the [records protocol and Python fake-host example](docs/dedupe-records.md)
+for the complete input, review contract, cancellation, and persistence rules.
+
 ### Stored duplicate groups
 
 `POST /v1/dedupe-groups` accepts a batch of explicitly reviewed member sets:
