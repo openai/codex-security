@@ -144,6 +144,57 @@ async function runWorkflow(
 }
 
 describe("scan and patch workflow", () => {
+  test.each([false, true])(
+    "shows progress during baseline preparation and cleans up on failure: %s",
+    async (failSnapshot) => {
+      const result = resultWithFindings(["high"]);
+      const stdout = capture();
+      const stderr = capture(true);
+      let snapshotHadProgress = false;
+      let modelStarted = false;
+      let timers = 0;
+      const current = dependencies({
+        result,
+        onWorkbench: () => savedScan(result),
+        onRepositoryCommand: (_command, args) => {
+          if (args.includes("add") && !modelStarted) {
+            snapshotHadProgress = stderr
+              .text()
+              .includes("Patching 1/1 · Finding 1");
+            if (failSnapshot) throw new Error("Baseline snapshot failed.");
+          }
+          return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+        },
+        onCodex: (args, output) => {
+          modelStarted = true;
+          completePatches(args, output);
+          return 0;
+        },
+      });
+      current.setInterval = () => {
+        timers += 1;
+        return {} as NodeJS.Timeout;
+      };
+      current.clearInterval = () => {
+        timers -= 1;
+      };
+
+      const status = await main(
+        ["scan", "--patch", "--patch-severity", "high"],
+        stdout.stream,
+        stderr.stream,
+        current,
+      );
+
+      expect(snapshotHadProgress).toBe(true);
+      expect(modelStarted).toBe(!failSnapshot);
+      expect(status).toBe(failSnapshot ? 2 : 0);
+      expect(timers).toBe(0);
+      if (failSnapshot)
+        expect(stderr.text()).toContain("Baseline snapshot failed.");
+    },
+  );
+
   test("puts patch runner diagnostics on a new line after the timer", async () => {
     for (const status of [1, 2]) {
       const result = resultWithFindings(["high"]);
@@ -255,9 +306,24 @@ describe("scan and patch workflow", () => {
           const label = `Patching ${index}/2 · Finding ${index}`;
           expect(stderr.text()).toContain(label);
           expect(stderr.text()).not.toContain(`VERIFIED  Finding ${index}`);
+          for (const delta of ["Checking ", "the ", "fix."]) {
+            output!.appServer!.onEvent!({
+              method: "item/reasoning/summaryTextDelta",
+              params: { itemId: "reasoning-1", delta },
+            });
+          }
+          expect(stderr.text().match(/Codex: Checking/gu) ?? []).toHaveLength(
+            index - 1,
+          );
           output!.appServer!.onEvent!({
-            method: "item/reasoning/summaryTextDelta",
-            params: { itemId: "reasoning-1", delta: "Checking the fix." },
+            method: "item/completed",
+            params: {
+              item: {
+                id: "reasoning-1",
+                type: "reasoning",
+                summary: ["Checking the fix."],
+              },
+            },
           });
           expect(stderr.text()).toContain("Codex: Checking the fix.");
           now += 84_000;

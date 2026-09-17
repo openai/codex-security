@@ -860,6 +860,7 @@ class FindingProgressPresenter {
       const id = values["itemId"];
       const delta = values["delta"];
       if (typeof id !== "string" || typeof delta !== "string") return;
+      if (this.#dashboard === null) return;
       const text = `${this.#reasoning.get(id) ?? ""}${delta}`;
       this.#reasoning.set(id, text);
       normalized = {
@@ -7069,7 +7070,6 @@ async function runFindingPatches(
   );
   const patches: FindingPatch[] = [];
   for (const finding of selected.findings) {
-    const base = await snapshotPatchState(selected.repository, dependencies);
     let response = "";
     const stdout: Writable = {
       write(value: string | Uint8Array): boolean {
@@ -7092,24 +7092,31 @@ async function runFindingPatches(
         void writeCliOutput(stderr, chunk).then(() => callback(), callback);
       },
     });
-    const status = await runSkill(
-      "fix-finding",
-      [],
-      codexOverrides,
-      effort,
-      stdout,
-      patchErrors,
-      dependencies,
-      {
-        ...options,
-        directory: selected.repository,
-        findings: [finding],
-        findingInstructions: instruction?.trim()
-          ? { [finding.occurrenceId]: instruction }
-          : undefined,
-        onEvent: progress.observe.bind(progress),
-      },
-    ).finally(() => progress.stop());
+    let base: string | Map<string, string>;
+    let status: number;
+    try {
+      base = await snapshotPatchState(selected.repository, dependencies);
+      status = await runSkill(
+        "fix-finding",
+        [],
+        codexOverrides,
+        effort,
+        stdout,
+        patchErrors,
+        dependencies,
+        {
+          ...options,
+          directory: selected.repository,
+          findings: [finding],
+          findingInstructions: instruction?.trim()
+            ? { [finding.occurrenceId]: instruction }
+            : undefined,
+          onEvent: progress.observe.bind(progress),
+        },
+      );
+    } finally {
+      progress.stop();
+    }
     if (status === 130 || status === 143) {
       throw new CodexSecurityError("Patch operation was interrupted.");
     }
