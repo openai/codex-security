@@ -9,8 +9,15 @@ import { build } from "esbuild";
 const root = resolve(import.meta.dirname, "..");
 const maxChunkBytes = 140_000;
 
-export async function buildMcpApp({ output }) {
+export async function buildMcpApp({ output, native = "universal" }) {
+  if (native !== "universal" && native !== "host") {
+    throw new Error("Native packaging must be universal or host.");
+  }
   const mcpDir = resolve(output);
+  const nativeRoot = join(root, "../native", native === "host" ? "dist" : "prebuilt");
+  const hostTarget = native === "host"
+    ? (await import("../../native/platform.mjs")).nativeTarget
+    : undefined;
 
   execFileSync(process.execPath, ["--run", "build"], {
     cwd: root,
@@ -23,9 +30,12 @@ export async function buildMcpApp({ output }) {
   const contract = JSON.parse(await readFile(join(root, "../plugin-files.json"), "utf8"));
   for (const file of contract.shippedExact.filter((path) => path.startsWith("mcp/native/"))) {
     const path = file.slice("mcp/native/".length);
+    if (hostTarget && path.endsWith(".node") && !path.startsWith(`${hostTarget}/`)) {
+      continue;
+    }
     const destination = join(mcpDir, "native", path);
     await mkdir(dirname(destination), { recursive: true });
-    await copyFile(join(root, "../native/prebuilt", path), destination);
+    await copyFile(join(nativeRoot, path), destination);
   }
   await writeRuntime("helpers", "helpers-main.ts");
 
@@ -72,11 +82,14 @@ if (
   && pathToFileURL(resolve(invokedPath)).href === import.meta.url
 ) {
   const args = process.argv.slice(2);
-  if (args.length !== 2 || args[0] !== "--output") {
-    console.error("Usage: node scripts/build_mcp_app.mjs --output <directory>");
+  if (
+    args[0] !== "--output"
+    || (args.length !== 2 && !(args.length === 4 && args[2] === "--native"))
+  ) {
+    console.error("Usage: node scripts/build_mcp_app.mjs --output <directory> [--native universal|host]");
     process.exitCode = 1;
   } else {
-    buildMcpApp({ output: args[1] }).catch((error) => {
+    buildMcpApp({ output: args[1], native: args[3] }).catch((error) => {
       console.error(error instanceof Error ? error.message : error);
       process.exitCode = 1;
     });

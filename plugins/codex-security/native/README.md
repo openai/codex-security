@@ -61,7 +61,19 @@ The build also compiles the test-only `windows-wide-launcher` Rust example. It s
 
 ## Package inputs
 
-The `native-artifacts` workflow calls all three platform workflows and combines their eight verified payloads into `native-universal-<commit>`. PR validation jobs share one artifact assembled by `node-ci`; release and standalone validation runs assemble their own. The standalone MCP builder and npm package include the same complete `mcp/native` tree; neither compiles nor downloads code at runtime.
+For a local build from only the plugin source, install the MCP app dependencies and build the current host's native runtime:
+
+```sh
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+node plugins/codex-security/mcp-app/scripts/build_native.mjs
+node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp-app/.preview/mcp --native host
+```
+
+The native build entrypoint compiles the TypeScript tools using the MCP app's dependencies, fetches the locked Cargo dependencies, and builds the host binary and license notices. It requires the pinned Rust toolchain. `--native host` packages that binary from `native/dist` with all shared notices; the result is for the current platform and architecture. CI tests this path from plugin source without the SDK on Linux, macOS, and Windows.
+
+The MCP builder defaults to `--native universal`, which requires all eight verified binaries in `native/prebuilt`. Use that default for distributable plugin and npm packages.
+
+The `native-artifacts` workflow calls all three platform workflows and combines their eight verified payloads into `native-universal-<commit>`. PR validation jobs share one artifact assembled by `node-ci`; release and standalone validation runs assemble their own. By default, the standalone MCP builder and npm package include the same complete `mcp/native` tree; neither compiles nor downloads code at runtime.
 
 The GNU x64 job also runs `notices.mjs` against the locked Cargo metadata. It collects crate licenses and the pinned Rust standard-library notices for both package surfaces. The NAPI crates omit license files from their registry archives, so `licenses/napi.txt` preserves their [pinned upstream license](https://github.com/napi-rs/napi-rs/blob/956e4525fea6a676ea3680b711382f167b899af9/LICENSE). Review that override when upgrading those dependencies.
 
