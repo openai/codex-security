@@ -124,7 +124,6 @@ EXCLUDED_FILENAMES = {
 SHARD_INPUT_GLOB = "rank-shard-*.input.jsonl"
 SHARD_OUTPUT_GLOB = "rank-shard-*.output.jsonl"
 SHARD_INPUT_PATTERN = re.compile(r"^rank-shard-([0-9]{4,})\.input\.jsonl$")
-DIRECT_SCOPE_PREVIEW_READ_BYTES = 64 * 1024
 RANK_POOL_PLAN_SCHEMA_VERSION = 1
 RANK_POOL_STRATEGY = "round_robin"
 RANK_POOL_WORKER_CAP = 6
@@ -507,11 +506,7 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
             ):
                 preview = ""
             else:
-                preview, is_binary = preview_for(
-                    path,
-                    args.preview_bytes,
-                    max_read_bytes=DIRECT_SCOPE_PREVIEW_READ_BYTES if directly_requested else None,
-                )
+                preview, is_binary = preview_for(path, args.preview_bytes)
                 if is_binary and not directly_requested:
                     continue
             rows_by_path.setdefault(
