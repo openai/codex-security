@@ -151,6 +151,7 @@ describe("scan and patch workflow", () => {
       const stdout = capture();
       const stderr = capture(true);
       let snapshotHadProgress = false;
+      let resultSnapshotHadProgress = false;
       let modelStarted = false;
       let timers = 0;
       const current = dependencies({
@@ -163,6 +164,8 @@ describe("scan and patch workflow", () => {
               .includes("Patching 1/1 · Finding 1");
             if (failSnapshot) throw new Error("Baseline snapshot failed.");
           }
+          if (args.includes("add") && modelStarted)
+            resultSnapshotHadProgress = timers > 0;
           return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
         },
         onCodex: (args, output) => {
@@ -187,6 +190,7 @@ describe("scan and patch workflow", () => {
       );
 
       expect(snapshotHadProgress).toBe(true);
+      expect(resultSnapshotHadProgress).toBe(!failSnapshot);
       expect(modelStarted).toBe(!failSnapshot);
       expect(status).toBe(failSnapshot ? 2 : 0);
       expect(timers).toBe(0);

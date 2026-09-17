@@ -7092,10 +7092,10 @@ async function runFindingPatches(
         void writeCliOutput(stderr, chunk).then(() => callback(), callback);
       },
     });
-    let base: string | Map<string, string>;
     let status: number;
+    let changedFiles: string[];
     try {
-      base = await snapshotPatchState(selected.repository, dependencies);
+      const base = await snapshotPatchState(selected.repository, dependencies);
       status = await runSkill(
         "fix-finding",
         [],
@@ -7114,18 +7114,17 @@ async function runFindingPatches(
           onEvent: progress.observe.bind(progress),
         },
       );
+      if (status === 130 || status === 143) {
+        throw new CodexSecurityError("Patch operation was interrupted.");
+      }
+      changedFiles = await changedPatchFiles(
+        selected.repository,
+        base,
+        dependencies,
+      );
     } finally {
       progress.stop();
     }
-    if (status === 130 || status === 143) {
-      throw new CodexSecurityError("Patch operation was interrupted.");
-    }
-
-    const changedFiles = await changedPatchFiles(
-      selected.repository,
-      base,
-      dependencies,
-    );
 
     const failed = (reason: string, files: string[] = []): FindingPatch => ({
       occurrenceId: finding.occurrenceId,
