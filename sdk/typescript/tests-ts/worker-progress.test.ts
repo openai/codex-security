@@ -200,6 +200,14 @@ describe("worker progress events", () => {
     ).toEqual({ kind: "dispatch", phase: "ranking", planned: 6, started: 0 });
   });
 
+  test("reads phase updates without file counts", () => {
+    expect(
+      scanProgressUpdatesFromEvent(
+        messageEvent('CODEX_SECURITY_SCAN_PROGRESS {"phase":"validation"}'),
+      ),
+    ).toEqual([{ phase: "validation", filesCompleted: 0, filesTotal: 0 }]);
+  });
+
   test("reads the current phase and fully reviewed file counts", () => {
     expect(
       scanProgressUpdatesFromEvent(
