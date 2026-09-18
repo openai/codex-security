@@ -62,8 +62,8 @@ importers:
         specifier: 2.9.0
         version: 2.9.0
       zod:
-        specifier: 4.6.1
-        version: 4.6.1
+        specifier: 4.6.2
+        version: 4.6.2
     devDependencies:
       '@openai/apps-sdk-ui':
         specifier: 0.2.2
@@ -96,8 +96,8 @@ importers:
         specifier: 0.28.2
         version: 0.28.2
       fast-check:
-        specifier: 4.9.0
-        version: 4.9.0
+        specifier: 4.10.0
+        version: 4.10.0
       ink-testing-library:
         specifier: 4.0.0
         version: 4.0.0(@types/react@19.3.0)
@@ -2085,8 +2085,8 @@ packages:
     engines: {node: '>= 10.17.0'}
     hasBin: true
 
-  fast-check@4.9.0:
-    resolution: {integrity: sha512-7ms6T7SybUev/PQITciI0yLM2pOSFy5zpG8Ty7tQofcVaQUvrMXp6CBwqF6fThLCLOrfBtuHAtwq6Yu4XPCllg==}
+  fast-check@4.10.0:
+    resolution: {integrity: sha512-hhqQL+IJllZi3aM4TKvmCj3bywLEcycNTTLZeLhA9ttMxBrCqM07q7Di4kl+j9EWSTXvJH1+EpIgsDbF/+8H5Q==}
     engines: {node: '>=12.17.0'}
 
   fast-deep-equal@3.1.3:
@@ -3136,8 +3136,8 @@ packages:
   yoga-layout@3.2.1:
     resolution: {integrity: sha512-0LPOt3AxKqMdFBZA3HBAt/t/8vIKq7VaQYbuA8WxCgung+p9TVyKRYdpvCb80HcdTN2NkbIKbhNwKUfm3tQywQ==}
 
-  zod@4.6.1:
-    resolution: {integrity: sha512-341aRWQsve0rvronKNTqZpjmzdbUDlFuzHaI/XLg/Ej82qffDJRRfBTCuv7+9q/rMjB6LSLyEBnW4InJeMtt/Q==}
+  zod@4.6.2:
+    resolution: {integrity: sha512-lh5RCAGFa1Cm2hjtNwLQhSs/AsqdWnTQaBER9fEwN/88pSh7KOtJavtBx/0VlkN/uFd61SwYmljLMDAsHlvzBQ==}
 
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
@@ -3634,7 +3634,7 @@ snapshots:
 
   '@modelcontextprotocol/server@2.0.0-alpha.4':
     dependencies:
-      zod: 4.6.1
+      zod: 4.6.2
 
   '@napi-rs/canvas-android-arm64@1.0.8':
     optional: true
@@ -5030,7 +5030,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  fast-check@4.9.0:
+  fast-check@4.10.0:
     dependencies:
       pure-rand: 8.4.2
 
@@ -5217,7 +5217,7 @@ snapshots:
       '@toon-format/toon': 2.3.1
       tokenx: 1.6.0
       yaml: 2.9.0
-      zod: 4.6.1
+      zod: 4.6.2
 
   indent-string@5.0.0: {}
 
@@ -5816,7 +5816,7 @@ snapshots:
 
   mutation-server-protocol@0.4.1:
     dependencies:
-      zod: 4.6.1
+      zod: 4.6.2
 
   mutation-testing-elements@3.8.4: {}
 
@@ -6411,6 +6411,6 @@ snapshots:
 
   yoga-layout@3.2.1: {}
 
-  zod@4.6.1: {}
+  zod@4.6.2: {}
 
   zwitch@2.0.4: {}

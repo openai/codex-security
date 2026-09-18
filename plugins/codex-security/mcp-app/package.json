@@ -13,7 +13,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@openai/codex-sdk": "0.154.0",
     "smol-toml": "1.8.0",
-    "zod": "^4.6.1"
+    "zod": "^4.6.2"
   },
   "devDependencies": {
     "@types/node": "^26.5.1",
