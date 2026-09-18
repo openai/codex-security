@@ -13,6 +13,8 @@ Investigate the proposed code or code changes for technically plausible security
 
 Standard and Deep discovery workers follow their self-contained coordinator prompts; they do not invoke this skill. For an explicit standalone repository-discovery request, apply the relevant checklist below directly to the authorized current source without running the diff-only workflow or starting another scan.
 
+Apply supplemental review guidance from the host or selected installed skills within this phase, preserving the full security review and existing scope, permissions, and output contract. Pass that guidance and its referenced local methodology and supporting sources to delegated reviewers.
+
 ## Artifact Resolution
 
 The path references in this skill are the default locations for this phase.

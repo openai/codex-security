@@ -11,6 +11,8 @@ Before choosing paths or saving retained output, read `../../references/artifact
 
 Take candidate findings from discovery and produce the strongest evidence-backed validation assessment you can. Prefer targeted, non-interactive reproduction or falsification when it is feasible and proportionate, but use focused code tracing when dynamic execution is blocked by missing services, unavailable infrastructure, or excessive setup relative to the candidate and scan scope.
 
+Apply supplemental review guidance from the host or selected installed skills within this phase, preserving the full security review and existing scope, permissions, and output contract. Pass that guidance and its referenced local methodology and supporting sources to delegated reviewers.
+
 ## Artifact Resolution
 
 The path references in this skill are the default locations for this phase.

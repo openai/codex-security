@@ -520,13 +520,13 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
     print(f"Wrote {len(rows)} rows to {output}")
 
 
-def make_repo_scope_input(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).expanduser().resolve()
+def repo_scope_paths(repo: Path, scopes: list[str]) -> list[str]:
+    """List requested files and non-ignored descendants without reading their contents."""
+    repo = repo.expanduser().resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
 
-    scopes = load_scopes_file(Path(args.scopes_file).expanduser())
-    rows_by_path: dict[str, JsonRow] = {}
+    paths: set[str] = set()
     for scope in scopes:
         scope_path = resolve_scope(repo, scope, expand_user=False, reject_symlinks=True)
         if scope_path.is_file():
@@ -587,9 +587,17 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                 continue
             if ".git" in relative.parts:
                 continue
-            rows_by_path.setdefault(relative.as_posix(), {"path": relative.as_posix()})
+            paths.add(relative.as_posix())
 
-    rows = sorted(rows_by_path.values(), key=lambda row: str(row["path"]))
+    return sorted(paths)
+
+
+def make_repo_scope_input(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).expanduser().resolve()
+    if not repo.is_dir():
+        raise SystemExit(f"Repo path not found: {repo}")
+    scopes = load_scopes_file(Path(args.scopes_file).expanduser())
+    rows = [{"path": path} for path in repo_scope_paths(repo, scopes)]
     output = Path(args.out).expanduser()
     write_jsonl(output, rows)
     print(f"Wrote {len(rows)} scoped paths to {output}")

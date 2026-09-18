@@ -84,6 +84,7 @@ try {
     await testSdkInvocationAndThreadCapture();
     await testBedrockCredentialsReachWorker();
     await testArtifactServerUsesExtendedStartupTimeout();
+    await testScopedWorkerGuidance();
     await testWorkerScratchPermissions();
     await testConcurrentWorkerTemporaryScratch();
     await testZeroSubagentsPreservesHostRestrictions();
@@ -1028,6 +1029,77 @@ async function testWorkerScratchPermissions() {
   }
 }
 
+async function testScopedWorkerGuidance() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  try {
+    const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
+    const targetPath = path.join(fixture.root, "target");
+    await mkdir(path.join(targetPath, "native"), { recursive: true });
+    await mkdir(path.join(targetPath, "frontend"));
+    await writeFile(path.join(targetPath, "native", "lib.rs"), "pub fn answer() -> u8 { 42 }\n");
+    await writeFile(path.join(targetPath, "frontend", "index.js"), "export const answer = 42;\n");
+    const workers = await Promise.all([
+      { label: "whole-repository", rust: true },
+      { label: "rust-scope", scope: "native", rust: true },
+      { label: "javascript-scope", scope: "frontend", rust: false },
+      { label: "reducer", rust: false, reducer: true }
+    ].map(async (scenario) => {
+      const workingDirectory = path.join(fixture.root, scenario.label, "output");
+      const promptPath = path.join(fixture.root, `${scenario.label}.md`);
+      await mkdir(workingDirectory, { recursive: true });
+      await writeFile(promptPath, "CAPTURE_WORKER_GUIDANCE\nReview the assigned source.\n");
+      const executor = new CodexSdkWorkerExecutor({
+        parentSandbox: trustedReadOnlyParentSandbox,
+        artifactContext: {
+          pluginRoot,
+          scanRoot: path.join(fixture.root, "scans"),
+          repoRoot: targetPath,
+          scanId: `guidance-${scenario.label}`,
+          ...(scenario.scope ? { scope: scenario.scope } : {})
+        }
+      });
+      const request = {
+        kind: scenario.reducer ? "dedup" : "discovery",
+        promptPath, workingDirectory, subagents: 0,
+        signal: new AbortController().signal,
+        artifactContext: {
+          root: workingDirectory,
+          layout: scenario.reducer ? "reducer" : "worker",
+          ...(scenario.reducer ? { deepReducer: {} } : {})
+        }
+      };
+      return { scenario, executor, request };
+    }));
+    // Concurrent scans of separate scopes must select their own guidance.
+    await Promise.all(workers.map(({ executor, request }) => executor.run(request)));
+    for (const { scenario, executor, request } of workers) {
+      const markerPath = path.join(request.workingDirectory, "invocation.json");
+      const invocation = JSON.parse(await readFile(markerPath, "utf8"));
+      assert.equal(invocation.stdin.includes("unsafe-rust-review"), scenario.rust, scenario.label);
+      assertReadOnlyWorkerPolicy(invocation.argv);
+      if (scenario.reducer) {
+        assert.equal(invocation.stdin, "CAPTURE_WORKER_GUIDANCE\nReview the assigned source.\n");
+      }
+      await executor.run({
+        ...request,
+        resumeThreadId: `guidance-${scenario.label}-thread`,
+        continuationPrompt: "CAPTURE_WORKER_GUIDANCE\nContinue the assigned audit."
+      });
+      const resumed = JSON.parse(await readFile(markerPath, "utf8"));
+      assert.equal(resumed.stdin.includes("unsafe-rust-review"), scenario.rust, `${scenario.label} resumed`);
+      assert.match(resumed.stdin, /Continue the assigned audit\./);
+      assertReadOnlyWorkerPolicy(resumed.argv);
+      if (scenario.reducer) {
+        assert.equal(resumed.stdin, "CAPTURE_WORKER_GUIDANCE\nContinue the assigned audit.");
+      }
+    }
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
 async function testConcurrentWorkerTemporaryScratch() {
   const previousPath = process.env.CODEX_CLI_PATH;
   const originalTemporaryEnvironment = [process.env.TMPDIR, process.env.TMP, process.env.TEMP];
@@ -1697,7 +1769,7 @@ async function fakeCodexFixture(
     "for await (const chunk of process.stdin) stdin += chunk;",
     "const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;",
     "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
-    "writeFileSync(stdin.includes('CAPTURE_WORKER_SCRATCH') ? process.argv[process.argv.indexOf('--cd') + 1] + '/invocation.json' : process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), temporaryEnvironment: [process.env.TMPDIR, process.env.TMP, process.env.TEMP], codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
+    "writeFileSync(/CAPTURE_WORKER_(?:SCRATCH|GUIDANCE)/.test(stdin) ? process.argv[process.argv.indexOf('--cd') + 1] + '/invocation.json' : process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), temporaryEnvironment: [process.env.TMPDIR, process.env.TMP, process.env.TEMP], codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
     "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
     "if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }",
     "if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }",

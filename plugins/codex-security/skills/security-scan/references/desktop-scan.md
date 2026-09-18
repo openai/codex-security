@@ -7,7 +7,7 @@ Read this reference only after the host explicitly identifies itself as the Code
 Resolve the target, requested scope, and user-provided security context before starting the scan.
 
 - If the request already includes a `scanId`, call `get_codex_security_scan_context`, passing `handoffClaimToken` when provided, and continue that existing scan.
-- Otherwise call `start_codex_security_prompt_only_scan` once with `mode: "standard"`, `targetPath`, `scope`, and any exact `userContext`. Require its authoritative `scan.scanId` and `scan.scanDir`; preserve its handoff token when provided.
+- Otherwise call `start_codex_security_prompt_only_scan` once with `mode: "standard"`, `targetPath`, `scope`, and any exact `userContext`. Require its authoritative `scan.scanId` and `scan.scanDir`; preserve its handoff token when provided. After a successful start, call `get_codex_security_scan_context` once with that scan ID and handoff token to load the complete context and any supplemental review guidance.
 - If the direct start fails or returns malformed context, surface that error. Do not invent scan ownership, start a replacement scan, open setup, or switch to a terminal workflow.
 
 Use the returned `scanId`, `scanDir`, scope, and exact `userContext` throughout the parent workflow. Read `../../../references/desktop-config-preflight.md` and run capability preflight only after this authoritative context exists.

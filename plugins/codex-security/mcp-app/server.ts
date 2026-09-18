@@ -9,6 +9,7 @@ import * as z from "zod/v4";
 import { missingPythonHelperMessage, resolvePythonCommand } from "./src/python_command.js";
 import type { ScanResults } from "./src/types.js";
 import { MCP_APP_VERSION } from "./src/version.js";
+import { loadScanGuidance } from "./src/scan-guidance.js";
 import {
   handoffClaimTokenSchema,
   recoveryHandoffClaimTokenSchema,
@@ -943,7 +944,7 @@ export function createCodexSecurityServer(): McpServer {
 
   server.registerTool("get_codex_security_scan_context", {
     title: "Get Codex Security Scan Context",
-    description: "Load the authoritative target, mode, optional user context, artifact directory, live progress, and optional selected finding for a launched scan. Validated legacy finding details may be migrated.",
+    description: "Load the authoritative target, mode, optional user context, artifact directory, live progress, and optional selected finding for a launched scan, plus applicable supplemental review guidance selected from its scoped filenames. Validated legacy finding details may be migrated.",
     inputSchema: scanContextSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: modelActionMeta
@@ -987,9 +988,26 @@ export function createCodexSecurityServer(): McpServer {
         threadId
       });
     }
+    const progress = scan && isJsonObject(scan.progress) ? scan.progress : undefined;
+    let guidance = "";
+    if (scan && progress?.status === "running" && typeof scan.targetPath === "string") {
+      const contract = isJsonObject(scan.contract) ? scan.contract : undefined;
+      const scope = contract && isJsonObject(contract.scope) ? contract.scope : undefined;
+      const requiredPaths = scope?.requiredIncludePaths;
+      guidance = await loadScanGuidance({
+        pluginRoot: PLUGIN_ROOT,
+        repository: scan.targetPath,
+        scopes: Array.isArray(requiredPaths) && requiredPaths.every((path) => typeof path === "string")
+          ? requiredPaths
+          : [typeof scan.scope === "string" ? scan.scope : "."],
+        ...(scan.mode === "diff" && isJsonObject(contract?.diffTarget)
+          ? { diffTarget: contract.diffTarget }
+          : {})
+      });
+    }
     return scanActionResult(
       redactHandoffClaimToken(scanContext),
-      "Loaded Codex Security scan context."
+      "Loaded Codex Security scan context." + (guidance ? `\n\n${guidance}` : "")
     );
   });
 

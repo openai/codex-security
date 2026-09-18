@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
+import { loadScanGuidance } from "../scan-guidance.js";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
   classifyCodexWorkerError,
@@ -127,9 +128,19 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const baseInput = request.resumeThreadId
         ? request.continuationPrompt ?? prompt
         : prompt;
-      const input = request.kind === "discovery" && this.modelSettings.artifactContext && request.artifactContext
-        ? `${baseInput.trimEnd()}\n\n${scratchInstructions(scratch)}\n`
-        : baseInput;
+      let input = baseInput;
+      const scan = this.modelSettings.artifactContext;
+      if (request.kind === "discovery" && scan && request.artifactContext) {
+        const guidance = await loadScanGuidance({
+          pluginRoot: scan.pluginRoot,
+          repository: scan.repoRoot,
+          scopes: [scan.scope ?? "."],
+          pythonCommand: scan.pythonCommand,
+          signal: request.signal
+        });
+        input = [baseInput.trimEnd(), scratchInstructions(scratch), guidance]
+          .filter(Boolean).join("\n\n") + "\n";
+      }
       const controller = new AbortController();
       const forwardAbort = () => controller.abort(request.signal.reason);
       if (request.signal.aborted) {

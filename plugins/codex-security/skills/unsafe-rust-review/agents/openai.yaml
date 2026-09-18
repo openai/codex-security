@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unsafe Rust Review"
+  short_description: "Review unsafe Rust soundness and security"
+  default_prompt: "Use $unsafe-rust-review to review Rust unsafe code and its safe interfaces for soundness and concrete security impact."
