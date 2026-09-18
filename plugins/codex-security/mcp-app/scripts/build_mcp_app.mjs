@@ -18,6 +18,13 @@ export async function buildMcpApp({ output, native = "universal" }) {
   const hostTarget = native === "host"
     ? (await import("../../native/platform.mjs")).nativeTarget
     : undefined;
+  const contract = JSON.parse(await readFile(join(root, "../plugin-files.json"), "utf8"));
+  const nativeFiles = contract.shippedExact.filter((path) => path.startsWith("mcp/native/"));
+  if (hostTarget && !nativeFiles.some((path) =>
+    path.startsWith(`mcp/native/${hostTarget}/`) && path.endsWith(".node")
+  )) {
+    throw new Error(`Unsupported native target: ${hostTarget}.`);
+  }
 
   execFileSync(process.execPath, ["--run", "build"], {
     cwd: root,
@@ -27,8 +34,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
   await mkdir(mcpDir, { recursive: true });
 
   await writeRuntime("server", "main.ts");
-  const contract = JSON.parse(await readFile(join(root, "../plugin-files.json"), "utf8"));
-  for (const file of contract.shippedExact.filter((path) => path.startsWith("mcp/native/"))) {
+  for (const file of nativeFiles) {
     const path = file.slice("mcp/native/".length);
     if (hostTarget && path.endsWith(".node") && !path.startsWith(`${hostTarget}/`)) {
       continue;

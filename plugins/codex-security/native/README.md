@@ -66,10 +66,10 @@ With the pinned Rust toolchain installed, build the plugin on its own:
 ```sh
 pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 node plugins/codex-security/mcp-app/scripts/build_native.mjs
-node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp-app/.preview/mcp --native host
+node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
 ```
 
-`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture. CI tests this build without the SDK on Linux, macOS, and Windows.
+`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. CI tests this build without the SDK on Linux, macOS, and Windows.
 
 For plugin and npm releases, use the default `--native universal`. It requires all eight verified binaries in `native/prebuilt`.
 
