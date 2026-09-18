@@ -145,7 +145,7 @@ async function runWorkflow(
 
 describe("scan and patch workflow", () => {
   test.each([false, true])(
-    "shows progress during baseline preparation and cleans up on failure: %s",
+    "shows progress during baseline preparation and cleans up on failure: %p",
     async (failSnapshot) => {
       const result = resultWithFindings(["high"]);
       const stdout = capture();
