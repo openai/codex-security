@@ -225,6 +225,7 @@ const distFiles = new Set(
     "server/api",
     "deduplication/codex-review",
     "deduplication/checkpointed-review",
+    "deduplication/refusal",
     "deduplication/retry",
     "deduplication/deduplication",
     "finding-retrieval",
