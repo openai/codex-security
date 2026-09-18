@@ -164,7 +164,38 @@ describe("Codex authentication process boundary", () => {
     expect(succeeded).toBe(true);
   });
 
-  test("retains large interactive output and login instructions", async () => {
+  test("distinguishes IPv6 host brackets from surrounding punctuation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-ipv6-"));
+    temporaryDirectories.push(root);
+    for (const [index, output, expected] of [
+      [0, "Open https://[2001:db8::1].", "https://[2001:db8::1]"],
+      [
+        1,
+        "Open [https://auth.example.test/device]",
+        "https://auth.example.test/device",
+      ],
+      [2, "Open [https://[2001:db8::2]]", "https://[2001:db8::2]"],
+    ] as const) {
+      const script = join(root, `login-${index}.mjs`);
+      await writeFile(
+        script,
+        `console.error(${JSON.stringify(output)}); console.error("User code: ABCD-EFGH");\n`,
+      );
+      const handle = new CodexLoginHandle(
+        { command: process.execPath },
+        [script, "login", "--device-auth"],
+        process.env,
+        () => {},
+      );
+
+      await handle.waitForInstructions({ deviceCode: true });
+      expect(handle.verificationUrl).toBe(expected);
+      expect(handle.userCode).toBe("ABCD-EFGH");
+      await expect(handle.wait()).resolves.toMatchObject({ success: true });
+    }
+  });
+
+  test("bounds interactive output while retaining discovered instructions", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-output-"));
     temporaryDirectories.push(root);
     const script = join(root, "login.mjs");
