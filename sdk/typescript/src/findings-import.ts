@@ -164,6 +164,11 @@ export async function parseImportedFindings(
       );
     }
     occurrenceIds.add(finding.occurrenceId);
+    if (finding.locations.some((location) => !safeFindingPath(location.path))) {
+      throw new CodexSecurityError(
+        `Findings JSON finding ${index + 1} has an invalid path.`,
+      );
+    }
   }
   return document.findings;
 }
