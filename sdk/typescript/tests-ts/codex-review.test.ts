@@ -21,12 +21,20 @@ import { resolveCodexCommand } from "../src/runtime.js";
 import { environmentEntry } from "../src/scan-comparison.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { retryDelay, waitForRetry } from "../src/deduplication/retry.js";
+import { isReviewRefusal } from "../src/deduplication/refusal.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
 );
 
 const failureReasons: Record<string, string> = {
+  "policy-turn-code": "Request blocked.",
+  "policy-request-code": "Request blocked.",
+  "policy-turn": "Request flagged for possible cybersecurity risk.",
+  "policy-request": "Request rejected: cyber_policy.",
+  "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-reported-error":
+    "Required review check could not be completed: Request refused due to cybersecurity policy violation.",
   "text-only": "Codex did not submit a validated review",
   "failed-turn": "Rate limit exceeded",
   "server-error": "Provider temporarily unavailable",
@@ -67,6 +75,8 @@ const recoveredScenarios: Record<string, string> = {
   "recover-no-submission": "text-only",
 };
 const modelFailures = new Set([
+  "policy-turn-code",
+  "policy-turn",
   "failed-turn",
   "server-error",
   "connection-error",
@@ -257,15 +267,23 @@ for (const {
       });
       const reportsBlocker =
         scenario.startsWith("required-source-error") ||
+        scenario === "policy-reported-error" ||
         scenario === "invalid-review-error";
-      const reviewRunner = reportsBlocker
-        ? new CheckpointedReviewRunner(
-            new FindingWorkflow("blocked-review", process.env, checkpoints.run),
-            runner,
-            checkpoints.source,
-            { allRepositories: true },
-          )
-        : runner;
+      const refused =
+        scenario.startsWith("policy-") || scenario === "refusal-text";
+      const reviewRunner =
+        reportsBlocker || refused
+          ? new CheckpointedReviewRunner(
+              new FindingWorkflow(
+                "blocked-review",
+                process.env,
+                checkpoints.run,
+              ),
+              runner,
+              checkpoints.source,
+              { allRepositories: true },
+            )
+          : runner;
       const result = reviewRunner.run({
         stage: "pair-review",
         model: "gpt-5.6-sol",
@@ -342,8 +360,9 @@ for (const {
         expect(reviewFailure.metadata).toEqual({
           stage: "pair-review",
           model: "gpt-5.6-sol",
-          category:
-            scenario === "invalid-submission"
+          category: refused
+            ? "refusal"
+            : scenario === "invalid-submission"
               ? "validation"
               : scenario === "text-only"
                 ? "no-submission"
@@ -358,8 +377,9 @@ for (const {
             ].includes(scenario)
               ? 2
               : 1) * sessions,
-          reason:
-            scenario === "credential-error"
+          reason: refused
+            ? "The model refused the deduplication review."
+            : scenario === "credential-error"
               ? "[redacted]"
               : scenario === "invalid-submission"
                 ? "The submitted review failed semantic validation."
@@ -385,7 +405,8 @@ for (const {
               ? sessions
               : 0,
         );
-        if (reportsBlocker) expect(checkpoints.saved).toHaveLength(0);
+        if (reportsBlocker || refused)
+          expect(checkpoints.saved).toHaveLength(0);
       }
       expect(starts).toBe(sessions);
       expect(delays).toEqual(
@@ -453,7 +474,12 @@ for (const {
                 "required-source-error-after-text",
               ].includes(scenario)
                 ? 2
-                : ["request-error", "credential-error"].includes(scenario)
+                : [
+                      "request-error",
+                      "credential-error",
+                      "policy-request",
+                      "policy-request-code",
+                    ].includes(scenario)
                   ? 0
                   : 1) * sessions,
         );
@@ -475,6 +501,37 @@ for (const {
     }
   });
 }
+
+test.each([
+  "cyber_policy",
+  "Request blocked by a safety policy violation.",
+  "Request flagged for potentially high-risk cyber activity.",
+  "I cannot help with this request.",
+  "I’m sorry, but I can’t assist with your request.",
+  "I can't help analyze or merge these vulnerability reports.",
+  "I'm unable to assist with this comparison.",
+])("recognizes explicit review refusals: %s", (message) => {
+  expect(isReviewRefusal(message)).toBe(true);
+});
+
+test.each(["cyberPolicy", "misalignmentPolicyViolation"])(
+  "recognizes structured policy refusal codes independently of message wording: %s",
+  (code) => {
+    expect(isReviewRefusal("Request blocked.", code)).toBe(true);
+    expect(isReviewRefusal("Request blocked.", "unauthorized")).toBe(false);
+  },
+);
+
+test.each([
+  "Rate limit exceeded",
+  "Authentication required",
+  "Required source revision could not be read.",
+  "I cannot complete the review because the source is unavailable.",
+  "Connection refused",
+  "Here is the review JSON.",
+])("does not turn other failures into refused reviews: %s", (message) => {
+  expect(isReviewRefusal(message)).toBe(false);
+});
 
 test("empty credential paths use default directories without denying cwd", async () => {
   if (

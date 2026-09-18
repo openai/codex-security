@@ -11,6 +11,43 @@ const args = [
   "--json",
 ];
 
+test.each([false, true])(
+  "dedupe reports refusals and succeeds even when diagnostic output fails: %j",
+  async (brokenLog) => {
+    const deps = dependencies();
+    const result = {
+      scanId: "scan-example",
+      uniqueFindingIds: ["finding-one", "finding-two"],
+      duplicateGroups: [],
+      deduplicationStatus: "completed_with_refusals" as const,
+      refusals: [
+        {
+          decision: "NO_DECISION" as const,
+          stage: "pair-review" as const,
+          model: "gpt-5.6-sol",
+          findingIds: ["finding-one", "finding-two"],
+          reason: "The model refused the deduplication review.",
+        },
+      ],
+    };
+    deps.deduplicateScan = async () => result;
+    const stdout = capture();
+    const stderr = capture();
+    if (brokenLog)
+      stderr.stream.write = () => {
+        throw new Error("Synthetic logging failure");
+      };
+    expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result);
+    if (!brokenLog) {
+      expect(stderr.text()).toContain("pair-review refused by gpt-5.6-sol");
+      expect(stderr.text()).toContain("finding-one, finding-two");
+      expect(stderr.text()).toContain("No decision was made");
+      expect(stderr.text()).toContain("kept separate");
+    }
+  },
+);
+
 test("dedupe resolves a workflow's pinned scan and passes the workflow ID to the SDK", async () => {
   const deps = dependencies();
   deps.runWorkbench = async (args, input) => {
