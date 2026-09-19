@@ -253,6 +253,149 @@ def test_cli_completion_accepts_sealed_clean_git_revision_without_snapshot_diges
     assert "snapshotDigest" not in sealed_manifest["scan"]["target"]
 
 
+def test_scoped_cli_completion_adopts_registered_revision_kind(tmp_path: Path) -> None:
+    # Regression for a path-scoped scan of a clean checkout: registration allows
+    # only git_revision, while the scan agent infers git_worktree from the
+    # checkout. Sealing adopts the registered kind instead of failing the scan.
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    (target / "app").mkdir()
+    (target / "app" / "main.py").write_text("print('fixture')\n")
+    subprocess.run(["git", "add", "app"], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add app"], cwd=target, check=True)
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    registered = run_workbench(
+        state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(scan_dir),
+        "--recipe-json",
+        json.dumps(
+            {
+                "config": {},
+                "mode": "standard",
+                "repository": str(target),
+                "target": {"kind": "paths", "paths": ["app"]},
+            }
+        ),
+    )
+    assert registered["contract"]["target"]["allowedKinds"] == ["git_revision"]
+    scan_id = str(registered["scanId"])
+    write_completed_contract(
+        scan_dir,
+        scan_id,
+        target,
+        relative_path="app/main.py",
+        target_kind="git_worktree",
+        target_revision=revision,
+        include_paths=["app"],
+        coverage_mode="scoped_path",
+        inventory_strategy="scoped_path",
+    )
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    sealed_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    assert sealed_manifest["scan"]["target"]["kind"] == "git_revision"
+    assert sealed_manifest["scan"]["target"]["revision"] == revision
+    assert "snapshotDigest" not in sealed_manifest["scan"]["target"]
+    assert sealed_manifest["scan"]["scope"]["includePaths"] == ["app"]
+    sealed_coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert sealed_coverage["mode"] == "scoped_path"
+
+
+def test_cli_completion_adopts_registered_worktree_kind_for_revision_draft(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    revision = initialize_git_repository(target)
+    (target / "README.md").write_text("changed after commit\n")
+    scan_dir = tmp_path / "scan"
+    registered = register_cli_scan(state_dir, target, scan_dir)
+    contract_target = registered["contract"]["target"]
+    assert contract_target["allowedKinds"] == ["git_worktree"]
+    scan_id = str(registered["scanId"])
+    write_completed_contract(
+        scan_dir,
+        scan_id,
+        target,
+        relative_path="README.md",
+        target_kind="git_revision",
+        target_revision=revision,
+    )
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    sealed_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    assert sealed_manifest["scan"]["target"]["kind"] == "git_worktree"
+    assert (
+        sealed_manifest["scan"]["target"]["snapshotDigest"]
+        == contract_target["requiredSnapshotDigest"]
+    )
+
+
+def test_cli_completion_rejects_unbindable_diff_kind_change(tmp_path: Path) -> None:
+    # A commit or range diff binds no snapshotDigest, so adopting git_diff would
+    # seal the draft's whole-worktree digest as the diff digest. The mismatch
+    # keeps failing closed instead.
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    (target / "README.md").write_text("second fixture\n")
+    subprocess.run(["git", "commit", "-qam", "Second commit"], cwd=target, check=True)
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    registered = run_workbench(
+        state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(scan_dir),
+        "--recipe-json",
+        json.dumps(
+            {
+                "config": {},
+                "mode": "standard",
+                "repository": str(target),
+                "target": {"kind": "refs", "paths": [], "base": "HEAD~1", "head": "HEAD"},
+            }
+        ),
+    )
+    assert registered["contract"]["target"]["allowedKinds"] == ["git_diff"]
+    scan_id = str(registered["scanId"])
+    write_completed_contract(
+        scan_dir,
+        scan_id,
+        target,
+        relative_path="README.md",
+        target_kind="git_worktree",
+        coverage_mode="branch_diff",
+        inventory_strategy="diff",
+    )
+
+    failed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id, check=False)
+
+    assert failed["returncode"] != 0
+    assert "scan.target.kind: must match the workbench target" in str(failed["stderr"])
+    draft_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    assert draft_manifest["scan"]["target"]["kind"] == "git_worktree"
+
+
 def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
@@ -435,8 +578,8 @@ def test_completion_keeps_invalid_prewrite_drafts_resumable(
 ) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    target_kind = manifest["scan"]["target"]["kind"]
-    manifest["scan"]["target"]["kind"] = "git_worktree"
+    # The workbench binding never owns the remote, so this stays a draft error.
+    manifest["scan"]["target"]["remote"] = "not-a-url"
     (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
 
     failed = run_workbench(
@@ -448,10 +591,10 @@ def test_completion_keeps_invalid_prewrite_drafts_resumable(
     )
 
     assert failed["returncode"] != 0
-    assert "target.kind" in str(failed["stderr"])
+    assert "target.remote" in str(failed["stderr"])
     pending = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert pending["progress"]["status"] == "running"
-    manifest["scan"]["target"]["kind"] = target_kind
+    del manifest["scan"]["target"]["remote"]
     (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     assert completed["progress"]["status"] == "complete"
@@ -521,7 +664,8 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
     manifest_path = scan_dir / "scan-manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    manifest["scan"]["target"]["kind"] = "git_worktree"
+    # The workbench binding never owns the remote, so this stays a draft error.
+    manifest["scan"]["target"]["remote"] = "not-a-url"
     manifest_path.write_text(json.dumps(manifest))
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
@@ -531,7 +675,7 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     failed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id, check=False)
 
     assert failed["returncode"] != 0
-    assert "target.kind" in str(failed["stderr"])
+    assert "target.remote" in str(failed["stderr"])
     recorded = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert recorded["progress"]["status"] == "failed"
     assert recorded["resultsRecoveryNeeded"] is True
