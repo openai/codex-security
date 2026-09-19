@@ -1,5 +1,64 @@
 import { isAbsolute, join, relative, sep } from "node:path";
 
+export interface ScanExecutionAttribution {
+  formatVersion: 1;
+  legacy?: true;
+  executionThreadIds: string[];
+  owner: { threadId: string | null; turnId: string | null; startedAt: string };
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export function attributedScanThreads(
+  sessions: Iterable<{
+    threadId: string | null;
+    parentThreadId: string | null;
+  }>,
+  attribution: ScanExecutionAttribution,
+): Set<string> {
+  const included = new Set(attribution.executionThreadIds);
+  const pending = [...included];
+  const all = [...sessions];
+  for (const parent of pending) {
+    for (const session of all) {
+      if (
+        session.threadId !== null &&
+        session.parentThreadId === parent &&
+        !included.has(session.threadId)
+      ) {
+        included.add(session.threadId);
+        pending.push(session.threadId);
+      }
+    }
+  }
+  if (attribution.owner.threadId) included.add(attribution.owner.threadId);
+  return included;
+}
+
+export function isAttributedScanEvent(
+  attribution: ScanExecutionAttribution,
+  threadId: string,
+  turnId: string | null,
+  timestamp: unknown,
+): boolean {
+  const time = sessionStartedAt(timestamp);
+  if (
+    time === null ||
+    time < Date.parse(attribution.startedAt) ||
+    (attribution.completedAt !== null &&
+      time > Date.parse(attribution.completedAt))
+  )
+    return false;
+  if (
+    threadId !== attribution.owner.threadId ||
+    attribution.executionThreadIds.includes(threadId)
+  )
+    return true;
+  return (
+    attribution.owner.turnId !== null && turnId === attribution.owner.turnId
+  );
+}
+
 export function sessionStartedAt(timestamp: unknown): number | null {
   const startedAt =
     typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;

@@ -6,9 +6,12 @@ import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import {
+  attributedScanThreads,
+  isAttributedScanEvent,
   isScanArtifactDirectory,
   sessionParentThreadId,
   sessionStartedAt,
+  type ScanExecutionAttribution,
 } from "./scan-sessions.js";
 
 interface ScanLogOptions {
@@ -20,6 +23,7 @@ interface ScanLogOptions {
   scanDirectory?: string;
   completedAt?: string | null;
   allowMissingRoot?: boolean;
+  executionAttribution?: ScanExecutionAttribution | null;
 }
 
 export type ScanLogSource = JsonObject & {
@@ -27,6 +31,7 @@ export type ScanLogSource = JsonObject & {
   continuationThreadId?: string;
   threadIds?: string[];
   executionThreadIds?: string[];
+  executionAttribution?: ScanExecutionAttribution | null;
   mode?: string;
   scanDir?: string;
   progress?: { status?: string; updatedAt?: string };
@@ -48,6 +53,7 @@ export function readSavedScanLogs(
     threadId: threadId ?? scan.threadIds?.[0],
     threadIds: scan.threadIds,
     executionThreadIds: scan.executionThreadIds ?? [],
+    executionAttribution: scan.executionAttribution,
     codexHome,
     allowMissingRoot: options.allowMissingRoot,
     scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
@@ -129,15 +135,20 @@ export async function readScanLogs(options: ScanLogOptions) {
     );
   }
 
-  const included = new Set([
-    ...(options.threadId ? [options.threadId] : []),
-    ...(options.threadIds ?? []),
-    ...(options.executionThreadIds ?? []),
-  ]);
+  const attribution = options.executionAttribution?.legacy
+    ? null
+    : options.executionAttribution;
+  const included = attribution
+    ? attributedScanThreads(logs.values(), attribution)
+    : new Set([
+        ...(options.threadId ? [options.threadId] : []),
+        ...(options.threadIds ?? []),
+        ...(options.executionThreadIds ?? []),
+      ]);
   // A Desktop owner can contain other work. Include its log without treating
   // the whole conversation tree as part of this scan.
   const traversed = new Set(options.executionThreadIds ?? included);
-  const pending = [...traversed];
+  const pending = attribution ? [] : [...traversed];
   for (const parentId of pending) {
     const parent = logs.get(parentId)?.[0];
     for (const [session] of logs.values()) {
@@ -168,8 +179,17 @@ export async function readScanLogs(options: ScanLogOptions) {
   const events: Record<string, unknown>[] = [];
   for (const session of sessions) {
     let replaying = false;
+    let turnId: string | null = null;
     for await (const event of sessionEvents(session.path)) {
       const payload = event["payload"];
+      if (
+        isRecord(payload) &&
+        (event["type"] === "turn_context" ||
+          payload["type"] === "task_started") &&
+        typeof payload["turn_id"] === "string"
+      ) {
+        turnId = payload["turn_id"];
+      }
       if (event["type"] === "session_meta" && isRecord(payload)) {
         replaying = payload["id"] !== session.threadId;
       }
@@ -186,7 +206,22 @@ export async function readScanLogs(options: ScanLogOptions) {
         }
         replaying = false;
       }
-      events.push({ threadId: session.threadId, event });
+      if (
+        !attribution ||
+        event["type"] === "session_meta" ||
+        isAttributedScanEvent(
+          attribution,
+          session.threadId,
+          event["type"] === "token_usage_record" &&
+            isRecord(payload) &&
+            typeof payload["turn_id"] === "string"
+            ? payload["turn_id"]
+            : turnId,
+          event["timestamp"],
+        )
+      ) {
+        events.push({ threadId: session.threadId, event });
+      }
     }
   }
 

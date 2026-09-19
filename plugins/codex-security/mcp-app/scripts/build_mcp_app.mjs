@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import { existsSync, realpathSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
@@ -57,6 +58,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
         loader: { ".md": "text" },
         logLevel: "info",
         logOverride: { "empty-import-meta": "silent" },
+        nodePaths: [join(root, "node_modules")],
         outfile: bundle,
         platform: "node",
         target: "node20"
@@ -84,8 +86,8 @@ export async function buildMcpApp({ output, native = "universal" }) {
 
 const invokedPath = process.argv[1];
 if (
-  invokedPath !== undefined
-  && pathToFileURL(resolve(invokedPath)).href === import.meta.url
+  invokedPath !== undefined && existsSync(invokedPath)
+  && realpathSync(invokedPath) === realpathSync(fileURLToPath(import.meta.url))
 ) {
   const args = process.argv.slice(2);
   if (
@@ -127,5 +129,6 @@ const runtimeModule = new Module(loaderPath);
 runtimeModule.filename = loaderPath;
 runtimeModule.paths = Module._nodeModulePaths(dirname(loaderPath));
 runtimeModule._compile(runtimeSource, loaderPath);
+export default runtimeModule.exports;
 `;
 }

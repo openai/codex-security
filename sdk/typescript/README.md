@@ -820,6 +820,12 @@ four workers. Unknown keys are rejected.
 `max_time_hours` accepts positive values up to 96, including fractional hours.
 At the deadline, discovery stops; the scan combines and returns completed findings.
 
+When a Deep scan has a saved accepted aggregate, recovering an interrupted
+publication reuses that aggregate and its original stop reason without another
+discovery or reducer run. Explicit cancellation and cost stops retain their
+stopped or partial-result behavior.
+Scans created by earlier versions keep their original workflow when resumed.
+
 `scan --workers` controls discovery workers within one deep scan;
 `bulk-scan --workers` controls how many repositories are scanned concurrently.
 
@@ -967,6 +973,14 @@ means an upper estimate is unavailable, including models without verified
 long-context rates. `cost.pricing` records the price source, verification date,
 processing tier, short-context rates, and verified long-context rates when known.
 Models without known short-context prices still have no cost estimate.
+
+Deep Scan accounting includes failed, replaced, and canceled worker attempts and
+their descendants once. Shared conversation usage is limited to the original
+scan turn and scan interval. Missing usage remains unavailable or partial;
+reported zero remains zero. When sessions use different models, `cost.modelCosts`
+records each model's tokens, estimate, and pricing basis, and `estimatedUsd` sums
+those estimates. A partial estimate has `cost.coverage: "partial"`; missing model
+attribution leaves the estimate unavailable until usage can be reconciled.
 
 For compatibility, `cacheWriteInputTokens` remains the reported token subtotal.
 `cacheWriteInputTokensReported: false` means at least one included usage record
