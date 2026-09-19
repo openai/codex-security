@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { parse as parseToml } from "smol-toml";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
 const bundle = await build({
@@ -83,6 +84,8 @@ try {
     await testSdkInvocationAndThreadCapture();
     await testBedrockCredentialsReachWorker();
     await testArtifactServerUsesExtendedStartupTimeout();
+    await testWorkerScratchPermissions();
+    await testConcurrentWorkerTemporaryScratch();
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
     await testRetryNotificationDoesNotInterruptTurn();
@@ -296,7 +299,7 @@ async function testWindowsLongExecutableLaunches() {
 async function testWindowsWorkerEnvironmentPreservesMixedCaseKeys() {
   const root = await mkdtemp(path.join(tmpdir(), "codex-security-windows-env-"));
   temporaryRoots.push(root);
-  const names = ["CODEX_CLI_PATH", "CODEX_HOME", "CODEX_MANAGED_PACKAGE_ROOT", "LOCALAPPDATA"];
+  const names = ["CODEX_CLI_PATH", "CODEX_HOME", "CODEX_MANAGED_PACKAGE_ROOT", "LOCALAPPDATA", "TMPDIR", "TMP", "TEMP"];
   const previousEnvironment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => names.includes(key.toUpperCase()))
   );
@@ -304,7 +307,10 @@ async function testWindowsWorkerEnvironmentPreservesMixedCaseKeys() {
     CODEX_CLI_PATH: path.join(root, "custom-codex.exe"),
     CODEX_HOME: root,
     CODEX_MANAGED_PACKAGE_ROOT: path.join(root, "managed-package"),
-    LOCALAPPDATA: path.join(root, "local-app-data")
+    LOCALAPPDATA: path.join(root, "local-app-data"),
+    TMPDIR: path.join(root, "tmpdir"),
+    TMP: path.join(root, "tmp"),
+    TEMP: path.join(root, "temp")
   };
   try {
     for (const name of names) delete process.env[name];
@@ -922,6 +928,173 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
   }
 }
 
+async function testWorkerScratchPermissions() {
+  const previousPath = process.env.CODEX_CLI_PATH;
+  const originalTemporaryEnvironment = [process.env.TMPDIR, process.env.TMP, process.env.TEMP];
+  try {
+    for (const scenario of ["writable", "read-only", "read-carveout", "denied", "reducer", "blocked"]) {
+      const writable = scenario === "writable" || scenario === "blocked";
+      const expectedProfile = (root) => ({
+        ...emptyWorkerPermissionProfile,
+        filesystem: {
+          ":root": "read",
+          ...(writable ? {
+            [path.join(root, "worker", "scratch")]: "write",
+            [path.join(root, "worker", "scratch", "private")]: "read"
+          } : {}),
+          [path.join(root, "worker", "scratch", "**", "*.secret")]: "deny",
+          ...(scenario === "denied" ? { [path.join(root, "worker")]: "deny" } : {})
+        }
+      });
+      const fixture = await fakeCodexFixture(expectedProfile, scenario !== "blocked");
+      const canonicalRoot = await realpath(fixture.root);
+      const scratch = path.join(canonicalRoot, "worker", "scratch");
+      const workingDirectory = path.join(fixture.root, "worker", "output");
+      const targetPath = path.join(fixture.root, "target");
+      const promptPath = path.join(fixture.root, "prompt.md");
+      await mkdir(workingDirectory, { recursive: true });
+      await mkdir(targetPath);
+      await writeFile(promptPath, "Run the synthetic Standard audit.\n");
+      process.env.CODEX_CLI_PATH = fixture.executablePath;
+      const parentSandbox = {
+        filesystemDenies: [
+          path.join(canonicalRoot, "worker", "scratch", "**", "*.secret"),
+          ...(scenario === "denied" ? [path.join(canonicalRoot, "worker")] : [])
+        ],
+        ...(scenario === "read-only" ? {} : {
+          filesystemWriteRules: [
+            { path: canonicalRoot, access: "write" },
+            { path: path.join(scratch, "private"), access: "read" },
+            ...(scenario === "read-carveout"
+              ? [{ path: path.join(canonicalRoot, "worker"), access: "read" }]
+              : [])
+          ]
+        })
+      };
+      const executor = new CodexSdkWorkerExecutor({
+        parentSandbox,
+        artifactContext: {
+          pluginRoot: fixture.root,
+          scanRoot: path.join(fixture.root, "scans"),
+          repoRoot: targetPath,
+          scanId: `scratch-${scenario}`
+        }
+      });
+      const request = {
+        kind: scenario === "reducer" ? "dedup" : "discovery",
+        promptPath, workingDirectory, subagents: 0,
+        signal: new AbortController().signal,
+        artifactContext: {
+          root: workingDirectory,
+          layout: scenario === "reducer" ? "reducer" : "worker",
+          ...(scenario === "reducer" ? { deepReducer: {} } : {})
+        }
+      };
+      if (scenario === "blocked") {
+        await assert.rejects(executor.run(request), (error) => error?.name === "DeepScanNonRetryableError"
+          && error.message.includes("[allowed_permission_profiles]"));
+        await assert.rejects(readFile(fixture.markerPath), { code: "ENOENT" });
+        await assert.rejects(realpath(scratch), { code: "ENOENT" });
+        continue;
+      }
+      await executor.run(request);
+      const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+      const launched = parseToml(workerPermissionProfileOverride(invocation.argv))
+        .permissions.codex_security_deep_scan_worker;
+      assert.deepEqual(launched, expectedProfile(canonicalRoot), scenario);
+      assert.equal(launched.filesystem[targetPath], undefined);
+      assert.equal(launched.filesystem[workingDirectory], undefined);
+      assert.equal(launched.network.enabled, false);
+      assertFlagPair(invocation.argv, "--cd", workingDirectory);
+      if (writable) {
+        assert.deepEqual(invocation.temporaryEnvironment, [scratch, scratch, scratch]);
+        const retainedProof = path.join(scratch, "proof.txt");
+        await writeFile(retainedProof, "synthetic proof input");
+        await executor.run({ ...request, resumeThreadId: "fixture-existing-thread", continuationPrompt: "Continue validation." });
+        const resumed = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+        assert.equal(workerPermissionProfileOverride(resumed.argv), workerPermissionProfileOverride(invocation.argv));
+        assert.equal(await readFile(retainedProof, "utf8"), "synthetic proof input");
+        // A fresh retry of this worker keeps its scratch while canonical output is independent.
+        await executor.run(request);
+        assert.equal(await readFile(retainedProof, "utf8"), "synthetic proof input");
+      } else {
+        await assert.rejects(readFile(path.join(scratch, "proof.txt")), { code: "ENOENT" });
+        assert.deepEqual(invocation.temporaryEnvironment, originalTemporaryEnvironment.map((value) => value ?? null));
+      }
+      assert.deepEqual([process.env.TMPDIR, process.env.TMP, process.env.TEMP], originalTemporaryEnvironment);
+    }
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
+async function testConcurrentWorkerTemporaryScratch() {
+  const previousPath = process.env.CODEX_CLI_PATH;
+  const originalTemporaryEnvironment = [process.env.TMPDIR, process.env.TMP, process.env.TEMP];
+  const temporaryRoot = await realpath(tmpdir());
+  const profiles = (root) => ["first", "second"].map((scan) => {
+    const scratch = path.join(temporaryRoot, "codex-security-deep-scratch", `${path.basename(root)}-${scan}`, "worker");
+    return {
+      cwd: path.join(root, scan, "worker", "output"),
+      scratch,
+      profile: {
+        ...emptyWorkerPermissionProfile,
+        filesystem: { ":root": "read", [scratch]: "write" }
+      }
+    };
+  });
+  const fixture = await fakeCodexFixture(profiles);
+  const canonicalRoot = await realpath(fixture.root);
+  const entries = profiles(canonicalRoot);
+  for (const entry of entries) temporaryRoots.push(path.dirname(entry.scratch));
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  try {
+    const workers = await Promise.all(entries.map(async (entry, index) => {
+      const targetPath = path.join(canonicalRoot, `${index}-target`);
+      const promptPath = path.join(canonicalRoot, `${index}-prompt.md`);
+      await mkdir(entry.cwd, { recursive: true });
+      await mkdir(targetPath);
+      await writeFile(promptPath, "CAPTURE_WORKER_SCRATCH\n");
+      const executor = new CodexSdkWorkerExecutor({
+        parentSandbox: {
+          filesystemDenies: [],
+          filesystemWriteRules: [
+            { path: temporaryRoot, access: "write" },
+            // Default scan artifacts need not be within a writable parent root.
+            { path: canonicalRoot, access: "read" }
+          ]
+        },
+        artifactContext: {
+          pluginRoot: canonicalRoot,
+          scanRoot: path.join(canonicalRoot, "scans"),
+          repoRoot: targetPath,
+          scanId: path.basename(path.dirname(entry.scratch))
+        }
+      });
+      return { executor, request: {
+        kind: "discovery", promptPath, workingDirectory: entry.cwd,
+        subagents: 0, signal: new AbortController().signal,
+        artifactContext: { root: entry.cwd, layout: "worker" }
+      } };
+    }));
+    await Promise.all(workers.map(({ executor, request }) => executor.run(request)));
+    for (const [index, entry] of entries.entries()) {
+      const invocation = JSON.parse(await readFile(path.join(entry.cwd, "invocation.json"), "utf8"));
+      const launched = parseToml(workerPermissionProfileOverride(invocation.argv))
+        .permissions.codex_security_deep_scan_worker;
+      assert.deepEqual(launched, entry.profile);
+      assert.deepEqual(invocation.temporaryEnvironment, [entry.scratch, entry.scratch, entry.scratch]);
+      assert.equal(launched.filesystem[entries[1 - index].scratch], undefined);
+      assert.equal(launched.filesystem[path.join(path.dirname(entry.cwd), "scratch")], undefined);
+      assert.equal(await realpath(entry.scratch), entry.scratch);
+      assert.match(invocation.stdin, /source locations against the original target/);
+    }
+    assert.deepEqual([process.env.TMPDIR, process.env.TMP, process.env.TEMP], originalTemporaryEnvironment);
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
 async function testSdkResumesExistingThread() {
   const fixture = await fakeCodexFixture();
   const previousPath = process.env.CODEX_CLI_PATH;
@@ -1469,6 +1642,7 @@ async function fakeCodexFixture(
 ) {
   const root = await mkdtemp(path.join(tmpdir(), "codex-security-sdk-executor-"));
   temporaryRoots.push(root);
+  if (typeof preflightProfile === "function") preflightProfile = preflightProfile(await realpath(root));
   const markerPath = path.join(root, "invocation.json");
   const preflightMarkerPath = path.join(root, "preflight.json");
   const scriptPath = path.join(root, "fake-codex.mjs");
@@ -1480,6 +1654,7 @@ async function fakeCodexFixture(
     `const accountResult = ${JSON.stringify(accountResult)};`,
     `const preflightMarkerPath = ${JSON.stringify(preflightMarkerPath)};`,
     "if (process.argv.includes('app-server')) {",
+    "  const selectedProfile = Array.isArray(preflightProfile) ? preflightProfile.find((entry) => entry.cwd === process.cwd()).profile : preflightProfile;",
     "  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, requests: [] };",
     "  writeFileSync(preflightMarkerPath, JSON.stringify(preflight));",
     "  let buffer = '';",
@@ -1502,7 +1677,7 @@ async function fakeCodexFixture(
     "      if (message.method === 'initialize') {",
     "        result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };",
     "      } else if (message.method === 'config/read') {",
-    "        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile } }, origins: {}, layers: null };",
+    "        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: selectedProfile } }, origins: {}, layers: null };",
     "      } else if (message.method === 'permissionProfile/list') {",
     "        result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: preflightAllowed }], nextCursor: null };",
     "      } else if (message.method === 'account/read') {",
@@ -1522,7 +1697,7 @@ async function fakeCodexFixture(
     "for await (const chunk of process.stdin) stdin += chunk;",
     "const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;",
     "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
-    "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
+    "writeFileSync(stdin.includes('CAPTURE_WORKER_SCRATCH') ? process.argv[process.argv.indexOf('--cd') + 1] + '/invocation.json' : process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), temporaryEnvironment: [process.env.TMPDIR, process.env.TMP, process.env.TEMP], codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
     "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
     "if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }",
     "if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }",

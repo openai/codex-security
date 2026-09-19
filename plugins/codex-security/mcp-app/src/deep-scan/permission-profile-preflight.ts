@@ -18,8 +18,9 @@ export interface DeepScanPermissionProfilePreflightOptions {
   /** Raw `-c` values passed to both this preflight and the SDK worker. */
   readonly configOverrides: readonly string[];
   /**
-   * Exact environment snapshot shared with the SDK worker. The caller resolves
-   * relative CODEX_HOME values before changing the preflight subprocess cwd.
+   * Worker configuration and authentication environment. The caller resolves
+   * relative CODEX_HOME values before changing the preflight subprocess cwd;
+   * temporary directories may move to verified scratch before the worker starts.
    * Omit it to retain Node's default child-process environment inheritance.
    */
   readonly env?: Readonly<Record<string, string>>;
@@ -430,31 +431,31 @@ function hasOwn(value: JsonRecord, key: string): boolean {
 
 function disallowedProfileAllowlistError(profileId: string): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `Deep Scan cannot safely start a read-only worker because organization policy does not allow the required \`${profileId}\` permission profile. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${profileId}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${profileId} = true\n\nDeep Scan did not run.`
+    `Deep Scan cannot safely start a worker because organization policy does not allow the required \`${profileId}\` permission profile. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${profileId}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${profileId} = true\n\nDeep Scan did not run.`
   );
 }
 
 function managedPolicyRejectedError(profileId: string): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `Deep Scan cannot safely start a read-only worker because managed Codex policy rejected the required \`${profileId}\` permission profile. Ask your Codex administrator to review the managed permission, sandbox, and filesystem requirements. Deep Scan did not run.`
+    `Deep Scan cannot safely start a worker because managed Codex policy rejected the required \`${profileId}\` permission profile. Ask your Codex administrator to review the managed permission, sandbox, and filesystem requirements. Deep Scan did not run.`
   );
 }
 
 function profileNotSelectedError(profileId: string): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `Deep Scan cannot safely start a read-only worker because Codex did not select the required \`${profileId}\` permission profile. Ask your Codex administrator to allow that profile for Deep Scan. Deep Scan did not run.`
+    `Deep Scan cannot safely start a worker because Codex did not select the required \`${profileId}\` permission profile. Ask your Codex administrator to allow that profile for Deep Scan. Deep Scan did not run.`
   );
 }
 
 function profileCollisionError(profileId: string): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `Deep Scan cannot safely start a read-only worker because existing Codex configuration changes the reserved \`${profileId}\` permission profile. Ask your Codex administrator to keep the normal-config \`[permissions.${profileId}]\` stub limited to \`extends = ":read-only"\`; Deep Scan supplies its deny rules at runtime. Deep Scan did not run.`
+    `Deep Scan cannot safely start a worker because existing Codex configuration changes the reserved \`${profileId}\` permission profile. Ask your Codex administrator to keep the normal-config \`[permissions.${profileId}]\` stub limited to \`extends = ":read-only"\`; Deep Scan supplies the exact filesystem rules at runtime. Deep Scan did not run.`
   );
 }
 
 function malformedPreflightError(): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    "Deep Scan cannot safely verify its read-only worker permission profile with this Codex configuration. Deep Scan did not run."
+    "Deep Scan cannot safely verify its worker permission profile with this Codex configuration. Deep Scan did not run."
   );
 }
 
@@ -463,7 +464,7 @@ function unsupportedCodexApiError(
   api: string
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    "Deep Scan cannot safely verify its read-only worker permission profile because "
+    "Deep Scan cannot safely verify its worker permission profile because "
       + "the selected Codex executable "
       + quotedExecutable(codexPath)
       + " does not support the required "
@@ -484,7 +485,7 @@ function jsonRpcPreflightError(
   if (code === -32601) return unsupportedCodexApiError(codexPath, method);
   const codeDetail = code === undefined ? "" : " (JSON-RPC code " + code + ")";
   return new DeepScanNonRetryableError(
-    "Deep Scan cannot safely verify its read-only worker permission profile because "
+    "Deep Scan cannot safely verify its worker permission profile because "
       + "the selected Codex executable "
       + quotedExecutable(codexPath)
       + " returned an error for "
@@ -542,7 +543,7 @@ function codexExecutableFailureMessage(
   detail: string
 ): string {
   return (
-    "Deep Scan cannot safely verify its read-only worker permission profile because "
+    "Deep Scan cannot safely verify its worker permission profile because "
       + "the selected Codex executable "
       + quotedExecutable(codexPath)
       + " "

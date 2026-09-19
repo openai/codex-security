@@ -1,6 +1,8 @@
 # Artifact Storage
 
-Apply this policy to plugin-managed scans and standalone artifact-producing skills. An explicitly SDK-owned workflow keeps its SDK-provided directories and existing artifact-writing and completion behavior; follow its existing instructions instead of this policy. Bound Deep workers keep their existing narrow artifact tools and read-only execution profile.
+Apply this policy to plugin-managed scans and standalone artifact-producing skills. An explicitly SDK-owned workflow keeps its SDK-provided directories and existing artifact-writing and completion behavior; follow its existing instructions instead of this policy. Workers with bound artifact tools keep those narrow tools and may use their assigned scratch workspace only within the parent's effective filesystem permissions. Their canonical artifacts and original target remain read-only to ordinary execution. Record reproduction commands, relevant proof inputs, and observed results in the existing semantic validation evidence; do not reference disposable scratch files as retained artifacts.
+
+An assigned worker scratch workspace requires a matching concrete filesystem grant or an unambiguous `/tmp` grant from the host. A read-only parent stays read-only. If the host exposes only an unresolved `TMPDIR` grant, the worker retains source-backed validation and records any runtime proof gap; the plugin does not infer the parent's temporary directory from its own environment. This does not change network access.
 
 ## Scan ownership
 
@@ -54,3 +56,5 @@ End each shared threat model with these two lines:
 - `Version: <revision for an immutable Git tree; snapshot digest otherwise>`
 
 Completed/sealed scan files cannot be edited through the save tool. For later write-ups or hardening requests, use the standalone target collection and link those returned files separately. Preserve the original result and its references. Temporary cleanup must not remove retained files or recovery checkpoints. The save tool publishes running-scan files under the same completion lock as finalization; surface a stopped/sealed-scan rejection and preserve existing output.
+
+Worker scratch is retained across resumed turns and retries so builds and harnesses can be reused. Scratch beside scan artifacts follows the scan directory lifecycle; scratch in the host temporary directory is disposable and follows host temporary-directory cleanup. Workers must save sufficient commands, inputs, and results in their existing validation evidence to make the finding understandable after scratch is removed.

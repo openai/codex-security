@@ -19,6 +19,10 @@ Keep discovery, validation, and attack-path reasoning within this one self-conta
 
 Resolve one working native local search command before scanning and pass its verified path to every worker. Prefer an existing ripgrep executable; reject DotSlash, bootstrap, or other download-capable wrappers, and fall back to local `git grep`, `find`, or `grep`. Do not install tools or trigger network downloads.
 
+## Runtime Validation
+
+The scan owner may build and execute targeted tests or proof-of-concept harnesses when its effective permissions provide a writable validation workspace. Complete this validation before submitting the final audit result. Keep source-review subagents read-only. Put build copies, harnesses, generated files, and build caches in the permitted workspace; preserve the original target and cite its original source paths and lines. Use the actual application or library, rather than a separate reimplementation of the suspected bug. Record commands, observed results, and proof artifacts in the existing validation evidence. Respect retained filesystem denials and networking permissions; unavailable execution or dependencies leave an explicit proof gap and do not by themselves disprove a source-backed finding.
+
 ## Repository Security Policy
 
 Resolve and cache directory-specific security guidance with `<plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --scope <file_or_directory> --out -` (use `launch_codex_security_mcp.cmd` on Windows). Resolve once per distinct reviewed directory or investigation packet, pass the matching inherited policy to its worker, and let the closest nested `SECURITY.md` take precedence.

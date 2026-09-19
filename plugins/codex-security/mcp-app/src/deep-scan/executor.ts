@@ -1,6 +1,7 @@
 import { accessSync, constants as fsConstants, existsSync, promises as fs, readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import { executablePathForSpawn } from "./executable-path.js";
@@ -13,7 +14,8 @@ import {
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile
 } from "./permission-profile-preflight.js";
-import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
+import { resolveDeepWorkerScratchAccess } from "./parent-sandbox.js";
+import type { DeepWorkerParentSandbox, DeepWorkerScratchAccess } from "./parent-sandbox.js";
 import type {
   CodexWorkerDiagnostic,
   CodexWorkerExecutor,
@@ -48,10 +50,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
         throw new DeepScanNonRetryableError(
-          "Deep Scan cannot start a read-only worker without verified parent sandbox metadata."
+          "Deep Scan cannot start a worker without verified parent sandbox metadata."
         );
       }
-      const workerProfile = workerPermissionProfile(parentSandbox);
+      const scratch = await this.workerScratchAccess(request, parentSandbox);
+      const workerProfile = workerPermissionProfile(parentSandbox, scratch);
       const configOverrides = workerPermissionProfileConfigOverrides(workerProfile);
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
@@ -75,6 +78,15 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
         signal: request.signal
       });
+      if (scratch) {
+        // The concrete profile is already verified. Create scratch before the
+        // real worker starts using it for temporary files; preflight retains
+        // the host's existing temporary directory for its own startup.
+        await fs.mkdir(scratch.writePath, { recursive: true });
+        childEnv.TMPDIR = scratch.writePath;
+        childEnv.TMP = scratch.writePath;
+        childEnv.TEMP = scratch.writePath;
+      }
       const prompt = await fs.readFile(request.promptPath, "utf8");
       const codex = new Codex({
         codexPathOverride: executablePathForSpawn(codexPath),
@@ -112,9 +124,12 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const thread = request.resumeThreadId
         ? codex.resumeThread(request.resumeThreadId, threadOptions)
         : codex.startThread(threadOptions);
-      const input = request.resumeThreadId
+      const baseInput = request.resumeThreadId
         ? request.continuationPrompt ?? prompt
         : prompt;
+      const input = request.kind === "discovery" && this.modelSettings.artifactContext && request.artifactContext
+        ? `${baseInput.trimEnd()}\n\n${scratchInstructions(scratch)}\n`
+        : baseInput;
       const controller = new AbortController();
       const forwardAbort = () => controller.abort(request.signal.reason);
       if (request.signal.aborted) {
@@ -177,6 +192,29 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
     } catch (error) {
       throw classifyCodexWorkerError(error);
+    }
+  }
+
+  private async workerScratchAccess(
+    request: CodexWorkerRequest,
+    sandbox: DeepWorkerParentSandbox
+  ): Promise<DeepWorkerScratchAccess | undefined> {
+    const scan = this.modelSettings.artifactContext;
+    const assigned = request.artifactContext;
+    if (request.kind !== "discovery" || !scan || assigned?.layout !== "worker") return;
+
+    // Keep scratch stable across a worker's resumed turns and artifact retries.
+    // Canonical results remain in the coordinator-owned output directory.
+    const workerRoot = dirname(assigned.root);
+    const temporaryPath = join("codex-security-deep-scratch", scan.scanId, basename(workerRoot));
+    const candidates = new Set([
+      join(workerRoot, "scratch"),
+      join(tmpdir(), temporaryPath),
+      ...(process.platform === "win32" ? [] : [join("/tmp", temporaryPath)])
+    ]);
+    for (const candidate of candidates) {
+      const access = await resolveDeepWorkerScratchAccess(sandbox, candidate, scan.repoRoot);
+      if (access) return access;
     }
   }
 
@@ -272,10 +310,16 @@ type TomlValue = string | number | boolean | TomlObject;
 type TomlObject = { [key: string]: TomlValue };
 
 function workerPermissionProfile(
-  sandbox: DeepWorkerParentSandbox
+  sandbox: DeepWorkerParentSandbox,
+  scratch?: DeepWorkerScratchAccess
 ): TomlObject {
   const filesystemEntries: Array<[string, TomlValue]> = [[":root", "read"]];
   const seenFilesystemKeys = new Set<string>();
+
+  if (scratch) {
+    filesystemEntries.push([scratch.writePath, "write"]);
+    for (const path of scratch.readOnlyPaths) filesystemEntries.push([path, "read"]);
+  }
 
   for (const key of sandbox.filesystemDenies) {
     if (seenFilesystemKeys.has(key)) continue;
@@ -294,6 +338,21 @@ function workerPermissionProfile(
     filesystem: Object.fromEntries(filesystemEntries) as TomlObject,
     network: { enabled: false }
   };
+}
+
+function scratchInstructions(scratch: DeepWorkerScratchAccess | undefined): string {
+  if (!scratch) {
+    return "This worker has no scratch write permission inherited from the parent. "
+      + "Keep validation source-backed and record any runtime proof gap; do not seek broader permissions.";
+  }
+  return `The parent permits scratch work at ${JSON.stringify(scratch.writePath)}, subject to the retained filesystem denials. `
+    + "Use it for validation harnesses, build copies, generated files, and local build caches. "
+    + "Keep the original target and canonical scan artifacts read-only, and report source locations against the original target. "
+    + "Perform targeted runtime validation within this worker before submitting its final result. "
+    + "Record reproduction commands, relevant proof inputs, and observed results in the existing validation evidence; "
+    + "scratch is disposable, so do not reference its files as retained canonical artifacts. "
+    + "Networking remains disabled; if existing permissions or unavailable dependencies prevent execution, record the exact proof gap. "
+    + "The scratch directory is reused on resumed turns and retries; check retained files against the current source before reusing them.";
 }
 
 function workerPermissionProfileConfigOverrides(profile: TomlObject): string[] {
@@ -405,7 +464,7 @@ async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
   if (process.platform === "win32") {
     // process.env is case-insensitive on Windows; a plain object is not.
     // Keep its selected values while giving the child one spelling per key.
-    for (const name of ["CODEX_CLI_PATH", "CODEX_HOME", "CODEX_MANAGED_PACKAGE_ROOT", "LOCALAPPDATA"]) {
+    for (const name of ["CODEX_CLI_PATH", "CODEX_HOME", "CODEX_MANAGED_PACKAGE_ROOT", "LOCALAPPDATA", "TMPDIR", "TMP", "TEMP"]) {
       const value = process.env[name];
       for (const key of Object.keys(environment)) {
         if (key.toUpperCase() === name) delete environment[key];

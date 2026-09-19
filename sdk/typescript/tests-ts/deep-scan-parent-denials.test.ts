@@ -78,7 +78,7 @@ function metadata(entries: unknown[]) {
   };
 }
 
-test("preserves literal parent deny paths and globs without parent write grants", async () => {
+test("preserves denies and write metadata without unassigned worker writes", async () => {
   const policy = await bundledPolicy();
   const denied = path.resolve("synthetic", "secret.with.dots");
   const glob = path.resolve("synthetic", "**", "*.secret");
@@ -95,6 +95,9 @@ test("preserves literal parent deny paths and globs without parent write grants"
   expect(sandbox).toEqual({
     filesystemDenies: [denied, glob],
     globScanMaxDepth: 8,
+    filesystemWriteRules: [
+      { path: path.resolve("synthetic"), access: "write" },
+    ],
   });
   expect(parse(policy.overrides(sandbox).join("\n"))).toEqual({
     default_permissions: "codex_security_deep_scan_worker",
