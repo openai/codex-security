@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import pytest
 from test_workbench_db import HEAD_CHANGED_WARNING
 from test_workbench_deep_scan import begin_target_scan
 from test_workbench_prompt_only_scan import start_headless_standard_scan, start_prompt_only_scan
@@ -442,7 +443,8 @@ def test_cli_scan_preserves_original_revision_when_head_moves(tmp_path: Path) ->
     assert history["scans"][0]["warnings"] == completed["scan"]["warnings"]
 
 
-def test_cli_scan_history_persists_per_scan_cost(tmp_path: Path) -> None:
+@pytest.mark.parametrize("context_reporting", ["bounded", "unknown_upper", "legacy"])
+def test_cli_scan_history_persists_per_scan_cost(tmp_path: Path, context_reporting: str) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -456,12 +458,25 @@ def test_cli_scan_history_persists_per_scan_cost(tmp_path: Path) -> None:
         "cacheWriteInputTokensReported": False,
         "pricing": {
             "source": "https://developers.openai.com/api/docs/pricing",
-            "asOf": "2026-09-09",
+            "asOf": "2026-09-09" if context_reporting == "legacy" else "2026-09-14",
             "serviceTier": "standard",
             "context": "short",
             "usdPerMillionTokens": {"input": 4, "cacheRead": 0.4, "cacheWrite": 5, "output": 20},
         },
     }
+    if context_reporting != "legacy":
+        cost["estimatedUsdRange"] = {
+            "min": 0.00488,
+            "max": 0.01156 if context_reporting == "bounded" else None,
+            "context": "unknown",
+        }
+    if context_reporting == "bounded":
+        cost["pricing"]["longContextUsdPerMillionTokens"] = {
+            "input": 8,
+            "cacheRead": 0.8,
+            "cacheWrite": 10,
+            "output": 30,
+        }
     scan = create_cli_scan(state_dir, tmp_path / "results", repository, cost=cost)
 
     listed = run_workbench(state_dir, "list-scans", "--repository", str(repository))

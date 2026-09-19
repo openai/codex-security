@@ -685,6 +685,11 @@ def merge_saved_results(
             "deferred": [],
         }
     )
+    if isinstance(coverage.get("openQuestions"), list):
+        coverage["openQuestions"] = [
+            {"question": item.strip()} if isinstance(item, str) else item
+            for item in coverage["openQuestions"]
+        ]
     canonical_rows = (
         {
             id(item)
@@ -1260,7 +1265,6 @@ def preserve_scan_results_locked(
             for relative, digest in retained_sources.items()
         ):
             raise ContractError("Stopped scan source digests could not be frozen.")
-        frozen_source_digests = retained_sources
         with connection:
             connection.execute(
                 "UPDATE scans SET retained_source_digests_json = ? "

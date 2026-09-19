@@ -143,6 +143,16 @@ describe("policy CLI", () => {
 
   test("generates a headless draft with machine-readable paths and no source edits", async () => {
     const f = await fixture();
+    const draft = await f.generate();
+    draft.cost = {
+      model: "synthetic-model",
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 1,
+      estimatedUsd: 1,
+      estimatedUsdRange: { min: 1, max: 2, context: "unknown" },
+    };
     const stdout = capture();
     const stderr = capture();
     let closed = false;
@@ -162,6 +172,7 @@ describe("policy CLI", () => {
         stdout.stream,
         stderr.stream,
         policyDependencies(f, {
+          draft,
           onClose: () => {
             closed = true;
           },
@@ -175,6 +186,8 @@ describe("policy CLI", () => {
     expect(result.status).toBe("draft");
     expect(result.targetPath).toBe(join(f.repository, "SECURITY.md"));
     expect(result.threatModelPath).toBe(join(f.outputDir, "THREAT_MODEL.md"));
+    expect(result.cost).toEqual(draft.cost);
+    expect(stderr.text()).toContain("$1.00–$2.00 (standard, context unknown)");
     expect(stderr.text()).toContain("[1/3]");
     expect(stderr.text()).not.toContain("+Requests must be authorized");
     expect(config).toMatchObject({

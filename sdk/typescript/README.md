@@ -572,9 +572,10 @@ Working-tree snapshots include files from untracked nested Git repositories.
 Initialized submodules must be clean and checked out at the commit recorded by
 the parent repository.
 
-Repeat `--knowledge-base PATH` for Markdown, text, PDF, or Word (`.docx`) files.
-Directories are searched recursively. Bulk scans share these documents with
-every repository.
+Repeat `--knowledge-base PATH` for UTF-8 text files with any extension (including
+JSON and SARIF), PDF, or Word (`.docx`) files. Directories are searched recursively,
+skipping other binary files. Explicitly supplied unsupported binary files are rejected.
+Bulk scans share these documents with every repository.
 
 Use an empty output directory outside the scanned directory and enclosing Git
 worktree. On macOS/Linux, existing directories must be private to you
@@ -585,6 +586,26 @@ SARIF output, when produced, is at `<scan-dir>/exports/results.sarif`.
 Scans are report-only by default. Set `--fail-on-severity high` to exit with
 `1` if a completed scan finds high or critical issues. Incomplete scans exit
 with `2`, writing available results to stdout and a coverage warning to stderr.
+
+For machine-readable scan output (`--format json` or `--format jsonl`), a scan
+execution failure writes one structured object to stdout:
+
+```json
+{
+  "status": "failed",
+  "code": "SCAN_FAILED",
+  "message": "..."
+}
+```
+
+With `--full-output`, the same code and message are reported under `error` in
+an `ok: false` envelope instead.
+
+The command still exits with `2` for runtime, export, invalid-input, or
+incomplete-scan failures, and human-readable diagnostics remain on stderr.
+Use `scan --schema --format json` to discover this failure variant alongside
+the successful scan output. Cancellation and termination retain their `130`
+and `143` exit codes.
 
 ### Import findings as a saved scan
 
@@ -933,20 +954,32 @@ The final summary preserves missing-data information from a matching session log
 If the Codex runtime converts an omitted count to zero before recording it, the
 CLI cannot distinguish that zero from reported usage.
 
-JSON results, scan history, and bulk-scan receipts record the model, tokens,
-estimated cost, and `cost.pricing`: the price source, verification date, processing
-tier, context category, and rates in USD per million tokens. Estimates use
-[standard, short-context API prices](https://developers.openai.com/api/docs/pricing),
-including cache reads and writes. They exclude long-context and other processing
-tier adjustments, fees, and surcharges. GPT-5.5 and GPT-6 Astra are supported;
-models without known prices show an unavailable estimate.
+Cost displays show a range using
+[standard API prices](https://developers.openai.com/api/docs/pricing), because
+runtime usage does not identify which requests received long-context pricing.
+The minimum assumes short-context pricing; the maximum assumes long-context
+pricing. These are token-cost estimates for the observed usage, excluding other
+processing tiers, fees, surcharges, and account-specific pricing.
+
+JSON results, scan history, and bulk-scan receipts preserve
+`cost.estimatedUsdRange`: `min`, `max`, and `context: "unknown"`. A `null` maximum
+means an upper estimate is unavailable, including models without verified
+long-context rates. `cost.pricing` records the price source, verification date,
+processing tier, short-context rates, and verified long-context rates when known.
+Models without known short-context prices still have no cost estimate.
 
 For compatibility, `cacheWriteInputTokens` remains the reported token subtotal.
 `cacheWriteInputTokensReported: false` means at least one included usage record
 did not report cache writes. Raw usage uses `cache_write_input_tokens_reported`.
-In that case, the estimate prices unclassified input at the ordinary input rate;
-it may undercount cache-write charges. Older saved records lack this distinction
-and the saved pricing basis.
+In that case, the range minimum prices unclassified input as ordinary input,
+and the maximum allows it to be cache writes. Token counts remain unchanged.
+Older saved records remain readable and display a labeled legacy estimate;
+they are not repriced using current rates.
+
+For compatibility, `cost.estimatedUsd` retains the short-context baseline used
+by existing spending limits. `cost.pricing.context: "short"` describes that
+baseline, not observed request contexts. Use `estimatedUsdRange` for cost
+reporting. This change does not change when spending limits stop scans.
 
 `--max-cost USD` stops the scan and its workers when estimated cost exceeds
 the limit, though in-flight requests can finish above it. If deep-scan
@@ -1277,7 +1310,7 @@ Omitting `--rubric` inherits each finding's existing severity without a model ca
 
 `--rubric PATH` supplies the classification policy. Repeat `--knowledge-base PATH`
 to provide supporting architecture, deployment, or business context. Both accept
-the same Markdown, text, PDF, DOCX, and directory inputs as scan knowledge bases.
+the same UTF-8 text, PDF, DOCX, and directory inputs as scan knowledge bases.
 Rubric classification uses the full supplied report and context in a separate
 read-only Codex turn per finding, without source inspection, tools, or new
 validation. `--model` and `--effort` select the classification model and reasoning
@@ -1610,6 +1643,26 @@ Use the SDK loop for a disposition per alert.
 files or literal text and work in the current directory. Pass a saved finding
 or occurrence ID to `patch` to use its original repository.
 
+Add `--validation-prompt-file PATH` to supply custom dynamic validation
+instructions, using the same UTF-8 prompt file format as `scan`. The patch task
+uses these instructions to set up the environment, build or start the application,
+exercise the fix, check legitimate behavior, and clean up. Include the commands,
+authorized targets, expected results, and cleanup steps for your environment.
+The task must report validation evidence or explain which checks failed or could
+not run before claiming the patch is fixed or verified.
+
+```bash
+npx @openai/codex-security patch OCCURRENCE_ID --validation-prompt-file validation.md
+npx @openai/codex-security patch issues.md --validation-prompt-file validation.md
+```
+
+The flag works with saved findings, issue text/files, and Linear inputs. Relative
+prompt paths resolve from the directory where you invoke the CLI, including when
+the saved finding belongs to another repository. The file is read once before
+patching; missing, empty, or non-regular files fail before the patch task starts.
+Without the flag, the usual fix-finding verification applies. The flag does not
+change sandbox permissions and cannot be combined with `--resume-pr`.
+
 Add `--assess-patch-risk` to a `patch` command to run the bundled patch-risk
 assessment skill once on the completed patch. The assessment is advisory and
 does not change the patch or its merge state. Human-readable commands print the
@@ -1657,6 +1710,8 @@ its read-only Codex sandbox.
 to select findings and add patch instructions. Results include a `patches`
 entry per finding with status `verified`, `no_change`, `blocked`, or `failed`.
 Verified and already-fixed findings no longer fail `--fail-on-severity`.
+Patching shows each finding's position, elapsed time, and live Codex activity.
+Progress goes to stderr; completed results stay in the terminal history.
 
 `--create-pr` commits generated patch files and opens a draft GitHub pull request
 with `gh` or a draft GitLab merge request with `glab`. Install and authenticate
@@ -1760,6 +1815,12 @@ cancels, resumes, publishes, edits, or deduplicates anything.
 
 The dashboard opens on Findings, followed by Duplicate groups. Both views
 support search, repository filtering, sorting, pagination, and record details.
+Click any column header to sort all matching records; click it again to reverse
+the order. The arrow marks the active column and direction. Changing the sort
+returns to the first page, and automatic refreshes keep the selected order.
+By default, findings sort by last update descending, then severity descending,
+then ID ascending to break ties. Groups sort by last update descending and ID
+ascending.
 Findings show stored content and links to their duplicate groups. Groups link
 back to their member findings, preserving separate overlapping groups and the
 original finding records.
@@ -1776,7 +1837,10 @@ repository choices, a page of records, and optional selected-record details:
 
 - `view`: `findings` (default) or `groups`.
 - `query`, `repository`: optional search text and exact repository ID.
-- `sort`: `activity` (default; most recently updated first) or `newest`.
+- `sort`: `activity` (default; last update), `newest` (created), `title`,
+  `repository`, `severity` (findings only), or `members` (groups only).
+- `direction`: `asc` or `desc` (default). Text sorts alphabetically without
+  case sensitivity, severity by level, and member counts numerically.
 - `limit`, `offset`: existing pagination conventions, defaulting to 50 and 0.
 - `id`: optional exact record ID to include in `detail`; unknown IDs return
   `detail: null` without hiding the list.
@@ -1903,7 +1967,7 @@ console.log(receipt.repositoryId, receipt.findingIds);
 Publish the scan with `--to custom` (or import it through the bulk API with its
 `repositoryId`) before deduplicating. The
 workflow reads a completed saved scan, queries candidates by finding ID, and
-runs Luna and Sol in the calling SDK/CLI process. Once all reviews succeed,
+runs Luna and Sol in the calling SDK/CLI process. Once all reviews finish,
 it posts accepted groups to the service. It does not re-upload findings or
 change scan artifacts.
 
@@ -1924,7 +1988,14 @@ has finished and none voted `DISTINCT`. It can run while unrelated Luna
 screenings continue. Results are combined in input order so completion timing
 does not change the groups.
 
-If a job fails after its retries, queued jobs stop and already running jobs
+An explicit model refusal keeps the affected pairs separate and allows unrelated
+reviews to continue. It is recorded as `NO_DECISION`, not a reviewed `DISTINCT`
+verdict. A screening refusal applies to every anchor/candidate pair in that
+screening; a pair-review refusal applies only to its assigned pair. Neither pair
+can be merged indirectly through other findings. Recognized policy errors and
+explicit refusal responses are not retried or sent to another model.
+
+If another kind of job fails after its retries, queued jobs stop and already running jobs
 finish before the command reports the failure. No groups are posted from an
 incomplete review. To retain completed reviews across runs, use a
 `--workflow-id` as described below.
@@ -1987,6 +2058,19 @@ members of an accepted group, with its canonical finding first. The canonical
 has the highest reported severity; ties use finding ID. Results do not delete,
 merge, or change stored finding documents. Accepted groups are saved as durable
 associations in the service before `deduplicationStatus` becomes `completed`.
+
+When any review is refused, the result instead has
+`deduplicationStatus: "completed_with_refusals"` and a `refusals` array. Each
+entry contains `decision: "NO_DECISION"`, `stage`, `model`, `findingIds`, and
+`reason`. For screening, the first finding ID is the anchor and the remaining
+IDs are its candidates. The CLI logs each refusal to stderr and exits
+successfully after saving the accepted groups. SDK callers can inspect and log
+the same structured entries. Findings retained because of a refusal are not
+confirmed unique. Successful runs without refusals keep their existing output
+shape. No command, flag, or default changes are required.
+
+This behavior applies to post-scan Luna/Sol deduplication. Deep Scan's internal
+reducer uses a separate workflow.
 
 ### Stored duplicate groups
 
@@ -2089,9 +2173,15 @@ exponential backoff with jitter; HTTP retries honor `Retry-After`. Waiting to re
 occupies the job's concurrency slot.
 
 Cancellation, authentication or configuration errors, permanent HTTP errors, and
-required-source-access blockers are not retried. Exhausted retries fail deduplication;
+required-source-access blockers are not retried. Model refusals continue with
+`NO_DECISION` as described above. Other exhausted retries fail deduplication;
 invalid or unfinished reviews are not cached. Completed checkpoints remain
 available when the workflow resumes.
+
+Refusals are not saved as validated review checkpoints. A completed workflow
+retains its final `completed_with_refusals` result, including all refusal entries,
+and returns it on subsequent calls. To attempt those reviews again after
+resolving the refusal, run dedupe without that workflow ID or with a new one.
 
 Checkpoints bind to the exact original records and ordering, approved source path,
 Git revision and current file contents (including ignored files), repository scope,

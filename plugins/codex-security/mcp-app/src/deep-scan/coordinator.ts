@@ -959,7 +959,7 @@ export class DeepScanCoordinator {
       throw new Error("Deep Scan ended without a successfully reduced Standard scan.");
     }
     return {
-      reason: stopReason ?? "capped",
+      reason: stopReason,
       omittedWorkerIds: unique(omittedWorkerIds),
       canceledWorkerIds: unique(canceledWorkerIds),
       accepted,

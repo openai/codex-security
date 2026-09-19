@@ -346,7 +346,8 @@ describe("interactive patch finding browser", () => {
 
     await press(app, "i");
     await press(app, "Discard this guidance.");
-    await press(app, "\u001B");
+    // A complete Escape sequence avoids Ink's delay for an ambiguous bare Escape.
+    await press(app, "\u001B[27u");
     expect(selected).toEqual([]);
     expect(app.lastFrame()).not.toContain("Discard this guidance.");
 

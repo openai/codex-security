@@ -136,7 +136,18 @@ describe("CLI", () => {
         dependencies(),
       ),
     ).toBe(0);
-    expect(JSON.parse(schema.text())).toMatchObject({
+    const scanSchema = JSON.parse(schema.text()) as {
+      args: Record<string, unknown>;
+      options: Record<string, unknown>;
+      output?: {
+        anyOf?: Array<{
+          properties?: Record<string, { const?: string; type?: string }>;
+          required?: string[];
+          additionalProperties?: boolean;
+        }>;
+      };
+    };
+    expect(scanSchema).toMatchObject({
       args: { properties: { repository: { type: "string" } } },
       options: {
         properties: {
@@ -163,6 +174,18 @@ describe("CLI", () => {
           headless: { type: "boolean" },
         },
       },
+    });
+    const failureSchema = scanSchema.output?.anyOf?.find(
+      (variant) => variant.properties?.["code"]?.const === "SCAN_FAILED",
+    );
+    expect(failureSchema).toMatchObject({
+      properties: {
+        status: { const: "failed" },
+        code: { const: "SCAN_FAILED" },
+        message: { type: "string" },
+      },
+      required: ["status", "code", "message"],
+      additionalProperties: false,
     });
 
     const rerunSchema = capture();
@@ -3644,7 +3667,10 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Provider failed for");
     expect(stderr.text()).toContain("tenant-private");
     expect(stderr.text()).toContain("req-internal");
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "SCAN_FAILED",
+    });
   });
 
   test("preserves provider identifier variants in scan failures", async () => {
@@ -3737,7 +3763,10 @@ describe("CLI", () => {
             deps,
           ),
         ).toBe(2);
-        expect(stdout.text()).toBe("");
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          status: "failed",
+          code: "SCAN_FAILED",
+        });
         expect(stderr.text()).toContain("Provider failed for");
         for (const identifier of identifiers) {
           expect(stderr.text()).toContain(identifier);
@@ -3957,7 +3986,10 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Cleanup failed for");
     expect(stderr.text()).toContain("tenant-private");
     expect(stderr.text()).toContain("req-internal");
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "SCAN_FAILED",
+    });
   });
 
   test("reports reconnect progress on stderr and keeps JSON output clean", async () => {
@@ -4063,6 +4095,105 @@ describe("CLI", () => {
     }
   });
 
+  test("emits structured failures for machine-readable scan output", async () => {
+    const message = "This content was flagged for possible cybersecurity risk.";
+    for (const formatArgs of [
+      ["--json"],
+      ["--format", "json"],
+      ["--format", "jsonl"],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async () => {
+          throw new CodexSecurityError(message);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(
+          ["scan", ".", ...formatArgs],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text().trim())).toEqual({
+        status: "failed",
+        code: "SCAN_FAILED",
+        message,
+      });
+      expect(stderr.text()).toContain(`${message}\n`);
+    }
+  });
+
+  test("reports full-output scan failures in an error envelope", async () => {
+    const message = "This content was flagged for possible cybersecurity risk.";
+    for (const formatArgs of [
+      ["--json"],
+      ["--format", "json"],
+      ["--format", "jsonl"],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async () => {
+          throw new CodexSecurityError(message);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(
+          ["scan", ".", ...formatArgs, "--full-output"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      const envelope = JSON.parse(stdout.text().trim());
+      expect(envelope.ok).toBe(false);
+      expect(envelope.error).toEqual({ code: "SCAN_FAILED", message });
+      expect(envelope).not.toHaveProperty("data");
+      expect(stderr.text()).toContain(`${message}\n`);
+    }
+  });
+
+  test("redacts credentials from full-output scan failures", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async () => {
+        throw new CodexSecurityError(
+          `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
+        );
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--json", "--full-output"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text()).error).toEqual({
+      code: "SCAN_FAILED",
+      message: "[redacted]",
+    });
+    expect(stdout.text()).not.toContain("SYNTHETIC_KEY_123");
+    expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
+  });
+
   test("surfaces underlying scanner errors instead of inventing a model outage", async () => {
     for (const message of [
       "Could not save the Codex Security scan: UNIQUE constraint failed: scans.scan_dir",
@@ -4085,7 +4216,11 @@ describe("CLI", () => {
       expect(
         await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toEqual({
+        status: "failed",
+        code: "SCAN_FAILED",
+        message,
+      });
       expect(stderr.text()).toContain(`${message}\n`);
       expect(stderr.text()).not.toContain("codex-security:");
       expect(stderr.text()).not.toContain("model service could not be reached");
@@ -4209,7 +4344,11 @@ describe("CLI", () => {
     expect(
       await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
     ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toEqual({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message: "[redacted]",
+    });
     expect(stderr.text()).toContain(
       `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
     );
@@ -4727,12 +4866,12 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
     expect(stderr.text()).toContain(
-      "Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total. Estimated cost: $0.00488 USD.",
+      "Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total. Estimated cost: $0.00488–$0.01156 (standard, context unknown, cache writes unknown).",
     );
     expect(stderr.text()).toContain("Scan phase: reviewing files (0/8 files).");
     expect(stderr.text()).toContain("Scan phase: reviewing files (3/8 files).");
     expect(stderr.text()).toContain(
-      "Running scan: reviewing files | Workers: 4/6 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total | Cost: $0.00488",
+      "Running scan: reviewing files | Workers: 4/6 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total | Cost: $0.00488–$0.01156",
     );
   });
 
@@ -4805,7 +4944,9 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
     );
-    expect(stderr.text()).toContain("COST      $0.00488");
+    expect(stderr.text()).toContain(
+      "COST      $0.00488–$0.01156 (standard, context unknown, cache writes unknown)",
+    );
     expect(stderr.text()).toContain(`REPORT    ${result.reportPath}`);
     expect(stderr.text()).toContain("RESULTS   /tmp/scan");
     expect(stderr.text()).not.toContain("Next:");
@@ -4848,7 +4989,7 @@ describe("CLI", () => {
     },
   );
 
-  test("reports the running cost against the scan budget", async () => {
+  test("reports a cost range while preserving the short-context scan budget", async () => {
     const stdout = capture();
     const stderr = capture();
     const result = fakeResult([], "complete", {
@@ -4859,14 +5000,20 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scan", ".", "--json", "--max-cost", "0.01"],
+        ["scan", ".", "--verbose", "--json", "--max-cost", "0.01"],
         stdout.stream,
         stderr.stream,
         dependencies({ result, costUpdates: [result.cost!] }),
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-    expect(stderr.text()).toContain("Estimated cost: $0.00488 of $0.01 limit");
+    expect(stderr.text()).toContain("Estimated cost: $0.00488–$0.01156");
+    expect(stderr.text()).toContain(
+      "short-context budget baseline: $0.00488 of $0.01 limit",
+    );
+    expect(stderr.text()).toContain(
+      'estimated_usd=0.00488 cost_estimate="$0.00488–$0.01156 (standard, context unknown, cache writes unknown)"',
+    );
   });
 
   test("includes cache-write tokens in verbose cost diagnostics", async () => {
@@ -4892,6 +5039,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("codex-security: debug: cost.updated");
     expect(stderr.text()).toContain("cache_write_input_tokens=200");
     expect(stderr.text()).not.toContain("estimated_usd=");
+    expect(stderr.text()).not.toContain("cost_estimate=");
   });
 
   test("reports and classifies a scan stopped when its live cost exceeds the limit", async () => {
@@ -4916,9 +5064,13 @@ describe("CLI", () => {
         }),
       ),
     ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message: expect.stringContaining("estimated cost"),
+    });
     expect(stderr.text()).toContain(
-      "Scan stopped: estimated cost $0.00488 exceeded the $0.004 limit; partial output remains at /tmp/scan.",
+      "Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at /tmp/scan.",
     );
     expect(stderr.text()).toMatch(
       /scan\.configuration[^\n]*max_cost_usd=0\.004/u,
@@ -5335,7 +5487,13 @@ describe("CLI", () => {
           failing,
         ),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        status: "failed",
+        code: "SCAN_FAILED",
+        message: expect.stringContaining(
+          "Scan output directory must be outside",
+        ),
+      });
       expect(stderr.text()).toContain(
         "Scan output directory must be outside the scanned directory and any enclosing Git worktree.",
       );
@@ -5442,7 +5600,10 @@ describe("CLI", () => {
         failing,
       ),
     ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "SCAN_FAILED",
+    });
     expect(stderr.text()).toContain(`Resolved path:  ${output}`);
     expect(stderr.text()).toContain(`Protected root: ${protectedRoot}`);
   });
@@ -5523,7 +5684,15 @@ describe("CLI", () => {
           }),
         ),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      if (json) {
+        expect(JSON.parse(stdout.text())).toEqual({
+          status: "failed",
+          code: "SCAN_FAILED",
+          message: "SYNTHETIC_AUTH_HOME_CLEANUP_FAILED",
+        });
+      } else {
+        expect(stdout.text()).toBe("");
+      }
       expect(stderr.text()).toContain("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED");
       expect(stderr.text()).toContain("Partial output was kept at /tmp/scan.");
     }

@@ -13,7 +13,7 @@ afterEach(async () => {
     await rm(directory, { recursive: true, force: true });
 });
 
-async function repositoryFixture() {
+async function repositoryFixture({ initializeGit = true } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "patch-results-"));
   directories.push(directory);
   const runRepositoryCommand: NonNullable<
@@ -29,12 +29,14 @@ async function repositoryFixture() {
   };
   const git = (...args: string[]) =>
     runRepositoryCommand("git", args, directory);
-  git("init", "--initial-branch=main");
-  git("config", "user.name", "Synthetic User");
-  git("config", "user.email", "synthetic@example.test");
   await writeFile(join(directory, "app.ts"), "original\n");
-  git("add", ".");
-  git("commit", "-m", "Synthetic fixture");
+  if (initializeGit) {
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    git("add", ".");
+    git("commit", "-m", "Synthetic fixture");
+  }
   return {
     directory,
     git,
@@ -117,7 +119,7 @@ lines.on("line", (line) => {
   });
 
   test.each([false, true])(
-    "fails a no-op with full output %s and preserves local changes",
+    "fails a no-op with full output %j and preserves local changes",
     async (fullOutput) => {
       const fixture = await repositoryFixture();
       await writeFile(join(fixture.directory, "app.ts"), "staged change\n");
@@ -178,13 +180,9 @@ lines.on("line", (line) => {
   });
 
   test.each([false, true])(
-    "checks patch changes outside a Git repository: %s",
+    "checks patch changes outside a Git repository: %j",
     async (apply) => {
-      const fixture = await repositoryFixture();
-      await rm(join(fixture.directory, ".git"), {
-        recursive: true,
-        force: true,
-      });
+      const fixture = await repositoryFixture({ initializeGit: false });
       const outcome = await fixture.patch(["Synthetic issue"], {
         onCodex: async () => {
           if (apply)
@@ -192,11 +190,15 @@ lines.on("line", (line) => {
           return 0;
         },
       });
-      expect(outcome.status).toBe(apply ? 0 : 2);
+      expect(outcome.status, outcome.stderr).toBe(apply ? 0 : 2);
       expect(outcome.result).toMatchObject({
         applied: apply,
         filesChanged: apply ? 1 : 0,
       });
+      if (!apply)
+        expect(outcome.result.error).toMatchObject({
+          code: "NO_PATCH_APPLIED",
+        });
     },
   );
 

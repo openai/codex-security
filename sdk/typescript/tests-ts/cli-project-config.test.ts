@@ -1031,7 +1031,11 @@ test("a malformed selected file fails before constructing a client", async () =>
   ).toBe(2);
   expect(initialized).toBe(false);
   expect(stderr.text()).toContain("Cannot parse project configuration");
-  expect(stdout.text()).toBe("");
+  expect(JSON.parse(stdout.text())).toEqual({
+    status: "failed",
+    code: "SCAN_FAILED",
+    message: `Cannot parse project configuration at ${input.config}.`,
+  });
 });
 
 test("dry-run uses the real SDK without initializing its runtime and reports provenance", async () => {

@@ -128,7 +128,19 @@ describe("ScanResult", () => {
     });
 
     expect(result.cost?.estimatedUsd).toBe(0.00488);
-    expect(result.toJSON()["cost"]).toEqual(result.cost);
+    const serialized = JSON.parse(JSON.stringify(result));
+    expect(serialized.cost).toEqual(result.cost);
+    expect(serialized.cost).toMatchObject({
+      estimatedUsdRange: { min: 0.00488, max: 0.01156, context: "unknown" },
+      pricing: {
+        longContextUsdPerMillionTokens: {
+          input: 8,
+          cacheRead: 0.8,
+          cacheWrite: 10,
+          output: 30,
+        },
+      },
+    });
   });
 
   test("discovers SARIF at its canonical scan path", async () => {

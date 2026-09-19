@@ -2,6 +2,10 @@
 
 Examples and templates for using Codex Security:
 
+- [GitHub Actions with Amazon Bedrock](github-actions/README.md): a copyable
+  workflow for PR-diff and full-repository scans with AWS OIDC authentication,
+  SARIF uploads, and downloadable reports.
+
 - [Findings CSV template](findings.csv): a header-only template for
   `codex-security publish scan --to cloud --csv PATH`. Copy it, add one finding
   per row, and validate the file before publishing:

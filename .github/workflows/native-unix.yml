@@ -45,7 +45,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           package_json_file: package.json
           cache: true
@@ -60,7 +60,17 @@ jobs:
           pnpm --dir sdk/typescript install --frozen-lockfile
           pnpm --dir sdk/typescript run build:ci
       - name: Set up Rust
-        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+        run: |
+          # Rustup 1.29 retries component downloads, but not manifest checksums.
+          for attempt in 1 2 3; do
+            if rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$((attempt * 10))"
+          done
       - name: Check Rust source and fetch locked dependencies
         run: |
           cargo fmt --check

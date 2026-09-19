@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import runpy
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -169,6 +171,92 @@ def test_make_repo_rank_input_matches_golden_and_filters_noise(tmp_path: Path) -
     assert output.read_text(encoding="utf-8") == (GOLDEN_DIR / "rank_input.jsonl").read_text(
         encoding="utf-8"
     )
+
+
+@pytest.mark.parametrize("scope", [".", "src", "src/large.py", "explicit", "overlap", "diff"])
+def test_rank_input_bounds_large_text_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    source = repo / "src" / "large.py"
+    source.write_bytes(b"def visible():\n    pass\n" + b"# source comment\n" * (128 * 1024))
+    output = tmp_path / "rank_input.jsonl"
+    arguments = ["make-repo-rank-input", "--repo", str(repo), "--out", str(output)]
+    if scope in {"explicit", "overlap"}:
+        scopes = tmp_path / "scopes.json"
+        scopes.write_text(
+            json.dumps(["src/large.py"] if scope == "explicit" else ["src", "src/large.py"])
+        )
+        arguments.extend(["--scopes-file", str(scopes)])
+    elif scope == "diff":
+        initialize_repo(repo)
+        git(repo, "commit", "--allow-empty", "-qm", "initial")
+        arguments[0] = "make-diff-rank-input"
+        arguments.extend(["--mode", "local-patch", "--base", "HEAD"])
+    else:
+        arguments.extend(["--scope", scope])
+
+    original_open = Path.open
+    reads: list[int] = []
+
+    def tracked_open(path: Path, *args, **kwargs):
+        reader = original_open(path, *args, **kwargs)
+        if path == source:
+            read = reader.read
+            index = len(reads)
+            reads.append(0)
+
+            def bounded_read(size: int = -1) -> bytes:
+                assert 0 <= size <= 64 * 1024 - reads[index]
+                data = read(size)
+                reads[index] += len(data)
+                return data
+
+            reader.read = bounded_read
+        return reader
+
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), *arguments])
+    with patch.object(Path, "open", tracked_open):
+        runpy.run_path(str(SCRIPT), run_name="__main__")
+
+    assert reads and all(count == 64 * 1024 for count in reads)
+    rows = read_jsonl(output)
+    assert len(rows) == 1
+    assert rows[0]["path"] == "src/large.py"
+    assert rows[0]["preview"] == "function visible()"
+
+
+@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
+def test_rank_input_includes_terraform(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    infra = repo / "infra"
+    infra.mkdir(parents=True)
+    initialize_repo(repo)
+    source = infra / "main.tf"
+    source.write_text('variable "enabled" { default = false }\n', encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    changed = 'variable "enabled" { default = true }'
+    source.write_text(changed + "\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "infra"]
+    else:
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
+        if mode == "revisions":
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    assert read_jsonl(output) == [
+        {"path": "infra/main.tf", "area": "infra" if mode == "repo" else "diff", "preview": changed}
+    ]
 
 
 def test_make_repo_rank_input_rejects_scope_outside_repo(tmp_path: Path) -> None:

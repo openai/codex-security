@@ -9,7 +9,12 @@ import type {
   ComponentScanResult,
 } from "./component-scan.js";
 import { formatUsd, type ScanCost, type ScanSessionEvent } from "./cost.js";
-import { estimateScanCost, formatScanCostTokens } from "./cost-model.js";
+import {
+  estimateScanCost,
+  formatScanCost,
+  formatScanCosts,
+  formatScanCostTokens,
+} from "./cost-model.js";
 import type { ScanActivity } from "./scan-activity.js";
 import type { ScanMode } from "./targets.js";
 import { scanPhaseLabel, type ScanProgress } from "./worker-progress.js";
@@ -564,18 +569,6 @@ export class ScanDashboard {
       this.#files === null
         ? "waiting for inventory"
         : `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`;
-    const cost =
-      this.#cost === null
-        ? this.#options.maxCostUsd === undefined
-          ? estimateScanCost(this.#options.model?.model, {
-              input_tokens: 0,
-              output_tokens: 0,
-            }) === null
-            ? "unavailable (model pricing missing)"
-            : "waiting for usage"
-          : `— / ${formatUsd(this.#options.maxCostUsd)}`
-        : `${formatUsd(this.#cost.estimatedUsd)}${this.#options.maxCostUsd === undefined ? "" : ` / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
-
     const history = this.#activityLines(width);
     const maximumOffset = Math.max(0, history.length - activityRows);
     this.#scrollOffset = Math.min(this.#scrollOffset, maximumOffset);
@@ -622,7 +615,7 @@ export class ScanDashboard {
               ? []
               : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
             ...this.#tokenLines(),
-            ...(this.#showCost ? [`  COST     ${cost}`] : []),
+            ...this.#costLines(),
             ...(this.#budget === null
               ? []
               : [
@@ -719,7 +712,10 @@ export class ScanDashboard {
   }
 
   #componentRows(): number {
-    return Math.max(1, (this.#stream.rows ?? 24) - (this.#showCost ? 11 : 10));
+    return Math.max(
+      1,
+      (this.#stream.rows ?? 24) - 10 - this.#componentCostLines().length,
+    );
   }
 
   #componentFrame(): string {
@@ -732,7 +728,16 @@ export class ScanDashboard {
         this.#components.length - rows,
       ),
     );
-    const nameWidth = Math.max(10, width - (this.#showCost ? 61 : 52));
+    const costWidth = Math.max(
+      8,
+      ...this.#components.map(({ dashboard }) =>
+        dashboard.#cost === null ? 1 : formatScanCost(dashboard.#cost).length,
+      ),
+    );
+    const nameWidth = Math.max(
+      10,
+      width - 52 - (this.#showCost ? costWidth + 1 : 0),
+    );
     const row = (
       marker: string,
       name: string,
@@ -758,9 +763,7 @@ export class ScanDashboard {
           receipt.findingCount === undefined
             ? "—"
             : formatCount(receipt.findingCount),
-          dashboard.#cost === null
-            ? "—"
-            : formatUsd(dashboard.#cost.estimatedUsd),
+          dashboard.#cost === null ? "—" : formatScanCost(dashboard.#cost),
         );
       });
     if (table.length === 0) table.push(`  ${this.#stage}…`);
@@ -769,9 +772,6 @@ export class ScanDashboard {
       this.#components.filter(({ receipt }) => receipt.status === status)
         .length;
     const selected = this.#components[this.#selectedComponent]?.receipt;
-    const costs = this.#components.flatMap(({ dashboard }) =>
-      dashboard.#cost === null ? [] : [dashboard.#cost.estimatedUsd],
-    );
     const rawFindings = this.#components.reduce(
       (sum, { receipt }) => sum + (receipt.findingCount ?? 0),
       0,
@@ -791,11 +791,7 @@ export class ScanDashboard {
       divider,
       `  SCOPE    ${selected?.paths.join(", ") ?? "waiting for component plan"}`,
       `  STATUS   ${selected?.error ?? findings}`,
-      ...(this.#showCost
-        ? [
-            `  COST     ${costs.length === 0 ? "waiting for usage" : formatUsd(costs.reduce((sum, value) => sum + value, 0))} · component scans only`,
-          ]
-        : []),
+      ...this.#componentCostLines(),
       `  STAGE    ${this.#stage}`,
       `  TIME     ${formatElapsed(Math.max(0, Math.floor((this.#options.clock.now() - this.#startedAt) / 1_000)))} · ↑↓ select · Enter activity · Ctrl+C cancel`,
     ]);
@@ -804,6 +800,18 @@ export class ScanDashboard {
   get #showCost(): boolean {
     return (
       this.#options.showCost === true || this.#options.maxCostUsd !== undefined
+    );
+  }
+
+  #componentCostLines(): string[] {
+    if (!this.#showCost) return [];
+    const costs = this.#components.flatMap(({ dashboard }) =>
+      dashboard.#cost === null ? [] : [dashboard.#cost],
+    );
+    return wrapActivity(
+      "  COST     ",
+      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)} · component scans only`,
+      this.#width(),
     );
   }
 
@@ -820,7 +828,7 @@ export class ScanDashboard {
         (this.#options.presentation === "publication" ||
         this.#options.presentation === "verification"
           ? 0
-          : this.#tokenLines().length - 1 - (this.#showCost ? 0 : 1)) +
+          : this.#tokenLines().length - 1 + this.#costLines().length - 1) +
         (this.#options.presentation === "publication"
           ? 2
           : this.#options.mode === "deep"
@@ -835,6 +843,22 @@ export class ScanDashboard {
         ? "waiting for usage"
         : formatScanCostTokens(this.#cost);
     return wrapActivity("  TOKENS   ", tokens, this.#width());
+  }
+
+  #costLines(): string[] {
+    if (!this.#showCost) return [];
+    const cost =
+      this.#cost === null
+        ? this.#options.maxCostUsd === undefined
+          ? estimateScanCost(this.#options.model?.model, {
+              input_tokens: 0,
+              output_tokens: 0,
+            }) === null
+            ? "unavailable (model pricing missing)"
+            : "waiting for usage"
+          : `— / ${formatUsd(this.#options.maxCostUsd)}`
+        : `${formatScanCost(this.#cost)}${this.#options.maxCostUsd === undefined ? "" : `; short-context budget baseline: ${formatUsd(this.#cost.estimatedUsd)} / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
+    return wrapActivity("  COST     ", cost, this.#width());
   }
 
   #activityLines(width: number): DashboardActivityLine[] {
