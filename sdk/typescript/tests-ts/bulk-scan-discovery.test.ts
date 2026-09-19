@@ -37,6 +37,7 @@ async function temporaryDirectory(): Promise<string> {
 class FakePrompt implements BulkScanPrompt {
   public readonly messages: string[] = [];
   public readonly questions: string[] = [];
+  public readonly signals: (AbortSignal | undefined)[] = [];
   public interactive = true;
   public confirms: boolean[] = [];
   public inputs: string[] = [];
@@ -51,21 +52,34 @@ class FakePrompt implements BulkScanPrompt {
     this.messages.push(value);
   }
 
-  public async confirm(question: string, fallback = false): Promise<boolean> {
+  public async confirm(
+    question: string,
+    fallback = false,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     this.questions.push(question);
+    this.signals.push(signal);
     return this.confirms.shift() ?? fallback;
   }
 
-  public async input(question: string, fallback = ""): Promise<string> {
+  public async input(
+    question: string,
+    fallback = "",
+    signal?: AbortSignal,
+  ): Promise<string> {
     this.questions.push(question);
+    this.signals.push(signal);
     return this.inputs.shift() ?? fallback;
   }
 
   public async select<Value extends string>(
     question: string,
     options: readonly { label: string; value: Value }[],
+    _presentation?: unknown,
+    signal?: AbortSignal,
   ): Promise<Value> {
     this.questions.push(question);
+    this.signals.push(signal);
     this.searchOptions.push(options.map(({ label }) => label));
     const value = this.choices.shift();
     return (options.find((option) => option.value === value) ?? options[0]!)
@@ -460,5 +474,17 @@ describe("bulk scan repository discovery", () => {
     ).rejects.toThrow();
     expect(prompt.questions).toEqual([]);
     expect(requests).toEqual([]);
+  });
+
+  test("passes cancellation to every setup prompt", async () => {
+    const root = await temporaryDirectory();
+    const { dependencies, prompt } = discoveryDependencies(root, {
+      organizations: ["acme"],
+    });
+    const signal = new AbortController().signal;
+
+    await runBulkScanWizard(dependencies, signal);
+
+    expect(prompt.signals).toEqual([signal, signal, signal, signal]);
   });
 });
