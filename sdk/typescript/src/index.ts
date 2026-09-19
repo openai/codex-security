@@ -129,6 +129,7 @@ export type {
   DeduplicateScanOptions,
   DeduplicateScanResult,
 } from "./deduplication/scan.js";
+export type { DeduplicationRefusal } from "./deduplication/deduplication.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,

@@ -776,11 +776,12 @@ class PublicationProgressPresenter {
   }
 }
 
-class VerificationProgressPresenter {
+class FindingProgressPresenter {
   readonly #stream: Writable;
   readonly #dependencies: CliDependencies;
   readonly #repository: string;
   readonly #total: number;
+  readonly #progress: Progress;
   readonly #seenActivities = new Set<string>();
   readonly #reasoning = new Map<string, string>();
   #dashboard: ScanDashboard | null = null;
@@ -790,19 +791,23 @@ class VerificationProgressPresenter {
     dependencies: CliDependencies,
     repository: string,
     total: number,
+    interactive = true,
   ) {
     this.#stream = stream;
     this.#dependencies = dependencies;
     this.#repository = repository;
     this.#total = total;
+    this.#progress = new Progress(
+      stream,
+      dependencies,
+      interactive &&
+        dependencies.environment["CI"] === undefined &&
+        dependencies.environment["TERM"] !== "dumb",
+    );
   }
 
-  public start(): void {
-    if (
-      this.#stream.isTTY === true &&
-      this.#dependencies.environment["CI"] === undefined &&
-      this.#dependencies.environment["TERM"] !== "dumb"
-    ) {
+  public startVerification(): void {
+    if (this.#progress.interactive) {
       const dashboard = new ScanDashboard(this.#stream, {
         repository: this.#repository,
         presentation: "verification",
@@ -828,6 +833,16 @@ class VerificationProgressPresenter {
     );
   }
 
+  public startPatch(finding: Finding, index: number): void {
+    try {
+      this.#progress.startTimer(
+        `Patching ${index + 1}/${this.#total} · ${safePatchText(finding.title)}`,
+      );
+    } catch {
+      this.stop();
+    }
+  }
+
   public observe(event: Readonly<Record<string, unknown>>): void {
     const method = event["method"];
     const params = event["params"];
@@ -845,6 +860,7 @@ class VerificationProgressPresenter {
       const id = values["itemId"];
       const delta = values["delta"];
       if (typeof id !== "string" || typeof delta !== "string") return;
+      if (this.#dashboard === null) return;
       const text = `${this.#reasoning.get(id) ?? ""}${delta}`;
       this.#reasoning.set(id, text);
       normalized = {
@@ -918,6 +934,7 @@ class VerificationProgressPresenter {
 
   public stop(): void {
     try {
+      this.#progress.stopTimer();
       this.#dashboard?.stop();
     } catch {}
     this.#dashboard = null;
@@ -925,7 +942,9 @@ class VerificationProgressPresenter {
 
   #write(message: string): void {
     try {
-      this.#stream.write(`${safePatchText(message)}\n`);
+      this.#progress.writeAboveTimer(() => {
+        this.#stream.write(`${safePatchText(message)}\n`);
+      });
     } catch {}
   }
 }
@@ -983,6 +1002,17 @@ interface ScanOutcome {
   data?: Record<string, unknown>;
   error?: string;
 }
+
+const scanOutputSchema = z
+  .union([
+    z.record(z.string(), z.unknown()),
+    z.object({
+      status: z.literal("failed"),
+      code: z.literal("SCAN_FAILED"),
+      message: z.string(),
+    }),
+  ])
+  .optional();
 
 interface ExportArguments {
   scanDir: string;
@@ -3554,7 +3584,7 @@ export async function main(
           },
         },
       ],
-      output: z.record(z.string(), z.unknown()).optional(),
+      output: scanOutputSchema,
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
           errorOutput.write(
@@ -3646,6 +3676,13 @@ export async function main(
         }
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
+          if (format === "json" || format === "jsonl") {
+            return {
+              status: "failed",
+              code: "SCAN_FAILED",
+              message: safeErrorMessage(outcome.error),
+            };
+          }
           return incurError({
             code: "SCAN_FAILED",
             message: outcome.error,
@@ -3881,7 +3918,18 @@ export async function main(
           scanId: z.string(),
           uniqueFindingIds: z.array(z.string()),
           duplicateGroups: z.array(z.array(z.string())),
-          deduplicationStatus: z.literal("completed"),
+          deduplicationStatus: z.enum(["completed", "completed_with_refusals"]),
+          refusals: z
+            .array(
+              z.object({
+                decision: z.literal("NO_DECISION"),
+                stage: z.enum(["screening", "pair-review"]),
+                model: z.string(),
+                findingIds: z.array(z.string()),
+                reason: z.string(),
+              }),
+            )
+            .optional(),
         })
         .optional(),
       async run({ options }) {
@@ -3901,7 +3949,7 @@ export async function main(
             throw new CodexSecurityError(
               "Deduplication requires --scan or --workflow-id.",
             );
-          return await (
+          const result = await (
             dependencies.deduplicateScan ?? deduplicateScanInternal
           )(
             scanId,
@@ -3920,6 +3968,16 @@ export async function main(
               runWorkbench: dependencies.runWorkbench,
             },
           );
+          for (const refusal of result.refusals ?? []) {
+            try {
+              errorOutput.write(
+                `codex-security: ${refusal.stage} refused by ${refusal.model} for ${refusal.findingIds.join(", ")}: ${refusal.reason} No decision was made; affected pairs were kept separate.\n`,
+              );
+            } catch {
+              // Optional diagnostics must not discard the completed result.
+            }
+          }
+          return result;
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
@@ -4800,13 +4858,13 @@ export async function main(
                 return true;
               },
             };
-            const progress = new VerificationProgressPresenter(
+            const progress = new FindingProgressPresenter(
               errorOutput,
               dependencies,
               repository,
               identifiers.length,
             );
-            progress.start();
+            progress.startVerification();
             try {
               exitCode = await runSkill(
                 "verify-fix",
@@ -7039,6 +7097,7 @@ async function runFindingPatches(
   stderr: Writable,
   dependencies: CliDependencies,
   options: Omit<SkillRunOptions, "directory" | "findings"> = {},
+  interactive = true,
 ): Promise<FindingPatch[]> {
   if (selected.findings.length === 0) {
     stderr.write("No matching open findings to patch.\n");
@@ -7050,7 +7109,6 @@ async function runFindingPatches(
   );
   const patches: FindingPatch[] = [];
   for (const finding of selected.findings) {
-    const base = await snapshotPatchState(selected.repository, dependencies);
     let response = "";
     const stdout: Writable = {
       write(value: string | Uint8Array): boolean {
@@ -7059,32 +7117,53 @@ async function runFindingPatches(
       },
     };
     const instruction = options.findingInstructions?.[finding.occurrenceId];
-    const status = await runSkill(
-      "fix-finding",
-      [],
-      codexOverrides,
-      effort,
-      stdout,
+    const progress = new FindingProgressPresenter(
       stderr,
       dependencies,
-      {
-        ...options,
-        directory: selected.repository,
-        findings: [finding],
-        findingInstructions: instruction?.trim()
-          ? { [finding.occurrenceId]: instruction }
-          : undefined,
-      },
-    );
-    if (status === 130 || status === 143) {
-      throw new CodexSecurityError("Patch operation was interrupted.");
-    }
-
-    const changedFiles = await changedPatchFiles(
       selected.repository,
-      base,
-      dependencies,
+      selected.findings.length,
+      interactive,
     );
+    progress.startPatch(finding, patches.length);
+    const patchErrors = new NodeWritable({
+      write(chunk, _encoding, callback) {
+        progress.stop();
+        void writeCliOutput(stderr, chunk).then(() => callback(), callback);
+      },
+    });
+    let status: number;
+    let changedFiles: string[];
+    try {
+      const base = await snapshotPatchState(selected.repository, dependencies);
+      status = await runSkill(
+        "fix-finding",
+        [],
+        codexOverrides,
+        effort,
+        stdout,
+        patchErrors,
+        dependencies,
+        {
+          ...options,
+          directory: selected.repository,
+          findings: [finding],
+          findingInstructions: instruction?.trim()
+            ? { [finding.occurrenceId]: instruction }
+            : undefined,
+          onEvent: progress.observe.bind(progress),
+        },
+      );
+      if (status === 130 || status === 143) {
+        throw new CodexSecurityError("Patch operation was interrupted.");
+      }
+      changedFiles = await changedPatchFiles(
+        selected.repository,
+        base,
+        dependencies,
+      );
+    } finally {
+      progress.stop();
+    }
 
     const failed = (reason: string, files: string[] = []): FindingPatch => ({
       occurrenceId: finding.occurrenceId,
@@ -8714,6 +8793,7 @@ async function executeScan(
           auth,
           findingInstructions: patchSelection?.instructions,
         },
+        progress?.interactive === true,
       );
       scanData = { ...scanData, patchSeverity: patchThreshold, patches };
       if (
@@ -9487,9 +9567,20 @@ export class Progress {
   }
 
   #renderTimer(message: string): void {
-    this.#stream.write(
-      `${this.#timerLineActive ? "\r" : ""}${this.#line(message)}`,
-    );
+    let line = this.#line(message);
+    const width = Math.max(0, (this.#stream.columns ?? 80) - 1);
+    if (publicationDisplayWidth(line) > width) {
+      let visible = "";
+      let used = 0;
+      for (const { segment } of PUBLICATION_GRAPHEME_SEGMENTER.segment(line)) {
+        const segmentWidth = publicationDisplayWidth(segment);
+        if (used + segmentWidth >= width) break;
+        visible += segment;
+        used += segmentWidth;
+      }
+      line = width > 0 ? `${visible}…` : "";
+    }
+    this.#stream.write(`${this.#timerLineActive ? "\r\u001B[K" : ""}${line}`);
     this.#timerLineActive = true;
   }
 }

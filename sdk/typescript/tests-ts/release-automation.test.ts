@@ -3932,6 +3932,7 @@ describe("GitHub release workflow safeguards", () => {
       "test",
       "compatibility",
       "mcp",
+      "plugin-host",
       "plugin-source",
       "windows-test",
       "windows-verify",
@@ -3969,6 +3970,7 @@ describe("GitHub release workflow safeguards", () => {
     ] as const) {
       const values = {
         "needs.static-checks.result": upstream,
+        "needs.plugin-host.result": upstream,
         "needs.plugin-source.result": upstream,
         "needs.package.result": upstream,
         "needs.compatibility.result": upstream,
@@ -3997,9 +3999,15 @@ describe("GitHub release workflow safeguards", () => {
         "test",
         "compatibility",
         "mcp",
+        "plugin-host",
         "plugin-source",
       ],
-      windows: ["static-checks", "windows-test", "windows-verify"],
+      windows: [
+        "static-checks",
+        "plugin-host",
+        "windows-test",
+        "windows-verify",
+      ],
     })) {
       for (const dependency of dependencies) {
         for (const result of ["failure", "cancelled", "skipped"]) {

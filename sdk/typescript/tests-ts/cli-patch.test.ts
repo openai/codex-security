@@ -12,6 +12,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { Writable } from "node:stream";
+import { stripVTControlCharacters } from "node:util";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
@@ -142,6 +144,292 @@ async function runWorkflow(
 }
 
 describe("scan and patch workflow", () => {
+  test.each([false, true])(
+    "shows progress during baseline preparation and cleans up on failure: %p",
+    async (failSnapshot) => {
+      const result = resultWithFindings(["high"]);
+      const stdout = capture();
+      const stderr = capture(true);
+      let snapshotHadProgress = false;
+      let resultSnapshotHadProgress = false;
+      let modelStarted = false;
+      let timers = 0;
+      const current = dependencies({
+        result,
+        onWorkbench: () => savedScan(result),
+        onRepositoryCommand: (_command, args) => {
+          if (args.includes("add") && !modelStarted) {
+            snapshotHadProgress = stderr
+              .text()
+              .includes("Patching 1/1 · Finding 1");
+            if (failSnapshot) throw new Error("Baseline snapshot failed.");
+          }
+          if (args.includes("add") && modelStarted)
+            resultSnapshotHadProgress = timers > 0;
+          return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+        },
+        onCodex: (args, output) => {
+          modelStarted = true;
+          completePatches(args, output);
+          return 0;
+        },
+      });
+      current.setInterval = () => {
+        timers += 1;
+        return {} as NodeJS.Timeout;
+      };
+      current.clearInterval = () => {
+        timers -= 1;
+      };
+
+      const status = await main(
+        ["scan", "--patch", "--patch-severity", "high"],
+        stdout.stream,
+        stderr.stream,
+        current,
+      );
+
+      expect(snapshotHadProgress).toBe(true);
+      expect(resultSnapshotHadProgress).toBe(!failSnapshot);
+      expect(modelStarted).toBe(!failSnapshot);
+      expect(status).toBe(failSnapshot ? 2 : 0);
+      expect(timers).toBe(0);
+      if (failSnapshot)
+        expect(stderr.text()).toContain("Baseline snapshot failed.");
+    },
+  );
+
+  test("puts patch runner diagnostics on a new line after the timer", async () => {
+    for (const status of [1, 2]) {
+      const result = resultWithFindings(["high"]);
+      const stdout = capture();
+      let errors = "";
+      const stderr = Object.assign(
+        new Writable({
+          write(chunk, _encoding, callback) {
+            errors += chunk.toString();
+            callback();
+          },
+        }),
+        { isTTY: true },
+      );
+      const current = dependencies({
+        result,
+        onWorkbench: () => savedScan(result),
+        onCodex: async (_args, output) => {
+          await new Promise<void>((resolve, reject) => {
+            output!.stderr.write(
+              "codex-security: Patch response failed.\n",
+              (error) => {
+                if (error) reject(error);
+                else resolve();
+              },
+            );
+          });
+          return status;
+        },
+      });
+
+      await main(
+        ["patch", "--scan", "scan-1", "--json"],
+        stdout.stream,
+        stderr,
+        current,
+      );
+
+      expect(stripVTControlCharacters(errors)).toContain(
+        "\ncodex-security: Patch response failed.\n",
+      );
+      expect(JSON.parse(stdout.text()).patches[0].status).toBe("failed");
+    }
+  });
+
+  test.each(["A long finding title ".repeat(12), "界".repeat(100)])(
+    "keeps a long patch timer on one terminal row: %s",
+    async (title) => {
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.title = title;
+      const stdout = capture();
+      const stderr = capture(true);
+      Object.assign(stderr.stream, { columns: 36 });
+      let now = 0;
+      let tick: (() => void) | undefined;
+      const current = dependencies({
+        result,
+        onWorkbench: () => savedScan(result),
+        onCodex: (args, output) => {
+          now = 84_000;
+          tick?.();
+          expect(completePatches(args, output)[0]!.title).toBe(title);
+          return 0;
+        },
+      });
+      current.now = () => now;
+      current.setInterval = (callback) => {
+        tick = callback;
+        return {} as NodeJS.Timeout;
+      };
+      current.clearInterval = () => {};
+
+      expect(
+        await main(
+          ["patch", "--scan", "scan-1", "--json"],
+          stdout.stream,
+          stderr.stream,
+          current,
+        ),
+      ).toBe(0);
+
+      const frames = stripVTControlCharacters(stderr.text())
+        .split(/[\r\n]/u)
+        .filter((line) => /^\[\d+:\d+\] Patching/u.test(line));
+      expect(frames).toHaveLength(2);
+      for (const frame of frames) {
+        expect(Bun.stringWidth(frame)).toBeLessThan(36);
+        expect(frame).toEndWith("…");
+      }
+    },
+  );
+
+  test("shows each patch and live activity before it finishes, with clean JSON output", async () => {
+    for (const args of [
+      ["scan", "--patch", "--patch-severity", "high"],
+      ["patch", "--scan", "scan-1", "--json"],
+    ]) {
+      const result = resultWithFindings(["high", "high"]);
+      const stdout = capture();
+      const stderr = capture(true);
+      let now = 0;
+      let index = 0;
+      const timers = new Map<NodeJS.Timeout, () => void>();
+      const current = dependencies({
+        result,
+        onWorkbench: () => savedScan(result),
+        onCodex: (args, output) => {
+          index += 1;
+          const label = `Patching ${index}/2 · Finding ${index}`;
+          expect(stderr.text()).toContain(label);
+          expect(stderr.text()).not.toContain(`VERIFIED  Finding ${index}`);
+          for (const delta of ["Checking ", "the ", "fix."]) {
+            output!.appServer!.onEvent!({
+              method: "item/reasoning/summaryTextDelta",
+              params: { itemId: "reasoning-1", delta },
+            });
+          }
+          expect(stderr.text().match(/Codex: Checking/gu) ?? []).toHaveLength(
+            index - 1,
+          );
+          output!.appServer!.onEvent!({
+            method: "item/completed",
+            params: {
+              item: {
+                id: "reasoning-1",
+                type: "reasoning",
+                summary: ["Checking the fix."],
+              },
+            },
+          });
+          expect(stderr.text()).toContain("Codex: Checking the fix.");
+          now += 84_000;
+          for (const tick of [...timers.values()]) tick();
+          expect(stderr.text()).toContain(`[01:24] ${label}`);
+          completePatches(args, output);
+          return 0;
+        },
+      });
+      current.now = () => now;
+      current.setInterval = (callback) => {
+        const timer = {} as NodeJS.Timeout;
+        timers.set(timer, callback);
+        return timer;
+      };
+      current.clearInterval = (timer) => {
+        timers.delete(timer);
+      };
+
+      expect(
+        await main(args, stdout.stream, stderr.stream, current),
+        stderr.text(),
+      ).toBe(0);
+      expect(index).toBe(2);
+      expect(timers.size).toBe(0);
+      const progress = stderr.text();
+      expect(progress.indexOf("VERIFIED  Finding 1")).toBeLessThan(
+        progress.indexOf("Patching 2/2"),
+      );
+      expect(progress).toContain("VERIFIED  Finding 2");
+      expect(progress.match(/Codex: Checking the fix\./gu)).toHaveLength(2);
+      if (args.includes("--json")) {
+        expect(JSON.parse(stdout.text()).patches).toMatchObject([
+          { occurrenceId: "occ_1", status: "verified" },
+          { occurrenceId: "occ_2", status: "verified" },
+        ]);
+      }
+      expect(stdout.text()).not.toContain("\u001B");
+    }
+  });
+
+  test("uses plain patch progress for noninteractive runs", async () => {
+    const saved = ["patch", "--scan", "scan-1", "--json"];
+    for (const [interactive, environment, args] of [
+      [false, {}, saved],
+      [true, { CI: "1" }, saved],
+      [true, { TERM: "dumb" }, saved],
+      [true, {}, ["scan", "--patch", "--headless"]],
+      [true, {}, ["scan", "--patch", "--json"]],
+    ] as const) {
+      const result = resultWithFindings(["high"]);
+      const outcome = await runWorkflow(
+        [...args],
+        {
+          result,
+          environment,
+          onWorkbench: () => savedScan(result),
+        },
+        { interactive },
+      );
+      expect(outcome.exitCode).toBe(0);
+      expect(outcome.stderr).toContain("Patching 1/1 · Finding 1");
+      expect(outcome.stderr).not.toContain("\u001B");
+    }
+  });
+
+  test("stops patch progress on interruption or an agent error", async () => {
+    for (const status of [130, "error"] as const) {
+      const result = resultWithFindings(["high", "high"]);
+      let timers = 0;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--json"],
+        {
+          result,
+          onWorkbench: () => savedScan(result),
+          onCodex: () => {
+            if (status === "error") throw new Error("Agent failed");
+            return status;
+          },
+        },
+        {
+          interactive: true,
+          configure: (current) => {
+            current.setInterval = () => {
+              timers += 1;
+              return {} as NodeJS.Timeout;
+            };
+            current.clearInterval = () => {
+              timers -= 1;
+            };
+          },
+        },
+      );
+      expect(outcome.exitCode).not.toBe(0);
+      expect(timers).toBe(0);
+      expect(outcome.stderr).toContain("\u001B[?25h");
+      expect(outcome.stderr).not.toContain("Patching 2/2");
+      expect(outcome.stderr).toContain(
+        status === "error" ? "Agent failed" : "Patch operation was interrupted",
+      );
+    }
+  });
   test("exposes the validation prompt in patch help and schema", async () => {
     const help = await runWorkflow(["patch", "--help"]);
     expect(help.exitCode).toBe(0);

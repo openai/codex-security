@@ -19,7 +19,7 @@ import {
   type DuplicateDecision,
   type ScreeningResult,
 } from "../src/deduplication/deduplication-reviewer.js";
-import { CodexSecurityError } from "../src/errors.js";
+import { CodexSecurityError, DeduplicationReviewError } from "../src/errors.js";
 import { FindingsClient } from "../src/findings-client.js";
 import { deduplicateScanDirectory } from "../src/index.js";
 import {
@@ -870,6 +870,66 @@ test("empty and isolated imports avoid models, while review failures propagate",
   await expect(service.run([first.findingId])).rejects.toBe(failure);
 });
 
+test.each(["screening", "pair-review"] as const)(
+  "a %s refusal keeps affected pairs separate without stopping other reviews",
+  async (stage) => {
+    const findings = [entry(1), entry(2), entry(3)];
+    const ids = findings.map((finding) => finding.findingId);
+    const refusedPair = pairKey([ids[0]!, ids[2]!]);
+    const nominations = new Set([
+      pairKey(ids.slice(0, 2)),
+      pairKey(ids.slice(1)),
+      refusedPair,
+    ]);
+    const failure = new DeduplicationReviewError({
+      stage,
+      model: stage === "screening" ? "gpt-5.6-luna" : "gpt-5.6-sol",
+      category: "refusal",
+      attempts: 1,
+      reason: "The model refused the deduplication review.",
+    });
+    const reviewed: string[] = [];
+    const result = await new FindingDeduplicator(candidates(findings), {
+      async screen(values) {
+        if (stage === "screening" && values[0]!.findingId === ids[0])
+          throw failure;
+        return screening(values, nominations);
+      },
+      async reviewPair(values) {
+        const key = pairKey(values.map((finding) => finding.findingId));
+        reviewed.push(key);
+        if (stage === "pair-review" && key === refusedPair) throw failure;
+        return same(values);
+      },
+    }).run(ids);
+
+    expect(result.deduplicationStatus).toBe("completed_with_refusals");
+    expect(result.refusals).toEqual([
+      {
+        decision: "NO_DECISION",
+        stage,
+        model: failure.metadata.model,
+        reason: failure.metadata.reason,
+        findingIds: stage === "screening" ? ids : [ids[2]!, ids[0]!],
+      },
+    ]);
+    expect(result.duplicateGroups.some((group) => group.length === 2)).toBe(
+      true,
+    );
+    expect(result.uniqueFindingIds).toHaveLength(2);
+    // A refused pair must not be reconnected through a third finding.
+    expect(
+      result.duplicateGroups.some(
+        (group) => group.includes(ids[0]!) && group.includes(ids[2]!),
+      ),
+    ).toBe(false);
+    if (stage === "screening") {
+      expect(result.uniqueFindingIds).toContain(ids[0]!);
+      expect(reviewed).toEqual([pairKey(ids.slice(1))]);
+    }
+  },
+);
+
 test("validates exact screening slots without model-owned finding identity", () => {
   const findings = [entry(1), entry(2), entry(3)];
   const ids = findings.map((finding) => finding.findingId);
@@ -1316,7 +1376,7 @@ test("writes accepted groups only after all reviews and fails on review or write
     if (process.platform !== "win32") await chmod(directory, 0o700);
     const findings = [document.findings[0]!, entry(2), entry(3)];
     const ids = findings.map((finding) => finding.findingId);
-    for (const failure of ["none", "write", "review"]) {
+    for (const failure of ["none", "write", "review", "refusal"]) {
       const phases: string[] = [];
       const controller = new AbortController();
       const result = deduplicateScanInternal(
@@ -1341,7 +1401,11 @@ test("writes accepted groups only after all reviews and fails on review or write
                 "http://synthetic.test/api/v1/dedupe-groups",
               );
               expect(JSON.parse(options.body as string)).toEqual({
-                groups: [[...ids].sort()],
+                groups: [
+                  failure === "refusal"
+                    ? ids.slice(0, 2).sort()
+                    : [...ids].sort(),
+                ],
               });
               return Response.json([], {
                 status: failure === "write" ? 409 : 201,
@@ -1367,6 +1431,14 @@ test("writes accepted groups only after all reviews and fails on review or write
             },
             async reviewPair(values) {
               phases.push("pair");
+              if (failure === "refusal" && values[1]!.findingId === ids[2])
+                throw new DeduplicationReviewError({
+                  stage: "pair-review",
+                  model: "gpt-5.6-sol",
+                  category: "refusal",
+                  attempts: 1,
+                  reason: "The model refused the deduplication review.",
+                });
               if (failure === "review" && values[1]!.findingId === ids[2])
                 throw new CodexSecurityError(
                   "Required source revision could not be read.",
@@ -1378,6 +1450,18 @@ test("writes accepted groups only after all reviews and fails on review or write
       );
       if (failure === "none") {
         expect((await result).duplicateGroups).toEqual([[...ids].sort()]);
+      } else if (failure === "refusal") {
+        expect(await result).toMatchObject({
+          deduplicationStatus: "completed_with_refusals",
+          duplicateGroups: [ids.slice(0, 2).sort()],
+          refusals: [
+            {
+              decision: "NO_DECISION",
+              stage: "pair-review",
+              findingIds: [ids[0], ids[2]],
+            },
+          ],
+        });
       } else if (failure === "review") {
         await expect(result).rejects.toThrow(
           "Required source revision could not be read.",

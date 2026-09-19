@@ -22,6 +22,7 @@ import {
   type DuplicateDecision,
 } from "../src/deduplication/deduplication-reviewer.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { DeduplicationReviewError } from "../src/errors.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
 
 const fixtures: Array<Awaited<ReturnType<typeof workflowFixture>>> = [];
@@ -91,6 +92,80 @@ async function fixtureWithFindings(count: number) {
   await writeFile(manifestPath, JSON.stringify(manifest));
   return value;
 }
+
+test("completed workflows preserve refusal outcomes without caching a false verdict", async () => {
+  const { environment, document, history } = await fixtureWithFindings(2);
+  const options = {
+    workflowId: "refused-review",
+    findingsUrl: "http://synthetic.test",
+  };
+  let reviews = 0;
+  const savedStages: string[] = [];
+  const dependencies = {
+    environment,
+    runWorkbench: async (args: readonly string[], input?: string) => {
+      const payload = input ? JSON.parse(input) : {};
+      if (payload.action === "save-review")
+        savedStages.push(payload.binding.stage);
+      return await history(args, input);
+    },
+    reviewRunner: {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        reviews++;
+        if (review.stage === "pair-review")
+          throw new DeduplicationReviewError({
+            stage: review.stage,
+            model: review.model,
+            category: "refusal",
+            attempts: 1,
+            reason: "The model refused the deduplication review.",
+          });
+        return review.validate({
+          decisions: {
+            "pair-1": {
+              decision: "SAME",
+              rationale: "One shared correction may cover both findings.",
+            },
+          },
+        });
+      },
+    },
+    fetch: async (url: URL) => {
+      if (url.pathname.endsWith("/bulk/findings"))
+        return Response.json(
+          document.findings.map((finding) => finding.findingId),
+        );
+      const id = decodeURIComponent(url.pathname.split("/").at(-2)!);
+      return Response.json({
+        finding: document.findings.find((finding) => finding.findingId === id),
+        potentialDuplicates: document.findings.filter(
+          (finding) => finding.findingId !== id,
+        ),
+      });
+    },
+  };
+  const result = await deduplicateScanInternal(
+    document.scanId,
+    options,
+    dependencies,
+  );
+  expect(result).toMatchObject({
+    deduplicationStatus: "completed_with_refusals",
+    duplicateGroups: [],
+    uniqueFindingIds: document.findings.map((finding) => finding.findingId),
+    refusals: [{ decision: "NO_DECISION", stage: "pair-review" }],
+  });
+  expect(reviews).toBe(3);
+  expect(savedStages).toEqual(["screening", "screening"]);
+  expect(
+    (await new FindingWorkflow(options.workflowId, environment).get())?.stages
+      .dedupe,
+  ).toEqual({ status: "completed", result });
+  expect(
+    await deduplicateScanInternal(document.scanId, options, dependencies),
+  ).toEqual(result);
+  expect(reviews).toBe(3);
+});
 
 async function restoreLegacyWorkflow(
   environment: NodeJS.ProcessEnv,
