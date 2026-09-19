@@ -1001,7 +1001,22 @@ interface ScanOutcome {
   exitCode: number;
   data?: Record<string, unknown>;
   error?: string;
+  coverageError?: string;
 }
+
+const incompleteScanEnvelopeSchema = z
+  .looseObject({
+    ok: z.literal(false),
+    error: z.object({
+      code: z.literal("SCAN_FAILED"),
+      message: z.string(),
+    }),
+    data: z.unknown().optional(),
+    meta: z.record(z.string(), z.unknown()),
+  })
+  .describe(
+    "Incomplete full-output JSON or JSONL with available scan results.",
+  );
 
 const scanOutputSchema = z
   .union([
@@ -1011,7 +1026,12 @@ const scanOutputSchema = z
       code: z.literal("SCAN_FAILED"),
       message: z.string(),
     }),
+    incompleteScanEnvelopeSchema,
   ])
+  .optional();
+
+const savedScanOutputSchema = z
+  .union([z.record(z.string(), z.unknown()), incompleteScanEnvelopeSchema])
   .optional();
 
 interface ExportArguments {
@@ -1816,6 +1836,17 @@ export async function main(
   let renderedPatch: string | undefined;
   let patchStructuredError = false;
   let scanStructuredError = false;
+  let incompleteScanOutput:
+    { format: "json" | "jsonl"; message: string } | undefined;
+  const recordIncompleteScanOutput = (outcome: ScanOutcome, format: string) => {
+    if (
+      outcome.coverageError !== undefined &&
+      (format === "json" || format === "jsonl") &&
+      argv.includes("--full-output")
+    ) {
+      incompleteScanOutput = { format, message: outcome.coverageError };
+    }
+  };
   const runImport = (options: ImportScanOptions) =>
     runScanImport(options, errorOutput, dependencies);
   const history = async (
@@ -2189,6 +2220,7 @@ export async function main(
     })
     .command("resume", {
       description: "Resume an interrupted Deep Scan in its original session.",
+      hint: "Incomplete full-output JSON or JSONL uses ok: false and keeps available scan results under data.",
       mcp: false,
       args: z.object({
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
@@ -2200,8 +2232,8 @@ export async function main(
           .default(false)
           .describe("Print scan diagnostics to stderr."),
       }),
-      output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, options }) {
+      output: savedScanOutputSchema,
+      async run({ args, error: incurError, format, options }) {
         let scanArguments: ScanArguments;
         try {
           const saved = await dependencies.runWorkbench([
@@ -2257,11 +2289,13 @@ export async function main(
             exitCode,
           });
         }
+        recordIncompleteScanOutput(outcome, format);
         return outcome.data;
       },
     })
     .command("rerun", {
       description: "Rerun a saved scan with its original configuration.",
+      hint: "Incomplete full-output JSON or JSONL uses ok: false and keeps available scan results under data.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -2288,8 +2322,8 @@ export async function main(
           .default(false)
           .describe("Print scan diagnostics to stderr."),
       }),
-      output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, options }) {
+      output: savedScanOutputSchema,
+      async run({ args, error: incurError, format, options }) {
         const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
         if (scanId === undefined) return;
         let scanArguments: ScanArguments;
@@ -2386,6 +2420,7 @@ export async function main(
             exitCode,
           });
         }
+        recordIncompleteScanOutput(outcome, format);
         return outcome.data;
       },
     })
@@ -3413,7 +3448,8 @@ export async function main(
         "Import existing findings without security analysis:\n" +
         "  codex-security scan import --csv findings.csv\n" +
         "  codex-security scan import --json findings.json\n" +
-        "Use ./import to scan a repository named import.",
+        "Use ./import to scan a repository named import.\n" +
+        "Incomplete JSON/JSONL --full-output returns ok: false and keeps scan results under data.",
       destructive: true,
       mcp: false,
       alias: { config: "c" },
@@ -3691,6 +3727,7 @@ export async function main(
             exitCode,
           });
         }
+        recordIncompleteScanOutput(outcome, format);
         if (
           !options.dryRun &&
           format === "toon" &&
@@ -5796,6 +5833,24 @@ export async function main(
             streamedLogs,
             frameworkOutput ? JSON.parse(frameworkOutput).cta : undefined,
           );
+    if (incompleteScanOutput !== undefined) {
+      const envelope: JsonValue = JSON.parse(frameworkOutput);
+      // Token-count output is a number, not a full-output envelope.
+      if (isJsonObject(envelope) && envelope["ok"] === true) {
+        frameworkOutput = `${JSON.stringify(
+          {
+            ...envelope,
+            ok: false,
+            error: {
+              code: "SCAN_FAILED",
+              message: incompleteScanOutput.message,
+            },
+          },
+          null,
+          incompleteScanOutput.format === "json" ? 2 : undefined,
+        )}\n`;
+      }
+    }
     await writeCliOutput(
       output,
       logOutput ??
@@ -8697,7 +8752,15 @@ async function executeScan(
     showCost,
     deepScanStop,
   );
-  const completedScan = (exitCode: number): ScanOutcome => {
+  const coverageError = incomplete
+    ? threshold === undefined
+      ? `Scan coverage is ${result.coverage.completeness}; results may be incomplete.`
+      : `Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.`
+    : undefined;
+  const completedScan = (
+    exitCode: number,
+    error = coverageError,
+  ): ScanOutcome => {
     diagnostic("scan.completed", {
       coverage: result.coverage.completeness,
       findings: findings.length,
@@ -8710,20 +8773,20 @@ async function executeScan(
       exit_code: exitCode,
     });
     progress?.stopTimer();
-    return { exitCode, data: scanData };
+    return {
+      exitCode,
+      data: scanData,
+      ...(error === undefined ? {} : { coverageError: error }),
+    };
   };
   if (targetWarnings.length > 0) {
-    errorOutput.write(
-      "codex-security: Scan target changed during execution; results do not represent the current checkout.\n",
-    );
-    return completedScan(2);
+    const message =
+      "Scan target changed during execution; results do not represent the current checkout.";
+    errorOutput.write(`codex-security: ${message}\n`);
+    return completedScan(2, incomplete ? message : undefined);
   }
-  if (incomplete) {
-    errorOutput.write(
-      threshold === undefined
-        ? `codex-security: Scan coverage is ${result.coverage.completeness}; results may be incomplete.\n`
-        : `codex-security: Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.\n`,
-    );
+  if (coverageError !== undefined) {
+    errorOutput.write(`codex-security: ${coverageError}\n`);
     return completedScan(2);
   }
 

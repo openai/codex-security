@@ -1425,10 +1425,21 @@ export class CodexSecurity {
           { ...progress, filesTotal: scopeFileCount },
         );
       };
+      const reportedInaccessibleSessionLogs = new Set<string>();
       const reportTrackingError = (error: unknown): void => {
         if (options.maxCostUsd !== undefined) {
           costAbortController.abort(error);
           return;
+        }
+        if (
+          isRecord(error) &&
+          (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+          error["syscall"] === "open" &&
+          typeof error["path"] === "string"
+        ) {
+          const path = error["path"];
+          if (reportedInaccessibleSessionLogs.has(path)) return;
+          reportedInaccessibleSessionLogs.add(path);
         }
         notifyObserver(
           "onWarning",
