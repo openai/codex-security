@@ -290,11 +290,7 @@ export async function logout(
 }
 
 /** @internal Authentication settings shared by login and model commands. */
-export const CODEX_AUTH_CONFIG_KEYS = [
-  "cli_auth_credentials_store",
-  "forced_login_method",
-  "forced_chatgpt_workspace_id",
-] as const;
+export { CODEX_AUTH_CONFIG_KEYS } from "./config.js";
 
 /** @internal Shared login recovery guidance for model commands. */
 export const NO_CREDENTIALS_MESSAGE =

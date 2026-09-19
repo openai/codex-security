@@ -5,7 +5,10 @@ import { expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { loadBundledRuntime } from "./plugin-root.js";
 
-type Sandbox = { filesystemDenies: string[]; globScanMaxDepth?: number };
+type Sandbox = {
+  filesystemDenies: Array<string | { path: string }>;
+  globScanMaxDepth?: number;
+};
 
 async function bundledPolicy() {
   const runtime = await loadBundledRuntime();
@@ -128,4 +131,24 @@ test("rejects parent denials that cannot be preserved", async () => {
     );
   }
   expect(() => policy.resolve({})).toThrow("trusted parent sandbox metadata");
+});
+
+test("preserves bracket paths as literal denials at the bundled worker boundary", async () => {
+  const policy = await bundledPolicy();
+  const denied = path.resolve("synthetic", "temp[1]", "credential-home");
+  const sandbox = policy.resolve(
+    metadata([{ access: "deny", path: { type: "path", path: denied } }]),
+  );
+  const config = parse(policy.overrides(sandbox).join("\n"));
+  expect(config["permissions"]).toEqual({
+    codex_security_deep_scan_worker: {
+      extends: ":read-only",
+      filesystem: {
+        ":root": "read",
+        [denied]: { ".": "deny" },
+        glob_scan_max_depth: 8,
+      },
+      network: { enabled: false },
+    },
+  });
 });

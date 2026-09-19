@@ -21,6 +21,7 @@ try {
   await writeFile(path.join(repository, "example.py"), "value = 1\n");
   await build({
     bundle: true,
+    nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
     define: { __dirname: JSON.stringify(applicationRoot), "import.meta.url": "__filename" },
     entryPoints: [path.join(applicationRoot, "main.ts")],
     external: ["fsevents"],

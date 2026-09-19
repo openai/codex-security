@@ -57,6 +57,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
         loader: { ".md": "text" },
         logLevel: "info",
         logOverride: { "empty-import-meta": "silent" },
+        nodePaths: [join(root, "node_modules")],
         outfile: bundle,
         platform: "node",
         target: "node20"

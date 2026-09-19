@@ -1229,6 +1229,7 @@ async function testReducerWorkerToolList(bundle) {
 async function bundleEntrypoint(entrypoint, outfile) {
   await build({
     bundle: true,
+    nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
     define: {
       __dirname: JSON.stringify(applicationRoot),
       "import.meta.url": "__filename"

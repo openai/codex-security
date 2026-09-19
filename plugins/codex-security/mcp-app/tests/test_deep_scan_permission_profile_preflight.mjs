@@ -27,13 +27,15 @@ const expectedProfile = {
   description: "Generated Deep Scan worker profile.",
   filesystem: {
     ":root": "read",
-    "/repo/.env": "deny"
+    "/repo/.env": "deny",
+    "/repo/temp[1]": { ".": "deny" },
+    "/": { "repo/temp[1]": "deny" }
   },
   network: { enabled: false }
 };
 const rawOverrides = [
   `default_permissions="${profileId}"`,
-  `permissions.${profileId}={filesystem={":root"="read","/repo/.env"="deny"},network={enabled=false}}`
+  `permissions.${profileId}={filesystem={":root"="read","/repo/.env"="deny","/repo/temp[1]"={"."="deny"},"/"={"repo/temp[1]"="deny"}},network={enabled=false}}`
 ];
 
 await testAllowedProfileAndRawArgv();
@@ -46,6 +48,7 @@ await testRepeatedCatalogCursorFailsClosed();
 await testDisallowedProfileGivesAdminGuidance();
 await testOtherManagedPolicyRejectionIsGeneric();
 await testMergedProfileCollisionFailsClosed();
+await testDroppedLiteralOrGlobFailsClosed();
 await testLiteralProtoKeyCollisionFailsClosed();
 await testMalformedAndUnsupportedResponsesFailClosed();
 await testEarlyExecutableExitIsNotVersionError();
@@ -312,6 +315,23 @@ async function testMergedProfileCollisionFailsClosed() {
         && error.message.includes('extends = ":read-only"')
     );
   });
+}
+
+async function testDroppedLiteralOrGlobFailsClosed() {
+  for (const key of ["/repo/temp[1]", "/"]) {
+    const weakened = structuredClone(expectedProfile);
+    delete weakened.filesystem[key];
+    await withFakeCodex({
+      configResult: configReadResult(weakened),
+      catalogResults: [catalogResult(true)]
+    }, async ({ codexPath, cwd }) => {
+      await assert.rejects(
+        preflight(codexPath, cwd),
+        (error) => error?.name === "DeepScanNonRetryableError"
+          && error.message.includes("existing Codex configuration changes")
+      );
+    });
+  }
 }
 
 async function testLiteralProtoKeyCollisionFailsClosed() {

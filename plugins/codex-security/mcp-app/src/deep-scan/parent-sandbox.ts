@@ -8,10 +8,11 @@ export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
 export type DeepWorkerParentSandbox = {
   /**
    * Validated path and glob keys copied into the worker's stricter root-read
-   * profile. Grants are intentionally not transported because Deep Scan
+   * profile. Objects retain literal paths containing glob characters.
+   * Grants are intentionally not transported because Deep Scan
    * workers never inherit parent write access.
    */
-  readonly filesystemDenies: readonly string[];
+  readonly filesystemDenies: readonly (string | { readonly path: string })[];
   readonly globScanMaxDepth?: number;
 };
 
@@ -47,7 +48,7 @@ export function resolveDeepWorkerParentSandbox(extra: unknown): DeepWorkerParent
   const globScanMaxDepth = resolveGlobScanMaxDepth(filesystem);
 
   let hasRootRead = false;
-  const filesystemDenies: string[] = [];
+  const filesystemDenies: Array<string | { path: string }> = [];
   for (const value of filesystem.entries) {
     const entry = record(value);
     if (!entry || !isKnownFilesystemAccess(entry.access)) {
@@ -89,12 +90,7 @@ export function resolveDeepWorkerParentSandbox(extra: unknown): DeepWorkerParent
             "a parent filesystem denial path cannot be preserved"
           );
         }
-        if (hasGlobMetacharacters(path.path)) {
-          throw unsupportedParentSandbox(
-            "a parent filesystem denial path with glob characters cannot be preserved"
-          );
-        }
-        filesystemDenies.push(path.path);
+        filesystemDenies.push(hasGlobMetacharacters(path.path) ? { path: path.path } : path.path);
       }
     } else if (path.type === "glob_pattern") {
       if (!isNonEmptyString(path.pattern)) {

@@ -83,6 +83,145 @@ const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
 afterEach(cleanup);
 
+test.each(
+  [
+    "default",
+    "default-configured",
+    "openai",
+    "openrouter",
+    "fireworks",
+    "command-auth",
+    "cloud.production",
+    "cloud production",
+  ].flatMap((name) =>
+    (["standard", "deep"] as const).map((mode) => [name, mode] as const),
+  ),
+)(
+  "writes isolated runtime worker settings for %s in %s without changing preflight input",
+  async (name, mode) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "home");
+    const configPath = join(root, "config-preflight.toml");
+    await mkdir(repository);
+    await mkdir(home);
+    const provider = name.startsWith("default")
+      ? "openai"
+      : name.startsWith("cloud")
+        ? "amazon-bedrock"
+        : name === "command-auth"
+          ? "openrouter"
+          : name;
+    const definition: JsonObject =
+      provider === "amazon-bedrock"
+        ? { aws: { region: "us-west-2", profile: "synthetic" } }
+        : {
+            name: "Synthetic provider",
+            base_url: `https://${provider}.example.test/v1`,
+            wire_api: "responses",
+            experimental_bearer_token: `synthetic-${name}-token`,
+            http_headers: { Authorization: `synthetic-${name}-header` },
+            ...(name === "command-auth"
+              ? {
+                  auth: {
+                    command: "synthetic-auth-helper",
+                    args: [],
+                    cwd: home,
+                  },
+                }
+              : { env_key: `${provider.toUpperCase()}_API_KEY` }),
+          };
+    const auth = {
+      cli_auth_credentials_store: "file",
+      forced_login_method: "chatgpt",
+      forced_chatgpt_workspace_id: "synthetic-workspace",
+    };
+    const config = {
+      ...auth,
+      ...(name.startsWith("default")
+        ? {}
+        : { model_provider: name.startsWith("cloud") ? "openai" : provider }),
+      model_providers: {
+        ...(name === "default" ? {} : { [provider]: definition }),
+        unrelated: {
+          experimental_bearer_token: "synthetic-unrelated-provider",
+        },
+      },
+      ...(name.startsWith("cloud")
+        ? { profile: name, profiles: { [name]: { model_provider: provider } } }
+        : {}),
+    };
+    let captured = false;
+    const client = new TestClient(
+      { codexOverrides: config },
+      {
+        environment: {
+          OPENROUTER_API_KEY: "synthetic-router",
+          FIREWORKS_API_KEY: "synthetic-fireworks",
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        },
+        prepareRuntime: async () => ({ ...preparedRuntime(home), configPath }),
+        resolvePluginPython: async () => "/managed/python",
+        createCodex: (options) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              const runtime = parseToml(
+                await readFile(`${configPath}.workers.toml`, "utf8"),
+              ) as JsonObject;
+              const permissionOverride = options.configOverrides?.find(
+                (value) =>
+                  value.startsWith(
+                    "permissions.codex_security_scan.filesystem=",
+                  ),
+              );
+              expect(permissionOverride).toBeDefined();
+              expect(parseToml(permissionOverride!)["permissions"]).toEqual({
+                codex_security_scan: {
+                  filesystem: {
+                    ":root": "read",
+                    ":workspace_roots": "write",
+                    [home]: "read",
+                    [`${configPath}.workers.toml`]: { ".": "deny" },
+                  },
+                },
+              });
+              expect(runtime["model_provider"]).toBe(provider);
+              expect(runtime["model_providers"]).toEqual(
+                name === "default"
+                  ? undefined
+                  : {
+                      [provider]: definition,
+                    },
+              );
+              for (const [key, value] of Object.entries(auth))
+                expect(runtime[key]).toBe(value);
+              expect(runtime["profile"]).toBeUndefined();
+              const preflight = parseToml(await readFile(configPath, "utf8"));
+              if (name.startsWith("cloud"))
+                expect(preflight["model_provider"]).toBe("openai");
+              else if (name !== "default")
+                expect(preflight["model_providers"]).not.toEqual(
+                  runtime["model_providers"],
+                );
+              captured = true;
+              throw new Error("runtime snapshot captured");
+            },
+          }),
+        }),
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { mode, outputDir: join(root, "scan") }),
+      ).rejects.toThrow("runtime snapshot captured");
+      expect(captured).toBe(true);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
 test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
   "durable scan workflow resumes after %s without rerunning completed work",
   async (scenario) => {
@@ -7297,6 +7436,171 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await client.close();
     expect(scanSignal?.aborted).toBe(false);
   });
+
+  test.each(["standard", "deep"] as const)(
+    "isolates concurrent managed %s sessions at the Codex child boundary",
+    async (mode) => {
+      const clients: TestClient[] = [];
+      try {
+        const outcomes = await Promise.allSettled(
+          ["first", "second"].map(async (name) => {
+            const root = await temporaryDirectory();
+            const repository = join(root, "repository");
+            const codexHome = join(root, "codex-home");
+            const scanDir = join(root, "scan");
+            const preload = join(root, "fake-codex.mjs");
+            const marker = join(root, "invocation.jsonl");
+            await Promise.all([
+              mkdir(repository),
+              mkdir(codexHome),
+              mkdir(scanDir, { mode: 0o700 }),
+            ]);
+            await writeFile(
+              preload,
+              [
+                'import { appendFileSync } from "node:fs";',
+                'let prompt = ""; for await (const chunk of process.stdin) prompt += chunk;',
+                `appendFileSync(${JSON.stringify(marker)}, JSON.stringify({args:process.argv, executable:process.execPath, home:process.env.CODEX_HOME, key:process.env.CODEX_API_KEY, value:process.env.FIXTURE_SCAN_VALUE, prompt}) + "\\n");`,
+                `console.log(JSON.stringify({type:"thread.started",thread_id:${JSON.stringify(`fixture-${name}-thread`)}}));`,
+                'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"scan complete"}}));',
+                'console.log(JSON.stringify({type:"turn.completed",usage:null}));',
+                "process.exit(0);",
+              ].join("\n"),
+            );
+            const fake = nodeCodex(preload);
+            const model = `fixture-${name}-model`;
+            const provider = `fixture-${name}-provider`;
+            const client = new TestClient(
+              {
+                codexOverrides: {
+                  model,
+                  model_provider: provider,
+                  model_reasoning_effort: "ultra",
+                  model_reasoning_summary:
+                    name === "first" ? "none" : "concise",
+                  features: {
+                    multi_agent_v2: { max_concurrent_threads_per_session: 4 },
+                  },
+                },
+              },
+              {
+                environment: {
+                  OPENAI_API_KEY: `synthetic-${name}-key`,
+                  CODEX_CLI_PATH: fake.command.command,
+                },
+                prepareRuntime: async () => ({
+                  ...preparedRuntime(codexHome),
+                  environment: {
+                    ...fake.environment,
+                    FIXTURE_SCAN_VALUE: name,
+                  },
+                }),
+                resolvePluginPython: async () => "/managed/python",
+                prepareOutputDir: async () => scanDir,
+                repositoryRevision: async () => "deadbeef",
+                createCodex: (options: CodexOptions) => {
+                  const codex = new Codex(options);
+                  return {
+                    startThread: (threadOptions: ThreadOptions) => {
+                      const thread = codex.startThread(threadOptions);
+                      return {
+                        get id() {
+                          return thread.id;
+                        },
+                        runStreamed: async (
+                          ...args: Parameters<typeof thread.runStreamed>
+                        ) => {
+                          if (thread.id === null) {
+                            await copyCompletedScan(root);
+                            if (mode === "deep") {
+                              const coveragePath = join(
+                                scanDir,
+                                "coverage.json",
+                              );
+                              const coverage = JSON.parse(
+                                await readFile(coveragePath, "utf8"),
+                              );
+                              coverage.mode = "deep_repository";
+                              const coverageBytes = JSON.stringify(coverage);
+                              await writeFile(coveragePath, coverageBytes);
+                              const manifestPath = join(
+                                scanDir,
+                                "scan-manifest.json",
+                              );
+                              const manifest = JSON.parse(
+                                await readFile(manifestPath, "utf8"),
+                              );
+                              manifest.scan.artifacts.find(
+                                (artifact: { path: string }) =>
+                                  artifact.path === "coverage.json",
+                              ).sha256 = createHash("sha256")
+                                .update(coverageBytes)
+                                .digest("hex");
+                              await writeFile(
+                                manifestPath,
+                                JSON.stringify(manifest),
+                              );
+                            }
+                          }
+                          return thread.runStreamed(...args);
+                        },
+                      };
+                    },
+                  };
+                },
+              },
+            );
+            clients.push(client);
+            const postScanPrompt = "Summarize the completed synthetic scan.";
+            const result = await client.run(repository, {
+              mode,
+              postScanPrompt,
+            });
+            expect(result.threadId).toBe(`fixture-${name}-thread`);
+            expect(result.turnResult.usage).toBeNull();
+            const children = (await readFile(marker, "utf8"))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+            expect(children).toHaveLength(2);
+            expect(children[1].prompt).toBe(postScanPrompt);
+            expect(children[1].args).toContain("resume");
+            expect(children[1].args).toContain(`fixture-${name}-thread`);
+            for (const child of children) {
+              expect(child.executable).toBe(
+                process.platform === "win32"
+                  ? win32.toNamespacedPath(fake.command.command)
+                  : fake.command.command,
+              );
+              expect(child.home).toBe(codexHome);
+              expect(child.key).toBe(`synthetic-${name}-key`);
+              expect(child.value).toBe(name);
+              expect(child.args).toContain(`model=${JSON.stringify(model)}`);
+              expect(child.args).toContain(
+                `model_provider=${JSON.stringify(provider)}`,
+              );
+              expect(child.args).toContain('model_reasoning_effort="ultra"');
+              expect(child.args).toContain(
+                `model_reasoning_summary=${JSON.stringify(name === "first" ? "none" : "concise")}`,
+              );
+              expect(child.args).toContain(
+                "features.multi_agent_v2.max_concurrent_threads_per_session=4",
+              );
+              expect(child.args).toContain(
+                'default_permissions="codex_security_scan"',
+              );
+              expect(child.args).toContain('approval_policy="on-request"');
+            }
+          }),
+        );
+        for (const outcome of outcomes) {
+          if (outcome.status === "rejected") throw outcome.reason;
+        }
+      } finally {
+        await Promise.all(clients.map((client) => client.close()));
+      }
+    },
+  );
 
   test("closes a real Codex subprocess cleanly after a streamed terminal failure", async () => {
     const root = await temporaryDirectory();

@@ -10,6 +10,13 @@ export interface JsonObject {
   [key: string]: JsonValue;
 }
 
+/** @internal Authentication settings shared by login and model commands. */
+export const CODEX_AUTH_CONFIG_KEYS = [
+  "cli_auth_credentials_store",
+  "forced_login_method",
+  "forced_chatgpt_workspace_id",
+] as const;
+
 export interface CodexSecurityConfig {
   pluginPath?: string;
   codexOverrides?: JsonObject;
@@ -200,6 +207,39 @@ export function resolveCodexProfile(config: JsonObject): JsonObject {
   delete resolved["profile"];
   delete resolved["profiles"];
   return resolved;
+}
+
+/** @internal Per-session runtime selections are separate from preflight input. */
+export function codexWorkerConfigPath(preflightPath: string): string {
+  return `${preflightPath}.workers.toml`;
+}
+
+/** @internal Preserve the selected profile and provider definition for workers. */
+export function codexWorkerConfig(config: JsonObject): JsonObject {
+  const resolved = resolveCodexProfile(config);
+  // Pin Codex's default before another session can change the shared home.
+  const result: JsonObject = { model_provider: "openai" };
+  for (const key of [
+    "model",
+    "model_provider",
+    "model_reasoning_effort",
+    "model_reasoning_summary",
+    "service_tier",
+    ...CODEX_AUTH_CONFIG_KEYS,
+  ]) {
+    const value = resolved[key];
+    if (value !== undefined) result[key] = value;
+  }
+  const selected = result["model_provider"];
+  const providers = resolved["model_providers"];
+  if (
+    typeof selected === "string" &&
+    isObject(providers) &&
+    Object.hasOwn(providers, selected)
+  ) {
+    result["model_providers"] = { [selected]: providers[selected]! };
+  }
+  return result;
 }
 
 export async function mergedCodexConfig(

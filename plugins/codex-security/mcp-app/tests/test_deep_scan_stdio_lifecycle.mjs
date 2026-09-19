@@ -7,10 +7,14 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
+import { parse as parseToml } from "smol-toml";
 
 const execFileAsync = promisify(execFile);
 const mcpAppRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const pluginRoot = path.resolve(mcpAppRoot, "..");
+const installedPluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT;
+const pluginRoot = installedPluginRoot
+  ? path.resolve(installedPluginRoot)
+  : path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const parentSandboxState = {
   permissionProfile: {
@@ -20,11 +24,27 @@ const parentSandboxState = {
       entries: [{
         path: { type: "special", value: { kind: "root" } },
         access: "read"
+      }, {
+        path: { type: "glob_pattern", pattern: "/repo/temp[1]" },
+        access: "deny"
+      }, {
+        path: { type: "path", path: "/repo/temp[1]" },
+        access: "deny"
       }]
     },
     network: "restricted"
   },
   sandboxCwd: pathToFileURL(pluginRoot).href
+};
+
+const workerPermissionProfile = {
+  extends: ":read-only",
+  filesystem: {
+    ":root": "read",
+    "/repo/temp[1]": { ".": "deny" },
+    "/": { "repo/temp[1]": "deny" }
+  },
+  network: { enabled: false }
 };
 
 if (process.platform === "win32") {
@@ -55,7 +75,7 @@ async function testDeepScanStdioLifecycle() {
   const serverBundlePath = path.join(
     pluginRoot,
     "mcp",
-    `.deep-scan-stdio-test-${randomUUID()}.cjs`
+    installedPluginRoot ? "server.mjs" : `.deep-scan-stdio-test-${randomUUID()}.cjs`
   );
   const threadId = "deep-scan-stdio-lifecycle-thread";
 
@@ -86,7 +106,7 @@ async function testDeepScanStdioLifecycle() {
     ''
   ].join('\n'));
   await writePythonWrapper(pythonWrapperPath);
-  await bundleServer(serverBundlePath);
+  if (!installedPluginRoot) await bundleServer(serverBundlePath);
 
   const environment = {
     ...process.env,
@@ -569,7 +589,7 @@ async function testDeepScanStdioLifecycle() {
     throw error;
   } finally {
     await server.stop();
-    await rm(serverBundlePath, { force: true });
+    if (!installedPluginRoot) await rm(serverBundlePath, { force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
   }
 }
@@ -577,6 +597,7 @@ async function testDeepScanStdioLifecycle() {
 async function bundleServer(outfile) {
   await build({
     bundle: true,
+    nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
     define: { "import.meta.url": "__filename" },
     entryPoints: [path.join(mcpAppRoot, "main.ts")],
     external: ["fsevents"],
@@ -702,9 +723,11 @@ function assertReadOnlyWorkerInvocation(args) {
   const overrides = args.filter((arg) =>
     arg.startsWith("permissions.codex_security_deep_scan_worker=")
   );
-  assert.deepEqual(overrides, [
-    'permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read"},network={enabled=false}}'
-  ]);
+  assert.equal(overrides.length, 1);
+  assert.deepEqual(
+    parseToml(overrides[0]).permissions.codex_security_deep_scan_worker,
+    workerPermissionProfile
+  );
 }
 
 async function waitForScanId({
@@ -790,7 +813,7 @@ async function writeFakeCodex(executablePath) {
     "      if (message.method === 'initialize') {",
     "        result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };",
     "      } else if (message.method === 'config/read') {",
-    "        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read' }, network: { enabled: false } } } }, origins: {}, layers: null };",
+    `        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: ${JSON.stringify(workerPermissionProfile)} } }, origins: {}, layers: null };`,
     "      } else if (message.method === 'permissionProfile/list') {",
     "        result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };",
     "      } else if (message.method === 'account/read') {",

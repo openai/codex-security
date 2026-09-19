@@ -1,7 +1,14 @@
 import { accessSync, constants as fsConstants, existsSync, promises as fs, readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
-import { Codex } from "@openai/codex-sdk";
+import { delimiter, dirname, isAbsolute, join, parse, resolve, win32 } from "node:path";
+import {
+  readCodexSessionTurn
+} from "../../../../../sdk/typescript/src/codex-session.js";
+import { Codex, type CodexOptions } from "@openai/codex-sdk";
+import {
+  codexWorkerConfig, codexWorkerConfigPath, inlineToml, modelProviderConfigOverride,
+  type JsonObject
+} from "../../../../../sdk/typescript/src/config.js";
 import { parse as parseToml } from "smol-toml";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
@@ -39,7 +46,7 @@ export interface CodexSdkWorkerArtifactContext {
 }
 
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
-  private runtimeReasoningSummary?: Promise<string | undefined>;
+  private runtimeModelConfig?: Promise<NonNullable<CodexOptions["config"]>>;
 
   constructor(private readonly modelSettings: CodexSdkWorkerModelSettings = {}) {}
 
@@ -52,11 +59,23 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         );
       }
       const workerProfile = workerPermissionProfile(parentSandbox);
-      const configOverrides = workerPermissionProfileConfigOverrides(workerProfile);
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
-      // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
-      const reasoningSummary = await (this.runtimeReasoningSummary ??= workerReasoningSummary(childEnv));
+      // Cache per-scan selections; reconstructed workers reload the same file.
+      // Native account credentials continue to refresh in the selected home.
+      const modelConfig: NonNullable<CodexOptions["config"]> = {
+        ...await (this.runtimeModelConfig ??= workerModelConfig(childEnv)),
+        ...(this.modelSettings.model ? { model: this.modelSettings.model } : {}),
+        // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
+        ...(this.modelSettings.reasoningEffort
+          ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
+          : {})
+      };
+      const { model_providers: _providers, ...sdkModelConfig } = modelConfig;
+      const configOverrides = [
+        ...modelProviderConfigOverride(modelConfig as JsonObject),
+        ...workerPermissionProfileConfigOverrides(workerProfile)
+      ];
       const openAiApiKey = environmentVariable(childEnv, "OPENAI_API_KEY", process.platform)?.trim();
       const codexApiKey = environmentVariable(childEnv, "CODEX_API_KEY", process.platform)?.trim();
       const codexPath = resolveCodexPath(
@@ -69,7 +88,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         codexPath,
         cwd: request.workingDirectory,
         profileId: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-        configOverrides,
+        configOverrides: [
+          ...Object.entries(codexWorkerConfig(modelConfig as JsonObject))
+            // Older SDK/direct-plugin workers keep their home-selected provider.
+            .filter(([key]) => key !== "model_providers" && modelConfig[key] !== undefined)
+            .map(([key, value]) => `${key}=${inlineToml(value)}`),
+          ...configOverrides
+        ],
         expectedProfile: workerProfile,
         env: childEnv,
         allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
@@ -83,13 +108,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         // Keep native credentials unless the worker has no configured account.
         ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
         config: {
-          ...(reasoningSummary === undefined
-            ? {}
-            : { model_reasoning_summary: reasoningSummary }),
-          // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
-          ...(this.modelSettings.reasoningEffort
-            ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
-            : {}),
+          ...sdkModelConfig,
           mcp_servers: {
             // Discovery workers use the bundled skills and artifacts, not the parent workbench MCP.
             // A disabled server still needs a valid transport while Codex resolves plugin configuration.
@@ -125,51 +144,44 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
 
       try {
         const { events } = await thread.runStreamed(input, { signal: controller.signal });
-        let finalResponse = "";
-        let threadId: string | undefined;
-        let turnCompleted = false;
-        let lastStreamError: string | undefined;
         const diagnostics: CodexWorkerDiagnostic[] = [];
-        for await (const event of events) {
-          if (event.type === "thread.started") {
-            threadId = event.thread_id;
-            await request.onThreadStarted?.(threadId);
-          } else if (event.type === "item.completed") {
-            const fallbackError = event.item.type === "error"
-              ? deepScanPermissionProfileFallbackError(event.item.message)
-              : undefined;
-            if (fallbackError) {
-              controller.abort(fallbackError);
-              throw fallbackError;
-            }
-            if (event.item.type === "agent_message") {
-              finalResponse = event.item.text;
-            } else {
+        const turn = await readCodexSessionTurn({
+          thread,
+          events,
+          stopOnCompletion: true,
+          onEvent: async (event) => {
+            if (event.type === "thread.started" && typeof event.thread_id === "string") {
+              await request.onThreadStarted?.(event.thread_id);
+            } else if (event.type === "item.completed" && isRecord(event.item)) {
+              const fallbackError = event.item.type === "error" && typeof event.item.message === "string"
+                ? deepScanPermissionProfileFallbackError(event.item.message)
+                : undefined;
+              if (fallbackError) {
+                controller.abort(fallbackError);
+                throw fallbackError;
+              }
               appendSafeItemDiagnostic(diagnostics, event.item);
+            } else if (event.type === "turn.completed") {
+              request.signal.removeEventListener("abort", forwardAbort);
+            } else if (event.type === "turn.failed") {
+              throw new Error((event.error as { message: string }).message);
+            } else if (event.type === "error" && typeof event.message === "string") {
+              const fallbackError = deepScanPermissionProfileFallbackError(event.message);
+              if (fallbackError) {
+                controller.abort(fallbackError);
+                throw fallbackError;
+              }
+              // Codex exec emits retry-in-progress notifications as error events.
             }
-          } else if (event.type === "turn.completed") {
-            turnCompleted = true;
-            request.signal.removeEventListener("abort", forwardAbort);
-            break;
-          } else if (event.type === "turn.failed") {
-            throw new Error(event.error.message);
-          } else if (event.type === "error") {
-            const fallbackError = deepScanPermissionProfileFallbackError(event.message);
-            if (fallbackError) {
-              controller.abort(fallbackError);
-              throw fallbackError;
-            }
-            // Codex exec currently emits retry-in-progress notifications as error events.
-            lastStreamError = event.message;
           }
-        }
-        if (!turnCompleted) {
-          const detail = lastStreamError ? `: ${lastStreamError}` : "";
+        });
+        if (turn.status !== "completed") {
+          const detail = turn.lastStreamError ? `: ${turn.lastStreamError}` : "";
           throw new Error(`Codex worker stream ended before turn.completed${detail}`);
         }
         return {
-          finalResponse,
-          threadId: threadId ?? thread.id ?? undefined,
+          finalResponse: turn.finalResponse,
+          threadId: turn.threadId ?? thread.id ?? undefined,
           ...(diagnostics.length > 0 ? { diagnostics } : {})
         };
       } finally {
@@ -251,7 +263,9 @@ function workerSubagentConfig(subagents: number) {
     // V1 counts children; V2 counts the root plus its children. Keeping its
     // feature disabled lets the model choose either runtime without rejecting
     // inherited agents.max_threads configuration.
-    ...(subagents > 0 ? { agents: { max_threads: subagents } } : {}),
+    ...(subagents > 0
+      ? { agents: { max_threads: subagents } }
+      : {}),
     features: {
       multi_agent_v2: {
         enabled: false,
@@ -274,17 +288,33 @@ type TomlObject = { [key: string]: TomlValue };
 function workerPermissionProfile(
   sandbox: DeepWorkerParentSandbox
 ): TomlObject {
-  const filesystemEntries: Array<[string, TomlValue]> = [[":root", "read"]];
-  const seenFilesystemKeys = new Set<string>();
+  const filesystemEntries = new Map<string, TomlValue>([[":root", "read"]]);
+  const literalPaths = new Set(sandbox.filesystemDenies.flatMap(
+    (denial) => typeof denial === "string" ? [] : [denial.path]
+  ));
+  const collidingGlobs = new Set<string>();
 
-  for (const key of sandbox.filesystemDenies) {
-    if (seenFilesystemKeys.has(key)) continue;
-    seenFilesystemKeys.add(key);
-    filesystemEntries.push([key, "deny"]);
+  for (const denial of sandbox.filesystemDenies) {
+    const key = typeof denial === "string" ? denial : denial.path;
+    if (typeof denial === "string" && literalPaths.has(key)) {
+      collidingGlobs.add(key);
+    } else {
+      filesystemEntries.set(key, typeof denial === "string" ? "deny" : { ".": "deny" });
+    }
+  }
+
+  // Scoped glob keys keep both meanings without duplicate filesystem TOML keys.
+  for (const pattern of collidingGlobs) {
+    const root = parse(pattern).root;
+    const scope = filesystemEntries.get(root);
+    filesystemEntries.set(root, {
+      ...(scope === undefined ? {} : typeof scope === "object" ? scope : { ".": scope }),
+      [pattern.slice(root.length)]: "deny"
+    });
   }
 
   if (sandbox.globScanMaxDepth !== undefined) {
-    filesystemEntries.push(["glob_scan_max_depth", sandbox.globScanMaxDepth]);
+    filesystemEntries.set("glob_scan_max_depth", sandbox.globScanMaxDepth);
   }
 
   return {
@@ -383,30 +413,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function workerReasoningSummary(environment: Record<string, string>): Promise<string | undefined> {
+async function workerModelConfig(environment: Record<string, string>): Promise<NonNullable<CodexOptions["config"]>> {
   const configPath = environmentVariable(environment, "CODEX_SECURITY_CONFIG_PATH", process.platform);
-  if (!configPath) return undefined;
-  const config = parseToml(await fs.readFile(configPath, "utf8"));
-  const profiles = config.profiles;
-  const profile = typeof config.profile === "string" && isRecord(profiles)
-    ? profiles[config.profile]
-    : undefined;
-  const summary = isRecord(profile) && profile.model_reasoning_summary !== undefined
-    ? profile.model_reasoning_summary
-    : config.model_reasoning_summary;
-  return typeof summary === "string" ? summary : undefined;
+  if (!configPath) return {};
+  try {
+    return codexWorkerConfig(parseToml(await fs.readFile(codexWorkerConfigPath(configPath), "utf8")) as JsonObject) as NonNullable<CodexOptions["config"]>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  // Older SDKs only provide preflight input. Keep their home-selected provider.
+  const config = codexWorkerConfig(parseToml(await fs.readFile(configPath, "utf8")) as JsonObject) as NonNullable<CodexOptions["config"]>;
+  return config.model_reasoning_summary === undefined ? {} : { model_reasoning_summary: config.model_reasoning_summary };
 }
 
-async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
+async function snapshotWorkerEnvironment(source: NodeJS.ProcessEnv = process.env): Promise<Record<string, string>> {
   const environment = Object.fromEntries(
-    Object.entries(process.env)
+    Object.entries(source)
       .filter((entry): entry is [string, string] => entry[1] !== undefined)
   ) as Record<string, string>;
   if (process.platform === "win32") {
     // process.env is case-insensitive on Windows; a plain object is not.
     // Keep its selected values while giving the child one spelling per key.
     for (const name of ["CODEX_CLI_PATH", "CODEX_HOME", "CODEX_MANAGED_PACKAGE_ROOT", "LOCALAPPDATA"]) {
-      const value = process.env[name];
+      const value = environmentVariable(source, name, process.platform);
       for (const key of Object.keys(environment)) {
         if (key.toUpperCase() === name) delete environment[key];
       }
