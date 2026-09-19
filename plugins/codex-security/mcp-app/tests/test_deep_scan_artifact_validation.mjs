@@ -33,6 +33,7 @@ const root = await realpath(await mkdtemp(path.join(tmpdir(), "deep-scan-artifac
 try {
   await testDiscoveryValidation(root);
   await testReducerValidation(root);
+  await testReducerLineageConvergence(root);
   await testEmptyDiscoveryAndReduction(root);
 } finally {
   await rm(root, { recursive: true, force: true });
@@ -364,13 +365,14 @@ async function testReducerValidation(root) {
       provenance: { source: "local_plugin", sourceFindingIds: ["origin:b"] },
     },
   ]));
-  await validateReducerArtifacts({
+  const validatedCollisions = await validateReducerArtifacts({
     artifacts,
     artifactDir,
     resultPath,
     reducerId: "dedup-colliding-previous",
     sources: collidingSources,
   }, scanId);
+  assert.equal(validatedCollisions.newFindings, 0);
   const reconciledCollisions = JSON.parse(await readFile(resultPath, "utf8")).findings;
   assert.deepEqual(
     reconciledCollisions.map((item) => item.provenance.sourceFindingIds),
@@ -544,6 +546,170 @@ async function testReducerValidation(root) {
       /canonical non-symlink path/
     );
   }
+}
+
+async function testReducerLineageConvergence(root) {
+  const artifacts = await createLayout(path.join(root, "lineage-convergence"));
+  const artifactDir = path.join(artifacts.dedupRoot, "dedup-lineage", "output");
+  const resultPath = path.join(artifactDir, "result.json");
+  await mkdir(artifactDir, { recursive: true });
+
+  const originalA = finding("alias-a", "src/alias-a.js");
+  const originalB = finding("alias-b", "src/alias-b.js");
+  const previousA = {
+    ...originalA,
+    provenance: {
+      source: "local_plugin",
+      sourceFindingIds: ["alias:a"],
+      sourceFindings: [{ id: "alias:a", finding: originalA }]
+    }
+  };
+  const previousB = {
+    ...originalB,
+    provenance: {
+      source: "local_plugin",
+      sourceFindingIds: ["alias:b"],
+      sourceFindings: [{ id: "alias:b", finding: originalB }]
+    }
+  };
+  const previousAliases = draft([previousA, previousB]);
+
+  await writeResult(resultPath, draft([{
+    ...originalA,
+    provenance: {
+      source: "local_plugin",
+      sourceFindingIds: ["alias:a", "alias:b"]
+    }
+  }]));
+  assert.equal((await validateReducerArtifacts({
+    artifacts,
+    artifactDir,
+    resultPath,
+    reducerId: "dedup-alias-collapse",
+    sources: { discoveries: [], previous: previousAliases }
+  }, scanId)).newFindings, 0);
+  const reconciledAlias = JSON.parse(await readFile(resultPath, "utf8")).findings[0];
+  assert.deepEqual(reconciledAlias.provenance.sourceFindingIds, ["alias:a", "alias:b"]);
+  assert.equal(reconciledAlias.provenance.previousFindings[0].identity.anchor, "alias-b");
+
+  const previousResultPath = path.join(
+    artifacts.dedupRoot,
+    "dedup-lineage-previous",
+    "output",
+    "result.json"
+  );
+  await mkdir(path.dirname(previousResultPath), { recursive: true });
+  await writeResult(previousResultPath, previousAliases);
+  assert.equal((await validateReducerArtifacts({
+    artifacts,
+    artifactDir,
+    resultPath,
+    reducerId: "dedup-alias-collapse-recovery",
+    previousReducerResultPath: previousResultPath
+  }, scanId)).newFindings, 0);
+
+  const freshEvidence = finding("fresh-evidence", "src/fresh-evidence.js");
+  const freshSources = [{ workerId: "worker-fresh", result: draft([freshEvidence]) }];
+  const previousCombined = {
+    ...originalA,
+    provenance: {
+      source: "local_plugin",
+      sourceFindingIds: ["alias:a", "alias:b"],
+      sourceFindings: [
+        { id: "alias:a", finding: originalA },
+        { id: "alias:b", finding: originalB }
+      ]
+    }
+  };
+  await writeResult(resultPath, draft([
+    {
+      ...originalA,
+      provenance: { source: "local_plugin", sourceFindingIds: ["alias:a"] }
+    },
+    {
+      ...originalB,
+      provenance: {
+        source: "local_plugin",
+        sourceFindingIds: ["alias:b", "worker-fresh:0"]
+      }
+    }
+  ]));
+  await assert.rejects(validateReducerArtifacts({
+    artifacts,
+    artifactDir,
+    resultPath,
+    reducerId: "dedup-lineage-split",
+    sources: { discoveries: freshSources, previous: draft([previousCombined]) }
+  }, scanId), (error) => (
+    error.code === "merge_traceability_unstable_candidate_id"
+    && /split/.test(error.message)
+  ));
+
+  await writeResult(resultPath, draft([{
+    ...finding("merged-root", "src/merged-root.js"),
+    provenance: {
+      source: "local_plugin",
+      sourceFindingIds: ["alias:a", "alias:b", "worker-fresh:0"]
+    }
+  }]));
+  assert.equal((await validateReducerArtifacts({
+    artifacts,
+    artifactDir,
+    resultPath,
+    reducerId: "dedup-existing-root-new-evidence",
+    sources: { discoveries: freshSources, previous: previousAliases }
+  }, scanId)).newFindings, 0);
+
+  await writeResult(resultPath, draft([
+    {
+      ...originalA,
+      provenance: {
+        source: "local_plugin",
+        sourceFindingIds: ["alias:a", "alias:b"]
+      }
+    },
+    {
+      ...freshEvidence,
+      provenance: {
+        source: "local_plugin",
+        sourceFindingIds: ["worker-fresh:0"]
+      }
+    }
+  ]));
+  assert.equal((await validateReducerArtifacts({
+    artifacts,
+    artifactDir,
+    resultPath,
+    reducerId: "dedup-genuinely-new-root",
+    sources: { discoveries: freshSources, previous: previousAliases }
+  }, scanId)).newFindings, 1);
+
+  const legacyPrevious = {
+    ...originalA,
+    provenance: { source: "local_plugin" }
+  };
+  await writeResult(resultPath, draft([originalA]));
+  assert.equal((await validateReducerArtifacts({
+    artifacts,
+    artifactDir,
+    resultPath,
+    reducerId: "dedup-legacy-identity",
+    sources: { discoveries: [], previous: draft([legacyPrevious]) }
+  }, scanId)).newFindings, 0);
+  await writeResult(resultPath, draft([{
+    ...finding("legacy-renamed", "src/alias-a.js"),
+    provenance: {
+      source: "local_plugin",
+      sourceFindingIds: ["previous:0"]
+    }
+  }]));
+  await assert.rejects(validateReducerArtifacts({
+    artifacts,
+    artifactDir,
+    resultPath,
+    reducerId: "dedup-legacy-renamed",
+    sources: { discoveries: [], previous: draft([legacyPrevious]) }
+  }, scanId), (error) => error.code === "merge_traceability_unstable_candidate_id");
 }
 
 async function testEmptyDiscoveryAndReduction(root) {
