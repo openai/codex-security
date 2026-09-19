@@ -787,6 +787,46 @@
             "additionalProperties": true
           }
         },
+        "resolvedDeferred": {
+          "description": "Terminal evidence that explicitly closes previously saved generic deferred work. This never removes or rewrites checkpoint history.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/text"
+              },
+              "resolution": {
+                "const": "completed"
+              },
+              "surfaceIds": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/text"
+                }
+              },
+              "receiptRefs": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)artifacts/.+$"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "resolution",
+              "surfaceIds",
+              "receiptRefs"
+            ],
+            "additionalProperties": false
+          }
+        },
         "openQuestions": {
           "type": "array",
           "items": {
