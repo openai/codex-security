@@ -15,6 +15,7 @@ import {
   estimateScanCost,
   ScanCostTracker,
   type ScanSessionEvent,
+  type ScanWorkerEvent,
 } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
 import { formatTokenUsage, tokenUsage } from "../src/cost-model.js";
@@ -614,6 +615,92 @@ describe("live scan cost tracking", () => {
     }
   });
 
+  test.each([...parentFields])(
+    "observes worker metadata without status markers or usage via %s",
+    async (parentField) => {
+      const home = await codexHome();
+      const parent = await writeSession(home, "scan-thread", {});
+      await appendSessionItem(parent, {
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text:
+              'CODEX_SECURITY_WORKER_STATUS {"phase":"validation","planned":1,"started":1}\n' +
+              '{"type":"session_meta","payload":{"id":"fictional-worker","parent_thread_id":"scan-thread"}}',
+          },
+        ],
+      });
+      await writeSession(home, "unrelated-worker", {}, "other-scan");
+      const workers: ScanWorkerEvent[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        onWorkerEvent: (event) => workers.push(event),
+      });
+      tracker.start("scan-thread");
+      try {
+        await tracker.refresh();
+        expect(workers).toEqual([]);
+        const path = join(parse(parent).dir, "rollout-worker-thread.jsonl");
+        const metadata =
+          JSON.stringify({
+            type: "session_meta",
+            payload: {
+              id: "worker-thread",
+              ...parentMetadata("scan-thread", parentField),
+              instructions: "Synthetic private instructions",
+            },
+          }) + "\n";
+        await writeFile(path, metadata);
+        await tracker.refresh();
+        expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
+        await writeFile(path.replace(".jsonl", "-copy.jsonl"), metadata);
+        await tracker.refresh();
+        await tracker.refresh();
+        expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test("polls for workers with only a worker observer and keeps concurrent scans separate", async () => {
+    const home = await codexHome();
+    const workers: ScanWorkerEvent[][] = [[], []];
+    const trackers = workers.map(
+      (events) =>
+        new ScanCostTracker({
+          codexHome: home,
+          model: "gpt-5.6-sol",
+          onWorkerEvent: (event) => events.push(event),
+        }),
+    );
+    trackers.forEach((tracker, index) => tracker.start(`scan-${index}`));
+    try {
+      await Promise.all(trackers.map((tracker) => tracker.refresh()));
+      await writeSession(home, "worker-0", {}, "scan-0");
+      await writeSession(home, "worker-1", {}, "scan-1");
+      await waitFor(() => workers.every((events) => events.length === 1));
+      expect(workers).toEqual([
+        [{ kind: "observed", worker: 1 }],
+        [{ kind: "observed", worker: 1 }],
+      ]);
+    } finally {
+      await Promise.all(trackers.map((tracker) => tracker.stop()));
+    }
+    const resumed: ScanWorkerEvent[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      onWorkerEvent: (event) => resumed.push(event),
+    });
+    tracker.start("scan-0");
+    await tracker.stop();
+    expect(resumed).toEqual([{ kind: "observed", worker: 1 }]);
+  });
+
   test("counts the scan and delegated workers without including other scans", async () => {
     const home = await codexHome();
     const parent = await writeSession(home, "scan-thread", {
@@ -734,11 +821,13 @@ describe("live scan cost tracking", () => {
       const unrelated = await writeSession(home, "unrelated-thread", usage);
       await appendSessionItem(unrelated, message("Unrelated output."));
       const events: ScanSessionEvent[] = [];
+      const workers: ScanWorkerEvent[] = [];
       const tracker = new ScanCostTracker({
         codexHome: home,
         scanDirectory,
         model: "gpt-5.6-sol",
         onSessionEvent: (event) => events.push(event),
+        onWorkerEvent: (event) => workers.push(event),
       });
       tracker.start("scan-thread");
       await tracker.refresh();
@@ -746,6 +835,7 @@ describe("live scan cost tracking", () => {
         false,
       );
 
+      expect(workers).toEqual([]);
       if (missing === "parent") {
         await writeSession(home, "parent-worker", usage, "scan-thread");
       } else {
@@ -756,6 +846,14 @@ describe("live scan cost tracking", () => {
       await tracker.refresh();
       await tracker.stop();
 
+      expect(workers).toEqual(
+        missing === "parent"
+          ? [
+              { kind: "observed", worker: 1 },
+              { kind: "observed", worker: 2 },
+            ]
+          : [{ kind: "observed", worker: 1 }],
+      );
       const workerEvents = events.filter(
         (event) => event.threadId === "worker-thread",
       );
@@ -861,11 +959,13 @@ describe("live scan cost tracking", () => {
         "2026-07-26T12:03:00Z",
       );
       const events: ScanSessionEvent[] = [];
+      const workers: ScanWorkerEvent[] = [];
       const tracker = new ScanCostTracker({
         codexHome: home,
         model: "gpt-5.6-sol",
         scanDirectory,
         onSessionEvent: (event) => events.push(event),
+        onWorkerEvent: (event) => workers.push(event),
       });
       tracker.start("scan-thread");
 
@@ -873,6 +973,9 @@ describe("live scan cost tracking", () => {
         input_tokens: 1_425,
         output_tokens: 14,
       });
+      expect(workers).toEqual(
+        [1, 2, 3].map((worker) => ({ kind: "observed", worker })),
+      );
       const labels = new Map(
         events.map(({ threadId, worker }) => [threadId, worker]),
       );
@@ -1185,6 +1288,7 @@ describe("live scan cost tracking", () => {
       const activities: ScanActivity[] = [];
       const progress: ScanProgress[] = [];
       const events: ScanSessionEvent[] = [];
+      const workers: ScanWorkerEvent[] = [];
       const tracker = new ScanCostTracker({
         codexHome: home,
         model: "gpt-5.6-terra",
@@ -1193,6 +1297,7 @@ describe("live scan cost tracking", () => {
         onActivity: (activity) => activities.push(activity),
         onProgress: (update) => progress.push(update),
         onSessionEvent: (event) => events.push(event),
+        onWorkerEvent: (event) => workers.push(event),
       });
       tracker.start("scan-thread");
 
@@ -1214,6 +1319,7 @@ describe("live scan cost tracking", () => {
           estimatedUsd: 0.003065,
         },
       });
+      expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
       expect(activities).toEqual([
         expect.objectContaining({
           kind: "message",

@@ -38,6 +38,7 @@ import {
   type ScanOptions,
   type ScanProgress,
   type ScanSessionEvent,
+  type ScanWorkerEvent,
   ScanInterruptedError,
 } from "../src/index.js";
 import {
@@ -3604,6 +3605,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(scanDir, { mode: 0o700 });
     const updates: ScanProgress[] = [];
     const sessionEvents: ScanSessionEvent[] = [];
+    const workers: ScanWorkerEvent[] = [];
     const observerErrors: ScanObserverName[] = [];
     const usage = { input_tokens: 100, output_tokens: 10 };
     const client = new TestClient(
@@ -3687,6 +3689,7 @@ describe("CodexSecurity orchestration", () => {
 
     const result = await client.run(repository, {
       onProgress: (progress) => updates.push(progress),
+      onWorkerEvent: (event) => workers.push(event),
       onSessionEvent: (event) => {
         sessionEvents.push(event);
         if (sessionEvents.length === 1) {
@@ -3711,9 +3714,84 @@ describe("CodexSecurity orchestration", () => {
         ),
       ),
     ).toEqual(new Set(["thread-1:null", "worker-thread:thread-1"]));
+    expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
+    expect(
+      new Set(
+        sessionEvents
+          .filter((event) => event.threadId === "worker-thread")
+          .map((event) => event.worker),
+      ),
+    ).toEqual(new Set([1]));
     expect(observerErrors).toEqual(["onSessionEvent"]);
     await client.close();
   });
+
+  test.each(["none", "sync", "async"] as const)(
+    "observes workers before scan completion with %s observer errors",
+    async (failure) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      const observed = Promise.withResolvers<void>();
+      const workers: ScanWorkerEvent[] = [];
+      const errors: ScanObserverName[] = [];
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: "thread-1",
+              async runStreamed() {
+                await copyCompletedScan(root);
+                await writeUsageSession(codexHome, "thread-1", {});
+                async function* events(): AsyncGenerator<ThreadEvent> {
+                  for await (const event of completedEvents()) {
+                    yield event;
+                    if (event.type === "turn.started") {
+                      await writeUsageSession(
+                        codexHome,
+                        "worker-thread",
+                        {},
+                        "thread-1",
+                      );
+                      await observed.promise;
+                    }
+                  }
+                }
+                return { events: events() };
+              },
+            }),
+          }),
+        },
+      );
+      try {
+        const result = await client.run(repository, {
+          onWorkerEvent: (event) => {
+            workers.push(event);
+            observed.resolve();
+            if (failure === "sync") throw new Error("Optional observer failed");
+            if (failure === "async")
+              return Promise.reject(new Error("Optional observer failed"));
+          },
+          onObserverError: (observer) => errors.push(observer),
+        });
+        expect(result.threadId).toBe("thread-1");
+        expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
+        expect(errors).toEqual(failure === "none" ? [] : ["onWorkerEvent"]);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test("provides only reviewed false positives to validation as a scan artifact", async () => {
     const root = await temporaryDirectory();
@@ -4415,13 +4493,14 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([
-    ["partial coverage", "partial", false],
-    ["unknown coverage", "unknown", false],
-    ["a failed scan", "failed", false],
-    ["a failed scan and follow-up", "failed", true],
+    ["partial coverage", "partial", false, false],
+    ["unknown coverage", "unknown", false, false],
+    ["a failed scan", "failed", false, false],
+    ["a failed scan and follow-up", "failed", true, false],
+    ["an interrupted follow-up", "partial", false, true],
   ] as const)(
     "runs post-scan instructions after %s",
-    async (_scenario, outcome, followUpFails) => {
+    async (_scenario, outcome, followUpFails, cancelFollowUp) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -4431,7 +4510,10 @@ describe("CodexSecurity orchestration", () => {
       await mkdir(scanDir, { mode: 0o700 });
       const prompts: string[] = [];
       const warnings: string[] = [];
+      const workers: ScanWorkerEvent[] = [];
+      const observerErrors: string[] = [];
       const scanFails = outcome === "failed";
+      const controller = new AbortController();
 
       const client = new TestClient(
         {},
@@ -4446,6 +4528,13 @@ describe("CodexSecurity orchestration", () => {
               id: "thread-1",
               async runStreamed(prompt: string) {
                 prompts.push(prompt);
+                await writeUsageSession(codexHome, "thread-1", {});
+                await writeUsageSession(
+                  codexHome,
+                  `worker-${prompts.length}`,
+                  {},
+                  "thread-1",
+                );
                 if (prompts.length === 1 && !scanFails) {
                   await copyCompletedScan(root);
                   const coveragePath = join(scanDir, "coverage.json");
@@ -4465,10 +4554,12 @@ describe("CodexSecurity orchestration", () => {
                   );
                   return { events: completedEvents() };
                 }
+                if (prompts.length === 2 && cancelFollowUp) controller.abort();
                 if (prompts.length === 2 && !followUpFails) {
                   return { events: completedEvents() };
                 }
                 async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+                  yield { type: "thread.started", thread_id: "thread-1" };
                   yield {
                     type: "turn.failed",
                     error: {
@@ -4488,15 +4579,25 @@ describe("CodexSecurity orchestration", () => {
 
       const result = client.run(repository, {
         postScanPrompt: "Record the scan cost.",
+        signal: controller.signal,
         onWarning: (warning) => warnings.push(warning),
+        onWorkerEvent: (event) => {
+          workers.push(event);
+          throw new Error("optional worker observer failed");
+        },
+        onObserverError: (observer) => observerErrors.push(observer),
       });
-      if (scanFails) {
+      if (cancelFollowUp) {
+        await expect(result).rejects.toBeInstanceOf(ScanInterruptedError);
+      } else if (scanFails) {
         await expect(result).rejects.toThrow("The scan failed.");
       } else {
         expect((await result).coverage.completeness).toBe(outcome);
       }
       expect(prompts.at(-1)).toBe("Record the scan cost.");
       expect(prompts).toHaveLength(2);
+      expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
+      expect(observerErrors).toEqual(["onWorkerEvent"]);
       expect(warnings).toEqual(
         followUpFails
           ? [
