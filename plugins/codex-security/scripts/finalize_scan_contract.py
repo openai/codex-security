@@ -1087,6 +1087,53 @@ def _recover_unsealed_coverage(
         )
         partial = True
 
+    resolved_schema = _require_dict(
+        _require_dict(properties, "resolvedDeferred", "coverage.schema.properties"),
+        "items",
+        "coverage.schema.properties.resolvedDeferred",
+    )
+    resolved_deferred = coverage.get("resolvedDeferred", [])
+    if not isinstance(resolved_deferred, list):
+        warnings.append("Skipped malformed resolved deferred records: expected an array.")
+        resolved_deferred = []
+        partial = True
+    recovered_resolutions: list[dict[str, Any]] = []
+    surfaces_by_id = {surface["id"]: surface for surface in coverage["surfaces"]}
+    for index, resolution in enumerate(resolved_deferred):
+        context = f"coverage.resolvedDeferred[{index}]"
+        try:
+            if not isinstance(resolution, dict):
+                raise ContractError(f"{context}: expected an object")
+            _validate_schema_node(resolution, resolved_schema, context)
+            referenced_surfaces = []
+            for surface_id in resolution["surfaceIds"]:
+                surface = surfaces_by_id.get(surface_id)
+                if surface is None:
+                    raise ContractError(f"{context}.surfaceIds: unknown surface id: {surface_id}")
+                if surface["disposition"] == "needs_follow_up":
+                    raise ContractError(
+                        f"{context}.surfaceIds: cannot reference needs_follow_up work"
+                    )
+                referenced_surfaces.append(surface)
+            surface_receipts = {
+                ref for surface in referenced_surfaces for ref in surface.get("receiptRefs", [])
+            }
+            normalized_receipts = []
+            for ref_index, ref in enumerate(resolution["receiptRefs"]):
+                ref_context = f"{context}.receiptRefs[{ref_index}]"
+                normalized_ref = _require_portable_relative_path(ref, ref_context)
+                if normalized_ref not in surface_receipts:
+                    raise ContractError(f"{ref_context}: must be attached to a referenced surface")
+                _require_scan_local_file(scan_dir, normalized_ref, ref_context)
+                normalized_receipts.append(normalized_ref)
+            resolution["receiptRefs"] = normalized_receipts
+        except ContractError as exc:
+            warnings.append(f"Skipped malformed resolved deferred item {index + 1}: {exc}.")
+            partial = True
+            continue
+        recovered_resolutions.append(resolution)
+    coverage["resolvedDeferred"] = recovered_resolutions
+
     if coverage["deferred"] and completeness != "partial":
         if not discarded_findings:
             warnings.append("Coverage has deferred review work; marked coverage as partial.")
@@ -1394,7 +1441,90 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
         raise ContractError(f"{context}.extensions: expected an object")
 
 
-def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_dir: Path) -> None:
+def _checkpoint_names(scan_dir: Path) -> list[str]:
+    if _descriptor_relative_reads_available():
+        root_fd = _open_verified_scan_directory(scan_dir)
+        checkpoint_fd: int | None = None
+        try:
+            try:
+                checkpoint_fd = _open_scan_local_directory(root_fd, ("checkpoints",), create=False)
+            except FileNotFoundError:
+                return []
+            return sorted(name for name in os.listdir(checkpoint_fd) if name.endswith(".json"))
+        except OSError as exc:
+            raise ContractError(
+                "coverage.resolvedDeferred: cannot read checkpoint history"
+            ) from exc
+        finally:
+            if checkpoint_fd is not None:
+                os.close(checkpoint_fd)
+            os.close(root_fd)
+
+    checkpoint_dir = scan_dir / "checkpoints"
+    try:
+        metadata = checkpoint_dir.lstat()
+    except FileNotFoundError:
+        return []
+    if not stat.S_ISDIR(metadata.st_mode) or checkpoint_dir.is_symlink():
+        raise ContractError("coverage.resolvedDeferred: checkpoint history must be a directory")
+    return sorted(path.name for path in checkpoint_dir.iterdir() if path.name.endswith(".json"))
+
+
+def _validate_resolved_deferred_history(
+    coverage: dict[str, Any], scan_dir: Path, scan_id: str
+) -> None:
+    rows_by_id: dict[str, set[str]] = {}
+    for name in _checkpoint_names(scan_dir):
+        relative_path = f"checkpoints/{name}"
+        checkpoint = _read_scan_local_json(scan_dir, relative_path, relative_path)
+        if checkpoint.get("scanId") != scan_id:
+            raise ContractError(f"{relative_path}.scanId: must match manifest scan id")
+        checkpoint_coverage = checkpoint.get("coverage")
+        if not isinstance(checkpoint_coverage, dict):
+            raise ContractError(f"{relative_path}.coverage: expected an object")
+        deferred = checkpoint_coverage.get("deferred", [])
+        if not isinstance(deferred, list):
+            raise ContractError(f"{relative_path}.coverage.deferred: expected an array")
+        for row in deferred:
+            if not isinstance(row, dict) or isinstance(row.get("candidateId"), str):
+                continue
+            row_id = row.get("id")
+            if not isinstance(row_id, str):
+                continue
+            rows_by_id.setdefault(row_id, set()).add(
+                json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            )
+
+    active_ids = {
+        row["id"]
+        for row in coverage.get("deferred", [])
+        if isinstance(row, dict)
+        and not isinstance(row.get("candidateId"), str)
+        and isinstance(row.get("id"), str)
+    }
+    for index, resolution in enumerate(coverage.get("resolvedDeferred", [])):
+        context = f"coverage.resolvedDeferred[{index}]"
+        if not isinstance(resolution, dict):
+            continue
+        resolved_id = resolution.get("id")
+        if not isinstance(resolved_id, str):
+            continue
+        rows = rows_by_id.get(resolved_id, set())
+        if not rows:
+            raise ContractError(f"{context}.id: no matching generic deferred checkpoint history")
+        if len(rows) != 1:
+            raise ContractError(f"{context}.id: ambiguous generic deferred checkpoint history")
+        if resolved_id in active_ids:
+            raise ContractError(f"{context}.id: deferred work is still active")
+
+
+def _validate_coverage(
+    manifest: dict[str, Any],
+    coverage: dict[str, Any],
+    scan_dir: Path,
+    *,
+    require_resolved_history: bool = False,
+) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     scan_id = _require_str(scan, "id", "manifest.scan")
     if coverage.get("scanId") != scan_id:
@@ -1442,6 +1572,46 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
+    resolved_deferred = coverage.get("resolvedDeferred", [])
+    if not isinstance(resolved_deferred, list):
+        raise ContractError("coverage.resolvedDeferred: expected an array")
+    if resolved_deferred and require_resolved_history:
+        _validate_resolved_deferred_history(coverage, scan_dir, scan_id)
+    resolved_ids: set[str] = set()
+    for index, resolution in enumerate(resolved_deferred):
+        context = f"coverage.resolvedDeferred[{index}]"
+        if not isinstance(resolution, dict):
+            raise ContractError(f"{context}: expected an object")
+        resolved_id = _require_str(resolution, "id", context)
+        if resolved_id in resolved_ids:
+            raise ContractError(f"{context}.id: duplicate resolved deferred id")
+        resolved_ids.add(resolved_id)
+        referenced_surfaces = []
+        for surface_id in _require_list(resolution, "surfaceIds", context):
+            if not isinstance(surface_id, str):
+                raise ContractError(f"{context}.surfaceIds: expected strings")
+            surface = next(
+                (item for item in coverage["surfaces"] if item["id"] == surface_id), None
+            )
+            if surface is None:
+                raise ContractError(f"{context}.surfaceIds: unknown surface id: {surface_id}")
+            if surface["disposition"] == "needs_follow_up":
+                raise ContractError(f"{context}.surfaceIds: cannot reference needs_follow_up work")
+            referenced_surfaces.append(surface)
+        surface_receipts = {
+            ref for surface in referenced_surfaces for ref in surface.get("receiptRefs", [])
+        }
+        for ref_index, ref in enumerate(_require_list(resolution, "receiptRefs", context)):
+            if not isinstance(ref, str):
+                raise ContractError(f"{context}.receiptRefs[{ref_index}]: expected a string")
+            normalized_ref = _require_portable_relative_path(
+                ref, f"{context}.receiptRefs[{ref_index}]"
+            )
+            if normalized_ref not in surface_receipts:
+                raise ContractError(
+                    f"{context}.receiptRefs[{ref_index}]: must be attached to a referenced surface"
+                )
+            resolution["receiptRefs"][ref_index] = normalized_ref
     if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
         raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
     _require_safe_json_value(coverage, "coverage.json")
@@ -2330,6 +2500,11 @@ def _artifact_record(
 
 def _coverage_receipt_refs(coverage: dict[str, Any]) -> list[str]:
     refs = {ref for surface in coverage["surfaces"] for ref in surface.get("receiptRefs", [])}
+    refs.update(
+        ref
+        for resolution in coverage.get("resolvedDeferred", [])
+        for ref in resolution.get("receiptRefs", [])
+    )
     return sorted(refs)
 
 
@@ -2745,7 +2920,12 @@ def _prepare_scan_finalization(
     else:
         _populate_unsealed_finding_identities(manifest, findings)
     _validate_findings(manifest, findings_for_validation)
-    _validate_coverage(manifest, coverage, scan_dir)
+    _validate_coverage(
+        manifest,
+        coverage,
+        scan_dir,
+        require_resolved_history=not was_sealed,
+    )
     _validate_canonical_schemas_before_projection(
         manifest, findings_for_validation, coverage, schema_dir
     )

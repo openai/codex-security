@@ -84,15 +84,24 @@ export async function recordCodexSecurityScanDraft(
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
   requireBoundScan(context, parsed, true);
-  if (!publishDraft) await saveScanDraftCheckpoint(context, parsed);
 
   for (;;) {
     signal?.throwIfAborted();
     // Deep results are ready to save. Do not merge older drafts or
     // checkpoints into them.
-    const preserved = context.mode === "deep" && parsed.complete !== false
+    const finalDeepDraft = context.mode === "deep" && parsed.complete !== false;
+    if (
+      finalDeepDraft
+      && ((parsed.coverage.resolvedDeferred as unknown[] | undefined) ?? []).length > 0
+    ) {
+      throw new Error(
+        "scan draft: coverage.resolvedDeferred is not supported for terminal Deep drafts.",
+      );
+    }
+    if (finalDeepDraft && !publishDraft) await saveScanDraftCheckpoint(context, parsed);
+    const preserved = finalDeepDraft
       ? { input: parsed, previousDigest: undefined }
-      : await preserveScanDraft(context, parsed, false);
+      : await preserveScanDraft(context, parsed, !publishDraft);
     const reconciled = preserved.input;
     const contract = requireObject(
       context.targetContract,
@@ -303,7 +312,6 @@ async function preserveScanDraft(
   saveCheckpoint = true,
 ): Promise<{ input: ScanDraftInput; previousDigest: string }> {
   const currentCheckpointName = scanDraftCheckpointName(input);
-  if (saveCheckpoint) await saveScanDraftCheckpoint(context, input, false);
   let result = structuredClone(input);
   const previousState = await readPreviousScanDraft(context);
   const previous = previousState.input;
@@ -329,6 +337,13 @@ async function preserveScanDraft(
   if (result.threatModel === undefined && retainedThreatModel !== undefined) {
     result.threatModel = structuredClone(retainedThreatModel);
   }
+
+  const resolvedDeferredIds = await validateResolvedDeferred(
+    context,
+    result,
+    sources,
+  );
+  if (saveCheckpoint) await saveScanDraftCheckpoint(context, input, false);
 
   const resolvedCandidateIds = new Set([
     ...result.findings.map(findingCandidateId),
@@ -405,6 +420,11 @@ async function preserveScanDraft(
         const candidateId = item.candidateId ?? item.id;
         return (
           (typeof candidateId !== "string" || !resolvedIds.has(candidateId))
+          && (
+            typeof item.candidateId === "string"
+            || typeof item.id !== "string"
+            || !resolvedDeferredIds.has(item.id)
+          )
           && !coverageEntryPresent(result.coverage.deferred as unknown[], item)
         );
       }),
@@ -429,6 +449,99 @@ async function preserveScanDraft(
   }
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
+}
+
+async function validateResolvedDeferred(
+  context: ArtifactContext,
+  result: ScanDraftInput,
+  sources: ScanDraftInput[],
+): Promise<Set<string>> {
+  const closures = (result.coverage.resolvedDeferred as JsonObject[] | undefined) ?? [];
+  if (closures.length === 0) return new Set();
+  if (result.complete === false) {
+    throw new Error(
+      "scan draft: coverage.resolvedDeferred is allowed only on a terminal draft.",
+    );
+  }
+
+  const active = new Map<string, Map<string, JsonObject>>();
+  for (const source of sources) {
+    for (const deferred of source.coverage.deferred as JsonObject[]) {
+      if (typeof deferred.candidateId === "string") continue;
+      const id = deferred.id;
+      if (typeof id !== "string") continue;
+      const rows = active.get(id) ?? new Map<string, JsonObject>();
+      rows.set(JSON.stringify(deferred), deferred);
+      active.set(id, rows);
+    }
+  }
+
+  const currentDeferredIds = new Set(
+    (result.coverage.deferred as JsonObject[]).flatMap((deferred) => {
+      if (typeof deferred.candidateId === "string") return [];
+      return typeof deferred.id === "string" ? [deferred.id] : [];
+    }),
+  );
+  const currentSurfaces = normalizeCoverageSurfaces(
+    result.coverage.surfaces as JsonObject[],
+  );
+  const resolved = new Set<string>();
+  for (const [index, closure] of closures.entries()) {
+    const id = closure.id as string;
+    const label = `scan draft: coverage.resolvedDeferred[${index}]`;
+    if (resolved.has(id)) {
+      throw new Error(`${label}.id duplicates ${id}.`);
+    }
+    const rows = active.get(id);
+    if (!rows) {
+      throw new Error(`${label}.id does not name active deferred work: ${id}.`);
+    }
+    if (rows.size !== 1) {
+      throw new Error(`${label}.id is ambiguous across saved checkpoints: ${id}.`);
+    }
+    if (currentDeferredIds.has(id)) {
+      throw new Error(`${label}.id is still active in coverage.deferred: ${id}.`);
+    }
+
+    const surfaceIds = closure.surfaceIds as string[];
+    const surfaces = surfaceIds.map((surfaceId) => currentSurfaces.find((surface) => (
+      surface.id === surfaceId
+    )));
+    const missingSurface = surfaceIds.find((_, surfaceIndex) => (
+      surfaces[surfaceIndex] === undefined
+    ));
+    if (missingSurface !== undefined) {
+      throw new Error(
+        `${label}.surfaceIds does not name a current surface: ${missingSurface}.`,
+      );
+    }
+    const followUpSurface = surfaces.find((surface) => (
+      surface?.disposition === "needs_follow_up"
+    ));
+    if (followUpSurface !== undefined) {
+      throw new Error(`${label}.surfaceIds cannot reference needs_follow_up work.`);
+    }
+
+    const surfaceReceiptRefs = new Set(
+      surfaces.flatMap((surface) => (
+        (surface?.receiptRefs as string[] | undefined) ?? []
+      )),
+    );
+    for (const receiptRef of closure.receiptRefs as string[]) {
+      if (!surfaceReceiptRefs.has(receiptRef)) {
+        throw new Error(
+          `${label}.receiptRefs must also be attached to a referenced current surface: ${receiptRef}.`,
+        );
+      }
+      await readArtifactText(
+        context,
+        receiptRef.split("/"),
+        `${label}.receiptRefs`,
+      );
+    }
+    resolved.add(id);
+  }
+  return resolved;
 }
 
 async function readCurrentCheckpoints(
@@ -976,7 +1089,7 @@ export async function getCodexSecurityCompletedScan(
 export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
   const parsed = scanDraftInputSchema.parse(input);
   validateFindingSemantics(parsed.findings);
-  validateCoverageSemantics(parsed.coverage);
+  validateCoverageSemantics(parsed.complete, parsed.coverage);
   return parsed;
 }
 
@@ -1486,32 +1599,7 @@ function buildCoverage(
   target: JsonObject,
 ): JsonObject {
   const surfaces = semanticCoverage.surfaces as JsonObject[];
-  const reservedSurfaceIds = new Set(
-    surfaces.flatMap((surface) =>
-      typeof surface.id === "string" ? [surface.id] : [],
-    ),
-  );
-  const surfaceIds = new Set<string>();
-  const normalizedSurfaces = surfaces.map((surface, index) => {
-    const explicitId = typeof surface.id === "string";
-    const baseId = explicitId
-      ? (surface.id as string)
-      : `surface_${semanticIdentifier(surface.label as string, String(index + 1))}`;
-    let id = baseId;
-    if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
-      let suffix = 2;
-      do {
-        id = `${baseId}-${suffix}`;
-        suffix += 1;
-      } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
-    }
-    surfaceIds.add(id);
-    return {
-      ...surface,
-      id,
-      receiptRefs: surface.receiptRefs ?? [],
-    };
-  });
+  const normalizedSurfaces = normalizeCoverageSurfaces(surfaces);
   const deferred = semanticCoverage.deferred as JsonObject[];
   // Reserve later owned identities before deriving any earlier missing ones.
   const deferredIds = new Set(
@@ -1573,6 +1661,35 @@ function buildCoverage(
           ),
         }),
   };
+}
+
+function normalizeCoverageSurfaces(surfaces: JsonObject[]): JsonObject[] {
+  const reservedSurfaceIds = new Set(
+    surfaces.flatMap((surface) =>
+      typeof surface.id === "string" ? [surface.id] : [],
+    ),
+  );
+  const surfaceIds = new Set<string>();
+  return surfaces.map((surface, index) => {
+    const explicitId = typeof surface.id === "string";
+    const baseId = explicitId
+      ? (surface.id as string)
+      : `surface_${semanticIdentifier(surface.label as string, String(index + 1))}`;
+    let id = baseId;
+    if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
+      let suffix = 2;
+      do {
+        id = `${baseId}-${suffix}`;
+        suffix += 1;
+      } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
+    }
+    surfaceIds.add(id);
+    return {
+      ...surface,
+      id,
+      receiptRefs: surface.receiptRefs ?? [],
+    };
+  });
 }
 
 function coverageMode(context: ArtifactContext, contract: JsonObject): string {
@@ -1715,7 +1832,18 @@ function validateFindingSemantics(findings: JsonObject[]): void {
   }
 }
 
-function validateCoverageSemantics(coverage: JsonObject): void {
+function validateCoverageSemantics(
+  complete: boolean | undefined,
+  coverage: JsonObject,
+): void {
+  if (
+    complete === false
+    && ((coverage.resolvedDeferred as unknown[] | undefined) ?? []).length > 0
+  ) {
+    throw new Error(
+      "scan draft: coverage.resolvedDeferred is allowed only on a terminal draft.",
+    );
+  }
   if (coverage.completeness !== "complete") return;
   if ((coverage.deferred as unknown[]).length > 0) {
     throw new Error(

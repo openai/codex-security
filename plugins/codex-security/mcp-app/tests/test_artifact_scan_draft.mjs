@@ -639,6 +639,274 @@ try {
   assert.deepEqual(resolvedRejection.coverage.deferred, []);
   assert.deepEqual(resolvedRejection.coverage.surfaces[0].candidate, candidate);
 
+  const resolvedGenericRoot = path.join(root, "resolved-generic-checkpoint");
+  await mkdir(resolvedGenericRoot);
+  const resolvedGenericContext = { ...context, root: resolvedGenericRoot };
+  const reviewReceipt = "artifacts/review/independent-source-review.json";
+  await mkdir(path.join(resolvedGenericRoot, "artifacts", "review"), { recursive: true });
+  await writeFile(
+    path.join(resolvedGenericRoot, reviewReceipt),
+    JSON.stringify({ status: "completed", reviewedPaths: ["src/a.js", "src/b.js"] }),
+  );
+  const genericCheckpoint = {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [],
+      deferred: [{
+        id: "independent-source-review",
+        reason: "Independent source review remains pending.",
+        paths: ["src/a.js", "src/b.js"],
+      }],
+    },
+  };
+  await recordCodexSecurityScanDraft(resolvedGenericContext, genericCheckpoint);
+  const genericClosure = {
+    id: "independent-source-review",
+    resolution: "completed",
+    surfaceIds: ["surface_independent-source-review"],
+    receiptRefs: [reviewReceipt],
+  };
+  const resolvedGenericDraft = {
+    ...input,
+    complete: true,
+    findings: [],
+    coverage: {
+      ...coverage,
+      surfaces: [{
+        label: "Independent source review",
+        disposition: "no_issue_found",
+        receiptRefs: [reviewReceipt],
+      }],
+      resolvedDeferred: [genericClosure],
+    },
+  };
+  await recordCodexSecurityScanDraft(resolvedGenericContext, resolvedGenericDraft);
+  const resolvedGenericCoverage = await readJson(
+    resolvedGenericRoot,
+    "coverage.json",
+  );
+  assert.equal(resolvedGenericCoverage.completeness, "complete");
+  assert.deepEqual(resolvedGenericCoverage.deferred, []);
+  assert.deepEqual(resolvedGenericCoverage.resolvedDeferred, [genericClosure]);
+  await assert.rejects(
+    recordCodexSecurityScanDraft(deepParentContext, {
+      ...acceptedDeepDraft,
+      coverage: {
+        ...acceptedDeepDraft.coverage,
+        resolvedDeferred: [genericClosure],
+      },
+    }),
+    /coverage\.resolvedDeferred is not supported for terminal Deep drafts/,
+  );
+  const genericCheckpointFiles = await readdir(
+    path.join(resolvedGenericRoot, "checkpoints"),
+  );
+  const genericCheckpointHistory = await Promise.all(
+    genericCheckpointFiles.map(async name => JSON.parse(await readFile(
+      path.join(resolvedGenericRoot, "checkpoints", name),
+      "utf8",
+    ))),
+  );
+  assert.equal(genericCheckpointHistory.some(checkpoint => (
+    checkpoint.complete === false
+    && checkpoint.coverage.deferred.some(item => item.id === "independent-source-review")
+  )), true, "terminal closure preserves the immutable partial checkpoint");
+  const genericCanonicalNames = [
+    "scan-manifest.json",
+    "findings.json",
+    "coverage.json",
+  ];
+  const genericCanonical = await Promise.all(genericCanonicalNames.map(name => (
+    readFile(path.join(resolvedGenericRoot, name))
+  )));
+  await recordCodexSecurityScanDraft(resolvedGenericContext, resolvedGenericDraft);
+  for (const [index, name] of genericCanonicalNames.entries()) {
+    assert.deepEqual(
+      await readFile(path.join(resolvedGenericRoot, name)),
+      genericCanonical[index],
+      `repeated terminal closure keeps ${name} deterministic`,
+    );
+  }
+
+  for (const [name, draft, error] of [
+    [
+      "unknown deferred ID",
+      {
+        ...resolvedGenericDraft,
+        coverage: {
+          ...resolvedGenericDraft.coverage,
+          resolvedDeferred: [{ ...genericClosure, id: "unknown-review" }],
+        },
+      },
+      /does not name active deferred work: unknown-review/,
+    ],
+    [
+      "duplicate closure",
+      {
+        ...resolvedGenericDraft,
+        coverage: {
+          ...resolvedGenericDraft.coverage,
+          resolvedDeferred: [genericClosure, genericClosure],
+        },
+      },
+      /id duplicates independent-source-review/,
+    ],
+    [
+      "missing surface",
+      {
+        ...resolvedGenericDraft,
+        coverage: {
+          ...resolvedGenericDraft.coverage,
+          resolvedDeferred: [{ ...genericClosure, surfaceIds: ["surface_missing"] }],
+        },
+      },
+      /does not name a current surface: surface_missing/,
+    ],
+    [
+      "unbound receipt",
+      {
+        ...resolvedGenericDraft,
+        coverage: {
+          ...resolvedGenericDraft.coverage,
+          resolvedDeferred: [{
+            ...genericClosure,
+            receiptRefs: ["artifacts/review/unbound.json"],
+          }],
+        },
+      },
+      /must also be attached to a referenced current surface/,
+    ],
+    [
+      "still active deferred work",
+      {
+        ...resolvedGenericDraft,
+        coverage: {
+          ...resolvedGenericDraft.coverage,
+          completeness: "partial",
+          deferred: genericCheckpoint.coverage.deferred,
+        },
+      },
+      /is still active in coverage.deferred/,
+    ],
+  ]) {
+    await assert.rejects(
+      recordCodexSecurityScanDraft(resolvedGenericContext, draft),
+      error,
+      name,
+    );
+    for (const [index, canonicalName] of genericCanonicalNames.entries()) {
+      assert.deepEqual(
+        await readFile(path.join(resolvedGenericRoot, canonicalName)),
+        genericCanonical[index],
+        `${name} is rejected before canonical writes`,
+      );
+    }
+  }
+  await assert.rejects(
+    recordCodexSecurityScanDraft(resolvedGenericContext, {
+      ...resolvedGenericDraft,
+      complete: false,
+    }),
+    /coverage\.resolvedDeferred is allowed only on a terminal draft/,
+  );
+
+  const mixedGenericRoot = path.join(root, "mixed-generic-checkpoint");
+  await mkdir(mixedGenericRoot);
+  const mixedGenericContext = { ...context, root: mixedGenericRoot };
+  await mkdir(path.join(mixedGenericRoot, "artifacts", "review"), { recursive: true });
+  await writeFile(path.join(mixedGenericRoot, reviewReceipt), "{}\n");
+  await recordCodexSecurityScanDraft(mixedGenericContext, {
+    ...genericCheckpoint,
+    coverage: {
+      ...genericCheckpoint.coverage,
+      deferred: [
+        ...genericCheckpoint.coverage.deferred,
+        { id: "runtime-follow-up", reason: "Runtime validation remains pending." },
+        {
+          id: "candidate-collision-row",
+          candidateId: "independent-source-review",
+          reason: "Candidate-linked work with a colliding identifier remains pending.",
+        },
+      ],
+    },
+  });
+  await recordCodexSecurityScanDraft(mixedGenericContext, {
+    ...resolvedGenericDraft,
+    coverage: {
+      ...resolvedGenericDraft.coverage,
+      completeness: "partial",
+      surfaces: [
+        ...resolvedGenericDraft.coverage.surfaces,
+        {
+          id: "surface_runtime-follow-up",
+          label: "Runtime validation",
+          disposition: "needs_follow_up",
+        },
+      ],
+      deferred: [{
+        id: "runtime-follow-up",
+        reason: "Runtime validation remains pending.",
+      }],
+    },
+  });
+  const mixedGenericCoverage = await readJson(mixedGenericRoot, "coverage.json");
+  assert.equal(mixedGenericCoverage.completeness, "partial");
+  assert.deepEqual(
+    mixedGenericCoverage.deferred.map(item => item.id),
+    ["runtime-follow-up", "candidate-collision-row"],
+  );
+  assert.deepEqual(mixedGenericCoverage.resolvedDeferred, [genericClosure]);
+
+  const isolatedGenericRoot = path.join(root, "isolated-generic-checkpoint");
+  await mkdir(isolatedGenericRoot);
+  const isolatedScanId = "83d97076-ee2f-4d2a-bf18-ddd400640ddd";
+  const isolatedContext = {
+    ...context,
+    root: isolatedGenericRoot,
+    scanId: isolatedScanId,
+  };
+  const isolatedCheckpoint = {
+    ...genericCheckpoint,
+    scanId: isolatedScanId,
+  };
+  await recordCodexSecurityScanDraft(isolatedContext, isolatedCheckpoint);
+  const isolatedCheckpointNames = await readdir(
+    path.join(isolatedGenericRoot, "checkpoints"),
+  );
+  const isolatedCheckpointBytes = await Promise.all(
+    isolatedCheckpointNames.map(name => readFile(
+      path.join(isolatedGenericRoot, "checkpoints", name),
+    )),
+  );
+  const isolatedCanonical = await Promise.all(
+    genericCanonicalNames.map(name => readFile(path.join(isolatedGenericRoot, name))),
+  );
+  await recordCodexSecurityScanDraft(resolvedGenericContext, resolvedGenericDraft);
+  const isolatedCoverage = await readJson(isolatedGenericRoot, "coverage.json");
+  assert.equal(isolatedCoverage.completeness, "partial");
+  assert.deepEqual(
+    isolatedCoverage.deferred.map(item => item.id),
+    ["independent-source-review"],
+  );
+  for (const [index, name] of genericCanonicalNames.entries()) {
+    assert.deepEqual(
+      await readFile(path.join(isolatedGenericRoot, name)),
+      isolatedCanonical[index],
+      "resolving one scan does not rewrite another scan's canonical artifact",
+    );
+  }
+  for (const [index, name] of isolatedCheckpointNames.entries()) {
+    assert.deepEqual(
+      await readFile(path.join(isolatedGenericRoot, "checkpoints", name)),
+      isolatedCheckpointBytes[index],
+      "resolving one scan does not rewrite another scan's checkpoint",
+    );
+  }
+
   const undefinedCandidateRoot = path.join(root, "undefined-candidate-worker");
   await mkdir(undefinedCandidateRoot);
   const undefinedCandidateContext = { ...workerContext, root: undefinedCandidateRoot };
