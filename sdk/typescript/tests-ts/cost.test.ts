@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
   appendFile,
+  chmod,
   mkdir,
   mkdtemp,
   realpath,
@@ -581,6 +582,79 @@ describe("live scan cost tracking", () => {
     expect(traversals).toBe(2);
     expect((await tracker.stop()).cost?.inputTokens).toBe(100);
   });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reports an inaccessible prior session log once instead of on every poll",
+    async () => {
+      const home = await codexHome();
+      await writeSession(home, "scan-thread", {
+        input_tokens: 100,
+        output_tokens: 10,
+      });
+      const inaccessible = await writeSession(home, "prior-thread", {
+        input_tokens: 1_000_000,
+        output_tokens: 1_000_000,
+      });
+      await chmod(inaccessible, 0o000);
+      const errors: string[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 1,
+        onError: (error) => {
+          if (error instanceof Error) errors.push(error.message);
+        },
+      });
+      tracker.start("scan-thread");
+
+      try {
+        await waitFor(() => errors.length === 1);
+        // Three more poll intervals: a retired file is not opened again.
+        await new Promise<void>((resolve) => setTimeout(resolve, 300));
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toContain("EACCES");
+        await tracker.stop();
+      } finally {
+        await chmod(inaccessible, 0o600);
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "still reports the scan's own usage when a prior session log is inaccessible",
+    async () => {
+      const home = await codexHome();
+      await writeSession(home, "scan-thread", {
+        input_tokens: 100,
+        output_tokens: 10,
+      });
+      const inaccessible = await writeSession(home, "prior-thread", {
+        input_tokens: 1_000_000,
+        output_tokens: 1_000_000,
+      });
+      await chmod(inaccessible, 0o000);
+      let reportFirstError!: () => void;
+      const firstError = new Promise<void>((resolve) => {
+        reportFirstError = resolve;
+      });
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 1,
+        onError: () => reportFirstError(),
+      });
+      tracker.start("scan-thread");
+
+      try {
+        await firstError;
+        const stopped = await tracker.stop();
+        expect(stopped.cost?.inputTokens).toBe(100);
+        expect(stopped.usage).toMatchObject({ input_tokens: 100 });
+      } finally {
+        await chmod(inaccessible, 0o600);
+      }
+    },
+  );
 
   test("reports live token use and cost without a spending limit", async () => {
     const home = await codexHome();
