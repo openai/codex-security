@@ -338,6 +338,8 @@ async function preserveScanDraft(
       ))
       .map((surface) => surface.candidateId),
   ].filter((value): value is string => typeof value === "string"));
+  const currentSurfaces = result.coverage.surfaces as JsonObject[];
+  const resolvedSurfaces = resolvedCoverageSurfaces(currentSurfaces, sources, previous);
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
     const pending = source.coverage.deferred as JsonObject[];
     if (pending.length === 0 || pending.some((item) => {
@@ -406,6 +408,7 @@ async function preserveScanDraft(
         return (
           (typeof candidateId !== "string" || !resolvedIds.has(candidateId))
           && !coverageEntryPresent(result.coverage.deferred as unknown[], item)
+          && !deferredSurfacesResolved(item, resolvedSurfaces.ids)
         );
       }),
       surfaces: (source.coverage.surfaces as JsonObject[]).filter((surface) => {
@@ -415,7 +418,10 @@ async function preserveScanDraft(
           && !coverageEntryPresent(result.coverage.surfaces as unknown[], surface)
           && !(
             surface.disposition === "needs_follow_up"
-            && coverageEntryPresent(resolvedFollowUpSurfaces, surface)
+            && (
+              coverageEntryPresent(resolvedFollowUpSurfaces, surface)
+              || coverageSurfaceResolved(surface, resolvedSurfaces)
+            )
           )
         );
       }),
@@ -854,6 +860,192 @@ function coverageEntryIdentities(entry: JsonObject): string[] {
     ];
   }
   return [];
+}
+
+function resolvedCoverageSurfaces(
+  current: JsonObject[],
+  sources: ScanDraftInput[],
+  previous: ScanDraftInput | undefined,
+): { ids: Set<string>; semanticKeys: Set<string> } {
+  // Surface IDs are workbench-owned, so a later semantic draft can omit them.
+  // Reconnect a terminal surface to history only when its label and risk area
+  // identify one historical ID; duplicate surfaces must stay distinct.
+  const previousKeysById = new Map<string, Set<string>>();
+  const previousIdsByKey = new Map<string, Set<string>>();
+  for (const surface of (previous?.coverage.surfaces ?? []) as JsonObject[]) {
+    const key = coverageSurfaceSemanticKey(surface);
+    if (key === undefined || typeof surface.id !== "string") continue;
+    const keys = previousKeysById.get(surface.id) ?? new Set<string>();
+    keys.add(key);
+    previousKeysById.set(surface.id, keys);
+    const ids = previousIdsByKey.get(key) ?? new Set<string>();
+    ids.add(surface.id);
+    previousIdsByKey.set(key, ids);
+  }
+  const historicalIds = new Map<string, Set<string>>();
+  const historicalKeysById = new Map<string, Set<string>>();
+  for (const source of sources) {
+    const sourceCounts = new Map<string, number>();
+    for (const surface of source.coverage.surfaces as JsonObject[]) {
+      const key = coverageSurfaceSemanticKey(surface);
+      if (key !== undefined) sourceCounts.set(key, (sourceCounts.get(key) ?? 0) + 1);
+    }
+    for (const surface of source.coverage.surfaces as JsonObject[]) {
+      const key = coverageSurfaceSemanticKey(surface);
+      if (key === undefined || typeof surface.id !== "string") continue;
+      let id = surface.id;
+      const savedIds = previousIdsByKey.get(key);
+      if (savedIds?.size === 1 && sourceCounts.get(key) === 1 && !previousKeysById.has(id)) {
+        id = [...savedIds][0]!;
+        surface.id = id;
+      }
+      // Canonical IDs include reservations from earlier drafts. A raw checkpoint
+      // cannot reassign them or recreate that context by projecting in isolation.
+      const previousKeys = previousKeysById.get(id);
+      if (previousKeys !== undefined && (previousKeys.size !== 1 || !previousKeys.has(key))) continue;
+      const ids = historicalIds.get(key) ?? new Set<string>();
+      ids.add(id);
+      historicalIds.set(key, ids);
+      const keys = historicalKeysById.get(id) ?? new Set<string>();
+      keys.add(key);
+      historicalKeysById.set(id, keys);
+    }
+  }
+  if (sources.length > 0) {
+    // Recover missing members of each historical group, using the complete
+    // ordered context so earlier explicit IDs remain reserved.
+    const groupSizes = new Map<string, number>();
+    for (const source of sources) {
+      const counts = new Map<string, number>();
+      for (const surface of source.coverage.surfaces as JsonObject[]) {
+        const key = coverageSurfaceSemanticKey(surface);
+        if (key === undefined) continue;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      for (const [key, count] of counts) {
+        groupSizes.set(key, Math.max(groupSizes.get(key) ?? 0, count));
+      }
+    }
+    const combined = preserveScanCoverage(
+      sources[0]!.coverage,
+      sources.slice(1).map(source => source.coverage),
+      false,
+    );
+    // Coverage union coalesces matching ID-less rows. Restore their historical
+    // multiplicity before projection so a partially identified group keeps its IDs.
+    const combinedSurfaces = combined.surfaces as JsonObject[];
+    const combinedCounts = new Map<string, number>();
+    for (const surface of combinedSurfaces) {
+      const key = coverageSurfaceSemanticKey(surface);
+      if (key !== undefined) combinedCounts.set(key, (combinedCounts.get(key) ?? 0) + 1);
+    }
+    for (const source of sources) {
+      for (const surface of source.coverage.surfaces as JsonObject[]) {
+        const key = coverageSurfaceSemanticKey(surface);
+        if (typeof surface.id === "string" || key === undefined) continue;
+        const count = combinedCounts.get(key) ?? 0;
+        if (count >= groupSizes.get(key)!) continue;
+        combinedSurfaces.push(surface);
+        combinedCounts.set(key, count + 1);
+      }
+    }
+    for (const surface of buildCoverageSurfaces(combined.surfaces as JsonObject[])) {
+      const key = coverageSurfaceSemanticKey(surface);
+      if (key === undefined || typeof surface.id !== "string") continue;
+      const recovered = historicalIds.get(key) ?? new Set<string>();
+      if (recovered.has(surface.id) || recovered.size >= groupSizes.get(key)!) continue;
+      recovered.add(surface.id);
+      historicalIds.set(key, recovered);
+      const keys = historicalKeysById.get(surface.id) ?? new Set<string>();
+      keys.add(key);
+      historicalKeysById.set(surface.id, keys);
+    }
+    // Reserve recovered identities and keep stale authored IDs from taking them
+    // back. These are working copies; raw checkpoint files remain unchanged.
+    for (const source of sources) {
+      source.coverage.surfaces = (source.coverage.surfaces as JsonObject[]).map(surface => {
+        const key = coverageSurfaceSemanticKey(surface);
+        if (key === undefined) return surface;
+        if (typeof surface.id === "string" && historicalIds.get(key)?.has(surface.id)) return surface;
+        const savedIds = historicalIds.get(key);
+        if (savedIds?.size === 1) return { ...surface, id: [...savedIds][0]! };
+        if (typeof surface.id !== "string" || !historicalKeysById.has(surface.id)) return surface;
+        const { id: _id, ...semantic } = surface;
+        return semantic;
+      });
+    }
+  }
+  for (const surface of current) {
+    if (typeof surface.id !== "string") continue;
+    const keys = previousKeysById.get(surface.id) ?? historicalKeysById.get(surface.id);
+    const key = coverageSurfaceSemanticKey(surface);
+    if (keys !== undefined && (keys.size !== 1 || key === undefined || !keys.has(key))) {
+      // Keep the saved identity reserved for its original surface. Otherwise a
+      // reused authored ID could replace it and become trusted on the next draft.
+      delete surface.id;
+    }
+  }
+  const ids = new Set<string>();
+  const currentByKey = new Map<string, JsonObject[]>();
+  for (const surface of current) {
+    const key = coverageSurfaceSemanticKey(surface);
+    if (key === undefined) continue;
+    // Authored IDs can be reused on unrelated surfaces. Only resolve an ID
+    // when the current surface also matches its historical semantic identity.
+    if (
+      surface.disposition !== "needs_follow_up"
+      && typeof surface.id === "string"
+      && historicalIds.get(key)?.has(surface.id)
+      && historicalKeysById.get(surface.id)?.size === 1
+    ) ids.add(surface.id);
+    const surfaces = currentByKey.get(key) ?? [];
+    surfaces.push(surface);
+    currentByKey.set(key, surfaces);
+  }
+  const semanticKeys = new Set<string>();
+  for (const [key, surfaces] of currentByKey) {
+    if (
+      surfaces.length !== 1
+      || surfaces[0]!.disposition === "needs_follow_up"
+    ) continue;
+    const previousIds = historicalIds.get(key);
+    if (previousIds?.size !== 1) continue;
+    const previousId = [...previousIds][0]!;
+    if (historicalKeysById.get(previousId)?.size !== 1) continue;
+    if (typeof surfaces[0]!.id === "string") surfaces[0]!.id = previousId;
+    ids.add(previousId);
+    semanticKeys.add(key);
+  }
+  for (const [key, historical] of historicalIds) {
+    if ([...historical].every(id => ids.has(id))) semanticKeys.add(key);
+  }
+  return { ids, semanticKeys };
+}
+
+function deferredSurfacesResolved(
+  deferred: JsonObject,
+  resolvedSurfaceIds: Set<string>,
+): boolean {
+  const surfaceIds = deferred.surfaceIds;
+  return Array.isArray(surfaceIds)
+    && surfaceIds.length > 0
+    && surfaceIds.every((value) => (
+      typeof value === "string" && resolvedSurfaceIds.has(value)
+    ));
+}
+
+function coverageSurfaceResolved(
+  surface: JsonObject,
+  resolved: { ids: Set<string>; semanticKeys: Set<string> },
+): boolean {
+  if (typeof surface.id === "string") return resolved.ids.has(surface.id);
+  const key = coverageSurfaceSemanticKey(surface);
+  return key !== undefined && resolved.semanticKeys.has(key);
+}
+
+function coverageSurfaceSemanticKey(surface: JsonObject): string | undefined {
+  if (typeof surface.label !== "string") return undefined;
+  return JSON.stringify([surface.riskArea ?? null, surface.label]);
 }
 
 /** Reducers cannot resolve source review by omitting its coverage records. */
@@ -1478,21 +1670,14 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   });
 }
 
-function buildCoverage(
-  context: ArtifactContext,
-  contract: JsonObject,
-  semanticCoverage: JsonObject,
-  scope: JsonObject,
-  target: JsonObject,
-): JsonObject {
-  const surfaces = semanticCoverage.surfaces as JsonObject[];
+function buildCoverageSurfaces(surfaces: JsonObject[]): JsonObject[] {
   const reservedSurfaceIds = new Set(
     surfaces.flatMap((surface) =>
       typeof surface.id === "string" ? [surface.id] : [],
     ),
   );
   const surfaceIds = new Set<string>();
-  const normalizedSurfaces = surfaces.map((surface, index) => {
+  return surfaces.map((surface, index) => {
     const explicitId = typeof surface.id === "string";
     const baseId = explicitId
       ? (surface.id as string)
@@ -1512,6 +1697,15 @@ function buildCoverage(
       receiptRefs: surface.receiptRefs ?? [],
     };
   });
+}
+
+function buildCoverage(
+  context: ArtifactContext,
+  contract: JsonObject,
+  semanticCoverage: JsonObject,
+  scope: JsonObject,
+  target: JsonObject,
+): JsonObject {
   const deferred = semanticCoverage.deferred as JsonObject[];
   // Reserve later owned identities before deriving any earlier missing ones.
   const deferredIds = new Set(
@@ -1561,7 +1755,7 @@ function buildCoverage(
     inventoryStrategy: inventoryStrategy(context, scope, target),
     includePaths: scope.includePaths,
     excludePaths: scope.excludePaths,
-    surfaces: normalizedSurfaces,
+    surfaces: buildCoverageSurfaces(semanticCoverage.surfaces as JsonObject[]),
     deferred: normalizedDeferred,
     ...(openQuestions === undefined
       ? {}
