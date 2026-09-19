@@ -11,6 +11,11 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
+import {
+  checkSavedProjection,
+  savedLogTurn,
+} from "./support/scan-log-lifecycle.js";
+import type { ScanLogSource } from "../src/scan-logs.js";
 import { main } from "../src/cli.js";
 import type { ScanOptions } from "../src/api.js";
 import { runWorkbench } from "../src/runtime.js";
@@ -402,12 +407,14 @@ function resumeClient(
   createCodex: NonNullable<
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
   >,
+  persistentCredentialHome = false,
 ) {
   return (config: ConstructorParameters<typeof TestClient>[0]) =>
     new TestClient(config, {
       environment: f.environment,
       prepareRuntime: async () => {
         const runtime = preparedRuntime(f.codexHome);
+        runtime.persistentCredentialHome = persistentCredentialHome;
         runtime.plugin.version = JSON.parse(
           await readFile(
             join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
@@ -1027,4 +1034,94 @@ test("resume requires an explicit scan ID", async () => {
   });
   expect(code).toBe(2);
   expect(stderr.text()).toContain("scanId");
+});
+
+test("saved logs retain the finishing task of an already-sealed running resume", async () => {
+  const f = await interruptedScan();
+  // Existing discovery fixture advances only its time-cap clock, not ownership.
+  await finishDiscovery(f);
+  await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+  const names = [
+    "scan-manifest.json",
+    "findings.json",
+    "coverage.json",
+    "report.md",
+  ];
+  const originals = await Promise.all(
+    names.map((name) => readFile(join(f.scanDir, name))),
+  );
+  const sealed = JSON.parse(originals[0]!.toString()).scan.completedAt;
+  expect(
+    (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+  ).toMatchObject({ progress: { status: "running" } });
+  await appendFile(
+    f.sessionPath,
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: new Date().toISOString(),
+      payload: { type: "task_started", turn_id: "unrelated-before-resume" },
+    }) + "\n",
+  );
+  const stdout = capture();
+  const stderr = capture();
+  expect(
+    await main(
+      ["scans", "resume", f.scanId, "--json"],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...dependencies({
+          environment: f.environment,
+          currentDirectory: f.root,
+        }),
+        runWorkbench: f.command,
+        createSecurity: resumeClient(
+          f,
+          (options) => ({
+            startThread() {
+              throw new Error("Unexpected new session");
+            },
+            resumeThread(threadId) {
+              expect(threadId).toBe(f.threadId);
+              return {
+                id: threadId,
+                async runStreamed() {
+                  return savedLogTurn({
+                    environment: options.env!,
+                    threadId,
+                    turnId: "finishing",
+                    outcome: "completed",
+                    delegate: true,
+                  });
+                },
+              };
+            },
+          }),
+          true,
+        ),
+      },
+    ),
+    stderr.text(),
+  ).toBe(2);
+  const scan = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+    "scan"
+  ] as ScanLogSource;
+  expect(scan.progress).toMatchObject({
+    status: "complete",
+    updatedAt: sealed,
+  });
+  expect(
+    await Promise.all(names.map((name) => readFile(join(f.scanDir, name)))),
+  ).toEqual(originals);
+  await checkSavedProjection(
+    scan,
+    f.environment,
+    f.root,
+    f.threadId,
+    ["finishing"],
+    true,
+  );
+  expect(
+    await Promise.all(names.map((name) => readFile(join(f.scanDir, name)))),
+  ).toEqual(originals);
 });
