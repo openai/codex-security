@@ -86,7 +86,7 @@
     "react": "19.3.0",
     "semver": "7.8.5",
     "smol-toml": "1.8.0",
-    "yaml": "2.9.0",
+    "yaml": "2.9.1",
     "zod": "4.6.2"
   },
   "devDependencies": {
