@@ -164,6 +164,30 @@ describe("TypeScript package skeleton", () => {
       "22.13.0",
       "24",
     ]);
+    const verificationSteps = jobs["windows-verify"]!.steps!;
+    const shardPython = jobs["windows-test"]!.steps!.find(({ uses }) =>
+      uses?.startsWith("actions/setup-python@"),
+    );
+    const pythonSetup = verificationSteps.findIndex(({ uses }) =>
+      uses?.startsWith("actions/setup-python@"),
+    );
+    const packageInspection = verificationSteps.findIndex(
+      ({ run }) => run === "node scripts/check-package.mjs ../../dist/*.tgz",
+    );
+    expect(shardPython?.uses).toMatch(/^actions\/setup-python@[a-f0-9]{40}$/);
+    expect(pythonSetup).toBeGreaterThanOrEqual(0);
+    expect(pythonSetup).toBeLessThan(packageInspection);
+    expect(verificationSteps[pythonSetup]).toMatchObject({
+      uses: shardPython?.uses,
+      with: { "python-version": "3.12" },
+    });
+    expect(verificationSteps[pythonSetup]).not.toHaveProperty("if");
+    expect(verificationSteps[pythonSetup]).not.toHaveProperty(
+      "continue-on-error",
+    );
+    expect([false, "false"]).not.toContain(
+      verificationSteps[pythonSetup]?.with?.["update-environment"],
+    );
     expect(jobs["required-test"]?.name).toBe("${{ matrix.os }} / node-22");
     expect(jobs["required-test"]?.needs).toEqual([
       "validate-title",
