@@ -12,7 +12,11 @@ Resolve the target, requested scope, and user-provided security context before s
 
 Use the returned `scanId`, `scanDir`, scope, and exact `userContext` throughout the parent workflow. Read `../../../references/desktop-config-preflight.md` and run capability preflight only after this authoritative context exists.
 
-Use the existing desktop phase labels for work that actually occurs: threat mapping, investigation, parent-led validation, attack-path assessment, and report assembly. Preserve the authoritative scan ID and handoff token. Increase the investigator total before dispatching each newly discovered assignment; the concurrently running baseline is independent and does not inflate that total. Capture each completed, source-backed investigation as a real coverage surface before advancing its `review_receipts` progress count. Do not create separate receipt files. Advance later phase counts only after the corresponding finding or report artifact exists, and never invent counts, phase workers, or coverage.
+## Publish Live Progress
+
+Call `update_codex_security_scan_progress({ scanId, handoffClaimToken, phase })` when entering each real phase. After publishing a ready preflight result, set `phase: "threat_model"` before mapping security boundaries. Set `discovery` before dispatching investigation packets, `validation` before parent validation, `attack_path` before assessing reachability, and `reporting` before assembling the final report inputs. Preserve the current phase when work overlaps; never move backward or repeat completed work. Use the returned `scan.userContext` for the new phase and its workers.
+
+Publish meaningful completed-review batches through the same tool. Increase the investigator total before dispatching each newly discovered assignment; the concurrently running baseline is independent and does not inflate that total. Capture each completed, source-backed investigation as a real coverage surface before advancing its `review_receipts` progress count. Do not create separate receipt files. Advance later phase counts only after the corresponding finding or report artifact exists, and never invent counts, phase workers, or coverage. Accepted checkpoints also advance a Standard scan to at least `discovery`, and the final draft advances it to `reporting`; publish earlier phase transitions as they happen instead of waiting for a checkpoint.
 
 ## Complete The Same Scan
 

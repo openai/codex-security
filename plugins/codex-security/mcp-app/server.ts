@@ -36,11 +36,16 @@ const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
 const CONFIGURED_WORKBENCH_STATE_DIR = process.env.CODEX_SECURITY_STATE_DIR?.trim();
 const PLUGIN_ROOT = resolve(__dirname, "..");
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
-const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set(["inspect-target", "inspect-setup"]);
+const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
+  "resolve-scan-root",
+  "inspect-target",
+  "inspect-setup",
+  "save-artifact",
+  "read-artifact"
+]);
 
 type JsonObject = Record<string, unknown>;
 
-let defaultScanRoot: Promise<string> | undefined;
 let fallbackWorkbenchStateDir: Promise<string> | undefined;
 let fallbackWorkbenchStateLogged = false;
 let persistentWorkbenchStateSucceeded = false;
@@ -48,12 +53,49 @@ let workbenchStateSelectionTail: Promise<void> = Promise.resolve();
 
 const userContextSchema = z.string().trim().min(1);
 const editableUserContextSchema = z.string().trim();
+const verifiedAccessGrantSchema = z.object({
+  level: z.enum(["tac1", "tac2", "tac3", "government"]),
+  source: z.enum(["user", "project", "current_account"])
+}).strict().refine(({ level, source }) =>
+  level === "tac1" || (level === "tac2" ? source === "user" : source === "current_account"),
+  "Unsupported Daybreak grant source."
+);
+const verifiedAccessSnapshotSchema = z.object({
+  schemaVersion: z.literal(1),
+  status: z.enum(["granted", "not_granted", "unknown"]),
+  grants: z.array(verifiedAccessGrantSchema),
+  checkedAt: z.iso.datetime({ offset: true }).optional(),
+  stale: z.boolean(),
+  enrollmentUrl: z.url().optional()
+}).strict().superRefine((snapshot, context) => {
+  if (snapshot.status === "granted" && snapshot.grants.length === 0) {
+    context.addIssue({ code: "custom", message: "Granted Daybreak access requires a grant." });
+  }
+  if (snapshot.status !== "granted" && snapshot.grants.length !== 0) {
+    context.addIssue({ code: "custom", message: "Only granted Daybreak access may include grants." });
+  }
+}).transform((snapshot) => ({
+  ...snapshot,
+  checkedAt: snapshot.checkedAt ?? new Date().toISOString()
+}));
+const daybreakEntitlementContextSchema = z.object({
+  schemaVersion: z.literal(1),
+  entitlements: z.object({
+    cyber_trusted_access: verifiedAccessSnapshotSchema
+  })
+});
 
-function scanRoot(): Promise<string> {
-  if (CONFIGURED_SCAN_ROOT) return Promise.resolve(CONFIGURED_SCAN_ROOT);
-  // Agent turns can write OS temporary directories but cannot write protected Codex state.
-  defaultScanRoot ??= fs.mkdtemp(join(tmpdir(), "codex-security-scans-"));
-  return defaultScanRoot;
+async function scanRoot(): Promise<string> {
+  if (!CONFIGURED_SCAN_ROOT && !CONFIGURED_WORKBENCH_STATE_DIR && !persistentWorkbenchStateSucceeded && !fallbackWorkbenchStateDir) {
+    // Select the workbench state before choosing its default artifact directory.
+    await runWorkbench(["list-scans", "--limit", "1"]);
+  }
+  if (!CONFIGURED_SCAN_ROOT && fallbackWorkbenchStateDir) {
+    return join(await fallbackWorkbenchStateDir, "scans");
+  }
+  const result = await runWorkbench(["resolve-scan-root", ...optionalArg("--scan-root", CONFIGURED_SCAN_ROOT)]);
+  if (typeof result.scanRoot !== "string") throw new Error("Missing scan artifact root.");
+  return result.scanRoot;
 }
 
 interface WorkspaceState extends JsonObject {
@@ -360,6 +402,54 @@ export function createCodexSecurityServer(): McpServer {
   server.server.onclose = () => deepScanCoordinators.shutdown("mcp_transport_closed");
   const appMeta = { ui: { visibility: ["app"] as const } };
   const modelActionMeta = { ui: { visibility: ["model"] as const } };
+
+  server.registerTool("get_codex_security_daybreak_access", {
+    title: "Check Codex Security Daybreak Access",
+    description: "Check this account's Daybreak access and available Daybreak programs. This check is advisory and never authorizes or blocks a scan.",
+    inputSchema: z.object({}).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    _meta: {
+      ...modelActionMeta,
+      "openai/requestedEntitlements": ["cyber_trusted_access"]
+    }
+  }, (_input, extra) => {
+    const metadata = requestMetadataFromExtra(extra);
+    const threadId = typeof metadata?.threadId === "string" && metadata.threadId.trim()
+      ? metadata.threadId.trim()
+      : undefined;
+    const parsed = threadId
+      ? daybreakEntitlementContextSchema.safeParse(metadata?.["openai/entitlementContext"])
+      : undefined;
+    const snapshot = parsed?.success ? parsed.data.entitlements.cyber_trusted_access : {
+      schemaVersion: 1 as const,
+      status: "unknown" as const,
+      grants: [],
+      checkedAt: new Date().toISOString(),
+      stale: false
+    };
+    const status = snapshot.stale ? "unknown" : snapshot.status;
+    const programs = status === "granted" ? [...new Set(snapshot.grants.map(({ level }) =>
+      level === "tac3" || level === "government" ? "Daybreak Red" : "Daybreak Blue"
+    ))] : [];
+    const access = {
+      schemaVersion: snapshot.schemaVersion,
+      status,
+      programs,
+      checkedAt: snapshot.checkedAt,
+      stale: snapshot.stale,
+      ...(snapshot.enrollmentUrl ? { enrollmentUrl: snapshot.enrollmentUrl } : {})
+    };
+    const warning = access.status === "not_granted"
+      ? " This check is advisory: a scan may run, but protected results may not be displayable."
+      : "";
+    return {
+      content: [{
+        type: "text" as const,
+        text: `Codex Security Daybreak access: status=${access.status}; programs=${programs.join(", ") || "none"}; checkedAt=${access.checkedAt}; stale=${access.stale}.${warning}`
+      }],
+      structuredContent: access
+    };
+  });
 
   server.registerTool("start_codex_security_standard_scan", {
     title: "Start or Join Codex Security Standard Scan",
@@ -706,7 +796,7 @@ export function createCodexSecurityServer(): McpServer {
       invocationFailure: toolErrorResult(deepScanInvocationFailureMessage(error))
     }));
     if ("invocationFailure" in preparation) return preparation.invocationFailure;
-    if ("immediate" in preparation) return preparation.immediate;
+    if (preparation.immediate) return preparation.immediate;
     const { begun, coordinator, joined } = preparation;
     if (joined) {
       logDeepScanEvent({ event: "coordinator_joined", scanId: begun.run.scanId });
@@ -1237,6 +1327,7 @@ export function createCodexSecurityServer(): McpServer {
   registerCompactArtifactTools(server, {
     runWorkbench,
     pluginRoot: PLUGIN_ROOT,
+    resolveScanRoot: scanRoot,
     resolveHandoffClaimToken: (scanId, requestContext) => {
       const claim = authenticatedArtifactClaims.get(scanId);
       return claim && claim.threadId === threadIdFromExtra(requestContext)
@@ -1541,7 +1632,7 @@ function logDeepScanEvent(event: {
 
 async function runWorkbench(
   args: string[],
-  input?: string
+  input?: string | Buffer
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
@@ -1564,7 +1655,7 @@ async function runWorkbench(
 async function executeWorkbenchWithStateSelection(
   pythonCommand: string,
   args: string[],
-  input?: string
+  input?: string | Buffer
 ): Promise<JsonObject> {
   if (WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "")) {
     return await executeWorkbench(pythonCommand, args, undefined, input);
@@ -1616,7 +1707,7 @@ async function executeWorkbench(
   pythonCommand: string,
   args: string[],
   stateDir?: string,
-  input?: string
+  input?: string | Buffer
 ): Promise<JsonObject> {
   const userContextIndex = args.indexOf("--user-context");
   const userContext = userContextIndex === -1 ? undefined : args[userContextIndex + 1];
@@ -1631,7 +1722,8 @@ async function executeWorkbench(
       ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
       : process.env,
     encoding: "utf8" as const,
-    maxBuffer: 4 * 1024 * 1024,
+    // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
+    maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
     timeout: [
       "begin-deep-scan",
       "claim-deep-scan-dedup",
@@ -1673,7 +1765,9 @@ async function executeWorkbench(
 
 async function pinFallbackWorkbenchStateDir(): Promise<string> {
   fallbackWorkbenchStateDir ??= (async () => {
-    const stateDir = join(await scanRoot(), "workbench-state");
+    const stateDir = CONFIGURED_SCAN_ROOT
+      ? join(await scanRoot(), "workbench-state")
+      : await fs.mkdtemp(join(tmpdir(), "codex-security-state-"));
     await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
     return stateDir;
   })();
@@ -1721,14 +1815,18 @@ function isJsonObject(value: unknown): value is JsonObject {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function threadIdFromExtra(extra: unknown): string | undefined {
+function requestMetadataFromExtra(extra: unknown): JsonObject | undefined {
   if (!isJsonObject(extra)) return undefined;
   const requestInfo = isJsonObject(extra.requestInfo) ? extra.requestInfo : undefined;
-  const metadata = isJsonObject(requestInfo?._meta)
+  return isJsonObject(requestInfo?._meta)
     ? requestInfo._meta
     : isJsonObject(extra._meta)
       ? extra._meta
       : undefined;
+}
+
+function threadIdFromExtra(extra: unknown): string | undefined {
+  const metadata = requestMetadataFromExtra(extra);
   for (const key of ["openai/threadId", "openai/thread_id", "codexThreadId", "codex_thread_id", "threadId", "thread_id"]) {
     const value = metadata?.[key];
     if (typeof value === "string" && value.trim()) return value.trim();
@@ -1742,13 +1840,7 @@ function codexModelSettingsFromExtra(extra: unknown): {
   model?: string;
   reasoningEffort?: string;
 } {
-  if (!isJsonObject(extra)) return {};
-  const requestInfo = isJsonObject(extra.requestInfo) ? extra.requestInfo : undefined;
-  const metadata = isJsonObject(requestInfo?._meta)
-    ? requestInfo._meta
-    : isJsonObject(extra._meta)
-      ? extra._meta
-      : undefined;
+  const metadata = requestMetadataFromExtra(extra);
   // Codex supplies the already-resolved runtime model and effective effort on every MCP call.
   const turnMetadata = isJsonObject(metadata?.["x-codex-turn-metadata"])
     ? metadata["x-codex-turn-metadata"]

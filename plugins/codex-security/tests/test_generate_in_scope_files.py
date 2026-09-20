@@ -148,6 +148,33 @@ def test_inventory_keeps_ignored_tracked_files_without_ignored_untracked_files(
     assert "./app/ignored.skip" not in paths
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not allow CR/LF in filenames")
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n"])
+@pytest.mark.parametrize("ignored_tracked", [False, True])
+@pytest.mark.parametrize("scope_kind", ["repository", "directory", "file"])
+def test_inventory_rejects_line_breaks_before_serializing_paths(
+    tmp_path: Path, separator: str, ignored_tracked: bool, scope_kind: str
+) -> None:
+    repository = make_repository(tmp_path)
+    directory = "ignored" if ignored_tracked else "app"
+    name = f"{directory}/concealed.py{separator}phantom.py"
+    write_file(repository, name)
+    if ignored_tracked:
+        git(repository, "add", "--force", "--", name)
+    scope = {"repository": ".", "directory": f"./{directory}", "file": name}[scope_kind]
+    output = tmp_path / "in_scope_files.txt"
+    previous = b"previous.py\n"
+    output.write_bytes(previous)
+
+    result = run_inventory(repository, scope, output)
+
+    assert result.returncode == 2
+    assert "path that cannot fit in the file inventory" in result.stderr
+    assert result.stdout == ""
+    assert output.read_bytes() == previous
+    assert list(output.parent.glob(f".{output.name}.*.tmp")) == []
+
+
 def test_diff_inventory_includes_power_shell_files(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -334,7 +361,7 @@ def test_large_inventory_is_not_limited_by_a_subprocess_output_buffer(tmp_path: 
         f"#!{sys.executable}\n"
         "import sys\n"
         "for index in range(12000, 0, -1):\n"
-        "    sys.stdout.write(f\"./{'x' * 100}-{index:05d}.py\\n\")\n",
+        "    sys.stdout.write(f\"./{'x' * 100}-{index:05d}.py\\0\")\n",
         encoding="utf-8",
     )
     ripgrep.chmod(0o755)
@@ -359,6 +386,7 @@ def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path) -
     write_file(repository, "app/new handler.py", b"handler = True\n")
     write_file(repository, "app/binary.py", b"\x00\xff\x01")
     write_file(repository, "tests/demo.py", b"excluded = True\n")
+    write_file(repository, ".github/workflows/ci.yml", b"name: CI\n")
     (repository / "app/évidence.py").unlink()
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "change")
@@ -374,9 +402,70 @@ def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8").splitlines() == [
+        ".github/workflows/ci.yml",
         "app/new handler.py",
         "app/routes.py",
         "app/évidence.py",
+    ]
+
+
+@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
+def test_diff_inventory_includes_changed_terraform(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "infra/main.tf", b'variable "enabled" { default = false }\n')
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    write_file(repository, "infra/main.tf", b'variable "enabled" { default = true }\n')
+    arguments = ["--diff-base", base, "--diff-mode", mode]
+    if mode == "revisions":
+        git(repository, "add", ".")
+        git(repository, "commit", "-qm", "change")
+        arguments.extend(["--diff-head", git(repository, "rev-parse", "HEAD")])
+        git(repository, "checkout", "-q", base)
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output, arguments=arguments)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "infra/main.tf\n"
+
+
+def test_diff_inventory_keeps_every_javascript_module_extension(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+
+    for name in (
+        "app/loader.cjs",
+        "app/loader.mjs",
+        "app/loader.js",
+        "app/types.cts",
+        "app/types.mts",
+        "app/types.ts",
+    ):
+        write_file(repository, name, b"export const handler = 1;\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "change")
+    head = git(repository, "rev-parse", "HEAD")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(
+        repository,
+        ".",
+        output,
+        arguments=["--diff-base", base, "--diff-head", head],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "app/loader.cjs",
+        "app/loader.js",
+        "app/loader.mjs",
+        "app/types.cts",
+        "app/types.mts",
+        "app/types.ts",
     ]
 
 
@@ -389,6 +478,7 @@ def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> 
     write_file(repository, "app/staged.py", b"staged = True\n")
     git(repository, "add", "app/staged.py")
     write_file(repository, "app/untracked.py", b"untracked = True\n")
+    write_file(repository, ".github/workflows/ci.yaml", b"name: CI\n")
     write_file(repository, "app/untracked-binary.py", b"\x00\xff\x01")
     index_only = write_file(repository, "app/index-only.py", b"index_only = True\n")
     git(repository, "add", "app/index-only.py")
@@ -404,6 +494,7 @@ def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> 
 
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8").splitlines() == [
+        ".github/workflows/ci.yaml",
         "app/routes.py",
         "app/staged.py",
         "app/untracked.py",

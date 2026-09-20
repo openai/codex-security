@@ -6,7 +6,7 @@ which should prompt the user for a finding in a supported format instead of retu
 
 The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
 
-Run these commands from the repository root. That keeps the eval runner on the same Node/PATH setup as the OpenAI monorepo shell environment while still installing dependencies under this eval directory.
+Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the repository root to install dependencies under this eval directory.
 
 The eval directory has its own `pnpm-workspace.yaml` so pnpm treats it as a small standalone workspace instead of joining the root OpenAI monorepo workspace.
 

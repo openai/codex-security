@@ -4,6 +4,8 @@ Apply this guidance once when a Standard or Deep Security Scan owns the top-leve
 
 ## Setup and Scan Ownership
 
+Read `artifact-storage.md` before choosing artifact paths and follow its scan-ownership and storage rules.
+
 Follow the active scan mode's existing direct-start, native-continuation, SDK-owned, or headless-launch path. Codex CLI, evaluation harnesses, automation, and other headless hosts never open or wait for a desktop workspace. An explicitly identified desktop host retains its documented app continuation and authoritative scan context.
 
 When an existing native continuation provides a `scanId`, load `get_codex_security_scan_context` once with its `handoffClaimToken` when present; preserve the returned scan identity, directory, target, scope, mode, exact `userContext`, and handoff token. If required context is missing, malformed, or belongs to another mode, follow the active entrypoint's existing error or routing behavior instead of inventing an identifier, creating a replacement scan, or widening the target. An SDK-owned scan preserves its SDK-provided scan identity and directory without creating or finalizing another scan.

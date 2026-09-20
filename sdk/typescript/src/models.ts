@@ -283,11 +283,7 @@ export interface CoverageDocument {
     | "deep_repository";
   completeness: "complete" | "partial" | "unknown";
   inventoryStrategy:
-    | "repository"
-    | "scoped_path"
-    | "diff"
-    | "directory"
-    | "custom";
+    "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
   excludePaths: string[];
   surfaces: {

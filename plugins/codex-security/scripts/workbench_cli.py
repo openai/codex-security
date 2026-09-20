@@ -34,6 +34,9 @@ def parse_args(description: str) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    resolve_scan_root = subparsers.add_parser("resolve-scan-root")
+    resolve_scan_root.add_argument("--scan-root")
+
     create_workspace = subparsers.add_parser("create-workspace")
     create_workspace.add_argument("--workspace-id", required=True)
     create_workspace.add_argument("--thread-id")
@@ -167,6 +170,10 @@ def parse_args(description: str) -> argparse.Namespace:
     get_scan_recipe = subparsers.add_parser("get-scan-recipe")
     get_scan_recipe.add_argument("--scan-id", required=True)
 
+    get_cli_scan_resume = subparsers.add_parser("get-cli-scan-resume")
+    get_cli_scan_resume.add_argument("--scan-id", required=True)
+    get_cli_scan_resume.add_argument("--allow-unavailable", action="store_true")
+
     compare_scans = subparsers.add_parser("compare-scans")
     compare_scans.add_argument("--before-scan-id", required=True)
     compare_scans.add_argument("--after-scan-id", required=True)
@@ -266,6 +273,16 @@ def parse_args(description: str) -> argparse.Namespace:
     write_scan_draft.add_argument("--checkpoint-path")
     write_scan_draft.add_argument("--expected-draft-digest")
     write_scan_draft.add_argument("--claim-token")
+
+    save_scan_artifact = subparsers.add_parser("save-scan-artifact")
+    save_scan_artifact.add_argument("--scan-id", required=True)
+    save_scan_artifact.add_argument("--artifact-path", required=True)
+    save_scan_artifact.add_argument("--claim-token")
+
+    for command in ("save-artifact", "read-artifact"):
+        artifact = subparsers.add_parser(command)
+        artifact.add_argument("--artifact-root", required=True)
+        artifact.add_argument("--artifact-path", required=True)
 
     mark_handoff_delivered = subparsers.add_parser("mark-handoff-delivered")
     mark_handoff_delivered.add_argument("--scan-id", required=True)

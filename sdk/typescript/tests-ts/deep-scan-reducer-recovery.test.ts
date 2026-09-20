@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,19 +65,28 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
       );
       expect(Object.keys(servers)).toEqual(["cs_artifacts"]);
       const server = servers["cs_artifacts"]!;
-      const result = spawnSync(node!, server.args, {
-        encoding: "utf8",
+      const child = Bun.spawn({
+        cmd: [node!, ...server.args],
         env: { ...process.env, ...server.env },
-        input: [
-          '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-security-test","version":"1.0.0"}}}',
-          '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
-          '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
-          "",
-        ].join("\n"),
+        stdin: Buffer.from(
+          [
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-security-test","version":"1.0.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
+            "",
+          ].join("\n"),
+        ),
+        stdout: "pipe",
+        stderr: "pipe",
         timeout: 30_000,
       });
-      expect(result.status, result.stderr).toBe(0);
-      const response = result.stdout
+      const [status, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(status, stderr).toBe(0);
+      const response = stdout
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as { id?: number; result?: unknown })

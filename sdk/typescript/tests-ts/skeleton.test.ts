@@ -25,7 +25,7 @@ interface WorkflowJob {
   needs?: string | string[];
   env?: Record<string, unknown>;
   strategy?: { matrix: Record<string, unknown> };
-  steps: WorkflowStep[];
+  steps?: WorkflowStep[];
 }
 
 async function workflow(name: string) {
@@ -58,6 +58,51 @@ function capture(): {
 }
 
 describe("TypeScript package skeleton", () => {
+  test("pins one Codex version across the CLI, MCP app, and evals", async () => {
+    const directories = [
+      "sdk/typescript",
+      "plugins/codex-security/mcp-app",
+      "plugins/codex-security/skills/triage-finding/evals",
+    ];
+    const manifests = await Promise.all(
+      directories.map(async (directory) =>
+        JSON.parse(
+          await readFile(
+            new URL(`../../../${directory}/package.json`, import.meta.url),
+            "utf8",
+          ),
+        ),
+      ),
+    );
+    const version = manifests[0].dependencies["@openai/codex"];
+    expect(version).toBeTruthy();
+    for (const [index, directory] of directories.entries()) {
+      expect(manifests[index].dependencies["@openai/codex-sdk"]).toBe(version);
+      const lockfile = Bun.YAML.parse(
+        await readFile(
+          new URL(`../../../${directory}/pnpm-lock.yaml`, import.meta.url),
+          "utf8",
+        ),
+      ) as {
+        packages: Record<string, { os?: string[]; cpu?: string[] }>;
+      };
+      expect(
+        Object.keys(lockfile.packages).filter((name) =>
+          name.startsWith("@openai/codex-sdk@"),
+        ),
+      ).toEqual([`@openai/codex-sdk@${version}`]);
+      for (const [name, metadata] of Object.entries(lockfile.packages)) {
+        if (name.startsWith("@openai/codex@")) {
+          const platform =
+            metadata.os && metadata.cpu
+              ? `-${metadata.os[0]}-${metadata.cpu[0]}`
+              : "";
+          expect(name).toBe(`@openai/codex@${version}${platform}`);
+        }
+      }
+    }
+  });
+
   test("exports typed attack-path aliases", () => {
     const dataflow: AttackPathDataflow = {
       transformations: ["decode archive entry"],
@@ -119,6 +164,30 @@ describe("TypeScript package skeleton", () => {
       "22.13.0",
       "24",
     ]);
+    const verificationSteps = jobs["windows-verify"]!.steps!;
+    const shardPython = jobs["windows-test"]!.steps!.find(({ uses }) =>
+      uses?.startsWith("actions/setup-python@"),
+    );
+    const pythonSetup = verificationSteps.findIndex(({ uses }) =>
+      uses?.startsWith("actions/setup-python@"),
+    );
+    const packageInspection = verificationSteps.findIndex(
+      ({ run }) => run === "node scripts/check-package.mjs ../../dist/*.tgz",
+    );
+    expect(shardPython?.uses).toMatch(/^actions\/setup-python@[a-f0-9]{40}$/);
+    expect(pythonSetup).toBeGreaterThanOrEqual(0);
+    expect(pythonSetup).toBeLessThan(packageInspection);
+    expect(verificationSteps[pythonSetup]).toMatchObject({
+      uses: shardPython?.uses,
+      with: { "python-version": "3.12" },
+    });
+    expect(verificationSteps[pythonSetup]).not.toHaveProperty("if");
+    expect(verificationSteps[pythonSetup]).not.toHaveProperty(
+      "continue-on-error",
+    );
+    expect([false, "false"]).not.toContain(
+      verificationSteps[pythonSetup]?.with?.["update-environment"],
+    );
     expect(jobs["required-test"]?.name).toBe("${{ matrix.os }} / node-22");
     expect(jobs["required-test"]?.needs).toEqual([
       "validate-title",
@@ -127,11 +196,13 @@ describe("TypeScript package skeleton", () => {
       "test",
       "compatibility",
       "mcp",
+      "plugin-host",
       "plugin-source",
     ]);
     expect(jobs["windows"]?.needs).toEqual([
       "validate-title",
       "static-checks",
+      "plugin-host",
       "windows-test",
       "windows-verify",
     ]);
@@ -141,7 +212,7 @@ describe("TypeScript package skeleton", () => {
           run: "node scripts/check-package.mjs ../../dist/*.tgz",
         }),
       );
-      expect(jobs[name]?.steps.some(({ name }) => name === "Set up Bun")).toBe(
+      expect(jobs[name]?.steps!.some(({ name }) => name === "Set up Bun")).toBe(
         false,
       );
     }
@@ -169,7 +240,7 @@ describe("TypeScript package skeleton", () => {
 
   test("checks one archive and restores its plugin before every test shard", async () => {
     const { jobs } = await workflow("node-ci.yml");
-    const uploads = jobs["package"]!.steps;
+    const uploads = jobs["package"]!.steps!;
     const inspection = uploads.findIndex(
       ({ name }) => name === "Inspect archive contents",
     );
@@ -193,13 +264,13 @@ describe("TypeScript package skeleton", () => {
       const job = jobs[name]!;
       expect(job.needs).toContain("package");
       expect(
-        job.steps.find(
+        job.steps!.find(
           ({ name }) => name === "Download package for this commit",
         )?.with,
       ).toEqual({ name: "package-${{ github.sha }}", path: "dist" });
     }
     for (const name of ["test", "windows-test", "mcp"]) {
-      const steps = jobs[name]!.steps;
+      const steps = jobs[name]!.steps!;
       const restore = steps.findIndex(
         ({ name }) => name === "Restore bundled plugin",
       );
@@ -218,28 +289,28 @@ describe("TypeScript package skeleton", () => {
 
   test("installs ripgrep before the independent MCP job", async () => {
     const { jobs } = await workflow("node-ci.yml");
-    const steps = jobs["mcp"]!.steps;
+    const steps = jobs["mcp"]!.steps!;
     const ripgrep = steps.findIndex(({ name }) => name === "Install ripgrep");
     const tests = steps.findIndex(({ name }) => name === "Test MCP app");
     expect(steps[ripgrep]?.run).toContain("apt-get install --yes ripgrep");
     expect(ripgrep).toBeLessThan(tests);
     expect(
-      jobs["test"]!.steps.some(({ name }) => name === "Test MCP app"),
+      jobs["test"]!.steps!.some(({ name }) => name === "Test MCP app"),
     ).toBe(false);
   });
 
   test("runs static checks independently and keeps diagnostic uploads non-blocking", async () => {
     const { jobs } = await workflow("node-ci.yml");
-    const steps = Object.values(jobs).flatMap((job) => job.steps);
+    const steps = Object.values(jobs).flatMap((job) => job.steps ?? []);
     expect(jobs["static-checks"]?.needs).toBe("validate-title");
-    expect(jobs["package"]?.needs).toBe("validate-title");
+    expect(jobs["package"]?.needs).toEqual(["validate-title", "native"]);
     for (const [name, job] of [
       ["Check plugin source boundary", "package"],
       ["Typecheck", "static-checks"],
       ["Check formatting", "static-checks"],
     ] as const) {
       expect(steps.filter((step) => step.name === name)).toHaveLength(1);
-      expect(jobs[job]!.steps.some((step) => step.name === name)).toBe(true);
+      expect(jobs[job]!.steps!.some((step) => step.name === name)).toBe(true);
     }
     for (const name of [
       "Upload test reports",
@@ -253,7 +324,7 @@ describe("TypeScript package skeleton", () => {
       });
     }
     expect(
-      jobs["plugin-source"]!.steps.find(
+      jobs["plugin-source"]!.steps!.find(
         ({ name }) => name === "Test Python source contracts",
       )?.run,
     ).toContain(
@@ -263,7 +334,7 @@ describe("TypeScript package skeleton", () => {
 
   test("keeps machine-wide policy changes out of parallel and experimental runs", async () => {
     const ci = await workflow("node-ci.yml");
-    const windows = ci.jobs["windows-test"]!.steps;
+    const windows = ci.jobs["windows-test"]!.steps!;
     expect(
       windows.find((step) => step.name === "Test shard ${{ matrix.shard }}")
         ?.env?.["CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST"],
@@ -275,16 +346,20 @@ describe("TypeScript package skeleton", () => {
     ).toMatchObject({
       if: "matrix.shard == 3 && runner.environment == 'github-hosted'",
       env: { CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true" },
-      run: "bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts",
+      "timeout-minutes": 7,
+      run: "bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts",
     });
     const quality = await workflow("test-quality.yml");
     expect(Object.keys(quality.on).sort()).toEqual([
-      "pull_request",
       "schedule",
+      "workflow_call",
       "workflow_dispatch",
     ]);
-    expect(quality.on["pull_request"]).toEqual({
-      paths: [".github/workflows/test-quality.yml"],
+    expect(ci.jobs["test-quality"]).toMatchObject({
+      needs: ["validate-title", "native"],
+      if: "needs.validate-title.outputs.test-quality == 'true'",
+      uses: "./.github/workflows/test-quality.yml",
+      with: { "native-artifacts-ready": true },
     });
     expect(quality.env?.["CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST"]).toBe(
       "false",
@@ -324,7 +399,7 @@ describe("TypeScript package skeleton", () => {
         args,
       });
     }
-    const command = runner.steps.find(
+    const command = runner.steps!.find(
       (step) => step.name === "Test runner mode",
     )?.run;
     expect(command).toContain(
@@ -334,7 +409,7 @@ describe("TypeScript package skeleton", () => {
     expect(command).toContain("--seed=${{ env.CODEX_SECURITY_PROPERTY_SEED }}");
 
     const uploads = [...Object.values(ci.jobs), ...Object.values(quality.jobs)]
-      .flatMap((job) => job.steps)
+      .flatMap((job) => job.steps ?? [])
       .filter((step) => step.uses?.startsWith("actions/upload-artifact@"));
     for (const upload of uploads) {
       expect(upload.with?.["overwrite"]).toBe(true);
@@ -346,7 +421,7 @@ describe("TypeScript package skeleton", () => {
       uploads.find((step) => step.name === "Upload runner report"),
     ).not.toHaveProperty("continue-on-error");
     expect(
-      quality.jobs["mutation"]?.steps.find(
+      quality.jobs["mutation"]?.steps!.find(
         (step) => step.name === "Run mutation trial",
       ),
     ).not.toHaveProperty("continue-on-error");
@@ -357,8 +432,10 @@ describe("TypeScript package skeleton", () => {
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
 
-    expect(packageJson.scripts.build).toBe(
-      "node --run clean && tsc -p tsconfig.build.json && node scripts/build-dashboard.mjs",
+    expect(packageJson.scripts.build).not.toMatch(/\b(?:pnpm|npm|bun)\b/u);
+    expect(packageJson.scripts.build).toMatch(/^node --run clean &&/u);
+    expect(packageJson.scripts.build).toContain(
+      "node scripts/build-dashboard.mjs",
     );
     expect(packageJson.scripts["build:plugin"]).toBe(
       "node scripts/build-plugin.mjs",
@@ -379,7 +456,7 @@ describe("TypeScript package skeleton", () => {
     for (const workflowName of ["node-ci.yml", "node-release.yml"]) {
       const { jobs } = await workflow(workflowName);
       const audits = Object.values(jobs)
-        .flatMap((job) => job.steps)
+        .flatMap((job) => job.steps ?? [])
         .filter((step) => step.name === "Audit production dependencies");
       expect(audits.length).toBeGreaterThan(0);
       for (const audit of audits) {

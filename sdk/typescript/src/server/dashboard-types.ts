@@ -2,6 +2,9 @@ import type { Finding } from "../models.js";
 import type { FindingDedupeGroup } from "../finding-dedupe-groups.js";
 
 export type DashboardView = "findings" | "groups";
+export type DashboardSort =
+  "activity" | "newest" | "title" | "repository" | "severity" | "members";
+export type DashboardSortDirection = "asc" | "desc";
 
 export interface DashboardQuery {
   view: DashboardView;
@@ -9,7 +12,8 @@ export interface DashboardQuery {
   offset: number;
   query: string;
   repository: string;
-  sort: "activity" | "newest";
+  sort: DashboardSort;
+  direction: DashboardSortDirection;
   id?: string;
 }
 

@@ -152,6 +152,31 @@ def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: P
         ).fetchone() == ("complete", manifest["scan"]["completedAt"])
 
 
+def test_incompatible_sealed_deep_scan_remains_recoverable(tmp_path: Path) -> None:
+    state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
+    run_workbench(state_dir, "prepare-scan-completion", "--scan-id", scan_id)
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["schemaVersion"] = "999.0"
+    manifest_path.write_text(json.dumps(manifest))
+    artifacts = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        before = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+
+    rejected = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id, check=False)
+
+    assert rejected["returncode"] != 0
+    assert "schemaVersion" in str(rejected["stderr"])
+    assert {name: (scan_dir / name).read_bytes() for name in artifacts} == artifacts
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone() == before
+        )
+
+
 def test_rejected_prepared_completion_can_be_marked_failed(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"

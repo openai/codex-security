@@ -215,8 +215,7 @@ type PublicationHandoffEvidence = {
 );
 
 type PublicationEvidence =
-  | PublicationEventEvidence
-  | PublicationHandoffEvidence;
+  PublicationEventEvidence | PublicationHandoffEvidence;
 
 type CompletedPublicationEvent = Extract<
   PublicationEventEvidence,
@@ -1604,7 +1603,7 @@ async function runPublicationCodex(
         }
         cleanup();
         resolve({
-          exitCode: terminationSignal === null ? code ?? 1 : 1,
+          exitCode: terminationSignal === null ? (code ?? 1) : 1,
           stdout,
           stderr,
           ...(terminationSignal === null ? {} : { terminatedBySignal: true }),

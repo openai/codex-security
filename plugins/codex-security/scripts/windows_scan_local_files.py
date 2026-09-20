@@ -465,7 +465,7 @@ def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
                 flags=_FILE_FLAG_OPEN_REPARSE_POINT,
             )
             assert handle is not None and handle.value is not None
-            try:
+            with handle:
                 _verify_regular_file(handle.value, path)
                 raw_handle = handle.detach()
                 try:
@@ -474,8 +474,6 @@ def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
                 except BaseException:
                     _close_handle(raw_handle)
                     raise
-            finally:
-                handle.close()
     except WindowsScanLocalFileError as exc:
         raise WindowsScanLocalFileError(
             exc.errno,

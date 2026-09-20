@@ -9,7 +9,8 @@ export type {
 } from "./artifact-io.js";
 
 export type RunArtifactWorkbench = (
-  arguments_: string[]
+  arguments_: string[],
+  input?: string | Buffer
 ) => Promise<Record<string, unknown>>;
 
 export interface ScanArtifactContextOptions {

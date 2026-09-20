@@ -41,6 +41,38 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
+    const stderr = capture(true);
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 60, rows: 24 },
+      {
+        repository: "/synthetic/repository",
+        showCost: true,
+        clock: fakeClock(),
+      },
+    );
+    dashboard.start();
+    dashboard.setCost({
+      model: "synthetic-model",
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      cacheWriteInputTokensReported: false,
+      outputTokens: 1,
+      estimatedUsd: 1,
+      estimatedUsdRange: { min: 1, max: 2, context: "unknown" },
+    });
+    const frame = stripVTControlCharacters(
+      stderr.text().split("\u001B[H").at(-1)!,
+    );
+    expect(frame.replace(/\s+/gu, " ")).toContain(
+      "$1.00–$2.00 (standard, context unknown, cache writes unknown)",
+    );
+    expect(frame.split("\n")).toHaveLength(24);
+    expect(frame.split("\n").every((line) => line.length <= 60)).toBe(true);
+    dashboard.stop();
+  });
+
   test("edits a higher total budget while continuing to show live cost", async () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
@@ -55,6 +87,7 @@ describe("live scan dashboard", () => {
       ...fakeResult([], "complete", { input_tokens: 100, output_tokens: 1 })
         .cost!,
       estimatedUsd: 16,
+      estimatedUsdRange: { min: 16, max: 32, context: "unknown" as const },
     };
     dashboard.start();
     dashboard.setCost(cost);
@@ -68,14 +101,24 @@ describe("live scan dashboard", () => {
     input.emit("data", "\u00150\r");
     input.emit("data", "\u0015Infinity\r");
     input.emit("data", "\u001520\r");
-    dashboard.setCost({ ...cost, estimatedUsd: 21 });
+    const updatedCost = {
+      ...cost,
+      estimatedUsd: 21,
+      estimatedUsdRange: { min: 21, max: 42, context: "unknown" as const },
+    };
+    dashboard.setCost(updatedCost);
     input.emit("data", "\u001520.5\r");
     expect(stderr.text()).toContain("above $21.00");
-    expect(stderr.text()).toContain("$21.00 / $20.00");
+    expect(
+      stripVTControlCharacters(stderr.text()).replace(/\s+/gu, " "),
+    ).toContain("short-context budget baseline: $21.00 / $20.00");
+    expect(stderr.text()).toContain("$21.00–$42.00");
     input.emit("data", "\u0015300\u007F\r");
     await expect(answer).resolves.toBe(30);
-    dashboard.setCost({ ...cost, estimatedUsd: 21 }, 30);
-    expect(stderr.text()).toContain("$21.00 / $30.00");
+    dashboard.setCost(updatedCost, 30);
+    expect(
+      stripVTControlCharacters(stderr.text()).replace(/\s+/gu, " "),
+    ).toContain("short-context budget baseline: $21.00 / $30.00");
     dashboard.stop();
     expect(input.isRaw).toBe(false);
     expect(input.listenerCount("data")).toBe(0);
@@ -134,6 +177,7 @@ describe("live scan dashboard", () => {
       {
         repository: "/synthetic/project",
         presentation: "components",
+        showCost: true,
         input,
         clock: {
           ...fakeClock(),
@@ -179,7 +223,15 @@ describe("live scan dashboard", () => {
       dashboard.recordComponentEvent({
         componentId: receipt.id,
         type: "cost",
-        value: { ...cost, estimatedUsd: index + 1 },
+        value: {
+          ...cost,
+          estimatedUsd: index + 1,
+          estimatedUsdRange: {
+            min: index + 1,
+            max: (index + 1) * 2,
+            context: "unknown",
+          },
+        },
       });
       dashboard.recordComponentEvent({
         componentId: receipt.id,
@@ -212,7 +264,8 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("validating findings");
     expect(frame()).toContain("1/10");
     expect(frame()).toContain("2/10");
-    expect(frame()).toContain("$3.00 · component scans only");
+    expect(frame()).toContain("$3.00–$6.00 (standard, context unknown");
+    expect(frame()).toContain("component scans only");
     expect(frame()).toContain("before deduplication");
     expect(frame().split("\n")).toHaveLength(20);
     input.emit("data", "\r");
@@ -299,12 +352,15 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("Component 19");
     expect(frame()).not.toContain("Component 0 ");
     expect(frame()).toContain("[redacted] unavailable");
+    expect(frame()).not.toContain("Cost");
     expect(
       frame()
         .split("\n")
         .every((line) => line.length <= 80),
     ).toBe(true);
-    input.emit("data", "\r\u0003");
+    input.emit("data", "\r");
+    expect(frame()).not.toContain("COST");
+    input.emit("data", "\u0003");
     expect(interrupted).toBe(true);
     dashboard.stop();
   });
@@ -567,7 +623,9 @@ describe("live scan dashboard", () => {
     expect(text).toContain("0 / 1,258 reviewed");
     expect(text).not.toContain("opened");
     expect(text).not.toContain("3 / 6 active");
-    expect(text).toContain("17,985 in · 10,496 cached · 236 out");
+    expect(text.replace(/\s+/gu, " ")).toContain(
+      "unavailable uncached input, 10,496 cache reads, unavailable cache writes, 236 output, 18,221 total",
+    );
     expect(text).toContain("/ $2.00");
     expect(stderr.text()).toContain("\u001B[?1049h");
     expect(stderr.text()).toContain("\u001B[?1049l");
@@ -620,10 +678,10 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("FILES");
     expect(frame).not.toContain("inspecting repository files");
     expect(frame).not.toContain("0 / 1,258 reviewed");
-    expect(frame).toContain("worker 1 · Reviewed source file 1");
+    expect(frame).toContain("worker 1 · Reviewed source file 2");
     expect(frame).toContain("worker 1 · Reviewed source file 6");
     expect(frame).toContain("TOKENS");
-    expect(frame).toContain("COST");
+    expect(frame).not.toContain("COST");
     expect(frame).toContain("TIME");
   });
 
@@ -881,7 +939,7 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("above live");
 
     input.emit("data", "\u001B[5~");
-    expect(lastFrame(stderr)).toContain("6 lines above live");
+    expect(lastFrame(stderr)).toContain("7 lines above live");
     input.emit("data", "\u001B[6~");
     expect(lastFrame(stderr)).not.toContain("above live");
     dashboard.stop();

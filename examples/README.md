@@ -2,6 +2,10 @@
 
 Examples and templates for using Codex Security:
 
+- [GitHub Actions with Amazon Bedrock](github-actions/README.md): a copyable
+  workflow for PR-diff and full-repository scans with AWS OIDC authentication,
+  SARIF uploads, and downloadable reports.
+
 - [Findings CSV template](findings.csv): a header-only template for
   `codex-security publish scan --to cloud --csv PATH`. Copy it, add one finding
   per row, and validate the file before publishing:
@@ -17,6 +21,10 @@ Examples and templates for using Codex Security:
 - [Custom validation demo](custom-validation/README.md): run a scan with a custom
   validation script against a deliberately vulnerable API using synthetic data.
   Follow the demo's setup instructions, and do not deploy the example app.
+
+- [Azure Pipelines with Amazon Bedrock](azure-pipelines/README.md): centrally run
+  manual full or committed-diff scans against Azure Repos, with OIDC credentials,
+  report artifacts, and optional native SARIF publishing.
 
 ## npm package
 

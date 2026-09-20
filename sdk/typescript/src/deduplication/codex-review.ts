@@ -39,6 +39,8 @@ import {
   reviewSubmissionInstructions,
   sourceReviewInstructions,
 } from "./deduplication-prompts.js";
+import { retryDelay, waitForRetry } from "./retry.js";
+import { isReviewRefusal } from "./refusal.js";
 
 const reviewErrorSchema = z
   .object({ reason: z.string().trim().min(1) })
@@ -58,6 +60,7 @@ class ReviewAttemptError extends Error {
     public readonly category: DeduplicationReviewFailureCategory,
     message: string,
     public readonly supportReason: string,
+    public readonly retryable = false,
   ) {
     super(message);
   }
@@ -72,7 +75,10 @@ type StartCodex = (
 interface Message {
   id?: string | number;
   method?: string;
-  error?: { message: string };
+  error?: {
+    message: string;
+    data?: { codexErrorInfo?: unknown };
+  };
   result?: {
     thread?: { id: string; ephemeral: boolean; path: string | null };
     turn?: { id: string };
@@ -80,11 +86,42 @@ interface Message {
   params?: {
     threadId: string;
     turnId?: string;
-    turn?: { id: string; status: string; error?: { message: string } | null };
+    turn?: {
+      id: string;
+      status: string;
+      error?: { message: string; codexErrorInfo?: unknown } | null;
+    };
     tool?: string;
     namespace?: string | null;
     arguments?: unknown;
+    item?: { type: string; text?: string };
   };
+}
+
+function transientCodexError(info: unknown): boolean {
+  if (
+    info === "usageLimitExceeded" ||
+    info === "serverOverloaded" ||
+    info === "internalServerError"
+  )
+    return true;
+  if (info === null || typeof info !== "object") return false;
+  for (const variant of [
+    "httpConnectionFailed",
+    "responseStreamConnectionFailed",
+    "responseStreamDisconnected",
+    "responseTooManyFailedAttempts",
+  ]) {
+    const detail = (info as Record<string, unknown>)[variant];
+    if (detail === null || typeof detail !== "object") continue;
+    const status = (detail as { httpStatusCode?: unknown }).httpStatusCode;
+    return (
+      status === null ||
+      (typeof status === "number" &&
+        [408, 429, 500, 502, 503, 504].includes(status))
+    );
+  }
+  return false;
 }
 
 export class CodexReviewRunner {
@@ -93,12 +130,33 @@ export class CodexReviewRunner {
     private readonly startCodex: StartCodex = spawn,
     private readonly signal?: AbortSignal,
     private readonly workingDirectory: string = process.cwd(),
+    private readonly retry: {
+      wait?: typeof waitForRetry;
+      random?: () => number;
+    } = {},
   ) {}
 
   async run<T>(review: CodexReview<T>): Promise<T> {
-    const state = { attempts: 1 };
+    const state = { attempts: 0 };
     try {
-      return await this.runSession(review, state);
+      for (let session = 1; ; session++) {
+        state.attempts++;
+        try {
+          return await this.runSession(review, state);
+        } catch (error) {
+          this.signal?.throwIfAborted();
+          if (
+            session >= 3 ||
+            !(error instanceof ReviewAttemptError) ||
+            !error.retryable
+          )
+            throw error;
+          await (this.retry.wait ?? waitForRetry)(
+            retryDelay(session, this.retry.random),
+            this.signal,
+          );
+        }
+      }
     } catch (error) {
       this.signal?.throwIfAborted();
       const category =
@@ -200,8 +258,20 @@ export class CodexReviewRunner {
       const closed = new Promise<void>((resolve) =>
         child.once("close", () => resolve()),
       );
-      child.once("error", () => undefined);
-      child.stdin.on("error", () => undefined);
+      const lines = createInterface({
+        input: child.stdout,
+        crlfDelay: Infinity,
+      });
+      let processError: Error | undefined;
+      let inputError: Error | undefined;
+      child.once("error", (error) => {
+        processError = error;
+        lines.close();
+      });
+      child.stdin.on("error", (error) => {
+        inputError = error;
+        lines.close();
+      });
       child.stderr.resume();
       const send = (message: object) =>
         child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -278,10 +348,14 @@ export class CodexReviewRunner {
       let turnId: string | undefined;
       let accepted: T | undefined;
       let validationFailure: string | undefined;
+      let finalResponse: string | undefined;
+      let turns = 0;
       const startTurn = (prompt: string) => {
         this.signal?.throwIfAborted();
+        turns++;
         turnId = undefined;
         validationFailure = undefined;
+        finalResponse = undefined;
         send({
           id: 3 + state.attempts,
           method: "turn/start",
@@ -302,15 +376,17 @@ export class CodexReviewRunner {
             capabilities: { experimentalApi: true },
           },
         });
-        for await (const line of createInterface({
-          input: child.stdout,
-          crlfDelay: Infinity,
-        })) {
+        for await (const line of lines) {
           let message: Message;
           try {
             message = JSON.parse(line) as Message;
           } catch {
-            throw new Error("Codex returned malformed JSON");
+            throw new ReviewAttemptError(
+              "transport",
+              "Codex returned malformed JSON",
+              "Codex review transport failed.",
+              true,
+            );
           }
           const params = message.params;
           if (message.id !== undefined && message.method !== undefined) {
@@ -361,9 +437,11 @@ export class CodexReviewRunner {
               });
               if (reportedFailure !== undefined)
                 throw new ReviewAttemptError(
-                  "model",
+                  isReviewRefusal(reportedFailure) ? "refusal" : "model",
                   `Required review check could not be completed: ${reportedFailure}`,
-                  "A required review check could not be completed.",
+                  isReviewRefusal(reportedFailure)
+                    ? "The model refused the deduplication review."
+                    : "A required review check could not be completed.",
                 );
             } else {
               send({
@@ -372,10 +450,18 @@ export class CodexReviewRunner {
               });
             }
           } else if (message.error !== undefined) {
+            const refused = isReviewRefusal(
+              message.error.message,
+              message.error.data?.codexErrorInfo,
+            );
             throw new ReviewAttemptError(
-              "transport",
+              refused ? "refusal" : "transport",
               message.error?.message ?? "Codex rejected the review request",
-              "Codex rejected the review request.",
+              refused
+                ? "The model refused the deduplication review."
+                : "Codex rejected the review request.",
+              !refused &&
+                transientCodexError(message.error.data?.codexErrorInfo),
             );
           } else if (message.id === 1) {
             send({ method: "initialized" });
@@ -406,6 +492,13 @@ export class CodexReviewRunner {
           ) {
             turnId = params?.turn?.id;
           } else if (
+            message.method === "item/completed" &&
+            params?.threadId === threadId &&
+            params?.turnId === turnId &&
+            params?.item?.type === "agentMessage"
+          ) {
+            finalResponse = params.item.text;
+          } else if (
             message.method === "turn/completed" &&
             params !== undefined &&
             threadId !== undefined &&
@@ -414,15 +507,31 @@ export class CodexReviewRunner {
             params.turn?.id === turnId
           ) {
             if (params.turn.status !== "completed") {
-              throw new ReviewAttemptError(
-                "model",
+              const reason =
                 params.turn.error?.message ??
-                  `Codex review turn ${params.turn.status}`,
-                "Codex review turn failed.",
+                `Codex review turn ${params.turn.status}`;
+              const refused = isReviewRefusal(
+                reason,
+                params.turn.error?.codexErrorInfo,
+              );
+              throw new ReviewAttemptError(
+                refused ? "refusal" : "model",
+                reason,
+                refused
+                  ? "The model refused the deduplication review."
+                  : "Codex review turn failed.",
+                !refused &&
+                  transientCodexError(params.turn.error?.codexErrorInfo),
               );
             }
             if (accepted === undefined) {
-              if (state.attempts === 1) {
+              if (finalResponse && isReviewRefusal(finalResponse))
+                throw new ReviewAttemptError(
+                  "refusal",
+                  finalResponse,
+                  "The model refused the deduplication review.",
+                );
+              if (turns === 1) {
                 state.attempts++;
                 startTurn(
                   `Continue the original assigned review in this conversation. No submission was accepted.${validationFailure ? ` The last submission was rejected: ${validationFailure}` : ""} ${reviewSubmissionInstructions}`,
@@ -434,19 +543,28 @@ export class CodexReviewRunner {
                   "validation",
                   `Review validation failed: ${validationFailure}`,
                   "The submitted review failed semantic validation.",
+                  true,
                 );
               }
               throw new ReviewAttemptError(
                 "no-submission",
                 "Codex did not submit a validated review",
                 "Codex did not submit a validated review.",
+                true,
               );
             }
             return accepted;
           }
         }
-        throw new Error("Codex exited before completing the review");
+        if (processError) throw processError;
+        throw new ReviewAttemptError(
+          "transport",
+          inputError?.message ?? "Codex exited before completing the review",
+          "Codex review transport failed.",
+          true,
+        );
       } finally {
+        lines.close();
         child.stdin.end();
         if (child.exitCode === null) child.kill();
         await closed;

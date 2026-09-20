@@ -121,6 +121,18 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
       `${runtimeLabel}: authenticate compact diff owner`
     );
 
+    for (const reserved of [
+      "artifacts/02_discovery/candidate_ledger.jsonl",
+      "artifacts/02_discovery/in_scope_files.txt",
+      "artifacts/01_context/false_positive_feedback.json"
+    ]) {
+      const rejected = await call("save_codex_security_artifact", {
+        scanId, handoffClaimToken, storage: "persistent",
+        path: `${reserved}/note.txt`, content: "must not block typed writers"
+      });
+      assert.equal(rejected.isError, true, `${runtimeLabel}: reject a canonical file used as a directory`);
+    }
+
     const inventory = requireSuccessfulTool(
       await call("prepare_codex_security_review_items", { scanId, handoffClaimToken }),
       `${runtimeLabel}: prepare exact compact diff inventory`
@@ -526,6 +538,38 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       );
     }
 
+    const progress = async () => requireSuccessfulTool(await call(
+      "get_codex_security_scan_context", { scanId, handoffClaimToken }
+    )).scan.progress;
+    assert.equal((await progress()).phase, "preflight");
+    requireSuccessfulTool(await call("update_codex_security_scan_progress", {
+      scanId, handoffClaimToken, phaseItemsTotal: 1, phaseItemsCompleted: 1,
+      phaseProgressUnit: "checks"
+    }));
+    const checkpoint = {
+      scanId,
+      handoffClaimToken,
+      complete: false,
+      findings: [finding],
+      coverage: { ...coverage, completeness: "partial" }
+    };
+    requireSuccessfulTool(await call("record_codex_security_scan_draft", checkpoint));
+    const discovery = await progress();
+    assert.equal(discovery.status, "running");
+    assert.equal(discovery.phase, "discovery");
+    assert.deepEqual(discovery.phaseProgress, { completed: 0, total: 0, unit: null });
+
+    requireSuccessfulTool(await call("update_codex_security_scan_progress", {
+      scanId, handoffClaimToken, phase: "validation", phaseItemsTotal: 2,
+      phaseItemsCompleted: 1, phaseProgressUnit: "candidate_findings"
+    }));
+    requireSuccessfulTool(await call("record_codex_security_scan_draft", checkpoint));
+    const validation = await progress();
+    assert.equal(validation.phase, "validation");
+    assert.deepEqual(validation.phaseProgress, {
+      completed: 1, total: 2, unit: "candidate_findings"
+    });
+
     const drafted = requireSuccessfulTool(await call(
       "record_codex_security_scan_draft",
       {
@@ -542,6 +586,10 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       operation: "replace",
       status: "draft_written"
     });
+    const reporting = await progress();
+    assert.equal(reporting.phase, "reporting");
+    assert.equal(reporting.status, "running");
+    assert.deepEqual(reporting.phaseProgress, { completed: 0, total: 0, unit: null });
 
     const completed = requireSuccessfulTool(await call(
       "complete_codex_security_scan",

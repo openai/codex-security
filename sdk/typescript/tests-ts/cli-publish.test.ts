@@ -582,8 +582,7 @@ describe("publish scan", () => {
       const stdout = capture();
       const stderr = capture();
       let invocation:
-        | { scanDirectory: string; options: Record<string, unknown> }
-        | undefined;
+        { scanDirectory: string; options: Record<string, unknown> } | undefined;
       const deps = dependencies({
         currentDirectory,
         onWorkbench: () => {
@@ -2394,8 +2393,7 @@ describe("publish scan", () => {
         },
       });
       let destination:
-        | { teamId: string; projectId: string | undefined }
-        | undefined;
+        { teamId: string; projectId: string | undefined } | undefined;
       deps.publishScan = async (_scanDirectory, options) => {
         destination = {
           teamId: options.teamId,

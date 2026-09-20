@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import type { ScanResults } from "../types.js";
 
@@ -15,7 +16,7 @@ export interface HandoffWorkspaceState extends JsonObject {
 interface ScanHandoffToolDependencies {
   appMeta: Record<string, unknown>;
   runWorkbench: (args: string[]) => Promise<JsonObject>;
-  workspaceResult: (workspace: HandoffWorkspaceState) => unknown;
+  workspaceResult: (workspace: HandoffWorkspaceState) => CallToolResult;
 }
 
 export const recoveryHandoffClaimTokenSchema = z.string().regex(

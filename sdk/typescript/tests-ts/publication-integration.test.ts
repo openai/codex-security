@@ -326,9 +326,8 @@ function receiptPath(fixture: PublicationFixture): string {
 
 describe("database-backed Linear publication integration", () => {
   test("publishes classified selections while verifying the complete scan history and preserving earlier tickets", async () => {
-    const { classifyScanDirectorySeverity } = await import(
-      "../src/classify-scan-severity.js"
-    );
+    const { classifyScanDirectorySeverity } =
+      await import("../src/classify-scan-severity.js");
     const completed = await fixture(2);
     const rubricPath = join(completed.stateDirectory, "policy.md");
     await writeFile(rubricPath, "Classify bounded impact as Medium.");
