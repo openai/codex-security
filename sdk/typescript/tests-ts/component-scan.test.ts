@@ -500,8 +500,8 @@ test.each([
           expect(typeof options.onProgress).toBe("function");
           options.onProgress?.({
             phase: "validation",
-            filesCompleted: 2,
-            filesTotal: 2,
+            filesCompleted: 0,
+            filesTotal: 0,
           });
           options.onCost?.({
             model: "gpt-5.6",
@@ -524,6 +524,8 @@ test.each([
       presentation === "dashboard",
     );
     expect(stderr.text()).toContain("Report:");
+    expect(stderr.text()).not.toContain("0/0");
+    expect(stderr.text()).not.toContain("Files:");
     expect(stderr.text().includes("$0.00123")).toBe(costFlags.length > 0);
     if (costFlags.length === 0)
       expect(stderr.text()).not.toMatch(/\bCOST\b|\bCost:/u);
@@ -534,9 +536,7 @@ test.each([
       );
     } else expect(stderr.text()).toContain("apps/api completed");
     if (presentation !== "dashboard") {
-      expect(stderr.text()).toContain(
-        "apps/api validating findings | Files: 2/2",
-      );
+      expect(stderr.text()).toContain("apps/api validating findings");
       expect(stderr.text()).toContain(
         "apps/api | Tokens: 90 uncached input, 10 cache reads, 0 cache writes, 20 output, 120 total",
       );

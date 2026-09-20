@@ -1,14 +1,13 @@
 """Scan history projection for the native Codex Security workbench."""
 
 import argparse
-import fnmatch
 import json
 import os
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator
 from itertools import chain
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
@@ -529,7 +528,6 @@ def compare_scans(
         backfill_finding_details(connection, before)
         backfill_finding_details(connection, after)
     after_coverage = read_coverage(after)
-    comparable = after_coverage.get("completeness") == "complete"
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
     matches = json.loads(cached["result_json"]) if cached is not None else None
@@ -599,22 +597,9 @@ def compare_scans(
         elif uncertain_reason is not None:
             status = "unknown"
             item["reason"] = uncertain_reason
-        elif not comparable:
-            status = "unknown"
-            item["reason"] = "The later scan has incomplete coverage."
-        elif not all(
-            scan_covers_path(
-                after,
-                target_id=after["target_id"],
-                path=row["relative_path"],
-                coverage=after_coverage,
-            )
-            for row in previous_rows
-        ):
-            status = "unknown"
-            item["reason"] = "The affected path was excluded or outside the later scope."
         else:
-            status = "resolved"
+            status = "unknown"
+            item["reason"] = "The finding was not reported again; a fix has not been verified."
         if len(previous_rows) == 1:
             item["beforeOccurrenceId"] = previous["id"]
         elif previous_rows:
@@ -635,7 +620,7 @@ def compare_scans(
     result = {
         "afterScanId": after["id"],
         "beforeScanId": before["id"],
-        "comparable": comparable,
+        "comparable": after_coverage.get("completeness") == "complete",
         "coverage": {"afterCompleteness": after_coverage.get("completeness")},
         "findings": findings,
         "repository": before["target_path"],
@@ -1172,54 +1157,6 @@ def _scan_findings(connection: sqlite3.Connection, scan_id: str) -> dict[str, sq
         (scan_id,),
     )
     return {row["finding_id"]: row for row in rows}
-
-
-def scan_covers_path(
-    scan: sqlite3.Row,
-    *,
-    target_id: str,
-    path: str | None,
-    coverage: dict[str, Any],
-) -> bool:
-    if (
-        scan["status"] != "complete"
-        or scan["target_id"] != target_id
-        or coverage.get("completeness") != "complete"
-    ):
-        return False
-    if not isinstance(path, str) or not path:
-        return False
-    included = coverage.get("includePaths")
-    if not isinstance(included, list) or not any(
-        isinstance(scope, str) and _path_within(path, scope) for scope in included
-    ):
-        return False
-    excluded = coverage.get("excludePaths")
-    if not isinstance(excluded, list):
-        return False
-    if any(isinstance(scope, str) and _path_matches(path, scope) for scope in excluded):
-        return False
-    exclusions = coverage.get("explicitExclusions")
-    if not isinstance(exclusions, list):
-        return False
-    if any(
-        isinstance(exclusion, dict)
-        and isinstance(exclusion.get("pattern"), str)
-        and _path_matches(path, exclusion["pattern"])
-        for exclusion in exclusions
-    ):
-        return False
-    return True
-
-
-def _path_within(path: str, scope: str) -> bool:
-    candidate = PurePosixPath(path)
-    parent = PurePosixPath(scope)
-    return parent == PurePosixPath(".") or candidate == parent or parent in candidate.parents
-
-
-def _path_matches(path: str, pattern: str) -> bool:
-    return _path_within(path, pattern) or fnmatch.fnmatchcase(path, pattern)
 
 
 if __name__ == "__main__":

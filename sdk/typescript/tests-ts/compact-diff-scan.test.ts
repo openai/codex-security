@@ -810,7 +810,7 @@ describe("compact diff scan", () => {
           findings: JsonObject[];
         }
       ).findings.map((draftFinding) => draftFinding["identity"]);
-      expect(canonicalDraftIdentities).toHaveLength(9);
+      expect(canonicalDraftIdentities).toHaveLength(8);
       await call("complete_codex_security_scan", {
         scanId,
         handoffClaimToken,
@@ -852,7 +852,6 @@ describe("compact diff scan", () => {
           instance: "dss-147-b",
         },
         { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
       ]);
       const legacyFinding = (
         (completed["findings"] as JsonObject)["findings"] as JsonObject[]
