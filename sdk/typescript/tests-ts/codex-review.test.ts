@@ -1,4 +1,8 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  execFileSync,
+  spawn,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { existsSync } from "node:fs";
 import {
   mkdir,
@@ -56,6 +60,10 @@ const failureReasons: Record<string, string> = {
     "Required review check could not be completed: Required source revision could not be read.",
   "model-policy-override":
     "Required review check could not be completed: Approval reviewer unavailable.",
+  "source-missing-revision":
+    "Required review check could not be completed: Required source revision could not be read.",
+  "source-missing-file":
+    "Required review check could not be completed: Required source revision could not be read.",
   exit: "Codex exited before completing the review",
 };
 const retriedFailures = new Set([
@@ -94,7 +102,13 @@ const transportCases: {
   extraEnvironment?: Record<string, string>;
   windowsOnly?: boolean;
   commandAuth?: "direct" | "ambient";
+  model?: string;
 }[] = [
+  {
+    scenario: "correction",
+    name: "Daybreak review without approval escalation",
+    model: "gpt-daybreak-blue-latest",
+  },
   {
     scenario: "correction",
     name: "command auth without an API key",
@@ -109,6 +123,7 @@ const transportCases: {
   { scenario: "text-only-correction" },
   { scenario: "cancel-continuation" },
   { scenario: "accepted-no-replay" },
+  { scenario: "source-read-success" },
   ...[
     "correction",
     "incomplete-content",
@@ -152,6 +167,7 @@ for (const {
   extraEnvironment,
   windowsOnly = false,
   commandAuth,
+  model = "gpt-5.6-sol",
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
@@ -170,6 +186,29 @@ for (const {
     const sessions = retriedFailures.has(scenario) ? 3 : recovery ? 2 : 1;
     const controller = new AbortController();
     try {
+      let sourceRevision = "";
+      if (scenario.startsWith("source-")) {
+        const git = (...args: string[]) =>
+          execFileSync("git", args, {
+            cwd: checkout,
+            encoding: "utf8",
+          }).trim();
+        git("init", "--quiet");
+        await mkdir(join(checkout, "src"));
+        await writeFile(join(checkout, "src", "app.ts"), "synthetic source\n");
+        git("add", ".");
+        git(
+          "-c",
+          "user.name=Example",
+          "-c",
+          "user.email=example@example.test",
+          "commit",
+          "--quiet",
+          "-m",
+          "Synthetic source",
+        );
+        sourceRevision = git("rev-parse", "HEAD");
+      }
       const auth = {
         command: "./synthetic-auth",
         args: ["token"],
@@ -237,6 +276,7 @@ for (const {
                   : scenario,
               transcript,
               checkout,
+              sourceRevision,
             ],
             options,
           );
@@ -269,6 +309,7 @@ for (const {
       });
       const reportsBlocker =
         scenario.startsWith("required-source-error") ||
+        scenario.startsWith("source-missing-") ||
         scenario === "policy-reported-error" ||
         scenario === "invalid-review-error" ||
         scenario === "model-policy-override";
@@ -291,7 +332,7 @@ for (const {
           : runner;
       const result = reviewRunner.run({
         stage: "pair-review",
-        model: "gpt-5.6-sol",
+        model,
         effort: "ultra",
         prompt: "Review the supplied synthetic reports.",
         schema: {
@@ -320,6 +361,7 @@ for (const {
           "retry-correction",
           "text-only-correction",
           "accepted-no-replay",
+          "source-read-success",
         ].includes(scenario)
       ) {
         expect(await result).toEqual({ decision: "SAME" });
@@ -330,7 +372,11 @@ for (const {
               : modelFailures.has(recovery)
                 ? 2
                 : 1
-            : ["text-only-correction", "accepted-no-replay"].includes(scenario)
+            : [
+                  "text-only-correction",
+                  "accepted-no-replay",
+                  "source-read-success",
+                ].includes(scenario)
               ? 1
               : 2,
         );
@@ -366,7 +412,7 @@ for (const {
         expect(reviewFailure.cause).toBeUndefined();
         expect(reviewFailure.metadata).toEqual({
           stage: "pair-review",
-          model: "gpt-5.6-sol",
+          model,
           category: refused
             ? "refusal"
             : scenario === "invalid-submission"
@@ -374,7 +420,9 @@ for (const {
               : scenario === "text-only"
                 ? "no-submission"
                 : modelFailures.has(scenario) || reportsBlocker
-                  ? "model"
+                  ? scenario.startsWith("source-missing-")
+                    ? "transport"
+                    : "model"
                   : "transport",
           attempts:
             ([
@@ -395,7 +443,11 @@ for (const {
                   : modelFailures.has(scenario)
                     ? "Codex review turn failed."
                     : reportsBlocker
-                      ? "A required review check could not be completed."
+                      ? scenario === "source-missing-revision"
+                        ? "The required source revision was unavailable."
+                        : scenario === "source-missing-file"
+                          ? "The required source could not be read."
+                          : "A required review check could not be completed."
                       : scenario === "request-error"
                         ? "Codex rejected the review request."
                         : "Codex review transport failed.",
@@ -415,7 +467,11 @@ for (const {
                     "exit",
                   ].includes(scenario)
                 ? "review_transport_unavailable"
-                : "review_unknown",
+                : scenario === "source-missing-revision"
+                  ? "review_source_revision_unavailable"
+                  : scenario === "source-missing-file"
+                    ? "review_source_access_unavailable"
+                    : "review_unknown",
           retryable: [
             "policy-turn",
             "invalid-submission",
@@ -489,6 +545,19 @@ for (const {
         const loginRequest = messages.find(
           (message) => message.method === "account/login/start",
         );
+        const threadRequest = messages.find(
+          (message) => message.method === "thread/start",
+        );
+        expect(
+          (threadRequest?.params as { model?: string } | undefined)?.model,
+        ).toBe(model);
+        expect(
+          messages.some(
+            (message) =>
+              typeof message.method === "string" &&
+              message.method.toLowerCase().includes("approval"),
+          ),
+        ).toBe(false);
         expect(
           messages.filter((message) => message.method === "thread/start"),
         ).toHaveLength(sessions);

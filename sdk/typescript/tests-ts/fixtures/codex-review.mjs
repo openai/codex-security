@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
-const [scenario, transcript, checkout] = process.argv.slice(2);
+const [scenario, transcript, checkout, sourceRevision] = process.argv.slice(2);
 const turnFailures = {
   "policy-turn-code": {
     message: "Request blocked.",
@@ -103,21 +103,35 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     assert.equal(message.params.ephemeral, true);
     assert.equal(message.params.permissions, "codex_security_review");
-    assert.equal(message.params.approvalPolicy, "on-request");
-    assert.equal(message.params.approvalsReviewer, "auto_review");
+    assert.equal(message.params.approvalPolicy, "never");
+    assert.equal("approvalsReviewer" in message.params, false);
     assert.equal(message.params.config.mcp_servers.synthetic.enabled, false);
     assert.deepEqual(
       message.params.config.features.code_mode.direct_only_tool_namespaces,
-      ["review_validator"],
+      ["review_source", "review_validator"],
+    );
+    assert.equal(message.params.config.allow_login_shell, false);
+    assert.equal(message.params.config.features.js_repl, false);
+    assert.equal(message.params.config.features.shell_tool, false);
+    assert.equal(message.params.config.features.unified_exec, false);
+    assert.match(
+      message.params.developerInstructions,
+      /allRepositories=true does not authorize another checkout/,
     );
     assert.equal(message.params.cwd, checkout);
     assert.notEqual(message.params.cwd, process.cwd());
-    assert.equal(message.params.dynamicTools[0].name, "review_validator");
-    assert.equal(
-      message.params.dynamicTools[0].tools[0].name,
-      "submit_decisions",
+    const source = message.params.dynamicTools.find(
+      (namespace) => namespace.name === "review_source",
     );
-    const errorTool = message.params.dynamicTools[0].tools.find(
+    assert.deepEqual(
+      source.tools.map((tool) => tool.name),
+      ["read_file", "search"],
+    );
+    const validator = message.params.dynamicTools.find(
+      (namespace) => namespace.name === "review_validator",
+    );
+    assert.equal(validator.tools[0].name, "submit_decisions");
+    const errorTool = validator.tools.find(
       (tool) => tool.name === "submit_error",
     );
     assert.deepEqual(errorTool.inputSchema.required, ["reason"]);
@@ -160,6 +174,23 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (scenario === "exit") process.exit(1);
     if (scenario === "invalid-json") {
       process.stdout.write("Synthetic private response data\n");
+    } else if (scenario === "source-read-success") {
+      send({
+        id: "source-success",
+        method: "item/tool/call",
+        params: {
+          threadId: "review-thread",
+          turnId,
+          tool: "read_file",
+          namespace: "review_source",
+          arguments: {
+            revision: sourceRevision,
+            path: "src/app.ts",
+            startLine: 1,
+            endLine: 1,
+          },
+        },
+      });
     } else if (
       scenario === "invalid-submission" ||
       (scenario === "retry-correction" && turns === 1)
@@ -214,6 +245,30 @@ for await (const line of createInterface({ input: process.stdin })) {
         },
         { tool: "submit_error" },
       );
+    } else if (
+      scenario === "source-missing-revision" ||
+      scenario === "source-missing-file"
+    ) {
+      send({
+        id: "source-failure",
+        method: "item/tool/call",
+        params: {
+          threadId: "review-thread",
+          turnId,
+          tool: "read_file",
+          namespace: "review_source",
+          arguments: {
+            revision:
+              scenario === "source-missing-revision"
+                ? "0".repeat(40)
+                : sourceRevision,
+            path:
+              scenario === "source-missing-file"
+                ? "src/missing.ts"
+                : "src/app.ts",
+          },
+        },
+      });
     } else if (
       scenario.startsWith("required-source-error") ||
       scenario === "policy-reported-error"
@@ -270,6 +325,21 @@ for await (const line of createInterface({ input: process.stdin })) {
       { reason: "Approval reviewer unavailable." },
       { tool: "submit_error" },
     );
+  } else if (message.id === "source-failure") {
+    assert.equal(message.result.success, false);
+    assert.match(message.result.contentItems[0].text, /Source request failed/);
+    submit(
+      "blocked",
+      { reason: "Required source revision could not be read." },
+      { tool: "submit_error" },
+    );
+  } else if (message.id === "source-success") {
+    assert.equal(message.result.success, true);
+    assert.equal(
+      JSON.parse(message.result.contentItems[0].text).content,
+      "synthetic source",
+    );
+    submit("valid", { decision: "SAME" });
   } else if (message.id === "invalid") {
     assert.equal(message.result.success, false);
     assert.match(message.result.contentItems[0].text, /Resubmit/);
