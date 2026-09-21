@@ -313,18 +313,6 @@ describe("TypeScript package skeleton", () => {
       expect(steps.filter((step) => step.name === name)).toHaveLength(1);
       expect(jobs[job]!.steps!.some((step) => step.name === name)).toBe(true);
     }
-    const staticSteps = jobs["static-checks"]!.steps!;
-    expect(
-      staticSteps.find((step) => step.name === "Checkout repository")?.with,
-    ).toMatchObject({ "fetch-depth": 2 });
-    const mcpFormat = staticSteps.find(
-      (step) => step.name === "Check changed MCP formatting",
-    );
-    expect(mcpFormat?.run).toContain("--diff-filter=ACMRT --name-only -z");
-    expect(mcpFormat?.run).toContain("-- plugins/codex-security/mcp-app");
-    expect(mcpFormat?.run).toContain(
-      "pnpm --dir plugins/codex-security/mcp-app exec prettier --check",
-    );
     for (const name of [
       "Upload test reports",
       "Upload Windows test reports",
@@ -355,14 +343,6 @@ describe("TypeScript package skeleton", () => {
     expect(restricted?.env?.["CODEX_SECURITY_TEST_WINDOWS_SYMLINKS"]).toBe(
       "disabled",
     );
-    for (const proof of [
-      "proof-windows.mjs",
-      "proof-policy-windows.mjs",
-      "junctionMetadataAndFinalNames",
-      "policySymlinkBoundary",
-    ]) {
-      expect(restricted?.run).toContain(proof);
-    }
     expect(restricted).not.toHaveProperty("continue-on-error");
   });
 

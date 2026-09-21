@@ -52,12 +52,13 @@ const coverage = {
 } satisfies CoverageDocument;
 
 describe("ScanResult", () => {
-  test.each([{ levels: [] }, { levels: ["high"] }] satisfies {
-    levels: SeverityLevel[];
-  }[])("rejects an unknown threshold with findings %j", ({ levels }) => {
-    expect(() =>
-      fakeResult([...levels]).hasFindingsAtOrAbove("hihg" as SeverityLevel),
-    ).toThrow("Unknown severity threshold");
+  test("rejects an unknown threshold with or without findings", () => {
+    for (const levels of [[], ["high"]] satisfies SeverityLevel[][]) {
+      const result = fakeResult(levels);
+      expect(() => result.hasFindingsAtOrAbove("hihg" as SeverityLevel)).toThrow(
+        "Unknown severity threshold",
+      );
+    }
   });
 
   test("evaluates a severity threshold without filtering findings or changing serialization", () => {
