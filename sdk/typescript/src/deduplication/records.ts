@@ -27,12 +27,11 @@ const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> = z
   .object({
     version: z.literal(1),
     observations: z.array(record),
-    canonicals: z.array(record),
     candidateRelationships: z.array(
       z
         .object({
           observationId: id,
-          canonicalIds: z.array(id),
+          candidateObservationIds: z.array(id),
         })
         .strict(),
     ),
@@ -42,8 +41,10 @@ const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> = z
 export interface DeduplicateRecordsInput {
   version: 1;
   observations: { id: string; finding: Finding }[];
-  canonicals: { id: string; finding: Finding }[];
-  candidateRelationships: { observationId: string; canonicalIds: string[] }[];
+  candidateRelationships: {
+    observationId: string;
+    candidateObservationIds: string[];
+  }[];
 }
 export interface DeduplicateRecordsOptions {
   reviewRunner: DeduplicationReviewRunner;
@@ -52,14 +53,13 @@ export interface DeduplicateRecordsOptions {
 export interface DeduplicateRecordsResult {
   version: 1;
   status: "completed" | "unresolved";
-  newGroups: {
+  groups: {
     representativeObservationId: string;
     observationIds: string[];
   }[];
-  matches: { observationId: string; canonicalId: string }[];
   unresolved: {
     observationId: string;
-    reason: "review_failed" | "ambiguous_canonicals";
+    reason: "review_failed";
     message: string;
   }[];
 }
@@ -72,30 +72,19 @@ export async function deduplicateRecords(
   options.signal?.throwIfAborted();
   // Snapshot before yielding: a host cannot mutate evidence during the review.
   const data = deduplicateRecordsInputSchema.parse(structuredClone(input));
-  const references = new Map<
-    string,
-    { kind: "observation" | "canonical"; id: string }
-  >();
-  const normalize = (
-    records: typeof data.observations,
-    kind: "observation" | "canonical",
-  ) => {
-    const result = new Map<string, Finding>();
-    for (const entry of records) {
-      if (result.has(entry.id))
-        throw new Error(`Duplicate ${kind} ID: ${entry.id}`);
-      // Finding IDs have a schema-defined format. Keep host identity in separate namespaces.
-      const findingId = `csf_${createHash("sha256")
-        .update(JSON.stringify([kind, entry.id]))
-        .digest("hex")
-        .slice(0, 24)}`;
-      result.set(entry.id, { ...entry.finding, findingId });
-      references.set(findingId, { kind, id: entry.id });
-    }
-    return result;
-  };
-  const observations = normalize(data.observations, "observation");
-  const canonicals = normalize(data.canonicals, "canonical");
+  const references = new Map<string, string>();
+  const observations = new Map<string, Finding>();
+  for (const entry of data.observations) {
+    if (observations.has(entry.id))
+      throw new Error(`Duplicate observation ID: ${entry.id}`);
+    // Original finding IDs can repeat across scans; host IDs identify observations.
+    const findingId = `csf_${createHash("sha256")
+      .update(entry.id)
+      .digest("hex")
+      .slice(0, 24)}`;
+    observations.set(entry.id, { ...entry.finding, findingId });
+    references.set(findingId, entry.id);
+  }
   const relationships = new Map<string, string[]>();
   for (const relation of data.candidateRelationships) {
     if (
@@ -106,27 +95,26 @@ export async function deduplicateRecords(
         "Each candidate relationship must name a different supplied observation.",
       );
     if (
-      new Set(relation.canonicalIds).size !== relation.canonicalIds.length ||
-      relation.canonicalIds.some((id) => !canonicals.has(id))
+      new Set(relation.candidateObservationIds).size !==
+        relation.candidateObservationIds.length ||
+      relation.candidateObservationIds.some(
+        (id) => id === relation.observationId || !observations.has(id),
+      )
     )
       throw new Error(
-        "Canonical candidates must name distinct supplied canonical IDs.",
+        "Candidates must name distinct supplied observations other than the anchor.",
       );
-    relationships.set(relation.observationId, relation.canonicalIds);
+    relationships.set(relation.observationId, relation.candidateObservationIds);
   }
-  if (relationships.size !== observations.size)
-    throw new Error(
-      "Supply candidate relationships for every observation, including empty lists.",
-    );
-
   const result: DeduplicateRecordsResult = {
     version: 1,
     status: "completed",
-    newGroups: [],
-    matches: [],
+    groups: [],
     unresolved: [],
   };
-  const sourceFindings = [...observations.values()];
+  const sourceFindings = [...relationships.keys()].map((id) =>
+    observations.get(id)!,
+  );
   const reviewer = new CodexDeduplicationReviewer({
     async run<T>({ validate, ...review }: CodexReview<T>): Promise<T> {
       return await abortable(async () => {
@@ -156,17 +144,12 @@ export async function deduplicateRecords(
   const algorithm = new FindingDeduplicator(
     {
       async potentialDuplicates(findingId) {
-        const reference = references.get(findingId)!;
+        const observationId = references.get(findingId)!;
         return {
-          finding: observations.get(reference.id)!,
-          potentialDuplicates: [
-            ...sourceFindings.filter(
-              (finding) => finding.findingId !== findingId,
-            ),
-            ...relationships
-              .get(reference.id)!
-              .map((id) => canonicals.get(id)!),
-          ],
+          finding: observations.get(observationId)!,
+          potentialDuplicates: relationships
+            .get(observationId)!
+            .map((id) => observations.get(id)!),
         };
       },
     },
@@ -188,7 +171,7 @@ export async function deduplicateRecords(
   } catch (error) {
     options.signal?.throwIfAborted();
     result.status = "unresolved";
-    result.unresolved = data.observations.map(({ id }) => ({
+    result.unresolved = [...relationships.keys()].map((id) => ({
       observationId: id,
       reason: "review_failed",
       message:
@@ -203,36 +186,11 @@ export async function deduplicateRecords(
       .map((finding) => [finding.findingId]),
   );
   for (const group of groups) {
-    const members = group.map((id) => references.get(id)!);
-    const sourceIds = members
-      .filter(({ kind }) => kind === "observation")
-      .map(({ id }) => id);
-    const canonicalIds = members
-      .filter(({ kind }) => kind === "canonical")
-      .map(({ id }) => id);
-    if (canonicalIds.length > 1) {
-      result.status = "unresolved";
-      result.unresolved.push(
-        ...sourceIds.map((observationId) => ({
-          observationId,
-          reason: "ambiguous_canonicals" as const,
-          message:
-            "Reviewed group connects multiple existing canonicals; host reconciliation is required.",
-        })),
-      );
-    } else if (canonicalIds.length === 1) {
-      result.matches.push(
-        ...sourceIds.map((observationId) => ({
-          observationId,
-          canonicalId: canonicalIds[0]!,
-        })),
-      );
-    } else {
-      result.newGroups.push({
-        representativeObservationId: sourceIds[0]!,
-        observationIds: sourceIds,
-      });
-    }
+    const observationIds = group.map((id) => references.get(id)!);
+    result.groups.push({
+      representativeObservationId: observationIds[0]!,
+      observationIds,
+    });
   }
   return result;
 }

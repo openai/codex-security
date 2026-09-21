@@ -45,13 +45,14 @@ The host sends:
   "params": {
     "version": 1,
     "observations": [
-      { "id": "observation-1", "finding": "<complete Finding object>" }
-    ],
-    "canonicals": [
-      { "id": "canonical-1", "finding": "<complete Finding object>" }
+      { "id": "observation-1", "finding": "<complete Finding object>" },
+      { "id": "observation-2", "finding": "<complete Finding object>" }
     ],
     "candidateRelationships": [
-      { "observationId": "observation-1", "canonicalIds": ["canonical-1"] }
+      {
+        "observationId": "observation-1",
+        "candidateObservationIds": ["observation-2"]
+      }
     ]
   }
 }
@@ -64,21 +65,20 @@ must describe the actual source; it does not authorize additional repository
 access. Unknown extension fields are preserved. This does not require creating
 scan manifests or other saved-scan artifacts.
 
-Observation IDs and canonical IDs are host-owned, nonempty strings, unique
-within their respective arrays. The same string can occur in both namespaces.
-Every observation must have exactly one `candidateRelationships` entry, including
-an empty `canonicalIds` array when no existing candidates apply. Each canonical
-ID must reference a supplied canonical and must appear at most once per entry.
-The host supplies each canonical's complete comparison evidence, including any
-existing membership evidence that matters. These links nominate comparisons;
-they do not assert that two records are duplicates.
+Observation IDs are host-owned, nonempty strings, unique within `observations`.
+Supply the pending observations and their retrieved neighbors together as original
+observations. Each `candidateRelationships` entry selects one anchor to process;
+its `candidateObservationIds` nominate comparisons to other supplied observations.
+Anchors must be distinct, and candidate IDs must be distinct within an entry and
+must not include the anchor itself. An empty candidate list produces a singleton
+without a model call. Observations without an anchor entry are candidates only.
 
-Every observation is also compared with every other observation in the batch.
-An omitted canonical link excludes that comparison; the host owns candidate
-coverage. There is no fixed batch limit (the expected batch is at most 50).
+Only the supplied relationships are compared; there is no implicit all-pairs
+comparison. The host owns candidate coverage. There is no fixed batch limit
+(the expected number of anchors is at most 50). Canonical records are not accepted.
 
 For model comparisons only, `findingId` is replaced with a stable, opaque
-comparison ID derived from the record kind and host ID. Thus observations with
+comparison ID derived from the host ID. Thus observations with
 the same original finding ID remain separate records. All other finding fields
 are preserved. Screening answers use assigned pair slots; pair reviews use the assigned IDs. Final
 results use the original host IDs, never the comparison IDs.
@@ -180,27 +180,25 @@ existing tool-submission validation and workflow checkpoints.
   "result": {
     "version": 1,
     "status": "completed",
-    "newGroups": [
+    "groups": [
       {
         "representativeObservationId": "observation-1",
         "observationIds": ["observation-1", "observation-2"]
       }
-    ],
-    "matches": [
-      { "observationId": "observation-3", "canonicalId": "canonical-1" }
     ],
     "unresolved": []
   }
 }
 ```
 
-Each successful observation occurs exactly once: either in a new group's
-`observationIds` (including its representative), or in `matches`. Singletons are
-new groups too. An existing canonical wins over a new representative regardless
-of severity. A reviewed group touching multiple existing canonicals is returned
-as unresolved with reason `ambiguous_canonicals`; the CLI does not merge existing
-canonicals or arbitrarily choose one. Other unresolved entries have reason
-`review_failed`. Each contains `observationId` and a diagnostic `message`.
+Each successful anchor occurs in exactly one group's `observationIds`, including
+singleton groups. Candidate-only observations appear only when grouped with an
+anchor; they are not assigned singleton dispositions. Groups can join observations
+from different scans and include a severity-selected representative from any
+member. All returned IDs identify original observations, never canonical records.
+
+A failed or inconclusive review returns no groups and marks every anchor unresolved
+with reason `review_failed`, an `observationId`, and a diagnostic `message`.
 Any unresolved entry makes `status` equal `unresolved`.
 
 The host creates canonical records and memberships, then removes pending

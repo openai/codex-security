@@ -41,11 +41,13 @@ function input(): DeduplicateRecordsInput {
       record("b", "shared"),
       record("c", "existing"),
       record("d", "unique"),
+      record("neighbor", "existing"),
     ],
-    canonicals: [record("c", "existing")],
     candidateRelationships: ["a", "b", "c", "d"].map((observationId) => ({
       observationId,
-      canonicalIds: ["c"],
+      candidateObservationIds: ["a", "b", "c", "d", "neighbor"].filter(
+        (id) => id !== observationId,
+      ),
     })),
   };
 }
@@ -81,7 +83,7 @@ function answer(review: DeduplicationReviewRequest): unknown {
       };
 }
 
-test("records groups batch duplicates, matches existing canonical IDs, and includes unique representatives", async () => {
+test("records groups original observations and retrieved neighbors with unique representatives", async () => {
   const original = input();
   const requests: DeduplicationReviewRequest[] = [];
   const result = await deduplicateRecords(original, {
@@ -101,11 +103,10 @@ test("records groups batch duplicates, matches existing canonical IDs, and inclu
     },
   });
   expect(result.status).toBe("completed");
-  expect(result.matches).toEqual([{ observationId: "c", canonicalId: "c" }]);
   expect(
-    result.newGroups.map((group) => [...group.observationIds].sort()).sort(),
-  ).toEqual([["a", "b"], ["d"]]);
-  for (const group of result.newGroups)
+    result.groups.map((group) => [...group.observationIds].sort()).sort(),
+  ).toEqual([["a", "b"], ["c", "neighbor"], ["d"]]);
+  for (const group of result.groups)
     expect(group.observationIds).toContain(group.representativeObservationId);
   expect(result.unresolved).toEqual([]);
   expect(new Set(requests.map(({ requestId }) => requestId)).size).toBe(
@@ -117,16 +118,15 @@ test("records groups batch duplicates, matches existing canonical IDs, and inclu
   expect(original).toEqual(input());
 });
 
-test("records honors explicit canonical neighborhoods and handles empty/isolated inputs without reviews", async () => {
+test("records honors explicit observation neighborhoods and handles empty/isolated inputs without reviews", async () => {
   for (const observations of [[], [record("a")]]) {
     const result = await deduplicateRecords(
       {
         version: 1,
-        observations,
-        canonicals: [record("c")],
+        observations: [...observations, record("unused")],
         candidateRelationships: observations.map(({ id }) => ({
           observationId: id,
-          canonicalIds: [],
+          candidateObservationIds: [],
         })),
       },
       {
@@ -138,32 +138,38 @@ test("records honors explicit canonical neighborhoods and handles empty/isolated
       },
     );
     expect(result.status).toBe("completed");
-    expect(result.newGroups).toHaveLength(observations.length);
+    expect(result.groups).toHaveLength(observations.length);
   }
 });
 
-test("multiple canonical matches remain unresolved instead of choosing an existing record", async () => {
-  const data = input();
-  data.observations = [record("a", "same")];
-  data.canonicals = [record("c1", "same"), record("c2", "same")];
-  data.candidateRelationships = [
-    { observationId: "a", canonicalIds: ["c1", "c2"] },
-  ];
+test("candidate-only observations are grouped without becoming additional anchors", async () => {
+  const data: DeduplicateRecordsInput = {
+    version: 1,
+    observations: [
+      record("a", "same"),
+      record("b", "same"),
+      record("c", "same"),
+    ],
+    candidateRelationships: [
+      { observationId: "a", candidateObservationIds: ["b"] },
+    ],
+  };
+  const requests: DeduplicationReviewRequest[] = [];
   const result = await deduplicateRecords(data, {
     reviewRunner: {
       async run(review) {
+        requests.push(review);
         return answer(review);
       },
     },
   });
-  expect(result.newGroups).toEqual([]);
-  expect(result.matches).toEqual([]);
-  expect(result.unresolved).toEqual([
-    {
-      observationId: "a",
-      reason: "ambiguous_canonicals",
-      message: expect.any(String),
-    },
+  expect(result.status).toBe("completed");
+  expect(
+    result.groups.map(({ observationIds }) => observationIds.sort()),
+  ).toEqual([["a", "b"]]);
+  expect(requests.map(({ stage }) => stage)).toEqual([
+    "screening",
+    "pair-review",
   ]);
 });
 
@@ -209,8 +215,7 @@ test.each([
       },
     });
     expect(result.status).toBe("unresolved");
-    expect(result.newGroups).toEqual([]);
-    expect(result.matches).toEqual([]);
+    expect(result.groups).toEqual([]);
     expect(result.unresolved.map(({ observationId }) => observationId)).toEqual(
       ["a", "b", "c", "d"],
     );
@@ -225,15 +230,40 @@ test("rejects invalid inputs before calling the host", async () => {
     { ...input(), version: 2 },
     { ...input(), observations: [record("a"), record("a")] },
     { ...input(), observations: [{ id: "a", finding: {} }] },
-    { ...input(), candidateRelationships: [] },
+    { ...input(), canonicals: [] },
     {
       ...input(),
-      candidateRelationships: [{ observationId: "unknown", canonicalIds: [] }],
+      candidateRelationships: [{ observationId: "a", canonicalIds: [] }],
     },
     {
       ...input(),
       candidateRelationships: [
-        { observationId: "a", canonicalIds: ["unknown"] },
+        { observationId: "a", candidateObservationIds: ["a"] },
+      ],
+    },
+    {
+      ...input(),
+      candidateRelationships: [
+        { observationId: "a", candidateObservationIds: ["b", "b"] },
+      ],
+    },
+    {
+      ...input(),
+      candidateRelationships: [
+        input().candidateRelationships[0],
+        input().candidateRelationships[0],
+      ],
+    },
+    {
+      ...input(),
+      candidateRelationships: [
+        { observationId: "unknown", candidateObservationIds: [] },
+      ],
+    },
+    {
+      ...input(),
+      candidateRelationships: [
+        { observationId: "a", candidateObservationIds: ["unknown"] },
       ],
     },
   ];
@@ -390,8 +420,7 @@ test.each([
   if (scenario === "host-error")
     expect(final.result).toMatchObject({
       status: "unresolved",
-      newGroups: [],
-      matches: [],
+      groups: [],
     });
   else expect(final.error).toBeDefined();
   host.stream.destroy();
@@ -467,7 +496,12 @@ test("real CLI pipes exit after a fake-host run without local Codex or state wri
       id: "run-1",
       result: {
         status: "completed",
-        matches: [{ observationId: "c", canonicalId: "c" }],
+        groups: expect.arrayContaining([
+          {
+            representativeObservationId: expect.any(String),
+            observationIds: expect.arrayContaining(["c", "neighbor"]),
+          },
+        ]),
       },
     });
     expect(await readdir(directory)).toEqual([]);
@@ -514,7 +548,6 @@ test("a disconnect while flushing the final result does not send a second respon
       params: {
         version: 1,
         observations: [],
-        canonicals: [],
         candidateRelationships: [],
       },
     })}\n`,
@@ -545,8 +578,7 @@ test.each(["screening", "pair-review"] as const)(
       },
     });
     expect(result.status).toBe("unresolved");
-    expect(result.newGroups).toEqual([]);
-    expect(result.matches).toEqual([]);
+    expect(result.groups).toEqual([]);
     expect(result.unresolved.map(({ observationId }) => observationId)).toEqual(
       ["a", "b", "c", "d"],
     );

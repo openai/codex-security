@@ -2078,8 +2078,8 @@ reducer uses a separate workflow.
 and emits serial `review.run` requests on stdout for a host-provided model
 backend. It requires no saved scan or Findings API and performs no local model
 execution or persistence. The SDK exposes `deduplicateRecords(input,
-{ reviewRunner, signal })`. Results distinguish new groups, existing canonical
-matches, and unresolved observations.
+{ reviewRunner, signal })`. The input contains original observations and explicit candidate links. Results
+contain groups of observation IDs and unresolved observations.
 
 See the [records protocol and Python fake-host example](docs/dedupe-records.md)
 for the complete input, review contract, cancellation, and persistence rules.
