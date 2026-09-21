@@ -204,6 +204,16 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("invalid", { decision: "UNKNOWN" });
     } else if (scenario === "invalid-review-error") {
       submit("invalid-error", { reason: " " }, { tool: "submit_error" });
+    } else if (scenario === "model-policy-override") {
+      submit(
+        "invalid-error-policy",
+        {
+          reason: "Approval reviewer unavailable.",
+          failureCode: "approval_reviewer_unavailable",
+          retryable: true,
+        },
+        { tool: "submit_error" },
+      );
     } else if (
       scenario.startsWith("required-source-error") ||
       scenario === "policy-reported-error"
@@ -250,6 +260,14 @@ for await (const line of createInterface({ input: process.stdin })) {
     submit(
       "blocked",
       { reason: "Required source revision could not be read." },
+      { tool: "submit_error" },
+    );
+  } else if (message.id === "invalid-error-policy") {
+    assert.equal(message.result.success, false);
+    assert.match(message.result.contentItems[0].text, /Resubmit/);
+    submit(
+      "blocked",
+      { reason: "Approval reviewer unavailable." },
       { tool: "submit_error" },
     );
   } else if (message.id === "invalid") {

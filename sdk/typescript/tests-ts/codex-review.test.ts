@@ -54,6 +54,8 @@ const failureReasons: Record<string, string> = {
     "Required review check could not be completed: Required source revision could not be read.",
   "invalid-review-error":
     "Required review check could not be completed: Required source revision could not be read.",
+  "model-policy-override":
+    "Required review check could not be completed: Approval reviewer unavailable.",
   exit: "Codex exited before completing the review",
 };
 const retriedFailures = new Set([
@@ -268,11 +270,14 @@ for (const {
       const reportsBlocker =
         scenario.startsWith("required-source-error") ||
         scenario === "policy-reported-error" ||
-        scenario === "invalid-review-error";
+        scenario === "invalid-review-error" ||
+        scenario === "model-policy-override";
+      const checkpointedFailure =
+        reportsBlocker && scenario !== "model-policy-override";
       const refused =
         scenario.startsWith("policy-") || scenario === "refusal-text";
       const reviewRunner =
-        reportsBlocker || refused
+        checkpointedFailure || refused
           ? new CheckpointedReviewRunner(
               new FindingWorkflow(
                 "blocked-review",
@@ -354,6 +359,8 @@ for (const {
             category: string;
             attempts: number;
             reason: string;
+            failureCode: string;
+            retryable: boolean;
           };
         };
         expect(reviewFailure.cause).toBeUndefined();
@@ -392,6 +399,33 @@ for (const {
                       : scenario === "request-error"
                         ? "Codex rejected the review request."
                         : "Codex review transport failed.",
+          failureCode: refused
+            ? ["policy-turn-code", "policy-request-code"].includes(scenario)
+              ? "review_model_refused"
+              : scenario === "policy-turn"
+                ? "review_transport_unavailable"
+                : "review_unknown"
+            : ["invalid-submission", "text-only"].includes(scenario)
+              ? "review_validation_exhausted"
+              : [
+                    "failed-turn",
+                    "server-error",
+                    "connection-error",
+                    "invalid-json",
+                    "exit",
+                  ].includes(scenario)
+                ? "review_transport_unavailable"
+                : "review_unknown",
+          retryable: [
+            "policy-turn",
+            "invalid-submission",
+            "text-only",
+            "failed-turn",
+            "server-error",
+            "connection-error",
+            "invalid-json",
+            "exit",
+          ].includes(scenario),
         });
         const supportBundle = JSON.stringify(reviewFailure.metadata);
         expect(supportBundle).not.toContain("synthetic-review-key");
@@ -405,7 +439,7 @@ for (const {
               ? sessions
               : 0,
         );
-        if (reportsBlocker || refused)
+        if (checkpointedFailure || refused)
           expect(checkpoints.saved).toHaveLength(0);
       }
       expect(starts).toBe(sessions);

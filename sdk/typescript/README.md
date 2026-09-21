@@ -2259,9 +2259,13 @@ merged findings. These review fields do not change the command's ID-only result
 or stored findings.
 
 Non-cancellation review failures throw `DeduplicationReviewError`. Its `metadata`
-contains only the review stage, model, failure category, attempt count, and a
-sanitized reason for diagnostics or an external support bundle; it does not
-contain findings, prompts, paths, thread IDs, or credentials.
+contains the review stage, model, legacy failure category, attempt count, a
+host-classified `failureCode` and `retryable` policy, and a sanitized reason for
+diagnostics or an external support bundle. Failure policy is derived from
+structured host observations, never diagnostic prose or model-selected fields.
+Unknown or inconsistent observations are non-retryable. This metadata is
+diagnostic and does not change the runner's existing session retry behavior.
+Metadata does not contain findings, prompts, paths, thread IDs, or credentials.
 
 If a completed turn has no accepted submission, whether it ended with text only
 or after rejected submissions, the runner sends one corrective instruction in

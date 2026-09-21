@@ -1,4 +1,10 @@
 import { formatScanCost, formatUsd, type ScanCost } from "./cost-model.js";
+import {
+  classifyReviewFailure,
+  type DeduplicationReviewFailureCode,
+  type DeduplicationReviewFailurePolicy,
+  validatedReviewFailurePolicy,
+} from "./deduplication/review-failure.js";
 
 /** Returns the original error message without altering its contents. */
 export function errorMessage(error: unknown): string {
@@ -41,16 +47,34 @@ export interface DeduplicationReviewFailureMetadata {
   category: DeduplicationReviewFailureCategory;
   attempts: number;
   reason: string;
+  failureCode: DeduplicationReviewFailureCode;
+  retryable: boolean;
 }
 
 export class DeduplicationReviewError extends CodexSecurityError {
+  public readonly metadata: Readonly<DeduplicationReviewFailureMetadata>;
+
   public constructor(
-    public readonly metadata: Readonly<DeduplicationReviewFailureMetadata>,
+    metadata: Readonly<
+      Omit<
+        DeduplicationReviewFailureMetadata,
+        keyof DeduplicationReviewFailurePolicy
+      > &
+        Partial<DeduplicationReviewFailurePolicy>
+    >,
     displayReason: string = metadata.reason,
   ) {
     super(
       `Codex did not complete a validated deduplication review. Findings are unchanged; retry the command. Reason: ${displayReason}`,
     );
+    const failurePolicy =
+      metadata.failureCode === undefined && metadata.retryable === undefined
+        ? classifyReviewFailure({ kind: "unknown" })
+        : validatedReviewFailurePolicy(
+            metadata.failureCode,
+            metadata.retryable,
+          );
+    this.metadata = { ...metadata, ...failurePolicy };
   }
 }
 

@@ -94,6 +94,12 @@ export type {
   DeduplicationReviewStage,
   ProtectedScanPathKind,
 } from "./errors.js";
+export { classifyReviewFailure } from "./deduplication/review-failure.js";
+export type {
+  DeduplicationReviewFailureCode,
+  DeduplicationReviewFailureObservation,
+  DeduplicationReviewFailurePolicy,
+} from "./deduplication/review-failure.js";
 export {
   DEFAULT_CODEX_CONFIG,
   mergedCodexConfig,
