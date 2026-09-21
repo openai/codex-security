@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
@@ -33,6 +41,10 @@ async function sourceFixture(): Promise<SourceFixture> {
   await writeFile(
     join(repository, "src", "matches.txt"),
     Array.from({ length: 120 }, () => "bounded needle").join("\n"),
+  );
+  await writeFile(
+    join(repository, "src", "auth.ts"),
+    'const mapped = "[::ffff:0:0]"; // auth marker\n',
   );
   git("add", ".");
   git(
@@ -86,6 +98,25 @@ test("reads and searches historical source without using the working tree", asyn
       startLine: 2,
       endLine: 2,
       content: "historical needle",
+      truncated: false,
+    });
+    expect(
+      await source.call("search", {
+        revision: fixture.firstRevision,
+        query: "auth marker",
+        paths: ["src"],
+        limit: 10,
+      }),
+    ).toEqual({
+      revision: fixture.firstRevision,
+      query: "auth marker",
+      matches: [
+        {
+          path: "src/auth.ts",
+          line: 1,
+          text: 'const mapped = "[::ffff:0:0]"; // auth marker',
+        },
+      ],
       truncated: false,
     });
     expect(
@@ -167,6 +198,98 @@ test("rejects an external Git object store", async () => {
     const failure = await ReviewSource.open(fixture.repository).catch(
       (error: unknown) => error,
     );
+    expect(failure).toBeInstanceOf(ReviewSourceError);
+    expect((failure as ReviewSourceError).observation).toEqual({
+      kind: "source",
+      outcome: "access-unavailable",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a changed Git common directory", async () => {
+  const fixture = await sourceFixture();
+  const linked = join(fixture.root, "linked");
+  const other = join(fixture.root, "other");
+  try {
+    execFileSync("git", ["worktree", "add", "--quiet", "--detach", linked], {
+      cwd: fixture.repository,
+    });
+    await mkdir(other);
+    execFileSync("git", ["init", "--quiet"], { cwd: other });
+    const source = await ReviewSource.open(linked);
+    const gitDirectory = execFileSync(
+      "git",
+      ["rev-parse", "--absolute-git-dir"],
+      { cwd: linked, encoding: "utf8" },
+    ).trim();
+    await writeFile(join(gitDirectory, "commondir"), join(other, ".git"));
+    const failure = await source
+      .call("read_file", {
+        revision: fixture.secondRevision,
+        path: "src/app.ts",
+      })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ReviewSourceError);
+    expect((failure as ReviewSourceError).observation).toEqual({
+      kind: "source",
+      outcome: "access-unavailable",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")(
+  "rejects an object directory replaced with a symlink",
+  async () => {
+    const fixture = await sourceFixture();
+    const other = join(fixture.root, "other");
+    const objects = join(fixture.repository, ".git", "objects");
+    try {
+      await mkdir(other);
+      execFileSync("git", ["init", "--quiet"], { cwd: other });
+      const source = await ReviewSource.open(fixture.repository);
+      await rename(objects, `${objects}-original`);
+      await symlink(join(other, ".git", "objects"), objects, "dir");
+      const failure = await source
+        .call("search", {
+          revision: fixture.secondRevision,
+          query: "needle",
+        })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ReviewSourceError);
+      expect((failure as ReviewSourceError).observation).toEqual({
+        kind: "source",
+        outcome: "access-unavailable",
+      });
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test("rejects alternates added after the source broker opens", async () => {
+  const fixture = await sourceFixture();
+  const other = join(fixture.root, "other");
+  try {
+    await mkdir(other);
+    execFileSync("git", ["init", "--quiet"], { cwd: other });
+    const source = await ReviewSource.open(fixture.repository);
+    await mkdir(join(fixture.repository, ".git", "objects", "info"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(fixture.repository, ".git", "objects", "info", "alternates"),
+      `${join(other, ".git", "objects")}\n`,
+    );
+    const failure = await source
+      .call("read_file", {
+        revision: fixture.secondRevision,
+        path: "src/app.ts",
+      })
+      .catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(ReviewSourceError);
     expect((failure as ReviewSourceError).observation).toEqual({
       kind: "source",

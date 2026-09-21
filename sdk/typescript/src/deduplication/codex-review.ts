@@ -111,6 +111,15 @@ interface Message {
   };
 }
 
+function sourceRequestKey(tool: string, input: unknown): string {
+  if (input === null || typeof input !== "object" || Array.isArray(input))
+    return `${tool}:${JSON.stringify(input)}`;
+  const normalized = Object.fromEntries(
+    Object.entries(input).sort(([left], [right]) => left.localeCompare(right)),
+  );
+  return `${tool}:${JSON.stringify(normalized)}`;
+}
+
 function transientCodexError(info: unknown): boolean {
   if (
     info === "usageLimitExceeded" ||
@@ -304,7 +313,10 @@ export class CodexReviewRunner {
       const send = (message: object) =>
         child.stdin.write(`${JSON.stringify(message)}\n`);
       let reviewSource: Promise<ReviewSource> | undefined;
-      let sourceFailure: DeduplicationReviewFailureObservation | undefined;
+      const sourceFailures = new Map<
+        string,
+        DeduplicationReviewFailureObservation
+      >();
       const startThread = () =>
         send({
           id: 3,
@@ -391,7 +403,6 @@ export class CodexReviewRunner {
         turnId = undefined;
         validationFailure = undefined;
         finalResponse = undefined;
-        sourceFailure = undefined;
         send({
           id: 3 + state.attempts,
           method: "turn/start",
@@ -472,7 +483,9 @@ export class CodexReviewRunner {
                   ],
                 },
               });
-              if (reportedFailure !== undefined)
+              if (reportedFailure !== undefined) {
+                const sourceFailure = [...sourceFailures.values()].at(-1);
+                sourceFailures.clear();
                 throw new ReviewAttemptError(
                   isReviewRefusal(reportedFailure)
                     ? "refusal"
@@ -493,6 +506,7 @@ export class CodexReviewRunner {
                     ? { kind: "unknown" }
                     : (sourceFailure ?? { kind: "unknown" }),
                 );
+              }
             } else if (
               message.method === "item/tool/call" &&
               params !== undefined &&
@@ -503,6 +517,10 @@ export class CodexReviewRunner {
               params.namespace === "review_source" &&
               (params.tool === "read_file" || params.tool === "search")
             ) {
+              const requestKey = sourceRequestKey(
+                params.tool,
+                params.arguments,
+              );
               try {
                 reviewSource ??= ReviewSource.open(
                   workingDirectory,
@@ -512,7 +530,7 @@ export class CodexReviewRunner {
                 const result = await (
                   await reviewSource
                 ).call(params.tool, params.arguments);
-                sourceFailure = undefined;
+                sourceFailures.delete(requestKey);
                 send({
                   id: message.id,
                   result: {
@@ -523,10 +541,10 @@ export class CodexReviewRunner {
                   },
                 });
               } catch (error) {
-                sourceFailure =
-                  error instanceof ReviewSourceError
-                    ? error.observation
-                    : undefined;
+                if (error instanceof ReviewSourceError) {
+                  sourceFailures.delete(requestKey);
+                  sourceFailures.set(requestKey, error.observation);
+                }
                 send({
                   id: message.id,
                   result: {

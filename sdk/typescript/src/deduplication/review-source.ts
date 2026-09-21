@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { devNull } from "node:os";
 import { isAbsolute, join, relative, resolve, win32 } from "node:path";
 import { promisify } from "node:util";
@@ -170,6 +170,13 @@ function exitCode(error: unknown): string | number | undefined {
     : undefined;
 }
 
+interface GitBoundary {
+  root: string;
+  gitDirectory: string;
+  commonDirectory: string;
+  objectDirectory: string;
+}
+
 export class ReviewSource {
   private running = false;
 
@@ -178,6 +185,7 @@ export class ReviewSource {
     private readonly checkoutRevision: string,
     private readonly git: string,
     private readonly environment: NodeJS.ProcessEnv,
+    private readonly boundary: GitBoundary | undefined,
     private readonly signal?: AbortSignal,
   ) {}
 
@@ -207,22 +215,15 @@ export class ReviewSource {
       "",
       command.executable,
       isolatedGitEnvironment(command.environment),
+      undefined,
       signal,
     );
-    let root: string;
-    let commonDirectory: string;
     let revision: string;
+    let boundary: GitBoundary;
     try {
-      root = await source.gitOutput(
-        ["rev-parse", "--show-toplevel"],
-        GIT_MAX_BUFFER_BYTES,
-      );
-      revision = await source.gitOutput(
+      boundary = await source.inspectBoundary();
+      revision = await source.rawGitOutput(
         ["rev-parse", "--verify", "HEAD^{commit}"],
-        GIT_MAX_BUFFER_BYTES,
-      );
-      commonDirectory = await source.gitOutput(
-        ["rev-parse", "--git-common-dir"],
         GIT_MAX_BUFFER_BYTES,
       );
     } catch (error) {
@@ -232,40 +233,12 @@ export class ReviewSource {
         error,
       );
     }
-    const canonicalRoot = await realpath(root).catch(() => root);
-    if (relative(canonical, canonicalRoot) !== "")
-      throw sourceAccessError(
-        "The approved source checkout is not the canonical Git worktree root.",
-      );
-    const commonRoot = await realpath(
-      resolve(canonical, commonDirectory),
-    ).catch((error) => {
-      throw sourceAccessError(
-        "The approved checkout's Git object store is unavailable.",
-        error,
-      );
-    });
-    for (const name of ["alternates", "http-alternates"]) {
-      const contents = await readFile(
-        join(commonRoot, "objects", "info", name),
-        "utf8",
-      ).catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return "";
-        throw sourceAccessError(
-          "The approved checkout's Git object store could not be inspected.",
-          error,
-        );
-      });
-      if (contents.trim() !== "")
-        throw sourceAccessError(
-          "The approved checkout uses an external Git object store.",
-        );
-    }
     return new ReviewSource(
       canonical,
       revision.toLowerCase(),
       command.executable,
       isolatedGitEnvironment(command.environment),
+      boundary,
       signal,
     );
   }
@@ -275,9 +248,18 @@ export class ReviewSource {
       throw sourceAccessError("Another source operation is already running.");
     this.running = true;
     try {
-      if (tool === "read_file") return await this.readFile(input);
-      if (tool === "search") return await this.search(input);
-      throw new Error("Unknown review source tool.");
+      await this.assertBoundary();
+      let result: unknown;
+      try {
+        if (tool === "read_file") result = await this.readFile(input);
+        else if (tool === "search") result = await this.search(input);
+        else throw new Error("Unknown review source tool.");
+      } catch (error) {
+        await this.assertBoundary();
+        throw error;
+      }
+      await this.assertBoundary();
+      return result;
     } finally {
       this.running = false;
     }
@@ -293,7 +275,7 @@ export class ReviewSource {
       throw new Error(`read_file accepts at most ${MAX_READ_LINES} lines.`);
     let source: string;
     try {
-      source = await this.gitOutput(
+      source = await this.sourceGitOutput(
         ["cat-file", "blob", `${revision}:${path}`],
         GIT_MAX_BUFFER_BYTES,
         [],
@@ -329,9 +311,10 @@ export class ReviewSource {
     const limit = request.limit ?? 50;
     let output: string;
     try {
-      output = await this.gitOutput(
+      output = await this.sourceGitOutput(
         [
           "grep",
+          "-z",
           "--no-recurse-submodules",
           "--no-textconv",
           "--full-name",
@@ -346,6 +329,7 @@ export class ReviewSource {
         ],
         SEARCH_MAX_BUFFER_BYTES,
         [1],
+        false,
       );
     } catch (error) {
       throw sourceAccessError(
@@ -353,20 +337,27 @@ export class ReviewSource {
         error,
       );
     }
+    const matches: { path: string; line: number; text: string }[] = [];
     const prefix = `${revision}:`;
-    const matches = output
-      .split(/\r?\n/u)
-      .filter(Boolean)
-      .slice(0, limit)
-      .map((line) => {
-        const value = line.startsWith(prefix)
-          ? line.slice(prefix.length)
-          : line;
-        const match = /^(.*):(\d+):(.*)$/u.exec(value);
-        if (match === null)
-          throw sourceAccessError("Git returned an invalid search result.");
-        return { path: match[1], line: Number(match[2]), text: match[3] };
+    let offset = 0;
+    while (offset < output.length && matches.length < limit) {
+      const pathEnd = output.indexOf("\0", offset);
+      const lineEnd = output.indexOf("\0", pathEnd + 1);
+      const textEnd = output.indexOf("\n", lineEnd + 1);
+      if (pathEnd < offset || lineEnd < pathEnd || textEnd < lineEnd)
+        throw sourceAccessError("Git returned an invalid search result.");
+      const framedPath = output.slice(offset, pathEnd);
+      const line = output.slice(pathEnd + 1, lineEnd);
+      if (!framedPath.startsWith(prefix) || !/^[1-9]\d*$/u.test(line))
+        throw sourceAccessError("Git returned an invalid search result.");
+      const text = output.slice(lineEnd + 1, textEnd).replace(/\r$/u, "");
+      matches.push({
+        path: framedPath.slice(prefix.length),
+        line: Number(line),
+        text,
       });
+      offset = textEnd + 1;
+    }
     return { revision, query, matches, truncated: matches.length === limit };
   }
 
@@ -375,11 +366,11 @@ export class ReviewSource {
     let current: string;
     let resolved: string;
     try {
-      current = await this.gitOutput(
+      current = await this.rawGitOutput(
         ["rev-parse", "--verify", "HEAD^{commit}"],
         GIT_MAX_BUFFER_BYTES,
       );
-      resolved = await this.gitOutput(
+      resolved = await this.rawGitOutput(
         ["rev-parse", "--verify", "--end-of-options", `${revision}^{commit}`],
         GIT_MAX_BUFFER_BYTES,
       );
@@ -405,7 +396,145 @@ export class ReviewSource {
     return revision;
   }
 
-  private async gitOutput(
+  private async sourceGitOutput(
+    args: readonly string[],
+    maxBuffer: number,
+    acceptedExitCodes: readonly number[] = [],
+    trimFinalNewline = true,
+  ): Promise<string> {
+    await this.assertBoundary();
+    try {
+      const output = await this.rawGitOutput(
+        args,
+        maxBuffer,
+        acceptedExitCodes,
+        trimFinalNewline,
+      );
+      await this.assertBoundary();
+      return output;
+    } catch (error) {
+      await this.assertBoundary();
+      throw error;
+    }
+  }
+
+  private async inspectBoundary(): Promise<GitBoundary> {
+    let root: string;
+    let gitDirectory: string;
+    let commonDirectory: string;
+    let objectDirectory: string;
+    try {
+      root = await this.rawGitOutput(
+        ["rev-parse", "--show-toplevel"],
+        GIT_MAX_BUFFER_BYTES,
+      );
+      gitDirectory = await this.rawGitOutput(
+        ["rev-parse", "--absolute-git-dir"],
+        GIT_MAX_BUFFER_BYTES,
+      );
+      commonDirectory = await this.rawGitOutput(
+        ["rev-parse", "--git-common-dir"],
+        GIT_MAX_BUFFER_BYTES,
+      );
+      objectDirectory = await this.rawGitOutput(
+        ["rev-parse", "--git-path", "objects"],
+        GIT_MAX_BUFFER_BYTES,
+      );
+    } catch (error) {
+      throw sourceAccessError(
+        "The approved source checkout's Git boundary could not be inspected.",
+        error,
+      );
+    }
+    const canonicalize = async (path: string): Promise<string> =>
+      await realpath(resolve(this.checkout, path)).catch((error) => {
+        throw sourceAccessError(
+          "The approved source checkout's Git boundary is unavailable.",
+          error,
+        );
+      });
+    const boundary = {
+      root: await canonicalize(root),
+      gitDirectory: await canonicalize(gitDirectory),
+      commonDirectory: await canonicalize(commonDirectory),
+      objectDirectory: await canonicalize(objectDirectory),
+    };
+    if (relative(this.checkout, boundary.root) !== "")
+      throw sourceAccessError(
+        "The approved source checkout is not the canonical Git worktree root.",
+      );
+    if (
+      relative(boundary.commonDirectory, boundary.objectDirectory) !== "objects"
+    ) {
+      throw sourceAccessError(
+        "The approved checkout uses an external Git object store.",
+      );
+    }
+    await this.assertNoAlternates(boundary.objectDirectory);
+    return boundary;
+  }
+
+  private async assertBoundary(): Promise<void> {
+    if (this.boundary === undefined) return;
+    const current = await this.inspectBoundary();
+    if (
+      current.root !== this.boundary.root ||
+      current.gitDirectory !== this.boundary.gitDirectory ||
+      current.commonDirectory !== this.boundary.commonDirectory ||
+      current.objectDirectory !== this.boundary.objectDirectory
+    ) {
+      throw sourceAccessError(
+        "The approved source checkout's Git boundary changed.",
+      );
+    }
+  }
+
+  private async assertNoAlternates(objectDirectory: string): Promise<void> {
+    const informationDirectory = join(objectDirectory, "info");
+    const information = await lstat(informationDirectory).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw sourceAccessError(
+          "The approved checkout's Git object store could not be inspected.",
+          error,
+        );
+      },
+    );
+    if (information === undefined) return;
+    if (information.isSymbolicLink() || !information.isDirectory())
+      throw sourceAccessError(
+        "The approved checkout's Git object metadata is not a directory.",
+      );
+    for (const name of ["alternates", "http-alternates"]) {
+      const path = join(informationDirectory, name);
+      const metadata = await lstat(path).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined;
+          throw sourceAccessError(
+            "The approved checkout's Git object store could not be inspected.",
+            error,
+          );
+        },
+      );
+      if (metadata === undefined) continue;
+      if (metadata.isSymbolicLink() || !metadata.isFile())
+        throw sourceAccessError(
+          "The approved checkout's Git object metadata is not a regular file.",
+        );
+      const contents = await readFile(path, "utf8").catch((error) => {
+        throw sourceAccessError(
+          "The approved checkout's Git object store could not be inspected.",
+          error,
+        );
+      });
+      if (contents.trim() !== "")
+        throw sourceAccessError(
+          "The approved checkout uses an external Git object store.",
+        );
+    }
+  }
+
+  private async rawGitOutput(
     args: readonly string[],
     maxBuffer: number,
     acceptedExitCodes: readonly number[] = [],

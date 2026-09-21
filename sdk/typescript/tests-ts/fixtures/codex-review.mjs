@@ -246,29 +246,36 @@ for await (const line of createInterface({ input: process.stdin })) {
         { tool: "submit_error" },
       );
     } else if (
-      scenario === "source-missing-revision" ||
+      scenario.startsWith("source-missing-revision") ||
       scenario === "source-missing-file"
     ) {
-      send({
-        id: "source-failure",
-        method: "item/tool/call",
-        params: {
-          threadId: "review-thread",
-          turnId,
-          tool: "read_file",
-          namespace: "review_source",
-          arguments: {
-            revision:
-              scenario === "source-missing-revision"
+      if (scenario === "source-missing-revision-correction" && turns > 1) {
+        submit(
+          "blocked",
+          { reason: "Required source revision could not be read." },
+          { tool: "submit_error" },
+        );
+      } else {
+        send({
+          id: "source-failure",
+          method: "item/tool/call",
+          params: {
+            threadId: "review-thread",
+            turnId,
+            tool: "read_file",
+            namespace: "review_source",
+            arguments: {
+              revision: scenario.startsWith("source-missing-revision")
                 ? "0".repeat(40)
                 : sourceRevision,
-            path:
-              scenario === "source-missing-file"
-                ? "src/missing.ts"
-                : "src/app.ts",
+              path:
+                scenario === "source-missing-file"
+                  ? "src/missing.ts"
+                  : "src/app.ts",
+            },
           },
-        },
-      });
+        });
+      }
     } else if (
       scenario.startsWith("required-source-error") ||
       scenario === "policy-reported-error"
@@ -328,6 +335,32 @@ for await (const line of createInterface({ input: process.stdin })) {
   } else if (message.id === "source-failure") {
     assert.equal(message.result.success, false);
     assert.match(message.result.contentItems[0].text, /Source request failed/);
+    if (scenario === "source-missing-revision-correction") {
+      complete();
+    } else if (scenario === "source-missing-revision-unrelated-success") {
+      send({
+        id: "source-unrelated-success",
+        method: "item/tool/call",
+        params: {
+          threadId: "review-thread",
+          turnId,
+          tool: "read_file",
+          namespace: "review_source",
+          arguments: {
+            revision: sourceRevision,
+            path: "src/app.ts",
+          },
+        },
+      });
+    } else {
+      submit(
+        "blocked",
+        { reason: "Required source revision could not be read." },
+        { tool: "submit_error" },
+      );
+    }
+  } else if (message.id === "source-unrelated-success") {
+    assert.equal(message.result.success, true);
     submit(
       "blocked",
       { reason: "Required source revision could not be read." },

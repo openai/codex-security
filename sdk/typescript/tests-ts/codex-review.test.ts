@@ -62,6 +62,10 @@ const failureReasons: Record<string, string> = {
     "Required review check could not be completed: Approval reviewer unavailable.",
   "source-missing-revision":
     "Required review check could not be completed: Required source revision could not be read.",
+  "source-missing-revision-correction":
+    "Required review check could not be completed: Required source revision could not be read.",
+  "source-missing-revision-unrelated-success":
+    "Required review check could not be completed: Required source revision could not be read.",
   "source-missing-file":
     "Required review check could not be completed: Required source revision could not be read.",
   exit: "Codex exited before completing the review",
@@ -429,6 +433,7 @@ for (const {
               "invalid-submission",
               "text-only",
               "required-source-error-after-text",
+              "source-missing-revision-correction",
             ].includes(scenario)
               ? 2
               : 1) * sessions,
@@ -443,7 +448,7 @@ for (const {
                   : modelFailures.has(scenario)
                     ? "Codex review turn failed."
                     : reportsBlocker
-                      ? scenario === "source-missing-revision"
+                      ? scenario.startsWith("source-missing-revision")
                         ? "The required source revision was unavailable."
                         : scenario === "source-missing-file"
                           ? "The required source could not be read."
@@ -467,7 +472,7 @@ for (const {
                     "exit",
                   ].includes(scenario)
                 ? "review_transport_unavailable"
-                : scenario === "source-missing-revision"
+                : scenario.startsWith("source-missing-revision")
                   ? "review_source_revision_unavailable"
                   : scenario === "source-missing-file"
                     ? "review_source_access_unavailable"
@@ -575,6 +580,7 @@ for (const {
                 "text-only-correction",
                 "cancel-continuation",
                 "required-source-error-after-text",
+                "source-missing-revision-correction",
               ].includes(scenario)
                 ? 2
                 : [
