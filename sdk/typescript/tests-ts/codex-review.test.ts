@@ -59,6 +59,7 @@ const failureReasons: Record<string, string> = {
   exit: "Codex exited before completing the review",
 };
 const retriedFailures = new Set([
+  "policy-turn",
   "text-only",
   "failed-turn",
   "server-error",

@@ -10,6 +10,8 @@ import {
   CheckpointedReviewRunner,
   reviewSettingsDigest,
 } from "../src/deduplication/checkpointed-review.js";
+import { classifyReviewFailure } from "../src/deduplication/review-failure.js";
+import { runReviewSessions } from "../src/deduplication/retry.js";
 import type { DuplicateDecision } from "../src/deduplication/deduplication-reviewer.js";
 import {
   checkpointWorkbench,
@@ -21,6 +23,65 @@ const distinct: DuplicateDecision = {
   decision: "DISTINCT",
   rationale: "Independent corrections are required.",
 };
+
+test("reuses a successful checkpoint after a transient review retry", async () => {
+  await using fixture = await workflowFixture();
+  const { environment, repository, document } = fixture;
+  const store = checkpointWorkbench("retried-review", {
+    repository,
+    revision: "synthetic-revision",
+    refsDigest: "synthetic-refs",
+    content: "synthetic-content",
+  });
+  const workflow = new FindingWorkflow(
+    "retried-review",
+    environment,
+    store.run,
+  );
+  const temporaryFailure = new Error("Synthetic transport outage");
+  const retryPolicy = classifyReviewFailure({
+    kind: "transport",
+    outcome: "unavailable",
+  });
+  const sessions: number[] = [];
+  const waits: number[] = [];
+  const runner = new CheckpointedReviewRunner(
+    workflow,
+    {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        return await runReviewSessions(
+          async (session) => {
+            sessions.push(session);
+            if (session === 1) throw temporaryFailure;
+            return review.validate(distinct);
+          },
+          (error) => (error === temporaryFailure ? retryPolicy : undefined),
+          {
+            random: () => 0,
+            wait: async (delay) => {
+              waits.push(delay);
+            },
+          },
+        );
+      },
+    },
+    await workflow.sourceSnapshot(repository),
+    { allRepositories: true },
+  );
+  const review: CodexReview<DuplicateDecision> = {
+    stage: "pair-review",
+    model: "gpt-5.6-sol",
+    effort: "ultra",
+    prompt: JSON.stringify(document.findings),
+    schema: { type: "object" },
+    validate: () => distinct,
+  };
+  await expect(runner.run(review)).resolves.toEqual(distinct);
+  await expect(runner.run(review)).resolves.toEqual(distinct);
+  expect(sessions).toEqual([1, 2]);
+  expect(waits).toEqual([1000]);
+  expect(store.saved).toHaveLength(1);
+});
 
 test.each([
   "finding",

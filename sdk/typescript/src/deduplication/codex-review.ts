@@ -39,7 +39,7 @@ import {
   reviewSubmissionInstructions,
   sourceReviewInstructions,
 } from "./deduplication-prompts.js";
-import { retryDelay, waitForRetry } from "./retry.js";
+import { runReviewSessions, waitForRetry } from "./retry.js";
 import { isReviewRefusal } from "./refusal.js";
 import {
   classifyReviewFailure,
@@ -66,7 +66,6 @@ class ReviewAttemptError extends Error {
     public readonly category: DeduplicationReviewFailureCategory,
     message: string,
     public readonly supportReason: string,
-    public readonly retryable = false,
     observation: DeduplicationReviewFailureObservation = { kind: "unknown" },
   ) {
     super(message);
@@ -157,24 +156,15 @@ export class CodexReviewRunner {
   async run<T>(review: CodexReview<T>): Promise<T> {
     const state = { attempts: 0 };
     try {
-      for (let session = 1; ; session++) {
-        state.attempts++;
-        try {
+      return await runReviewSessions(
+        async () => {
+          state.attempts++;
           return await this.runSession(review, state);
-        } catch (error) {
-          this.signal?.throwIfAborted();
-          if (
-            session >= 3 ||
-            !(error instanceof ReviewAttemptError) ||
-            !error.retryable
-          )
-            throw error;
-          await (this.retry.wait ?? waitForRetry)(
-            retryDelay(session, this.retry.random),
-            this.signal,
-          );
-        }
-      }
+        },
+        (error) =>
+          error instanceof ReviewAttemptError ? error.failurePolicy : undefined,
+        { signal: this.signal, ...this.retry },
+      );
     } catch (error) {
       this.signal?.throwIfAborted();
       const category =
@@ -408,7 +398,6 @@ export class CodexReviewRunner {
               "transport",
               "Codex returned malformed JSON",
               "Codex review transport failed.",
-              true,
               { kind: "transport", outcome: "unavailable" },
             );
           }
@@ -466,7 +455,6 @@ export class CodexReviewRunner {
                   isReviewRefusal(reportedFailure)
                     ? "The model refused the deduplication review."
                     : "A required review check could not be completed.",
-                  false,
                   { kind: "unknown" },
                 );
             } else {
@@ -486,8 +474,6 @@ export class CodexReviewRunner {
               refused
                 ? "The model refused the deduplication review."
                 : "Codex rejected the review request.",
-              !refused &&
-                transientCodexError(message.error.data?.codexErrorInfo),
               codexFailureObservation(message.error.data?.codexErrorInfo),
             );
           } else if (message.id === 1) {
@@ -547,8 +533,6 @@ export class CodexReviewRunner {
                 refused
                   ? "The model refused the deduplication review."
                   : "Codex review turn failed.",
-                !refused &&
-                  transientCodexError(params.turn.error?.codexErrorInfo),
                 codexFailureObservation(params.turn.error?.codexErrorInfo),
               );
             }
@@ -558,7 +542,6 @@ export class CodexReviewRunner {
                   "refusal",
                   finalResponse,
                   "The model refused the deduplication review.",
-                  false,
                   { kind: "unknown" },
                 );
               if (turns === 1) {
@@ -573,7 +556,6 @@ export class CodexReviewRunner {
                   "validation",
                   `Review validation failed: ${validationFailure}`,
                   "The submitted review failed semantic validation.",
-                  true,
                   { kind: "validation", outcome: "exhausted" },
                 );
               }
@@ -581,7 +563,6 @@ export class CodexReviewRunner {
                 "no-submission",
                 "Codex did not submit a validated review",
                 "Codex did not submit a validated review.",
-                true,
                 { kind: "validation", outcome: "exhausted" },
               );
             }
@@ -593,7 +574,6 @@ export class CodexReviewRunner {
           "transport",
           inputError?.message ?? "Codex exited before completing the review",
           "Codex review transport failed.",
-          true,
           { kind: "transport", outcome: "unavailable" },
         );
       } finally {
