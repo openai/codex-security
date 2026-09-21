@@ -59,6 +59,8 @@ node --expose-gc plugins/codex-security/native/proof-windows.mjs python plugins/
 
 The build also compiles the test-only `windows-wide-launcher` Rust example. It starts a Node proof child with lone surrogates in arguments, environment values, and its working directory. That child checks complete directory iteration, distinct surrogate and replacement-character files, canonical paths, bounded reads, output truncation, and recursive long paths through the typed adapter. A Rust file guard with sharing disabled remains open while the child enumerates its name; an explicit data read fails with a sharing violation. Attribute-only access is not blocked by Windows file sharing. Root-normalization tables run on the same matrix. The launcher cleans up the wide fixtures and is never included in the uploaded or bundled native payloads.
 
+Creating file and directory symbolic links requires Windows Developer Mode or the symbolic-link privilege. Without it, the proofs still run their other assertions, including directory junctions, and report the skipped symbolic-link assertions as `false` in their JSON output. CI requires real symbolic links on both architectures and also forces the restricted case to exercise both paths.
+
 ## Package inputs
 
 With the pinned Rust toolchain installed, build the plugin on its own:
