@@ -42,6 +42,7 @@ TEXT_CODE_EXTENSIONS = {
     ".kt",
     ".kts",
     ".lua",
+    ".m",
     ".mjs",
     ".mm",
     ".mts",
