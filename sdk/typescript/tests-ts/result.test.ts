@@ -55,9 +55,9 @@ describe("ScanResult", () => {
   test("rejects an unknown threshold with or without findings", () => {
     for (const levels of [[], ["high"]] satisfies SeverityLevel[][]) {
       const result = fakeResult(levels);
-      expect(() => result.hasFindingsAtOrAbove("hihg" as SeverityLevel)).toThrow(
-        "Unknown severity threshold",
-      );
+      expect(() =>
+        result.hasFindingsAtOrAbove("hihg" as SeverityLevel),
+      ).toThrow("Unknown severity threshold");
     }
   });
 
