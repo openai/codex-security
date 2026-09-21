@@ -587,6 +587,26 @@ Scans are report-only by default. Set `--fail-on-severity high` to exit with
 `1` if a completed scan finds high or critical issues. Incomplete scans exit
 with `2`, writing available results to stdout and a coverage warning to stderr.
 
+For machine-readable scan output (`--format json` or `--format jsonl`), a scan
+execution failure writes one structured object to stdout:
+
+```json
+{
+  "status": "failed",
+  "code": "SCAN_FAILED",
+  "message": "..."
+}
+```
+
+With `--full-output`, the same code and message are reported under `error` in
+an `ok: false` envelope instead.
+
+The command still exits with `2` for runtime, export, invalid-input, or
+incomplete-scan failures, and human-readable diagnostics remain on stderr.
+Use `scan --schema --format json` to discover this failure variant alongside
+the successful scan output. Cancellation and termination retain their `130`
+and `143` exit codes.
+
 ### Import findings as a saved scan
 
 Import an existing findings CSV or JSON file into local scan history and SQLite:
@@ -1690,6 +1710,8 @@ its read-only Codex sandbox.
 to select findings and add patch instructions. Results include a `patches`
 entry per finding with status `verified`, `no_change`, `blocked`, or `failed`.
 Verified and already-fixed findings no longer fail `--fail-on-severity`.
+Patching shows each finding's position, elapsed time, and live Codex activity.
+Progress goes to stderr; completed results stay in the terminal history.
 
 `--create-pr` commits generated patch files and opens a draft GitHub pull request
 with `gh` or a draft GitLab merge request with `glab`. Install and authenticate
@@ -1793,6 +1815,12 @@ cancels, resumes, publishes, edits, or deduplicates anything.
 
 The dashboard opens on Findings, followed by Duplicate groups. Both views
 support search, repository filtering, sorting, pagination, and record details.
+Click any column header to sort all matching records; click it again to reverse
+the order. The arrow marks the active column and direction. Changing the sort
+returns to the first page, and automatic refreshes keep the selected order.
+By default, findings sort by last update descending, then severity descending,
+then ID ascending to break ties. Groups sort by last update descending and ID
+ascending.
 Findings show stored content and links to their duplicate groups. Groups link
 back to their member findings, preserving separate overlapping groups and the
 original finding records.
@@ -1809,7 +1837,10 @@ repository choices, a page of records, and optional selected-record details:
 
 - `view`: `findings` (default) or `groups`.
 - `query`, `repository`: optional search text and exact repository ID.
-- `sort`: `activity` (default; most recently updated first) or `newest`.
+- `sort`: `activity` (default; last update), `newest` (created), `title`,
+  `repository`, `severity` (findings only), or `members` (groups only).
+- `direction`: `asc` or `desc` (default). Text sorts alphabetically without
+  case sensitivity, severity by level, and member counts numerically.
 - `limit`, `offset`: existing pagination conventions, defaulting to 50 and 0.
 - `id`: optional exact record ID to include in `detail`; unknown IDs return
   `detail: null` without hiding the list.
@@ -1936,7 +1967,7 @@ console.log(receipt.repositoryId, receipt.findingIds);
 Publish the scan with `--to custom` (or import it through the bulk API with its
 `repositoryId`) before deduplicating. The
 workflow reads a completed saved scan, queries candidates by finding ID, and
-runs Luna and Sol in the calling SDK/CLI process. Once all reviews succeed,
+runs Luna and Sol in the calling SDK/CLI process. Once all reviews finish,
 it posts accepted groups to the service. It does not re-upload findings or
 change scan artifacts.
 
@@ -1957,7 +1988,14 @@ has finished and none voted `DISTINCT`. It can run while unrelated Luna
 screenings continue. Results are combined in input order so completion timing
 does not change the groups.
 
-If a job fails after its retries, queued jobs stop and already running jobs
+An explicit model refusal keeps the affected pairs separate and allows unrelated
+reviews to continue. It is recorded as `NO_DECISION`, not a reviewed `DISTINCT`
+verdict. A screening refusal applies to every anchor/candidate pair in that
+screening; a pair-review refusal applies only to its assigned pair. Neither pair
+can be merged indirectly through other findings. Recognized policy errors and
+explicit refusal responses are not retried or sent to another model.
+
+If another kind of job fails after its retries, queued jobs stop and already running jobs
 finish before the command reports the failure. No groups are posted from an
 incomplete review. To retain completed reviews across runs, use a
 `--workflow-id` as described below.
@@ -2020,6 +2058,19 @@ members of an accepted group, with its canonical finding first. The canonical
 has the highest reported severity; ties use finding ID. Results do not delete,
 merge, or change stored finding documents. Accepted groups are saved as durable
 associations in the service before `deduplicationStatus` becomes `completed`.
+
+When any review is refused, the result instead has
+`deduplicationStatus: "completed_with_refusals"` and a `refusals` array. Each
+entry contains `decision: "NO_DECISION"`, `stage`, `model`, `findingIds`, and
+`reason`. For screening, the first finding ID is the anchor and the remaining
+IDs are its candidates. The CLI logs each refusal to stderr and exits
+successfully after saving the accepted groups. SDK callers can inspect and log
+the same structured entries. Findings retained because of a refusal are not
+confirmed unique. Successful runs without refusals keep their existing output
+shape. No command, flag, or default changes are required.
+
+This behavior applies to post-scan Luna/Sol deduplication. Deep Scan's internal
+reducer uses a separate workflow.
 
 ### Host-provided records deduplication
 
@@ -2134,9 +2185,15 @@ exponential backoff with jitter; HTTP retries honor `Retry-After`. Waiting to re
 occupies the job's concurrency slot.
 
 Cancellation, authentication or configuration errors, permanent HTTP errors, and
-required-source-access blockers are not retried. Exhausted retries fail deduplication;
+required-source-access blockers are not retried. Model refusals continue with
+`NO_DECISION` as described above. Other exhausted retries fail deduplication;
 invalid or unfinished reviews are not cached. Completed checkpoints remain
 available when the workflow resumes.
+
+Refusals are not saved as validated review checkpoints. A completed workflow
+retains its final `completed_with_refusals` result, including all refusal entries,
+and returns it on subsequent calls. To attempt those reviews again after
+resolving the refusal, run dedupe without that workflow ID or with a new one.
 
 Checkpoints bind to the exact original records and ordering, approved source path,
 Git revision and current file contents (including ignored files), repository scope,

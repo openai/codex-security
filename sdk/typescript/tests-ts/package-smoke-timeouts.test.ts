@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 type PackageSmokeTimeouts = {
   packageSmokeTimeouts: (platform?: NodeJS.Platform) => {
     commandTimeoutMs: number;
+    installTimeoutMs: number;
     processTimeoutMs: number;
   };
 };
@@ -18,17 +19,20 @@ describe("npm package smoke timeouts", () => {
     }
   });
 
-  test("allows the Windows npm install to complete", () => {
-    expect(packageSmokeTimeouts("win32").commandTimeoutMs).toBe(180_000);
+  test("extends the Windows install budget without slowing other command failures", () => {
+    const { installTimeoutMs, commandTimeoutMs } =
+      packageSmokeTimeouts("win32");
+    expect(installTimeoutMs).toBe(300_000);
+    expect(commandTimeoutMs).toBe(180_000);
   });
 
   test.each(["linux", "darwin", "win32"] as const)(
-    "allows installation and verification to each use a command budget on %s",
+    "allows installation and verification to each use their budget on %s",
     (platform) => {
-      const { commandTimeoutMs, processTimeoutMs } =
+      const { commandTimeoutMs, installTimeoutMs, processTimeoutMs } =
         packageSmokeTimeouts(platform);
 
-      const remainingAfterInstallation = processTimeoutMs - commandTimeoutMs;
+      const remainingAfterInstallation = processTimeoutMs - installTimeoutMs;
       expect(remainingAfterInstallation).toBeGreaterThan(commandTimeoutMs);
     },
   );

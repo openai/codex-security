@@ -61,11 +61,23 @@ The build also compiles the test-only `windows-wide-launcher` Rust example. It s
 
 ## Package inputs
 
-The `native-artifacts` workflow calls all three platform workflows and combines their eight verified payloads into `native-universal-<commit>`. PR validation jobs share one artifact assembled by `node-ci`; release and standalone validation runs assemble their own. The standalone MCP builder and npm package include the same complete `mcp/native` tree; neither compiles nor downloads code at runtime.
+With the pinned Rust toolchain installed, build the plugin on its own:
+
+```sh
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+node plugins/codex-security/mcp-app/scripts/build_native.mjs
+node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
+```
+
+`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. CI tests this build without the SDK on Linux, macOS, and Windows.
+
+For plugin and npm releases, use the default `--native universal`. It requires all eight verified binaries in `native/prebuilt`.
+
+The `native-artifacts` workflow calls all three platform workflows and combines their eight verified payloads into `native-universal-<commit>`. PR validation jobs share one artifact assembled by `node-ci`; release and standalone validation runs assemble their own. By default, the standalone MCP builder and npm package include the same complete `mcp/native` tree; neither compiles nor downloads code at runtime.
 
 The GNU x64 job also runs `notices.mjs` against the locked Cargo metadata. It collects crate licenses and the pinned Rust standard-library notices for both package surfaces. The NAPI crates omit license files from their registry archives, so `licenses/napi.txt` preserves their [pinned upstream license](https://github.com/napi-rs/napi-rs/blob/956e4525fea6a676ea3680b711382f167b899af9/LICENSE). Review that override when upgrading those dependencies.
 
-Before local plugin builds, tests, or Docker builds, select a successful run for the checkout's native sources. You can run `native-artifacts` manually on a pushed branch. Use the artifact name shown by that run; pull-request artifacts use the tested merge commit. From the repository root:
+For universal builds, SDK tests, or Docker builds, select a successful run for the checkout's native sources. You can run `native-artifacts` manually on a pushed branch. Use the artifact name shown by that run; pull-request artifacts use the tested merge commit. From the repository root:
 
 ```sh
 gh run download <run-id> --name native-universal-<commit> --dir plugins/codex-security/native/prebuilt

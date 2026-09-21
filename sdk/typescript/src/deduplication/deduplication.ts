@@ -1,10 +1,15 @@
 import type { Finding } from "../models.js";
 import type { FindingNeighborhood } from "../finding-retrieval.js";
-import { CodexSecurityError } from "../errors.js";
+import {
+  CodexSecurityError,
+  DeduplicationReviewError,
+  type DeduplicationReviewStage,
+} from "../errors.js";
 import {
   pairKey,
   screeningPairSlot,
   type DeduplicationReviewer,
+  type ScreeningResult,
 } from "./deduplication-reviewer.js";
 
 export const DEFAULT_DEDUPE_CONCURRENCY = 8;
@@ -61,10 +66,21 @@ async function runQueued(
   if (failure !== undefined) throw failure.error;
 }
 
+export interface DeduplicationRefusal {
+  decision: "NO_DECISION";
+  stage: DeduplicationReviewStage;
+  model: string;
+  /** For screening, the first finding is the anchor and the rest are its candidates. */
+  findingIds: string[];
+  reason: string;
+}
+
 export interface DeduplicationResult {
   uniqueFindingIds: string[];
   duplicateGroups: string[][];
-  deduplicationStatus: "completed";
+  deduplicationStatus: "completed" | "completed_with_refusals";
+  /** Refused reviews are kept separate without claiming a DISTINCT verdict. */
+  refusals?: DeduplicationRefusal[];
 }
 
 const severityOrder: Record<Finding["severity"]["level"], number> = {
@@ -242,6 +258,23 @@ export class FindingDeduplicator {
     const concurrency = deduplicationConcurrency(this.concurrency);
     const ids = [...new Set(findingIds)];
     const findings = new Map<string, Finding>();
+    const refusals = new Map<string, DeduplicationRefusal>();
+    const recordRefusal = (error: unknown, ids: string[]): void => {
+      this.signal?.throwIfAborted();
+      if (
+        !(error instanceof DeduplicationReviewError) ||
+        error.metadata.category !== "refusal"
+      )
+        throw error;
+      const { stage, model, reason } = error.metadata;
+      refusals.set(JSON.stringify([stage, ...ids]), {
+        decision: "NO_DECISION",
+        stage,
+        model,
+        findingIds: ids,
+        reason,
+      });
+    };
     const neighborhoods = new Array<Finding[]>(ids.length);
     await runQueued(
       ids.map((id, index) => async () => {
@@ -288,7 +321,15 @@ export class FindingDeduplicator {
     const pending = neighborhoods
       .filter((neighborhood) => neighborhood.length > 1)
       .map((neighborhood) => async () => {
-        const screening = await this.reviewer.screen(neighborhood);
+        let screening: ScreeningResult | undefined;
+        try {
+          screening = await this.reviewer.screen(neighborhood);
+        } catch (error) {
+          recordRefusal(
+            error,
+            neighborhood.map((finding) => finding.findingId),
+          );
+        }
         this.signal?.throwIfAborted();
         for (let index = 0; index < neighborhood.length - 1; index++) {
           const key = pairKey([
@@ -297,20 +338,25 @@ export class FindingDeduplicator {
           ]);
           const state = pairs.get(key)!;
           if (
+            screening === undefined ||
             screening.decisions[screeningPairSlot(index)]!.decision ===
-            "DISTINCT"
+              "DISTINCT"
           )
             state.rejected = true;
           state.remaining--;
-          // Wait for every screening of this pair: a later DISTINCT veto must
+          // Wait for every screening: a later DISTINCT verdict or refusal must
           // prevent verification, including a verification that could fail.
           if (state.remaining === 0 && !state.rejected) {
             ready.push(async () => {
-              state.decision = (
-                await this.reviewer.reviewPair(
-                  state.ids.map((id) => findings.get(id)!),
-                )
-              ).decision;
+              try {
+                state.decision = (
+                  await this.reviewer.reviewPair(
+                    state.ids.map((id) => findings.get(id)!),
+                  )
+                ).decision;
+              } catch (error) {
+                recordRefusal(error, state.ids);
+              }
             });
           }
         }
@@ -400,7 +446,17 @@ export class FindingDeduplicator {
     return {
       uniqueFindingIds: [...new Set(ids.map((id) => canonical.get(id) ?? id))],
       duplicateGroups,
-      deduplicationStatus: "completed",
+      deduplicationStatus:
+        refusals.size > 0 ? "completed_with_refusals" : "completed",
+      ...(refusals.size > 0
+        ? {
+            refusals: [...refusals.entries()]
+              .sort(([left], [right]) =>
+                left < right ? -1 : left > right ? 1 : 0,
+              )
+              .map(([, refusal]) => refusal),
+          }
+        : {}),
     };
   }
 }

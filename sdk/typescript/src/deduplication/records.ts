@@ -180,6 +180,10 @@ export async function deduplicateRecords(
       sourceFindings.map((finding) => finding.findingId),
     );
     options.signal?.throwIfAborted();
+    if (decisions.refusals?.length)
+      throw new Error(
+        decisions.refusals.map(({ reason }) => reason).join("\n"),
+      );
     groups = decisions.duplicateGroups;
   } catch (error) {
     options.signal?.throwIfAborted();

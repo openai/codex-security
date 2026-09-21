@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { DeduplicationReviewError } from "../src/errors.js";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -524,3 +525,33 @@ test("a disconnect while flushing the final result does not send a second respon
   ]);
   expect(messages).toHaveLength(1);
 });
+
+test.each(["screening", "pair-review"] as const)(
+  "%s refusal leaves records unresolved when the shared algorithm continues",
+  async (stage) => {
+    const result = await deduplicateRecords(input(), {
+      reviewRunner: {
+        async run(review) {
+          if (review.stage === stage)
+            throw new DeduplicationReviewError({
+              stage,
+              model: review.model,
+              category: "refusal",
+              attempts: 1,
+              reason: "Synthetic review refusal.",
+            });
+          return answer(review);
+        },
+      },
+    });
+    expect(result.status).toBe("unresolved");
+    expect(result.newGroups).toEqual([]);
+    expect(result.matches).toEqual([]);
+    expect(result.unresolved.map(({ observationId }) => observationId)).toEqual(
+      ["a", "b", "c", "d"],
+    );
+    expect(
+      result.unresolved.every(({ reason }) => reason === "review_failed"),
+    ).toBe(true);
+  },
+);
