@@ -4558,7 +4558,7 @@ function boundedFixtureErrorText(message, maximum) {
 }
 
 const {
-  testDiscoveryParsePayloadCannotFailScan,
+  testRecoverableWorkerErrorsCannotFailScan,
   testNonRetryableDiscoveryReplacesOnlyFailedWorker,
   testNonRetryableReducerPreservesInputsAndCommittedAggregate,
   testFatalReducerAbortsScanWithoutRetry,
@@ -4617,7 +4617,7 @@ try {
   await testRateLimitAndUnrelatedRefusalsRetainTransientRecovery();
   await testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold();
   await testExhaustedTransientDiscoveryIsReplaced();
-  await testDiscoveryParsePayloadCannotFailScan();
+  await testRecoverableWorkerErrorsCannotFailScan();
   await testNonRetryableDiscoveryReplacesOnlyFailedWorker();
   await testSuccessfulDiscoveryResetsConsecutiveFailureThreshold();
   await testExhaustedInvalidDiscoveryArtifactsAreReplaced();

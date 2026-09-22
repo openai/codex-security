@@ -14,8 +14,27 @@ export function createDeepScanWorkerFailureCases({
   workerIdFromPrompt,
   promptContext,
 }) {
-  async function testDiscoveryParsePayloadCannotFailScan() {
-    for (const output of ["config unknown", "authentication required"]) {
+  async function testRecoverableWorkerErrorsCannotFailScan() {
+    const failures = ["config unknown", "authentication required"].map(
+      (output) =>
+        new Error(
+          `Failed to parse item: ${JSON.stringify({
+            type: "item.completed",
+            item: {
+              id: "fixture-command",
+              type: "command_execution",
+              command: "synthetic-command",
+              aggregated_output: output,
+            },
+          })}`,
+        ),
+    );
+    failures.push(
+      ...["ENOENT", "EACCES", "ENOEXEC", "EPERM"].map((code) =>
+        Object.assign(new Error("fixture worker I/O failure"), { code }),
+      ),
+    );
+    for (const failure of failures) {
       const fixture = await fixtureRun({
         workers: 2,
         subagents: 0,
@@ -27,17 +46,6 @@ export function createDeepScanWorkerFailureCases({
       const normalExecutor = new FakeExecutor();
       const attempts = [];
       const events = [];
-      const parseError = new Error(
-        `Failed to parse item: ${JSON.stringify({
-          type: "item.completed",
-          item: {
-            id: "fixture-command",
-            type: "command_execution",
-            command: "synthetic-command",
-            aggregated_output: output,
-          },
-        })}`,
-      );
       const coordinator = new DeepScanCoordinator({
         run: fixture.run,
         store,
@@ -52,7 +60,7 @@ export function createDeepScanWorkerFailureCases({
               await request.onThreadStarted?.(
                 request.resumeThreadId ?? "fixture-parse-thread",
               );
-              throw classifyCodexWorkerError(parseError);
+              throw classifyCodexWorkerError(failure);
             }
             return normalExecutor.run(request);
           },
@@ -309,7 +317,7 @@ export function createDeepScanWorkerFailureCases({
   }
 
   return {
-    testDiscoveryParsePayloadCannotFailScan,
+    testRecoverableWorkerErrorsCannotFailScan,
     testNonRetryableDiscoveryReplacesOnlyFailedWorker,
     testNonRetryableReducerPreservesInputsAndCommittedAggregate,
     testFatalReducerAbortsScanWithoutRetry,

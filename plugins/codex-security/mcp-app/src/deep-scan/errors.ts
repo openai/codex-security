@@ -17,13 +17,6 @@ const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
   "This request has been flagged for potentially high-risk cyber activity.",
 ]);
 
-const NON_RETRYABLE_WORKER_ERROR_CODES = new Set([
-  "ENOENT",
-  "EACCES",
-  "ENOEXEC",
-  "EPERM",
-]);
-
 /** Retire this worker without retrying its conversation; the scan may replace it. */
 export class DeepScanNonRetryableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -102,20 +95,13 @@ export function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
 export function classifyCodexWorkerError(error: unknown): Error {
   const normalized = error instanceof Error ? error : new Error(String(error));
   if (normalized instanceof DeepScanNonRetryableError) return normalized;
-  const code =
-    "code" in normalized && typeof normalized.code === "string"
-      ? normalized.code
-      : undefined;
-  if (
-    (code !== undefined && NON_RETRYABLE_WORKER_ERROR_CODES.has(code)) ||
-    isCodexCybersecurityPolicyRefusal(normalized)
-  ) {
+  if (isCodexCybersecurityPolicyRefusal(normalized)) {
     return new DeepScanNonRetryableError(normalized.message, {
       cause: normalized,
     });
   }
-  // Unknown failures use the worker's normal retry/replacement policy. SDK
-  // errors can contain arbitrary command output, so do not infer a permanent
-  // configuration or authentication failure from words in their messages.
+  // OS error codes alone do not establish a permanent failure, and SDK errors
+  // can contain arbitrary command output. Leave both on the normal retry path
+  // unless a producer explicitly identifies the failure as nonretryable.
   return normalized;
 }

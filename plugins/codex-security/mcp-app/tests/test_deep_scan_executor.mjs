@@ -174,7 +174,7 @@ try {
     ),
     path.join(originalCwd, "codex"),
   );
-  testSpawnPermissionErrorsAreNonRetryable();
+  testOsErrorCodesRemainRetryable();
   testTextualMissingPathErrorsRemainRetryable();
   testWorkerErrorClassificationUsesExactAllowlist();
   await testWindowsAppsCodexFallsBackToRelocatedBinary();
@@ -193,13 +193,12 @@ try {
   );
 }
 
-function testSpawnPermissionErrorsAreNonRetryable() {
+function testOsErrorCodesRemainRetryable() {
   for (const code of ["ENOENT", "EACCES", "ENOEXEC", "EPERM"]) {
     const original = Object.assign(new Error(`spawn codex ${code}`), { code });
     const classified = classifyCodexWorkerError(original);
-    assert.equal(classified.name, "DeepScanNonRetryableError");
-    assert.equal(classified instanceof DeepScanFatalError, false);
-    assert.equal(classified.cause, original);
+    assert.equal(classified, original);
+    assert.equal(classified.name, "Error");
   }
 }
 

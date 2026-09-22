@@ -72,6 +72,7 @@ await testStdioFailuresRemainRetryable();
 await testUnknownJsonRpcFailuresRemainRetryableAndSafe();
 await testRuntimeFallbackWarningClassification();
 await testSpawnErrorFailsClosed();
+await testMissingWorkerDirectoryRemainsRetryable();
 await testAbortKillsPreflightChild();
 
 async function testAllowedProfileAndRawArgv() {
@@ -635,13 +636,27 @@ async function testSpawnErrorFailsClosed() {
   await assert.rejects(
     preflight(missingCodex, tmpdir()),
     (error) =>
-      error?.name === "DeepScanNonRetryableError" &&
+      error?.name === "Error" &&
+      error.cause?.code === "ENOENT" &&
       error.message.includes(JSON.stringify(missingCodex)) &&
       error.message.includes("could not start") &&
       error.message.includes("with --version") &&
       error.message.includes("CODEX_CLI_PATH/PATH") &&
       !error.message.includes("does not support"),
   );
+}
+
+async function testMissingWorkerDirectoryRemainsRetryable() {
+  await withFakeCodex({}, async ({ codexPath, cwd, argvPath }) => {
+    await assert.rejects(
+      preflight(codexPath, path.join(cwd, "missing-worker-directory")),
+      (error) =>
+        error?.name === "Error" &&
+        error.cause?.code === "ENOENT" &&
+        error.message.includes("could not start"),
+    );
+    await assert.rejects(readFile(argvPath), { code: "ENOENT" });
+  });
 }
 
 async function testRuntimeFallbackWarningClassification() {

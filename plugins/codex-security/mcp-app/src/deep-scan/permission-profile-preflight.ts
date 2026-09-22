@@ -2,11 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import { MCP_APP_VERSION } from "../version.js";
-import {
-  classifyCodexWorkerError,
-  DeepScanFatalError,
-  DeepScanNonRetryableError,
-} from "./errors.js";
+import { DeepScanFatalError } from "./errors.js";
 import { executablePathForSpawn } from "./executable-path.js";
 
 export const DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID =
@@ -551,10 +547,7 @@ function codexExecutableStartError(codexPath: string, error: Error): Error {
     codexPath,
     "could not start" + codeDetail,
   );
-  const classified = classifyCodexWorkerError(error);
-  return classified instanceof DeepScanNonRetryableError
-    ? new DeepScanNonRetryableError(message, { cause: classified })
-    : new Error(message, { cause: classified });
+  return new Error(message, { cause: error });
 }
 
 function codexExecutableExitError(
