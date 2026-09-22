@@ -6,7 +6,7 @@ export function decodePosixBytes(bytes: Buffer): string {
   } catch {
     // Match Python's surrogateescape for undecodable POSIX path bytes.
     let value = "";
-    for (let offset = 0; offset < bytes.length; ) {
+    for (let offset = 0; offset < bytes.length;) {
       let decoded = false;
       for (let size = 1; size <= 4 && offset + size <= bytes.length; size++) {
         try {
