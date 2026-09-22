@@ -555,14 +555,14 @@ async function skillSession(
 }
 
 describe("imported finding SDK sessions", () => {
-  test("the default factory preserves Codex home and selected-profile network settings", async () => {
+  test("the default factory preserves native provider, approval, model, and network settings", async () => {
     const root = await temporaryDirectory();
     const script = `
       import { strict as assert } from "node:assert";
       import { mock } from "bun:test";
       import { join } from "node:path";
       const [root, source] = process.argv.slice(1);
-      const { writeCodexConfig } = await import(join(source, "config.ts"));
+      const { writeCodexConfig, mergedCodexConfig } = await import(join(source, "config.ts"));
       const runtime = await import(join(source, "runtime.ts"));
       mock.module(join(source, "runtime.ts"), () => ({
         ...runtime,
@@ -590,21 +590,57 @@ describe("imported finding SDK sessions", () => {
       });
       for (const webSearch of ["disabled", "cached"]) {
         for (const selectedProfile of [false, true]) {
-          const settings = { web_search: webSearch, sandbox_workspace_write: { network_access: false } };
+          const settings = {
+            web_search: webSearch,
+            sandbox_workspace_write: { network_access: false },
+            approval_policy: "never",
+            model: "configured-model",
+            model_reasoning_effort: "medium",
+            model_provider: "example-provider",
+            model_providers: {
+              "example-provider": {
+                name: "Example provider",
+                base_url: "https://provider.example.invalid/v1",
+                wire_api: "responses",
+                auth: { command: ["example-auth"], cwd: "auth" },
+              },
+            },
+            features: { goals: false },
+          };
+          const nativeSettings = {
+            ...settings,
+            features: { ...settings.features, plugins: true },
+            plugins: { "example-plugin@example-marketplace": { enabled: true } },
+            marketplaces: { "example-marketplace": { source_type: "local", source: root } },
+          };
           await writeCodexConfig(join(root, "config.toml"), selectedProfile
-            ? { web_search: "live", profile: "restricted", profiles: { restricted: settings } }
-            : settings);
+            ? { web_search: "live", approval_policy: "on-request", profile: "restricted", profiles: { restricted: nativeSettings } }
+            : nativeSettings);
           await client.assess("report-1", ["finding-1"]);
           assert.deepEqual(overrides, {
             ...settings,
             model: "requested-model",
             model_reasoning_effort: "high",
           });
+          // Typical home plugin configuration must not trip SDK plugin ownership checks.
+          await mergedCodexConfig({ codexOverrides: overrides });
+          const configuredClient = new DependencyFindings({
+            environment: { CODEX_HOME: root, CODEX_SECURITY_STATE_DIR: join(root, "state") },
+          });
+          await configuredClient.assess("report-1", ["finding-1"]);
+          assert.deepEqual(overrides, settings);
         }
       }
+      await writeCodexConfig(join(root, "config.toml"), {
+        approval_policy: "never",
+        profile: "interactive",
+        profiles: { interactive: { approval_policy: "on-request" } },
+      });
+      await client.assess("report-1", ["finding-1"]);
+      assert.equal(overrides.approval_policy, "never");
       await writeCodexConfig(join(root, "config.toml"), {});
       await client.assess("report-1", ["finding-1"]);
-      assert.deepEqual(overrides, { model: "requested-model", model_reasoning_effort: "high" });
+      assert.deepEqual(overrides, { approval_policy: "on-request", model: "requested-model", model_reasoning_effort: "high" });
     `;
     const result = spawnSync(
       process.execPath,

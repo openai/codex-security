@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { readCodexHomeConfig } from "./auth.js";
 import {
   resolveCodexProfile,
+  scanApprovalPolicy,
   type JsonObject,
   type JsonValue,
 } from "./config.js";
@@ -370,26 +371,27 @@ function defaultDependencies(
       ),
     runSkill: async (request) => {
       const { createSecurityInternal } = await import("./api.js");
-      const configured = resolveCodexProfile(
-        await readCodexHomeConfig(environment, options.signal),
-      );
-      const sandbox = configured["sandbox_workspace_write"];
-      const networkAccess =
-        sandbox !== null &&
-        typeof sandbox === "object" &&
-        !Array.isArray(sandbox)
-          ? sandbox["network_access"]
-          : undefined;
+      const homeConfig = await readCodexHomeConfig(environment, options.signal);
+      const configured: JsonObject = {
+        ...resolveCodexProfile(homeConfig),
+        approval_policy: scanApprovalPolicy(homeConfig),
+      };
+      // The SDK owns the bundled plugin; other native settings stay in effect.
+      delete configured["plugins"];
+      delete configured["marketplaces"];
+      const features = configured["features"];
+      if (
+        features !== null &&
+        typeof features === "object" &&
+        !Array.isArray(features)
+      ) {
+        delete features["plugins"];
+      }
       await using security = createSecurityInternal(
         {
           pythonPath: options.pythonPath,
           codexOverrides: {
-            ...(configured["web_search"] === undefined
-              ? {}
-              : { web_search: configured["web_search"] }),
-            ...(networkAccess === undefined
-              ? {}
-              : { sandbox_workspace_write: { network_access: networkAccess } }),
+            ...configured,
             ...(options.model === undefined ? {} : { model: options.model }),
             ...(options.reasoningEffort === undefined
               ? {}

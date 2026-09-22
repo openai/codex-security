@@ -63,7 +63,7 @@ export function renderDependencyFindings(
       `${report.vendor} · ${report.findingCount.toLocaleString("en-US")} imported findings`,
     );
     wrap(`Repository: ${report.targetPath}`);
-    wrap(`Revision: ${report.targetRevision}`);
+    wrap(`Imported revision: ${report.targetRevision}`);
     lines.push(`  Report ID: ${report.id}`);
     if (report.warnings.length) {
       lines.push("", `  ${strong("Import notes")}`);
@@ -75,10 +75,6 @@ export function renderDependencyFindings(
     if (assessment.applicability !== assessment.summary) {
       wrap(assessment.applicability, 4);
     }
-    wrap(
-      `Assessed version: ${assessment.packageVersion ?? "Unverified"}${assessment.versionBasis ? ` (${assessment.versionBasis})` : ""} · revision ${assessment.targetRevision}`,
-      4,
-    );
     for (const unknown of assessment.unknowns) wrap(`Unknown: ${unknown}`, 4);
     for (const limitation of assessment.limitations ?? []) {
       wrap(`Limitation: ${limitation}`, 4);
@@ -112,6 +108,10 @@ export function renderDependencyFindings(
     for (const warning of entry.inputWarnings)
       wrap(`Import note: ${warning}`, 4);
     if (assessment) {
+      wrap(
+        `Assessed version: ${assessment.packageVersion ?? "Unverified"}${assessment.versionBasis ? ` (${assessment.versionBasis})` : ""} · revision ${assessment.targetRevision}`,
+        4,
+      );
       if (command === "assess") assessmentDetails(assessment);
       else wrap(assessment.summary, 4);
     }

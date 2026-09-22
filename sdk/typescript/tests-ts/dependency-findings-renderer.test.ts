@@ -28,7 +28,7 @@ const assessment: DependencyFindingAssessment = {
   applicability: "The deployed entry point was unavailable for inspection.",
   versionBasis: "declared",
   packageVersion: "2.0.0",
-  targetRevision: report.targetRevision,
+  targetRevision: "fedcba0987654321",
   createdAt: "2026-09-01T13:00:00Z",
   unknowns: ["Whether user input reaches the parser."],
   limitations: ["No deployed artifact was available."],
@@ -109,7 +109,14 @@ describe("dependency findings renderer", () => {
         expect(output).toContain(
           `show ${report.id} --offset 11 --limit 1 --verdict not_applicable`,
         );
-        expect(output.replace(/\s+/g, " ")).toContain(assessment.summary);
+        const compact = output.replace(/\s+/g, " ");
+        expect(compact).toContain(assessment.summary);
+        expect(compact).toContain(
+          `Assessed version: ${assessment.packageVersion} (${assessment.versionBasis}) · revision ${assessment.targetRevision}`,
+        );
+        expect(compact).toContain(
+          `Imported revision: ${report.targetRevision}`,
+        );
         expect(output).not.toContain("RAW_VENDOR_PAYLOAD");
         expect(output).not.toContain(assessment.applicability);
       }
