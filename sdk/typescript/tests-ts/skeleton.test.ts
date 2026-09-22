@@ -308,7 +308,7 @@ describe("TypeScript package skeleton", () => {
       ["Check plugin source boundary", "package"],
       ["Typecheck", "static-checks"],
       ["Check formatting", "static-checks"],
-      ["Check changed MCP formatting", "static-checks"],
+      ["Check MCP formatting", "static-checks"],
     ] as const) {
       expect(steps.filter((step) => step.name === name)).toHaveLength(1);
       expect(jobs[job]!.steps!.some((step) => step.name === name)).toBe(true);

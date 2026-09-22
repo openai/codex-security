@@ -13,6 +13,7 @@
 - add Azure Pipelines Bedrock scan example ([#906](https://github.com/openai/codex-security/pull/906))
 - run Windows proofs without symlink privileges ([#988](https://github.com/openai/codex-security/pull/988))
 - pin the MCP formatter ([#990](https://github.com/openai/codex-security/pull/990))
+- check formatting across the MCP app ([#991](https://github.com/openai/codex-security/pull/991))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

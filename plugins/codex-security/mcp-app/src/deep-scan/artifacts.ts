@@ -18,47 +18,63 @@ export function createDeepScanArtifacts(scanDir: string): DeepScanArtifacts {
     scanDir,
     deepRoot,
     workersRoot: join(deepRoot, "workers"),
-    dedupRoot: join(deepRoot, "dedup")
+    dedupRoot: join(deepRoot, "dedup"),
   };
 }
 
 export function discoveryArtifacts(artifactDir: string): DiscoveryArtifacts {
   return {
-    resultPath: join(artifactDir, "result.json")
+    resultPath: join(artifactDir, "result.json"),
   };
 }
 
-export async function ensureDeepScanDirectories(artifacts: DeepScanArtifacts): Promise<void> {
+export async function ensureDeepScanDirectories(
+  artifacts: DeepScanArtifacts,
+): Promise<void> {
   for (const path of [
     artifacts.deepRoot,
     artifacts.workersRoot,
-    artifacts.dedupRoot
+    artifacts.dedupRoot,
   ]) {
     await fs.mkdir(path, { recursive: true });
   }
 }
 
-export async function writePrivateFile(path: string, content: string): Promise<void> {
+export async function writePrivateFile(
+  path: string,
+  content: string,
+): Promise<void> {
   await fs.mkdir(dirname(path), { recursive: true });
-  await fs.writeFile(path, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  await fs.writeFile(path, content, {
+    encoding: "utf8",
+    mode: 0o600,
+    flag: "wx",
+  });
 }
 
-export async function writeJsonAtomic(path: string, payload: unknown): Promise<void> {
+export async function writeJsonAtomic(
+  path: string,
+  payload: unknown,
+): Promise<void> {
   await fs.mkdir(dirname(path), { recursive: true });
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
   await fs.writeFile(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, {
     encoding: "utf8",
-    mode: 0o600
+    mode: 0o600,
   });
   await fs.rename(temporaryPath, path);
 }
 
-export async function readJsonObject(path: string): Promise<Record<string, unknown>> {
+export async function readJsonObject(
+  path: string,
+): Promise<Record<string, unknown>> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(await fs.readFile(path, "utf8"));
   } catch (error) {
-    throw new Error(`Invalid Deep Scan JSON artifact ${path}: ${errorMessage(error)}`);
+    throw new Error(
+      `Invalid Deep Scan JSON artifact ${path}: ${errorMessage(error)}`,
+    );
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`Deep Scan JSON artifact must contain an object: ${path}`);
@@ -69,19 +85,33 @@ export async function readJsonObject(path: string): Promise<Record<string, unkno
 export async function requireRegularFile(
   path: string,
   root: string,
-  requireContent = true
+  requireContent = true,
 ): Promise<void> {
   const rootPath = await fs.realpath(root);
   const resolvedPath = await fs.realpath(path);
-  assertInside(rootPath, resolvedPath, `Deep Scan artifact escaped its scan directory: ${path}`);
+  assertInside(
+    rootPath,
+    resolvedPath,
+    `Deep Scan artifact escaped its scan directory: ${path}`,
+  );
   assertCanonicalPath(path, resolvedPath);
-  const [linkStat, fileStat] = await Promise.all([fs.lstat(path), fs.stat(path)]);
-  if (linkStat.isSymbolicLink() || !fileStat.isFile() || (requireContent && fileStat.size === 0)) {
+  const [linkStat, fileStat] = await Promise.all([
+    fs.lstat(path),
+    fs.stat(path),
+  ]);
+  if (
+    linkStat.isSymbolicLink() ||
+    !fileStat.isFile() ||
+    (requireContent && fileStat.size === 0)
+  ) {
     throw new Error(`Deep Scan artifact is not a valid regular file: ${path}`);
   }
 }
 
-export async function archiveDirectory(source: string, destination: string): Promise<void> {
+export async function archiveDirectory(
+  source: string,
+  destination: string,
+): Promise<void> {
   await fs.mkdir(dirname(destination), { recursive: true });
   await fs.rm(destination, { recursive: true, force: true });
   try {
@@ -94,7 +124,10 @@ export async function archiveDirectory(source: string, destination: string): Pro
 
 function assertInside(root: string, path: string, message: string): void {
   const child = relative(root, path);
-  if (child === "" || (!isAbsolute(child) && child !== ".." && !child.startsWith(`..${sep}`))) {
+  if (
+    child === "" ||
+    (!isAbsolute(child) && child !== ".." && !child.startsWith(`..${sep}`))
+  ) {
     return;
   }
   throw new Error(message);
@@ -102,7 +135,9 @@ function assertInside(root: string, path: string, message: string): void {
 
 function assertCanonicalPath(path: string, resolvedPath: string): void {
   if (relative(resolve(path), resolvedPath) === "") return;
-  throw new Error(`Deep Scan artifact must use a canonical non-symlink path: ${path}`);
+  throw new Error(
+    `Deep Scan artifact must use a canonical non-symlink path: ${path}`,
+  );
 }
 
 function errorMessage(error: unknown): string {
@@ -110,5 +145,10 @@ function errorMessage(error: unknown): string {
 }
 
 function isMissing(error: unknown): boolean {
-  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+  return Boolean(
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "ENOENT",
+  );
 }

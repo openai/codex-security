@@ -7,7 +7,7 @@ import {
   realpath,
   rm,
   symlink,
-  writeFile
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -15,21 +15,28 @@ import { build } from "esbuild";
 
 const bundle = await build({
   bundle: true,
-  entryPoints: [new URL("../src/artifact-threat-model.ts", import.meta.url).pathname],
+  entryPoints: [
+    new URL("../src/artifact-threat-model.ts", import.meta.url).pathname,
+  ],
   format: "esm",
   platform: "node",
-  write: false
+  write: false,
 });
 const threatModel = await import(
-  "data:text/javascript;base64,"
-  + Buffer.from(bundle.outputFiles[0].contents).toString("base64")
+  "data:text/javascript;base64," +
+    Buffer.from(bundle.outputFiles[0].contents).toString("base64")
 );
-const schema = JSON.parse(await readFile(
-  new URL("../../schemas/tools/worker-threat-model.schema.json", import.meta.url),
-  "utf8"
-));
+const schema = JSON.parse(
+  await readFile(
+    new URL(
+      "../../schemas/tools/worker-threat-model.schema.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
 const fixtureRoot = await realpath(
-  await mkdtemp(path.join(tmpdir(), "codex-security-worker-threat-model-"))
+  await mkdtemp(path.join(tmpdir(), "codex-security-worker-threat-model-")),
 );
 const repoRoot = path.join(fixtureRoot, "repository");
 
@@ -52,7 +59,7 @@ async function testCheckedInStrictSchema() {
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
   assert.equal(
     schema.$id,
-    "codex-security://schemas/tools/worker-threat-model.schema.json"
+    "codex-security://schemas/tools/worker-threat-model.schema.json",
   );
 
   const input = schema.$defs.recordWorkerThreatModelInput;
@@ -64,7 +71,10 @@ async function testCheckedInStrictSchema() {
   assert.equal(input.properties.content.pattern, "\\S");
 
   const validator = threatModel.workerThreatModelInputSchema;
-  assert.equal(validator.safeParse({ content: "# Worker threat model" }).success, true);
+  assert.equal(
+    validator.safeParse({ content: "# Worker threat model" }).success,
+    true,
+  );
   for (const invalid of [
     {},
     { content: null },
@@ -74,12 +84,12 @@ async function testCheckedInStrictSchema() {
     { content: "# Threat model", scanId: "another-scan" },
     { content: "# Threat model", path: "outside.md" },
     { content: "# Threat model", artifactRoot: repoRoot },
-    { content: "# Threat model", operation: "append" }
+    { content: "# Threat model", operation: "append" },
   ]) {
     assert.equal(
       validator.safeParse(invalid).success,
       false,
-      `Worker threat-model schema unexpectedly accepted ${JSON.stringify(invalid)}.`
+      `Worker threat-model schema unexpectedly accepted ${JSON.stringify(invalid)}.`,
     );
   }
 }
@@ -94,15 +104,15 @@ async function testExactContentAndAtomicReplacement() {
     "",
     "Repository: fixture/repository",
     "Version: sha256:original",
-    ""
+    "",
   ].join("\n");
 
   assert.deepEqual(
     await threatModel.recordCodexSecurityWorkerThreatModel(
       { content: original },
-      context
+      context,
     ),
-    { operation: "replace" }
+    { operation: "replace" },
   );
   assert.equal(await readFile(destination, "utf8"), original);
 
@@ -113,18 +123,20 @@ async function testExactContentAndAtomicReplacement() {
     "",
     "Repository: fixture/repository",
     "Version: sha256:replacement",
-    ""
+    "",
   ].join("\n");
 
   assert.deepEqual(
     await threatModel.recordCodexSecurityWorkerThreatModel(
       { content: replacement },
-      context
+      context,
     ),
-    { operation: "replace" }
+    { operation: "replace" },
   );
   assert.equal(await readFile(destination, "utf8"), replacement);
-  assert.deepEqual(await readdir(path.dirname(destination)), ["threat_model.md"]);
+  assert.deepEqual(await readdir(path.dirname(destination)), [
+    "threat_model.md",
+  ]);
 }
 
 async function testInvalidInputDoesNotWrite() {
@@ -133,16 +145,15 @@ async function testInvalidInputDoesNotWrite() {
     { content: "" },
     { content: "  \t\n " },
     { content: "# Threat model", path: "outside.md" },
-    { content: "# Threat model", scanId: "another-scan" }
+    { content: "# Threat model", scanId: "another-scan" },
   ].entries()) {
     const context = await createWorkerContext(`invalid-${index}`);
     await assert.rejects(
-      threatModel.recordCodexSecurityWorkerThreatModel(input, context)
+      threatModel.recordCodexSecurityWorkerThreatModel(input, context),
     );
-    await assert.rejects(
-      readFile(threatModelDestination(context), "utf8"),
-      { code: "ENOENT" }
-    );
+    await assert.rejects(readFile(threatModelDestination(context), "utf8"), {
+      code: "ENOENT",
+    });
   }
 }
 
@@ -153,14 +164,13 @@ async function testOnlyDiscoveryWorkersCanWrite() {
     await assert.rejects(
       threatModel.recordCodexSecurityWorkerThreatModel(
         { content: "# Threat model\n" },
-        context
+        context,
       ),
-      /only a bound discovery worker/i
+      /only a bound discovery worker/i,
     );
-    await assert.rejects(
-      readFile(threatModelDestination(context), "utf8"),
-      { code: "ENOENT" }
-    );
+    await assert.rejects(readFile(threatModelDestination(context), "utf8"), {
+      code: "ENOENT",
+    });
   }
 }
 
@@ -171,21 +181,18 @@ async function testSymlinkedContextDirectoryIsRejected() {
   await mkdir(path.join(context.root, "artifacts"), { recursive: true });
   await mkdir(outside, { recursive: true });
   await writeFile(outsideThreatModel, "outside remains unchanged\n");
-  await symlink(
-    outside,
-    path.join(context.root, "artifacts", "01_context")
-  );
+  await symlink(outside, path.join(context.root, "artifacts", "01_context"));
 
   await assert.rejects(
     threatModel.recordCodexSecurityWorkerThreatModel(
       { content: "# Escaping threat model\n" },
-      context
+      context,
     ),
-    /regular directory|escaped|safe/i
+    /regular directory|escaped|safe/i,
   );
   assert.equal(
     await readFile(outsideThreatModel, "utf8"),
-    "outside remains unchanged\n"
+    "outside remains unchanged\n",
   );
 }
 
@@ -200,9 +207,9 @@ async function testSymlinkedDestinationIsRejected() {
   await assert.rejects(
     threatModel.recordCodexSecurityWorkerThreatModel(
       { content: "# Escaping threat model\n" },
-      context
+      context,
     ),
-    /regular file|escaped|safe/i
+    /regular file|escaped|safe/i,
   );
   assert.equal(await readFile(outside, "utf8"), "outside remains unchanged\n");
 }
@@ -216,14 +223,13 @@ async function testSymlinkedArtifactRootIsRejected() {
   await assert.rejects(
     threatModel.recordCodexSecurityWorkerThreatModel(
       { content: "# Escaping threat model\n" },
-      context
+      context,
     ),
-    /safe regular directory|escaped|context/i
+    /safe regular directory|escaped|context/i,
   );
-  await assert.rejects(
-    readFile(threatModelDestination(worker), "utf8"),
-    { code: "ENOENT" }
-  );
+  await assert.rejects(readFile(threatModelDestination(worker), "utf8"), {
+    code: "ENOENT",
+  });
 }
 
 async function createWorkerContext(name) {
@@ -232,15 +238,10 @@ async function createWorkerContext(name) {
   return {
     root: await realpath(root),
     repoRoot,
-    layout: "worker"
+    layout: "worker",
   };
 }
 
 function threatModelDestination(context) {
-  return path.join(
-    context.root,
-    "artifacts",
-    "01_context",
-    "threat_model.md"
-  );
+  return path.join(context.root, "artifacts", "01_context", "threat_model.md");
 }
