@@ -194,21 +194,8 @@ jobs:
         run: pnpm --dir sdk/typescript run types
       - name: Check formatting
         run: pnpm --dir sdk/typescript run format
-      - name: Check changed MCP formatting
-        shell: bash
-        run: |
-          changed_files="$(mktemp)"
-          git diff --no-renames --diff-filter=ACMRT --name-only -z HEAD^1 HEAD -- plugins/codex-security/mcp-app > "$changed_files"
-          files=()
-          while IFS= read -r -d '' path; do
-            case "$path" in
-              *.cjs|*.cts|*.js|*.jsx|*.mjs|*.mts|*.ts|*.tsx)
-                files+=("$GITHUB_WORKSPACE/$path") ;;
-            esac
-          done < "$changed_files"
-          if ((${#files[@]} > 0)); then
-            pnpm --dir plugins/codex-security/mcp-app exec prettier --check "${files[@]}"
-          fi
+      - name: Check MCP formatting
+        run: pnpm --dir plugins/codex-security/mcp-app exec prettier --check "**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}"
 
   native:
     needs: validate-title
