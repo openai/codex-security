@@ -1,6 +1,11 @@
 import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { JsonObject, JsonValue } from "./config.js";
+import { readCodexHomeConfig } from "./auth.js";
+import {
+  resolveCodexProfile,
+  type JsonObject,
+  type JsonValue,
+} from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   bundledPluginRoot,
@@ -365,10 +370,26 @@ function defaultDependencies(
       ),
     runSkill: async (request) => {
       const { createSecurityInternal } = await import("./api.js");
+      const configured = resolveCodexProfile(
+        await readCodexHomeConfig(environment, options.signal),
+      );
+      const sandbox = configured["sandbox_workspace_write"];
+      const networkAccess =
+        sandbox !== null &&
+        typeof sandbox === "object" &&
+        !Array.isArray(sandbox)
+          ? sandbox["network_access"]
+          : undefined;
       await using security = createSecurityInternal(
         {
           pythonPath: options.pythonPath,
           codexOverrides: {
+            ...(configured["web_search"] === undefined
+              ? {}
+              : { web_search: configured["web_search"] }),
+            ...(networkAccess === undefined
+              ? {}
+              : { sandbox_workspace_write: { network_access: networkAccess } }),
             ...(options.model === undefined ? {} : { model: options.model }),
             ...(options.reasoningEffort === undefined
               ? {}

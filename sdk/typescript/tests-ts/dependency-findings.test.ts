@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -554,6 +555,66 @@ async function skillSession(
 }
 
 describe("imported finding SDK sessions", () => {
+  test("the default factory preserves Codex home and selected-profile network settings", async () => {
+    const root = await temporaryDirectory();
+    const script = `
+      import { strict as assert } from "node:assert";
+      import { mock } from "bun:test";
+      import { join } from "node:path";
+      const [root, source] = process.argv.slice(1);
+      const { writeCodexConfig } = await import(join(source, "config.ts"));
+      const runtime = await import(join(source, "runtime.ts"));
+      mock.module(join(source, "runtime.ts"), () => ({
+        ...runtime,
+        resolvePluginPython: async () => "python",
+        bundledPluginRoot: async () => root,
+        runWorkbench: async () => ({
+          assessment: { id: "assessment-1", targetPath: root, state: "complete" },
+        }),
+      }));
+      let overrides;
+      mock.module(join(source, "api.ts"), () => ({
+        createSecurityInternal: (config) => {
+          overrides = config.codexOverrides;
+          return {
+            runDependencyFindingSkill: async () => "complete",
+            async [Symbol.asyncDispose]() {},
+          };
+        },
+      }));
+      const { DependencyFindings } = await import(join(source, "dependency-findings.ts"));
+      const client = new DependencyFindings({
+        environment: { CODEX_HOME: root, CODEX_SECURITY_STATE_DIR: join(root, "state") },
+        model: "requested-model",
+        reasoningEffort: "high",
+      });
+      for (const webSearch of ["disabled", "cached"]) {
+        for (const selectedProfile of [false, true]) {
+          const settings = { web_search: webSearch, sandbox_workspace_write: { network_access: false } };
+          await writeCodexConfig(join(root, "config.toml"), selectedProfile
+            ? { web_search: "live", profile: "restricted", profiles: { restricted: settings } }
+            : settings);
+          await client.assess("report-1", ["finding-1"]);
+          assert.deepEqual(overrides, {
+            ...settings,
+            model: "requested-model",
+            model_reasoning_effort: "high",
+          });
+        }
+      }
+      await writeCodexConfig(join(root, "config.toml"), {});
+      await client.assess("report-1", ["finding-1"]);
+      assert.deepEqual(overrides, { model: "requested-model", model_reasoning_effort: "high" });
+    `;
+    const result = spawnSync(
+      process.execPath,
+      ["--eval", script, root, resolve(import.meta.dir, "../src")],
+      { encoding: "utf8" },
+    );
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+  });
+
   test.each(["dependency-finding-assessment", "fix-finding"] as const)(
     "%s uses current credentials, settings, and an external writable workspace",
     async (skill) => {

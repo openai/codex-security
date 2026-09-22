@@ -191,8 +191,11 @@ def _check_inputs(target_revision: str, claim: dict[str, Any]) -> dict[str, Any]
 
 def _file_digest(path: Path) -> str:
     """Hash resolver inputs without interpreting their package-manager format."""
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _require_resolution_unchanged(target: Path, results: list[dict[str, Any]]) -> None:
@@ -641,6 +644,13 @@ def _validate_result(
             target,
             "ls-files",
             "--cached",
+            "--recurse-submodules",
+            "-z",
+            "--",
+            source.relative_to(target).as_posix(),
+        ) and not git_bytes(
+            target,
+            "ls-files",
             "--others",
             "--exclude-standard",
             "-z",
@@ -764,7 +774,7 @@ def record_assessments(
         )
     report = _report(connection, row["report_id"])
     target = Path(report["target_path"])
-    results = _decode(_read(Path(args.results_path)))
+    results = _decode(Path(args.results_path).read_bytes())
     claims = {claim["id"]: claim for claim in json.loads(row["claims_json"])}
     if (
         not isinstance(results, list)

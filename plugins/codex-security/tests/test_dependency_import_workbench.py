@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +15,9 @@ from workbench_test_support import initialize_git_repository, run_workbench
 
 
 def setup_report(
-    tmp_path: Path, *, ecosystem: str = "npm"
+    tmp_path: Path, *, ecosystem: str = "npm", finding_count: int = 2
 ) -> tuple[Path, Path, str, list[dict[str, Any]]]:
-    """Create an isolated repository and import two scanner claims."""
+    """Create an isolated repository and import synthetic scanner claims."""
     target, state = tmp_path / "repo", tmp_path / "state"
     initialize_git_repository(target)
     (target / "app.js").write_text("const parser = require('parser');\nparser.parse(input);\n")
@@ -42,7 +43,7 @@ def setup_report(
                         "reachability": "not-reachable",
                         "fixedIn": ["2.0.0"],
                     }
-                    for index in range(2)
+                    for index in range(finding_count)
                 ],
             }
         )
@@ -245,6 +246,92 @@ def test_import_assess_selection_and_reviewed_fix(tmp_path: Path) -> None:
     ).read_text() == "const parser = require('parser');\nparser.parse(input);\n"
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 0
+
+
+def test_assessment_batch_retains_large_native_transcripts(tmp_path: Path) -> None:
+    """Record a complete selection whose resolver output exceeds the report import cap."""
+    target, state, report_id, findings = setup_report(tmp_path, finding_count=100)
+    selected = start(state, report_id, [finding["id"] for finding in findings])
+    results = [result(finding["id"], target) for finding in findings]
+    for output in results:
+        output["resolution"]["stdout"] += "\n" + " " * (90 * 1024)
+    assert len(json.dumps(results).encode("utf-8")) > 8 * 1024 * 1024
+
+    recorded = record(tmp_path, state, selected["assessment"]["id"], results)
+
+    assert recorded["assessment"]["state"] == "complete"
+    assert len(recorded["results"]) == 100
+    assert [output["resolution"] for output in recorded["results"]] == [
+        output["resolution"] for output in results
+    ]
+
+
+def test_resolver_hash_works_without_hashlib_file_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workbench_api: dict[str, Any]
+) -> None:
+    """Hash complete resolver inputs on Python versions without hashlib.file_digest."""
+    content = b"resolver input\n" * 100000
+    path = tmp_path / "resolver-input.json"
+    path.write_bytes(content)
+    monkeypatch.delattr(hashlib, "file_digest", raising=False)
+
+    assert (
+        workbench_api["dependency_imports"]._file_digest(path)
+        == hashlib.sha256(content).hexdigest()
+    )
+
+
+def test_clean_submodule_code_evidence_is_bound_to_its_recorded_revision(tmp_path: Path) -> None:
+    """Accept tracked submodule source while rejecting ignored files and later changes."""
+    target, state, report_id, findings = setup_report(tmp_path)
+    dependency = tmp_path / "dependency"
+    initialize_git_repository(dependency)
+    source = "parser.parse(request.body);\n"
+    (dependency / "app.js").write_text(source)
+    (dependency / ".gitignore").write_text("ignored.js\n")
+    subprocess.run(["git", "add", "."], cwd=dependency, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "Add synthetic application"], cwd=dependency, check=True
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            str(dependency),
+            "component",
+        ],
+        cwd=target,
+        check=True,
+    )
+    subprocess.run(["git", "commit", "-qam", "Add synthetic submodule"], cwd=target, check=True)
+    selected = start(state, report_id, [findings[0]["id"]])["assessment"]["id"]
+    output = result(findings[0]["id"], target)
+    (target / "component/ignored.js").write_text(source)
+    output["codeEvidence"][0].update(path="component/ignored.js", startLine=1)
+    rejected = record(tmp_path, state, selected, [output], check=False)
+    assert rejected["returncode"] != 0
+    assert "Ignored files" in rejected["stderr"]
+
+    output["codeEvidence"][0]["path"] = "component/app.js"
+    recorded = record(tmp_path, state, selected, [output])
+    assert recorded["results"][0]["codeEvidence"][0]["excerpt"] == source.strip()
+    (target / "component/app.js").write_text("parser.parse('changed');\n")
+    stale = run_workbench(
+        state,
+        "get-dependency-finding",
+        "--report-id",
+        report_id,
+        "--finding-id",
+        findings[0]["id"],
+        "--require-current",
+        check=False,
+    )
+    assert stale["returncode"] != 0
+    assert "Dirty Git submodules" in stale["stderr"]
 
 
 @pytest.mark.parametrize("flaw", ["missing", "unselected", "unknown", "path", "line", "version"])
