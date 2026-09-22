@@ -11,6 +11,7 @@
 - report full-output scan failures as errors ([#971](https://github.com/openai/codex-security/pull/971))
 - add GitHub Actions workflow for Bedrock scans ([#901](https://github.com/openai/codex-security/pull/901))
 - add Azure Pipelines Bedrock scan example ([#906](https://github.com/openai/codex-security/pull/906))
+- run Windows proofs without symlink privileges ([#988](https://github.com/openai/codex-security/pull/988))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

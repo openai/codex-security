@@ -308,6 +308,7 @@ describe("TypeScript package skeleton", () => {
       ["Check plugin source boundary", "package"],
       ["Typecheck", "static-checks"],
       ["Check formatting", "static-checks"],
+      ["Check changed MCP formatting", "static-checks"],
     ] as const) {
       expect(steps.filter((step) => step.name === name)).toHaveLength(1);
       expect(jobs[job]!.steps!.some((step) => step.name === name)).toBe(true);
@@ -330,6 +331,19 @@ describe("TypeScript package skeleton", () => {
     ).toContain(
       "-n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml",
     );
+  });
+
+  test("runs Windows native proofs with and without symbolic-link privileges", async () => {
+    const { jobs } = await workflow("native-windows.yml");
+    const job = jobs["primitives"]!;
+    expect(job.env?.["CODEX_SECURITY_TEST_WINDOWS_SYMLINKS"]).toBe("required");
+    const restricted = job.steps!.find(
+      (step) => step.name === "Verify Windows proofs without symbolic links",
+    );
+    expect(restricted?.env?.["CODEX_SECURITY_TEST_WINDOWS_SYMLINKS"]).toBe(
+      "disabled",
+    );
+    expect(restricted).not.toHaveProperty("continue-on-error");
   });
 
   test("keeps machine-wide policy changes out of parallel and experimental runs", async () => {
