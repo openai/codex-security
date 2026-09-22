@@ -2,32 +2,41 @@ import { createHash } from "node:crypto";
 
 const MAX_PERSISTED_ERROR_LENGTH = 2_400;
 
-const RATE_LIMIT_PATTERN =
-  /\b(?:429|rate[ _-]*limit(?:ed|ing)?|too many requests)\b/iu;
-
-const ARTIFACT_MCP_STARTUP_TIMEOUT_PATTERN =
-  /\b(?:cs_artifacts|codex_security_artifacts)\b[^\r\n]*(?:timed out handshaking with MCP server|timed out after \d+(?:\.\d+)?\s*(?:seconds?|s)\b|request timed out\b)/iu;
-
-const REMOTE_PLUGIN_AUTH_WARNING_PATTERN =
-  /\bchatgpt authentication required (?:for remote plugin catalog|to sync remote plugins)(?:; api key auth is not supported)?/giu;
-
 const STALE_COORDINATOR_GENERATION_MESSAGE =
   "Deep Scan coordinator lease belongs to a newer generation.";
 
-const CYBERSECURITY_POLICY_REFUSAL_PATTERNS = [
-  /\bflagged for possible cybersecurity risk\b/iu,
-  /\bflagged for potentially high-risk cyber activity\b/iu,
-  /\bcyber[_\s-]?policy\b/iu,
-  /\b(?:cybersecurity|cyber)[ _-]*policy[ _-]*(?:violation|refusal|refused)\b/iu,
-  /\b(?:content|safety)[ _-]*policy[ _-]*(?:violation|refusal|refused)\b/iu,
-  /\b(?:refusal|refused)\b[^\n]*\b(?:cybersecurity|cyber|safety policy)\b/iu,
-  /\b(?:cybersecurity|cyber|safety policy)\b[^\n]*\b(?:refusal|refused)\b/iu,
-] as const;
+// The SDK currently exposes only the message for turn errors. Match known
+// refusal messages exactly so repository output embedded in another error
+// cannot be mistaken for a refusal.
+const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
+  "Request blocked by cyberPolicy.",
+  "Request blocked by a safety policy violation.",
+  "This content was flagged for possible cybersecurity risk.",
+  "This content was flagged for potentially high-risk cyber activity.",
+  "This request has been flagged for possible cybersecurity risk.",
+  "This request has been flagged for potentially high-risk cyber activity.",
+]);
 
+const NON_RETRYABLE_WORKER_ERROR_CODES = new Set([
+  "ENOENT",
+  "EACCES",
+  "ENOEXEC",
+  "EPERM",
+]);
+
+/** Retire this worker without retrying its conversation; the scan may replace it. */
 export class DeepScanNonRetryableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "DeepScanNonRetryableError";
+  }
+}
+
+/** Opt in only at a producer that has confirmed a scan-wide prerequisite failed. */
+export class DeepScanFatalError extends DeepScanNonRetryableError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "DeepScanFatalError";
   }
 }
 
@@ -87,10 +96,7 @@ export function isStaleCoordinatorGenerationError(error: unknown): boolean {
 /** A safety refusal retires the refused thread; it is not a broken scan. */
 export function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  if (RATE_LIMIT_PATTERN.test(message)) return false;
-  return CYBERSECURITY_POLICY_REFUSAL_PATTERNS.some((pattern) =>
-    pattern.test(message),
-  );
+  return CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(message);
 }
 
 export function classifyCodexWorkerError(error: unknown): Error {
@@ -101,41 +107,15 @@ export function classifyCodexWorkerError(error: unknown): Error {
       ? normalized.code
       : undefined;
   if (
-    code === "ENOENT" ||
-    code === "EACCES" ||
-    code === "ENOEXEC" ||
-    code === "EPERM"
-  ) {
-    return new DeepScanNonRetryableError(normalized.message, {
-      cause: normalized,
-    });
-  }
-  // API-key workers cannot catalog or sync remote plugins, but those warnings
-  // are unrelated when their local artifact MCP server merely starts too slowly.
-  const configurationMessage = ARTIFACT_MCP_STARTUP_TIMEOUT_PATTERN.test(
-    normalized.message,
-  )
-    ? normalized.message.replace(REMOTE_PLUGIN_AUTH_WARNING_PATTERN, "")
-    : normalized.message;
-  if (
-    isCodexConfigurationFailure(configurationMessage) ||
+    (code !== undefined && NON_RETRYABLE_WORKER_ERROR_CODES.has(code)) ||
     isCodexCybersecurityPolicyRefusal(normalized)
   ) {
     return new DeepScanNonRetryableError(normalized.message, {
       cause: normalized,
     });
   }
+  // Unknown failures use the worker's normal retry/replacement policy. SDK
+  // errors can contain arbitrary command output, so do not infer a permanent
+  // configuration or authentication failure from words in their messages.
   return normalized;
-}
-
-function isCodexConfigurationFailure(message: string): boolean {
-  return [
-    /Codex Exec exited with code 2:/i,
-    /Codex Exec exited with code 1:[\s\S]*\(os error 2\)/i,
-    /agents\.max_threads cannot be set when features\.multi_agent_v2 is enabled/i,
-    /failed to (?:load|parse|read) (?:the )?(?:Codex )?config(?:uration)?/i,
-    /(?:config(?:uration)?|config\.toml).*(?:invalid|parse|syntax|unknown)/i,
-    /(?:invalid|unknown).*(?:--config|config(?:uration)? key)/i,
-    /not logged in|authentication required|missing (?:an? )?(?:api key|credentials)/i,
-  ].some((pattern) => pattern.test(message));
 }

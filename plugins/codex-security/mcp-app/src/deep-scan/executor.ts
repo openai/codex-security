@@ -18,10 +18,7 @@ import {
 import { Codex } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import { executablePathForSpawn } from "./executable-path.js";
-import {
-  classifyCodexWorkerError,
-  DeepScanNonRetryableError,
-} from "./errors.js";
+import { classifyCodexWorkerError, DeepScanFatalError } from "./errors.js";
 import {
   DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
   deepScanPermissionProfileFallbackError,
@@ -63,7 +60,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     try {
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
-        throw new DeepScanNonRetryableError(
+        throw new DeepScanFatalError(
           "Deep Scan cannot start a read-only worker without verified parent sandbox metadata.",
         );
       }

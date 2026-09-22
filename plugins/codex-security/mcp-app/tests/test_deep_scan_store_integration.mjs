@@ -40,6 +40,7 @@ const {
 );
 
 await testReducerCommitAndFinishAgainstRealWorkbench();
+await testReducerCommitAndFinishAgainstRealWorkbench(true);
 await testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench();
 await testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalSeal();
 await testRecoveredPublicationRejectsLateFailure();
@@ -390,7 +391,9 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
   }
 }
 
-async function testReducerCommitAndFinishAgainstRealWorkbench() {
+async function testReducerCommitAndFinishAgainstRealWorkbench(
+  replaceFailedReducer = false,
+) {
   const fixtureRoot = await mkdtemp(
     path.join(tmpdir(), "deep-scan-store-integration-"),
   );
@@ -542,6 +545,41 @@ async function testReducerCommitAndFinishAgainstRealWorkbench() {
     const first = await createSucceededDiscovery(store, run, "first");
     const second = await createSucceededDiscovery(store, run, "second");
     const late = await createRunningDiscovery(store, run, "late");
+    if (replaceFailedReducer) {
+      const retired = await createWorkerFixture(run.scanDir, "retired-reducer");
+      await store.claimDedup({
+        id: retired.id,
+        scanId: run.scanId,
+        workerIds: [first.id, second.id],
+        promptPath: retired.promptPath,
+        artifactDir: retired.artifactDir,
+      });
+      const mutation = {
+        id: retired.id,
+        scanId: run.scanId,
+        kind: "dedup",
+        promptPath: retired.promptPath,
+        artifactDir: retired.artifactDir,
+        attempt: 1,
+      };
+      await store.updateWorker({ ...mutation, status: "running" });
+      await store.updateWorker({
+        ...mutation,
+        status: "failed",
+        error: "Request blocked by cyberPolicy.",
+      });
+      const afterRetirement = await store.get(run.scanId, threadId);
+      assert.equal(afterRetirement.status, "running");
+      for (const workerId of [first.id, second.id]) {
+        assert.equal(
+          afterRetirement.persistedWorkers.find(
+            (worker) => worker.id === workerId,
+          )?.mergeState,
+          "buffered",
+          "a retired reducer must release every input for its replacement",
+        );
+      }
+    }
     const reducer = await createReducerFixture(run.scanDir, [
       first.id,
       second.id,

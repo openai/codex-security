@@ -48,7 +48,11 @@ const errorsBundle = await build({
   platform: "node",
   write: false,
 });
-const { classifyCodexWorkerError } = await import(
+const {
+  classifyCodexWorkerError,
+  DeepScanFatalError,
+  DeepScanNonRetryableError,
+} = await import(
   `data:text/javascript;base64,${Buffer.from(errorsBundle.outputFiles[0].contents).toString("base64")}`
 );
 const temporaryRoots = [];
@@ -105,9 +109,10 @@ try {
     await testStreamTerminationWithoutTerminalEventFails();
     await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
     await testAbortPropagation();
-    await testConfigurationFailureIsNonRetryable();
-    await testThreadStartConfigurationFailureIsNonRetryable();
+    await testUnstructuredConfigurationFailureRemainsRetryable();
+    await testUnstructuredThreadStartFailureRemainsRetryable();
     await testPolicyFailuresAreNonRetryable();
+    await testMalformedCommandEventsRemainRetryable();
     await testRateLimitPolicyFailureRemainsRetryable();
     await testArtifactStartupTimeoutClassification();
   }
@@ -170,7 +175,8 @@ try {
     path.join(originalCwd, "codex"),
   );
   testSpawnPermissionErrorsAreNonRetryable();
-  testTextualMissingPathErrorsAreNonRetryable();
+  testTextualMissingPathErrorsRemainRetryable();
+  testWorkerErrorClassificationUsesExactAllowlist();
   await testWindowsAppsCodexFallsBackToRelocatedBinary();
   await testWindowsNpmPackageResolution();
   await testWindowsNpmPackageResolution("managed");
@@ -192,11 +198,12 @@ function testSpawnPermissionErrorsAreNonRetryable() {
     const original = Object.assign(new Error(`spawn codex ${code}`), { code });
     const classified = classifyCodexWorkerError(original);
     assert.equal(classified.name, "DeepScanNonRetryableError");
+    assert.equal(classified instanceof DeepScanFatalError, false);
     assert.equal(classified.cause, original);
   }
 }
 
-function testTextualMissingPathErrorsAreNonRetryable() {
+function testTextualMissingPathErrorsRemainRetryable() {
   for (const diagnostic of [
     "Error: No such file or directory (os error 2)",
     "Error: The system cannot find the file specified. (os error 2)",
@@ -205,8 +212,69 @@ function testTextualMissingPathErrorsAreNonRetryable() {
       ["Codex Exec exited with code 1:", diagnostic].join("\n"),
     );
     const classified = classifyCodexWorkerError(original);
+    assert.equal(classified, original);
+  }
+}
+
+function testWorkerErrorClassificationUsesExactAllowlist() {
+  const explicit = new DeepScanNonRetryableError(
+    "Explicitly rejected worker permission profile.",
+  );
+  assert.equal(classifyCodexWorkerError(explicit), explicit);
+  const fatal = new DeepScanFatalError(
+    "Verified parent sandbox metadata is unavailable.",
+  );
+  assert.equal(classifyCodexWorkerError(fatal), fatal);
+
+  const refusalMessages = [
+    "Request blocked by cyberPolicy.",
+    "Request blocked by a safety policy violation.",
+    "This content was flagged for possible cybersecurity risk.",
+    "This content was flagged for potentially high-risk cyber activity.",
+    "This request has been flagged for possible cybersecurity risk.",
+    "This request has been flagged for potentially high-risk cyber activity.",
+  ];
+  for (const message of refusalMessages) {
+    const original = new Error(message);
+    const classified = classifyCodexWorkerError(original);
     assert.equal(classified.name, "DeepScanNonRetryableError");
+    assert.equal(classified instanceof DeepScanFatalError, false);
     assert.equal(classified.cause, original);
+
+    for (const unrecognized of [
+      `Source fixture: ${message}`,
+      `${message} Source fixture.`,
+      JSON.stringify({ message }),
+      `Codex Exec exited with code 1: ${message}`,
+      `429 Too Many Requests: ${message}`,
+      ` ${message}`,
+      `${message}\n`,
+      message.toLowerCase(),
+    ]) {
+      const unrelated = new Error(unrecognized);
+      assert.equal(classifyCodexWorkerError(unrelated), unrelated);
+    }
+  }
+
+  for (const message of [
+    "config parser handles unknown keys",
+    "failed to load configuration: invalid value",
+    "agents.max_threads cannot be set when features.multi_agent_v2 is enabled",
+    "authentication required",
+    "not logged in",
+    "missing API key",
+    "Codex Exec exited with code 2: failed to load configuration: invalid value",
+    "chatgpt authentication required for remote plugin catalog; api key auth is not supported",
+    "chatgpt authentication required to sync remote plugins; api key auth is not supported",
+  ]) {
+    const original = new Error(message);
+    assert.equal(classifyCodexWorkerError(original), original);
+  }
+  for (const code of ["ECONNRESET", "EPIPE", "ETIMEDOUT", "cyber_policy"]) {
+    const original = Object.assign(new Error("Unrecognized worker failure"), {
+      code,
+    });
+    assert.equal(classifyCodexWorkerError(original), original);
   }
 }
 
@@ -1552,7 +1620,7 @@ async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
   }
 }
 
-async function testConfigurationFailureIsNonRetryable() {
+async function testUnstructuredConfigurationFailureRemainsRetryable() {
   const fixture = await fakeCodexFixture();
   const previousPath = process.env.CODEX_CLI_PATH;
   process.env.CODEX_CLI_PATH = fixture.executablePath;
@@ -1571,14 +1639,16 @@ async function testConfigurationFailureIsNonRetryable() {
         subagents: 0,
         signal: new AbortController().signal,
       }),
-      (error) => error?.name === "DeepScanNonRetryableError",
+      (error) =>
+        error?.name === "Error" &&
+        error.message.startsWith("Codex Exec exited with code 2:"),
     );
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
   }
 }
 
-async function testThreadStartConfigurationFailureIsNonRetryable() {
+async function testUnstructuredThreadStartFailureRemainsRetryable() {
   const fixture = await fakeCodexFixture();
   const previousPath = process.env.CODEX_CLI_PATH;
   process.env.CODEX_CLI_PATH = fixture.executablePath;
@@ -1597,7 +1667,9 @@ async function testThreadStartConfigurationFailureIsNonRetryable() {
         subagents: 0,
         signal: new AbortController().signal,
       }),
-      (error) => error?.name === "DeepScanNonRetryableError",
+      (error) =>
+        error?.name === "Error" &&
+        error.message.startsWith("Codex Exec exited with code 1:"),
     );
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
@@ -1610,6 +1682,8 @@ async function testPolicyFailuresAreNonRetryable() {
     "SAFETY_POLICY_ERROR",
     "CYBERSECURITY_RISK_ERROR",
     "HIGH_RISK_CYBER_ACTIVITY_ERROR",
+    "UPSTREAM_CYBERSECURITY_RISK_ERROR",
+    "UPSTREAM_HIGH_RISK_CYBER_ACTIVITY_ERROR",
   ]) {
     const fixture = await fakeCodexFixture();
     const previousPath = process.env.CODEX_CLI_PATH;
@@ -1657,11 +1731,59 @@ async function testRateLimitPolicyFailureRemainsRetryable() {
         signal: new AbortController().signal,
       }),
       (error) =>
-        error?.name !== "DeepScanNonRetryableError" &&
+        error?.name === "Error" &&
         /429 Too Many Requests/.test(error?.message ?? ""),
     );
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
+async function testMalformedCommandEventsRemainRetryable() {
+  for (const output of [
+    "ordinary source text",
+    "config parser handles unknown keys",
+    "authentication required",
+    "Request blocked by cyberPolicy.",
+    "This request has been flagged for possible cybersecurity risk.",
+  ]) {
+    const fixture = await fakeCodexFixture();
+    const previousPath = process.env.CODEX_CLI_PATH;
+    process.env.CODEX_CLI_PATH = fixture.executablePath;
+    try {
+      const promptPath = path.join(fixture.root, "prompt.md");
+      const workingDirectory = path.join(fixture.root, "artifacts");
+      await mkdir(workingDirectory);
+      await writeFile(
+        promptPath,
+        `MALFORMED_COMMAND_EVENT\n${JSON.stringify(output)}\n`,
+      );
+      let threadId;
+      await assert.rejects(
+        new CodexSdkWorkerExecutor({
+          parentSandbox: trustedParentSandbox,
+        }).run({
+          kind: "discovery",
+          promptPath,
+          workingDirectory,
+          subagents: 0,
+          signal: new AbortController().signal,
+          onThreadStarted: (value) => {
+            threadId = value;
+          },
+        }),
+        (error) =>
+          error?.name === "Error" &&
+          error.cause instanceof SyntaxError &&
+          error.message.startsWith("Failed to parse item: ") &&
+          error.message.includes('"id":"fixture-command"') &&
+          error.message.includes(JSON.stringify(output)),
+        `Malformed command output must remain retryable: ${output}`,
+      );
+      assert.equal(threadId, "fixture-thread-id");
+    } finally {
+      restoreEnv("CODEX_CLI_PATH", previousPath);
+    }
   }
 }
 
@@ -1701,29 +1823,29 @@ async function testArtifactStartupTimeoutClassification() {
     },
     {
       prompt: "ARTIFACT_MCP_STARTUP_TIMEOUT_WITH_MISSING_API_KEY",
-      retryable: false,
+      retryable: true,
     },
     {
       prompt: "ARTIFACT_MCP_STARTUP_TIMEOUT_WITH_POLICY_REFUSAL",
-      retryable: false,
+      retryable: true,
     },
     {
       prompt:
         "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_SYNC_AUTH_WARNING_WITH_MISSING_API_KEY",
-      retryable: false,
+      retryable: true,
     },
     {
       prompt:
         "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_BOTH_AUTH_WARNINGS_WITH_POLICY_REFUSAL",
-      retryable: false,
+      retryable: true,
     },
-    { prompt: "OTHER_MCP_STARTUP_TIMEOUT", retryable: false },
+    { prompt: "OTHER_MCP_STARTUP_TIMEOUT", retryable: true },
     {
       prompt: "OTHER_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_SYNC_AUTH_WARNING",
-      retryable: false,
+      retryable: true,
     },
-    { prompt: "CATALOG_AUTH_ONLY", retryable: false },
-    { prompt: "SYNC_AUTH_ONLY", retryable: false },
+    { prompt: "CATALOG_AUTH_ONLY", retryable: true },
+    { prompt: "SYNC_AUTH_ONLY", retryable: true },
   ]) {
     const fixture = await fakeCodexFixture();
     const previousPath = process.env.CODEX_CLI_PATH;
@@ -1743,7 +1865,7 @@ async function testArtifactStartupTimeoutClassification() {
           subagents: 0,
           signal: new AbortController().signal,
         }),
-        (error) => (error?.name !== "DeepScanNonRetryableError") === retryable,
+        (error) => (error?.name === "Error") === retryable,
         `${prompt} should ${retryable ? "remain retryable" : "remain terminal"}`,
       );
     } finally {
@@ -1766,7 +1888,7 @@ async function testMissingParentSandboxFailsBeforeWorkerLaunch() {
         signal: new AbortController().signal,
       }),
       (error) =>
-        error?.name === "DeepScanNonRetryableError" &&
+        error?.name === "DeepScanFatalError" &&
         /verified parent sandbox metadata/i.test(error.message),
     );
     await assert.rejects(
@@ -1799,7 +1921,7 @@ async function testDisallowedWorkerProfileFailsBeforeWorkerLaunch() {
         signal: new AbortController().signal,
       }),
       (error) =>
-        error?.name === "DeepScanNonRetryableError" &&
+        error?.name === "DeepScanFatalError" &&
         error.message.includes("codex_security_deep_scan_worker") &&
         error.message.includes("[allowed_permission_profiles]") &&
         error.message.includes("codex_security_deep_scan_worker = true") &&
@@ -1839,7 +1961,7 @@ async function testRuntimePermissionProfileFallbackStopsAndDiscards() {
           signal: new AbortController().signal,
         }),
         (error) =>
-          error?.name === "DeepScanNonRetryableError" &&
+          error?.name === "DeepScanFatalError" &&
           error.message.includes("worker was stopped") &&
           error.message.includes("results were discarded") &&
           !error.message.includes("did not run"),
@@ -1937,6 +2059,12 @@ async function fakeCodexFixture(
       "const resumeIndex = process.argv.indexOf('resume');",
       "const threadId = resumeIndex === -1 ? 'fixture-thread-id' : process.argv[resumeIndex + 1];",
       "console.log(JSON.stringify({ type: 'thread.started', thread_id: threadId }));",
+      "if (stdin.includes('MALFORMED_COMMAND_EVENT')) {",
+      "  const output = JSON.parse(stdin.split('\\n')[1]);",
+      "  const event = { type: 'item.completed', item: { id: 'fixture-command', type: 'command_execution', command: 'cat example.ts', aggregated_output: output, exit_code: 0, status: 'completed' } };",
+      "  console.log(JSON.stringify(event).slice(0, -1));",
+      "  process.exit(0);",
+      "}",
       "const permissionProfileFallbackWarning = 'Configured value for `permission_profile` is disallowed by requirements; falling back from `codex_security_deep_scan_worker` to required value `:read-only`.';",
       "if (stdin.includes('PERMISSION_PROFILE_FALLBACK_ITEM')) console.log(JSON.stringify({ type: 'item.completed', item: { id: 'warning-1', type: 'error', message: permissionProfileFallbackWarning } }));",
       "if (stdin.includes('PERMISSION_PROFILE_FALLBACK_EVENT')) console.log(JSON.stringify({ type: 'error', message: permissionProfileFallbackWarning }));",
@@ -1944,6 +2072,8 @@ async function fakeCodexFixture(
       "if (stdin.includes('RATE_LIMIT_CYBER_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: '429 Too Many Requests: Request blocked by cyberPolicy.' } })); process.exit(0); }",
       "if (stdin.includes('CYBER_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'Request blocked by cyberPolicy.' } })); process.exit(0); }",
       "if (stdin.includes('SAFETY_POLICY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'Request blocked by a safety policy violation.' } })); process.exit(0); }",
+      "if (stdin.includes('UPSTREAM_CYBERSECURITY_RISK_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This request has been flagged for possible cybersecurity risk.' } })); process.exit(0); }",
+      "if (stdin.includes('UPSTREAM_HIGH_RISK_CYBER_ACTIVITY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This request has been flagged for potentially high-risk cyber activity.' } })); process.exit(0); }",
       "if (stdin.includes('CYBERSECURITY_RISK_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This content was flagged for possible cybersecurity risk.' } })); process.exit(0); }",
       "if (stdin.includes('HIGH_RISK_CYBER_ACTIVITY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This content was flagged for potentially high-risk cyber activity.' } })); process.exit(0); }",
       "if (stdin.includes('RETRYABLE_STREAM_ERROR')) console.log(JSON.stringify({ type: 'error', message: 'Reconnecting... 2/5 (stream disconnected before completion: websocket closed by server before response.completed)' }));",

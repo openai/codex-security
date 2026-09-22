@@ -695,6 +695,14 @@ async function testDeterministicPersistenceFailuresAreNotRetried() {
         code: "ABORT_ERR",
         name: "AbortError",
       }),
+      Object.assign(new Error("Explicit fatal failure after a timeout"), {
+        name: "DeepScanFatalError",
+      }),
+      new Error("workbench command timed out", {
+        cause: Object.assign(new Error("Explicit fatal prerequisite failure"), {
+          name: "DeepScanFatalError",
+        }),
+      }),
     ]) {
       let workerAttempts = 0;
       const workerStore = new WorkbenchDeepScanStore(async () => {
