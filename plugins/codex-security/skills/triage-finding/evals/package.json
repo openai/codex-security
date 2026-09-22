@@ -30,7 +30,7 @@
     "pf:view": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo view"
   },
   "dependencies": {
-    "@openai/codex-sdk": "0.155.0",
+    "@openai/codex-sdk": "0.155.1",
     "@opencode-ai/sdk": "1.18.30",
     "promptfoo": "0.123.0"
   }
