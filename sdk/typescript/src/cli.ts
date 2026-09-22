@@ -1,4 +1,15 @@
 #!/usr/bin/env node
+import {
+  DependencyFindings,
+  type DependencyFindingsOptions,
+  type DependencyReport,
+  type ImportedDependencyFinding,
+} from "./dependency-findings.js";
+import {
+  renderDependencyFindings,
+  dependencySeverityLabel,
+  type DependencyFindingsCommand,
+} from "./dependency-findings-renderer.js";
 
 import {
   execFile as execFileCallback,
@@ -321,6 +332,13 @@ const EXPORT_DEFAULT_OUTPUTS = {
   sarif: "results.sarif",
 } as const;
 const VALUE_OPTIONS = new Set([
+  "--vendor",
+  "--repository",
+  "--report-name",
+  "--finding",
+  "--offset",
+  "--limit",
+  "--verdict",
   "--config",
   "-c",
   "--port",
@@ -1133,6 +1151,13 @@ interface PatchRiskAssessment extends PatchRiskReport {
 }
 
 interface CliDependencies {
+  dependencyFindingsPrompt?: Pick<
+    BulkScanPrompt,
+    "isInteractive" | "select" | "checkbox" | "input"
+  >;
+  createDependencyFindings?(
+    options: DependencyFindingsOptions,
+  ): DependencyFindings;
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
@@ -1811,6 +1836,7 @@ export async function main(
   let frameworkOutput = "";
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedHistory: string | undefined;
+  let renderedDependencies: string | undefined;
   let renderedPublication: string | undefined;
   let renderedPolicy: string | undefined;
   let renderedPatch: string | undefined;
@@ -1988,6 +2014,373 @@ export async function main(
     });
     return result;
   };
+  const dependencyClient = (
+    options: DependencyFindingsOptions = {},
+  ): DependencyFindings => {
+    const configuration = { ...options, environment: dependencies.environment };
+    return (
+      dependencies.createDependencyFindings?.(configuration) ??
+      new DependencyFindings(configuration, undefined, "cli")
+    );
+  };
+  const humanDependencyOutput = (format: string): boolean =>
+    format === "toon" &&
+    output.isTTY === true &&
+    !argv.some((argument) => OUTPUT_OPTION.test(argument));
+  const presentDependencies = <T>(
+    result: T,
+    command: DependencyFindingsCommand,
+    format: string,
+    options: Parameters<typeof renderDependencyFindings>[2] = {},
+  ): T => {
+    if (humanDependencyOutput(format)) {
+      renderedDependencies = renderDependencyFindings(
+        result as JsonObject,
+        command,
+        {
+          columns: output.columns,
+          color:
+            dependencies.environment["NO_COLOR"] === undefined &&
+            dependencies.environment["TERM"] !== "dumb",
+          ...options,
+        },
+      );
+    }
+    return result;
+  };
+  const dependencyPrompt = (format: string) => {
+    const prompt =
+      dependencies.dependencyFindingsPrompt ??
+      createBulkScanDiscoveryDependencies({
+        output: errorOutput,
+        now: dependencies.now,
+        currentDirectory: dependencies.currentDirectory,
+      }).prompt;
+    if (!humanDependencyOutput(format) || !prompt.isInteractive()) {
+      throw new CodexSecurityError(
+        "Interactive finding selection requires a terminal with default output. " +
+          "Provide REPORT_ID for show, or REPORT_ID and --finding FINDING_ID for assess.",
+      );
+    }
+    return prompt;
+  };
+  const chooseDependencyReport = async (
+    client: DependencyFindings,
+    reportId: string | undefined,
+    format: string,
+    signal: AbortSignal,
+  ): Promise<string> => {
+    if (reportId !== undefined) return reportId;
+    const prompt = dependencyPrompt(format);
+    const reports: DependencyReport[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      signal.throwIfAborted();
+      const page = await client.list(dependencies.currentDirectory(), {
+        offset,
+        limit: 100,
+      });
+      reports.push(...page.reports);
+      offset = page.nextOffset;
+    }
+    if (reports.length === 0) {
+      throw new CodexSecurityError(
+        "No imported reports in this repository. Run codex-security dependency-findings import REPORT_FILE --vendor endor|snyk|socket first.",
+      );
+    }
+    return await prompt.select(
+      "Which report would you like to review?",
+      reports.map((report) => ({
+        label: `${report.reportName} · ${report.vendor} · ${report.findingCount.toLocaleString("en-US")} findings · ${report.createdAt.slice(0, 16).replace("T", " ")} · ${report.id.slice(0, 8)}`,
+        short: report.reportName,
+        value: report.id,
+      })),
+      undefined,
+      signal,
+    );
+  };
+  const chooseDependencyFindings = async (
+    client: DependencyFindings,
+    reportId: string,
+    format: string,
+    signal: AbortSignal,
+  ): Promise<string[]> => {
+    const prompt = dependencyPrompt(format);
+    const findings: ImportedDependencyFinding[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      signal.throwIfAborted();
+      const page = await client.show(reportId, { offset, limit: 100 });
+      findings.push(...page.findings);
+      offset = page.nextOffset;
+    }
+    if (findings.length === 0) {
+      throw new CodexSecurityError("This report has no findings to assess.");
+    }
+    const choices = findings.map((finding) => ({
+      label: [
+        finding.advisoryIds[0] ?? finding.title,
+        `${finding.package["name"] ?? "Unknown package"}@${finding.package["version"] ?? "Unknown version"}`,
+        dependencySeverityLabel(finding.originalSeverity),
+        finding.assessment?.verdict.replaceAll("_", " ") ?? "Not assessed",
+      ].join(" · "),
+      description: finding.title,
+      searchText: [finding.title, ...finding.advisoryIds].join(" "),
+      short: finding.title,
+      value: finding.id,
+    }));
+    for (;;) {
+      signal.throwIfAborted();
+      const filter = (
+        await prompt.input(
+          "Filter findings (leave blank for all)",
+          undefined,
+          signal,
+        )
+      )
+        .trim()
+        .toLowerCase();
+      const matching = choices.filter((choice) =>
+        `${choice.label} ${choice.searchText}`.toLowerCase().includes(filter),
+      );
+      if (matching.length === 0) {
+        errorOutput.write("No findings match. Try another search.\n");
+        continue;
+      }
+      for (;;) {
+        signal.throwIfAborted();
+        const selected = await prompt.checkbox(
+          "Select findings to assess (1–100; space to toggle, enter to start)",
+          matching,
+          {
+            required: true,
+            header:
+              "Advisory · Package · Scanner severity · Application impact",
+          },
+          signal,
+        );
+        if (selected.length >= 1 && selected.length <= 100) return selected;
+        errorOutput.write("Select between 1 and 100 findings.\n");
+      }
+    }
+  };
+  const dependencyAction = async (
+    action: (signal: AbortSignal) => Promise<unknown>,
+  ): Promise<unknown> => {
+    const controller = new AbortController();
+    const onInterrupt = (): void => controller.abort("SIGINT");
+    const onTerminate = (): void => controller.abort("SIGTERM");
+    dependencies.addSignalListener("SIGINT", onInterrupt);
+    dependencies.addSignalListener("SIGTERM", onTerminate);
+    try {
+      const result = await action(controller.signal);
+      if (controller.signal.aborted) {
+        exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+        return undefined;
+      }
+      return result;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+      } else if (error instanceof Error && error.name === "ExitPromptError") {
+        exitCode = 130;
+      } else {
+        errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
+        exitCode = 2;
+      }
+      return undefined;
+    } finally {
+      dependencies.removeSignalListener("SIGINT", onInterrupt);
+      dependencies.removeSignalListener("SIGTERM", onTerminate);
+    }
+  };
+  const dependencyReportArgs = z.object({
+    reportId: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Imported report identifier; omit to choose a report in the current repository.",
+      ),
+  });
+  const dependencyRuntimeOptions = {
+    model: optionValue("--model").optional(),
+    effort: effortOption(),
+    python: optionValue("--python").optional(),
+  };
+  const dependencyReports = Cli.create("dependency-findings", {
+    description:
+      "Import, assess, and propose fixes for existing vendor dependency findings.",
+  })
+    .command("import", {
+      description:
+        "Import an Endor JSON or CSV report, or a Snyk or Socket JSON report, for a local repository.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        report: z
+          .string()
+          .min(1)
+          .describe("Vendor report path (JSON, or CSV for Endor)."),
+      }),
+      options: z.object({
+        vendor: z.enum(["endor", "snyk", "socket"]),
+        repository: optionValue("--repository").default("."),
+        reportName: optionValue("--report-name").optional(),
+        python: optionValue("--python").optional(),
+      }),
+      run: ({ args, options, format }) =>
+        dependencyAction(async (signal) =>
+          presentDependencies(
+            {
+              report: await dependencyClient({
+                pythonPath: options.python,
+                signal,
+              }).import(resolve(dependencies.currentDirectory(), args.report), {
+                vendor: options.vendor,
+                targetPath: resolve(
+                  dependencies.currentDirectory(),
+                  options.repository,
+                ),
+                reportName: options.reportName,
+              }),
+            },
+            "import",
+            format,
+          ),
+        ),
+    })
+    .command("list", {
+      description: "List imported reports, optionally for one repository.",
+      mcp: false,
+      args: z.object({ repository: z.string().min(1).optional() }),
+      options: z.object({
+        python: optionValue("--python").optional(),
+        offset: z.number().int().nonnegative().optional(),
+        limit: z.number().int().positive().max(100).optional(),
+      }),
+      run: ({ args, options, format }) =>
+        dependencyAction(async (signal) =>
+          presentDependencies(
+            await dependencyClient({ pythonPath: options.python, signal }).list(
+              args.repository === undefined
+                ? undefined
+                : resolve(dependencies.currentDirectory(), args.repository),
+              options,
+            ),
+            "list",
+            format,
+            options,
+          ),
+        ),
+    })
+    .command("show", {
+      description:
+        "Show vendor findings alongside saved assessments; omit the report ID to choose interactively.",
+      mcp: false,
+      args: dependencyReportArgs,
+      options: z.object({
+        offset: z.number().int().nonnegative().optional(),
+        limit: z.number().int().positive().max(100).optional(),
+        verdict: z
+          .enum([
+            "affects_application",
+            "not_applicable",
+            "inconclusive",
+            "pending",
+          ])
+          .optional(),
+        python: optionValue("--python").optional(),
+      }),
+      run: ({ args, options, format }) =>
+        dependencyAction(async (signal) => {
+          const client = dependencyClient({
+            pythonPath: options.python,
+            signal,
+          });
+          const reportId = await chooseDependencyReport(
+            client,
+            args.reportId,
+            format,
+            signal,
+          );
+          signal.throwIfAborted();
+          return presentDependencies(
+            await client.show(reportId, options),
+            "show",
+            format,
+            options,
+          );
+        }),
+    })
+    .command("assess", {
+      description:
+        "Assess selected findings; omit IDs to choose a report and findings interactively.",
+      destructive: true,
+      mcp: false,
+      args: dependencyReportArgs,
+      options: z.object({
+        finding: z
+          .array(optionValue("--finding"))
+          .min(1, "Select at least one finding with --finding.")
+          .max(100)
+          .optional()
+          .describe(
+            "Repeat to select between 1 and 100 findings; omit to choose interactively.",
+          ),
+        ...dependencyRuntimeOptions,
+      }),
+      run: ({ args, options, format }) =>
+        dependencyAction(async (signal) => {
+          const client = dependencyClient({
+            signal,
+            pythonPath: options.python,
+            model: options.model,
+            reasoningEffort: options.effort,
+          });
+          const reportId = await chooseDependencyReport(
+            client,
+            args.reportId,
+            format,
+            signal,
+          );
+          const findingIds =
+            options.finding ??
+            (await chooseDependencyFindings(client, reportId, format, signal));
+          signal.throwIfAborted();
+          const progress = humanDependencyOutput(format)
+            ? new Progress(errorOutput, dependencies)
+            : undefined;
+          try {
+            progress?.startTimer(
+              `Assessing ${findingIds.length} selected finding${findingIds.length === 1 ? "" : "s"}`,
+            );
+            const result = await client.assess(reportId, findingIds);
+            return presentDependencies(result, "assess", format);
+          } finally {
+            progress?.stopTimer();
+          }
+        }),
+    })
+    .command("fix", {
+      description:
+        "Propose a patch for an assessed finding without editing the repository.",
+      mcp: false,
+      args: z.object({
+        reportId: z.string().min(1),
+        findingId: z.string().min(1),
+      }),
+      options: z.object(dependencyRuntimeOptions),
+      run: ({ args, options }) =>
+        dependencyAction((signal) =>
+          dependencyClient({
+            signal,
+            pythonPath: options.python,
+            model: options.model,
+            reasoningEffort: options.effort,
+          }).fix(args.reportId, args.findingId),
+        ),
+    });
   const findingFeedback = Cli.create("findings", {
     description: "Review and manage saved Codex Security findings.",
   }).command("false-positive", {
@@ -3775,6 +4168,7 @@ export async function main(
     })
     .command(scanHistory)
     .command(findingFeedback)
+    .command(dependencyReports)
     .command(publication)
     .command("classify-severity", {
       description:
@@ -5803,6 +6197,7 @@ export async function main(
         renderedPatch ??
         renderedPublication ??
         renderedHistory ??
+        renderedDependencies ??
         frameworkOutput,
     );
     return exitCode;
@@ -6131,6 +6526,7 @@ function validateCliArguments(
     command === undefined ||
     ![
       "scan",
+      "dependency-findings",
       "policy",
       "install-hook",
       "bulk-scan",
@@ -6211,6 +6607,7 @@ function validateCliArguments(
     scanImport ||
     command === "scans" ||
     command === "findings" ||
+    command === "dependency-findings" ||
     command === "publish" ||
     command === "import";
   const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
@@ -6291,7 +6688,9 @@ function validateCliArguments(
       command === "info" ||
       command === "serve"
         ? 0
-        : subcommand === "compare" || subcommand === "match"
+        : subcommand === "compare" ||
+            subcommand === "match" ||
+            (command === "dependency-findings" && subcommand === "fix")
           ? 2
           : 1)
   ) {

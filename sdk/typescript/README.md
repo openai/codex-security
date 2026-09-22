@@ -1637,6 +1637,144 @@ Import is read-only and returns an array (`[]` when empty). `--json` aliases
 `--format json`. Save validation inputs without output filters or token limits.
 Use the SDK loop for a disposition per alert.
 
+### Assess existing dependency reports
+
+Import Endor JSON or CSV findings, or Snyk or Socket JSON findings, into local
+history, then assess whether they affect the application. After installing the
+CLI (`npm install -g @openai/codex-security`), run these commands from your
+repository root:
+
+```bash
+codex-security dependency-findings import endor-findings.csv --vendor endor
+codex-security dependency-findings show
+codex-security dependency-findings assess
+```
+
+For Snyk, use an Open Source CLI export:
+
+```bash
+snyk test --json-file-output=snyk.json
+codex-security dependency-findings import snyk.json --vendor snyk
+```
+
+Single-project, multi-project, and `--group-issues` exports are supported. Exports
+containing failed-project error records are rejected; complete those scans before
+importing the report. Snyk Code/IaC SARIF and API issue responses are different
+formats.
+
+For Socket, export the package artifacts from an existing scan:
+
+```bash
+socket scan view SCAN_ID socket.json --json --org ORG_SLUG
+codex-security dependency-findings import socket.json --vendor socket
+```
+
+Socket `ok/data` JSON, artifact arrays, and NDJSON streams are supported, including
+a stream with only one package. `socket scan report --json` produces a different
+policy-summary format and is not supported. License and other policy alerts are
+excluded with counts; vulnerability and malware alerts remain available to assess.
+
+Import displays the finding count and import notes without starting assessment.
+`show` lets you choose an imported report for the current repository and displays
+scanner severity separately from application impact. `assess` offers a report
+picker, an optional text filter, and a checklist of findings. Press space to toggle
+a finding and enter to assess your selection. All report pages are available to
+the picker; each assessment accepts 1–100 findings. Assessment displays elapsed
+time while running, then verdicts, explanations, and remaining unknowns.
+
+Python is discovered automatically. Reports use the normal Codex Security state
+directory; no environment variables or shell helpers are needed. Use
+`--repository /path/to/repository` when importing from another directory. For
+local CLI development, run `npm link` from `sdk/typescript` after building the
+package, then use the same `codex-security` commands.
+
+Scripts can continue passing explicit IDs and requesting JSON. Omitted IDs
+require an interactive terminal with default output; redirected output and
+explicit output-format options never open selection prompts:
+
+```bash
+codex-security dependency-findings import vendor-report.json --vendor snyk --format json
+codex-security dependency-findings list /path/to/repository --format json
+codex-security dependency-findings show REPORT_ID --format json
+codex-security dependency-findings assess REPORT_ID --finding FINDING_ID --format json
+codex-security dependency-findings show REPORT_ID --verdict inconclusive --format json
+```
+
+Imports accept up to 8 MiB and 10,000 source records, including excluded alerts,
+with a 16 MiB limit on normalized data. These limits bound import and storage
+work. Use `--finding` to select a finding, or repeat it to select up to 100 per
+assessment.
+Importing and browsing reports do not start Codex. Assessment checks advisory
+and package identity first, then the application conditions relevant to the
+claim. It can look up public advisories and exact public package source without
+uploading repository content, paths, reports, or private identifiers. Explicit
+web-search restrictions remain in effect. When selected versions or the package
+graph matter, the shared dependency-resolution skill runs the existing native
+tool offline and read-only. Assessment does not install dependencies or run
+lifecycle scripts.
+
+The vendor's original severity remains alongside `affects_application`,
+`not_applicable`, or `inconclusive`. New results record the conclusion's `basis`,
+public `advisoryEvidence`, nonblocking `limitations`, and material gaps in
+`unknowns`. `versionBasis` distinguishes a cited declaration, native resolution,
+or a fetched artifact; `packageVersion` is the version assessed and can differ
+from the scanner's version. Artifact evidence must identify the matching package
+and version in a manifest or shipped code; source code alone does not establish
+the shipped version. Native evidence retains the command, output, selected versions,
+and input-file digests when collected.
+
+`externalEvidence` records public file URLs, immutable revisions when known,
+complete-file SHA-256 digests, excerpts, and the distinction between manifests,
+source, and shipped code. These are the assessor's observations; the recorder
+does not fetch the files or certify provenance. A mutable tag does not prove
+historical bytes. `investigation` records actual checks and their results,
+including access failures; inconclusive results require an attempted check and
+the remaining material unknowns. `affects_application` also requires an
+`attackPath` describing evidenced attacker control, the entry point, vulnerable
+operation, and environmental prerequisites. An API call alone is insufficient.
+`execution_excluded` can support `not_applicable` when repository code rules out
+the required execution context, even without a nested package version.
+
+Older saved assessments remain readable without the new fields. `list` and
+`show` support `--offset` and `--limit` (up to 100) for larger result sets.
+
+From the report's repository root, request a proposed fix for an applicable
+finding:
+
+```bash
+npx @openai/codex-security dependency-findings fix REPORT_ID FINDING_ID --json
+```
+
+Fixes require a current saved assessment. The session can write a patch and
+test an isolated copy in the local review state directory; it cannot write to
+the target repository. Review the proposal and any compatibility or testing
+limitations before applying it. The command never commits or pushes changes.
+Use `--model`, `--effort`, and `--python` to configure assessment and fix runs.
+Reports and assessments stay under the Codex Security state directory; they
+are not uploaded to the report vendor.
+
+The same workflow is available through the SDK:
+
+```ts
+import { DependencyFindings } from "@openai/codex-security";
+
+const findings = new DependencyFindings();
+const report = await findings.import("vendor-report.json", {
+  vendor: "snyk",
+  targetPath: "/path/to/repository",
+});
+const imported = await findings.show(report.id);
+const selected = imported.findings.slice(0, 1).map((finding) => finding.id);
+if (selected.length > 0) {
+  const assessed = await findings.assess(report.id, selected);
+  console.log(assessed.results);
+}
+```
+
+The client also exposes `list`, `show`, `getFinding`, and `fix`. Constructor
+options are `pythonPath`, `model`, `reasoningEffort`, `environment`, and an
+`AbortSignal` as `signal`.
+
 ### Validate and patch findings
 
 `validate` assesses candidates; `patch` fixes and verifies them. Both accept

@@ -1,5 +1,9 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
+import {
+  dependencyFindingSkillPrompt,
+  type DependencyFindingSkillRequest,
+} from "./dependency-findings.js";
 import { statSync } from "node:fs";
 import {
   chmod,
@@ -433,6 +437,7 @@ export type CodexSecuritySurface = "cli" | "sdk";
 
 interface CodexSecurityRuntimeOptions {
   surface: CodexSecuritySurface;
+  environment?: ProcessEnvironment;
 }
 
 interface ClientDependencies {
@@ -727,6 +732,88 @@ export class CodexSecurity {
       throwIfAborted(signal, outputDir);
       throw error;
     }
+  }
+
+  /** @internal Runs a persisted imported-finding request through the normal SDK session. */
+  public async runDependencyFindingSkill(
+    request: DependencyFindingSkillRequest,
+    requestedSignal?: AbortSignal,
+  ): Promise<string> {
+    return await this.#trackOperation(async () => {
+      const signal = AbortSignal.any([
+        this.#abortController.signal,
+        ...(requestedSignal === undefined ? [] : [requestedSignal]),
+      ]);
+      let outputDir = "";
+      try {
+        throwIfAborted(signal);
+        const inputs = await this.#prepareLocalInputs(
+          request.targetPath,
+          {},
+          signal,
+        );
+        const session = await this.#prepareSession(inputs, {}, signal);
+        const outputRoot = await preparePersistentOutputRoot(
+          inputs.stateDirectory,
+          "validations",
+          basename(inputs.repository),
+        );
+        outputDir = await prepareOutputDir(
+          undefined,
+          basename(inputs.repository),
+          outputRoot,
+          (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
+        );
+        session.sessionConfig["features"] = {
+          ...(session.sessionConfig["features"] as JsonObject),
+          plugins: false,
+        };
+        const { codex } = this.#createSessionCodex(session, {
+          CODEX_SECURITY_REPOSITORY: inputs.repository,
+          CODEX_SECURITY_PLUGIN_ROOT: session.runtime.plugin.pluginRoot,
+          CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
+          CODEX_SECURITY_SURFACE: this.#surface,
+        });
+        const thread = codex.startThread({
+          threadSource:
+            request.skill === "fix-finding"
+              ? CODEX_SECURITY_THREAD_SOURCES.remediation
+              : CODEX_SECURITY_THREAD_SOURCES.validation,
+          workingDirectory: inputs.stateDirectory,
+          skipGitRepoCheck: true,
+          approvalPolicy: session.approvalPolicy,
+          ...(request.skill === "dependency-finding-assessment" &&
+          resolveCodexProfile(session.sessionConfig)["web_search"] === undefined
+            ? { webSearchMode: "live" as const }
+            : {}),
+        });
+        const { events } = await thread.runStreamed(
+          dependencyFindingSkillPrompt(
+            request,
+            session.runtime.plugin.pluginRoot,
+            session.python,
+            outputDir,
+          ),
+          { signal },
+        );
+        const { status, finalResponse } = await readCodexTurn({
+          thread,
+          events,
+          onEvent: () => throwIfAborted(signal, outputDir),
+        });
+        throwIfAborted(signal, outputDir);
+        if (status !== "completed" || !finalResponse.trim()) {
+          throw new CodexSecurityError(
+            "Dependency finding request did not complete.",
+          );
+        }
+        return finalResponse;
+      } catch (error) {
+        if (this.#closed) this.#requireOpen();
+        throwIfAborted(signal, outputDir);
+        throw error;
+      }
+    });
   }
 
   public async preflight(
@@ -3560,7 +3647,14 @@ export function createSecurityInternal(
   config: CodexSecurityConfig = {},
   runtimeOptions: CodexSecurityRuntimeOptions,
 ): CodexSecurity {
-  return new CodexSecurity(config, DEFAULT_DEPENDENCIES, runtimeOptions);
+  return new CodexSecurity(
+    config,
+    {
+      ...DEFAULT_DEPENDENCIES,
+      environment: runtimeOptions.environment ?? process.env,
+    },
+    runtimeOptions,
+  );
 }
 
 export async function initialCredentialsAvailable(

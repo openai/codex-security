@@ -70,7 +70,12 @@ export interface BulkScanPrompt {
   ): Promise<Value>;
   checkbox<Value extends string>(
     question: string,
-    options: readonly { label: string; value: Value; short?: string }[],
+    options: readonly {
+      label: string;
+      value: Value;
+      short?: string;
+      description?: string;
+    }[],
     presentation?: { header?: string; required?: boolean },
     signal?: AbortSignal,
   ): Promise<Value[]>;
@@ -348,10 +353,11 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
             ...(presentation?.header === undefined
               ? []
               : [new Separator(presentation.header)]),
-            ...options.map(({ label, value, short }) => ({
+            ...options.map(({ label, value, short, description }) => ({
               name: label,
               value,
               ...(short === undefined ? {} : { short }),
+              ...(description === undefined ? {} : { description }),
             })),
           ],
           required: presentation?.required,

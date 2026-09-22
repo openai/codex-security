@@ -867,6 +867,46 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        42,
+        "import external dependency claims and record selected assessments",
+        """
+        CREATE TABLE dependency_reports (
+            id TEXT PRIMARY KEY,
+            target_path TEXT NOT NULL,
+            target_revision TEXT NOT NULL,
+            target_snapshot_digest TEXT NOT NULL,
+            vendor TEXT NOT NULL CHECK (vendor IN ('endor', 'snyk', 'socket')),
+            report_name TEXT NOT NULL,
+            report_digest TEXT NOT NULL,
+            original_report TEXT NOT NULL,
+            warnings_json TEXT NOT NULL,
+            finding_count INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX dependency_reports_by_target ON dependency_reports(target_path, created_at);
+        CREATE TABLE dependency_imported_findings (
+            id TEXT PRIMARY KEY,
+            report_id TEXT NOT NULL REFERENCES dependency_reports(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            claim_json TEXT NOT NULL,
+            assessment_json TEXT,
+            UNIQUE (report_id, position)
+        );
+        CREATE TABLE dependency_assessments (
+            id TEXT PRIMARY KEY,
+            report_id TEXT NOT NULL REFERENCES dependency_reports(id) ON DELETE CASCADE,
+            finding_ids_json TEXT NOT NULL,
+            target_revision TEXT NOT NULL,
+            target_snapshot_digest TEXT NOT NULL,
+            claims_json TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('pending', 'complete')),
+            created_at TEXT NOT NULL,
+            results_json TEXT
+        );
+        CREATE INDEX dependency_assessments_by_report ON dependency_assessments(report_id, state);
+        """,
+    ),
 )
 
 
