@@ -2610,7 +2610,9 @@ async function executeWorkbench(
         "start-dependency-assessment",
         "get-dependency-assessment",
         "record-dependency-assessments",
-      ].includes(args[0] ?? "") ? Infinity : 4 * 1024 * 1024,
+      ].includes(args[0] ?? "")
+        ? Infinity
+        : 4 * 1024 * 1024,
       timeout: [
         "begin-deep-scan",
         "claim-deep-scan-dedup",
