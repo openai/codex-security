@@ -207,7 +207,7 @@ jobs:
             esac
           done < "$changed_files"
           if ((${#files[@]} > 0)); then
-            pnpm --dir sdk/typescript exec prettier --check "${files[@]}"
+            pnpm --dir plugins/codex-security/mcp-app exec prettier --check "${files[@]}"
           fi
 
   native:
