@@ -26,7 +26,6 @@ import {
 import {
   Codex,
   type CodexOptions,
-  type ModelReasoningEffort,
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
@@ -286,7 +285,7 @@ const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
 
 export interface DependencyScanRoleModelSettings {
   model?: string;
-  reasoningEffort?: ModelReasoningEffort;
+  reasoningEffort?: string;
 }
 
 export type DependencyScanTarget = "malware" | "malware-and-vulnerabilities";
@@ -360,7 +359,7 @@ export interface DependencyCalculationOptions extends Pick<
   | "signal"
 > {
   model?: string;
-  reasoningEffort?: ModelReasoningEffort;
+  reasoningEffort?: string;
 }
 
 export interface DependencyCalculationResult {
