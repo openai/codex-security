@@ -4,6 +4,19 @@ const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|[^\s|;&<>]+/gu;
 
 export type ScanActivityStatus = "running" | "completed" | "failed";
 
+export type DependencyScanPhase = "acquisition" | "scanning" | "history";
+
+export interface DependencyScanProgress {
+  jobId: string;
+  status: "queued" | "running" | "completed" | "failed";
+  packagesTotal: number;
+  packagesCompleted: number;
+  packagesCached: number;
+  packagesFailed: number;
+  packagesActive: number;
+  activePhases: Array<{ phase: DependencyScanPhase; count: number }>;
+}
+
 export interface ScanActivity {
   id: string;
   kind: "command" | "tool" | "reasoning" | "message";
@@ -11,6 +24,7 @@ export interface ScanActivity {
   description: string;
   paths: string[];
   worker?: number;
+  dependencyProgress?: DependencyScanProgress;
 }
 
 export function scanActivitiesFromEvent(
@@ -85,6 +99,10 @@ export function scanActivityFromEvent(
     const arguments_ = isRecord(item["arguments"]) ? item["arguments"] : {};
     const value = arguments_["cmd"] ?? arguments_["command"];
     const command = typeof value === "string" ? displayCommand(value) : null;
+    const dependencyProgress =
+      event["type"] === "item.completed"
+        ? dependencyScanProgress(item, arguments_)
+        : null;
     return {
       id: item["id"],
       kind: "tool",
@@ -92,11 +110,15 @@ export function scanActivityFromEvent(
       description:
         item["tool"] === "exec" && command !== null
           ? command
-          : toolDescription(item["tool"], arguments_, item["arguments"]),
+          : event["type"] === "item.completed" &&
+              isDependencyDiscoveryProgress(item)
+            ? `${item["tool"]} · discovering dependencies`
+            : toolDescription(item["tool"], arguments_, item["arguments"]),
       paths:
         item["tool"] === "exec" && command !== null
           ? commandRepositoryPaths(command, repository)
           : argumentRepositoryPaths(arguments_, repository),
+      ...(dependencyProgress === null ? {} : { dependencyProgress }),
     };
   }
 
@@ -113,6 +135,140 @@ export function scanActivityFromEvent(
   }
 
   return null;
+}
+
+function isDependencyDiscoveryProgress(
+  item: Readonly<Record<string, unknown>>,
+): boolean {
+  if (
+    item["server"] !== "codex-security" ||
+    item["tool"] !== "update_codex_security_scan_progress" ||
+    item["status"] !== "completed" ||
+    !isRecord(item["result"]) ||
+    item["result"]["isError"] === true ||
+    !isRecord(item["result"]["structured_content"])
+  ) {
+    return false;
+  }
+
+  const scan = item["result"]["structured_content"]["scan"];
+  return (
+    isRecord(scan) &&
+    (scan["mode"] === "dependency_update" ||
+      scan["mode"] === "full_dependency") &&
+    isRecord(scan["progress"]) &&
+    scan["progress"]["phase"] === "discovery"
+  );
+}
+
+function dependencyScanProgress(
+  item: Readonly<Record<string, unknown>>,
+  arguments_: Readonly<Record<string, unknown>>,
+): DependencyScanProgress | null {
+  if (
+    item["server"] !== "codex-security" ||
+    item["status"] !== "completed" ||
+    !isRecord(item["result"]) ||
+    !isRecord(item["result"]["structured_content"])
+  ) {
+    return null;
+  }
+
+  const result = item["result"]["structured_content"];
+  const jobId = result["jobId"];
+  const status = result["status"];
+  if (
+    typeof jobId !== "string" ||
+    (status !== "queued" &&
+      status !== "running" &&
+      status !== "completed" &&
+      status !== "failed")
+  ) {
+    return null;
+  }
+
+  if (item["tool"] === "submit_codex_security_dependency_scan") {
+    if (!Array.isArray(arguments_["dependencies"])) return null;
+    return {
+      jobId,
+      status,
+      packagesTotal: arguments_["dependencies"].length,
+      packagesCompleted: 0,
+      packagesCached: 0,
+      packagesFailed: 0,
+      packagesActive: 0,
+      activePhases: [],
+    };
+  }
+
+  if (
+    item["tool"] !== "get_codex_security_dependency_scan" ||
+    !Array.isArray(result["packages"]) ||
+    !result["packages"].every(isRecord)
+  ) {
+    return null;
+  }
+
+  const packages = result["packages"];
+  const phases: Record<DependencyScanPhase, number> = {
+    acquisition: 0,
+    scanning: 0,
+    history: 0,
+  };
+  let packagesCompleted = 0;
+  let packagesCached = 0;
+  let packagesFailed = 0;
+  let packagesActive = 0;
+
+  for (const package_ of packages) {
+    const packageStatus = package_["status"];
+    if (
+      packageStatus === "completed" ||
+      packageStatus === "partial" ||
+      packageStatus === "failed"
+    ) {
+      packagesCompleted += 1;
+    }
+    if (packageStatus === "failed") packagesFailed += 1;
+    if (packageStatus === "running") {
+      packagesActive += 1;
+      const phase = package_["phase"];
+      if (
+        phase === "acquisition" ||
+        phase === "scanning" ||
+        phase === "history"
+      ) {
+        phases[phase] += 1;
+      }
+    }
+
+    const artifacts = package_["artifacts"];
+    if (
+      Array.isArray(artifacts) &&
+      artifacts.length > 0 &&
+      artifacts.every(
+        (artifact) => isRecord(artifact) && artifact["cacheHit"] === true,
+      )
+    ) {
+      packagesCached += 1;
+    }
+  }
+
+  const activePhases = (
+    ["acquisition", "scanning", "history"] as const
+  ).flatMap((phase) =>
+    phases[phase] === 0 ? [] : [{ phase, count: phases[phase] }],
+  );
+  return {
+    jobId,
+    status,
+    packagesTotal: packages.length,
+    packagesCompleted,
+    packagesCached,
+    packagesFailed,
+    packagesActive,
+    activePhases,
+  };
 }
 
 function displayCommand(command: string): string {

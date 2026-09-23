@@ -41,6 +41,25 @@ function toolEvent(
   };
 }
 
+function completedDependencyToolEvent(
+  tool: string,
+  arguments_: Record<string, unknown>,
+  structuredContent: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    type: "item.completed",
+    item: {
+      id: "dependency-tool-1",
+      type: "mcp_tool_call",
+      server: "codex-security",
+      tool,
+      arguments: arguments_,
+      result: { content: [], structured_content: structuredContent },
+      status: "completed",
+    },
+  };
+}
+
 function sessionEvent(
   payload: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -48,6 +67,258 @@ function sessionEvent(
 }
 
 describe("scan activity", () => {
+  test("reports genuinely persisted discovery for dedicated dependency scans", () => {
+    for (const mode of ["dependency_update", "full_dependency"]) {
+      expect(
+        scanActivityFromEvent(
+          completedDependencyToolEvent(
+            "update_codex_security_scan_progress",
+            { scanId: "scan_public", phase: "discovery" },
+            {
+              scan: {
+                id: "scan_public",
+                mode,
+                progress: { phase: "discovery", status: "running" },
+              },
+            },
+          ),
+          "/code/juice-shop",
+        ),
+      ).toEqual({
+        id: "dependency-tool-1",
+        kind: "tool",
+        status: "completed",
+        description:
+          "update_codex_security_scan_progress · discovering dependencies",
+        paths: [],
+      });
+    }
+  });
+
+  test("does not infer dependency discovery from untrusted, failed, or unchanged progress", () => {
+    const event = completedDependencyToolEvent(
+      "update_codex_security_scan_progress",
+      { scanId: "scan_public", phase: "discovery" },
+      {
+        scan: {
+          id: "scan_public",
+          mode: "full_dependency",
+          progress: { phase: "discovery", status: "running" },
+        },
+      },
+    );
+    const item = event["item"] as Record<string, unknown>;
+    const result = item["result"] as Record<string, unknown>;
+    const ordinaryResult = {
+      structured_content: {
+        scan: {
+          id: "scan_public",
+          mode: "standard",
+          progress: { phase: "discovery", status: "running" },
+        },
+      },
+    };
+    const unchangedResult = {
+      structured_content: {
+        scan: {
+          id: "scan_public",
+          mode: "full_dependency",
+          progress: { phase: "preflight", status: "running" },
+        },
+      },
+    };
+
+    for (const altered of [
+      { ...event, item: { ...item, server: "untrusted-server" } },
+      { ...event, item: { ...item, status: "failed" } },
+      { ...event, item: { ...item, result: ordinaryResult } },
+      { ...event, item: { ...item, result: unchangedResult } },
+      { ...event, item: { ...item, result: { ...result, isError: true } } },
+    ]) {
+      expect(scanActivityFromEvent(altered, "/code/juice-shop")).toMatchObject({
+        description: "update_codex_security_scan_progress",
+      });
+    }
+  });
+
+  test("reports the exact submitted dependency count without package identities", () => {
+    const activity = scanActivityFromEvent(
+      completedDependencyToolEvent(
+        "submit_codex_security_dependency_scan",
+        {
+          dependencies: [
+            {
+              package: "public-package",
+              sourcePath: "src/private-first-party-file.ts",
+            },
+            { package: "second-public-package" },
+          ],
+        },
+        { jobId: "dps_public", status: "queued" },
+      ),
+      "/code/juice-shop",
+    );
+
+    expect(activity).toMatchObject({
+      kind: "tool",
+      status: "completed",
+      dependencyProgress: {
+        jobId: "dps_public",
+        status: "queued",
+        packagesTotal: 2,
+        packagesCompleted: 0,
+        packagesCached: 0,
+        packagesFailed: 0,
+        packagesActive: 0,
+        activePhases: [],
+      },
+    });
+    expect(JSON.stringify(activity?.dependencyProgress)).not.toContain(
+      "public-package",
+    );
+    expect(JSON.stringify(activity?.dependencyProgress)).not.toContain(
+      "private-first-party-file.ts",
+    );
+  });
+
+  test("derives exact active phases, terminal packages, failures, and complete cache hits", () => {
+    const activity = scanActivityFromEvent(
+      completedDependencyToolEvent(
+        "get_codex_security_dependency_scan",
+        { jobId: "dps_public" },
+        {
+          jobId: "dps_public",
+          status: "running",
+          packages: [
+            { status: "queued", artifacts: [] },
+            { status: "running", phase: "acquisition", artifacts: [] },
+            { status: "running", phase: "scanning", artifacts: [] },
+            { status: "running", phase: "history", artifacts: [] },
+            {
+              status: "completed",
+              artifacts: [{ cacheHit: true }, { cacheHit: true }],
+              findings: [{ title: "private first-party finding context" }],
+            },
+            {
+              status: "partial",
+              artifacts: [{ cacheHit: true }, { cacheHit: false }],
+            },
+            { status: "failed", artifacts: [] },
+            { status: "completed", artifacts: [] },
+          ],
+        },
+      ),
+      "/code/juice-shop",
+    );
+
+    expect(activity?.dependencyProgress).toEqual({
+      jobId: "dps_public",
+      status: "running",
+      packagesTotal: 8,
+      packagesCompleted: 4,
+      packagesCached: 1,
+      packagesFailed: 1,
+      packagesActive: 3,
+      activePhases: [
+        { phase: "acquisition", count: 1 },
+        { phase: "scanning", count: 1 },
+        { phase: "history", count: 1 },
+      ],
+    });
+    expect(JSON.stringify(activity?.dependencyProgress)).not.toContain(
+      "private first-party finding context",
+    );
+  });
+
+  test("never invents dependency progress from untrusted or unsuccessful MCP calls", () => {
+    const cases: Record<string, unknown>[] = [
+      {
+        ...completedDependencyToolEvent(
+          "get_codex_security_dependency_scan",
+          { jobId: "dps_public" },
+          { jobId: "dps_public", status: "running", packages: [] },
+        ),
+        item: {
+          ...(completedDependencyToolEvent(
+            "get_codex_security_dependency_scan",
+            { jobId: "dps_public" },
+            { jobId: "dps_public", status: "running", packages: [] },
+          )["item"] as Record<string, unknown>),
+          server: "untrusted-server",
+        },
+      },
+      {
+        ...completedDependencyToolEvent(
+          "get_codex_security_dependency_scan",
+          { jobId: "dps_public" },
+          { jobId: "dps_public", status: "running", packages: [] },
+        ),
+        item: {
+          ...(completedDependencyToolEvent(
+            "get_codex_security_dependency_scan",
+            { jobId: "dps_public" },
+            { jobId: "dps_public", status: "running", packages: [] },
+          )["item"] as Record<string, unknown>),
+          status: "failed",
+        },
+      },
+      completedDependencyToolEvent(
+        "get_codex_security_dependency_scan",
+        { jobId: "dps_public" },
+        { jobId: "dps_public", status: "running" },
+      ),
+      completedDependencyToolEvent(
+        "submit_codex_security_dependency_scan",
+        {},
+        { jobId: "dps_public", status: "queued" },
+      ),
+      completedDependencyToolEvent(
+        "some_other_tool",
+        { dependencies: [] },
+        { jobId: "dps_public", status: "queued" },
+      ),
+    ];
+
+    for (const event of cases) {
+      expect(
+        scanActivityFromEvent(event, "/code/juice-shop")?.dependencyProgress,
+      ).toBeUndefined();
+    }
+  });
+
+  test("does not attribute phases to queued packages or invent unsupported phases", () => {
+    expect(
+      scanActivityFromEvent(
+        completedDependencyToolEvent(
+          "get_codex_security_dependency_scan",
+          { jobId: "dps_public" },
+          {
+            jobId: "dps_public",
+            status: "running",
+            packages: [
+              { status: "queued", phase: "acquisition", artifacts: [] },
+              { status: "running", phase: "unsupported", artifacts: [] },
+              {
+                status: "completed",
+                artifacts: [{ cacheHit: "true" }],
+              },
+            ],
+          },
+        ),
+        "/code/juice-shop",
+      )?.dependencyProgress,
+    ).toEqual({
+      jobId: "dps_public",
+      status: "running",
+      packagesTotal: 3,
+      packagesCompleted: 1,
+      packagesCached: 0,
+      packagesFailed: 0,
+      packagesActive: 1,
+      activePhases: [],
+    });
+  });
+
   test("reports repository files as soon as a read command starts", () => {
     expect(
       scanActivityFromEvent(

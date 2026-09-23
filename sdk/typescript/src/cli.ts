@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import type { ModelReasoningEffort } from "@openai/codex-sdk";
 
 import {
   execFile as execFileCallback,
@@ -60,6 +61,9 @@ import {
   runtimeScanAuthentication,
   selectedScanEnvironment,
   type DeepScanOptions,
+  type DependencyCalculationResult,
+  type DependencyScanModelSettings,
+  type DependencyScanTarget,
   type ScanAuthMode,
   type ScanAuthentication,
   type ScanOptions,
@@ -269,6 +273,11 @@ import {
   type ResolvedScanSettings,
 } from "./scan-settings.js";
 
+import {
+  DEPENDENCY_CALCULATION_EFFORT,
+  DEPENDENCY_CALCULATION_MODEL,
+} from "./dependency-calculation.js";
+
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
 const execFile = promisify(execFileCallback);
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
@@ -342,8 +351,22 @@ const VALUE_OPTIONS = new Set([
   "--head",
   "--base",
   "--mode",
+  "--target",
+  "--dependency-depth",
+  "--dependency-graph",
+
   "--model",
   "--effort",
+  "--resolution-model",
+  "--resolution-effort",
+  "--acquisition-model",
+  "--acquisition-effort",
+  "--security-model",
+  "--security-effort",
+  "--verification-model",
+  "--verification-effort",
+  "--history-model",
+  "--history-effort",
   "--provider",
   "--output-dir",
   "--plugin-path",
@@ -950,10 +973,10 @@ class FindingProgressPresenter {
   }
 }
 
-function effortOption() {
+function effortOption(flag = "--effort") {
   return z
     .enum(MODEL_REASONING_EFFORTS, {
-      error: "--effort must be minimal, low, medium, high, xhigh, or max.",
+      error: `${flag} must be minimal, low, medium, high, xhigh, or max.`,
     })
     .optional()
     .describe(
@@ -976,7 +999,95 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
   return resolveConfigPath(directory, value);
 }
 
+const DEPENDENCY_CLI_OPTIONS = z.object({
+  target: z
+    .enum(["malware", "malware-and-vulnerabilities"])
+    .default("malware-and-vulnerabilities")
+    .describe("Select dependency artifact malware or comprehensive scanning."),
+  dependencyDepth: optionValue("--dependency-depth")
+    .refine(
+      (value) =>
+        value === "all" ||
+        (Number.isSafeInteger(Number(value)) && Number(value) > 0),
+      "--dependency-depth must be a positive integer or all.",
+    )
+    .optional()
+    .describe(
+      "Review published artifacts through graph depth N, or all (default: 1).",
+    ),
+  calculateDependencies: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Calculate dependency counts and save the graph without scanning packages.",
+    ),
+  dependencyGraph: optionValue("--dependency-graph")
+    .optional()
+    .describe("Reuse dependency resolver output saved at PATH."),
+  resolutionModel: optionValue("--resolution-model")
+    .optional()
+    .describe(
+      `Model for --calculate-dependencies (default: ${DEPENDENCY_CALCULATION_MODEL}).`,
+    ),
+  resolutionEffort: effortOption("--resolution-effort").describe(
+    `Reasoning effort for --calculate-dependencies (default: ${DEPENDENCY_CALCULATION_EFFORT}).`,
+  ),
+  acquisitionModel: optionValue("--acquisition-model")
+    .optional()
+    .describe("Model for dependency artifact acquisition."),
+  acquisitionEffort: effortOption("--acquisition-effort").describe(
+    "Reasoning effort for dependency artifact acquisition.",
+  ),
+  securityModel: optionValue("--security-model")
+    .optional()
+    .describe("Model for dependency artifact security scanning."),
+  securityEffort: effortOption("--security-effort").describe(
+    "Reasoning effort for dependency artifact security scanning.",
+  ),
+  verificationModel: optionValue("--verification-model")
+    .optional()
+    .describe("Model for dependency artifact malware verification."),
+  verificationEffort: effortOption("--verification-effort").describe(
+    "Reasoning effort for dependency artifact malware verification.",
+  ),
+  historyModel: optionValue("--history-model")
+    .optional()
+    .describe("Model for dependency vulnerability history analysis."),
+  historyEffort: effortOption("--history-effort").describe(
+    "Reasoning effort for dependency vulnerability history analysis.",
+  ),
+});
+
+function dependencyModelSettings(
+  options: z.output<typeof DEPENDENCY_CLI_OPTIONS>,
+): DependencyScanModelSettings | undefined {
+  const settings: DependencyScanModelSettings = {};
+  for (const [role, model, reasoningEffort] of [
+    ["acquisition", options.acquisitionModel, options.acquisitionEffort],
+    ["scan", options.securityModel, options.securityEffort],
+    ["verification", options.verificationModel, options.verificationEffort],
+    ["history", options.historyModel, options.historyEffort],
+  ] as const) {
+    if (model === undefined && reasoningEffort === undefined) continue;
+    settings[role] = {
+      ...(model === undefined ? {} : { model }),
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    };
+  }
+  return Object.keys(settings).length === 0 ? undefined : settings;
+}
+
 interface ScanArguments extends ResolvedScanSettings {
+  scanDependencies?: boolean;
+  dependenciesOnly?: boolean;
+  dependencyScanTarget?: DependencyScanTarget;
+  dependencyModelSettings?: DependencyScanModelSettings;
+  dependencyDepth?: number | null;
+  dependencyGraphPath?: string;
+  calculateDependencies?: boolean;
+  resolutionModel?: string;
+  resolutionEffort?: ModelReasoningEffort;
+
   codexOverrides: JsonObject;
   projectConfig?: ProjectConfigProvenance;
   resumeScanId?: string;
@@ -1133,10 +1244,11 @@ interface PatchRiskAssessment extends PatchRiskReport {
   summary: string;
 }
 
+type CliSecurity = Pick<CodexSecurity, "run" | "preflight" | "close"> &
+  Partial<Pick<CodexSecurity, "scanDependencies" | "calculateDependencies">>;
+
 interface CliDependencies {
-  createSecurity(
-    config: CodexSecurityConfig,
-  ): Pick<CodexSecurity, "run" | "preflight" | "close">;
+  createSecurity(config: CodexSecurityConfig): CliSecurity;
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
@@ -3448,300 +3560,6 @@ export async function main(
         }
       },
     })
-    .command("scan", {
-      description: "Run a Codex Security scan.",
-      hint:
-        "Import existing findings without security analysis:\n" +
-        "  codex-security scan import --csv findings.csv\n" +
-        "  codex-security scan import --json findings.json\n" +
-        "Use ./import to scan a repository named import.",
-      destructive: true,
-      mcp: false,
-      alias: { config: "c" },
-      args: z.object({
-        repository: z
-          .string()
-          .optional()
-          .describe("Repository root to scan (default: current directory)."),
-      }),
-      options: z
-        .object({
-          config: PROJECT_CONFIG_OPTION,
-          workflowId: optionValue("--workflow-id")
-            .optional()
-            .describe(
-              "Reuse completed work in the named local findings workflow.",
-            ),
-          auth: ScanSettingsSchema.shape.auth.describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
-          ),
-          verbose: z
-            .boolean()
-            .default(false)
-            .describe("Print scan diagnostics to stderr."),
-          safetyIdentifier: optionValue("--safety-identifier")
-            .optional()
-            .describe(
-              "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
-            ),
-          path: z
-            .array(optionValue("--path"))
-            .optional()
-            .meta({ default: [] })
-            .describe(
-              "Scan only PATH; repeat for multiple repository-relative paths.",
-            ),
-          knowledgeBase: z
-            .array(optionValue("--knowledge-base"))
-            .optional()
-            .meta({ default: [] })
-            .describe(
-              "Add security-context files or directories; repeat for multiple paths.",
-            ),
-          scanPromptFile: optionValue("--scan-prompt-file")
-            .optional()
-            .describe("Append scan instructions from FILE."),
-          validationPromptFile: optionValue("--validation-prompt-file")
-            .optional()
-            .describe(
-              "Replace final validation with the workflow in FILE (not Deep).",
-            ),
-          postScanPromptFile: optionValue("--post-scan-prompt-file")
-            .optional()
-            .describe("Run FILE after each scan, including failures."),
-          diff: optionValue("--diff")
-            .optional()
-            .describe("Scan committed Git changes from BASE to --head."),
-          workingTree: z
-            .boolean()
-            .optional()
-            .meta({ default: false })
-            .describe("Scan staged and unstaged changes against --base."),
-          head: optionValue("--head")
-            .optional()
-            .describe("Git head ref for --diff (default: HEAD)."),
-          base: optionValue("--base")
-            .optional()
-            .describe("Git base ref for --working-tree (default: HEAD)."),
-          mode: ScanSettingsSchema.shape.mode.describe(
-            "Scan mode (default: standard); deep supports repository and path targets.",
-          ),
-          ...DEEP_SCAN_OPTION_SCHEMAS,
-          model: optionValue("--model")
-            .optional()
-            .describe(
-              `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-            ),
-          effort: effortOption(),
-          provider: PROVIDER_OPTION,
-          outputDir: optionValue("--output-dir")
-            .optional()
-            .describe(
-              "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
-            ),
-          archiveExisting: z
-            .boolean()
-            .default(false)
-            .describe("Archive existing results; requires --output-dir."),
-          pluginPath: optionValue("--plugin-path")
-            .optional()
-            .describe(PLUGIN_PATH_DESCRIPTION),
-          python: optionValue("--python")
-            .optional()
-            .describe(PYTHON_PATH_DESCRIPTION),
-          codex: z
-            .array(optionValue("--codex"))
-            .default([])
-            .describe(CODEX_OVERRIDE_DESCRIPTION),
-          failOnSeverity: FailureSeveritySchema.optional().describe(
-            "Exit 1 for findings at or above LEVEL.",
-          ),
-          patch: z
-            .boolean()
-            .default(false)
-            .describe("Patch and verify confirmed findings after the scan."),
-          patchSeverity: z
-            .enum(REPORTABLE_SEVERITIES)
-            .optional()
-            .describe("Patch findings at or above LEVEL; requires --patch."),
-          createPr: CREATE_PR_OPTION,
-          maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
-            "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
-          ),
-          showCost: SHOW_COST_OPTION,
-          headless: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Use plain text progress instead of the interactive dashboard.",
-            ),
-          dryRun: z
-            .boolean()
-            .default(false)
-            .describe("Validate local scan inputs without starting a scan."),
-          mock: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Save synthetic Standard scan findings without calling an LLM.",
-            ),
-        })
-        .refine(
-          (options) => options.patchSeverity === undefined || options.patch,
-          {
-            message: "--patch-severity requires --patch.",
-          },
-        )
-        .refine((options) => !options.createPr || options.patch, {
-          message: "--create-pr requires --patch.",
-        })
-        .refine((options) => !options.patch || !options.dryRun, {
-          message: "--patch cannot be combined with --dry-run.",
-        })
-        .refine(
-          (options) => !options.mock || (!options.dryRun && !options.patch),
-          {
-            message: "--mock cannot be combined with --dry-run or --patch.",
-          },
-        ),
-      examples: [
-        { args: { repository: "." } },
-        {
-          args: { repository: "." },
-          options: { config: "codex-security.yaml" },
-        },
-        { args: { repository: "." }, options: { model: "gpt-5.6-terra" } },
-        {
-          args: { repository: "." },
-          options: { model: "gpt-5.6-terra", effort: "high" },
-        },
-        { args: { repository: "." }, options: { path: ["src"] } },
-        { args: { repository: "." }, options: { diff: "origin/main" } },
-        {
-          args: { repository: "." },
-          options: {
-            codex: [
-              "features.multi_agent_v2.max_concurrent_threads_per_session=4",
-            ],
-          },
-        },
-      ],
-      output: scanOutputSchema,
-      async run({ args, error: incurError, format, options }) {
-        if (format === "md") {
-          errorOutput.write(
-            "codex-security: Markdown output is not supported for scan results.\n",
-          );
-          exitCode = 2;
-          return;
-        }
-        let outcome: ScanOutcome;
-        try {
-          const directory = dependencies.currentDirectory();
-          const project = await selectedProjectConfig(
-            options.config,
-            dependencies,
-          );
-          const scope = resolveCliScope(project?.input.scan?.scope, {
-            paths: options.path,
-            diff: options.diff,
-            workingTree: options.workingTree,
-            head: options.head,
-            base: options.base,
-          });
-          const {
-            config,
-            options: settings,
-            projectConfig: provenance,
-          } = resolveScanSettings(
-            project,
-            {
-              auth: options.auth,
-              target: scope.target,
-              knowledgeBasePaths: options.knowledgeBase,
-              scanPromptFile: options.scanPromptFile,
-              validationPromptFile: options.validationPromptFile,
-              postScanPromptFile: options.postScanPromptFile,
-              mode: options.mode,
-              workers: options.workers,
-              subagents: options.subagents,
-              stopAfterNoNew: options.stopAfterNoNew,
-              maxDiscoveryRuns: options.maxDiscoveryRuns,
-              maxTimeHours: options.maxTimeHours,
-              outputDir: options.outputDir,
-              failureSeverity: options.failOnSeverity,
-              maxCostUsd: options.maxCost,
-              codexOverrides: parseCodexOverrides(
-                options.codex,
-                options.model,
-                options.effort,
-                options.provider,
-                project?.input.codex,
-              ),
-            },
-            directory,
-            scope.sources,
-          );
-          if (options.archiveExisting && settings.outputDir === undefined) {
-            throw new CodexSecurityError(
-              "--archive-existing requires --output-dir.",
-            );
-          }
-          outcome = await runScan(
-            {
-              ...settings,
-              codexOverrides: config.codexOverrides,
-              projectConfig: provenance,
-              workflowId: options.workflowId,
-              safetyIdentifier: options.safetyIdentifier,
-              verbose: options.verbose,
-              repository: args.repository,
-              archiveExisting: options.archiveExisting,
-              pluginPath: options.pluginPath,
-              pythonPath: options.python,
-              patch: options.patch,
-              patchSeverity: options.patchSeverity,
-              createPr: options.createPr,
-              showCost: options.showCost,
-              headless: options.headless,
-              dryRun: options.dryRun,
-              mock: options.mock,
-            },
-            errorOutput,
-            dependencies,
-            format !== "json" && format !== "jsonl",
-          );
-        } catch (error) {
-          const message = errorMessage(error);
-          errorOutput.write(`${message}\n`);
-          outcome = { exitCode: 2, error: message };
-        }
-        exitCode = outcome.exitCode;
-        if (outcome.error !== undefined) {
-          if (format === "json" || format === "jsonl") {
-            const message = safeErrorMessage(outcome.error);
-            if (!argv.includes("--full-output"))
-              return { status: "failed", code: "SCAN_FAILED", message };
-            // Incur would wrap returned data in an ok: true envelope.
-            scanStructuredError = true;
-            return incurError({ code: "SCAN_FAILED", message, exitCode });
-          }
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
-        }
-        if (
-          !options.dryRun &&
-          format === "toon" &&
-          !argv.some((argument) => OUTPUT_OPTION.test(argument))
-        ) {
-          return;
-        }
-        return outcome.data;
-      },
-    })
     .command("install-hook", {
       description:
         "Install an advisory local Git pre-commit check. Require a passing scan in CI.",
@@ -5719,6 +5537,333 @@ export async function main(
       },
     });
 
+  for (const dependencyOnly of [false, true]) {
+    cli.command(dependencyOnly ? "dependency-scan" : "scan", {
+      description: dependencyOnly
+        ? "Scan all current dependencies or dependency updates in a Git diff."
+        : "Run a Codex Security scan.",
+      hint:
+        "Import existing findings without security analysis:\n" +
+        "  codex-security scan import --csv findings.csv\n" +
+        "  codex-security scan import --json findings.json\n" +
+        "Use ./import to scan a repository named import.",
+      destructive: true,
+      mcp: false,
+      alias: { config: "c" },
+      args: z.object({
+        repository: z
+          .string()
+          .optional()
+          .describe("Repository root to scan (default: current directory)."),
+      }),
+      options: z
+        .object({
+          ...DEPENDENCY_CLI_OPTIONS.shape,
+          ...(dependencyOnly
+            ? {}
+            : {
+                dependencies: z
+                  .boolean()
+                  .default(false)
+                  .describe(
+                    "Include dependency checks alongside first-party code scanning.",
+                  ),
+              }),
+          config: PROJECT_CONFIG_OPTION,
+          workflowId: optionValue("--workflow-id")
+            .optional()
+            .describe(
+              "Reuse completed work in the named local findings workflow.",
+            ),
+          auth: ScanSettingsSchema.shape.auth.describe(
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
+          ),
+          verbose: z
+            .boolean()
+            .default(false)
+            .describe("Print scan diagnostics to stderr."),
+          safetyIdentifier: optionValue("--safety-identifier")
+            .optional()
+            .describe(
+              "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
+            ),
+          path: z
+            .array(optionValue("--path"))
+            .optional()
+            .meta({ default: [] })
+            .describe(
+              "Scan only PATH; repeat for multiple repository-relative paths.",
+            ),
+          knowledgeBase: z
+            .array(optionValue("--knowledge-base"))
+            .optional()
+            .meta({ default: [] })
+            .describe(
+              "Add security-context files or directories; repeat for multiple paths.",
+            ),
+          scanPromptFile: optionValue("--scan-prompt-file")
+            .optional()
+            .describe("Append scan instructions from FILE."),
+          validationPromptFile: optionValue("--validation-prompt-file")
+            .optional()
+            .describe(
+              "Replace final validation with the workflow in FILE (not Deep).",
+            ),
+          postScanPromptFile: optionValue("--post-scan-prompt-file")
+            .optional()
+            .describe("Run FILE after each scan, including failures."),
+          diff: optionValue("--diff")
+            .optional()
+            .describe("Scan committed Git changes from BASE to --head."),
+          workingTree: z
+            .boolean()
+            .optional()
+            .meta({ default: false })
+            .describe("Scan staged and unstaged changes against --base."),
+          head: optionValue("--head")
+            .optional()
+            .describe("Git head ref for --diff (default: HEAD)."),
+          base: optionValue("--base")
+            .optional()
+            .describe("Git base ref for --working-tree (default: HEAD)."),
+          mode: ScanSettingsSchema.shape.mode.describe(
+            "Scan mode (default: standard); deep supports repository and path targets.",
+          ),
+          ...DEEP_SCAN_OPTION_SCHEMAS,
+          model: optionValue("--model")
+            .optional()
+            .describe(
+              `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+            ),
+          effort: effortOption(),
+          provider: PROVIDER_OPTION,
+          outputDir: optionValue("--output-dir")
+            .optional()
+            .describe(
+              "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+            ),
+          archiveExisting: z
+            .boolean()
+            .default(false)
+            .describe("Archive existing results; requires --output-dir."),
+          pluginPath: optionValue("--plugin-path")
+            .optional()
+            .describe(PLUGIN_PATH_DESCRIPTION),
+          python: optionValue("--python")
+            .optional()
+            .describe(PYTHON_PATH_DESCRIPTION),
+          codex: z
+            .array(optionValue("--codex"))
+            .default([])
+            .describe(CODEX_OVERRIDE_DESCRIPTION),
+          failOnSeverity: FailureSeveritySchema.optional().describe(
+            "Exit 1 for findings at or above LEVEL.",
+          ),
+          patch: z
+            .boolean()
+            .default(false)
+            .describe("Patch and verify confirmed findings after the scan."),
+          patchSeverity: z
+            .enum(REPORTABLE_SEVERITIES)
+            .optional()
+            .describe("Patch findings at or above LEVEL; requires --patch."),
+          createPr: CREATE_PR_OPTION,
+          maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+            "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
+          ),
+          showCost: SHOW_COST_OPTION,
+          headless: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Use plain text progress instead of the interactive dashboard.",
+            ),
+          dryRun: z
+            .boolean()
+            .default(false)
+            .describe("Validate local scan inputs without starting a scan."),
+          mock: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Save synthetic Standard scan findings without calling an LLM.",
+            ),
+        })
+        .refine(
+          (options) => options.patchSeverity === undefined || options.patch,
+          {
+            message: "--patch-severity requires --patch.",
+          },
+        )
+        .refine((options) => !options.createPr || options.patch, {
+          message: "--create-pr requires --patch.",
+        })
+        .refine((options) => !options.patch || !options.dryRun, {
+          message: "--patch cannot be combined with --dry-run.",
+        })
+        .refine(
+          (options) => !options.mock || (!options.dryRun && !options.patch),
+          {
+            message: "--mock cannot be combined with --dry-run or --patch.",
+          },
+        ),
+      examples: [
+        { args: { repository: "." } },
+        {
+          args: { repository: "." },
+          options: { config: "codex-security.yaml" },
+        },
+        { args: { repository: "." }, options: { model: "gpt-5.6-terra" } },
+        {
+          args: { repository: "." },
+          options: { model: "gpt-5.6-terra", effort: "high" },
+        },
+        { args: { repository: "." }, options: { path: ["src"] } },
+        { args: { repository: "." }, options: { diff: "origin/main" } },
+        {
+          args: { repository: "." },
+          options: {
+            codex: [
+              "features.multi_agent_v2.max_concurrent_threads_per_session=4",
+            ],
+          },
+        },
+      ],
+      output: scanOutputSchema,
+      async run({ args, error: incurError, format, options }) {
+        if (format === "md") {
+          errorOutput.write(
+            "codex-security: Markdown output is not supported for scan results.\n",
+          );
+          exitCode = 2;
+          return;
+        }
+        let outcome: ScanOutcome;
+        try {
+          const directory = dependencies.currentDirectory();
+          const project = await selectedProjectConfig(
+            options.config,
+            dependencies,
+          );
+          const scope = resolveCliScope(project?.input.scan?.scope, {
+            paths: options.path,
+            diff: options.diff,
+            workingTree: options.workingTree,
+            head: options.head,
+            base: options.base,
+          });
+          const {
+            config,
+            options: settings,
+            projectConfig: provenance,
+          } = resolveScanSettings(
+            project,
+            {
+              auth: options.auth,
+              target: scope.target,
+              knowledgeBasePaths: options.knowledgeBase,
+              scanPromptFile: options.scanPromptFile,
+              validationPromptFile: options.validationPromptFile,
+              postScanPromptFile: options.postScanPromptFile,
+              mode: options.mode,
+              workers: options.workers,
+              subagents: options.subagents,
+              stopAfterNoNew: options.stopAfterNoNew,
+              maxDiscoveryRuns: options.maxDiscoveryRuns,
+              maxTimeHours: options.maxTimeHours,
+              outputDir: options.outputDir,
+              failureSeverity: options.failOnSeverity,
+              maxCostUsd: options.maxCost,
+              codexOverrides: parseCodexOverrides(
+                options.codex,
+                options.model,
+                options.effort,
+                options.provider,
+                project?.input.codex,
+              ),
+            },
+            directory,
+            scope.sources,
+          );
+          if (options.archiveExisting && settings.outputDir === undefined) {
+            throw new CodexSecurityError(
+              "--archive-existing requires --output-dir.",
+            );
+          }
+          outcome = await runScan(
+            {
+              ...settings,
+              scanDependencies:
+                !dependencyOnly &&
+                "dependencies" in options &&
+                options.dependencies === true,
+              dependenciesOnly: dependencyOnly,
+              dependencyScanTarget: options.target,
+              dependencyDepth:
+                options.dependencyDepth === "all"
+                  ? null
+                  : options.dependencyDepth === undefined
+                    ? undefined
+                    : Number(options.dependencyDepth),
+              dependencyGraphPath: options.dependencyGraph,
+              dependencyModelSettings: dependencyModelSettings(options),
+              calculateDependencies: options.calculateDependencies,
+              resolutionModel: options.resolutionModel,
+              resolutionEffort: options.resolutionEffort,
+              codexOverrides: config.codexOverrides,
+              projectConfig: provenance,
+              workflowId: options.workflowId,
+              safetyIdentifier: options.safetyIdentifier,
+              verbose: options.verbose,
+              repository: args.repository,
+              archiveExisting: options.archiveExisting,
+              pluginPath: options.pluginPath,
+              pythonPath: options.python,
+              patch: options.patch,
+              patchSeverity: options.patchSeverity,
+              createPr: options.createPr,
+              showCost: options.showCost,
+              headless: options.headless,
+              dryRun: options.dryRun,
+              mock: options.mock,
+            },
+            errorOutput,
+            dependencies,
+            format !== "json" && format !== "jsonl",
+          );
+        } catch (error) {
+          const message = errorMessage(error);
+          errorOutput.write(`${message}\n`);
+          outcome = { exitCode: 2, error: message };
+        }
+        exitCode = outcome.exitCode;
+        if (outcome.error !== undefined) {
+          if (format === "json" || format === "jsonl") {
+            const message = safeErrorMessage(outcome.error);
+            if (!argv.includes("--full-output"))
+              return { status: "failed", code: "SCAN_FAILED", message };
+            // Incur would wrap returned data in an ok: true envelope.
+            scanStructuredError = true;
+            return incurError({ code: "SCAN_FAILED", message, exitCode });
+          }
+          return incurError({
+            code: "SCAN_FAILED",
+            message: outcome.error,
+            exitCode,
+          });
+        }
+        if (
+          !options.dryRun &&
+          format === "toon" &&
+          !argv.some((argument) => OUTPUT_OPTION.test(argument))
+        ) {
+          return;
+        }
+        return outcome.data;
+      },
+    });
+  }
+
   // Incur cannot mount a command with both a handler and subcommands.
   // Select the nested import route while preserving scan [repository].
   if (isScanImportCommand(argv)) {
@@ -6120,6 +6265,36 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe contains deep scan settings for a standard scan.",
     );
   }
+  const roleModelSettings = z.object({
+    model: z.string().min(1).optional(),
+    reasoningEffort: z.enum(MODEL_REASONING_EFFORTS).optional(),
+  });
+  const dependencyOptions = z
+    .object({
+      dependencyMode: z
+        .enum(["full_dependency", "dependency_update"])
+        .optional(),
+      scanDependencies: z.boolean().optional(),
+      dependencyDepth: z.number().int().positive().nullable().optional(),
+      dependencyScanTarget: z
+        .enum(["malware", "malware-and-vulnerabilities"])
+        .optional(),
+      dependencyModelSettings: z
+        .object({
+          acquisition: roleModelSettings.optional(),
+          scan: roleModelSettings.optional(),
+          verification: roleModelSettings.optional(),
+          history: roleModelSettings.optional(),
+        })
+        .optional(),
+    })
+    .safeParse(recipe);
+  if (!dependencyOptions.success) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid dependency scan settings.",
+    );
+  }
+  const { dependencyMode, ...dependencyScanSettings } = dependencyOptions.data;
   const safetyIdentifier = recipe["safetyIdentifier"];
   const postScanPrompt = recipe["postScanPrompt"];
   if (
@@ -6159,6 +6334,8 @@ async function prepareScanArgumentsFromRecipe(
     postScanPrompt,
     mode,
     ...deepScan.data,
+    ...dependencyScanSettings,
+    ...(dependencyMode === undefined ? {} : { dependenciesOnly: true }),
     archiveExisting: false,
     codexOverrides: Object.hasOwn(config, "approval_policy")
       ? config
@@ -6186,6 +6363,7 @@ function validateCliArguments(
     command === undefined ||
     ![
       "scan",
+      "dependency-scan",
       "policy",
       "install-hook",
       "bulk-scan",
@@ -6242,7 +6420,10 @@ function validateCliArguments(
   ) {
     return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
   }
-  if (command === "scan" && !argv.includes("--schema")) {
+  if (
+    (command === "scan" || command === "dependency-scan") &&
+    !argv.includes("--schema")
+  ) {
     if (
       argv.some(
         (value) =>
@@ -8097,6 +8278,7 @@ async function executeScan(
   let dashboard: ScanDashboard | null = null;
   let lastWorkerUpdate = "";
   let lastProgressUpdate = "";
+  let dependencyPackageProgress: string | null = null;
   let workerCapacity: { planned: number; started: number } | null = null;
   let fileProgress: ScanProgress | null = null;
   let runningCost: Readonly<ScanCost> | null = null;
@@ -8180,9 +8362,9 @@ async function executeScan(
   dependencies.addSignalListener("SIGINT", onInterrupt);
   dependencies.addSignalListener("SIGTERM", onTerminate);
 
-  let security: Pick<CodexSecurity, "run" | "preflight" | "close"> | null =
-    null;
+  let security: CliSecurity | null = null;
   let result: ScanResult | null = null;
+  let dependencyCalculation: DependencyCalculationResult | null = null;
   let preflight: ScanPreflight | null = null;
   let effectiveModel = DEFAULT_SCAN_MODEL_CONFIGURATION.model;
   let effectiveReasoningEffort =
@@ -8195,6 +8377,16 @@ async function executeScan(
   let failed = false;
   let failure: unknown;
   try {
+    if (
+      arguments_.mode === "deep" &&
+      (arguments_.dependenciesOnly ||
+        arguments_.scanDependencies ||
+        arguments_.calculateDependencies)
+    ) {
+      throw new CodexSecurityError(
+        "Dependency scanning does not support --mode deep. Use --mode standard; --dependency-depth controls transitive package analysis independently.",
+      );
+    }
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
     const target = arguments_.target;
@@ -8208,6 +8400,30 @@ async function executeScan(
       pythonPath: arguments_.pythonPath,
       codexOverrides: arguments_.codexOverrides,
     };
+    if (arguments_.calculateDependencies) {
+      const resolutionSettings = {
+        model: arguments_.resolutionModel ?? DEPENDENCY_CALCULATION_MODEL,
+        model_reasoning_effort:
+          arguments_.resolutionEffort ?? DEPENDENCY_CALCULATION_EFFORT,
+      };
+      const overrides = config.codexOverrides ?? {};
+      const profileName = overrides["profile"];
+      const profiles = overrides["profiles"];
+      config.codexOverrides = { ...overrides, ...resolutionSettings };
+      if (
+        typeof profileName === "string" &&
+        profiles !== undefined &&
+        isJsonObject(profiles)
+      ) {
+        const profile = profiles[profileName];
+        if (profile !== undefined && isJsonObject(profile)) {
+          config.codexOverrides["profiles"] = {
+            ...profiles,
+            [profileName]: { ...profile, ...resolutionSettings },
+          };
+        }
+      }
+    }
     const selectedProfileName = config.codexOverrides?.["profile"];
     const effectiveConfiguration = {
       ...DEFAULT_CODEX_CONFIG,
@@ -8291,10 +8507,18 @@ async function executeScan(
         dependencies.environment["CI"] === undefined &&
         dependencies.environment["TERM"] !== "dumb",
     );
-    if (progress.interactive && !arguments_.dryRun && !verbose) {
+    if (
+      progress.interactive &&
+      !arguments_.dryRun &&
+      !arguments_.calculateDependencies &&
+      !verbose
+    ) {
       dashboard = new ScanDashboard(errorOutput, {
         repository,
         mode: arguments_.mode,
+        ...(arguments_.dependenciesOnly === true
+          ? { dependencyOnly: true }
+          : {}),
         showCost,
         model: scanModelConfiguration(await mergedCodexConfig(config)),
         ...(arguments_.maxCostUsd === undefined
@@ -8309,8 +8533,9 @@ async function executeScan(
     }
     const scope = scanScope(arguments_);
     const runningMessage = (): string => {
-      const stage =
-        phase === null
+      const stage = arguments_.calculateDependencies
+        ? "Calculating dependencies"
+        : phase === null
           ? scope === null
             ? "Running scan"
             : `Running scan: ${scope}`
@@ -8326,6 +8551,8 @@ async function executeScan(
           `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
         );
       }
+      if (dependencyPackageProgress !== null)
+        details.push(dependencyPackageProgress);
       if (runningCost !== null) {
         details.push(`Tokens: ${formatScanCostTokens(runningCost)}`);
         if (showCost) details.push(`Cost: ${formatScanCost(runningCost)}`);
@@ -8353,6 +8580,36 @@ async function executeScan(
     }
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
+      ...(arguments_.scanDependencies === true
+        ? { scanDependencies: true }
+        : {}),
+      ...((arguments_.scanDependencies === true ||
+        arguments_.dependenciesOnly === true) &&
+      arguments_.dependencyScanTarget !== undefined
+        ? { dependencyScanTarget: arguments_.dependencyScanTarget }
+        : {}),
+      ...((arguments_.scanDependencies === true ||
+        arguments_.dependenciesOnly === true) &&
+      arguments_.dependencyModelSettings !== undefined
+        ? { dependencyModelSettings: arguments_.dependencyModelSettings }
+        : {}),
+      ...((arguments_.scanDependencies === true ||
+        arguments_.dependenciesOnly === true) &&
+      arguments_.dependencyDepth !== undefined
+        ? { dependencyDepth: arguments_.dependencyDepth }
+        : {}),
+      ...((arguments_.scanDependencies === true ||
+        arguments_.dependenciesOnly === true ||
+        arguments_.calculateDependencies === true) &&
+      arguments_.dependencyGraphPath !== undefined
+        ? {
+            dependencyGraphPath: resolve(
+              dependencies.currentDirectory(),
+              expandHome(arguments_.dependencyGraphPath),
+            ),
+          }
+        : {}),
+
       ...(arguments_.resumeScanId === undefined
         ? {}
         : { resumeScanId: arguments_.resumeScanId }),
@@ -8472,7 +8729,12 @@ async function executeScan(
       onScanStarted: () => {
         diagnostic("scan.started");
         if (dashboard !== null) {
-          dashboard.setStage(phase ?? "Scanning repository");
+          dashboard.setStage(
+            arguments_.dependenciesOnly === true &&
+              (phase === null || phase === "preflight")
+              ? "Scanning dependencies"
+              : (phase ?? "Scanning repository"),
+          );
           return;
         }
         progress?.stopTimer();
@@ -8508,11 +8770,52 @@ async function executeScan(
         progress?.startTimer(runningMessage());
       },
       onActivity: (activity) => {
-        if (dashboard === null) return;
-        dashboard.record(activity);
-        if (activity.paths.length > 0 && phase === "preflight") {
-          dashboard.setStage("inspecting repository files");
+        if (dashboard !== null) {
+          dashboard.record(activity);
+          if (activity.paths.length > 0 && phase === "preflight")
+            dashboard.setStage("inspecting repository files");
+          return;
         }
+        if (
+          arguments_.dependenciesOnly === true &&
+          activity.kind === "tool" &&
+          activity.status === "completed" &&
+          activity.description ===
+            "update_codex_security_scan_progress · discovering dependencies"
+        ) {
+          if (phase === "discovering dependencies") return;
+          phase = "discovering dependencies";
+          progress?.stopTimer();
+          progress?.stage(`Scan phase: ${phase}.`);
+          progress?.startTimer(runningMessage());
+          return;
+        }
+        const packageProgress = activity.dependencyProgress;
+        if (packageProgress === undefined) return;
+        const counts = [
+          `Packages: ${packageProgress.packagesCompleted.toLocaleString("en-US")}/${packageProgress.packagesTotal.toLocaleString("en-US")}`,
+          `Cached: ${packageProgress.packagesCached.toLocaleString("en-US")}`,
+          `Failed: ${packageProgress.packagesFailed.toLocaleString("en-US")}`,
+          ...(packageProgress.packagesActive === 0
+            ? []
+            : [
+                `Active: ${packageProgress.packagesActive.toLocaleString("en-US")}`,
+              ]),
+          ...packageProgress.activePhases.map(({ phase, count }) => {
+            const label =
+              phase === "acquisition"
+                ? "Acquisition"
+                : phase === "scanning"
+                  ? "Security"
+                  : "History";
+            return `${label}: ${count.toLocaleString("en-US")}`;
+          }),
+        ].join(" | ");
+        if (counts === dependencyPackageProgress) return;
+        dependencyPackageProgress = counts;
+        progress?.stopTimer();
+        progress?.stage(`Dependency scan: ${counts}.`);
+        progress?.startTimer(runningMessage());
       },
       onSessionEvent:
         scanInput.isTTY === true
@@ -8598,7 +8901,45 @@ async function executeScan(
       },
     };
     if (arguments_.dryRun) {
-      preflight = await security.preflight(repository, options);
+      preflight = await security.preflight(repository, {
+        ...options,
+        ...(arguments_.dependenciesOnly || arguments_.calculateDependencies
+          ? { scanDependencies: true }
+          : {}),
+      });
+    } else if (arguments_.calculateDependencies) {
+      if (security.calculateDependencies === undefined) {
+        throw new CodexSecurityError("Dependency calculation is unavailable.");
+      }
+      progress?.stopTimer();
+      progress?.startTimer("Calculating dependencies");
+      dependencyCalculation = await security.calculateDependencies(repository, {
+        target,
+        auth,
+        dependencyGraphPath: options.dependencyGraphPath,
+        outputDir: options.outputDir,
+        archiveExisting: options.archiveExisting,
+        model: arguments_.resolutionModel,
+        reasoningEffort: arguments_.resolutionEffort,
+        signal: options.signal,
+        onActivity: options.onActivity,
+        onAuthentication: options.onAuthentication,
+        onWarning: options.onWarning,
+        onObserverError: options.onObserverError,
+        onOutputDirReady: options.onOutputDirReady,
+        onOutputArchived: options.onOutputArchived,
+        maxCostUsd: options.maxCostUsd,
+        onCost: options.onCost,
+      });
+    } else if (arguments_.dependenciesOnly) {
+      if (security.scanDependencies === undefined) {
+        throw new CodexSecurityError("Dependency scanning is unavailable.");
+      }
+      result = await security.scanDependencies(repository, {
+        ...options,
+        target,
+      });
+      scanDir = result.scanDir;
     } else {
       result = await security.run(repository, options);
       scanDir = result.scanDir;
@@ -8711,6 +9052,26 @@ async function executeScan(
               failOnSeverity: arguments_.failureSeverity,
             }),
       },
+    };
+  }
+  if (dependencyCalculation !== null) {
+    progress?.stage("Dependency calculation complete");
+    let total = 0;
+    for (const [index, count] of dependencyCalculation.depthCounts.entries()) {
+      total += count;
+      errorOutput.write(
+        `Depth ${index + 1}: ${count.toLocaleString("en-US")} packages (${total.toLocaleString("en-US")} through this depth)\n`,
+      );
+    }
+    errorOutput.write(
+      `Total: ${total.toLocaleString("en-US")} packages\nDependency graph: ${errorMessage(dependencyCalculation.dependencyGraphPath)}\nNo package scans were started.\n`,
+    );
+    return {
+      exitCode: targetWarnings.length > 0 ? 2 : 0,
+      data:
+        targetWarnings.length === 0
+          ? { ...dependencyCalculation }
+          : { ...dependencyCalculation, warnings: targetWarnings },
     };
   }
   if (result === null) {

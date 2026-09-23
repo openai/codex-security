@@ -41,6 +41,45 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test.each([false, true])(
+    "shows package counts within terminal height, dependency-only=%p",
+    (dependencyOnly) => {
+      const stderr = capture(true);
+      const dashboard = new ScanDashboard(
+        { ...stderr.stream, columns: 96, rows: 18 },
+        {
+          repository: "/code/juice-shop",
+          clock: fakeClock(),
+          dependencyOnly,
+        },
+      );
+      dashboard.start();
+      dashboard.record({
+        id: "package-progress",
+        kind: "tool",
+        status: "completed",
+        description: "get_codex_security_dependency_scan",
+        paths: [],
+        dependencyProgress: {
+          jobId: "dps_fixture",
+          status: "running",
+          packagesTotal: 11,
+          packagesCompleted: 4,
+          packagesCached: 2,
+          packagesFailed: 1,
+          packagesActive: 1,
+          activePhases: [{ phase: "history", count: 1 }],
+        },
+      });
+      const frame = lastFrame(stderr);
+      expect(frame).toContain("PACKAGES 4 / 11 reviewed · 1 failed");
+      expect(frame).toContain("analyzing dependency history");
+      expect(frame.includes("FILES")).toBe(!dependencyOnly);
+      expect(frame.trimEnd().split("\n")).toHaveLength(18);
+      dashboard.stop();
+    },
+  );
+
   test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
     const stderr = capture(true);
     const dashboard = new ScanDashboard(

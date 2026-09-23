@@ -15,7 +15,7 @@ import {
   formatScanCosts,
   formatScanCostTokens,
 } from "./cost-model.js";
-import type { ScanActivity } from "./scan-activity.js";
+import type { DependencyScanProgress, ScanActivity } from "./scan-activity.js";
 import type { ScanMode } from "./targets.js";
 import { scanPhaseLabel, type ScanProgress } from "./worker-progress.js";
 
@@ -56,6 +56,7 @@ interface DashboardInput {
 
 interface ScanDashboardOptions {
   repository: string;
+  dependencyOnly?: boolean;
   presentation?: "scan" | "publication" | "verification" | "components";
   componentName?: string;
   mode?: ScanMode;
@@ -134,6 +135,7 @@ export class ScanDashboard {
   } | null = null;
   #stage = "Preparing scan";
   #files: ScanProgress | null = null;
+  #dependencyProgress: DependencyScanProgress | null = null;
   #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
   #budget: {
@@ -459,6 +461,30 @@ export class ScanDashboard {
   }
 
   public record(activity: ScanActivity): void {
+    if (activity.dependencyProgress !== undefined) {
+      this.#dependencyProgress = activity.dependencyProgress;
+      this.#stage =
+        activity.dependencyProgress.status === "running" &&
+        activity.dependencyProgress.activePhases.length > 0
+          ? activity.dependencyProgress.activePhases
+              .map(({ phase }) =>
+                phase === "acquisition"
+                  ? "acquiring dependencies"
+                  : phase === "scanning"
+                    ? "scanning dependencies"
+                    : "analyzing dependency history",
+              )
+              .join(" · ")
+          : `dependency scan ${activity.dependencyProgress.status}`;
+    } else if (
+      this.#options.dependencyOnly === true &&
+      activity.kind === "tool" &&
+      activity.status === "completed" &&
+      activity.description ===
+        "update_codex_security_scan_progress · discovering dependencies"
+    ) {
+      this.#stage = "discovering dependencies";
+    }
     const existing = this.#activities.findIndex(
       (entry) =>
         entry.id === activity.id ||
@@ -599,6 +625,13 @@ export class ScanDashboard {
     if (this.#options.componentName !== undefined)
       scrollStatus = `Esc components · ${scrollStatus}`;
     const model = this.#options.model;
+    const dependencyProgress = this.#dependencyProgress;
+    const dependencyLines =
+      dependencyProgress === null
+        ? []
+        : [
+            `  PACKAGES ${formatCount(dependencyProgress.packagesCompleted)} / ${formatCount(dependencyProgress.packagesTotal)} reviewed${dependencyProgress.packagesFailed === 0 ? "" : ` · ${formatCount(dependencyProgress.packagesFailed)} failed`}`,
+          ];
 
     const lines = [
       `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${this.#options.componentName === undefined ? "" : `  ·  ${this.#options.componentName}`}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
@@ -613,7 +646,13 @@ export class ScanDashboard {
         : [
             ...(this.#options.mode === "deep"
               ? []
-              : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
+              : [
+                  `  STAGE    ${this.#stage}`,
+                  ...dependencyLines,
+                  ...(this.#options.dependencyOnly
+                    ? []
+                    : [`  FILES    ${files}`]),
+                ]),
             ...this.#tokenLines(),
             ...this.#costLines(),
             ...(this.#budget === null
@@ -824,6 +863,8 @@ export class ScanDashboard {
       1,
       (this.#stream.rows ?? 24) -
         FIXED_SCREEN_ROWS -
+        (this.#dependencyProgress === null ? 0 : 1) +
+        (this.#options.dependencyOnly ? 1 : 0) -
         (this.#budget === null ? 0 : 2) -
         (this.#options.presentation === "publication" ||
         this.#options.presentation === "verification"
