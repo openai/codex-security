@@ -306,9 +306,28 @@ function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
     /https?:\/\/[^\s<>"']+/g,
   )) {
-    const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
-    try {
-      const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+    let url = match[0];
+    while (true) {
+      url = url.replace(/[.,;:!?)}]+$/, "");
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        if (!url.endsWith("]")) break;
+        url = url.slice(0, -1);
+        continue;
+      }
+      if (
+        url.endsWith("]") &&
+        (!parsed.hostname.startsWith("[") ||
+          parsed.pathname !== "/" ||
+          parsed.search !== "" ||
+          parsed.hash !== "")
+      ) {
+        url = url.slice(0, -1);
+        continue;
+      }
+      const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
       if (
         hostname !== "localhost" &&
         !hostname.endsWith(".localhost") &&
@@ -322,8 +341,7 @@ function preferredAuthUrl(value: string): string | null {
       ) {
         return url;
       }
-    } catch {
-      continue;
+      break;
     }
   }
   return null;

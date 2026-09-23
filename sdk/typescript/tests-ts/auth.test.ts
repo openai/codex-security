@@ -164,7 +164,51 @@ describe("Codex authentication process boundary", () => {
     expect(succeeded).toBe(true);
   });
 
-  test("retains large interactive output and login instructions", async () => {
+  test("distinguishes IPv6 host brackets from surrounding punctuation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-ipv6-"));
+    temporaryDirectories.push(root);
+    const node = execFileSync("node", ["-p", "process.execPath"], {
+      encoding: "utf8",
+    }).trim();
+    for (const [index, output, expected] of [
+      [0, "Open https://[2001:db8::1].", "https://[2001:db8::1]"],
+      [
+        1,
+        "Open [https://auth.example.test/device]",
+        "https://auth.example.test/device",
+      ],
+      [2, "Open [https://[2001:db8::2]]", "https://[2001:db8::2]"],
+      [
+        3,
+        "Open [https://auth.example.test/device.]",
+        "https://auth.example.test/device",
+      ],
+      [4, "Open [https://[2001:db8::3].]", "https://[2001:db8::3]"],
+      [
+        5,
+        "Open [https://[2001:db8::4]/device?challenge=ABCD.]",
+        "https://[2001:db8::4]/device?challenge=ABCD",
+      ],
+    ] as const) {
+      const script = join(root, `login-${index}.mjs`);
+      await writeFile(
+        script,
+        `process.stderr.write(${JSON.stringify(`${output}\nUser code: ABCD-EFGH\n`)}, () => process.exit(0));\n`,
+      );
+      const handle = new CodexLoginHandle(
+        { command: node },
+        [script, "login", "--device-auth"],
+        process.env,
+        () => {},
+      );
+
+      await expect(handle.wait()).resolves.toMatchObject({ success: true });
+      expect(handle.verificationUrl).toBe(expected);
+      expect(handle.userCode).toBe("ABCD-EFGH");
+    }
+  });
+
+  test("bounds interactive output while retaining discovered instructions", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-output-"));
     temporaryDirectories.push(root);
     const script = join(root, "login.mjs");
