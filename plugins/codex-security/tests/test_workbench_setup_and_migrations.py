@@ -204,6 +204,122 @@ def test_workbench_counts_scope_before_taking_sqlite_writer_lock(tmp_path: Path)
     assert started["results"]["progress"]["coverage"]["filesTotal"] == 1
 
 
+@pytest.mark.parametrize("dependency_mode", ("dependency_update", "full_dependency"))
+def test_dependency_only_cli_registration_never_inventories_first_party_files(
+    tmp_path: Path, dependency_mode: str
+) -> None:
+    target = tmp_path / "target"
+    revision = initialize_git_repository(target)
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    requested_target = (
+        {"kind": "refs", "paths": [], "base": revision, "head": revision}
+        if dependency_mode == "dependency_update"
+        else {"kind": "repository", "paths": []}
+    )
+    recipe = {
+        "config": {},
+        "mode": "standard",
+        "repository": str(target),
+        "target": requested_target,
+    }
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    register_cli_scan = namespace["register_cli_scan"]
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    namespace["apply_migrations"](connection)
+    forbidden_inventory = mock.Mock(
+        side_effect=AssertionError("Dependency-only scans must not inventory first-party files.")
+    )
+
+    with mock.patch.dict(
+        namespace["dependency_scans"].__dict__,
+        {"directory_snapshot_regular_file_count": forbidden_inventory},
+    ):
+        registered = register_cli_scan(
+            connection,
+            argparse.Namespace(
+                repository=str(target),
+                scan_dir=str(scan_dir),
+                recipe_json=json.dumps(recipe),
+                registration_json_stdin=False,
+                recipe_json_stdin=False,
+                dependency_mode=dependency_mode,
+                scan_dependencies=False,
+                model_settings=None,
+                parent_scan_id=None,
+                archive_existing=False,
+                archived_scan_dir=None,
+            ),
+        )
+
+    forbidden_inventory.assert_not_called()
+    assert registered["scopeFileCount"] == 0
+    assert (
+        connection.execute(
+            "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?",
+            (registered["scanId"],),
+        ).fetchone()["scope_file_count"]
+        == 0
+    )
+
+
+@pytest.mark.parametrize("scan_dependencies", (False, True))
+def test_source_cli_registration_preserves_first_party_inventory_with_dependency_add_on(
+    tmp_path: Path, scan_dependencies: bool
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    recipe = {
+        "config": {},
+        "mode": "standard",
+        "repository": str(target),
+        "target": {"kind": "repository", "paths": []},
+    }
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    register_cli_scan = namespace["register_cli_scan"]
+    original_inventory = namespace["dependency_scans"].__dict__[
+        "directory_snapshot_regular_file_count"
+    ]
+    counted_inventory = mock.Mock(wraps=original_inventory)
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    namespace["apply_migrations"](connection)
+
+    with mock.patch.dict(
+        namespace["dependency_scans"].__dict__,
+        {"directory_snapshot_regular_file_count": counted_inventory},
+    ):
+        registered = register_cli_scan(
+            connection,
+            argparse.Namespace(
+                repository=str(target),
+                scan_dir=str(scan_dir),
+                recipe_json=json.dumps(recipe),
+                registration_json_stdin=False,
+                recipe_json_stdin=False,
+                dependency_mode=None,
+                scan_dependencies=scan_dependencies,
+                model_settings=None,
+                parent_scan_id=None,
+                archive_existing=False,
+                archived_scan_dir=None,
+            ),
+        )
+
+    counted_inventory.assert_called_once_with(target)
+    assert registered["scopeFileCount"] == 1
+    assert (
+        connection.execute(
+            "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?",
+            (registered["scanId"],),
+        ).fetchone()["scope_file_count"]
+        == 1
+    )
+
+
 def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     dependency = tmp_path / "dependency"
@@ -405,7 +521,7 @@ def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) ->
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (44,)
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])
@@ -482,6 +598,328 @@ def test_workbench_backfills_repository_targets_only_during_migration() -> None:
         apply_migrations(connection)
 
     backfill.assert_called_once_with(connection)
+
+
+def test_dependency_scan_migration_preserves_running_scans_and_foreign_keys() -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    apply_migrations = namespace["apply_migrations"]
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    preceding = tuple(migration for migration in namespace["MIGRATIONS"] if migration[0] < 42)
+    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": preceding}):
+        apply_migrations(connection)
+    timestamp = "2026-07-01T00:00:00Z"
+    connection.execute(
+        "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
+        ("legacy-workspace", timestamp, timestamp),
+    )
+    connection.execute(
+        """
+        INSERT INTO scans (
+            id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
+            status, phase, started_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "legacy-scan",
+            "legacy-workspace",
+            "/legacy/target",
+            "legacy-revision",
+            ".",
+            "standard",
+            "/legacy/scan",
+            "running",
+            "discovery",
+            timestamp,
+            timestamp,
+            timestamp,
+        ),
+    )
+    connection.execute(
+        "INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
+        ("legacy-scan", timestamp),
+    )
+    connection.execute(
+        "UPDATE workspaces SET active_scan_id = ? WHERE id = ?",
+        ("legacy-scan", "legacy-workspace"),
+    )
+    connection.execute(
+        "CREATE TRIGGER legacy_scan_update AFTER UPDATE ON scans BEGIN SELECT 1; END"
+    )
+    connection.commit()
+
+    apply_migrations(connection)
+
+    assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert tuple(
+        connection.execute(
+            "SELECT active_scan_id, scan_dependencies, model_settings_json FROM workspaces"
+        ).fetchone()
+    ) == ("legacy-scan", 0, None)
+    assert tuple(
+        connection.execute(
+            "SELECT mode, scan_dependencies, model_settings_json, dependency_job_id FROM scans"
+        ).fetchone()
+    ) == ("standard", 0, None, None)
+    assert tuple(connection.execute("SELECT scan_id FROM scan_progress").fetchone()) == (
+        "legacy-scan",
+    )
+    assert tuple(
+        connection.execute(
+            "SELECT name FROM sqlite_schema WHERE name = 'scans_one_running_per_workspace'"
+        ).fetchone()
+    ) == ("scans_one_running_per_workspace",)
+    assert tuple(
+        connection.execute(
+            "SELECT name FROM sqlite_schema WHERE name = 'legacy_scan_update'"
+        ).fetchone()
+    ) == ("legacy_scan_update",)
+
+
+def test_dependency_scan_migration_failure_restores_schema_and_foreign_keys() -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    apply_migrations = namespace["apply_migrations"]
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    preceding = tuple(migration for migration in namespace["MIGRATIONS"] if migration[0] < 42)
+    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": preceding}):
+        apply_migrations(connection)
+    timestamp = "2026-07-01T00:00:00Z"
+    connection.execute(
+        "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
+        ("legacy-workspace", timestamp, timestamp),
+    )
+    connection.commit()
+    version, name, sql = next(
+        migration for migration in namespace["MIGRATIONS"] if migration[0] == 42
+    )
+    broken = (*preceding, (version, name, f"{sql}\nINVALID MIGRATION;"))
+
+    with (
+        mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": broken}),
+        pytest.raises(sqlite3.OperationalError),
+    ):
+        apply_migrations(connection)
+
+    assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert connection.execute("SELECT id FROM workspaces").fetchone()["id"] == "legacy-workspace"
+    assert (
+        connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?", (version,)
+        ).fetchone()
+        is None
+    )
+    assert "scan_dependencies" not in {
+        row["name"] for row in connection.execute("PRAGMA table_info(workspaces)")
+    }
+
+
+def test_full_dependency_setup_persists_settings_and_owner_bound_job(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    workspace_id = str(uuid.uuid4())
+    model_settings = {
+        "acquisition": {"model": "acquisition-model"},
+        "scan": {"model": "scan-model", "reasoningEffort": "high"},
+        "verification": {"model": "verification-model", "reasoningEffort": "high"},
+        "history": {"reasoningEffort": "medium"},
+    }
+    encoded_settings = json.dumps(model_settings)
+    created = run_workbench(
+        state_dir,
+        "create-workspace",
+        "--workspace-id",
+        workspace_id,
+        "--thread-id",
+        "owning-thread",
+        "--target-path",
+        str(target),
+        "--mode",
+        "full_dependency",
+        "--scan-dependencies",
+        "--model-settings",
+        encoded_settings,
+    )
+    assert created["mode"] == "full_dependency"
+    assert created["scanDependencies"] is True
+    assert created["modelSettings"] == model_settings
+
+    saved = run_workbench(
+        state_dir,
+        "save-workspace",
+        "--workspace-id",
+        workspace_id,
+        "--target-path",
+        str(target),
+        "--scope",
+        ".",
+        "--mode",
+        "full_dependency",
+        "--scan-dependencies",
+        "--model-settings",
+        encoded_settings,
+    )
+    assert saved["diffTarget"] is None
+    started = start_delivered_scan(state_dir, "--workspace-id", workspace_id)
+    scan = started["results"]
+    scan_id = str(scan["scanId"])
+    assert scan["mode"] == "full_dependency"
+    assert scan["scanDependencies"] is True
+    assert scan["modelSettings"] == model_settings
+    assert scan["dependencyJobId"] is None
+
+    wrong_owner = run_workbench(
+        state_dir,
+        "bind-dependency-job",
+        "--scan-id",
+        scan_id,
+        "--job-id",
+        "dps_existing",
+        "--thread-id",
+        "different-thread",
+        check=False,
+    )
+    assert wrong_owner["returncode"] != 0
+    bound = run_workbench(
+        state_dir,
+        "bind-dependency-job",
+        "--scan-id",
+        scan_id,
+        "--job-id",
+        "dps_existing",
+        "--thread-id",
+        "owning-thread",
+    )
+    assert bound["scan"]["dependencyJobId"] == "dps_existing"
+    rebound = run_workbench(
+        state_dir,
+        "bind-dependency-job",
+        "--scan-id",
+        scan_id,
+        "--job-id",
+        "dps_existing",
+        "--thread-id",
+        "owning-thread",
+    )
+    assert rebound["scan"]["dependencyJobId"] == "dps_existing"
+    replacement = run_workbench(
+        state_dir,
+        "bind-dependency-job",
+        "--scan-id",
+        scan_id,
+        "--job-id",
+        "dps_another",
+        "--thread-id",
+        "owning-thread",
+        check=False,
+    )
+    assert replacement["returncode"] != 0
+    reopened = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+    assert reopened["scan"]["dependencyJobId"] == "dps_existing"
+    assert run_workbench(state_dir, "list-scans")["scans"][0]["dependencyJobId"] == "dps_existing"
+
+
+def test_dependency_update_setup_preserves_real_git_diff(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    (target / "README.md").write_text("updated dependency fixture\n")
+    workspace_id = str(uuid.uuid4())
+    run_workbench(
+        state_dir,
+        "create-workspace",
+        "--workspace-id",
+        workspace_id,
+        "--target-path",
+        str(target),
+        "--mode",
+        "dependency_update",
+        "--diff-target-kind",
+        "working_tree",
+    )
+    saved = run_workbench(
+        state_dir,
+        "save-workspace",
+        "--workspace-id",
+        workspace_id,
+        "--target-path",
+        str(target),
+        "--scope",
+        ".",
+        "--mode",
+        "dependency_update",
+        "--diff-target-kind",
+        "working_tree",
+    )
+    assert saved["mode"] == "dependency_update"
+    assert saved["diffTarget"]["kind"] == "working_tree"
+    started = start_delivered_scan(state_dir, "--workspace-id", workspace_id)
+    assert started["results"]["mode"] == "dependency_update"
+    assert started["results"]["diffTarget"]["kind"] == "working_tree"
+    assert started["results"]["contract"]["target"]["allowedKinds"] == ["git_diff"]
+
+
+def test_dependency_scan_projects_existing_graph_and_finding_attribution(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target, mode="full_dependency")
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
+    scan_id = str(started["results"]["scanId"])
+    scan_dir = Path(str(started["results"]["scanDir"]))
+    write_completed_contract(scan_dir, scan_id, target)
+
+    dependency = {
+        "ecosystem": "npm",
+        "registry": "https://registry.npmjs.org",
+        "package": "example-package",
+        "oldVersion": None,
+        "newVersion": "1.2.3",
+        "upstreamFindingId": "dep_existing",
+        "introducedIn": {
+            "version": "1.2.0",
+            "artifactDigest": f"sha256:{'a' * 64}",
+        },
+    }
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    findings["findings"][0]["extensions"] = {"dependency": dependency}
+    findings["findings"][0]["provenance"] = {"source": "dependency_update_scan"}
+    findings_path.write_text(json.dumps(findings))
+
+    graph = {
+        "nodes": [
+            {
+                "id": "npm:example-package@1.2.3",
+                "kind": "dependency",
+                "name": "example-package",
+                "package": "example-package",
+                "ecosystem": "npm",
+                "registry": "https://registry.npmjs.org",
+                "oldVersion": None,
+                "newVersion": "1.2.3",
+                "status": "completed",
+                "changed": False,
+                "findingCount": 1,
+                "cacheHit": True,
+            }
+        ],
+        "edges": [],
+    }
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["dependencies"] = graph
+    coverage_path.write_text(json.dumps(coverage))
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    assert completed["dependencies"] == graph
+    assert completed["findings"][0]["extensions"]["dependency"] == dependency
+    assert completed["findings"][0]["provenance"]["source"] == "dependency_update_scan"
 
 
 def test_scan_model_migration_preserves_existing_scans() -> None:
@@ -867,8 +1305,13 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
+            (42, "persist dependency scan setup and upstream job association"),
+            (43, "persist dependency scan graph depth"),
+            (44, "persist dependency scan target"),
         ]
         assert {row[1] for row in connection.execute("PRAGMA table_info(workspaces)")} >= {
+            "dependency_depth",
+            "dependency_scan_target",
             "diff_target_kind",
             "diff_base_revision",
             "diff_head_revision",
@@ -879,6 +1322,8 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
         }
 
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
+            "dependency_depth",
+            "dependency_scan_target",
             "diff_target_kind",
             "diff_base_revision",
             "diff_head_revision",
@@ -969,7 +1414,7 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN handoff_claim_token")
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (44,)
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
             "handoff_claim_token",
@@ -1996,6 +2441,9 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
+            (42, "persist dependency scan setup and upstream job association"),
+            (43, "persist dependency scan graph depth"),
+            (44, "persist dependency scan target"),
         ]
         assert "capability_preflight_json" in {
             row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
@@ -2079,6 +2527,9 @@ def test_workbench_upgrades_pre_release_phase_progress_migration(tmp_path: Path)
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
+            (42, "persist dependency scan setup and upstream job association"),
+            (43, "persist dependency scan graph depth"),
+            (44, "persist dependency scan target"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
@@ -2170,6 +2621,9 @@ def test_workbench_upgrades_pre_release_preflight_progress_migration(tmp_path: P
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
+            (42, "persist dependency scan setup and upstream job association"),
+            (43, "persist dependency scan graph depth"),
+            (44, "persist dependency scan target"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")

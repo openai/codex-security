@@ -33,6 +33,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
+import workbench_dependency_scans as dependency_scans
 import workbench_native_indexes as native_indexes
 import workbench_progress as progress
 import workbench_publication as publication
@@ -62,6 +63,7 @@ from finding_preview import bounded_finding_details
 from workbench import handoff
 from workbench.storage import resolve_scan_root, state_dir
 from workbench_cli import parse_args
+from workbench_compact_completion import prepare_compact_completion_draft
 from workbench_constants import (
     ARTIFACTS,
     CLAIM_LEASE_SECONDS,
@@ -82,9 +84,10 @@ from workbench_constants import (
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_dashboard import dashboard
+from workbench_dependency_scans import encoded_model_settings
 from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
-from workbench_finding_workflows import finding_workflow, register_workflow_scan
+from workbench_finding_workflows import finding_workflow
 from workbench_findings import (
     find_potential_duplicates,
     list_dedupe_groups,
@@ -94,7 +97,6 @@ from workbench_findings import (
 )
 from workbench_remediation import remediation_claim_is_active
 from workbench_scan_start import (
-    archive_scan,
     compact_timestamp,
     insert_running_scan,
     safe_segment,
@@ -130,6 +132,7 @@ from workbench_target import (
     require_remediation_target,
     require_scan_target_identity,
     scan_target_warning,
+    update_digest_field,
     worktree_content_digest,
     worktree_content_digest_for_context,
 )
@@ -365,9 +368,9 @@ def inspect_setup_values(
     target = require_target(target_path)
     require_scannable_target(target)
     normalized_scope = require_scope(scope, mode, target)
-    if mode == "diff" and normalized_scope != ".":
+    if mode in {"diff", "dependency_update"} and normalized_scope != ".":
         raise SystemExit("Review changes requires the whole target; use scope '.'.")
-    if mode != "diff" and any(
+    if mode not in {"diff", "dependency_update"} and any(
         value is not None
         for value in (
             diff_target_kind,
@@ -385,7 +388,7 @@ def inspect_setup_values(
             diff_head_revision,
             diff_content_digest,
         )
-        if mode == "diff"
+        if mode in {"diff", "dependency_update"}
         else None
     )
     return {
@@ -426,7 +429,7 @@ def require_scannable_target(target: Path) -> None:
 
 
 def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
-    if scan["mode"] == "diff":
+    if scan["mode"] in {"diff", "dependency_update"}:
         return ["git_diff"]
     if scan["target_revision"] == "unversioned":
         return ["directory_snapshot"]
@@ -454,7 +457,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
         "targetId": scan["target_id"],
     }
     if (
-        scan["mode"] != "diff"
+        scan["mode"] not in {"diff", "dependency_update"}
         and scan["target_snapshot_digest"]
         and (
             scan["target_revision"] == "unversioned"
@@ -469,7 +472,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
             "requestedPath": scan["scope"],
             **(
                 {"requiredIncludePaths": requested_scan_paths(scan)}
-                if scan["mode"] != "diff"
+                if scan["mode"] not in {"diff", "dependency_update"}
                 else {}
             ),
         },
@@ -478,7 +481,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
 
 
 def expected_coverage_mode(scan: sqlite3.Row) -> str:
-    if scan["mode"] == "diff":
+    if scan["mode"] in {"diff", "dependency_update"}:
         mode = {
             "commit": "commit",
             "range": "branch_diff",
@@ -511,11 +514,17 @@ def workbench_completion_binding(
         "targetId": target_contract["targetId"],
         "displayName": target_contract["displayName"],
     }
-    if scan["mode"] == "diff":
+    if scan["mode"] in {"diff", "dependency_update"}:
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
         if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
             target["snapshotDigest"] = scan["diff_content_digest"]
+        elif scan["diff_target_kind"] in {"commit", "range"}:
+            digest = hashlib.sha256()
+            update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
+            update_digest_field(digest, b"base-revision", scan["diff_base_revision"].encode())
+            update_digest_field(digest, b"head-revision", scan["diff_head_revision"].encode())
+            target["snapshotDigest"] = f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
     else:
         if scan["target_revision"] != "unversioned":
             target["revision"] = scan["target_revision"]
@@ -564,7 +573,7 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
     ):
         raise SystemExit("scan-manifest.json target revision must match the workbench target.")
     if (
-        scan["mode"] != "diff"
+        scan["mode"] not in {"diff", "dependency_update"}
         and scan["target_snapshot_digest"] is not None
         and target.get("kind") in {"directory_snapshot", "git_worktree"}
         and target.get("snapshotDigest") != scan["target_snapshot_digest"]
@@ -572,7 +581,7 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
         raise SystemExit(
             "scan-manifest.json target snapshotDigest must match the workbench target snapshot."
         )
-    if scan["mode"] == "diff":
+    if scan["mode"] in {"diff", "dependency_update"}:
         if not scan["diff_target_kind"]:
             raise SystemExit("This migrated diff scan does not have a validated change set.")
         if target.get("baseRevision") != scan["diff_base_revision"]:
@@ -602,7 +611,9 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
             "scan-manifest.json scope excludePaths must match the workbench scan scope."
         )
     requested_scope = scan["scope"]
-    if scan["mode"] != "diff" and include_paths != requested_scan_paths(scan):
+    if scan["mode"] not in {"diff", "dependency_update"} and include_paths != requested_scan_paths(
+        scan
+    ):
         raise SystemExit("scan-manifest.json scope must match the workbench scan scope.")
     for include_path in include_paths:
         if not isinstance(include_path, str) or not path_within_scope(
@@ -673,16 +684,11 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
     timestamp = now()
     target_path = optional_text(args.target_path, maximum=4096)
     default_scope = optional_text(args.scope, maximum=4096) or "."
-    diff_target_kind = args.diff_target_kind if args.mode == "diff" else None
-    diff_base_revision = (
-        optional_text(args.diff_base_revision, maximum=512) if args.mode == "diff" else None
-    )
-    diff_head_revision = (
-        optional_text(args.diff_head_revision, maximum=512) if args.mode == "diff" else None
-    )
-    diff_content_digest = (
-        optional_text(args.diff_content_digest, maximum=128) if args.mode == "diff" else None
-    )
+    is_diff = args.mode in {"diff", "dependency_update"}
+    diff_target_kind = args.diff_target_kind if is_diff else None
+    diff_base_revision = optional_text(args.diff_base_revision, maximum=512) if is_diff else None
+    diff_head_revision = optional_text(args.diff_head_revision, maximum=512) if is_diff else None
+    diff_content_digest = optional_text(args.diff_content_digest, maximum=128) if is_diff else None
     if target_path:
         try:
             inspected = inspect_setup_values(
@@ -713,8 +719,9 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 id, thread_id, target_id, target_path, target_title, target_summary,
                 default_scope, default_mode,
                 user_context, diff_target_kind, diff_base_revision, diff_head_revision,
-                diff_content_digest, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                diff_content_digest, scan_dependencies, dependency_depth, dependency_scan_target,
+                model_settings_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 workspace_id,
@@ -730,6 +737,13 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 diff_base_revision,
                 diff_head_revision,
                 diff_content_digest,
+                int(
+                    getattr(args, "scan_dependencies", False)
+                    or args.mode in {"dependency_update", "full_dependency"}
+                ),
+                getattr(args, "dependency_depth", 1),
+                getattr(args, "dependency_scan_target", "malware-and-vulnerabilities"),
+                encoded_model_settings(args),
                 timestamp,
                 timestamp,
             ),
@@ -774,6 +788,8 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
             SET target_id = ?, target_path = ?, target_title = ?, target_summary = ?, default_scope = ?,
                 default_mode = ?, user_context = ?, diff_target_kind = ?,
                 diff_base_revision = ?, diff_head_revision = ?, diff_content_digest = ?,
+                scan_dependencies = ?, dependency_depth = ?, dependency_scan_target = ?,
+                model_settings_json = ?,
                 submitted = 1, updated_at = ?
             WHERE id = ? AND active_scan_id IS NULL
             """,
@@ -789,6 +805,13 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 diff_target["baseRevision"] if diff_target else None,
                 diff_target["headRevision"] if diff_target else None,
                 diff_target.get("contentDigest") if diff_target else None,
+                int(
+                    getattr(args, "scan_dependencies", False)
+                    or args.mode in {"dependency_update", "full_dependency"}
+                ),
+                getattr(args, "dependency_depth", 1),
+                getattr(args, "dependency_scan_target", "malware-and-vulnerabilities"),
+                encoded_model_settings(args),
                 timestamp,
                 workspace["id"],
             ),
@@ -798,6 +821,10 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 "This workspace already has a scan. Open a new workspace to change setup."
             )
     return workspace_state(connection, workspace["id"])
+
+
+def bind_dependency_job(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    return dependency_scans.bind_dependency_job(_WORKBENCH_DEPENDENCY_CONTEXT, connection, args)
 
 
 def scan_target_root(scan_root: str | None, target: Path) -> Path:
@@ -833,7 +860,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         target_metadata = target.stat()
         scope = require_scope(workspace["default_scope"], workspace["default_mode"], target)
         diff_target = None
-        if workspace["default_mode"] == "diff":
+        if workspace["default_mode"] in {"diff", "dependency_update"}:
             diff_target = require_diff_target(
                 target,
                 workspace["diff_target_kind"],
@@ -842,7 +869,9 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                 workspace["diff_content_digest"],
             )
         target_summary = (
-            workspace["target_summary"] if workspace["default_mode"] == "diff" else None
+            workspace["target_summary"]
+            if workspace["default_mode"] in {"diff", "dependency_update"}
+            else None
         )
         if diff_target is not None and not target_summary:
             target_summary = diff_target_summary(diff_target)
@@ -971,7 +1000,7 @@ def _start_prompt_driven_scan(
                 args.diff_head_revision,
                 args.diff_content_digest,
             )
-            if args.mode == "diff"
+            if args.mode in {"diff", "dependency_update"}
             else None
         )
         if (
@@ -987,6 +1016,8 @@ def _start_prompt_driven_scan(
             JOIN workspaces ON workspaces.active_scan_id = scans.id
             WHERE workspaces.thread_id = ? AND workspaces.target_path = ?
                 AND workspaces.default_scope = ? AND workspaces.default_mode = ?
+                AND workspaces.dependency_depth IS ?
+                AND workspaces.dependency_scan_target = ?
                 AND workspaces.user_context IS ? AND workspaces.target_summary IS ?
                 AND workspaces.diff_target_kind IS ? AND workspaces.diff_base_revision IS ?
                 AND workspaces.diff_head_revision IS ? AND workspaces.diff_content_digest IS ?
@@ -1008,6 +1039,8 @@ def _start_prompt_driven_scan(
                 target_path,
                 scope,
                 args.mode,
+                getattr(args, "dependency_depth", 1),
+                getattr(args, "dependency_scan_target", "malware-and-vulnerabilities"),
                 user_context,
                 target_summary,
                 *diff_identity,
@@ -1033,8 +1066,9 @@ def _start_prompt_driven_scan(
             INSERT INTO workspaces (
                 id, thread_id, target_id, target_path, target_title, target_summary, default_scope,
                 default_mode, user_context, diff_target_kind, diff_base_revision,
-                diff_head_revision, diff_content_digest, submitted, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                diff_head_revision, diff_content_digest, scan_dependencies, dependency_depth,
+                dependency_scan_target, submitted, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (
                 workspace_id,
@@ -1047,6 +1081,9 @@ def _start_prompt_driven_scan(
                 args.mode,
                 user_context,
                 *diff_identity,
+                int(args.mode in {"dependency_update", "full_dependency"}),
+                getattr(args, "dependency_depth", 1),
+                getattr(args, "dependency_scan_target", "malware-and-vulnerabilities"),
                 timestamp,
                 timestamp,
             ),
@@ -1500,7 +1537,10 @@ def complete_scan_locked(
         )
     )
     completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
-    if scan["recipe_json"] is not None:
+    draft_documents = prepare_compact_completion_draft(
+        connection, scan, scan_dir, completion_binding
+    )
+    if scan["recipe_json"] is not None and draft_documents is None:
         missing_drafts = []
         for file_name in (
             ARTIFACTS["manifest"],
@@ -1528,20 +1568,26 @@ def complete_scan_locked(
             # Save the finished Deep result as submitted. Worker drafts and
             # recovery repairs belong to the stopped-scan path.
             completion_warnings=warnings if scan["mode"] != "deep" else None,
-            draft_documents=saved_results.merge_saved_results(
-                scan_dir,
-                scan["id"],
-                completion_binding,
-                connection.execute(
-                    "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                    (scan["id"],),
-                ).fetchall(),
-                warnings,
-                stopped=False,
-                reason="",
-            )
-            if scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
-            else None,
+            draft_documents=draft_documents
+            if draft_documents is not None
+            else (
+                saved_results.merge_saved_results(
+                    scan_dir,
+                    scan["id"],
+                    completion_binding,
+                    connection.execute(
+                        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+                        (scan["id"],),
+                    ).fetchall(),
+                    warnings,
+                    stopped=False,
+                    reason="",
+                )
+                if scan["mode"] != "deep"
+                and current_manifest_path is not None
+                and not already_sealed
+                else None
+            ),
         )
         add_warning()
         wrote = True
@@ -1648,132 +1694,12 @@ def complete_scan_locked(
     return context
 
 
+def inspect_cli_dependencies(args: argparse.Namespace) -> dict[str, Any]:
+    return dependency_scans.inspect_cli_dependencies(_WORKBENCH_DEPENDENCY_CONTEXT, args)
+
+
 def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    repository = require_target(args.repository)
-    require_scannable_target(repository)
-    scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
-    if scan_dir == repository or repository in scan_dir.parents:
-        raise SystemExit("The scan artifact directory must be outside the selected target.")
-    if next(scan_dir.iterdir(), None) is not None:
-        raise SystemExit("The scan artifact directory must be empty before the scan starts.")
-
-    user_context = None
-    workflow_id = None
-    if args.registration_json_stdin:
-        registration = json.load(sys.stdin)
-        recipe_json = json.dumps(registration["recipe"], ensure_ascii=False, separators=(",", ":"))
-        user_context = registration.get("userContext")
-        workflow_id = registration.get("workflowId")
-    else:
-        recipe_json = sys.stdin.read() if args.recipe_json_stdin else args.recipe_json
-    recipe = parse_scan_recipe(recipe_json, repository)
-    requested_target = recipe["target"]
-    paths = requested_target["paths"]
-    scope = paths[0] if len(paths) == 1 else "."
-    diff_target = None
-    if requested_target["kind"] in {"refs", "working_tree"}:
-        current_head = require_review_changes_target(repository)
-        base = resolve_git_commit(repository, requested_target["base"], "Base revision")
-        head = resolve_git_commit(repository, requested_target["head"], "Head revision")
-        diff_target = {
-            "kind": "range" if requested_target["kind"] == "refs" else "working_tree",
-            "baseRevision": base,
-            "headRevision": head,
-        }
-        if requested_target["kind"] == "working_tree":
-            if head != current_head:
-                raise SystemExit("Working-tree HEAD changed before the scan started.")
-            diff_target["contentDigest"] = worktree_content_digest(repository)
-    mode = "diff" if diff_target is not None else recipe["mode"]
-    target_identity = scan_target_identity(repository, diff_target)
-    scope_file_count = (
-        directory_snapshot_regular_file_count(repository)
-        if not paths
-        else sum(
-            1
-            if (repository / path).is_file()
-            else directory_snapshot_regular_file_count(repository / path)
-            for path in paths
-        )
-    )
-    parent_scan_id = (
-        require_uuid(args.parent_scan_id, "parent-scan-id")
-        if args.parent_scan_id is not None
-        else None
-    )
-    timestamp = now()
-    scan_id = str(uuid.uuid4())
-    workspace_id = str(uuid.uuid4())
-
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
-        target_id = ensure_security_target(connection, str(repository))
-        if parent_scan_id is not None:
-            parent = require_scan(connection, parent_scan_id)
-            if parent["target_id"] != target_id:
-                raise SystemExit("A rerun must belong to the same repository as its parent scan.")
-
-        connection.execute(
-            """
-            INSERT INTO workspaces (
-                id, target_id, target_path, target_title, default_scope, default_mode,
-                diff_target_kind, diff_base_revision, diff_head_revision,
-                diff_content_digest, submitted, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-            """,
-            (
-                workspace_id,
-                target_id,
-                str(repository),
-                repository.name,
-                scope,
-                mode,
-                *scan_diff_identity(diff_target),
-                timestamp,
-                timestamp,
-            ),
-        )
-        workspace = require_workspace(connection, workspace_id)
-        insert_running_scan(
-            connection,
-            scan_id=scan_id,
-            workspace=workspace,
-            target=repository,
-            scope=scope,
-            diff_target=diff_target,
-            target_identity=target_identity,
-            target_root=scan_dir.parent,
-            target_summary=None,
-            scope_file_count=scope_file_count,
-            timestamp=timestamp,
-            handoff_status="delivered",
-            scan_dir=scan_dir,
-        )
-        connection.execute(
-            "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, user_context = ? WHERE id = ?",
-            (
-                json.dumps(recipe, allow_nan=False, separators=(",", ":"), sort_keys=True),
-                parent_scan_id,
-                user_context,
-                scan_id,
-            ),
-        )
-        if workflow_id is not None:
-            register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
-    scan = require_scan(connection, scan_id)
-    return {
-        "contract": scan_contract(scan),
-        "scanDir": str(scan_dir),
-        "scanId": scan_id,
-        "scopeFileCount": scope_file_count,
-        "targetId": target_id,
-        "targetRevision": scan["target_revision"],
-    }
+    return dependency_scans.register_cli_scan(_WORKBENCH_DEPENDENCY_CONTEXT, connection, args)
 
 
 def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -1812,52 +1738,7 @@ def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace
 
 
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
-    try:
-        recipe = json.loads(value, parse_constant=reject_non_finite_json)
-    except (TypeError, UnicodeError, ValueError) as exc:
-        raise SystemExit("Scan launch recipe must be a valid JSON object.") from exc
-    if not isinstance(recipe, dict):
-        raise SystemExit("Scan launch recipe must be a JSON object.")
-    requested_repository = recipe.get("repository")
-    if (
-        not isinstance(requested_repository, str)
-        or require_target(requested_repository) != repository
-    ):
-        raise SystemExit("Scan launch recipe repository must match the scanned repository.")
-    if recipe.get("mode") not in {"standard", "deep"}:
-        raise SystemExit("Scan launch recipe mode must be standard or deep.")
-    if not isinstance(recipe.get("config"), dict):
-        raise SystemExit("Scan launch recipe config must be a JSON object.")
-    target = recipe.get("target")
-    if not isinstance(target, dict) or target.get("kind") not in {
-        "repository",
-        "paths",
-        "refs",
-        "working_tree",
-    }:
-        raise SystemExit("Scan launch recipe target must identify a supported scan target.")
-    paths = target.get("paths")
-    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
-        raise SystemExit("Scan launch recipe target paths must be an array of strings.")
-    if target["kind"] == "paths" and not paths:
-        raise SystemExit("A scoped scan launch recipe must include at least one target path.")
-    if target["kind"] != "paths" and paths:
-        raise SystemExit("Only scoped scan launch recipes can include target paths.")
-    for path in paths:
-        candidate = PurePosixPath(path)
-        if (
-            not path
-            or candidate.is_absolute()
-            or ".." in candidate.parts
-            or "\\" in path
-            or not (repository / candidate).exists()
-            or not (repository / candidate).resolve().is_relative_to(repository)
-        ):
-            raise SystemExit("Scan launch recipe target paths must exist inside the repository.")
-    if target["kind"] in {"refs", "working_tree"}:
-        if not isinstance(target.get("base"), str) or not isinstance(target.get("head"), str):
-            raise SystemExit("Diff scan launch recipes require resolved base and head revisions.")
-    return recipe
+    return dependency_scans.parse_scan_recipe(_WORKBENCH_DEPENDENCY_CONTEXT, value, repository)
 
 
 _WORKBENCH_DB_CONTEXT: saved_results.WorkbenchDbContext
@@ -2627,8 +2508,16 @@ def workspace_state(
     persisted_diff_target = stored_diff_target(workspace)
     result: dict[str, Any] = {
         "id": workspace["id"],
+        "dependencyDepth": workspace["dependency_depth"],
+        "dependencyScanTarget": workspace["dependency_scan_target"],
         "diffTarget": persisted_diff_target,
         "mode": workspace["default_mode"],
+        "modelSettings": (
+            json.loads(workspace["model_settings_json"], parse_constant=reject_non_finite_json)
+            if workspace["model_settings_json"] is not None
+            else None
+        ),
+        "scanDependencies": bool(workspace["scan_dependencies"]),
         "scope": workspace["default_scope"],
         "setup": {"submitted": bool(workspace["submitted"])},
         "setupValidation": {"error": None, "valid": bool(workspace["submitted"])},
@@ -2747,6 +2636,10 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
     }
 
 
+def provisional_dependency_inventory(scan: sqlite3.Row) -> dict[str, Any] | None:
+    return dependency_scans.provisional_dependency_inventory(_WORKBENCH_DEPENDENCY_CONTEXT, scan)
+
+
 def scan_result(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -2833,7 +2726,7 @@ def scan_result(
     relations = scan_history.finding_relations(
         connection, scan["id"], (row["id"] for row in occurrence_rows)
     )
-    return {
+    result = {
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
@@ -2841,6 +2734,9 @@ def scan_result(
         "continuationThreadId": scan["continuation_thread_id"],
         "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
         "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
+        "dependencyDepth": scan["dependency_depth"],
+        "dependencyJobId": scan["dependency_job_id"],
+        "dependencyScanTarget": scan["dependency_scan_target"],
         "failureMessage": scan["failure_message"],
         "findings": [
             finding_result(connection, scan, row, related=relations.get(row["id"], []))
@@ -2854,6 +2750,11 @@ def scan_result(
         "handoffStatus": scan["handoff_status"],
         "mode": scan["mode"],
         "model": scan["model"],
+        "modelSettings": (
+            json.loads(scan["model_settings_json"], parse_constant=reject_non_finite_json)
+            if scan["model_settings_json"] is not None
+            else None
+        ),
         "diffTarget": stored_diff_target(scan),
         "progress": progress_result,
         "reasoningEffort": scan["reasoning_effort"],
@@ -2864,6 +2765,7 @@ def scan_result(
             _WORKBENCH_DB_CONTEXT, connection, scan
         ),
         "scanDir": scan["scan_dir"],
+        "scanDependencies": bool(scan["scan_dependencies"]),
         "scanId": scan["id"],
         "scope": scan["scope"],
         "targetPath": scan["target_path"],
@@ -2878,6 +2780,22 @@ def scan_result(
         "userContext": scan["user_context"],
         "warnings": json.loads(scan["completion_warnings_json"]),
     }
+    coverage_path = artifacts.get("coverage")
+    if coverage_path is not None:
+        try:
+            coverage = json.loads(
+                Path(coverage_path).read_text(encoding="utf-8"),
+                parse_constant=reject_non_finite_json,
+            )
+        except (OSError, UnicodeError, ValueError):
+            coverage = None
+        if isinstance(coverage, dict) and isinstance(coverage.get("dependencies"), dict):
+            result["dependencies"] = coverage["dependencies"]
+    if "dependencies" not in result:
+        provisional_dependencies = provisional_dependency_inventory(scan)
+        if provisional_dependencies is not None:
+            result["dependencies"] = provisional_dependencies
+    return result
 
 
 def remediation_availability(scan: sqlite3.Row) -> tuple[bool, str | None]:
@@ -2998,7 +2916,8 @@ def finding_result(
     *,
     related: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    details = bounded_finding_details(read_finding_details(occurrence["details_json"]))
+    full_details = read_finding_details(occurrence["details_json"])
+    details = bounded_finding_details(full_details)
     confidence = details.get("confidence")
     confidence = confidence if isinstance(confidence, dict) else {}
     severity = details.get("severity")
@@ -3054,6 +2973,9 @@ def finding_result(
         "title": bounded_output_text(occurrence["title"], FINDING_TITLE_BYTES),
         "triage": finding_triage_result(connection, occurrence["id"]),
     }
+    extensions = full_details.get("extensions")
+    if isinstance(extensions, dict) and isinstance(extensions.get("dependency"), dict):
+        result["extensions"] = {"dependency": extensions["dependency"]}
     matches, known_since, known_scan_ids = scan_history.finding_matches(
         connection, occurrence["id"], scan["id"], scan["started_at"]
     )
@@ -3358,6 +3280,21 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
+_WORKBENCH_DEPENDENCY_CONTEXT = dependency_scans.WorkbenchDependencyContext(
+    scan_contract=scan_contract,
+    require_target=require_target,
+    require_scannable_target=require_scannable_target,
+    require_canonical_scan_directory=require_canonical_scan_directory,
+    require_scan=require_scan,
+    require_workspace=require_workspace,
+    now=now,
+    scan_context=scan_context,
+    available_artifact_path=available_artifact_path,
+    resolve_git_commit=resolve_git_commit,
+    require_review_changes_target=require_review_changes_target,
+)
+
+
 _WORKBENCH_PUBLICATION_CONTEXT = publication.WorkbenchPublicationContext(
     ARTIFACTS=ARTIFACTS,
     artifact_path=artifact_path,
@@ -3435,6 +3372,10 @@ def main() -> None:
         result = inspect_setup(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
+    if args.command == "inspect-cli-dependencies":
+        result = inspect_cli_dependencies(args)
+        print(json.dumps(result))
+        return
     if args.command in {"save-artifact", "read-artifact"}:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
@@ -3484,6 +3425,12 @@ def main() -> None:
             result = deep_scan.record_deep_scan_publication_failure(connection, args)
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
+        elif args.command == "claim-dependency-submission":
+            result = dependency_scans.claim_dependency_submission(
+                _WORKBENCH_DEPENDENCY_CONTEXT, connection, args
+            )
+        elif args.command == "bind-dependency-job":
+            result = bind_dependency_job(connection, args)
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":

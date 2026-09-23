@@ -867,6 +867,36 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        42,
+        "persist dependency scan setup and upstream job association",
+        """
+        ALTER TABLE workspaces ADD COLUMN scan_dependencies INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE workspaces ADD COLUMN model_settings_json TEXT;
+        ALTER TABLE scans ADD COLUMN scan_dependencies INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE scans ADD COLUMN model_settings_json TEXT;
+        ALTER TABLE scans ADD COLUMN dependency_job_id TEXT;
+        ALTER TABLE scans ADD COLUMN dependency_request_json TEXT;
+        """,
+    ),
+    (
+        43,
+        "persist dependency scan graph depth",
+        """
+        ALTER TABLE workspaces ADD COLUMN dependency_depth INTEGER;
+        ALTER TABLE scans ADD COLUMN dependency_depth INTEGER;
+        """,
+    ),
+    (
+        44,
+        "persist dependency scan target",
+        """
+        ALTER TABLE workspaces
+        ADD COLUMN dependency_scan_target TEXT NOT NULL DEFAULT 'malware-and-vulnerabilities';
+        ALTER TABLE scans
+        ADD COLUMN dependency_scan_target TEXT NOT NULL DEFAULT 'malware-and-vulnerabilities';
+        """,
+    ),
 )
 
 
@@ -939,6 +969,40 @@ def migrate_finding_workflow_columns(connection: sqlite3.Connection) -> None:
         )
 
 
+def rebuild_dependency_mode_tables(connection: sqlite3.Connection) -> None:
+    """Extend scan modes while retaining table rows, indexes, and triggers."""
+    for table, column in (("workspaces", "default_mode"), ("scans", "mode")):
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()["sql"]
+        dependent_sql = [
+            row["sql"]
+            for row in connection.execute(
+                """
+                SELECT sql FROM sqlite_schema
+                WHERE tbl_name = ? AND type IN ('index', 'trigger') AND sql IS NOT NULL
+                ORDER BY type, name
+                """,
+                (table,),
+            )
+        ]
+        replacement = f"{table}_dependency_migration"
+        replacement_sql = table_sql.replace(
+            f"CREATE TABLE {table} ", f"CREATE TABLE {replacement} ", 1
+        ).replace(
+            f"{column} IN ('diff', 'standard', 'deep')",
+            f"{column} IN ('diff', 'standard', 'deep', 'dependency_update', 'full_dependency')",
+            1,
+        )
+        connection.execute(replacement_sql)
+        connection.execute(f"INSERT INTO {replacement} SELECT * FROM {table}")
+        connection.execute(f"DROP TABLE {table}")
+        connection.execute(f"ALTER TABLE {replacement} RENAME TO {table}")
+        for statement in dependent_sql:
+            connection.execute(statement)
+
+
 def apply_migrations(
     connection: sqlite3.Connection,
     migrations: tuple[tuple[int, str, str], ...],
@@ -946,6 +1010,17 @@ def apply_migrations(
     backfill_security_targets: Callable[[sqlite3.Connection], None],
 ) -> None:
     connection.commit()
+    foreign_keys_enabled = bool(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+    migrations_table_exists = connection.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'"
+    ).fetchone()
+    dependency_mode_migration_pending = any(version == 42 for version, _, _ in migrations) and (
+        migrations_table_exists is None
+        or connection.execute("SELECT 1 FROM schema_migrations WHERE version = 42").fetchone()
+        is None
+    )
+    if dependency_mode_migration_pending and foreign_keys_enabled:
+        connection.execute("PRAGMA foreign_keys = OFF")
     connection.execute("BEGIN IMMEDIATE")
     try:
         connection.execute(
@@ -1017,6 +1092,8 @@ def apply_migrations(
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
             else:
+                if version == 42:
+                    rebuild_dependency_mode_tables(connection)
                 for statement in sql_statements(sql):
                     connection.execute(statement)
                 if version == 38:
@@ -1031,10 +1108,18 @@ def apply_migrations(
             repair_deep_scan_failure_counter_migration(connection)
         if should_backfill_targets:
             backfill_security_targets(connection)
+        if (
+            dependency_mode_migration_pending
+            and connection.execute("PRAGMA foreign_key_check").fetchone()
+        ):
+            raise sqlite3.IntegrityError("Dependency scan migration violated a foreign key.")
         connection.commit()
     except BaseException:
         connection.rollback()
         raise
+    finally:
+        if dependency_mode_migration_pending and foreign_keys_enabled:
+            connection.execute("PRAGMA foreign_keys = ON")
 
 
 def normalize_pre_release_execution_profile_migrations(

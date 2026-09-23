@@ -83,6 +83,7 @@ def resolve_output(value: str) -> Path:
 
 def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     """Atomically write the exact ripgrep inventory sorted as ``LC_ALL=C``."""
+    dependency_artifact_scan = os.environ.get("CODEX_SECURITY_DEPENDENCY_ARTIFACT_SCAN") == "1"
     command = [
         "rg",
         "--files",
@@ -95,6 +96,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--",
         scope,
     ]
+    if dependency_artifact_scan:
+        command[1:1] = ["--no-ignore", "--glob", "!**/.git/**"]
     with tempfile.TemporaryFile(mode="w+b") as inventory:
         try:
             result = subprocess.run(
@@ -152,6 +155,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 )
             rows.append(path + b"\n")
         rows.sort()
+        if dependency_artifact_scan:
+            rows = [row for row in rows if is_dependency_artifact_text(repository, row)]
 
     return write_inventory(output, rows)
 
@@ -287,6 +292,25 @@ def write_inventory(output: Path, rows: list[bytes]) -> int:
             temporary.unlink(missing_ok=True)
 
     return len(rows)
+
+
+def is_dependency_artifact_text(repository: Path, row: bytes) -> bool:
+    """Keep only regular package text files; never expose Git internals or binaries."""
+    try:
+        relative = Path(os.fsdecode(row.rstrip(b"\r\n")))
+        if ".git" in relative.parts:
+            return False
+        candidate = repository / relative
+        if candidate.is_symlink() or not candidate.is_file():
+            return False
+        candidate.resolve(strict=True).relative_to(repository)
+        with candidate.open("rb") as source:
+            while chunk := source.read(64 * 1024):
+                if b"\0" in chunk:
+                    return False
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def main() -> None:

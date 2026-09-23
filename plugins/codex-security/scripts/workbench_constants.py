@@ -2,7 +2,7 @@
 
 import argparse
 
-MODES = ("diff", "standard", "deep")
+MODES = ("diff", "standard", "deep", "dependency_update", "full_dependency")
 DIFF_TARGET_KINDS = ("working_tree", "commit", "range")
 PHASES = ("preflight", "threat_model", "discovery", "validation", "attack_path", "reporting")
 PHASE_PROGRESS_UNITS = (
