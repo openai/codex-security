@@ -190,6 +190,7 @@ const distFiles = new Set(
     "custom-publish",
     "deep-progress",
     "dependency-calculation",
+    "dependency-selection",
     "deep-config",
     "deep-scan-defaults",
     "project-config",

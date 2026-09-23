@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from typing import Any
 
 import pytest
 
@@ -159,6 +160,38 @@ def test_review_checkpoints_keep_the_first_valid_result_and_enforce_workflow_own
     assert row["source_repository_path"] == binding["source"]["repository"]
     assert row["settings_digest"] == binding["settingsDigest"]
     assert json.loads(row["result_json"]) == result
+
+
+def test_dependency_calculation_keeps_its_request_and_first_result_across_stage_writes(
+    workbench_api: dict[str, Any], workbench_db: sqlite3.Connection
+) -> None:
+    request = {"requestDigest": "synthetic-calculation"}
+    prepared = workflow(workbench_api, workbench_db, "prepare-dependency-calculation", **request)
+    assert prepared["workflow"]["dependencyCalculation"] == request
+    result = {"dependencyGraphPath": "/synthetic/graph.json", "dependencies": [], "costUsd": 3}
+    for value in (result, {**result, "costUsd": 9}):
+        completed = workflow(
+            workbench_api,
+            workbench_db,
+            "complete-dependency-calculation",
+            **request,
+            result=value,
+        )
+        assert completed["workflow"]["dependencyCalculation"] == {**request, "result": result}
+    workflow(workbench_api, workbench_db, "complete", stage="scan", result={"scanId": "scan-1"})
+    saved = workflow(workbench_api, workbench_db, "get")
+    assert saved["workflow"]["dependencyCalculation"] == {**request, "result": result}
+    for action in ("prepare-dependency-calculation", "complete-dependency-calculation"):
+        with pytest.raises(SystemExit, match="already bound to a different"):
+            workflow(
+                workbench_api,
+                workbench_db,
+                action,
+                requestDigest="different-calculation",
+                result=result,
+            )
+        assert not workbench_db.in_transaction
+        assert workflow(workbench_api, workbench_db, "get") == saved
 
 
 @pytest.mark.parametrize(

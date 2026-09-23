@@ -52,6 +52,7 @@ def parse_args(description: str) -> argparse.Namespace:
     create_workspace.add_argument("--diff-content-digest")
     create_workspace.add_argument("--scan-dependencies", action="store_true")
     create_workspace.add_argument("--dependency-depth", type=dependency_depth, default=1)
+    create_workspace.add_argument("--selected-dependencies")
     create_workspace.add_argument(
         "--dependency-scan-target",
         choices=("malware", "malware-and-vulnerabilities"),
@@ -92,6 +93,7 @@ def parse_args(description: str) -> argparse.Namespace:
     save_workspace.add_argument("--diff-content-digest")
     save_workspace.add_argument("--scan-dependencies", action="store_true")
     save_workspace.add_argument("--dependency-depth", type=dependency_depth, default=1)
+    save_workspace.add_argument("--selected-dependencies")
     save_workspace.add_argument(
         "--dependency-scan-target",
         choices=("malware", "malware-and-vulnerabilities"),
@@ -122,6 +124,7 @@ def parse_args(description: str) -> argparse.Namespace:
     start_prompt_only_scan.add_argument("--diff-content-digest")
     start_prompt_only_scan.add_argument("--scan-root")
     start_prompt_only_scan.add_argument("--dependency-depth", type=dependency_depth, default=1)
+    start_prompt_only_scan.add_argument("--selected-dependencies")
     start_prompt_only_scan.add_argument(
         "--dependency-scan-target",
         choices=("malware", "malware-and-vulnerabilities"),
@@ -151,6 +154,9 @@ def parse_args(description: str) -> argparse.Namespace:
     )
 
     deep_scan.register_subcommands(subparsers, positive_int)
+
+    thread_selection = subparsers.add_parser("get-thread-dependency-selection")
+    thread_selection.add_argument("--thread-id", required=True)
 
     get_scan = subparsers.add_parser("get-scan")
     get_scan.add_argument("--scan-id", required=True)
@@ -205,6 +211,7 @@ def parse_args(description: str) -> argparse.Namespace:
     )
     register_cli_scan.add_argument("--scan-dependencies", action="store_true")
     register_cli_scan.add_argument("--dependency-depth", type=dependency_depth, default=1)
+    register_cli_scan.add_argument("--selected-dependencies")
     register_cli_scan.add_argument(
         "--dependency-scan-target",
         choices=("malware", "malware-and-vulnerabilities"),
@@ -246,6 +253,9 @@ def parse_args(description: str) -> argparse.Namespace:
     list_global_findings = subparsers.add_parser("list-global-findings")
     list_global_findings.add_argument("--query")
     list_global_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
+    list_global_findings.add_argument(
+        "--application-impact", choices=("affected", "not_affected", "inconclusive")
+    )
     list_global_findings.add_argument("--status", choices=FINDING_STATUSES)
     list_global_findings.add_argument("--target-id")
     list_global_findings.add_argument("--offset", type=non_negative_int, default=0)
@@ -261,6 +271,9 @@ def parse_args(description: str) -> argparse.Namespace:
     list_findings.add_argument("--scan-id", required=True)
     list_findings.add_argument("--query")
     list_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
+    list_findings.add_argument(
+        "--application-impact", choices=("affected", "not_affected", "inconclusive")
+    )
     list_findings.add_argument("--status", choices=FINDING_STATUSES)
     list_findings.add_argument("--offset", type=non_negative_int, default=0)
     list_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)

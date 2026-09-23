@@ -8,6 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+import pytest
 from jsonschema import Draft202012Validator
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -148,6 +149,13 @@ def test_upstream_finding_merges_into_existing_canonical_contract(tmp_path: Path
         "affectedProjects": ["services/payments"],
         "dependencyChains": [["payments", "@scope/example"]],
         "usageContext": "Installation runs in CI with credential access.",
+        "scannerSeverity": {"level": "high"},
+        "applicationImpact": {
+            "status": "inconclusive",
+            "summary": "Application impact has not been established for this package finding.",
+            "evidence": [],
+            "limitations": ["No per-finding assessment of first-party usage was recorded."],
+        },
     }
 
     spec = importlib.util.spec_from_file_location("dependency_test_finalizer", FINALIZER_SCRIPT)
@@ -164,6 +172,104 @@ def test_upstream_finding_merges_into_existing_canonical_contract(tmp_path: Path
     finalizer._validate_finding(finding, "findings.findings[0]")
     assert finding["findingId"].startswith("csf_")
     assert finding["occurrenceId"].startswith("occ_")
+
+
+@pytest.mark.parametrize("status", ["affected", "not_affected", "inconclusive"])
+def test_application_impact_is_per_finding_and_preserves_package_severity(
+    tmp_path: Path, status: str
+) -> None:
+    result = cloud_result()
+    second = deepcopy(result["packages"][0]["findings"][0])
+    second["upstreamFindingId"] = "dep_unassessed"
+    result["packages"][0]["findings"].append(second)
+    impacts = local_impacts()
+    assessment = {
+        "upstreamFindingId": "dep_1234567890abcdef",
+        "status": status,
+        "summary": "The checked installation configuration determines hook exposure.",
+        "evidence": [
+            {
+                "path": ".npmrc",
+                "startLine": 1,
+                "code": "ignore-scripts=true",
+                "explanation": "The configured installation skips the reported lifecycle hook.",
+            }
+        ],
+        "limitations": ["This assessment covers the checked installation configuration."],
+    }
+    impacts["dependencies"][0]["findingAssessments"] = [assessment]
+
+    findings, _ = run_reporting(tmp_path, result=result, impacts=impacts)
+
+    assert len(findings["findings"]) == 2
+    assessed, unassessed = findings["findings"]
+    extension = assessed["extensions"]["dependency"]
+    assert extension["applicationImpact"] == {
+        key: value for key, value in assessment.items() if key != "upstreamFindingId"
+    }
+    assert assessed["severity"] == extension["scannerSeverity"] == {"level": "high"}
+    assert unassessed["extensions"]["dependency"]["applicationImpact"]["status"] == "inconclusive"
+
+    spec = importlib.util.spec_from_file_location(
+        "impact_test_projection", REPORT_PROJECTION_SCRIPT
+    )
+    assert spec is not None and spec.loader is not None
+    projection = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(projection)
+    markdown = "\n".join(projection._finding_section(1, assessed))
+    assert f"| Application impact | {status.replace('_', ' ')} |" in markdown
+    assert "| Package severity | high |" in markdown
+    assert assessment["summary"] in markdown
+    assert assessment["evidence"][0]["code"] in markdown
+    assert assessment["limitations"][0] in markdown
+
+
+@pytest.mark.parametrize("status", ["affected", "not_affected"])
+def test_application_impact_without_evidence_remains_inconclusive(
+    tmp_path: Path, status: str
+) -> None:
+    impacts = local_impacts()
+    impacts["dependencies"][0]["findingAssessments"] = [
+        {
+            "upstreamFindingId": "dep_1234567890abcdef",
+            "status": status,
+            "summary": "The package is installed.",
+        }
+    ]
+
+    findings, _ = run_reporting(tmp_path, impacts=impacts)
+
+    impact = findings["findings"][0]["extensions"]["dependency"]["applicationImpact"]
+    assert impact["status"] == "inconclusive"
+    assert impact["evidence"] == []
+    assert impact["limitations"]
+
+
+@pytest.mark.parametrize("field,value", [("path", "../outside"), ("startLine", True), ("code", "")])
+def test_application_impact_rejects_invalid_first_party_evidence(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    impacts = local_impacts()
+    evidence = {
+        "path": ".npmrc",
+        "startLine": 1,
+        "code": "ignore-scripts=true",
+        "explanation": "Hooks are disabled.",
+    }
+    evidence[field] = value
+    impacts["dependencies"][0]["findingAssessments"] = [
+        {
+            "upstreamFindingId": "dep_1234567890abcdef",
+            "status": "not_affected",
+            "summary": "Lifecycle hooks are disabled.",
+            "evidence": [evidence],
+        }
+    ]
+
+    findings, completed = run_reporting(tmp_path, impacts=impacts, check=False)
+
+    assert completed.returncode != 0
+    assert findings["findings"] == []
 
 
 def test_existing_findings_and_partial_upstream_results_are_preserved(tmp_path: Path) -> None:
@@ -851,6 +957,91 @@ def test_unknown_prior_assessments_preserve_existing_work_and_deduplicate_determ
     assert "Linux artifact was inconclusive" in shared["reason"]
     assert "macOS artifact was inconclusive" in shared["reason"]
     assert all("dep_verified" not in item["reason"] for item in unknown)
+
+
+def test_selected_inventory_keeps_supporting_graph_outside_artifact_coverage(
+    tmp_path: Path,
+) -> None:
+    discovery, impacts, results, coverage = graph_documents()
+    selected = results["packages"][0]
+    discovery["selectedDependencies"] = [
+        {
+            field: selected[field]
+            for field in ("ecosystem", "registry", "package", "oldVersion", "newVersion")
+        }
+    ]
+    results["packages"] = [selected]
+    coverage["completeness"] = "complete"
+    coverage["deferred"] = []
+
+    _, observed, _ = run_inventory_reporting(
+        tmp_path, documents=(discovery, impacts, results, coverage)
+    )
+
+    nodes = observed["dependencies"]["nodes"]
+    selected_nodes = [node for node in nodes if node.get("selected") is True]
+    assert len(selected_nodes) == 1
+    assert selected_nodes[0]["package"] == selected["package"]
+    assert any(node.get("selected") is False for node in nodes)
+    assert observed["completeness"] == "complete"
+    assert observed["deferred"] == []
+    schema = json.loads((PLUGIN_ROOT / "schemas" / "coverage.schema.json").read_text())
+    Draft202012Validator(schema).validate(observed)
+    spec = importlib.util.spec_from_file_location(
+        "selected_test_projection", REPORT_PROJECTION_SCRIPT
+    )
+    assert spec is not None and spec.loader is not None
+    projection = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(projection)
+    markdown = "\n".join(projection._dependency_inventory_lines(observed))
+    assert "1 selected packages" in markdown
+    assert "not selected" in markdown
+
+
+def test_selected_inventory_defers_missing_requested_results(tmp_path: Path) -> None:
+    discovery, impacts, results, coverage = graph_documents()
+    selected = results["packages"][0]
+    discovery["selectedDependencies"] = [
+        {
+            field: selected[field]
+            for field in ("ecosystem", "registry", "package", "oldVersion", "newVersion")
+        }
+    ]
+    results["packages"] = []
+    coverage["completeness"] = "complete"
+    coverage["deferred"] = []
+
+    _, observed, _ = run_inventory_reporting(
+        tmp_path, documents=(discovery, impacts, results, coverage)
+    )
+
+    assert observed["completeness"] == "partial"
+    assert len(observed["deferred"]) == 1
+    assert selected["package"] in observed["deferred"][0]["reason"]
+    assert selected["newVersion"] in observed["deferred"][0]["reason"]
+    assert "no published-artifact result" in observed["deferred"][0]["reason"]
+    nodes = observed["dependencies"]["nodes"]
+    assert any(node.get("selected") is False for node in nodes)
+    _, repeated, _ = run_inventory_reporting(
+        tmp_path, documents=(discovery, impacts, results, observed)
+    )
+    assert repeated["deferred"] == observed["deferred"]
+
+
+def test_selected_inventory_rejects_unrequested_result_packages(tmp_path: Path) -> None:
+    discovery, impacts, results, coverage = graph_documents()
+    selected = results["packages"][0]
+    discovery["selectedDependencies"] = [
+        {
+            field: selected[field]
+            for field in ("ecosystem", "registry", "package", "oldVersion", "newVersion")
+        }
+    ]
+
+    with pytest.raises(subprocess.CalledProcessError, match="returned non-zero") as error:
+        run_inventory_reporting(tmp_path, documents=(discovery, impacts, results, coverage))
+
+    assert "outside the requested selection" in error.value.stderr
 
 
 def test_reporting_requires_discovery_and_coverage_together(tmp_path: Path) -> None:

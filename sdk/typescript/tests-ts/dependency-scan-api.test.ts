@@ -23,6 +23,7 @@ import {
   DiffTarget,
   InvalidTargetError,
   type ScanTarget,
+  type DependencyIdentity,
 } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -188,6 +189,7 @@ async function createArtifactScanHarness(
   const commands: Array<readonly string[]> = [];
   const prompts: string[] = [];
   const targetPathSnapshots: unknown[] = [];
+  const scanEnvironments: CodexOptions["env"][] = [];
   let threadsStarted = 0;
   const client = new TestClientBase(
     {},
@@ -234,6 +236,7 @@ async function createArtifactScanHarness(
       },
       createCodex: (codexOptions: CodexOptions) => ({
         startThread: () => {
+          scanEnvironments.push(codexOptions.env);
           threadsStarted += 1;
           return {
             id: null,
@@ -282,6 +285,7 @@ async function createArtifactScanHarness(
     commands,
     prompts,
     targetPathSnapshots,
+    scanEnvironments,
     threadsStarted: () => threadsStarted,
   };
 }
@@ -477,7 +481,234 @@ async function createCalculationHarness(
   };
 }
 
+const selectedPackage: DependencyIdentity = {
+  ecosystem: "npm",
+  registry: "https://registry.npmjs.org",
+  package: "@example/library",
+  oldVersion: null,
+  newVersion: "1.2.3",
+};
+
 describe("CodexSecurity dependency scan API", () => {
+  test.each([1, 20])(
+    "preserves %i selected packages in registration, recipe and runtime",
+    async (count) => {
+      const harness = await createArtifactScanHarness([[]], {
+        artifactMode: false,
+      });
+      const selectedDependencies = Array.from(
+        { length: count },
+        (_, index) => ({
+          ...selectedPackage,
+          package: index === 0 ? selectedPackage.package : `package-${index}`,
+          newVersion:
+            index === 0 ? selectedPackage.newVersion : "2.0.0-beta.1+build.01",
+        }),
+      );
+      const preflight = await harness.client.preflight(harness.repository, {
+        scanDependencies: true,
+        selectedDependencies,
+        target: ["package.json"],
+      });
+      expect(preflight.selectedDependencies).toEqual(selectedDependencies);
+      expect(preflight).not.toHaveProperty("dependencyDepth");
+      await expect(
+        harness.client.scanDependencies(harness.repository, {
+          selectedDependencies,
+          target: ["package.json"],
+        }),
+      ).rejects.toThrow("host preparation observed");
+      const registration = harness.commands.find(
+        ([command]) => command === "register-cli-scan",
+      )!;
+      expect(
+        JSON.parse(
+          registration[registration.indexOf("--selected-dependencies") + 1]!,
+        ),
+      ).toEqual(selectedDependencies);
+      const recipe = JSON.parse(
+        registration[registration.indexOf("--recipe-json") + 1]!,
+      );
+      expect(recipe.selectedDependencies).toEqual(selectedDependencies);
+      expect(recipe.dependencyMode).toBe("full_dependency");
+      expect(recipe).not.toHaveProperty("dependencyDepth");
+      expect(
+        JSON.parse(
+          harness.scanEnvironments[0]!["CODEX_SECURITY_SELECTED_DEPENDENCIES"]!,
+        ),
+      ).toEqual(selectedDependencies);
+      await harness.client.close();
+    },
+  );
+
+  test("rejects invalid selections and incompatible scan scopes before starting the runtime", async () => {
+    const root = await temporaryDirectory();
+    const repository = await gitRepository(root);
+    let runtimeCalls = 0;
+    const client = new TestClientBase(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => {
+          runtimeCalls += 1;
+          throw new Error("runtime started");
+        },
+      },
+    );
+    for (const selectedDependencies of [
+      [],
+      [selectedPackage, selectedPackage],
+      Array.from({ length: 21 }, (_, i) => ({
+        ...selectedPackage,
+        package: `package-${i}`,
+      })),
+      [{ ...selectedPackage, ecosystem: "pypi" }],
+      [{ ...selectedPackage, registry: "https://private.example" }],
+      [{ ...selectedPackage, registry: "https://registry.npmjs.org/" }],
+      [{ ...selectedPackage, oldVersion: "1.0.0" }],
+      [{ ...selectedPackage, newVersion: "^1.2.3" }],
+      [{ ...selectedPackage, newVersion: "1.2.3-01" }],
+      [{ ...selectedPackage, newVersion: "1.2.3-alpha.01" }],
+      [{ ...selectedPackage, package: "@invalid" }],
+    ]) {
+      await expect(
+        client.scanDependencies(repository, {
+          selectedDependencies: selectedDependencies as DependencyIdentity[],
+        }),
+      ).rejects.toBeInstanceOf(InvalidTargetError);
+    }
+    for (const target of [
+      DiffTarget.refs({ base: "HEAD", head: "HEAD" }),
+      DiffTarget.workingTree({ base: "HEAD" }),
+    ]) {
+      await expect(
+        client.scanDependencies(repository, {
+          target,
+          selectedDependencies: [selectedPackage],
+        }),
+      ).rejects.toBeInstanceOf(InvalidTargetError);
+    }
+    await expect(
+      client.scanDependencies(repository, {
+        dependencyDepth: 1,
+        selectedDependencies: [selectedPackage],
+      }),
+    ).rejects.toBeInstanceOf(InvalidTargetError);
+    await expect(
+      client.run(repository, {
+        scanDependencies: true,
+        selectedDependencies: [selectedPackage],
+      }),
+    ).rejects.toBeInstanceOf(InvalidTargetError);
+    expect(runtimeCalls).toBe(0);
+    await client.close();
+  });
+
+  test("persists calculated selectable identities and returns them from the saved graph", async () => {
+    const dependencies = [selectedPackage];
+    const harness = await createCalculationHarness({
+      events: calculationEvents({ depthCounts: [1], dependencies }),
+    });
+    const result = await harness.client.calculateDependencies(
+      harness.repository,
+    );
+    expect(result.dependencies).toEqual(dependencies);
+    expect(
+      JSON.parse(
+        await readFile(`${result.dependencyGraphPath}.setup.json`, "utf8"),
+      ).dependencies,
+    ).toEqual(dependencies);
+    await expect(
+      harness.client.calculateDependencies(harness.repository, {
+        dependencyGraphPath: result.dependencyGraphPath,
+      }),
+    ).resolves.toEqual(result);
+    expect(harness.prompts).toHaveLength(1);
+    await harness.client.close();
+  });
+
+  test("rejects malformed calculation inventories instead of advertising them as selectable", async () => {
+    for (const dependencies of [
+      null,
+      {},
+      [selectedPackage, selectedPackage],
+      [{ ...selectedPackage, registry: "https://private.example" }],
+    ]) {
+      const harness = await createCalculationHarness({
+        events: calculationEvents({ depthCounts: [1], dependencies }),
+      });
+      await expect(
+        harness.client.calculateDependencies(harness.repository),
+      ).rejects.toThrow("invalid selectable dependency inventory");
+      await expect(
+        readFile(`${harness.dependencyGraphPath}.setup.json`, "utf8"),
+      ).rejects.toThrow();
+      await harness.client.close();
+    }
+  });
+
+  test("the native calculation processor exposes only exact public npm artifact identities", async () => {
+    const { buildDependencyCalculationPrompt } =
+      await import("../../../plugins/codex-security/skills/dependency-resolution/dependency-calculation-prompt.mjs");
+    const prompt = buildDependencyCalculationPrompt({
+      targetPath: "/fixture",
+      setup: {},
+    });
+    expect(prompt).toContain("npm ls --all --long --json --offline --silent");
+    const processor = /node -e '([^']+)'/.exec(prompt)?.[1];
+    expect(processor).toBeDefined();
+    const result = JSON.parse(
+      execFileSync(process.execPath, ["-e", processor!], {
+        input: JSON.stringify({
+          dependencies: {
+            "@example/library": {
+              name: "@example/library",
+              version: "1.2.3",
+              resolved:
+                "https://registry.npmjs.org/@example/library/-/library-1.2.3.tgz",
+            },
+            "local-alias": {
+              name: "example-aliased",
+              version: "4.5.6",
+              resolved:
+                "https://registry.npmjs.org/example-aliased/-/example-aliased-4.5.6.tgz",
+            },
+            "another-alias": {
+              name: "example-aliased",
+              version: "4.5.6",
+              resolved:
+                "https://registry.npmjs.org/example-aliased/-/example-aliased-4.5.6.tgz",
+            },
+            private: {
+              version: "2.0.0",
+              resolved: "https://private.example/private/-/private-2.0.0.tgz",
+            },
+            unknown: { version: "3.0.0" },
+            alias: {
+              version: "1.2.3",
+              resolved: "https://registry.npmjs.org/other/-/other-1.2.3.tgz",
+            },
+          },
+        }),
+        encoding: "utf8",
+        timeout: 10000,
+      }),
+    );
+    expect(result).toEqual({
+      depthCounts: [5],
+      dependencies: [
+        selectedPackage,
+        {
+          ecosystem: "npm",
+          registry: "https://registry.npmjs.org",
+          package: "example-aliased",
+          oldVersion: null,
+          newVersion: "4.5.6",
+        },
+      ],
+    });
+  });
+
   test("rejects Deep dependency scans before preparing runtime", async () => {
     let runtimeInitialized = false;
     const client = new TestClientBase(

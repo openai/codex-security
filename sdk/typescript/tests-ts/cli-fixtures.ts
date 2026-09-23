@@ -200,9 +200,7 @@ export function dependencies(
     ) => string | Promise<string>;
     bulkScan?: MainDependencies["bulkScan"];
     onWorkbench?: (
-      args: readonly string[],
-      input?: string,
-      signal?: AbortSignal,
+      ...arguments_: Parameters<MainDependencies["runWorkbench"]>
     ) => JsonObject | Promise<JsonObject>;
     onMatch?: MainDependencies["matchFindings"];
     onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
@@ -279,8 +277,8 @@ export function dependencies(
     ...(options.importGitHubAlerts === undefined
       ? {}
       : { importGitHubAlerts: options.importGitHubAlerts }),
-    runWorkbench: async (args, input, signal) =>
-      (await options.onWorkbench?.(args, input, signal)) ?? { scans: [] },
+    runWorkbench: async (...arguments_) =>
+      (await options.onWorkbench?.(...arguments_)) ?? { scans: [] },
     matchFindings: async (input, comparisonOptions) =>
       (await options.onMatch?.(input, comparisonOptions)) ?? {
         matches: [],

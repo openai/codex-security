@@ -1261,6 +1261,78 @@ try {
     );
     assert.equal(directFull.structuredContent.scan.diffTarget, null);
 
+    const selectedPackage = {
+      ecosystem: "npm",
+      registry: "https://registry.npmjs.org",
+      package: "example",
+      oldVersion: null,
+      newVersion: "1.2.3",
+    };
+    const selectedOwner = {
+      "openai/threadId": "fixture-selected-dependency-thread",
+    };
+    const selectedScan = await client.callTool({
+      name: "start_codex_security_prompt_only_scan",
+      arguments: {
+        mode: "full_dependency",
+        targetPath: target,
+        scope: ".",
+        selectedDependencies: [selectedPackage],
+      },
+      _meta: selectedOwner,
+    });
+    assert.equal(selectedScan.isError, undefined);
+    assert.deepEqual(selectedScan.structuredContent.scan.selectedDependencies, [
+      selectedPackage,
+    ]);
+    const selectedScanId = selectedScan.structuredContent.scan.scanId;
+    const inventoryDirectory = path.join(
+      selectedScan.structuredContent.scan.scanDir,
+      "artifacts",
+      "02_discovery",
+      "dependency-update-scan",
+    );
+    await mkdir(inventoryDirectory, { recursive: true });
+    await writeFile(
+      path.join(inventoryDirectory, "dependency-discovery.json"),
+      JSON.stringify({ dependencies: [selectedPackage] }),
+    );
+    const beforeSelectedSubmission = requests.length;
+    for (const arguments_ of [
+      { dependencies: [selectedPackage] },
+      {
+        scanId: selectedScanId,
+        dependencies: [
+          selectedPackage,
+          { ...selectedPackage, package: "unselected" },
+        ],
+      },
+    ]) {
+      const rejected = await client.callTool({
+        name: "submit_codex_security_dependency_scan",
+        arguments: arguments_,
+        _meta: selectedOwner,
+      });
+      assert.equal(rejected.isError, true);
+      assert.equal(requests.length, beforeSelectedSubmission);
+    }
+    const exactSubmission = await client.callTool({
+      name: "submit_codex_security_dependency_scan",
+      arguments: { scanId: selectedScanId, dependencies: [selectedPackage] },
+      _meta: selectedOwner,
+    });
+    assert.equal(exactSubmission.isError, undefined);
+    assert.equal(requests.length, beforeSelectedSubmission + 1);
+    assert.deepEqual(requests.at(-1).body.dependencies, [
+      {
+        ecosystem: "npm",
+        registry: "https://registry.npmjs.org",
+        package: "example",
+        old_version: null,
+        new_version: "1.2.3",
+      },
+    ]);
+
     const directUpdate = await client.callTool({
       name: "start_codex_security_prompt_only_scan",
       arguments: {

@@ -42,6 +42,7 @@ import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
 import workbench_severity as severity
+from dependency_scan_selection import encoded_selected_dependencies
 from filesystem_identity import (
     serialize_filesystem_identity as serialize_filesystem_identity,
 )
@@ -722,9 +723,9 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 id, thread_id, target_id, target_path, target_title, target_summary,
                 default_scope, default_mode,
                 user_context, diff_target_kind, diff_base_revision, diff_head_revision,
-                diff_content_digest, scan_dependencies, dependency_depth, dependency_scan_target,
+                diff_content_digest, scan_dependencies, dependency_depth, dependency_scan_target, selected_dependencies_json,
                 model_settings_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 workspace_id,
@@ -746,6 +747,7 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 ),
                 getattr(args, "dependency_depth", 1),
                 getattr(args, "dependency_scan_target", "malware-and-vulnerabilities"),
+                encoded_selected_dependencies(args),
                 encoded_model_settings(args),
                 timestamp,
                 timestamp,
@@ -791,7 +793,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
             SET target_id = ?, target_path = ?, target_title = ?, target_summary = ?, default_scope = ?,
                 default_mode = ?, user_context = ?, diff_target_kind = ?,
                 diff_base_revision = ?, diff_head_revision = ?, diff_content_digest = ?,
-                scan_dependencies = ?, dependency_depth = ?, dependency_scan_target = ?,
+                scan_dependencies = ?, dependency_depth = ?, dependency_scan_target = ?, selected_dependencies_json = ?,
                 model_settings_json = ?,
                 submitted = 1, updated_at = ?
             WHERE id = ? AND active_scan_id IS NULL
@@ -814,6 +816,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 ),
                 getattr(args, "dependency_depth", 1),
                 getattr(args, "dependency_scan_target", "malware-and-vulnerabilities"),
+                encoded_selected_dependencies(args),
                 encoded_model_settings(args),
                 timestamp,
                 workspace["id"],
@@ -1021,6 +1024,7 @@ def _start_prompt_driven_scan(
                 AND workspaces.default_scope = ? AND workspaces.default_mode = ?
                 AND workspaces.dependency_depth IS ?
                 AND workspaces.dependency_scan_target = ?
+                AND workspaces.selected_dependencies_json IS ?
                 AND workspaces.user_context IS ? AND workspaces.target_summary IS ?
                 AND workspaces.diff_target_kind IS ? AND workspaces.diff_base_revision IS ?
                 AND workspaces.diff_head_revision IS ? AND workspaces.diff_content_digest IS ?
@@ -1044,6 +1048,7 @@ def _start_prompt_driven_scan(
                 args.mode,
                 getattr(args, "dependency_depth", 1),
                 getattr(args, "dependency_scan_target", "malware-and-vulnerabilities"),
+                encoded_selected_dependencies(args),
                 user_context,
                 target_summary,
                 *diff_identity,
@@ -1070,8 +1075,8 @@ def _start_prompt_driven_scan(
                 id, thread_id, target_id, target_path, target_title, target_summary, default_scope,
                 default_mode, user_context, diff_target_kind, diff_base_revision,
                 diff_head_revision, diff_content_digest, scan_dependencies, dependency_depth,
-                dependency_scan_target, submitted, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                dependency_scan_target, selected_dependencies_json, submitted, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (
                 workspace_id,
@@ -1087,6 +1092,7 @@ def _start_prompt_driven_scan(
                 int(args.mode in {"dependency_update", "full_dependency"}),
                 getattr(args, "dependency_depth", 1),
                 getattr(args, "dependency_scan_target", "malware-and-vulnerabilities"),
+                encoded_selected_dependencies(args),
                 timestamp,
                 timestamp,
             ),
@@ -2513,6 +2519,9 @@ def workspace_state(
         "id": workspace["id"],
         "dependencyDepth": workspace["dependency_depth"],
         "dependencyScanTarget": workspace["dependency_scan_target"],
+        "selectedDependencies": json.loads(workspace["selected_dependencies_json"])
+        if workspace["selected_dependencies_json"] is not None
+        else None,
         "diffTarget": persisted_diff_target,
         "mode": workspace["default_mode"],
         "modelSettings": (
@@ -2609,9 +2618,14 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
         query=args.query,
         severity=args.severity,
         status=args.status,
+        application_impact=args.application_impact,
     )
     conditions, values = scan_history.finding_occurrence_conditions(
-        scan["id"], query=args.query, severity=args.severity, status=args.status
+        scan["id"],
+        query=args.query,
+        severity=args.severity,
+        status=args.status,
+        application_impact=args.application_impact,
     )
     total = connection.execute(
         f"""
@@ -2740,6 +2754,9 @@ def scan_result(
         "dependencyDepth": scan["dependency_depth"],
         "dependencyJobId": scan["dependency_job_id"],
         "dependencyScanTarget": scan["dependency_scan_target"],
+        "selectedDependencies": json.loads(scan["selected_dependencies_json"])
+        if scan["selected_dependencies_json"] is not None
+        else None,
         "failureMessage": scan["failure_message"],
         "findings": [
             finding_result(connection, scan, row, related=relations.get(row["id"], []))
@@ -3426,6 +3443,12 @@ def main() -> None:
             result = deep_scan.fail_deep_scan(connection, args)
         elif args.command == "record-deep-scan-publication-failure":
             result = deep_scan.record_deep_scan_publication_failure(connection, args)
+        elif args.command == "get-thread-dependency-selection":
+            result = {
+                "requiresScanId": dependency_scans.thread_requires_selected_dependency_scan_id(
+                    connection, args.thread_id
+                )
+            }
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
         elif args.command == "claim-dependency-submission":

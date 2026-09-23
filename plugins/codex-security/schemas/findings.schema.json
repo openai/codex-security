@@ -663,6 +663,56 @@
           "extensions": {
             "type": "object",
             "properties": {
+              "dependency": {
+                "type": "object",
+                "properties": {
+                  "scannerSeverity": {
+                    "type": "object",
+                    "required": ["level"],
+                    "properties": {
+                      "level": {
+                        "enum": ["critical", "high", "medium", "low", "informational"]
+                      }
+                    }
+                  },
+                  "applicationImpact": {
+                    "type": "object",
+                    "required": ["status", "summary", "evidence", "limitations"],
+                    "properties": {
+                      "status": {
+                        "enum": ["affected", "not_affected", "inconclusive"]
+                      },
+                      "summary": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "evidence": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "required": ["path", "startLine", "code", "explanation"],
+                          "properties": {
+                            "path": {"type": "string", "minLength": 1},
+                            "startLine": {"type": "integer", "minimum": 1},
+                            "code": {"type": "string", "minLength": 1},
+                            "explanation": {"type": "string", "minLength": 1}
+                          }
+                        }
+                      },
+                      "limitations": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1}
+                      }
+                    },
+                    "allOf": [
+                      {
+                        "if": {"properties": {"status": {"enum": ["affected", "not_affected"]}}},
+                        "then": {"properties": {"evidence": {"minItems": 1}}}
+                      }
+                    ]
+                  }
+                }
+              },
               "candidateId": {
                 "type": "string",
                 "minLength": 1

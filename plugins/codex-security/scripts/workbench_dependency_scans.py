@@ -20,6 +20,7 @@ from dependency_scan_reporting import (
     project_for_chain,
     project_node_id,
 )
+from dependency_scan_selection import encoded_selected_dependencies
 from workbench_finding_workflows import register_workflow_scan
 from workbench_scan_start import (
     archive_scan,
@@ -255,9 +256,9 @@ def register_cli_scan(
             INSERT INTO workspaces (
                 id, target_id, target_path, target_title, default_scope, default_mode,
                 diff_target_kind, diff_base_revision, diff_head_revision,
-                diff_content_digest, scan_dependencies, dependency_depth, dependency_scan_target,
+                diff_content_digest, scan_dependencies, dependency_depth, dependency_scan_target, selected_dependencies_json,
                 model_settings_json, submitted, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (
                 workspace_id,
@@ -273,6 +274,7 @@ def register_cli_scan(
                 ),
                 getattr(args, "dependency_depth", 1),
                 getattr(args, "dependency_scan_target", "malware-and-vulnerabilities"),
+                encoded_selected_dependencies(args),
                 encoded_model_settings(args),
                 timestamp,
                 timestamp,
@@ -459,6 +461,25 @@ def provisional_dependency_inventory(
         return inventory
     except (KeyError, OSError, TypeError, UnicodeError, ValueError):
         return None
+
+
+def thread_requires_selected_dependency_scan_id(
+    connection: sqlite3.Connection, thread_id: str
+) -> bool:
+    """Require a scan ID when this thread owns an active selected-package scan."""
+    return (
+        connection.execute(
+            """
+        SELECT 1 FROM scans JOIN workspaces ON workspaces.id = scans.workspace_id
+        WHERE scans.status = 'running' AND scans.canceled_at IS NULL
+            AND scans.selected_dependencies_json IS NOT NULL
+            AND COALESCE(scans.continuation_thread_id, workspaces.thread_id) = ?
+        LIMIT 1
+        """,
+            (thread_id,),
+        ).fetchone()
+        is not None
+    )
 
 
 if __name__ == "__main__":

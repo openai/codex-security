@@ -24,6 +24,10 @@ import {
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { createScanArtifactContext } from "./src/artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
+import {
+  requireSelectedDependencyBatch,
+  selectedDependenciesSchema,
+} from "./src/server/dependency-selection.js";
 import { estimateDependencyDepthCounts } from "./src/server/dependency-estimation.js";
 import {
   DeepScanCoordinatorRegistry,
@@ -217,6 +221,7 @@ const currentScanPreflightCheckSchema = z
   })
   .strict();
 const openSchema = {
+  selectedDependencies: selectedDependenciesSchema.optional(),
   dependencyDepth: dependencyDepthSchema.optional(),
   dependencyScanTarget: dependencyScanTargetSchema.optional(),
   diffTarget: diffTargetSchema
@@ -275,6 +280,7 @@ const startScanSchema = {
   reasoningEffort: z.string().trim().min(1).max(32).optional(),
 };
 const startPromptOnlyScanSchema = {
+  selectedDependencies: selectedDependenciesSchema.optional(),
   dependencyScanTarget: dependencyScanTargetSchema.optional(),
   diffTarget: diffTargetSchema
     .optional()
@@ -336,6 +342,7 @@ const startHeadlessStandardScanSchema = {
     .describe("Optional security focus supplied by the user."),
 };
 type PromptOnlyScanInput = {
+  selectedDependencies?: z.output<typeof selectedDependenciesSchema>;
   dependencyScanTarget?: z.output<typeof dependencyScanTargetSchema>;
   diffTarget?: z.output<typeof diffTargetSchema>;
   mode: "diff" | "standard" | "dependency_update" | "full_dependency";
@@ -406,6 +413,7 @@ const targetInspectionSchema = {
   targetPath: z.string().trim().min(1).max(4096),
 };
 const submissionSchema = {
+  selectedDependencies: selectedDependenciesSchema.optional(),
   dependencyDepth: dependencyDepthSchema.optional(),
   dependencyScanTarget: dependencyScanTargetSchema.optional(),
   diffTarget: diffTargetSchema.optional(),
@@ -629,6 +637,9 @@ const collectionPageSchema = {
   offset: z.number().int().nonnegative().optional(),
 };
 const findingCollectionFiltersSchema = {
+  applicationImpact: z
+    .enum(["affected", "not_affected", "inconclusive"])
+    .optional(),
   query: z.string().trim().max(512).optional(),
   severity: z
     .enum(["critical", "high", "medium", "low", "informational"])
@@ -749,6 +760,34 @@ export function createCodexSecurityServer(): McpServer {
               : undefined;
             if (!scan) {
               return toolErrorResult("The dependency scan no longer exists.");
+            }
+            if (scan.selectedDependencies != null) {
+              await requireSelectedDependencyBatch(
+                dependencies,
+                scan.selectedDependencies,
+                typeof scan.scanDir === "string" ? scan.scanDir : undefined,
+              );
+            }
+          }
+
+          const environmentSelection =
+            process.env.CODEX_SECURITY_SELECTED_DEPENDENCIES;
+          if (environmentSelection !== undefined) {
+            await requireSelectedDependencyBatch(
+              dependencies,
+              JSON.parse(environmentSelection),
+              process.env.CODEX_SECURITY_SCAN_DIR,
+            );
+          } else if (scanId === undefined && threadIdFromExtra(extra)) {
+            const context = await runWorkbench([
+              "get-thread-dependency-selection",
+              "--thread-id",
+              threadIdFromExtra(extra)!,
+            ]);
+            if (context.requiresScanId) {
+              throw new Error(
+                "Use the selected dependency scan's scanId to preserve its package scope.",
+              );
             }
           }
 
@@ -1083,6 +1122,7 @@ export function createCodexSecurityServer(): McpServer {
     },
     async (
       {
+        selectedDependencies,
         dependencyScanTarget,
         mode,
         targetPath,
@@ -1123,6 +1163,7 @@ export function createCodexSecurityServer(): McpServer {
       }
       const promptOnly = await startPromptOnlyScan(
         {
+          selectedDependencies,
           dependencyScanTarget,
           mode,
           targetPath,
@@ -1430,6 +1471,7 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({
       dependencyDepth,
+      selectedDependencies,
       dependencyScanTarget,
       sessionId,
       targetPath,
@@ -1458,6 +1500,12 @@ export function createCodexSecurityServer(): McpServer {
             ...diffTargetArgs(diffTarget),
             ...dependencyDepthArgs(dependencyDepth),
             ...optionalArg("--dependency-scan-target", dependencyScanTarget),
+            ...(selectedDependencies === undefined
+              ? []
+              : [
+                  "--selected-dependencies",
+                  JSON.stringify(selectedDependencies),
+                ]),
             ...(scanDependencies ? ["--scan-dependencies"] : []),
             ...(modelSettings === undefined
               ? []
@@ -1832,12 +1880,21 @@ export function createCodexSecurityServer(): McpServer {
       },
       _meta: appMeta,
     },
-    async ({ limit, offset, query, severity, status, targetId }) =>
+    async ({
+      applicationImpact,
+      limit,
+      offset,
+      query,
+      severity,
+      status,
+      targetId,
+    }) =>
       scanActionResult(
         await runWorkbench([
           "list-global-findings",
           ...optionalArg("--query", query),
           ...optionalArg("--severity", severity),
+          ...optionalArg("--application-impact", applicationImpact),
           ...optionalArg("--status", status),
           ...optionalArg("--target-id", targetId),
           ...optionalNumberArg("--offset", offset),
@@ -2517,7 +2574,15 @@ export function createCodexSecurityServer(): McpServer {
       },
       _meta: appMeta,
     },
-    async ({ limit, offset, query, scanId, severity, status }) =>
+    async ({
+      applicationImpact,
+      limit,
+      offset,
+      query,
+      scanId,
+      severity,
+      status,
+    }) =>
       scanActionResult(
         await runWorkbench([
           "list-findings",
@@ -2525,6 +2590,7 @@ export function createCodexSecurityServer(): McpServer {
           scanId,
           ...optionalArg("--query", query),
           ...optionalArg("--severity", severity),
+          ...optionalArg("--application-impact", applicationImpact),
           ...optionalArg("--status", status),
           ...optionalNumberArg("--offset", offset),
           ...optionalNumberArg("--limit", limit),
@@ -2550,6 +2616,7 @@ export function createCodexSecurityServer(): McpServer {
 
 async function createWorkspace(
   input: {
+    selectedDependencies?: z.output<typeof selectedDependenciesSchema>;
     dependencyDepth?: number | null;
     dependencyScanTarget?: z.infer<typeof dependencyScanTargetSchema>;
     diffTarget?: z.infer<typeof diffTargetSchema>;
@@ -2579,6 +2646,12 @@ async function createWorkspace(
       ...diffTargetArgs(input.diffTarget),
       ...dependencyDepthArgs(input.dependencyDepth),
       ...optionalArg("--dependency-scan-target", input.dependencyScanTarget),
+      ...(input.selectedDependencies === undefined
+        ? []
+        : [
+            "--selected-dependencies",
+            JSON.stringify(input.selectedDependencies),
+          ]),
       ...(input.scanDependencies ? ["--scan-dependencies"] : []),
       ...(input.modelSettings === undefined
         ? []
@@ -2612,6 +2685,7 @@ async function startPromptOnlyScan(
   modelSettings: { model?: string; reasoningEffort?: string } = {},
 ): Promise<JsonObject> {
   const {
+    selectedDependencies,
     dependencyScanTarget,
     mode,
     targetPath,
@@ -2632,6 +2706,9 @@ async function startPromptOnlyScan(
       "--mode",
       mode,
       ...optionalArg("--dependency-scan-target", dependencyScanTarget),
+      ...(selectedDependencies === undefined
+        ? []
+        : ["--selected-dependencies", JSON.stringify(selectedDependencies)]),
       ...optionalArg("--model", modelSettings.model),
       ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
       ...optionalArg("--target-summary", targetSummary),

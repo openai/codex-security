@@ -5,6 +5,7 @@ import * as z from "zod/v4";
 import { CodexSdkWorkerExecutor } from "../deep-scan/executor.js";
 import type { DeepWorkerParentSandbox } from "../deep-scan/parent-sandbox.js";
 import type { CodexWorkerExecutor } from "../deep-scan/types.js";
+import { selectableDependencySchema } from "./dependency-selection.js";
 
 export interface DependencyEstimationSetup {
   targetPath: string;
@@ -30,12 +31,13 @@ interface DependencyEstimationOptions {
 const dependencyEstimateSchema = z
   .object({
     depthCounts: z.array(z.number().int().nonnegative()),
+    dependencies: z.array(selectableDependencySchema).optional(),
   })
   .strict();
 
 export async function estimateDependencyDepthCounts(
   options: DependencyEstimationOptions,
-): Promise<{ depthCounts: number[] }> {
+): Promise<z.infer<typeof dependencyEstimateSchema>> {
   const signal = options.signal ?? new AbortController().signal;
   signal.throwIfAborted();
 
@@ -113,8 +115,8 @@ function estimationPrompt(options: DependencyEstimationOptions): string {
     "Count only public package versions eligible for the existing published-artifact scan: the complete current graph for repository scans, or actual additions and version changes for change scans.",
     "Deduplicate using the complete normalized ecosystem, registry, package, oldVersion, and newVersion identity. Never merge different versions of the same package.",
     "For each eligible identity, derive its shortest real dependency chain from a first-party project or workspace; a direct dependency has depth one. Do not infer depth from dependency-type labels, invent graph edges, or substitute a different revision.",
-    'Return only a JSON object shaped exactly like {"depthCounts":[24,149,226]}. Array index zero is depth one, every later index is its actual depth, and zero-count intermediate depths remain present.',
-    'For a resolver-confirmed empty graph, return {"depthCounts":[]}. If an identity or real chain cannot be established, explain the blocker instead of inventing an estimate.',
-    "Do not start or submit a security scan, perform advisory checks, create findings, modify the repository, or include package identities, paths, or dependency chains in your final response.",
+    'Return only a JSON object with depthCounts and dependencies, such as {"depthCounts":[24,149,226],"dependencies":[{"ecosystem":"npm","registry":"https://registry.npmjs.org","package":"example","oldVersion":null,"newVersion":"1.2.3"}]}. Include only current public npm identities with exact versions established by the native resolver and public registry source evidence in dependencies, without merging versions. Counts still cover every ecosystem. Array index zero is depth one, every later index is its actual depth, and zero-count intermediate depths remain present.',
+    'For a resolver-confirmed empty graph, return {"depthCounts":[],"dependencies":[]}. If an identity or real chain cannot be established, explain the blocker instead of inventing an estimate.',
+    "Do not start or submit a security scan, perform advisory checks, create findings, modify the repository, or include private package identities, paths, credentials, or dependency chains in your final response.",
   ].join("\n");
 }

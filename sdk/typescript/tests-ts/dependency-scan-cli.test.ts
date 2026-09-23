@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { FindingWorkflow } from "../src/finding-workflow.js";
+import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
+import { workflowFixture } from "./support/workflow-fixture.js";
 import type { DependencyCalculationOptions, ScanOptions } from "../src/api.js";
+import type { DependencyIdentity } from "../src/dependency-selection.js";
 import { main } from "../src/cli.js";
 import { mergedCodexConfig, scanModelConfiguration } from "../src/config.js";
 import {
@@ -15,7 +20,361 @@ import {
   FakeSignals,
 } from "./cli-fixtures.js";
 
+const selectedPackage: DependencyIdentity = {
+  ecosystem: "npm",
+  registry: "https://registry.npmjs.org",
+  package: "@example/library",
+  oldVersion: null,
+  newVersion: "1.2.3",
+};
+
 describe("dependency scanning CLI", () => {
+  test("calculates and displays inventory before scanning exact repeated package selections", async () => {
+    const inventory = [
+      selectedPackage,
+      { ...selectedPackage, package: "other", newVersion: "2.0.0" },
+    ];
+    const calls: string[] = [];
+    let observedOptions: ScanOptions | undefined;
+    const calculationTargets: DependencyCalculationOptions["target"][] = [];
+    const sdk = dependencies();
+    const createSecurity = sdk.createSecurity;
+    sdk.createSecurity = (config) => ({
+      ...createSecurity(config),
+      async calculateDependencies(_repository, options) {
+        calls.push("calculate");
+        calculationTargets.push(options?.target);
+        return {
+          depthCounts: [2],
+          dependencies: inventory,
+          dependencyGraphPath: resolve("graph.json"),
+        };
+      },
+      async scanDependencies(_repository, options) {
+        calls.push("scan");
+        observedOptions = options;
+        return fakeResult();
+      },
+    });
+    const output = capture();
+    const errorOutput = capture();
+    expect(
+      await main(
+        ["dependency-scan", "--calculate-dependencies", "--json"],
+        output.stream,
+        errorOutput.stream,
+        sdk,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(output.text()).dependencies).toEqual(inventory);
+    expect(errorOutput.text()).toContain("@example/library@1.2.3");
+    expect(
+      await main(
+        [
+          "dependency-scan",
+          "--dependency",
+          "@example/library@1.2.3",
+          "--dependency",
+          "other@2.0.0",
+          "--path",
+          "services/api",
+          "--json",
+        ],
+        capture().stream,
+        capture().stream,
+        sdk,
+      ),
+    ).toBe(0);
+    expect(calls).toEqual(["calculate", "calculate", "scan"]);
+    expect(calculationTargets).toEqual(["repository", ["services/api"]]);
+    expect(observedOptions).toMatchObject({
+      selectedDependencies: inventory,
+      target: ["services/api"],
+      dependencyGraphPath: resolve("graph.json"),
+    });
+    expect(observedOptions).not.toHaveProperty("dependencyDepth");
+  });
+
+  test("retries selected workflows without resolving again or changing their remaining budget", async () => {
+    await using fixture = await workflowFixture();
+    const workbenchOptions = {
+      environment: fixture.environment,
+      pluginRoot: fileURLToPath(
+        new URL("../../../plugins/codex-security/", import.meta.url),
+      ),
+      python: await resolvePluginPython({ environment: fixture.environment }),
+    };
+    const workbench: typeof runWorkbench = (_options, args, input) =>
+      runWorkbench(workbenchOptions, args, input);
+    const workflow = new FindingWorkflow(
+      "selected-retry",
+      fixture.environment,
+      workbench,
+    );
+    const sdk = dependencies({
+      environment: fixture.environment,
+      currentDirectory: fixture.repository,
+      onWorkbench: (args, input, _signal, preparedOptions) => {
+        expect(preparedOptions?.python).toBe(workbenchOptions.python);
+        expect(preparedOptions?.environment["CODEX_SECURITY_STATE_DIR"]).toBe(
+          fixture.environment.CODEX_SECURITY_STATE_DIR,
+        );
+        return runWorkbench(workbenchOptions, args, input);
+      },
+    });
+    const createSecurity = sdk.createSecurity;
+    const scanned: ScanOptions[] = [];
+    let calculations = 0;
+    sdk.createSecurity = (config) => ({
+      ...createSecurity(config),
+      async calculateDependencies(_repository, options) {
+        calculations++;
+        options?.onCost?.({
+          model: "gpt-5.6-luna",
+          inputTokens: 100,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 10,
+          estimatedUsd: 3,
+        });
+        return {
+          depthCounts: [1],
+          dependencies: [selectedPackage],
+          dependencyGraphPath: resolve(
+            fixture.root,
+            `graph-${calculations}.json`,
+          ),
+        };
+      },
+      async scanDependencies(_repository, options) {
+        scanned.push(options!);
+        await workflow.begin("scan");
+        if (scanned.length === 1) {
+          await workflow.fail("scan", new Error("Synthetic interrupted scan"));
+          throw new Error("Synthetic interrupted scan");
+        }
+        await workflow.complete("scan", { scanId: "completed-selected-scan" });
+        return fakeResult();
+      },
+    });
+    const args = [
+      "dependency-scan",
+      "--dependency",
+      "@example/library@1.2.3",
+      "--workflow-id",
+      "selected-retry",
+      "--python",
+      workbenchOptions.python,
+      "--max-cost",
+      "10",
+      "--json",
+    ];
+    for (const expected of [2, 0, 0]) {
+      const errors = capture();
+      expect(
+        await main(args, capture().stream, errors.stream, sdk),
+        errors.text(),
+      ).toBe(expected);
+    }
+    expect(calculations).toBe(1);
+    expect(scanned).toHaveLength(3);
+    for (const options of scanned) {
+      expect(options).toMatchObject({
+        workflowId: "selected-retry",
+        dependencyGraphPath: resolve(fixture.root, "graph-1.json"),
+        maxCostUsd: 7,
+        selectedDependencies: [selectedPackage],
+      });
+    }
+    const state = await workflow.get();
+    expect(state?.stages.scan.status).toBe("completed");
+    expect(state?.dependencyCalculation?.result?.costUsd).toBe(3);
+    const changedErrors = capture();
+    expect(
+      await main(
+        [...args, "--path", "other"],
+        capture().stream,
+        changedErrors.stream,
+        sdk,
+      ),
+    ).toBe(2);
+    expect(changedErrors.text()).toContain("different");
+    expect(calculations).toBe(1);
+    expect(scanned).toHaveLength(3);
+  });
+
+  test("refuses selectors that do not identify exactly one discovered package", async () => {
+    for (const [selector, inventory] of [
+      ["@example/library@1.2.4", [selectedPackage]],
+      ["@example/library", [selectedPackage]],
+      ["@example/library@^1.2.3", [selectedPackage]],
+      ["@example/library@1.2.3", []],
+      ["@example/library@1.2.3", undefined],
+      ["@example/library@1.2.3", [selectedPackage, selectedPackage]],
+    ] as const) {
+      let scanned = false;
+      const sdk = dependencies();
+      const createSecurity = sdk.createSecurity;
+      sdk.createSecurity = (config) => ({
+        ...createSecurity(config),
+        async calculateDependencies() {
+          return {
+            depthCounts: [1],
+            dependencies: inventory === undefined ? undefined : [...inventory],
+            dependencyGraphPath: "graph.json",
+          };
+        },
+        async scanDependencies() {
+          scanned = true;
+          return fakeResult();
+        },
+      });
+      expect(
+        await main(
+          ["dependency-scan", "--dependency", selector, "--json"],
+          capture().stream,
+          capture().stream,
+          sdk,
+        ),
+      ).toBe(2);
+      expect(scanned).toBe(false);
+    }
+  });
+
+  test.each([3, 10])(
+    "reserves the remaining scan budget after a $%i selection calculation",
+    async (calculationCost) => {
+      const sdk = dependencies();
+      const createSecurity = sdk.createSecurity;
+      let observedOptions: ScanOptions | undefined;
+      const errorOutput = capture();
+      sdk.createSecurity = (config) => ({
+        ...createSecurity(config),
+        async calculateDependencies(_repository, options) {
+          expect(options?.maxCostUsd).toBe(10);
+          options?.onCost?.({
+            model: "gpt-5.6-luna",
+            inputTokens: 100,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            outputTokens: 10,
+            estimatedUsd: calculationCost,
+          });
+          return {
+            depthCounts: [1],
+            dependencies: [selectedPackage],
+            dependencyGraphPath: "graph.json",
+          };
+        },
+        async scanDependencies(_repository, options) {
+          observedOptions = options;
+          options?.onCost?.(
+            {
+              model: "gpt-5.6-sol",
+              inputTokens: 100,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              outputTokens: 10,
+              estimatedUsd: 1,
+            },
+            options.maxCostUsd,
+          );
+          return fakeResult();
+        },
+      });
+      const code = await main(
+        [
+          "dependency-scan",
+          "--dependency",
+          "@example/library@1.2.3",
+          "--max-cost",
+          "10",
+          "--json",
+        ],
+        capture().stream,
+        errorOutput.stream,
+        sdk,
+      );
+      expect(code).toBe(calculationCost === 10 ? 2 : 0);
+      if (calculationCost === 10) expect(observedOptions).toBeUndefined();
+      else {
+        expect(observedOptions?.maxCostUsd).toBe(7);
+        expect(errorOutput.text()).toContain("remains for package scans");
+      }
+    },
+  );
+
+  test("rejects selected packages with incompatible CLI options before calculation", async () => {
+    for (const extra of [
+      ["--diff", "HEAD"],
+      ["--working-tree"],
+      ["--dependency-depth", "all"],
+      ["--calculate-dependencies"],
+      ["--dry-run"],
+    ]) {
+      let calculated = false;
+      const sdk = dependencies();
+      const createSecurity = sdk.createSecurity;
+      sdk.createSecurity = (config) => ({
+        ...createSecurity(config),
+        async calculateDependencies() {
+          calculated = true;
+          return { depthCounts: [], dependencyGraphPath: "unused" };
+        },
+      });
+      expect(
+        await main(
+          [
+            "dependency-scan",
+            "--dependency",
+            "@example/library@1.2.3",
+            ...extra,
+            "--json",
+          ],
+          capture().stream,
+          capture().stream,
+          sdk,
+        ),
+      ).toBe(2);
+      expect(calculated).toBe(false);
+    }
+  });
+
+  test("reruns the exact persisted selection without replacing it with a depth scan", async () => {
+    let observedOptions: ScanOptions | undefined;
+    const sdk = dependencies({
+      onWorkbench: () => ({
+        recipe: {
+          repository: "/original/repository",
+          target: { kind: "paths", paths: ["services/api"] },
+          mode: "standard",
+          config: {},
+          dependencyMode: "full_dependency",
+          selectedDependencies: [{ ...selectedPackage }],
+        },
+      }),
+    });
+    const createSecurity = sdk.createSecurity;
+    sdk.createSecurity = (config) => ({
+      ...createSecurity(config),
+      async scanDependencies(_repository, options) {
+        observedOptions = options;
+        return fakeResult();
+      },
+    });
+    expect(
+      await main(
+        ["scans", "rerun", "original-scan"],
+        capture().stream,
+        capture().stream,
+        sdk,
+      ),
+    ).toBe(0);
+    expect(observedOptions?.selectedDependencies).toEqual([selectedPackage]);
+    expect(observedOptions?.target).toEqual(["services/api"]);
+    expect(observedOptions).not.toHaveProperty("dependencyDepth");
+  });
+
   test.each([
     { command: ["dependency-scan"] },
     { command: ["dependency-scan", "--dry-run"] },

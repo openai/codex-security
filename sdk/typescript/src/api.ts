@@ -76,6 +76,7 @@ import {
   dependencyCalculationConfig,
   dependencyCalculationPrompt,
   parseDependencyDepthCounts,
+  parseDependencyInventory,
   parseDependencyGraphSetup,
   requireDependencyGraph,
   reusableDependencyGraph,
@@ -83,6 +84,10 @@ import {
   saveDependencyGraphSetup,
   stageDependencyGraph,
 } from "./dependency-calculation.js";
+import {
+  parseSelectedDependencies,
+  type DependencyIdentity,
+} from "./dependency-selection.js";
 import {
   DeepScanProgressTracker,
   type DeepScanProgress,
@@ -300,6 +305,8 @@ export interface DependencyScanModelSettings {
 
 export interface ScanOptions extends ScanSettings {
   scanDependencies?: boolean;
+  /** Exact installed public npm identities for a current repository/path scanDependencies call. */
+  selectedDependencies?: DependencyIdentity[];
   dependencyScanTarget?: DependencyScanTarget;
   dependencyModelSettings?: DependencyScanModelSettings;
   /** Published-artifact review depth: 1 by default, or null for all depths. */
@@ -364,6 +371,8 @@ export interface DependencyCalculationOptions extends Pick<
 }
 
 export interface DependencyCalculationResult {
+  /** Installed public npm identities available for explicit selection; older saved calculations omit this field. */
+  dependencies?: DependencyIdentity[];
   /** Number of distinct public packages at each shortest dependency depth. */
   depthCounts: number[];
   dependencyGraphPath: string;
@@ -464,6 +473,7 @@ type ScanObserverName =
 export interface ScanPreflight extends DeepScanOptions {
   dependencyDepth?: number | null;
   dependencyGraphPath?: string;
+  selectedDependencies?: DependencyIdentity[];
 
   repository: string;
   target: NormalizedTarget;
@@ -572,6 +582,11 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions = {},
   ): Promise<ScanResult> {
+    if (options.selectedDependencies !== undefined) {
+      throw new InvalidTargetError(
+        "Selected dependencies require scanDependencies with a current repository or path target.",
+      );
+    }
     return await this.#trackOperation(() =>
       options.workflowId === undefined
         ? this.#run(repository, { ...options })
@@ -694,7 +709,17 @@ export class CodexSecurity {
     repository: string,
     options: Omit<ScanOptions, "scanDependencies"> = {},
   ): Promise<ScanResult> {
-    const scanOptions = { ...options, scanDependencies: true };
+    const scanOptions = {
+      ...options,
+      scanDependencies: true,
+      ...(options.selectedDependencies === undefined
+        ? {}
+        : {
+            selectedDependencies: parseSelectedDependencies(
+              options.selectedDependencies,
+            ),
+          }),
+    };
     return await this.#trackOperation(() =>
       options.workflowId === undefined
         ? this.#run(repository, scanOptions, undefined, true)
@@ -994,6 +1019,7 @@ export class CodexSecurity {
           );
         }
         const depthCounts = parseDependencyDepthCounts(parsedResponse);
+        const dependencies = parseDependencyInventory(parsedResponse);
         await requireDependencyGraph(dependencyGraphPath);
         const currentSetup = await inspect();
         if (sameDependencyGraphSetup(setup, currentSetup)) {
@@ -1002,6 +1028,7 @@ export class CodexSecurity {
             setup,
             depthCounts,
             signal,
+            dependencies,
           );
         } else {
           notifyObserver(
@@ -1013,7 +1040,11 @@ export class CodexSecurity {
           );
         }
         throwIfAborted(signal, outputDir);
-        return { depthCounts, dependencyGraphPath };
+        return {
+          depthCounts,
+          dependencyGraphPath,
+          ...(dependencies === undefined ? {} : { dependencies }),
+        };
       } catch (error) {
         await tracker?.stop().catch(() => null);
         if (this.#closed) this.#requireOpen();
@@ -1196,10 +1227,18 @@ export class CodexSecurity {
       ),
       ...(options.scanDependencies === true
         ? {
-            dependencyDepth:
-              options.dependencyDepth === undefined
-                ? 1
-                : options.dependencyDepth,
+            ...(options.selectedDependencies === undefined
+              ? {
+                  dependencyDepth:
+                    options.dependencyDepth === undefined
+                      ? 1
+                      : options.dependencyDepth,
+                }
+              : {
+                  selectedDependencies: parseSelectedDependencies(
+                    options.selectedDependencies,
+                  ),
+                }),
             ...(options.dependencyGraphPath === undefined
               ? {}
               : { dependencyGraphPath: options.dependencyGraphPath }),
@@ -2072,6 +2111,12 @@ export class CodexSecurity {
                         : String(options.dependencyDepth),
                     ]
                   : []),
+                ...(options.selectedDependencies === undefined
+                  ? []
+                  : [
+                      "--selected-dependencies",
+                      JSON.stringify(options.selectedDependencies),
+                    ]),
                 ...(options.scanDependencies === true &&
                 options.dependencyScanTarget !== undefined
                   ? ["--dependency-scan-target", options.dependencyScanTarget]
@@ -2371,6 +2416,13 @@ export class CodexSecurity {
         CODEX_SECURITY_STATE_DIR: stateDirectory,
         CODEX_SECURITY_SURFACE: this.#surface,
         CODEX_SECURITY_SCAN_ID: scanId,
+        ...(options.selectedDependencies === undefined
+          ? {}
+          : {
+              CODEX_SECURITY_SELECTED_DEPENDENCIES: JSON.stringify(
+                options.selectedDependencies,
+              ),
+            }),
         CODEX_SECURITY_TARGET_ID: targetId,
         CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repo),
         CODEX_SECURITY_TARGET_KIND: targetKind,
@@ -3850,6 +3902,19 @@ export class CodexSecurity {
     signal?: AbortSignal,
     protectedRoots?: readonly string[],
   ): Promise<LocalScanInputs> {
+    if (options.selectedDependencies !== undefined) {
+      parseSelectedDependencies(options.selectedDependencies);
+      if (options.scanDependencies !== true) {
+        throw new InvalidTargetError(
+          "Selected dependencies require dependency scanning.",
+        );
+      }
+      if (options.dependencyDepth !== undefined) {
+        throw new InvalidTargetError(
+          "Selected dependencies cannot be combined with dependencyDepth.",
+        );
+      }
+    }
     if (options.scanDependencies === true && options.mode === "deep") {
       throw new InvalidTargetError(
         "Dependency scanning does not support Deep mode. Use Standard mode; dependencyDepth controls transitive package analysis independently.",
@@ -3928,6 +3993,14 @@ export class CodexSecurity {
     const requestedTarget = options.target ?? "repository";
     validatedGitEnvironment(this.#dependencies.environment);
     const normalized = await normalizeTarget(repo, requestedTarget, signal);
+    if (
+      options.selectedDependencies !== undefined &&
+      (normalized.kind === "refs" || normalized.kind === "working_tree")
+    ) {
+      throw new InvalidTargetError(
+        "Selected dependencies require a current repository or path target.",
+      );
+    }
     throwIfAborted(signal);
     const mode = options.mode ?? DEFAULT_SCAN_MODE;
     validateMode(normalized, mode);
@@ -4861,8 +4934,16 @@ function dependencyScanRecipe(
               : "full_dependency",
         }
       : {}),
-    dependencyDepth:
-      options.dependencyDepth === undefined ? 1 : options.dependencyDepth,
+    ...(options.selectedDependencies === undefined
+      ? {
+          dependencyDepth:
+            options.dependencyDepth === undefined ? 1 : options.dependencyDepth,
+        }
+      : {
+          selectedDependencies: options.selectedDependencies.map(
+            (identity) => ({ ...identity }),
+          ),
+        }),
     dependencyScanTarget:
       options.dependencyScanTarget ?? "malware-and-vulnerabilities",
     ...(options.dependencyModelSettings === undefined

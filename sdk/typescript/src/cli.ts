@@ -70,6 +70,12 @@ import {
   type ScanPreflight,
 } from "./api.js";
 import {
+  MAX_SELECTED_DEPENDENCIES,
+  parseSelectedDependencies,
+  selectDependencies,
+  type DependencyIdentity,
+} from "./dependency-selection.js";
+import {
   accountStatus,
   CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
@@ -77,6 +83,7 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract } from "./contract.js";
+import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
@@ -188,6 +195,7 @@ import {
   runWorkbench,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
+  type WorkbenchCommandOptions,
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
@@ -354,6 +362,7 @@ const VALUE_OPTIONS = new Set([
   "--target",
   "--dependency-depth",
   "--dependency-graph",
+  "--dependency",
 
   "--model",
   "--effort",
@@ -1080,6 +1089,8 @@ function dependencyModelSettings(
 interface ScanArguments extends ResolvedScanSettings {
   scanDependencies?: boolean;
   dependenciesOnly?: boolean;
+  dependency?: string[];
+  selectedDependencies?: DependencyIdentity[];
   dependencyScanTarget?: DependencyScanTarget;
   dependencyModelSettings?: DependencyScanModelSettings;
   dependencyDepth?: number | null;
@@ -1310,6 +1321,7 @@ interface CliDependencies {
     args: readonly string[],
     input?: string,
     signal?: AbortSignal,
+    preparedOptions?: WorkbenchCommandOptions,
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1458,7 +1470,10 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     }
     return undefined;
   },
-  runWorkbench: async (args, input, signal) => {
+  runWorkbench: async (args, input, signal, preparedOptions) => {
+    if (preparedOptions !== undefined) {
+      return await runWorkbench({ ...preparedOptions, signal }, args, input);
+    }
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -5560,7 +5575,14 @@ export async function main(
         .object({
           ...DEPENDENCY_CLI_OPTIONS.shape,
           ...(dependencyOnly
-            ? {}
+            ? {
+                dependency: z
+                  .array(optionValue("--dependency"))
+                  .default([])
+                  .describe(
+                    "Scan only this installed public npm name@version; repeat for up to 20 packages.",
+                  ),
+              }
             : {
                 dependencies: z
                   .boolean()
@@ -5808,6 +5830,8 @@ export async function main(
               dependencyGraphPath: options.dependencyGraph,
               dependencyModelSettings: dependencyModelSettings(options),
               calculateDependencies: options.calculateDependencies,
+              dependency:
+                "dependency" in options ? options.dependency : undefined,
               resolutionModel: options.resolutionModel,
               resolutionEffort: options.resolutionEffort,
               codexOverrides: config.codexOverrides,
@@ -6295,6 +6319,10 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   const { dependencyMode, ...dependencyScanSettings } = dependencyOptions.data;
+  const selectedDependencies =
+    recipe["selectedDependencies"] === undefined
+      ? undefined
+      : parseSelectedDependencies(recipe["selectedDependencies"]);
   const safetyIdentifier = recipe["safetyIdentifier"];
   const postScanPrompt = recipe["postScanPrompt"];
   if (
@@ -6335,6 +6363,7 @@ async function prepareScanArgumentsFromRecipe(
     mode,
     ...deepScan.data,
     ...dependencyScanSettings,
+    ...(selectedDependencies === undefined ? {} : { selectedDependencies }),
     ...(dependencyMode === undefined ? {} : { dependenciesOnly: true }),
     archiveExisting: false,
     codexOverrides: Object.hasOwn(config, "approval_policy")
@@ -8390,6 +8419,35 @@ async function executeScan(
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
     const target = arguments_.target;
+    if (
+      (arguments_.dependency?.length ?? 0) > 0 ||
+      arguments_.selectedDependencies !== undefined
+    ) {
+      if (
+        !arguments_.dependenciesOnly ||
+        target instanceof DiffTarget ||
+        arguments_.calculateDependencies
+      ) {
+        throw new InvalidTargetError(
+          "--dependency requires dependency-scan with a current repository or path target.",
+        );
+      }
+      if ((arguments_.dependency?.length ?? 0) > MAX_SELECTED_DEPENDENCIES) {
+        throw new InvalidTargetError(
+          `Select at most ${MAX_SELECTED_DEPENDENCIES} dependencies.`,
+        );
+      }
+      if (arguments_.dependencyDepth !== undefined) {
+        throw new InvalidTargetError(
+          "--dependency cannot be combined with --dependency-depth.",
+        );
+      }
+      if (arguments_.dryRun) {
+        throw new InvalidTargetError(
+          "Use --calculate-dependencies to preview exact installed packages before selecting --dependency.",
+        );
+      }
+    }
     const prompts = await resolveScanPrompts(
       arguments_,
       resolve(directory, repository),
@@ -8935,9 +8993,115 @@ async function executeScan(
       if (security.scanDependencies === undefined) {
         throw new CodexSecurityError("Dependency scanning is unavailable.");
       }
+      let selectedDependencies = arguments_.selectedDependencies;
+      if ((arguments_.dependency?.length ?? 0) > 0) {
+        if (security.calculateDependencies === undefined) {
+          throw new CodexSecurityError(
+            "Dependency calculation is unavailable.",
+          );
+        }
+        progress?.stopTimer();
+        progress?.startTimer("Resolving selected dependencies");
+        const workflow =
+          options.workflowId === undefined
+            ? undefined
+            : new FindingWorkflow(
+                options.workflowId,
+                dependencies.environment,
+                (settings, args, input) =>
+                  dependencies.runWorkbench(
+                    args,
+                    input,
+                    options.signal,
+                    settings,
+                  ),
+                arguments_.pythonPath,
+              );
+        const requestDigest = workflowDigest({
+          config,
+          repository: resolve(directory, repository),
+          selectors: arguments_.dependency,
+          resolutionModel:
+            arguments_.resolutionModel ?? DEPENDENCY_CALCULATION_MODEL,
+          resolutionEffort:
+            arguments_.resolutionEffort ?? DEPENDENCY_CALCULATION_EFFORT,
+          options: {
+            ...options,
+            target: target ?? "repository",
+            outputDir:
+              options.outputDir === undefined
+                ? undefined
+                : resolve(directory, options.outputDir),
+            signal: undefined,
+            auth: undefined,
+            archiveExisting: undefined,
+            workflowId: undefined,
+          },
+        });
+        const savedCalculation =
+          await workflow?.prepareDependencyCalculation(requestDigest);
+        let calculation = savedCalculation?.result;
+        if (calculation === undefined) {
+          let costUsd = 0;
+          const resolvedDependencies = await security.calculateDependencies(
+            repository,
+            {
+              target,
+              auth,
+              dependencyGraphPath: options.dependencyGraphPath,
+              model: arguments_.resolutionModel,
+              reasoningEffort: arguments_.resolutionEffort,
+              signal: options.signal,
+              onActivity: options.onActivity,
+              onAuthentication: options.onAuthentication,
+              onWarning: options.onWarning,
+              onObserverError: options.onObserverError,
+              maxCostUsd: options.maxCostUsd,
+              onCost: (cost) => {
+                costUsd = cost.estimatedUsd;
+                options.onCost?.(cost);
+              },
+            },
+          );
+          calculation = {
+            dependencyGraphPath: resolvedDependencies.dependencyGraphPath,
+            dependencies: resolvedDependencies.dependencies,
+            costUsd,
+          };
+          if (workflow !== undefined) {
+            calculation = (
+              await workflow.completeDependencyCalculation(
+                requestDigest,
+                calculation,
+              )
+            ).result!;
+          }
+        }
+        const calculationCost = calculation.costUsd;
+        selectedDependencies = selectDependencies(
+          arguments_.dependency!,
+          calculation.dependencies,
+        );
+        options.dependencyGraphPath = calculation.dependencyGraphPath;
+        if (options.maxCostUsd !== undefined) {
+          options.maxCostUsd -= calculationCost;
+          if (options.maxCostUsd <= 0) {
+            throw new CodexSecurityError(
+              "Dependency calculation used the scan cost limit; no packages were scanned.",
+            );
+          }
+          maxCostUsd = options.maxCostUsd;
+          const budgetMessage = `Dependency resolution used ${formatUsd(calculationCost)}; ${formatUsd(maxCostUsd)} remains for package scans.`;
+          if (dashboard !== null) dashboard.note(budgetMessage);
+          else progress?.stage(budgetMessage);
+        }
+        progress?.stopTimer();
+        progress?.startTimer("Scanning selected dependencies");
+      }
       result = await security.scanDependencies(repository, {
         ...options,
         target,
+        ...(selectedDependencies === undefined ? {} : { selectedDependencies }),
       });
       scanDir = result.scanDir;
     } else {
@@ -9062,6 +9226,16 @@ async function executeScan(
       errorOutput.write(
         `Depth ${index + 1}: ${count.toLocaleString("en-US")} packages (${total.toLocaleString("en-US")} through this depth)\n`,
       );
+    }
+    if (dependencyCalculation.dependencies !== undefined) {
+      errorOutput.write(
+        "Selectable public npm packages (use --dependency name@version):\n",
+      );
+      for (const identity of dependencyCalculation.dependencies) {
+        errorOutput.write(
+          `  ${errorMessage(identity.package)}@${errorMessage(identity.newVersion)}\n`,
+        );
+      }
     }
     errorOutput.write(
       `Total: ${total.toLocaleString("en-US")} packages\nDependency graph: ${errorMessage(dependencyCalculation.dependencyGraphPath)}\nNo package scans were started.\n`,

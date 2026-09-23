@@ -183,10 +183,10 @@ def insert_running_scan(
             target_device, target_inode, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
-            reasoning_effort, scan_dependencies, dependency_depth, dependency_scan_target,
+            reasoning_effort, scan_dependencies, dependency_depth, dependency_scan_target, selected_dependencies_json,
             model_settings_json,
             status, phase, handoff_status, started_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             'running', 'preflight', ?, ?, ?, ?)
         """,
         (
@@ -210,6 +210,7 @@ def insert_running_scan(
             workspace["scan_dependencies"],
             workspace["dependency_depth"],
             workspace["dependency_scan_target"],
+            workspace["selected_dependencies_json"],
             workspace["model_settings_json"],
             handoff_status,
             timestamp,

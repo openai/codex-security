@@ -1553,3 +1553,120 @@ def test_cli_diff_launch_accepts_equal_refs_and_distinct_working_tree_base(tmp_p
                 base_revision,
                 head,
             )
+
+
+def test_selected_comparison_preserves_unreviewed_versions_and_first_party_findings(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    root = tmp_path / "results"
+    before = create_cli_scan(
+        state_dir,
+        root,
+        repository,
+        identity_anchor="selected-version",
+        extra_anchors=("other-version", "other-package", "first-party"),
+    )
+    after = create_cli_scan(state_dir, root, repository, finding=False)
+    selected = {
+        "ecosystem": "npm",
+        "registry": "https://registry.npmjs.org",
+        "package": "selected",
+        "oldVersion": None,
+        "newVersion": "1.2.3",
+    }
+    finding_ids = {}
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET selected_dependencies_json = ? WHERE id = ?",
+            (json.dumps([selected]), after["scanId"]),
+        )
+        for occurrence_id, finding_id, raw in connection.execute(
+            "SELECT id, finding_id, details_json FROM finding_occurrences WHERE scan_id = ?",
+            (before["scanId"],),
+        ).fetchall():
+            finding = json.loads(raw)
+            anchor = finding["identity"]["anchor"]
+            finding_ids[anchor] = finding_id
+            if anchor == "first-party":
+                continue
+            dependency = {**selected, "oldVersion": "1.0.0"}
+            if anchor == "other-version":
+                dependency["newVersion"] = "1.2.4"
+            elif anchor == "other-package":
+                dependency["package"] = "unselected"
+            finding["extensions"] = {"dependency": dependency}
+            connection.execute(
+                "UPDATE finding_occurrences SET details_json = ? WHERE id = ?",
+                (json.dumps(finding), occurrence_id),
+            )
+
+    comparison = compare_scan_pair(state_dir, before, after)
+
+    by_id = {finding["findingId"]: finding for finding in comparison["findings"]}
+    assert by_id[finding_ids["selected-version"]]["status"] == "resolved"
+    for anchor in ("other-version", "other-package", "first-party"):
+        assert by_id[finding_ids[anchor]]["status"] == "unknown"
+
+
+def test_selected_comparison_requires_every_previously_matched_occurrence(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    root = tmp_path / "results"
+    original = create_cli_scan(state_dir, root, repository, identity_anchor="shared-install-hook")
+    before = create_cli_scan(
+        state_dir,
+        root,
+        repository,
+        identity_anchor="selected-version",
+        extra_anchors=("omitted-version",),
+    )
+    after = create_cli_scan(state_dir, root, repository, finding=False)
+    selected = {
+        "ecosystem": "npm",
+        "registry": "https://registry.npmjs.org",
+        "package": "example-dependency",
+        "oldVersion": None,
+        "newVersion": "1.2.3",
+    }
+    inputs = compare_scan_pair(state_dir, original, before, "--include-matching-inputs")[
+        "matchingInputs"
+    ]
+    save_scan_matches(
+        state_dir,
+        original,
+        before,
+        confirmed_match(
+            inputs["before"][0]["occurrenceId"],
+            [finding["occurrenceId"] for finding in inputs["after"]],
+        ),
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET selected_dependencies_json = ? WHERE id = ?",
+            (json.dumps([selected]), after["scanId"]),
+        )
+        for finding in inputs["after"]:
+            included = finding["identity"]["anchor"] == "selected-version"
+            finding["extensions"] = {
+                "dependency": {**selected, "newVersion": "1.2.3" if included else "1.2.4"}
+            }
+            connection.execute(
+                "UPDATE finding_occurrences SET details_json = ?, severity = ? WHERE id = ?",
+                (json.dumps(finding), "critical" if included else "low", finding["occurrenceId"]),
+            )
+
+    comparison = compare_scan_pair(state_dir, before, after)
+    assert len(comparison["findings"]) == 1
+    assert comparison["findings"][0]["status"] == "unknown"
+    assert len(comparison["findings"][0]["beforeOccurrenceIds"]) == 2
+
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET selected_dependencies_json = ? WHERE id = ?",
+            (json.dumps([selected, {**selected, "newVersion": "1.2.4"}]), after["scanId"]),
+        )
+    assert compare_scan_pair(state_dir, before, after)["findings"][0]["status"] == "resolved"

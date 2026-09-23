@@ -897,6 +897,14 @@ MIGRATIONS = (
         ADD COLUMN dependency_scan_target TEXT NOT NULL DEFAULT 'malware-and-vulnerabilities';
         """,
     ),
+    (
+        45,
+        "persist explicitly selected dependency versions",
+        """
+        ALTER TABLE workspaces ADD COLUMN selected_dependencies_json TEXT;
+        ALTER TABLE scans ADD COLUMN selected_dependencies_json TEXT;
+        """,
+    ),
 )
 
 
