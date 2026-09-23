@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import { MCP_APP_VERSION } from "../version.js";
-import { DeepScanFatalError } from "./errors.js";
+import { DeepScanNonRetryableError } from "./errors.js";
 import { executablePathForSpawn } from "./executable-path.js";
 
 export const DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID =
@@ -474,26 +474,28 @@ function hasOwn(value: JsonRecord, key: string): boolean {
 // transport attempt alone does not establish that the scan cannot proceed.
 function disallowedProfileAllowlistError(
   profileId: string,
-): DeepScanFatalError {
-  return new DeepScanFatalError(
+): DeepScanNonRetryableError {
+  return new DeepScanNonRetryableError(
     `Deep Scan cannot safely start a read-only worker because organization policy does not allow the required \`${profileId}\` permission profile. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${profileId}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${profileId} = true\n\nDeep Scan did not run.`,
   );
 }
 
-function managedPolicyRejectedError(profileId: string): DeepScanFatalError {
-  return new DeepScanFatalError(
+function managedPolicyRejectedError(
+  profileId: string,
+): DeepScanNonRetryableError {
+  return new DeepScanNonRetryableError(
     `Deep Scan cannot safely start a read-only worker because managed Codex policy rejected the required \`${profileId}\` permission profile. Ask your Codex administrator to review the managed permission, sandbox, and filesystem requirements. Deep Scan did not run.`,
   );
 }
 
-function profileNotSelectedError(profileId: string): DeepScanFatalError {
-  return new DeepScanFatalError(
+function profileNotSelectedError(profileId: string): DeepScanNonRetryableError {
+  return new DeepScanNonRetryableError(
     `Deep Scan cannot safely start a read-only worker because Codex did not select the required \`${profileId}\` permission profile. Ask your Codex administrator to allow that profile for Deep Scan. Deep Scan did not run.`,
   );
 }
 
-function profileCollisionError(profileId: string): DeepScanFatalError {
-  return new DeepScanFatalError(
+function profileCollisionError(profileId: string): DeepScanNonRetryableError {
+  return new DeepScanNonRetryableError(
     `Deep Scan cannot safely start a read-only worker because existing Codex configuration changes the reserved \`${profileId}\` permission profile. Ask your Codex administrator to keep the normal-config \`[permissions.${profileId}]\` stub limited to \`extends = ":read-only"\`; Deep Scan supplies its deny rules at runtime. Deep Scan did not run.`,
   );
 }
@@ -507,8 +509,8 @@ function malformedPreflightError(): Error {
 function unsupportedCodexApiError(
   codexPath: string,
   api: string,
-): DeepScanFatalError {
-  return new DeepScanFatalError(
+): DeepScanNonRetryableError {
+  return new DeepScanNonRetryableError(
     "Deep Scan cannot safely verify its read-only worker permission profile because " +
       "the selected Codex executable " +
       quotedExecutable(codexPath) +
@@ -620,7 +622,7 @@ function processErrorCode(error: Error): string | undefined {
 export function deepScanPermissionProfileFallbackError(
   message: unknown,
   profileId = DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-): DeepScanFatalError | undefined {
+): DeepScanNonRetryableError | undefined {
   if (typeof message !== "string" || !nonEmptyString(profileId))
     return undefined;
   const prefix =
@@ -631,7 +633,7 @@ export function deepScanPermissionProfileFallbackError(
   // itself contain backticks or newlines, so only anchor the known source
   // prefix and the warning's terminal backtick-period.
   if (!warning.startsWith(prefix) || !warning.endsWith("`.")) return undefined;
-  return new DeepScanFatalError(
+  return new DeepScanNonRetryableError(
     `Deep Scan stopped a worker because organization policy rejected the required \`${profileId}\` permission profile after the turn started. The worker was stopped and its results were discarded. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${profileId}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${profileId} = true`,
   );
 }

@@ -91,7 +91,7 @@ export interface CoordinatorOptions {
   onStopped?: (run: DeepScanRunState) => Promise<void>;
 }
 
-export { DeepScanFatalError, DeepScanNonRetryableError } from "./errors.js";
+export { DeepScanNonRetryableError } from "./errors.js";
 
 /** Runs setup, keeps the discovery/reducer queue moving, and closes the scan. */
 export class DeepScanCoordinator {

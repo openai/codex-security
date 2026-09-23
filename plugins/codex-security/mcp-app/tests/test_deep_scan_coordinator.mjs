@@ -34,7 +34,6 @@ const bundle = await build({
 const {
   DeepScanCoordinator,
   DeepScanCoordinatorRegistry,
-  DeepScanFatalError,
   DeepScanNonRetryableError,
   DeepScanRemoteCoordinator,
   DeepScanStartLock,
@@ -739,7 +738,7 @@ async function testSaturationIgnoresWorkerFailureSettledAfterStop() {
   const executor = new FakeExecutor({
     blockDedup: true,
     dedupNewFindings: [0],
-    fatalDiscoveryWorkers: ["discovery-0003"],
+    nonRetryableDiscoveryWorkers: ["discovery-0003"],
   });
   const completedDrafts = [];
   const coordinator = new DeepScanCoordinator({
@@ -941,7 +940,6 @@ async function testProviderCybersecurityRiskMessagesReplaceRefusedDiscoveryImmed
     const executor = new FakeExecutor({
       policyRefusalWorkers: ["discovery-0001"],
       policyRefusalMessages: { "discovery-0001": message },
-      nonRetryablePolicyRefusalWorkers: ["discovery-0001"],
       dedupNewFindings: [1],
     });
     const sleeps = [];
@@ -1049,7 +1047,6 @@ async function testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold() {
       "discovery-0001": "Request blocked by cyberPolicy.",
       "discovery-0002": "Request blocked by cyberPolicy.",
     },
-    nonRetryablePolicyRefusalWorkers: ["discovery-0001", "discovery-0002"],
   });
   const coordinator = new DeepScanCoordinator({
     run: fixture.run,
@@ -1289,7 +1286,7 @@ async function testTransientExecutionFailureResumesWorkerThread() {
   );
 }
 
-async function testFatalConfigurationFailureDoesNotRetry(
+async function testConfigurationFailureDoesNotRetry(
   failureMessage = "fixture configuration failure",
 ) {
   const fixture = await fixtureRun({
@@ -1300,8 +1297,8 @@ async function testFatalConfigurationFailureDoesNotRetry(
   });
   const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor({
-    fatalDiscovery: true,
-    fatalDiscoveryMessage: failureMessage,
+    nonRetryableDiscovery: true,
+    nonRetryableDiscoveryMessage: failureMessage,
   });
   const sleeps = [];
   const coordinator = new DeepScanCoordinator({
@@ -1341,7 +1338,7 @@ async function testFailureManifestWriteDoesNotMaskOriginalError() {
   const coordinator = new DeepScanCoordinator({
     run: fixture.run,
     store,
-    executor: new FakeExecutor({ fatalDiscovery: true }),
+    executor: new FakeExecutor({ nonRetryableDiscovery: true }),
     pluginRoot: fixture.pluginRoot,
     clock: immediateClock,
   });
@@ -1444,7 +1441,7 @@ async function testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest() 
   const executor = new FakeExecutor({
     dedupNewFindings: [0],
     discoveryGates: { "discovery-0003": thirdWorkerGate.promise },
-    fatalDiscoveryWorkersAfterGate: ["discovery-0003"],
+    failDiscoveryWorkersAfterGate: ["discovery-0003"],
   });
   const completedDrafts = [];
   const coordinator = new DeepScanCoordinator({
@@ -4175,11 +4172,7 @@ class FakeExecutor {
           const message =
             this.options.policyRefusalMessages?.[workerId] ??
             "Request blocked by cyberPolicy.";
-          throw this.options.nonRetryablePolicyRefusalWorkers?.includes(
-            workerId,
-          )
-            ? new DeepScanNonRetryableError(message)
-            : new Error(message);
+          throw new Error(message);
         }
         if (this.options.transientFailureWorkers?.includes(workerId)) {
           throw new Error("transient worker failure");
@@ -4200,18 +4193,18 @@ class FakeExecutor {
           }
           throw new Error("transient worker failure");
         }
-        if (this.options.fatalDiscovery) {
-          throw new DeepScanFatalError(
-            this.options.fatalDiscoveryMessage ??
+        if (this.options.nonRetryableDiscovery) {
+          throw new DeepScanNonRetryableError(
+            this.options.nonRetryableDiscoveryMessage ??
               "fixture configuration failure",
           );
         }
-        if (this.options.fatalDiscoveryWorkers?.includes(workerId)) {
-          throw new DeepScanFatalError("fixture configuration failure");
+        if (this.options.nonRetryableDiscoveryWorkers?.includes(workerId)) {
+          throw new DeepScanNonRetryableError("fixture configuration failure");
         }
         await this.options.discoveryGates?.[workerId];
-        if (this.options.fatalDiscoveryWorkersAfterGate?.includes(workerId)) {
-          throw new DeepScanFatalError("fixture late discovery failure");
+        if (this.options.failDiscoveryWorkersAfterGate?.includes(workerId)) {
+          throw new DeepScanNonRetryableError("fixture late discovery failure");
         }
         const delayMs = this.options.discoveryDelayMs?.[workerId] ?? 0;
         if (delayMs > 0)
@@ -4559,15 +4552,13 @@ function boundedFixtureErrorText(message, maximum) {
 
 const {
   testRecoverableWorkerErrorsCannotFailScan,
-  testNonRetryableDiscoveryReplacesOnlyFailedWorker,
-  testNonRetryableReducerPreservesInputsAndCommittedAggregate,
-  testFatalReducerAbortsScanWithoutRetry,
+  testPolicyRefusedReducerPreservesInputsAndCommittedAggregate,
+  testNonRetryableReducerAbortsScanWithoutRetry,
 } = createDeepScanWorkerFailureCases({
   fixtureRun,
   FakeStore,
   FakeExecutor,
   DeepScanCoordinator,
-  DeepScanFatalError,
   DeepScanNonRetryableError,
   classifyCodexWorkerError,
   deferred,
@@ -4618,15 +4609,12 @@ try {
   await testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold();
   await testExhaustedTransientDiscoveryIsReplaced();
   await testRecoverableWorkerErrorsCannotFailScan();
-  await testNonRetryableDiscoveryReplacesOnlyFailedWorker();
   await testSuccessfulDiscoveryResetsConsecutiveFailureThreshold();
   await testExhaustedInvalidDiscoveryArtifactsAreReplaced();
   await testExhaustedMalformedDiscoveryDoesNotRemainPublishable();
   await testTransientExecutionFailureResumesWorkerThread();
-  await testFatalConfigurationFailureDoesNotRetry();
-  await testFatalConfigurationFailureDoesNotRetry(
-    "Request blocked by cyberPolicy.",
-  );
+  await testConfigurationFailureDoesNotRetry();
+  await testConfigurationFailureDoesNotRetry("Request blocked by cyberPolicy.");
   await testFailureManifestWriteDoesNotMaskOriginalError();
   await testFinishPersistenceFailureRewritesManifestAsFailure();
   await testLostFinishResponseReplaysWithoutOverwritingSuccessManifest();
@@ -4642,9 +4630,9 @@ try {
   await testInvalidReducerResultRetriesFromSnapshot(true);
   await testMissingReducerResultResumesExistingThread();
   await testExhaustedReducerIsReplacedAtDiscoveryLimit();
-  await testNonRetryableReducerPreservesInputsAndCommittedAggregate();
-  await testFatalReducerAbortsScanWithoutRetry();
-  await testFatalReducerAbortsScanWithoutRetry(
+  await testPolicyRefusedReducerPreservesInputsAndCommittedAggregate();
+  await testNonRetryableReducerAbortsScanWithoutRetry();
+  await testNonRetryableReducerAbortsScanWithoutRetry(
     "Request blocked by cyberPolicy.",
   );
   await testExhaustedReducerPreservesCommittedArtifacts();

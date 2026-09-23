@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { DeepScanFatalError } from "./errors.js";
+import { DeepScanNonRetryableError } from "./errors.js";
 
 export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
 
@@ -287,8 +287,8 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function unsupportedParentSandbox(reason: string): DeepScanFatalError {
-  return new DeepScanFatalError(
+function unsupportedParentSandbox(reason: string): DeepScanNonRetryableError {
+  return new DeepScanNonRetryableError(
     `Deep Scan cannot safely start a read-only worker: ${reason}.`,
   );
 }

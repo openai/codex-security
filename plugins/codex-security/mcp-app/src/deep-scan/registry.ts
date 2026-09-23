@@ -13,7 +13,6 @@ const COORDINATOR_POLL_MS = 1_000;
 
 export {
   DeepScanCoordinator,
-  DeepScanFatalError,
   DeepScanNonRetryableError,
 } from "./coordinator.js";
 

@@ -580,7 +580,6 @@ export function isTransientPersistenceError(error: unknown): boolean {
     if (
       record.name === "AbortError" ||
       record.name === "CanceledError" ||
-      record.name === "DeepScanFatalError" ||
       record.name === "DeepScanNonRetryableError" ||
       record.code === "ABORT_ERR"
     ) {

@@ -343,7 +343,7 @@ async function testDisallowedProfileGivesAdminGuidance() {
       await assert.rejects(
         preflight(codexPath, cwd),
         (error) =>
-          error?.name === "DeepScanFatalError" &&
+          error?.name === "DeepScanNonRetryableError" &&
           error.message.includes(`\`${profileId}\``) &&
           error.message.includes(`[permissions.${profileId}]`) &&
           error.message.includes("[allowed_permission_profiles]") &&
@@ -383,7 +383,7 @@ async function testOtherManagedPolicyRejectionIsGeneric() {
       await assert.rejects(
         preflight(codexPath, cwd),
         (error) =>
-          error?.name === "DeepScanFatalError" &&
+          error?.name === "DeepScanNonRetryableError" &&
           error.message.includes("managed Codex policy rejected") &&
           error.message.includes(`\`${profileId}\``) &&
           !error.message.includes("[allowed_permission_profiles]") &&
@@ -406,7 +406,7 @@ async function testMergedProfileCollisionFailsClosed() {
       await assert.rejects(
         preflight(codexPath, cwd),
         (error) =>
-          error?.name === "DeepScanFatalError" &&
+          error?.name === "DeepScanNonRetryableError" &&
           error.message.includes("existing Codex configuration changes") &&
           error.message.includes(`\`${profileId}\``) &&
           error.message.includes('extends = ":read-only"'),
@@ -431,7 +431,7 @@ async function testLiteralProtoKeyCollisionFailsClosed() {
       await assert.rejects(
         preflight(codexPath, cwd),
         (error) =>
-          error?.name === "DeepScanFatalError" &&
+          error?.name === "DeepScanNonRetryableError" &&
           error.message.includes("existing Codex configuration changes"),
       );
     },
@@ -450,7 +450,7 @@ async function testSelectedProfileClassificationRequiresVerifiedString() {
       async ({ codexPath, cwd, terminatedPath, children }) => {
         await assert.rejects(preflight(codexPath, cwd), (error) =>
           selected === ":read-only"
-            ? error?.name === "DeepScanFatalError" &&
+            ? error?.name === "DeepScanNonRetryableError" &&
               error.message.includes("did not select the required")
             : error?.name === "Error" &&
               error.message.includes("with this Codex configuration"),
@@ -511,7 +511,7 @@ async function testMalformedAndUnsupportedResponsesFailClosed() {
       await assert.rejects(
         preflight(codexPath, cwd),
         (error) =>
-          error?.name === "DeepScanFatalError" &&
+          error?.name === "DeepScanNonRetryableError" &&
           error.message.includes(JSON.stringify(codexPath)) &&
           error.message.includes("permissionProfile/list") &&
           error.message.includes("does not support") &&
@@ -662,7 +662,7 @@ async function testMissingWorkerDirectoryRemainsRetryable() {
 async function testRuntimeFallbackWarningClassification() {
   const warning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`enterprise-default\`.`;
   const error = deepScanPermissionProfileFallbackError(warning, profileId);
-  assert.equal(error?.name, "DeepScanFatalError");
+  assert.equal(error?.name, "DeepScanNonRetryableError");
   assert.equal(
     error?.message.includes(
       "worker was stopped and its results were discarded",
@@ -686,13 +686,13 @@ async function testRuntimeFallbackWarningClassification() {
   const unusualWarning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`${unusualDestination}\`.`;
   assert.equal(
     deepScanPermissionProfileFallbackError(unusualWarning, profileId)?.name,
-    "DeepScanFatalError",
+    "DeepScanNonRetryableError",
   );
   const emptyDestinationWarning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`\`.`;
   assert.equal(
     deepScanPermissionProfileFallbackError(emptyDestinationWarning, profileId)
       ?.name,
-    "DeepScanFatalError",
+    "DeepScanNonRetryableError",
   );
 }
 

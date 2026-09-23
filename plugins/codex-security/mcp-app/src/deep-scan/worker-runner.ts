@@ -18,7 +18,6 @@ import {
 import type { DeepScanArtifacts } from "./artifacts.js";
 import {
   boundedDeepScanErrorMessage,
-  DeepScanFatalError,
   DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
 } from "./errors.js";
@@ -435,7 +434,8 @@ export class DeepScanWorkerRunner {
       outcome,
     );
     if (outcome.status === "failed") {
-      if (outcome.error instanceof DeepScanFatalError) throw outcome.error;
+      if (outcome.error instanceof DeepScanNonRetryableError)
+        throw outcome.error;
       return {
         type: "dedup",
         status: "failed",
@@ -640,12 +640,12 @@ export class DeepScanWorkerRunner {
           );
         }
         const normalized = asError(error);
-        const scanFatal = normalized instanceof DeepScanFatalError;
-        const policyRefusal = isCodexCybersecurityPolicyRefusal(normalized);
         const retryable = !(normalized instanceof DeepScanNonRetryableError);
+        const policyRefusal =
+          retryable && isCodexCybersecurityPolicyRefusal(normalized);
         if (policyRefusal || !retryable || attempt === maximumAttempts) {
           const replaceableFailureKind =
-            input.kind === "discovery" && !scanFatal
+            input.kind === "discovery" && retryable
               ? policyRefusal
                 ? "policy_refusal"
                 : validationStarted

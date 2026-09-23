@@ -17,19 +17,11 @@ const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
   "This request has been flagged for potentially high-risk cyber activity.",
 ]);
 
-/** Retire this worker without retrying its conversation; the scan may replace it. */
+/** Explicitly opt a confirmed scan-wide prerequisite failure out of retries. */
 export class DeepScanNonRetryableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "DeepScanNonRetryableError";
-  }
-}
-
-/** Opt in only at a producer that has confirmed a scan-wide prerequisite failed. */
-export class DeepScanFatalError extends DeepScanNonRetryableError {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "DeepScanFatalError";
   }
 }
 
@@ -93,15 +85,9 @@ export function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
 }
 
 export function classifyCodexWorkerError(error: unknown): Error {
-  const normalized = error instanceof Error ? error : new Error(String(error));
-  if (normalized instanceof DeepScanNonRetryableError) return normalized;
-  if (isCodexCybersecurityPolicyRefusal(normalized)) {
-    return new DeepScanNonRetryableError(normalized.message, {
-      cause: normalized,
-    });
-  }
   // OS error codes alone do not establish a permanent failure, and SDK errors
   // can contain arbitrary command output. Leave both on the normal retry path
-  // unless a producer explicitly identifies the failure as nonretryable.
-  return normalized;
+  // unless a producer explicitly identifies the failure as nonretryable. The
+  // worker runner handles exact policy refusals without failing the scan.
+  return error instanceof Error ? error : new Error(String(error));
 }

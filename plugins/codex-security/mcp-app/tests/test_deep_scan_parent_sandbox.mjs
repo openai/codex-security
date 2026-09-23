@@ -140,7 +140,7 @@ assert.throws(
       }),
     ),
   (error) =>
-    error.name === "DeepScanFatalError" &&
+    error.name === "DeepScanNonRetryableError" &&
     /symbolic project-roots denial metadata/i.test(error.message),
 );
 
@@ -348,7 +348,7 @@ for (const invalid of [
   assert.throws(
     () => resolveDeepWorkerParentSandbox(invalid),
     (error) =>
-      error.name === "DeepScanFatalError" &&
+      error.name === "DeepScanNonRetryableError" &&
       error.message.startsWith(
         "Deep Scan cannot safely start a read-only worker:",
       ),

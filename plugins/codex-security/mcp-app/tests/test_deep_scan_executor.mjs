@@ -50,8 +50,8 @@ const errorsBundle = await build({
 });
 const {
   classifyCodexWorkerError,
-  DeepScanFatalError,
   DeepScanNonRetryableError,
+  isCodexCybersecurityPolicyRefusal,
 } = await import(
   `data:text/javascript;base64,${Buffer.from(errorsBundle.outputFiles[0].contents).toString("base64")}`
 );
@@ -111,7 +111,7 @@ try {
     await testAbortPropagation();
     await testUnstructuredConfigurationFailureRemainsRetryable();
     await testUnstructuredThreadStartFailureRemainsRetryable();
-    await testPolicyFailuresAreNonRetryable();
+    await testPolicyFailuresRemainWorkerErrors();
     await testMalformedCommandEventsRemainRetryable();
     await testRateLimitPolicyFailureRemainsRetryable();
     await testArtifactStartupTimeoutClassification();
@@ -176,7 +176,7 @@ try {
   );
   testOsErrorCodesRemainRetryable();
   testTextualMissingPathErrorsRemainRetryable();
-  testWorkerErrorClassificationUsesExactAllowlist();
+  testWorkerErrorClassificationPreservesExplicitFailures();
   await testWindowsAppsCodexFallsBackToRelocatedBinary();
   await testWindowsNpmPackageResolution();
   await testWindowsNpmPackageResolution("managed");
@@ -215,15 +215,11 @@ function testTextualMissingPathErrorsRemainRetryable() {
   }
 }
 
-function testWorkerErrorClassificationUsesExactAllowlist() {
+function testWorkerErrorClassificationPreservesExplicitFailures() {
   const explicit = new DeepScanNonRetryableError(
     "Explicitly rejected worker permission profile.",
   );
   assert.equal(classifyCodexWorkerError(explicit), explicit);
-  const fatal = new DeepScanFatalError(
-    "Verified parent sandbox metadata is unavailable.",
-  );
-  assert.equal(classifyCodexWorkerError(fatal), fatal);
 
   const refusalMessages = [
     "Request blocked by cyberPolicy.",
@@ -236,9 +232,12 @@ function testWorkerErrorClassificationUsesExactAllowlist() {
   for (const message of refusalMessages) {
     const original = new Error(message);
     const classified = classifyCodexWorkerError(original);
-    assert.equal(classified.name, "DeepScanNonRetryableError");
-    assert.equal(classified instanceof DeepScanFatalError, false);
-    assert.equal(classified.cause, original);
+    assert.equal(classified, original);
+    assert.equal(classified.name, "Error");
+    assert.equal(isCodexCybersecurityPolicyRefusal(classified), true);
+
+    const explicitRefusal = new DeepScanNonRetryableError(message);
+    assert.equal(classifyCodexWorkerError(explicitRefusal), explicitRefusal);
 
     for (const unrecognized of [
       `Source fixture: ${message}`,
@@ -252,6 +251,7 @@ function testWorkerErrorClassificationUsesExactAllowlist() {
     ]) {
       const unrelated = new Error(unrecognized);
       assert.equal(classifyCodexWorkerError(unrelated), unrelated);
+      assert.equal(isCodexCybersecurityPolicyRefusal(unrelated), false);
     }
   }
 
@@ -1675,7 +1675,7 @@ async function testUnstructuredThreadStartFailureRemainsRetryable() {
   }
 }
 
-async function testPolicyFailuresAreNonRetryable() {
+async function testPolicyFailuresRemainWorkerErrors() {
   for (const prompt of [
     "CYBER_POLICY_ERROR",
     "SAFETY_POLICY_ERROR",
@@ -1702,7 +1702,8 @@ async function testPolicyFailuresAreNonRetryable() {
           subagents: 0,
           signal: new AbortController().signal,
         }),
-        (error) => error?.name === "DeepScanNonRetryableError",
+        (error) =>
+          error?.name === "Error" && isCodexCybersecurityPolicyRefusal(error),
       );
     } finally {
       restoreEnv("CODEX_CLI_PATH", previousPath);
@@ -1887,7 +1888,7 @@ async function testMissingParentSandboxFailsBeforeWorkerLaunch() {
         signal: new AbortController().signal,
       }),
       (error) =>
-        error?.name === "DeepScanFatalError" &&
+        error?.name === "DeepScanNonRetryableError" &&
         /verified parent sandbox metadata/i.test(error.message),
     );
     await assert.rejects(
@@ -1920,7 +1921,7 @@ async function testDisallowedWorkerProfileFailsBeforeWorkerLaunch() {
         signal: new AbortController().signal,
       }),
       (error) =>
-        error?.name === "DeepScanFatalError" &&
+        error?.name === "DeepScanNonRetryableError" &&
         error.message.includes("codex_security_deep_scan_worker") &&
         error.message.includes("[allowed_permission_profiles]") &&
         error.message.includes("codex_security_deep_scan_worker = true") &&
@@ -1960,7 +1961,7 @@ async function testRuntimePermissionProfileFallbackStopsAndDiscards() {
           signal: new AbortController().signal,
         }),
         (error) =>
-          error?.name === "DeepScanFatalError" &&
+          error?.name === "DeepScanNonRetryableError" &&
           error.message.includes("worker was stopped") &&
           error.message.includes("results were discarded") &&
           !error.message.includes("did not run"),
