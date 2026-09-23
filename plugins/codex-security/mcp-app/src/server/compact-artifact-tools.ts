@@ -26,6 +26,10 @@ import {
   recordCodexSecurityCandidateAttackPaths,
 } from "../artifact-attack-path.js";
 import {
+  dependencyArtifactResultInputSchema,
+  recordCodexSecurityDependencyArtifactResult,
+} from "../artifact-dependency-result.js";
+import {
   deepReducerInputsInputSchema,
   deepReductionInputSchema,
   getCodexSecurityDeepReducerInputs,
@@ -256,7 +260,25 @@ export function registerCompactArtifactTools(
   registerDiscoveryCandidateTools(server, options);
   registerCandidateValidationTools(server, options);
   registerCandidateAttackPathTools(server, options);
-  registerScanDraftTools(server, options);
+  if (process.env.CODEX_SECURITY_DEPENDENCY_ARTIFACT_SCAN !== "1") {
+    registerScanDraftTools(server, options);
+  } else {
+    registerCompactTool(server, {
+      name: "record_codex_security_dependency_artifact_result",
+      title: "Record Codex Security Dependency Artifact Result",
+      description:
+        "Record reviewed published-package finding semantics through trusted existing scan phase records. Submit findings: [] when the verified artifact has no findings. Never supply package identity, versions, artifact digests, account information, paths, or report metadata.",
+      inputSchema: dependencyArtifactResultInputSchema,
+      readOnly: false,
+      handler: async (value, requestContext) => {
+        const input = dependencyArtifactResultInputSchema.parse(value);
+        return recordCodexSecurityDependencyArtifactResult(
+          await scanContext(input, options, true, requestContext),
+          input,
+        );
+      },
+    });
+  }
   registerCompactTool(server, {
     name: "save_codex_security_artifact",
     title: "Save Codex Security Artifact",
