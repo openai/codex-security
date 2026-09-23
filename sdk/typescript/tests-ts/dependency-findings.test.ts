@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, toNamespacedPath } from "node:path";
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { parse } from "smol-toml";
 import type {
   CodexOptions,
   ThreadOptions,
@@ -596,6 +597,7 @@ describe("imported finding SDK sessions", () => {
   test.each(["dependency-finding-assessment", "fix-finding"] as const)(
     "%s uses current credentials, settings, and an external writable workspace",
     async (skill) => {
+      const notice = { model_migrations: { "gpt-5.3-codex": "gpt-5.4" } };
       const shellEnvironmentPolicy = {
         inherit: "none",
         exclude: ["CODEX_*"],
@@ -611,6 +613,7 @@ describe("imported finding SDK sessions", () => {
         captured,
         workbench,
       } = await skillSession(undefined, {
+        notice,
         shell_environment_policy: shellEnvironmentPolicy,
       });
       await using client = security;
@@ -642,6 +645,12 @@ describe("imported finding SDK sessions", () => {
       expect(captured.codex?.config?.["shell_environment_policy"]).toEqual(
         shellEnvironmentPolicy,
       );
+      expect(captured.codex?.config?.["notice"]).toBeUndefined();
+      const noticeOverride = captured.codex?.configOverrides?.find((value) =>
+        value.startsWith("notice="),
+      );
+      expect(noticeOverride).toBeDefined();
+      expect(parse(noticeOverride!)).toEqual({ notice });
       expect(captured.codex?.env?.["OPENAI_API_KEY"]).toBeUndefined();
       expect(captured.codex?.env?.["CODEX_API_KEY"]).toBeUndefined();
       expect(environment.CODEX_HOME).not.toBe(codexHome);

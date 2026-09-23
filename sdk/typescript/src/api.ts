@@ -2760,6 +2760,18 @@ export class CodexSecurity {
     )
       ? sdkCodexConfig["responses_api_metadata"]
       : {};
+    sdkCodexConfig["responses_api_metadata"] = {
+      ...configuredResponsesMetadata,
+      codex_security_surface: this.#surface,
+    };
+    const literalConfigOverrides: string[] = [];
+    for (const [key, value] of Object.entries(sdkCodexConfig)) {
+      if (hasQuotedConfigKeys(value)) {
+        // The SDK flattens nested keys without quoting literal dots.
+        literalConfigOverrides.push(`${key}=${inlineToml(value)}`);
+        delete sdkCodexConfig[key];
+      }
+    }
     let codexPathOverride =
       environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") ===
       undefined
@@ -2778,9 +2790,12 @@ export class CodexSecurity {
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      ...(commandAuth || configOverrides.length > 0
+      ...(commandAuth ||
+      literalConfigOverrides.length > 0 ||
+      configOverrides.length > 0
         ? {
             configOverrides: [
+              ...literalConfigOverrides,
               ...(commandAuth
                 ? modelProviderConfigOverride(sessionConfig)
                 : []),
@@ -2789,13 +2804,7 @@ export class CodexSecurity {
           }
         : {}),
       env: sdkEnvironment,
-      config: {
-        ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
-        responses_api_metadata: {
-          ...configuredResponsesMetadata,
-          codex_security_surface: this.#surface,
-        },
-      },
+      config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
     });
     return { codex, environment };
   }
@@ -4641,6 +4650,16 @@ function rethrowPolicyOutputError(error: unknown): never {
   if (error instanceof OutputDirectoryNotEmptyError)
     throw new OutputDirectoryNotEmptyError(error.directory, "policy");
   throw error;
+}
+
+function hasQuotedConfigKeys(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Object.entries(value).some(
+      ([key, child]) =>
+        !/^[A-Za-z0-9_-]+$/u.test(key) || hasQuotedConfigKeys(child),
+    )
+  );
 }
 
 function requirePolicyConfigKeys(config: JsonObject): void {
