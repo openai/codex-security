@@ -1611,9 +1611,45 @@ runtime/export error, `130` for interruption, and `143` for termination.
 JSON scans do not use interactive controls. `validate`, `login`, and `logout`
 reject `--json`.
 
-`install-hook` scans staged and unstaged changes before each commit. It blocks
-on high-severity findings or failed scans, respects `core.hooksPath`, and leaves
-existing hooks alone. Change the threshold with `--fail-on-severity`.
+`install-hook` adds an optional local Git pre-commit check for staged and
+unstaged changes. It's advisory; use a required CI check to enforce a passing
+scan. When Git runs the hook, it blocks commits if the scan can't finish or
+finds an issue at or above the threshold (`high` by default). Set it when
+installing with `--fail-on-severity`. The installer respects `core.hooksPath`
+and leaves custom hooks alone.
+
+We recommend installing the CLI outside the repository and running that copy
+directly. For a global installation:
+
+```bash
+npm install --global @openai/codex-security
+```
+
+If the repository also has a local copy, `npx` may run it instead.
+
+Before installing or replacing a hook, run
+`git -C /path/to/repository rev-parse --git-path hooks/pre-commit`. Git may
+return a path relative to `/path/to/repository`. Check the hook, if it exists,
+and the path to its directory for symlinks or shared locations. Leave custom,
+linked, shared, or unverified hooks alone. If they need to change, contact the
+owner or use a required CI check. Check older generated hooks too; the installer
+can update them automatically.
+
+If the hooks directory belongs only to this repository and there is no hook,
+run the global CLI from outside the repository:
+
+```bash
+codex-security install-hook /path/to/repository
+```
+
+To migrate a hook, confirm it's a regular file used only by this repository
+and contains only the generated Codex Security command. Keep its severity.
+The installer can update older hooks that invoke `npx` if you use the same
+severity. Newer hooks store absolute paths to Node and the CLI. If either path
+changes, the installer won't replace the hook: back it up, remove it, and rerun
+`codex-security install-hook /path/to/repository` with the same
+`--fail-on-severity` value (default: `high`). If reinstallation fails, restore
+the backup and verify the hook before relying on it.
 
 ### Import alerts from the CLI
 
