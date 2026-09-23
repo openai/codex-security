@@ -779,6 +779,86 @@ From TypeScript, use `runComponentScans({ repository, outputDir, components })`.
 Use `auto: true` for planning, `planOnly: true` to save the plan without scans,
 and `scanOptions.auth` to select credentials.
 
+### Configure dependency scans
+
+Use `dependency-scan` for dependency-only scans, or `scan --dependencies` to
+include dependency checks in a first-party scan. Submitting package scans
+requires ChatGPT authentication (`--auth chatgpt`). Dependency checks do not
+support `--mode deep`; use Standard mode and `--dependency-depth` to select
+transitive package analysis. Both commands support:
+
+- `--dependency-depth N` to review published artifacts through graph depth N.
+  The default is `1` (direct dependencies); `--dependency-depth all` includes
+  every eligible transitive package. This selection does not truncate graph
+  resolution or known-advisory checks for the selected scan.
+- Repeatable `--path PATH` to select the union of project paths without
+  including unrelated sibling projects. Root or shared workspace manifests
+  can still supply dependency context. Full and scoped scans support non-Git
+  directories; `--diff BASE --head HEAD` and `--working-tree` require Git and
+  cannot be combined with `--path`.
+- `--calculate-dependencies` to calculate dependency counts by depth and save
+  native resolver output without running advisory checks, first-party scans,
+  or package security jobs. This runs Codex with read-only local
+  package-manager resolution; unlike `--dry-run`, it requires model access.
+- `--dependency-graph PATH` to reuse saved resolver output in a scan or another
+  calculation for the same repository, scope, and snapshot.
+
+Calculate the graph first, then use the printed graph path to scan that same
+scope at all depths:
+
+```bash
+npx @openai/codex-security dependency-scan /path/to/repository \
+  --auth chatgpt --path services/api --path tools/worker \
+  --calculate-dependencies \
+  --output-dir /path/outside/repository/dependency-preview
+
+npx @openai/codex-security dependency-scan /path/to/repository \
+  --auth chatgpt --path services/api --path tools/worker \
+  --dependency-graph /path/outside/repository/dependency-preview/dependency-resolver-output.json \
+  --dependency-depth all --target malware --headless
+```
+
+The preview saves `dependency-resolver-output.json` and
+`dependency-resolver-output.json.setup.json` together. The sidecar records the
+selected setup and depth counts; keep both files together and private. If the
+saved graph no longer matches the repository, scope, or snapshot, the CLI
+warns and resolves the graph again. `--dry-run` performs only local preflight:
+it does not calculate counts, validate model access, or start a scan.
+
+Calculation defaults to `gpt-5.6-luna` with `low` reasoning effort. Override
+these with `--resolution-model` and `--resolution-effort`. These settings are
+separate from the `--acquisition-model`, `--security-model`,
+`--verification-model`, and `--history-model` flags and their corresponding
+`--…-effort` flags. `--target malware-and-vulnerabilities` remains the default
+package-analysis target.
+
+The SDK exposes the same flow through `calculateDependencies` and
+`scanDependencies`. With an open `CodexSecurity` client:
+
+```ts
+const target = ["services/api", "tools/worker"];
+const preview = await security.calculateDependencies("/path/to/repository", {
+  auth: "chatgpt",
+  target,
+  outputDir: "/path/outside/repository/dependency-preview",
+  model: "gpt-5.6-luna",
+  reasoningEffort: "low",
+});
+
+console.log(preview.depthCounts); // Index 0 is depth 1; counts are not cumulative.
+await security.scanDependencies("/path/to/repository", {
+  auth: "chatgpt",
+  target,
+  dependencyGraphPath: preview.dependencyGraphPath,
+  dependencyDepth: null, // All depths; omit for direct dependencies only.
+  dependencyScanTarget: "malware",
+});
+```
+
+Pass `dependencyGraphPath` to `calculateDependencies` to reuse a matching
+preview. Use `security.run(..., { scanDependencies: true, ... })` for combined
+code and dependency scans with the same depth, path, and graph options.
+
 ### Configure deep scans
 
 For `scan --mode deep`, `--workers` sets discovery concurrency and `--subagents`
