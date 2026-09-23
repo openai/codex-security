@@ -9,11 +9,18 @@ type Sandbox = { filesystemDenies: string[]; globScanMaxDepth?: number };
 
 async function bundledPolicy() {
   const runtime = await loadBundledRuntime();
-  const start = runtime.indexOf("var CODEX_SANDBOX_STATE_META_CAPABILITY =");
-  const end = runtime.indexOf("\n// ", start);
-  expect(start).toBeGreaterThan(0);
-  expect(end).toBeGreaterThan(start);
-  const source = runtime.slice(start, end);
+  const source = [
+    "var CODEX_SANDBOX_STATE_META_CAPABILITY =",
+    "function resolveDeepWorkerParentSandbox(",
+  ]
+    .map((marker) => {
+      const start = runtime.indexOf(marker);
+      const end = runtime.indexOf("\n// ", start);
+      expect(start).toBeGreaterThan(0);
+      expect(end).toBeGreaterThan(start);
+      return runtime.slice(start, end);
+    })
+    .join("\n");
   const imports = [
     ...new Set(source.match(/import_node_(?:path|url|util)\d*/gu)),
   ];

@@ -2,6 +2,8 @@
 
 Model-facing dependency MCP tools require the host's working directory and restrict report reads and assessment writes to that exact repository path. The app's global inventory, task history, and `_from_app` operations are app-only tools for local report management. Direct CLI/SDK callers retain cross-repository access; the workbench's ID-based get, start, and record commands accept `--target-path REPO` to check the stored report target before reading claims or changing assessments.
 
+CLI/SDK assessment and fix sessions receive only their selected saved request in `dependency-request.json`. They work in a separate output directory, with the shared plugin state denied by the session's filesystem permissions. Assessments write the existing result array to `dependency-assessments.json`; the SDK reads it safely and records it using the original assessment ID and repository path. Fix sessions return a proposed patch. These model sessions do not receive a command for the shared workbench, and the SDK keeps responsibility for reading and updating saved records.
+
 Import preserves the original scanner claim. A separate assessment records what Codex checked in the application, its conclusion, and the remaining unknowns. Nothing is submitted to a cloud dependency scan or changed in the vendor system.
 
 ## File formats

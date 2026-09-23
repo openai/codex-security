@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, toNamespacedPath } from "node:path";
 import { afterEach, describe, expect, mock, test } from "bun:test";
@@ -11,6 +19,7 @@ import type {
 } from "@openai/codex-sdk";
 import {
   DependencyFindings,
+  checkDependencyPermissions,
   type DependencyFindingSkillRequest,
 } from "../src/dependency-findings.js";
 import type { JsonObject } from "../src/config.js";
@@ -29,7 +38,15 @@ import {
 } from "../src/errors.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
-afterEach(cleanup);
+const skillOutputDirectories: string[] = [];
+afterEach(async () => {
+  await cleanup();
+  await Promise.all(
+    skillOutputDirectories
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true })),
+  );
+});
 
 function client(
   workbench: (args: readonly string[]) => Promise<JsonObject>,
@@ -430,24 +447,55 @@ async function skillSession(
   events: (signal: AbortSignal) => AsyncGenerator<ThreadEvent> = () =>
     completedEvents(),
   codexOverrides: JsonObject = {},
+  credentialHomeInState = false,
+  stateAlias = false,
 ) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
-  const codexHome = join(root, "credentials");
   const stateDirectory = join(root, "state");
+  const codexHome = credentialHomeInState
+    ? join(stateDirectory, "codex-home")
+    : join(root, "credentials");
+  await mkdir(stateDirectory);
   await Promise.all([mkdir(repository), mkdir(codexHome)]);
+  const configuredStateDirectory = stateAlias
+    ? join(root, "state-alias")
+    : stateDirectory;
+  if (stateAlias)
+    await symlink(stateDirectory, configuredStateDirectory, "junction");
   const environment = {
     CODEX_HOME: join(root, "ambient-home"),
     CODEX_CLI_PATH: process.execPath,
-    CODEX_SECURITY_STATE_DIR: stateDirectory,
+    CODEX_SECURITY_STATE_DIR: configuredStateDirectory,
     OPENAI_API_KEY: "synthetic-imported-finding-key",
   };
   const captured: {
     codex?: CodexOptions;
     thread?: ThreadOptions;
     prompt?: string;
+    recorded?: { path: string; results: unknown };
   } = {};
-  const workbench = mock(async () => ({}));
+  const selected = {
+    report: { id: "report-1", targetPath: repository },
+    assessment: { id: "assessment-1", state: "pending" },
+    findings: [
+      { id: "finding-1", original: { marker: "selected-source-claim" } },
+    ],
+  };
+  const workbench = mock(async (_options, args: readonly string[]) => {
+    if (args[0] === "record-dependency-assessments") {
+      const path = args[args.indexOf("--results-path") + 1]!;
+      captured.recorded = {
+        path,
+        results: JSON.parse(await readFile(path, "utf8")),
+      };
+      return { assessment: { state: "complete" } };
+    }
+    return selected;
+  });
+  const permissionCheck = mock(
+    async (..._args: Parameters<typeof checkDependencyPermissions>) => {},
+  );
   const security = new TestClient(
     {
       codexOverrides: {
@@ -461,19 +509,32 @@ async function skillSession(
       environment,
       prepareRuntime: async () => ({
         ...preparedRuntime(codexHome),
+        plugin: {
+          ...preparedRuntime(codexHome).plugin,
+          pluginRoot: join(stateDirectory, "runtime-plugin"),
+        },
         environment,
       }),
       resolvePluginPython: async () => join(root, "python"),
       runWorkbench: workbench,
+      checkDependencyPermissions: permissionCheck,
       createCodex: (options) => {
         captured.codex = options;
         return {
           startThread: (options) => {
             captured.thread = options;
+            skillOutputDirectories.push(options.workingDirectory!);
             return {
               id: null,
               async runStreamed(prompt, options) {
                 captured.prompt = prompt;
+                await writeFile(
+                  join(
+                    captured.thread!.workingDirectory!,
+                    "dependency-assessments.json",
+                  ),
+                  JSON.stringify([{ findingId: "finding-1" }]),
+                );
                 return { events: events(options.signal!) };
               },
             };
@@ -490,6 +551,8 @@ async function skillSession(
     environment,
     captured,
     workbench,
+    selected,
+    permissionCheck,
   };
 }
 
@@ -594,9 +657,16 @@ describe("imported finding SDK sessions", () => {
     expect(result.status).toBe(0);
   });
 
-  test.each(["dependency-finding-assessment", "fix-finding"] as const)(
-    "%s uses current credentials, settings, and an external writable workspace",
-    async (skill) => {
+  test.each([
+    ["dependency-finding-assessment", true, false],
+    ["fix-finding", true, false],
+    ["dependency-finding-assessment", false, false],
+    ["fix-finding", false, false],
+    ["dependency-finding-assessment", true, true],
+    ["fix-finding", true, true],
+  ] as const)(
+    "%s keeps selected settings with credential home inside state=%s and state alias=%s",
+    async (skill, credentialHomeInState, stateAlias) => {
       const notice = { model_migrations: { "gpt-5.3-codex": "gpt-5.4" } };
       const shellEnvironmentPolicy = {
         inherit: "none",
@@ -612,10 +682,16 @@ describe("imported finding SDK sessions", () => {
         environment,
         captured,
         workbench,
-      } = await skillSession(undefined, {
-        notice,
-        shell_environment_policy: shellEnvironmentPolicy,
-      });
+        permissionCheck,
+      } = await skillSession(
+        undefined,
+        {
+          notice,
+          shell_environment_policy: shellEnvironmentPolicy,
+        },
+        credentialHomeInState,
+        stateAlias,
+      );
       await using client = security;
       const request = {
         skill,
@@ -627,22 +703,109 @@ describe("imported finding SDK sessions", () => {
       expect(await client.runDependencyFindingSkill(request)).toBe(
         "scan complete",
       );
-      expect(workbench).not.toHaveBeenCalled();
+      const output = captured.thread!.workingDirectory!;
+      const config = Object.assign(
+        {},
+        ...captured.codex!.configOverrides!.map((value) => parse(value)),
+      );
+      expect(permissionCheck.mock.calls[0]).toEqual([
+        await realpath(PLUGIN_ROOT),
+        "dependency-permission-profile",
+        {
+          codexPath: captured.codex!.codexPathOverride!,
+          cwd: output,
+          profileId: "codex_security_scan",
+          configOverrides: captured.codex!.configOverrides!,
+          expectedProfile: {
+            filesystem: {
+              ":root": "read",
+              ":workspace_roots": "write",
+              [codexHome]: credentialHomeInState ? { ".": "deny" } : "read",
+              [stateDirectory]: { ".": "deny" },
+            },
+          },
+        },
+        {
+          ...captured.codex!.env,
+          CODEX_API_KEY: "synthetic-imported-finding-key",
+        },
+        expect.any(AbortSignal),
+      ]);
+      expect(captured.codex!.config).toEqual({});
+      expect(config).toMatchObject({
+        model: "synthetic-model",
+        model_reasoning_effort: "high",
+        features: { plugins: false },
+      });
+      expect(output).not.toBe(stateDirectory);
+      expect(captured.codex?.env?.["CODEX_SECURITY_STATE_DIR"]).toBe(output);
+      expect(
+        JSON.parse(
+          await readFile(join(output, "dependency-request.json"), "utf8"),
+        ),
+      ).toMatchObject({
+        findings: [{ original: { marker: "selected-source-claim" } }],
+      });
+      const scopeOverride = captured.codex?.configOverrides?.find((value) =>
+        value.startsWith("permissions.codex_security_scan.filesystem="),
+      );
+      expect(parse(scopeOverride!)).toEqual({
+        permissions: {
+          codex_security_scan: {
+            filesystem: {
+              ":root": "read",
+              ":workspace_roots": "write",
+              [codexHome]: credentialHomeInState ? { ".": "deny" } : "read",
+              [stateDirectory]: { ".": "deny" },
+            },
+          },
+        },
+      });
+      expect(workbench.mock.calls[0]![1]).toEqual(
+        skill === "fix-finding"
+          ? [
+              "get-dependency-finding",
+              "--report-id",
+              "report-1",
+              "--finding-id",
+              "finding-1",
+              "--require-current",
+              "--target-path",
+              repository,
+            ]
+          : [
+              "get-dependency-assessment",
+              "--assessment-id",
+              "assessment-1",
+              "--target-path",
+              repository,
+            ],
+      );
+      if (skill === "dependency-finding-assessment") {
+        expect(workbench.mock.calls[1]![1]).toEqual([
+          "record-dependency-assessments",
+          "--assessment-id",
+          "assessment-1",
+          "--target-path",
+          repository,
+          "--results-path",
+          captured.recorded!.path,
+        ]);
+        expect(captured.recorded!.path.startsWith(stateDirectory)).toBe(true);
+        expect(captured.recorded!.results).toEqual([
+          { findingId: "finding-1" },
+        ]);
+      } else expect(workbench.mock.calls.length).toBe(1);
       expect(captured.codex).toMatchObject({
         apiKey: "synthetic-imported-finding-key",
         codexPathOverride: toNamespacedPath(process.execPath),
-        config: {
-          model: "synthetic-model",
-          model_reasoning_effort: "high",
-          features: { plugins: false },
-        },
         env: {
           CODEX_HOME: codexHome,
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
+          CODEX_SECURITY_STATE_DIR: output,
           CODEX_SECURITY_REPOSITORY: repository,
         },
       });
-      expect(captured.codex?.config?.["shell_environment_policy"]).toEqual(
+      expect(config["shell_environment_policy"]).toEqual(
         shellEnvironmentPolicy,
       );
       expect(captured.codex?.config?.["notice"]).toBeUndefined();
@@ -659,21 +822,20 @@ describe("imported finding SDK sessions", () => {
           skill === "fix-finding"
             ? "security_remediation"
             : "security_validation",
-        workingDirectory: stateDirectory,
+        workingDirectory: output,
         approvalPolicy: "never",
       });
-      expect(captured.thread?.webSearchMode).toBe(
+      expect(config["web_search"]).toBe(
         skill === "dependency-finding-assessment" ? "live" : undefined,
       );
+      expect(captured.thread?.webSearchMode).toBeUndefined();
       expect(captured.thread?.networkAccessEnabled).toBeUndefined();
       expect(captured.prompt).toContain(JSON.stringify(request));
-      const workbenchArguments = JSON.parse(
-        captured.prompt!.match(/Workbench executable arguments: (.+)\./)![1]!,
-      ) as string[];
-      expect(workbenchArguments.slice(-2)).toEqual([
-        stateDirectory,
-        join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
-      ]);
+      expect(captured.prompt).not.toContain("workbench_db.py");
+      expect(captured.prompt).not.toContain(stateDirectory);
+      expect(captured.prompt).toContain(
+        JSON.stringify(join(output, "dependency-request.json")),
+      );
       expect(captured.prompt).toContain(
         JSON.stringify(join(PLUGIN_ROOT, "skills", skill, "SKILL.md")),
       );
@@ -685,6 +847,65 @@ describe("imported finding SDK sessions", () => {
         );
     },
   );
+
+  test.each(["preflight", "runtime-warning"] as const)(
+    "rejects a permission profile failure at %s",
+    async (failure) => {
+      const { security, repository, captured, workbench, permissionCheck } =
+        await skillSession(async function* () {
+          yield {
+            type: "error",
+            message: "synthetic permission fallback warning",
+          };
+          yield* completedEvents();
+        });
+      permissionCheck.mockImplementation(async (_plugin, command) => {
+        if (
+          command ===
+          (failure === "preflight"
+            ? "dependency-permission-profile"
+            : "dependency-permission-warning")
+        ) {
+          throw new Error("Required dependency permission profile rejected");
+        }
+      });
+      await using client = security;
+      await expect(
+        client.runDependencyFindingSkill({
+          skill: "dependency-finding-assessment",
+          targetPath: repository,
+          assessmentId: "assessment-1",
+        }),
+      ).rejects.toThrow("Required dependency permission profile rejected");
+      if (failure === "preflight") expect(captured.thread).toBeUndefined();
+      expect(workbench).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test("rejects a results directory redirected outside the model workspace", async () => {
+    const foreign = await temporaryDirectory();
+    await writeFile(
+      join(foreign, "dependency-assessments.json"),
+      JSON.stringify([{ findingId: "foreign-finding" }]),
+    );
+    const { security, repository, captured, workbench } = await skillSession(
+      async function* () {
+        const output = captured.thread!.workingDirectory!;
+        await rm(output, { recursive: true });
+        await symlink(foreign, output, "junction");
+        yield* completedEvents();
+      },
+    );
+    await using client = security;
+    await expect(
+      client.runDependencyFindingSkill({
+        skill: "dependency-finding-assessment",
+        targetPath: repository,
+        assessmentId: "assessment-1",
+      }),
+    ).rejects.toThrow();
+    expect(workbench).toHaveBeenCalledTimes(1);
+  });
 
   test("assessment preserves explicit web-search and shell-network settings", async () => {
     const settings: JsonObject[] = [
@@ -703,7 +924,12 @@ describe("imported finding SDK sessions", () => {
         targetPath: repository,
         assessmentId: "assessment-1",
       });
-      expect(captured.codex?.config).toMatchObject({
+      expect(
+        Object.assign(
+          {},
+          ...captured.codex!.configOverrides!.map((value) => parse(value)),
+        ),
+      ).toMatchObject({
         ...codexOverrides,
         sandbox_workspace_write: { network_access: false },
       });

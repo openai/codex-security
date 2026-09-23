@@ -2,6 +2,7 @@
 
 import {
   dependencyFindingSkillPrompt,
+  checkDependencyPermissions,
   type DependencyFindingSkillRequest,
 } from "./dependency-findings.js";
 import { statSync } from "node:fs";
@@ -454,6 +455,7 @@ interface ClientDependencies {
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
+  checkDependencyPermissions?: typeof checkDependencyPermissions;
   matchFindings?: typeof matchScanFindingsInternal;
 }
 
@@ -740,7 +742,9 @@ export class CodexSecurity {
     requestedSignal?: AbortSignal,
   ): Promise<string> {
     return await this.#trackOperation(async () => {
+      const controller = new AbortController();
       const signal = AbortSignal.any([
+        controller.signal,
         this.#abortController.signal,
         ...(requestedSignal === undefined ? [] : [requestedSignal]),
       ]);
@@ -753,54 +757,175 @@ export class CodexSecurity {
           signal,
         );
         const session = await this.#prepareSession(inputs, {}, signal);
-        const outputRoot = await preparePersistentOutputRoot(
-          inputs.stateDirectory,
-          "validations",
-          basename(inputs.repository),
-        );
+        const stateDirectory = await realpath(inputs.stateDirectory);
         outputDir = await prepareOutputDir(
           undefined,
           basename(inputs.repository),
-          outputRoot,
-          (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
+          undefined,
+          (path) => {
+            requireOutputOutsideRepository(
+              inputs.protectedRoot,
+              path,
+              "temporary",
+            );
+            requireOutputOutsideRepository(stateDirectory, path, "temporary");
+          },
+        );
+        const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+        const workbenchOptions: WorkbenchCommandOptions = {
+          python: session.python,
+          pluginRoot: session.runtime.plugin.pluginRoot,
+          environment: {
+            ...session.scanEnvironment,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+          signal,
+        };
+        const selection =
+          request.skill === "fix-finding"
+            ? [
+                "get-dependency-finding",
+                "--report-id",
+                request.reportId,
+                "--finding-id",
+                request.findingId,
+                "--require-current",
+              ]
+            : [
+                "get-dependency-assessment",
+                "--assessment-id",
+                request.assessmentId,
+              ];
+        if (selection.some((value) => value === undefined)) {
+          throw new CodexSecurityError(
+            "Dependency finding request is missing its selected IDs.",
+          );
+        }
+        const selected = await workbench(workbenchOptions, [
+          ...(selection as string[]),
+          "--target-path",
+          inputs.repository,
+        ]);
+        await writeFile(
+          join(outputDir, "dependency-request.json"),
+          JSON.stringify(selected),
+          { mode: 0o600, signal },
+        );
+        const modelPluginRoot = await bundledPluginRoot();
+        requireOutputOutsideRepository(
+          stateDirectory,
+          modelPluginRoot,
+          "temporary",
         );
         session.sessionConfig["features"] = {
           ...(session.sessionConfig["features"] as JsonObject),
           plugins: false,
         };
-        const { codex } = this.#createSessionCodex(session, {
-          CODEX_SECURITY_REPOSITORY: inputs.repository,
-          CODEX_SECURITY_PLUGIN_ROOT: session.runtime.plugin.pluginRoot,
-          CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
-          CODEX_SECURITY_SURFACE: this.#surface,
-        });
+        if (
+          request.skill === "dependency-finding-assessment" &&
+          resolveCodexProfile(session.sessionConfig)["web_search"] === undefined
+        ) {
+          session.sessionConfig["web_search"] = "live";
+        }
+        const permissionProfile = (
+          session.sessionConfig["permissions"] as JsonObject
+        )[SCAN_PERMISSION_PROFILE] as JsonObject;
+        const filesystem = {
+          ...(permissionProfile["filesystem"] as JsonObject),
+          [stateDirectory]: { ".": "deny" },
+        };
+        const homeRelativeToState = relative(
+          stateDirectory,
+          session.runtimeHome,
+        );
+        if (
+          homeRelativeToState === "" ||
+          (homeRelativeToState !== ".." &&
+            !homeRelativeToState.startsWith(`..${sep}`) &&
+            !isAbsolute(homeRelativeToState))
+        ) {
+          filesystem[session.runtimeHome] = { ".": "deny" };
+        }
+        const { codex, options: codexOptions } = this.#createSessionCodex(
+          session,
+          {
+            CODEX_SECURITY_REPOSITORY: inputs.repository,
+            CODEX_SECURITY_PLUGIN_ROOT: modelPluginRoot,
+            CODEX_SECURITY_STATE_DIR: outputDir,
+            CODEX_SECURITY_SURFACE: this.#surface,
+          },
+          "auto",
+          undefined,
+          [
+            `permissions.${SCAN_PERMISSION_PROFILE}.filesystem=${inlineToml(filesystem)}`,
+          ],
+          true,
+        );
+        const checkPermissions =
+          this.#dependencies.checkDependencyPermissions ??
+          checkDependencyPermissions;
+        const permissionEnvironment = {
+          ...codexOptions.env,
+          ...(codexOptions.apiKey
+            ? { CODEX_API_KEY: codexOptions.apiKey }
+            : {}),
+        };
+        await checkPermissions(
+          modelPluginRoot,
+          "dependency-permission-profile",
+          {
+            codexPath: codexOptions.codexPathOverride!,
+            cwd: outputDir,
+            profileId: SCAN_PERMISSION_PROFILE,
+            configOverrides: codexOptions.configOverrides!,
+            expectedProfile: { ...permissionProfile, filesystem },
+          },
+          permissionEnvironment,
+          signal,
+        );
         const thread = codex.startThread({
           threadSource:
             request.skill === "fix-finding"
               ? CODEX_SECURITY_THREAD_SOURCES.remediation
               : CODEX_SECURITY_THREAD_SOURCES.validation,
-          workingDirectory: inputs.stateDirectory,
+          workingDirectory: outputDir,
           skipGitRepoCheck: true,
           approvalPolicy: session.approvalPolicy,
-          ...(request.skill === "dependency-finding-assessment" &&
-          resolveCodexProfile(session.sessionConfig)["web_search"] === undefined
-            ? { webSearchMode: "live" as const }
-            : {}),
         });
         const { events } = await thread.runStreamed(
-          dependencyFindingSkillPrompt(
-            request,
-            session.runtime.plugin.pluginRoot,
-            session.python,
-            outputDir,
-            inputs.stateDirectory,
-          ),
+          dependencyFindingSkillPrompt(request, modelPluginRoot, outputDir),
           { signal },
         );
         const { status, finalResponse } = await readCodexTurn({
           thread,
           events,
-          onEvent: () => throwIfAborted(signal, outputDir),
+          onEvent: async (event) => {
+            throwIfAborted(signal, outputDir);
+            const item =
+              event.type === "item.completed" && isRecord(event["item"])
+                ? event["item"]
+                : undefined;
+            const message =
+              event.type === "error"
+                ? event["message"]
+                : item?.["type"] === "error"
+                  ? item["message"]
+                  : undefined;
+            if (typeof message === "string") {
+              try {
+                await checkPermissions(
+                  modelPluginRoot,
+                  "dependency-permission-warning",
+                  { message, profileId: SCAN_PERMISSION_PROFILE },
+                  permissionEnvironment,
+                  signal,
+                );
+              } catch (error) {
+                controller.abort(error);
+                throw error;
+              }
+            }
+          },
         });
         throwIfAborted(signal, outputDir);
         if (status !== "completed" || !finalResponse.trim()) {
@@ -808,9 +933,36 @@ export class CodexSecurity {
             "Dependency finding request did not complete.",
           );
         }
+        if (request.skill === "dependency-finding-assessment") {
+          const results = await readScanFile(
+            outputDir,
+            "dependency-assessments.json",
+            "dependency assessment results",
+            signal,
+          );
+          const staging = await mkdtemp(
+            join(stateDirectory, "dependency-results-"),
+          );
+          try {
+            const resultsPath = join(staging, "results.json");
+            await writeFile(resultsPath, results, { mode: 0o600, signal });
+            await workbench(workbenchOptions, [
+              "record-dependency-assessments",
+              "--assessment-id",
+              request.assessmentId!,
+              "--target-path",
+              inputs.repository,
+              "--results-path",
+              resultsPath,
+            ]);
+          } finally {
+            await rm(staging, { recursive: true, force: true });
+          }
+        }
         return finalResponse;
       } catch (error) {
         if (this.#closed) this.#requireOpen();
+        if (controller.signal.aborted) throw controller.signal.reason;
         throwIfAborted(signal, outputDir);
         throw error;
       }
@@ -2713,7 +2865,12 @@ export class CodexSecurity {
     auth: ScanAuthMode = "auto",
     config?: JsonObject,
     configOverrides: string[] = [],
-  ): { codex: CodexClientLike; environment: ProcessEnvironment } {
+    rawConfigOnly = false,
+  ): {
+    codex: CodexClientLike;
+    environment: ProcessEnvironment;
+    options: CodexOptions;
+  } {
     const {
       runtime,
       python,
@@ -2766,15 +2923,17 @@ export class CodexSecurity {
     };
     const literalConfigOverrides: string[] = [];
     for (const [key, value] of Object.entries(sdkCodexConfig)) {
-      if (hasQuotedConfigKeys(value)) {
-        // The SDK flattens nested keys without quoting literal dots.
+      if (rawConfigOnly || hasQuotedConfigKeys(value)) {
+        // Preflight and the turn share exact arguments in raw mode; quoted
+        // keys also bypass the SDK's dotted-key flattening.
         literalConfigOverrides.push(`${key}=${inlineToml(value)}`);
         delete sdkCodexConfig[key];
       }
     }
     let codexPathOverride =
+      !rawConfigOnly &&
       environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") ===
-      undefined
+        undefined
         ? undefined
         : this.#codexCommand().command;
     let sdkEnvironment = definedEnvironment(withoutOpenAiApiKeys(environment));
@@ -2785,7 +2944,7 @@ export class CodexSecurity {
         sdkEnvironment,
       );
     }
-    const codex = this.#dependencies.createCodex({
+    const options: CodexOptions = {
       ...(codexPathOverride === undefined
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
@@ -2805,8 +2964,9 @@ export class CodexSecurity {
         : {}),
       env: sdkEnvironment,
       config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
-    });
-    return { codex, environment };
+    };
+    const codex = this.#dependencies.createCodex(options);
+    return { codex, environment, options };
   }
 
   async #prepareSession(

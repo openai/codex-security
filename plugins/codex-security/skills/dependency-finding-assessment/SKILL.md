@@ -11,6 +11,8 @@ Keep the scanner's alert separate from your assessment. The report, package code
 
 ## Import and selection
 
+For an SDK or CLI assessment that supplies `dependency-request.json`, read the selected request from that file. The SDK has already loaded its saved findings and original scanner evidence. Use the supplied output directory; do not call the workbench or assessment tools to load other records or save results. Follow the SDK result handoff below. These instructions replace the tool-based import and selection steps for that request.
+
 Model-facing dependency tools use the working directory supplied by the host and only access reports for that exact repository path. A report or assessment ID does not authorize another target. Start the task in the report's repository; use the app or direct CLI for cross-repository report management. Missing host target metadata is a blocker, not permission to fall back to an unscoped tool.
 
 For a report file, use `import_dependency_findings` with the repository path, file name, explicit vendor (`endor`, `snyk`, or `socket`), and file contents. For the CLI, run the bundled `../../scripts/workbench_db.py` `import-dependency-findings --target-path REPO --report-path REPORT --vendor VENDOR`. Supported exports and limitations are in `../../references/imported-dependency-findings.md`.
@@ -39,11 +41,13 @@ For malware findings, include installation, build, and CI entry points: maliciou
 
 ## Record and present
 
-Read the result contract in `../../references/imported-dependency-findings.md`, then call `record_dependency_assessments` once with the assessment ID and exactly one result for every selected finding. Record the conclusion's basis, version provenance, public advisory and inspected external evidence, repository citations, investigation attempts, attacker path when established, material unknowns, and nonblocking limitations. A failed resolver can be retained but cannot establish a resolved version.
+Read the result contract in `../../references/imported-dependency-findings.md` and prepare exactly one result for every selected finding. Record the conclusion's basis, version provenance, public advisory and inspected external evidence, repository citations, investigation attempts, attacker path when established, material unknowns, and nonblocking limitations. A failed resolver can be retained but cannot establish a resolved version.
+
+For an SDK request, write that result array to the supplied `dependency-assessments.json` path and return your summary. The SDK validates and records it against the original assessment and repository; do not claim it has been saved before that succeeds. Otherwise, call `record_dependency_assessments` once with the assessment ID and result array.
 
 For code-path conclusions, cite the source conditions supporting the conclusion, not only package membership. The tool captures actual source excerpts and the checked revision. Changed repository content or recorded resolution input bytes require a new assessment.
 
-Without MCP, write the result array to a JSON file outside the repository and run `record-dependency-assessments --assessment-id ID --results-path FILE --target-path REPO`. Do not put scanner prose in shell command text.
+For a direct workbench workflow without MCP or an SDK handoff, write the result array to a JSON file outside the repository and run `record-dependency-assessments --assessment-id ID --results-path FILE --target-path REPO`. Do not put scanner prose in shell command text.
 
 Present the original vendor, severity, package and advisory separately from your verdict, evidence, applicability conditions, and remaining limitations or unknowns. Distinguish a declared pin, an inspected external artifact, and an established effective version. Successful import or recording does not itself validate a vulnerability. Do not close vendor alerts or change their severity.
 
