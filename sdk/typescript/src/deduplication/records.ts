@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { z } from "incur";
+import { z } from "zod";
 import { DeduplicationReviewError } from "../errors.js";
 import type { Finding } from "../models.js";
 import { abortable } from "../targets.js";

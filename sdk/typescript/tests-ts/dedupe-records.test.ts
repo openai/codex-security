@@ -326,6 +326,7 @@ test("published records input requires findings with or without strict null chec
       join(directory, "node_modules"),
       process.platform === "win32" ? "junction" : "dir",
     );
+    await writeFile(join(directory, "package.json"), '{"type":"module"}');
     await writeFile(
       join(directory, "consumer.mts"),
       `
@@ -347,11 +348,14 @@ void [valid, missing];
         "--strict",
         "--strictNullChecks",
         strictNullChecks,
-        "--module",
+        "--target",
+        "ES2022",
+        "--lib",
         "ESNext",
-        "--moduleResolution",
-        "Bundler",
-        "--skipLibCheck",
+        "--module",
+        "NodeNext",
+        "--types",
+        "node",
         "consumer.mts",
       ]);
       expect(result.status, result.stdout + result.stderr).toBe(0);
