@@ -379,6 +379,68 @@ async function testDependencyImportTools() {
       findingIds: [findingId],
     });
     const assessmentId = started.assessment.id;
+    const scope = { accountId: null, hostId: "local", reportId };
+    const launchRequest = { ...scope, assessmentId, kind: "assessment" };
+    const otherClient = await connect();
+    const attempts = await Promise.all(
+      [client, otherClient].map((current) =>
+        call(current, "claim_dependency_task_launch", launchRequest),
+      ),
+    );
+    assert.equal(attempts.filter((attempt) => attempt.claimed).length, 1);
+    assert.deepEqual(attempts[0].launch, attempts[1].launch);
+    const firstLaunch = attempts[0].launch;
+    const recovered = await call(otherClient, "claim_dependency_task_launch", {
+      ...launchRequest,
+      retryAttemptId: firstLaunch.attemptId,
+    });
+    assert.equal(recovered.claimed, true);
+    assert.notEqual(recovered.launch.attemptId, firstLaunch.attemptId);
+    const settlement = {
+      accountId: null,
+      hostId: "local",
+      launchId: firstLaunch.id,
+      status: "settled",
+      threadId: "saved-dependency-task",
+    };
+    await expectError(
+      client,
+      "settle_dependency_task_launch",
+      {
+        ...settlement,
+        attemptId: firstLaunch.attemptId,
+      },
+      /stale/i,
+    );
+    await call(otherClient, "settle_dependency_task_launch", {
+      ...settlement,
+      attemptId: recovered.launch.attemptId,
+      error: "The first turn outcome is unknown; check the saved task.",
+    });
+    const savedLaunches = await call(
+      client,
+      "get_dependency_task_launches",
+      scope,
+    );
+    assert.equal(savedLaunches.assessments[0].id, assessmentId);
+    assert.equal(savedLaunches.launches[0].threadId, settlement.threadId);
+    assert.equal(savedLaunches.launches[0].status, "settled");
+    assert.match(savedLaunches.launches[0].error, /first turn outcome/);
+    const confirmedLaunch = await call(
+      client,
+      "settle_dependency_task_launch",
+      {
+        ...settlement,
+        attemptId: recovered.launch.attemptId,
+      },
+    );
+    assert.equal(confirmedLaunch.launch.threadId, settlement.threadId);
+    assert.equal(confirmedLaunch.launch.error, null);
+    const otherScope = await call(client, "get_dependency_task_launches", {
+      ...scope,
+      accountId: "different-account",
+    });
+    assert.deepEqual(otherScope.launches, []);
     assert.deepEqual(started.assessment.findingIds, [findingId]);
     assert.deepEqual(
       started.findings.map((finding) => finding.id),

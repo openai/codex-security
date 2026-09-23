@@ -148,6 +148,118 @@ export function registerDependencyImportTools(
     idempotentHint: true,
     openWorldHint: false,
   };
+  const launchScope = {
+    accountId: z.string().min(1).nullable(),
+    hostId: z.string().min(1),
+  };
+  const scopeArgs = (accountId: string | null, hostId: string) => [
+    "--host-id",
+    hostId,
+    ...(accountId === null ? [] : ["--account-id", accountId]),
+  ];
+  server.registerTool(
+    "claim_dependency_task_launch",
+    {
+      title: "Claim a dependency task launch",
+      description:
+        "Atomically claim an assessment or fix task for this account and execution host. Only launch when claimed is true. Existing pending or unknown attempts never expire: supply retryAttemptId only after the user checked existing tasks and explicitly chose to retry. Known task links cannot be retried; confirmed failed launches can be claimed again.",
+      inputSchema: {
+        ...launchScope,
+        reportId: id,
+        kind: z.enum(["assessment", "fix"]),
+        assessmentId: id,
+        findingId: id.optional(),
+        retryAttemptId: id.optional(),
+      },
+      annotations: {
+        ...annotations,
+        readOnlyHint: false,
+        idempotentHint: false,
+      },
+    },
+    async ({
+      accountId,
+      hostId,
+      reportId,
+      kind,
+      assessmentId,
+      findingId,
+      retryAttemptId,
+    }) =>
+      result(
+        await runWorkbench([
+          "claim-dependency-task-launch",
+          ...scopeArgs(accountId, hostId),
+          "--report-id",
+          reportId,
+          "--kind",
+          kind,
+          "--assessment-id",
+          assessmentId,
+          ...(findingId ? ["--finding-id", findingId] : []),
+          ...(retryAttemptId ? ["--retry-attempt-id", retryAttemptId] : []),
+        ]),
+      ),
+  );
+  server.registerTool(
+    "settle_dependency_task_launch",
+    {
+      title: "Save a dependency task launch outcome",
+      description:
+        "Save an outcome for the matching attemptId. Use settled with a known threadId (and error if its first turn is uncertain), failed only when creation definitely failed without a task, or outcome_unknown when task creation may have succeeded. A saved task link cannot be replaced or downgraded. Stale attempts are rejected.",
+      inputSchema: {
+        ...launchScope,
+        launchId: id,
+        attemptId: id,
+        status: z.enum(["outcome_unknown", "failed", "settled"]),
+        threadId: z.string().min(1).optional(),
+        error: z.string().optional(),
+      },
+      annotations: { ...annotations, readOnlyHint: false },
+    },
+    async ({
+      accountId,
+      hostId,
+      launchId,
+      attemptId,
+      status,
+      threadId,
+      error,
+    }) =>
+      result(
+        await runWorkbench([
+          "settle-dependency-task-launch",
+          ...scopeArgs(accountId, hostId),
+          "--launch-id",
+          launchId,
+          "--attempt-id",
+          attemptId,
+          "--status",
+          status,
+          ...(threadId ? ["--thread-id", threadId] : []),
+          ...(error !== undefined ? ["--error", error] : []),
+        ]),
+      ),
+  );
+  server.registerTool(
+    "get_dependency_task_launches",
+    {
+      title: "Read saved dependency assessments and task launches",
+      description:
+        "Read all saved assessment summaries for a report and task launches for this account and execution host, including pending attempts, unknown outcomes, failures, and known task links. Reading does not retry a launch.",
+      inputSchema: { ...launchScope, reportId: id },
+      annotations,
+    },
+    async ({ accountId, hostId, reportId }) =>
+      result(
+        await runWorkbench([
+          "get-dependency-task-launches",
+          ...scopeArgs(accountId, hostId),
+          "--report-id",
+          reportId,
+        ]),
+      ),
+  );
   server.registerTool(
     "import_dependency_findings",
     {

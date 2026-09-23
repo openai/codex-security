@@ -62,6 +62,30 @@ def add_arguments(subparsers: Any) -> None:
     command.add_argument("--assessment-id", required=True)
     command.add_argument("--results-path", required=True)
 
+    for name in (
+        "claim-dependency-task-launch",
+        "settle-dependency-task-launch",
+        "get-dependency-task-launches",
+    ):
+        command = subparsers.add_parser(name)
+        command.add_argument("--account-id")
+        command.add_argument("--host-id", required=True)
+        if name == "settle-dependency-task-launch":
+            command.add_argument("--launch-id", required=True)
+            command.add_argument("--attempt-id", required=True)
+            command.add_argument(
+                "--status", choices=("outcome_unknown", "failed", "settled"), required=True
+            )
+            command.add_argument("--thread-id")
+            command.add_argument("--error")
+        else:
+            command.add_argument("--report-id", required=True)
+        if name == "claim-dependency-task-launch":
+            command.add_argument("--kind", choices=("assessment", "fix"), required=True)
+            command.add_argument("--assessment-id", required=True)
+            command.add_argument("--finding-id")
+            command.add_argument("--retry-attempt-id")
+
 
 def _json(value: object) -> str:
     return json.dumps(value, allow_nan=False, sort_keys=True)
@@ -831,6 +855,163 @@ def record_assessments(
     }
 
 
+def _launch_result(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "id": row["id"],
+        "accountId": row["account_id"] or None,
+        "hostId": row["host_id"],
+        "reportId": row["report_id"],
+        "kind": row["kind"],
+        "assessmentId": row["assessment_id"],
+        "findingId": row["finding_id"] or None,
+        "attemptId": row["attempt_id"],
+        "status": row["status"],
+        "threadId": row["thread_id"],
+        "error": row["error"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def _task_launch(connection: sqlite3.Connection, args: argparse.Namespace) -> sqlite3.Row:
+    row = connection.execute(
+        "SELECT * FROM dependency_task_launches WHERE id = ? AND account_id = ? AND host_id = ?",
+        (args.launch_id, args.account_id or "", args.host_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError("Dependency task launch not found for this account and host.")
+    return row
+
+
+def _require_current_launch(
+    connection: sqlite3.Connection, args: argparse.Namespace, assessment: sqlite3.Row
+) -> None:
+    if args.kind == "fix":
+        saved = get_finding(
+            connection,
+            argparse.Namespace(
+                report_id=args.report_id, finding_id=args.finding_id, require_current=True
+            ),
+        )["finding"]["assessment"]
+        if saved["assessmentId"] != args.assessment_id:
+            raise ValueError("The finding has a different saved assessment. Refresh before fixing.")
+    else:
+        report = _report(connection, args.report_id)
+        if assessment["state"] != "pending":
+            raise ValueError("This assessment is already complete.")
+        if _snapshot(Path(report["target_path"])) != (
+            assessment["target_revision"],
+            assessment["target_snapshot_digest"],
+        ):
+            raise ValueError("The repository changed. Start a new assessment before launching.")
+
+
+def claim_task_launch(
+    connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, object]:
+    """Claim once, or replace a failed or explicitly checked unknown attempt."""
+    if args.kind not in ("assessment", "fix") or bool(args.finding_id) != (args.kind == "fix"):
+        raise ValueError("Fix launches require a finding; assessment launches do not.")
+    connection.execute("BEGIN IMMEDIATE")
+    with connection:
+        assessment = _assessment(connection, args.assessment_id)
+        if assessment["report_id"] != args.report_id:
+            raise ValueError("Assessment does not belong to this imported report.")
+        identity = (
+            args.account_id or "",
+            args.host_id,
+            args.report_id,
+            args.kind,
+            args.assessment_id,
+            args.finding_id or "",
+        )
+        existing = connection.execute(
+            "SELECT * FROM dependency_task_launches WHERE account_id = ? AND host_id = ? "
+            "AND report_id = ? AND kind = ? AND assessment_id = ? AND finding_id = ?",
+            identity,
+        ).fetchone()
+        if args.retry_attempt_id:
+            if existing is None or existing["attempt_id"] != args.retry_attempt_id:
+                raise ValueError("The task launch attempt changed. Refresh before retrying.")
+            if existing["thread_id"] is not None:
+                raise ValueError("This launch already has a task. Open the saved task instead.")
+        elif existing is not None and existing["status"] != "failed":
+            return {"claimed": False, "launch": _launch_result(existing)}
+        _require_current_launch(connection, args, assessment)
+        timestamp, attempt_id = _now(), str(uuid.uuid4())
+        launch_id = existing["id"] if existing is not None else str(uuid.uuid4())
+        if existing is None:
+            connection.execute(
+                "INSERT INTO dependency_task_launches VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)",
+                (launch_id, *identity, attempt_id, timestamp, timestamp),
+            )
+        else:
+            connection.execute(
+                "UPDATE dependency_task_launches SET attempt_id = ?, status = 'pending', "
+                "thread_id = NULL, error = NULL, updated_at = ? WHERE id = ?",
+                (attempt_id, timestamp, launch_id),
+            )
+        row = _task_launch(connection, argparse.Namespace(**vars(args), launch_id=launch_id))
+        return {"claimed": True, "launch": _launch_result(row)}
+
+
+def settle_task_launch(
+    connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, object]:
+    """Save an outcome only while the caller still owns this attempt."""
+    if args.status not in ("settled", "failed", "outcome_unknown") or bool(args.thread_id) != (
+        args.status == "settled"
+    ):
+        raise ValueError("Only a settled launch requires and accepts a task ID.")
+    connection.execute("BEGIN IMMEDIATE")
+    with connection:
+        existing = _task_launch(connection, args)
+        if existing["attempt_id"] != args.attempt_id:
+            raise ValueError("The task launch attempt changed. This outcome is stale.")
+        if existing["status"] == "failed" and args.status == "outcome_unknown":
+            return {"launch": _launch_result(existing)}
+        if existing["thread_id"] is not None:
+            if args.status != "settled":
+                return {"launch": _launch_result(existing)}
+            if args.thread_id != existing["thread_id"]:
+                raise ValueError(
+                    "This launch already has a task. Its saved link cannot be replaced."
+                )
+        connection.execute(
+            "UPDATE dependency_task_launches SET status = ?, thread_id = ?, error = ?, "
+            "updated_at = ? WHERE id = ?",
+            (args.status, args.thread_id, args.error, _now(), args.launch_id),
+        )
+        return {"launch": _launch_result(_task_launch(connection, args))}
+
+
+def get_task_launches(
+    connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, object]:
+    """Read report assessment history and this account/host's durable task links."""
+    connection.execute("BEGIN")
+    with connection:
+        report = _report(connection, args.report_id)
+        assessments = connection.execute(
+            "SELECT id, report_id, finding_ids_json, target_revision, state, created_at "
+            "FROM dependency_assessments WHERE report_id = ? ORDER BY created_at DESC, id",
+            (args.report_id,),
+        ).fetchall()
+        launches = connection.execute(
+            "SELECT * FROM dependency_task_launches WHERE account_id = ? AND host_id = ? "
+            "AND report_id = ? ORDER BY created_at DESC, id",
+            (args.account_id or "", args.host_id, args.report_id),
+        ).fetchall()
+    return {
+        "assessments": [
+            {**_assessment_result(row, report["target_path"]), "createdAt": row["created_at"]}
+            for row in assessments
+        ],
+        "launches": [_launch_result(row) for row in launches],
+    }
+
+
 def run_command(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, object]:
     """Dispatch an import command with the workbench's concise CLI errors."""
     try:
@@ -840,6 +1021,9 @@ def run_command(connection: sqlite3.Connection, args: argparse.Namespace) -> dic
 
 
 COMMANDS = {
+    "claim-dependency-task-launch": claim_task_launch,
+    "settle-dependency-task-launch": settle_task_launch,
+    "get-dependency-task-launches": get_task_launches,
     "import-dependency-findings": import_report,
     "list-dependency-reports": list_reports,
     "get-dependency-report": get_report,

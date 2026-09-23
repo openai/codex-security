@@ -89,6 +89,14 @@ Hash the actual manifests, lockfiles, or installed metadata that establish the n
 
 Select findings explicitly; a selection is limited to 100 and retries reuse an identical pending assessment. Results must contain exactly one result per selection. Assessment prose and generated source excerpts are limited to 64 KiB per finding; the native resolver transcript is retained separately from that prose budget. Code citations must refer to files covered by the Git snapshot. Changing the repository or recorded resolver inputs requires a new assessment; previous claims and completed assessment history remain available.
 
+### Task launches
+
+Clients that open assessment or fix tasks first call `claim_dependency_task_launch` with the account (nullable for API-key use), execution host, report, kind, and assessment ID. Fixes also require the finding ID and its latest saved assessment. The client creates the task only after a response with `claimed: true`. The workbench stores the claim atomically across connections and returns an `attemptId` for settlement.
+
+Save the outcome with `settle_dependency_task_launch`: `settled` requires a known `threadId`, `failed` means task creation definitely failed, and `outcome_unknown` means creation may have succeeded. A known thread remains linked even when its first turn is uncertain; save that uncertainty in `error`. Settlement must use the captured attempt ID, so an old callback cannot overwrite a replacement attempt or replace a known task link.
+
+Pending and unknown attempts never expire automatically. After checking existing tasks, the user may explicitly choose to retry; pass the saved `retryAttemptId` to compare and replace that attempt. This also recovers a pending claim left by a closed client. Confirmed failures may be claimed again normally. Both new and recovered launches recheck repository evidence. `get_dependency_task_launches` returns all saved assessment summaries for the report and task links for the requested account and host, without discarding older history.
+
 ## Fixes
 
 Fixing requires an explicit user request and a current `affects_application` assessment. Fetch it with `requireCurrent: true`; the repository and any recorded resolver inputs must still match. Preserve its declared, resolved, or artifact scope and recheck the attacker path and prerequisites, including for older results without structured attack-path fields. Recheck native resolution when the fix relies on effective versions or package presence. For external artifacts, recheck the repository's current reference and inspected artifact identity; repository freshness alone does not detect a moved remote tag. Prepare a tested patch in an isolated worktree or temporary copy and record relevant tests and breaking upgrade behavior. Assessment alone does not authorize edits, and the Fix action does not automatically apply, commit, push, merge, or deploy a patch.

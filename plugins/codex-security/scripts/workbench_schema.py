@@ -907,6 +907,31 @@ MIGRATIONS = (
         CREATE INDEX dependency_assessments_by_report ON dependency_assessments(report_id, state);
         """,
     ),
+    (
+        43,
+        "persist dependency task launch ownership",
+        """
+        CREATE TABLE dependency_task_launches (
+            id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            host_id TEXT NOT NULL,
+            report_id TEXT NOT NULL REFERENCES dependency_reports(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL CHECK (kind IN ('assessment', 'fix')),
+            assessment_id TEXT NOT NULL REFERENCES dependency_assessments(id) ON DELETE CASCADE,
+            finding_id TEXT NOT NULL,
+            attempt_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'outcome_unknown', 'failed', 'settled')),
+            thread_id TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (account_id, host_id, report_id, kind, assessment_id, finding_id),
+            CHECK ((kind = 'assessment' AND finding_id = '') OR (kind = 'fix' AND finding_id != '')),
+            CHECK ((status = 'settled' AND thread_id IS NOT NULL)
+                OR (status != 'settled' AND thread_id IS NULL))
+        );
+        """,
+    ),
 )
 
 
