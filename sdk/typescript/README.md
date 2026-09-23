@@ -1612,47 +1612,44 @@ JSON scans do not use interactive controls. `validate`, `login`, and `logout`
 reject `--json`.
 
 `install-hook` adds an optional local Git pre-commit check for staged and
-unstaged changes. When Git invokes the installed hook, it blocks the commit if
-the scan cannot complete or finds an issue at or above the configured severity
-(high by default). It respects `core.hooksPath` and leaves custom hooks alone.
-Choose the threshold when installing with `--fail-on-severity`.
+unstaged changes. It's advisory; use a required CI check to enforce a passing
+scan. When Git runs the hook, it blocks commits if the scan can't finish or
+finds an issue at or above the threshold (`high` by default). Set it when
+installing with `--fail-on-severity`. The installer respects `core.hooksPath`
+and leaves custom hooks alone.
 
-The hook is advisory. We recommend installing the CLI outside the repository
-and invoking that installation directly. For example, install it globally:
+We recommend installing the CLI outside the repository and running that copy
+directly. For a global installation:
 
 ```bash
 npm install --global @openai/codex-security
 ```
 
-If the repository also has a local installation, `npx` may select that copy.
+If the repository also has a local copy, `npx` may run it instead.
 
-Before installing or replacing a hook, find the hook entry with
-`git -C /path/to/repository rev-parse --git-path hooks/pre-commit`; Git may
+Before installing or replacing a hook, run
+`git -C /path/to/repository rev-parse --git-path hooks/pre-commit`. Git may
 return a path relative to `/path/to/repository`. Check the hook, if it exists,
-and the path to its directory for symbolic links or a shared location. Leave
-custom, linked, shared, or unverified hooks untouched. If such a hook needs
-changing, coordinate with its owner or use a required CI check. The installer
-can update older generated hooks automatically, so inspect those before
-invoking it too.
+and the path to its directory for symlinks or shared locations. Leave custom,
+linked, shared, or unverified hooks alone. If they need to change, contact the
+owner or use a required CI check. Check older generated hooks too; the installer
+can update them automatically.
 
-If the hooks directory belongs only to this repository and there is no existing
-hook, run the global executable from outside the repository:
+If the hooks directory belongs only to this repository and there is no hook,
+run the global CLI from outside the repository:
 
 ```bash
 codex-security install-hook /path/to/repository
 ```
 
-For an existing regular file you can confirm belongs only to this repository
-and contains just the generated Codex Security command, preserve its severity.
-An older generated hook that invokes `npx` can be updated automatically when
-you run the installer with that severity. Newer generated hooks record the
-absolute paths to both Node and the CLI. If either path changes, `install-hook`
-will not replace the existing hook: back it up, remove it, and rerun
+To migrate a hook, confirm it's a regular file used only by this repository
+and contains only the generated Codex Security command. Keep its severity.
+The installer can update older hooks that invoke `npx` if you use the same
+severity. Newer hooks store absolute paths to Node and the CLI. If either path
+changes, the installer won't replace the hook: back it up, remove it, and rerun
 `codex-security install-hook /path/to/repository` with the same
-`--fail-on-severity` value as before (default: `high`). If reinstallation fails,
-restore the backup and verify the hook before relying on it.
-
-Use a required CI check when a passing scan must be enforced.
+`--fail-on-severity` value (default: `high`). If reinstallation fails, restore
+the backup and verify the hook before relying on it.
 
 ### Import alerts from the CLI
 
