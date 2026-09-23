@@ -885,3 +885,193 @@ def test_projection_includes_surface_evidence_receipts() -> None:
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "Reviewed parser entrypoints. Evidence: artifacts/receipts/parser.jsonl" in markdown
+
+
+def test_projection_renders_full_dependency_graph_including_clean_shared_packages() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["dependencies"] = {
+        "nodes": [
+            {
+                "id": "project:services/payments",
+                "kind": "project",
+                "name": "services/payments",
+                "status": "project",
+                "changed": False,
+            },
+            {
+                "id": "npm:clean-direct@2.1.0",
+                "kind": "dependency",
+                "name": "clean-direct",
+                "package": "clean-direct",
+                "oldVersion": "2.0.0",
+                "newVersion": "2.1.0",
+                "dependencyTypes": ["direct"],
+                "status": "completed",
+                "changed": True,
+                "cacheHit": True,
+                "findingCount": 0,
+                "affectedProjects": ["services/payments"],
+            },
+            {
+                "id": "npm:other-direct@1.1.0",
+                "kind": "dependency",
+                "name": "other-direct",
+                "package": "other-direct",
+                "oldVersion": "1.0.0",
+                "newVersion": "1.1.0",
+                "dependencyTypes": ["direct"],
+                "status": "completed",
+                "changed": True,
+                "findingCount": 1,
+                "affectedProjects": ["services/payments"],
+            },
+            {
+                "id": "npm:unchanged-bridge",
+                "kind": "dependency",
+                "name": "unchanged-bridge",
+                "package": "unchanged-bridge",
+                "status": "unchanged",
+                "changed": False,
+                "affectedProjects": ["services/payments"],
+            },
+            {
+                "id": "npm:shared-leaf@3.1.0",
+                "kind": "dependency",
+                "name": "shared-leaf",
+                "package": "shared-leaf",
+                "oldVersion": "3.0.0",
+                "newVersion": "3.1.0",
+                "dependencyTypes": ["transitive"],
+                "status": "completed",
+                "changed": True,
+                "findingCount": 0,
+                "affectedProjects": ["services/payments"],
+            },
+            {
+                "id": "npm:failed-leaf@4.0.0",
+                "kind": "dependency",
+                "name": "failed-leaf",
+                "package": "failed-leaf",
+                "oldVersion": None,
+                "newVersion": "4.0.0",
+                "dependencyTypes": ["transitive"],
+                "status": "failed",
+                "changed": True,
+                "findingCount": 0,
+                "affectedProjects": ["services/payments"],
+            },
+        ],
+        "edges": [
+            {"from": "project:services/payments", "to": "npm:clean-direct@2.1.0"},
+            {"from": "project:services/payments", "to": "npm:other-direct@1.1.0"},
+            {"from": "npm:clean-direct@2.1.0", "to": "npm:unchanged-bridge"},
+            {"from": "npm:other-direct@1.1.0", "to": "npm:unchanged-bridge"},
+            {"from": "npm:unchanged-bridge", "to": "npm:shared-leaf@3.1.0"},
+            {"from": "npm:unchanged-bridge", "to": "npm:failed-leaf@4.0.0"},
+        ],
+    }
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert "## Dependency Updates" in markdown
+    assert "services/payments" in markdown
+    assert "clean-direct" in markdown
+    assert "2.0.0 → 2.1.0" in markdown
+    assert "unchanged-bridge" in markdown
+    assert "shared-leaf" in markdown
+    assert "failed-leaf" in markdown
+    assert "failed-leaf added at 4.0.0" in markdown
+    assert "failed" in markdown
+    assert "cached" in markdown
+    assert "shared" in markdown
+    assert "4 changed" in markdown
+
+
+def test_projection_omits_dependency_section_when_inventory_is_absent() -> None:
+    markdown = PROJECTION.generate_report_markdown(*canonical_documents()).decode()
+
+    assert "## Dependency Updates" not in markdown
+
+
+def test_projection_describes_full_dependency_graph_without_inventing_updates() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["dependencies"] = {
+        "nodes": [
+            {
+                "id": "project:services/payments",
+                "kind": "project",
+                "name": "services/payments",
+                "status": "project",
+                "changed": False,
+            },
+            {
+                "id": "npm:direct@2.1.0",
+                "kind": "dependency",
+                "name": "direct",
+                "package": "direct",
+                "oldVersion": None,
+                "newVersion": "2.1.0",
+                "dependencyTypes": ["direct"],
+                "status": "completed",
+                "changed": False,
+                "cacheHit": True,
+                "findingCount": 0,
+            },
+            {
+                "id": "npm:transitive@3.1.0",
+                "kind": "dependency",
+                "name": "transitive",
+                "package": "transitive",
+                "oldVersion": None,
+                "newVersion": "3.1.0",
+                "dependencyTypes": ["transitive"],
+                "status": "failed",
+                "changed": False,
+                "findingCount": 1,
+            },
+        ],
+        "edges": [
+            {"from": "project:services/payments", "to": "npm:direct@2.1.0"},
+            {"from": "npm:direct@2.1.0", "to": "npm:transitive@3.1.0"},
+        ],
+    }
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert "## Dependencies" in markdown
+    assert "## Dependency Updates" not in markdown
+    assert "2 packages: 1 direct, 1 transitive" in markdown
+    assert "changed packages" not in markdown
+    assert "1 completed, 1 failed" in markdown
+    assert "Cached package results: 1" in markdown
+    assert "Upstream findings: 1" in markdown
+    assert "services/payments" in markdown
+    assert "direct 2.1.0" in markdown
+    assert "transitive 3.1.0" in markdown
+    assert "added at" not in markdown
+
+
+def test_projection_displays_verified_finding_introduction_version() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["extensions"] = {
+        "dependency": {
+            "package": "example-package",
+            "introducedIn": {
+                "version": "1.0.4",
+                "artifactDigest": "sha256:" + "a" * 64,
+            },
+        }
+    }
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert "| Introduced in | 1.0.4 |" in markdown
+
+
+def test_projection_does_not_claim_unverified_finding_introduction() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["extensions"] = {"dependency": {"package": "example-package"}}
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert "| Introduced in |" not in markdown

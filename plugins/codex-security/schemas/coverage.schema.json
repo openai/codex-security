@@ -167,6 +167,124 @@
         }
       }
     },
+    "dependencies": {
+      "type": "object",
+      "required": [
+        "nodes",
+        "edges"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "kind",
+              "name",
+              "status",
+              "changed"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "enum": [
+                  "project",
+                  "dependency"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "enum": [
+                  "project",
+                  "completed",
+                  "partial",
+                  "failed",
+                  "not_scanned",
+                  "unchanged"
+                ]
+              },
+              "changed": {
+                "type": "boolean"
+              },
+              "ecosystem": {
+                "type": "string",
+                "minLength": 1
+              },
+              "registry": {
+                "type": "string",
+                "minLength": 1
+              },
+              "package": {
+                "type": "string",
+                "minLength": 1
+              },
+              "oldVersion": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1
+              },
+              "newVersion": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dependencyTypes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "cacheHit": {
+                "type": "boolean"
+              },
+              "findingCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "affectedProjects": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "from",
+              "to"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "type": "string",
+                "minLength": 1
+              },
+              "to": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
     "openQuestions": {
       "type": "array",
       "items": {
