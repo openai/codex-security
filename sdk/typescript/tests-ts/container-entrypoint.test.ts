@@ -1,5 +1,5 @@
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -34,29 +34,6 @@ const versionVerifier = existsSync(publicVersionVerifier)
       "docker",
       "verify-container-release-version.sh",
     );
-const appArmorRestrictsUserNamespaces = (() => {
-  try {
-    return (
-      readFileSync(
-        "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
-        "utf8",
-      ).trim() === "1"
-    );
-  } catch {
-    return false;
-  }
-})();
-const usesCodexSecurityAppArmorProfile = (() => {
-  try {
-    return (
-      readFileSync("/proc/self/attr/current", "utf8").trim() ===
-      "codex-security-container (enforce)"
-    );
-  } catch {
-    return false;
-  }
-})();
-
 async function runEntrypoint(
   args: readonly string[],
   overrides: Record<string, string> = {},
@@ -135,7 +112,7 @@ async function runVersionVerifier(
 
 describe("customer container entrypoint", () => {
   testPosix(
-    "preserves CSV scan arguments and selects Landlock only without the AppArmor profile",
+    "preserves CSV scan arguments without selecting the legacy sandbox",
     async () => {
       const result = await runEntrypoint([
         "bulk-scan",
@@ -156,10 +133,6 @@ describe("customer container entrypoint", () => {
           "/output",
           "--workers",
           "2",
-          ...(appArmorRestrictsUserNamespaces &&
-          !usesCodexSecurityAppArmorProfile
-            ? ["--codex", "features.use_legacy_landlock=true"]
-            : []),
           "",
         ].join("\n"),
       );
@@ -182,16 +155,7 @@ describe("customer container entrypoint", () => {
       const result = await runEntrypoint(arguments_);
       expect(result.status).toBe(0);
       expect(result.stderr).toBe("");
-      expect(result.stdout).toBe(
-        [
-          ...arguments_,
-          ...(appArmorRestrictsUserNamespaces &&
-          !usesCodexSecurityAppArmorProfile
-            ? ["--codex", "features.use_legacy_landlock=true"]
-            : []),
-          "",
-        ].join("\n"),
-      );
+      expect(result.stdout).toBe([...arguments_, ""].join("\n"));
     }
   });
 
@@ -206,54 +170,21 @@ describe("customer container entrypoint", () => {
     },
   );
 
-  testPosix(
-    "preserves an explicit Landlock override without duplicating it",
-    async () => {
-      const arguments_ = [
-        "bulk-scan",
-        "/input/repositories.csv",
-        "--output-dir",
-        "/output",
-        "--codex",
-        "features.use_legacy_landlock=true",
-      ];
-      const result = await runEntrypoint(arguments_);
+  testPosix("preserves explicit Codex sandbox settings", async () => {
+    const arguments_ = [
+      "bulk-scan",
+      "/input/repositories.csv",
+      "--output-dir",
+      "/output",
+      "--codex",
+      "features.use_legacy_landlock=false",
+    ];
+    const result = await runEntrypoint(arguments_);
 
-      expect(result.status).toBe(0);
-      expect(result.stderr).toBe("");
-      expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
-    },
-  );
-
-  testPosix(
-    "rejects incompatible Landlock overrides only on restricted hosts",
-    async () => {
-      const arguments_ = [
-        "bulk-scan",
-        "/input/repositories.csv",
-        "--output-dir",
-        "/output",
-        "--codex",
-        "features.use_legacy_landlock=false",
-      ];
-      const result = await runEntrypoint(arguments_);
-
-      if (
-        appArmorRestrictsUserNamespaces &&
-        !usesCodexSecurityAppArmorProfile
-      ) {
-        expect(result.status).toBe(2);
-        expect(result.stdout).toBe("");
-        expect(result.stderr).toBe(
-          "codex-security: restricted Ubuntu hosts require --codex features.use_legacy_landlock=true.\n",
-        );
-      } else {
-        expect(result.status).toBe(0);
-        expect(result.stderr).toBe("");
-        expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
-      }
-    },
-  );
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
+  });
 
   testPosix(
     "rejects interactive discovery before starting the CLI",
