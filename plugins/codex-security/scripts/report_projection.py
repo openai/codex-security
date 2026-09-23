@@ -523,6 +523,158 @@ def _surface_notes(surface: dict[str, Any]) -> str:
     return _cell(f"{notes} Evidence: {evidence}")
 
 
+def _dependency_introduction_lines(finding: dict[str, Any]) -> list[str]:
+    extensions = finding.get("extensions")
+    if not isinstance(extensions, dict):
+        return []
+    dependency = extensions.get("dependency")
+    if not isinstance(dependency, dict):
+        return []
+    introduced = dependency.get("introducedIn")
+    if not isinstance(introduced, dict):
+        return []
+    version = introduced.get("version")
+    return [f"| Introduced in | {_cell(version)} |"] if isinstance(version, str) and version else []
+
+
+def _dependency_node_label(node: dict[str, Any]) -> str:
+    label = _text(node.get("name"), "Unnamed dependency")
+    if node.get("kind") == "project":
+        return label
+    old_version = _text(node.get("oldVersion"), "")
+    new_version = _text(node.get("newVersion"), "")
+    if old_version and new_version:
+        label += f" {old_version} → {new_version}"
+    elif new_version:
+        label += f" added at {new_version}" if node.get("changed") is True else f" {new_version}"
+
+    details = [_text(node.get("status"), "not recorded")]
+    dependency_types = _strings(node.get("dependencyTypes"))
+    if dependency_types:
+        details.append(", ".join(dependency_types))
+    cache_hit = node.get("cacheHit")
+    if cache_hit is True:
+        details.append("cached")
+    elif cache_hit is False:
+        details.append("fresh scan")
+    finding_count = node.get("findingCount")
+    if isinstance(finding_count, int) and not isinstance(finding_count, bool):
+        details.append(f"{finding_count} finding{'s' if finding_count != 1 else ''}")
+    projects = _strings(node.get("affectedProjects"))
+    if len(projects) > 1:
+        details.append("projects: " + ", ".join(projects))
+    return f"{label} [{'; '.join(details)}]"
+
+
+def _dependency_inventory_lines(coverage: dict[str, Any]) -> list[str]:
+    inventory = coverage.get("dependencies")
+    if inventory is None:
+        return []
+    if not isinstance(inventory, dict):
+        raise ReportProjectionError("coverage dependencies must be an object")
+    raw_nodes = inventory.get("nodes")
+    raw_edges = inventory.get("edges")
+    if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
+        raise ReportProjectionError("coverage dependencies must contain nodes and edges")
+
+    nodes: dict[str, dict[str, Any]] = {}
+    for node in raw_nodes:
+        if not isinstance(node, dict) or not isinstance(node.get("id"), str) or not node["id"]:
+            raise ReportProjectionError("coverage dependency nodes require nonempty identities")
+        if node["id"] in nodes:
+            raise ReportProjectionError("coverage dependency nodes have duplicate identities")
+        nodes[node["id"]] = node
+
+    children: dict[str, set[str]] = {node_id: set() for node_id in nodes}
+    incoming: dict[str, int] = {node_id: 0 for node_id in nodes}
+    for edge in raw_edges:
+        if not isinstance(edge, dict):
+            raise ReportProjectionError("coverage dependency edges must be objects")
+        parent = edge.get("from")
+        child = edge.get("to")
+        if parent not in nodes or child not in nodes:
+            raise ReportProjectionError("coverage dependency edges must reference known nodes")
+        if child not in children[parent]:
+            children[parent].add(child)
+            incoming[child] += 1
+
+    dependencies = [node for node in nodes.values() if node.get("kind") == "dependency"]
+    update_scan = any(node.get("changed") is True for node in dependencies)
+    selected = [
+        node
+        for node in dependencies
+        if (node.get("changed") is True if update_scan else node.get("status") != "unchanged")
+    ]
+    direct = sum("direct" in node.get("dependencyTypes", []) for node in selected)
+    transitive = sum("transitive" in node.get("dependencyTypes", []) for node in selected)
+    statuses = Counter(str(node.get("status")) for node in selected)
+    cached = sum(node.get("cacheHit") is True for node in selected)
+    finding_count = sum(
+        count
+        for node in selected
+        if isinstance(count := node.get("findingCount"), int) and not isinstance(count, bool)
+    )
+    lines = [
+        "",
+        "## Dependency Updates" if update_scan else "## Dependencies",
+        "",
+        (
+            f"- {len(selected)} {'changed ' if update_scan else ''}packages: "
+            f"{direct} direct, {transitive} transitive."
+        ),
+        "- Artifact review: "
+        + ", ".join(
+            f"{statuses[status]} {status.replace('_', ' ')}"
+            for status in ("completed", "partial", "failed", "not_scanned")
+            if statuses[status]
+        )
+        + ".",
+        f"- Cached package results: {cached}.",
+        f"- Upstream findings: {finding_count}.",
+        "",
+        "### Dependency Tree",
+        "",
+    ]
+
+    def sort_key(node_id: str) -> tuple[bool, str, str, str]:
+        node = nodes[node_id]
+        return (
+            node.get("kind") != "project",
+            str(node.get("name", "")),
+            str(node.get("newVersion", "")),
+            node_id,
+        )
+
+    rendered: set[str] = set()
+
+    def visit(node_id: str, depth: int, ancestors: set[str]) -> None:
+        label = _dependency_node_label(nodes[node_id])
+        if node_id in ancestors:
+            lines.append(f"{'  ' * depth}- {label} [cycle]")
+            return
+        if node_id in rendered:
+            lines.append(f"{'  ' * depth}- {label} [shared]")
+            return
+        lines.append(f"{'  ' * depth}- {label}")
+        rendered.add(node_id)
+        for child_id in sorted(children[node_id], key=sort_key):
+            visit(child_id, depth + 1, {*ancestors, node_id})
+
+    roots = sorted((node_id for node_id, count in incoming.items() if count == 0), key=sort_key)
+    for node_id in roots:
+        visit(node_id, 0, set())
+    for node_id in sorted(nodes, key=sort_key):
+        if node_id not in rendered:
+            visit(node_id, 0, set())
+    if not nodes:
+        lines.append(
+            "- No dependency changes were recorded."
+            if update_scan
+            else "- No dependencies were recorded."
+        )
+    return lines
+
+
 def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
     _, raw_root_cause = merged_root_cause(finding)
@@ -634,6 +786,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         f"| Category | {_cell(finding['taxonomy']['category'])} |",
         f"| CWE | {_cell(cwes)} |",
         f"| Affected lines | {_cell(_locations(finding))} |",
+        *_dependency_introduction_lines(finding),
         "",
         "#### Summary",
         "",
@@ -768,6 +921,7 @@ def _linked_finding_section(number: int, finding: dict[str, Any], report_path: s
         f"| Category | {_cell(finding['taxonomy']['category'])} |",
         f"| CWE | {_cell(cwes)} |",
         f"| Affected lines | {_cell(_locations(finding))} |",
+        *_dependency_introduction_lines(finding),
     ]
     for heading in ("Summary", "Validation", "Dataflow", "Reachability", "Severity", "Remediation"):
         lines.extend(["", f"#### {heading}", "", f"See the {link}."])
@@ -887,6 +1041,7 @@ def build_report_markdown(
         values = _strings(threat_model.get(key))
         if values:
             lines.extend(["", f"### {heading}", "", *_bullets(values, fallback)])
+    lines.extend(_dependency_inventory_lines(coverage))
     lines.extend(["", "## Findings", ""])
     if findings:
         if deep_presentation:
