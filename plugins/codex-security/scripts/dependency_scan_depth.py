@@ -12,6 +12,8 @@ from typing import Any
 DependencyIdentity = tuple[str, str, str, str | None, str]
 
 _REPORTING = run_path(str(Path(__file__).with_name("dependency_scan_reporting.py")))
+_SELECTION = run_path(str(Path(__file__).with_name("dependency_scan_selection.py")))
+selected_dependencies = _SELECTION["selected_dependencies"]
 dependency_identity = _REPORTING["dependency_identity"]
 read_object = _REPORTING["read_object"]
 require_entries = _REPORTING["require_entries"]
@@ -90,6 +92,20 @@ def select_dependencies_by_depth(
     return selected
 
 
+def select_exact_dependencies(
+    discovery: dict[str, Any], selection: object
+) -> list[dict[str, str | None]]:
+    """Select only requested versions that occur in the current resolved graph."""
+    selected = selected_dependencies(selection)
+    discovered = _discovered_dependencies(discovery)
+    if any(dependency_identity(entry) not in discovered for entry in selected):
+        raise ValueError(
+            "A selected version is missing from the current resolved inventory. "
+            "Calculate dependencies again."
+        )
+    return selected
+
+
 def _record_unknown_depth_limitations(discovery: dict[str, Any], impacts: dict[str, Any]) -> bool:
     discovered = _discovered_dependencies(discovery)
     depths = _actual_dependency_depths(discovery, impacts)
@@ -128,15 +144,27 @@ def main() -> None:
     )
     parser.add_argument("--discovery", required=True, help="Local dependency-discovery JSON.")
     parser.add_argument("--impacts", required=True, help="Local dependency-impacts JSON.")
-    parser.add_argument("--dependency-depth", required=True, help="A selected graph depth, or all.")
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--dependency-depth", help="A selected graph depth, or all.")
+    selection.add_argument("--selected-dependencies", help="JSON array of exact selected versions.")
     args = parser.parse_args()
 
     discovery_path = Path(args.discovery)
     discovery = read_object(discovery_path, "Local dependency discovery")
     impacts = read_object(Path(args.impacts), "Local dependency impacts")
-    dependency_depth = None if args.dependency_depth == "all" else int(args.dependency_depth)
-
-    selected = select_dependencies_by_depth(discovery, impacts, dependency_depth)
+    dependency_depth = (
+        None if args.dependency_depth in (None, "all") else int(args.dependency_depth)
+    )
+    selected = (
+        select_exact_dependencies(discovery, json.loads(args.selected_dependencies))
+        if args.selected_dependencies is not None
+        else select_dependencies_by_depth(discovery, impacts, dependency_depth)
+    )
+    if args.selected_dependencies is not None:
+        discovery["selectedDependencies"] = selected
+        discovery_path.write_text(
+            json.dumps(discovery, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
     if dependency_depth is not None and _record_unknown_depth_limitations(discovery, impacts):
         discovery_path.write_text(
             json.dumps(discovery, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

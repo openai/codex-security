@@ -64,6 +64,7 @@
     "scripts/deep_scan_workbench.py",
     "scripts/dependency_scan_depth.py",
     "scripts/dependency_scan_reporting.py",
+    "scripts/dependency_scan_selection.py",
     "scripts/filesystem_identity.py",
     "scripts/finalize_scan_contract.py",
     "scripts/finding_preview.py",

@@ -521,7 +521,7 @@ def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) ->
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (44,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (45,)
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])
@@ -1308,6 +1308,7 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
             (42, "persist dependency scan setup and upstream job association"),
             (43, "persist dependency scan graph depth"),
             (44, "persist dependency scan target"),
+            (45, "persist explicitly selected dependency versions"),
         ]
         assert {row[1] for row in connection.execute("PRAGMA table_info(workspaces)")} >= {
             "dependency_depth",
@@ -1414,7 +1415,7 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN handoff_claim_token")
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (44,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (45,)
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
             "handoff_claim_token",
@@ -2444,6 +2445,7 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
             (42, "persist dependency scan setup and upstream job association"),
             (43, "persist dependency scan graph depth"),
             (44, "persist dependency scan target"),
+            (45, "persist explicitly selected dependency versions"),
         ]
         assert "capability_preflight_json" in {
             row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
@@ -2530,6 +2532,7 @@ def test_workbench_upgrades_pre_release_phase_progress_migration(tmp_path: Path)
             (42, "persist dependency scan setup and upstream job association"),
             (43, "persist dependency scan graph depth"),
             (44, "persist dependency scan target"),
+            (45, "persist explicitly selected dependency versions"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
@@ -2624,6 +2627,7 @@ def test_workbench_upgrades_pre_release_preflight_progress_migration(tmp_path: P
             (42, "persist dependency scan setup and upstream job association"),
             (43, "persist dependency scan graph depth"),
             (44, "persist dependency scan target"),
+            (45, "persist explicitly selected dependency versions"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")

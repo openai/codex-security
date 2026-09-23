@@ -27,6 +27,11 @@ outside an approved path.
 - Support Windows as well as Unix. Use platform-aware path and process APIs, and test realistic Windows paths and directory links when relevant.
 - Favor direct flows and clear errors over defensive fallbacks for implausible cases.
 
+## TypeScript conventions
+
+Follow the strict compiler settings in `tsconfig.json` and the package Prettier
+formatter. Describe public SDK types and options with concise JSDoc comments.
+
 ## Unit tests
 
 Add focused Bun tests in `tests-ts/<module>.test.ts`. Cover observable behavior,

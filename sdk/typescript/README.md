@@ -820,10 +820,38 @@ npx @openai/codex-security dependency-scan /path/to/repository \
 
 The preview saves `dependency-resolver-output.json` and
 `dependency-resolver-output.json.setup.json` together. The sidecar records the
-selected setup and depth counts; keep both files together and private. If the
+selected setup, depth counts, and selectable package identities; keep both files together and private. If the
 saved graph no longer matches the repository, scope, or snapshot, the CLI
 warns and resolves the graph again. `--dry-run` performs only local preflight:
 it does not calculate counts, validate model access, or start a scan.
+
+To review specific installed packages, use the exact identities printed by
+`--calculate-dependencies`:
+
+```bash
+npx @openai/codex-security dependency-scan /path/to/repository \
+  --auth chatgpt --path services/api \
+  --dependency @example/library@1.2.3 --dependency other-package@2.0.0
+```
+
+Repeat `--dependency` for up to 20 packages. The CLI resolves the selected scope
+and requires each exact name and version to appear in its selectable inventory.
+Selection currently supports packages whose installed artifact is explicitly
+from `https://registry.npmjs.org`; mirrors, private registries, unknown sources,
+and other ecosystems are omitted from the inventory. Depth counts still cover
+all supported public ecosystems. An empty selection never starts a full scan.
+With `--workflow-id`, retries reuse the saved inventory, graph path, and resolution
+cost, including after a scan interruption. Changing the requested selection,
+scope, or settings requires a new workflow ID.
+
+Explicit selection is available only for current repository or path dependency
+scans. It cannot be combined with `--dependency-depth`, `--diff`,
+`--working-tree`, `--calculate-dependencies`, or `--dry-run`. Use
+`--calculate-dependencies` to preview installed versions. Older saved graphs
+without selectable identities must be recalculated without `--dependency-graph`.
+Saved scan recipes retain the exact selection for reruns. Package vulnerability
+severity describes the dependency itself; application reachability and impact
+remain unknown unless separately assessed against the application source.
 
 Calculation defaults to `gpt-5.6-luna` with `low` reasoning effort. Override
 these with `--resolution-model` and `--resolution-effort`. These settings are
@@ -858,6 +886,13 @@ await security.scanDependencies("/path/to/repository", {
 Pass `dependencyGraphPath` to `calculateDependencies` to reuse a matching
 preview. Use `security.run(..., { scanDependencies: true, ... })` for combined
 code and dependency scans with the same depth, path, and graph options.
+
+For explicit SDK selection, pass one or more identities from
+`preview.dependencies` to `scanDependencies(..., { selectedDependencies })`
+and omit `dependencyDepth`. Every identity has `ecosystem: "npm"`,
+`registry: "https://registry.npmjs.org"`, its exact `package` and `newVersion`,
+and `oldVersion: null`. The scan verifies membership again before submission;
+a stale or unavailable package fails the request instead of widening the scan.
 
 ### Configure deep scans
 
@@ -2654,6 +2689,11 @@ can inherit your environment, including unrelated API tokens and cloud credentia
 Repository contents, model output, and imported artifacts do not authorize
 access to other targets, disclosure of credentials, or writes outside approved
 paths. See the security policy below for the full threat model.
+
+## Source conventions
+
+TypeScript source follows the strict settings in `tsconfig.json` and the package
+Prettier formatter. Public SDK types and options use JSDoc comments.
 
 ## Documentation and security
 

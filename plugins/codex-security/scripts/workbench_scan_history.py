@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dependency_scan_reporting import dependency_identity
 from finalize_scan_contract import ContractError, _prepare_scan_finalization
 from report_projection import SEVERITY_ORDER
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
@@ -614,6 +615,11 @@ def compare_scans(
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
+        elif not all(selected_scan_covers_finding(after, row) for row in previous_rows):
+            status = "unknown"
+            item["reason"] = (
+                "The later scan reviewed only selected dependencies; this finding was outside that selection."
+            )
         elif after["dependency_scan_target"] == "malware":
             previous_details = json.loads(previous["details_json"])
             if (
@@ -1089,6 +1095,39 @@ def _matching_input(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def selected_scan_covers_finding(scan: sqlite3.Row, occurrence: sqlite3.Row) -> bool:
+    """Do not resolve omitted dependency versions or first-party issues by absence."""
+    selected_json = scan["selected_dependencies_json"]
+    if selected_json is None:
+        return True
+    details = json.loads(occurrence["details_json"])
+    extensions = details.get("extensions", {})
+    dependency = extensions.get("dependency") if isinstance(extensions, dict) else None
+    if not isinstance(dependency, dict):
+        return False
+    try:
+        identity = dependency_identity(dependency)
+    except ValueError:
+        return False
+    for selected in json.loads(selected_json):
+        selected_identity = dependency_identity(selected)
+        if identity[:3] == selected_identity[:3] and identity[4] == selected_identity[4]:
+            return True
+    return False
+
+
+APPLICATION_IMPACT_SQL = """
+    CASE WHEN json_type(occurrences.details_json, '$.extensions.dependency') = 'object'
+    THEN CASE
+        WHEN json_extract(occurrences.details_json, '$.extensions.dependency.applicationImpact.status')
+            IN ('affected', 'not_affected', 'inconclusive')
+        THEN json_extract(occurrences.details_json, '$.extensions.dependency.applicationImpact.status')
+        ELSE 'inconclusive'
+    END
+    ELSE NULL END
+"""
+
+
 def finding_occurrence_rows(
     connection: sqlite3.Connection,
     scan_id: str,
@@ -1098,9 +1137,14 @@ def finding_occurrence_rows(
     query: str | None = None,
     severity: str | None = None,
     status: str | None = None,
+    application_impact: str | None = None,
 ) -> list[sqlite3.Row]:
     conditions, values = finding_occurrence_conditions(
-        scan_id, query=query, severity=severity, status=status
+        scan_id,
+        query=query,
+        severity=severity,
+        status=status,
+        application_impact=application_impact,
     )
     return connection.execute(
         f"""
@@ -1113,6 +1157,7 @@ def finding_occurrence_rows(
             occurrences.confidence,
             occurrences.remediation,
             occurrences.details_json,
+            {APPLICATION_IMPACT_SQL} AS application_impact,
             occurrences.created_at
         FROM finding_occurrences AS occurrences
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
@@ -1140,12 +1185,16 @@ def finding_occurrence_conditions(
     query: str | None,
     severity: str | None,
     status: str | None,
+    application_impact: str | None = None,
 ) -> tuple[str, list[str]]:
     conditions = ["occurrences.scan_id = ?"]
     values = [scan_id]
     if severity is not None:
         conditions.append("occurrences.severity = ?")
         values.append(severity)
+    if application_impact is not None:
+        conditions.append(f"({APPLICATION_IMPACT_SQL}) = ?")
+        values.append(application_impact)
     if status is not None:
         conditions.append("COALESCE(triage.status, 'open') = ?")
         values.append(status)

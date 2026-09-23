@@ -133,7 +133,7 @@ connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
 connection.executescript('''
 PRAGMA foreign_keys = ON;
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT, dependency_scan_target TEXT);
+CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT, dependency_scan_target TEXT, selected_dependencies_json TEXT);
 CREATE TABLE finding_occurrences (
     id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT, severity TEXT
 );
@@ -428,7 +428,7 @@ import workbench_scan_history as history
 connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
 connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT, dependency_scan_target TEXT);
+CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT, dependency_scan_target TEXT, selected_dependencies_json TEXT);
 CREATE TABLE finding_occurrences (
     id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT, severity TEXT
 );

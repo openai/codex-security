@@ -71,6 +71,73 @@ def require_string(value: Any, label: str) -> str:
     return value
 
 
+def application_impact(impact: dict[str, Any], upstream_id: str) -> dict[str, Any]:
+    """Keep each upstream issue separate from its evidenced first-party impact."""
+    assessments = impact.get("findingAssessments", [])
+    if not isinstance(assessments, list):
+        raise ValueError("Dependency findingAssessments must be an array.")
+    selected = None
+    seen: set[str] = set()
+    for assessment in assessments:
+        if not isinstance(assessment, dict):
+            raise ValueError("Dependency finding assessments must be objects.")
+        finding_id = require_string(
+            assessment.get("upstreamFindingId"), "Assessment upstreamFindingId"
+        )
+        if finding_id in seen:
+            raise ValueError(
+                "Dependency finding assessments must have unique upstreamFindingId values."
+            )
+        seen.add(finding_id)
+        if finding_id == upstream_id:
+            selected = assessment
+    if selected is None:
+        return {
+            "status": "inconclusive",
+            "summary": "Application impact has not been established for this package finding.",
+            "evidence": [],
+            "limitations": ["No per-finding assessment of first-party usage was recorded."],
+        }
+
+    status = selected.get("status")
+    if status not in {"affected", "not_affected", "inconclusive"}:
+        raise ValueError(
+            "Application impact status must be affected, not_affected, or inconclusive."
+        )
+    summary = require_string(selected.get("summary"), "Application impact summary")
+    raw_evidence = selected.get("evidence", [])
+    if not isinstance(raw_evidence, list):
+        raise ValueError("Application impact evidence must be an array.")
+    evidence = []
+    for item in raw_evidence:
+        if not isinstance(item, dict):
+            raise ValueError("Application impact evidence must be an object.")
+        line = item.get("startLine")
+        if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+            raise ValueError("Application impact evidence startLine must be a positive integer.")
+        evidence.append(
+            {
+                "path": safe_relative_path(item.get("path")),
+                "startLine": line,
+                "code": require_string(item.get("code"), "Application impact evidence code"),
+                "explanation": require_string(
+                    item.get("explanation"), "Application impact evidence explanation"
+                ),
+            }
+        )
+    limitations = selected.get("limitations", [])
+    if not isinstance(limitations, list):
+        raise ValueError("Application impact limitations must be an array.")
+    limitations = [require_string(item, "Application impact limitation") for item in limitations]
+    if status != "inconclusive" and not evidence:
+        status = "inconclusive"
+        summary = "Application impact could not be established without first-party evidence."
+        limitations.append(
+            "The recorded assessment did not provide first-party code or configuration evidence."
+        )
+    return {"status": status, "summary": summary, "evidence": evidence, "limitations": limitations}
+
+
 def local_finding(
     package: dict[str, Any],
     upstream: dict[str, Any],
@@ -115,6 +182,8 @@ def local_finding(
         "affectedProjects": impact.get("affectedProjects", []),
         "dependencyChains": impact.get("dependencyChains", []),
         "usageContext": impact.get("usageContext", ""),
+        "scannerSeverity": upstream.get("severity", {"level": "medium"}),
+        "applicationImpact": application_impact(impact, upstream_id),
     }
     introduced = upstream.get("introducedIn")
     if introduced is not None:
@@ -292,6 +361,20 @@ def dependency_inventory(
     results_by_identity = {dependency_identity(entry): entry for entry in result_entries}
     if set(results_by_identity) - set(discovered_by_identity):
         raise ValueError("Cloud dependency results contain an identity outside local discovery.")
+    selected = None
+    if "selectedDependencies" in discovery:
+        selected = {
+            dependency_identity(entry)
+            for entry in require_entries(discovery, "selectedDependencies", "Dependency selection")
+        }
+        if not selected or not selected.issubset(discovered_by_identity):
+            raise ValueError(
+                "Selected dependencies must identify resolved packages in this discovery."
+            )
+        if not set(results_by_identity).issubset(selected):
+            raise ValueError(
+                "Cloud dependency results contain packages outside the requested selection."
+            )
     impacts_by_identity: dict[tuple[str, str, str, str | None, str], list[dict[str, Any]]] = {}
     for impact in impact_entries:
         impacts_by_identity.setdefault(dependency_identity(impact), []).append(impact)
@@ -326,6 +409,8 @@ def dependency_inventory(
             "status": status,
             "changed": not full_repository,
         }
+        if selected is not None:
+            node["selected"] = identity in selected
         dependency_types = discovered.get("dependencyTypes", [])
         if not isinstance(dependency_types, list) or any(
             not isinstance(value, str) or not value.strip() for value in dependency_types
@@ -452,6 +537,42 @@ def dependency_inventory(
     }
 
 
+def defer_missing_selected_results(
+    coverage: dict[str, Any], discovery: dict[str, Any], results: dict[str, Any]
+) -> None:
+    """Keep requested packages without a result visible as incomplete work."""
+    if "selectedDependencies" not in discovery:
+        return
+    received = {
+        dependency_identity(entry)
+        for entry in require_entries(results, "packages", "Cloud dependency results")
+    }
+    missing = [
+        entry
+        for entry in require_entries(discovery, "selectedDependencies", "Dependency selection")
+        if dependency_identity(entry) not in received
+    ]
+    if not missing:
+        return
+    deferred = require_entries(coverage, "deferred", "Canonical coverage")
+    existing_ids = {entry.get("id") for entry in deferred}
+    for dependency in missing:
+        identity = json.dumps(dependency_identity(dependency), separators=(",", ":"))
+        review_id = "dependency-missing-" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+        if review_id not in existing_ids:
+            deferred.append(
+                {
+                    "id": review_id,
+                    "reason": (
+                        f"Selected dependency {dependency['package']} {dependency['newVersion']} "
+                        "has no published-artifact result."
+                    ),
+                }
+            )
+            existing_ids.add(review_id)
+    coverage["completeness"] = "partial"
+
+
 def defer_unknown_prior_findings(
     coverage: dict[str, Any],
     results: dict[str, Any],
@@ -541,6 +662,7 @@ def main() -> None:
             discovery = read_object(Path(arguments.discovery), "Local dependency discovery")
             coverage = read_object(Path(arguments.coverage), "Canonical coverage")
             coverage["dependencies"] = dependency_inventory(discovery, impacts, results)
+            defer_missing_selected_results(coverage, discovery, results)
             defer_unknown_prior_findings(coverage, results, impacts)
         merged, unmapped = merge_dependency_findings(findings, results, impacts, coverage)
         findings_path.write_text(

@@ -523,18 +523,52 @@ def _surface_notes(surface: dict[str, Any]) -> str:
     return _cell(f"{notes} Evidence: {evidence}")
 
 
-def _dependency_introduction_lines(finding: dict[str, Any]) -> list[str]:
+def _dependency_summary_lines(finding: dict[str, Any]) -> list[str]:
     extensions = finding.get("extensions")
     if not isinstance(extensions, dict):
         return []
     dependency = extensions.get("dependency")
     if not isinstance(dependency, dict):
         return []
+    lines = []
+    scanner_severity = dependency.get("scannerSeverity")
+    if isinstance(scanner_severity, dict):
+        lines.append(f"| Package severity | {_cell(scanner_severity.get('level'))} |")
+    impact = dependency.get("applicationImpact")
+    impact_status = (
+        impact.get("status", "inconclusive") if isinstance(impact, dict) else "inconclusive"
+    )
+    lines.append(f"| Application impact | {_cell(impact_status.replace('_', ' '))} |")
     introduced = dependency.get("introducedIn")
-    if not isinstance(introduced, dict):
+    if (
+        isinstance(introduced, dict)
+        and isinstance(version := introduced.get("version"), str)
+        and version
+    ):
+        lines.append(f"| Introduced in | {_cell(version)} |")
+    return lines
+
+
+def _dependency_impact_lines(finding: dict[str, Any]) -> list[str]:
+    """Project local impact evidence without changing the upstream issue severity."""
+    extensions = finding.get("extensions")
+    dependency = extensions.get("dependency") if isinstance(extensions, dict) else None
+    if not isinstance(dependency, dict):
         return []
-    version = introduced.get("version")
-    return [f"| Introduced in | {_cell(version)} |"] if isinstance(version, str) and version else []
+    impact = dependency.get("applicationImpact")
+    if not isinstance(impact, dict):
+        return ["", "#### Application Impact", "", "Application impact has not been assessed."]
+    lines = [
+        "",
+        "#### Application Impact",
+        "",
+        _text(impact.get("summary"), "Application impact has not been established."),
+    ]
+    lines.extend(_code_evidence_lines(impact.get("evidence", [])))
+    limitations = _strings(impact.get("limitations"))
+    if limitations:
+        lines.extend(["", "Limitations:", *_bullets(limitations, "None recorded.")])
+    return lines
 
 
 def _dependency_node_label(node: dict[str, Any]) -> str:
@@ -548,7 +582,11 @@ def _dependency_node_label(node: dict[str, Any]) -> str:
     elif new_version:
         label += f" added at {new_version}" if node.get("changed") is True else f" {new_version}"
 
-    details = [_text(node.get("status"), "not recorded")]
+    details = [
+        "not selected"
+        if node.get("selected") is False
+        else _text(node.get("status"), "not recorded")
+    ]
     dependency_types = _strings(node.get("dependencyTypes"))
     if dependency_types:
         details.append(", ".join(dependency_types))
@@ -600,11 +638,16 @@ def _dependency_inventory_lines(coverage: dict[str, Any]) -> list[str]:
 
     dependencies = [node for node in nodes.values() if node.get("kind") == "dependency"]
     update_scan = any(node.get("changed") is True for node in dependencies)
-    selected = [
-        node
-        for node in dependencies
-        if (node.get("changed") is True if update_scan else node.get("status") != "unchanged")
-    ]
+    explicit_selection = any("selected" in node for node in dependencies)
+    if explicit_selection:
+        selected = [node for node in dependencies if node.get("selected") is True]
+        package_scope = "selected "
+    elif update_scan:
+        selected = [node for node in dependencies if node.get("changed") is True]
+        package_scope = "changed "
+    else:
+        selected = [node for node in dependencies if node.get("status") != "unchanged"]
+        package_scope = ""
     direct = sum("direct" in node.get("dependencyTypes", []) for node in selected)
     transitive = sum("transitive" in node.get("dependencyTypes", []) for node in selected)
     statuses = Counter(str(node.get("status")) for node in selected)
@@ -618,10 +661,7 @@ def _dependency_inventory_lines(coverage: dict[str, Any]) -> list[str]:
         "",
         "## Dependency Updates" if update_scan else "## Dependencies",
         "",
-        (
-            f"- {len(selected)} {'changed ' if update_scan else ''}packages: "
-            f"{direct} direct, {transitive} transitive."
-        ),
+        (f"- {len(selected)} {package_scope}packages: {direct} direct, {transitive} transitive."),
         "- Artifact review: "
         + ", ".join(
             f"{statuses[status]} {status.replace('_', ' ')}"
@@ -786,11 +826,12 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         f"| Category | {_cell(finding['taxonomy']['category'])} |",
         f"| CWE | {_cell(cwes)} |",
         f"| Affected lines | {_cell(_locations(finding))} |",
-        *_dependency_introduction_lines(finding),
+        *_dependency_summary_lines(finding),
         "",
         "#### Summary",
         "",
         _text(finding["summary"], "No canonical finding summary was recorded."),
+        *_dependency_impact_lines(finding),
     ]
     if root_cause_summary or root_cause_code_evidence:
         lines.extend(["", "#### Root Cause", ""])
@@ -921,7 +962,8 @@ def _linked_finding_section(number: int, finding: dict[str, Any], report_path: s
         f"| Category | {_cell(finding['taxonomy']['category'])} |",
         f"| CWE | {_cell(cwes)} |",
         f"| Affected lines | {_cell(_locations(finding))} |",
-        *_dependency_introduction_lines(finding),
+        *_dependency_summary_lines(finding),
+        *_dependency_impact_lines(finding),
     ]
     for heading in ("Summary", "Validation", "Dataflow", "Reachability", "Severity", "Remediation"):
         lines.extend(["", f"#### {heading}", "", f"See the {link}."])

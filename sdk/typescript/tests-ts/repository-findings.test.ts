@@ -16,7 +16,7 @@ connection.row_factory = sqlite3.Row
 connection.executescript("""
 CREATE TABLE security_targets(id TEXT, current_path TEXT, display_name TEXT);
 CREATE TABLE scans(id TEXT, target_id TEXT, scope TEXT, updated_at TEXT, status TEXT, started_at TEXT);
-CREATE TABLE finding_occurrences(id TEXT, finding_id TEXT, severity TEXT, created_at TEXT, scan_id TEXT, title TEXT, summary TEXT);
+CREATE TABLE finding_occurrences(id TEXT, finding_id TEXT, severity TEXT, created_at TEXT, scan_id TEXT, title TEXT, summary TEXT, details_json TEXT DEFAULT '{}');
 CREATE TABLE finding_triage(occurrence_id TEXT, status TEXT, updated_at TEXT, close_reason TEXT);
 CREATE TABLE finding_locations(occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
 CREATE TABLE scan_comparison_matches(before_occurrence_id TEXT, after_occurrence_id TEXT);
@@ -28,7 +28,7 @@ def add_scan(scan_id, target, day):
 
 def add_finding(occurrence, finding, scan):
     started = connection.execute("SELECT started_at FROM scans WHERE id = ?", (scan,)).fetchone()[0]
-    connection.execute("INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?)", (occurrence, finding, "high", started, scan, finding, "Summary"))
+    connection.execute("INSERT INTO finding_occurrences (id, finding_id, severity, created_at, scan_id, title, summary) VALUES (?, ?, ?, ?, ?, ?, ?)", (occurrence, finding, "high", started, scan, finding, "Summary"))
     connection.execute("INSERT INTO finding_locations VALUES (?, ?, ?, ?)", (occurrence, "src/auth.py", "root_control", 0))
 
 for scan_id, target, day in [("old", "first", 1), ("same", "first", 2), ("renamed", "first", 3), ("latest", "first", 4), ("other", "second", 4)]:

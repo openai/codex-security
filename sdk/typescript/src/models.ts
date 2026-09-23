@@ -259,6 +259,26 @@ export interface FindingsDocument {
       [k: string]: unknown;
     };
     extensions?: {
+      dependency?: {
+        scannerSeverity?: {
+          level: "critical" | "high" | "medium" | "low" | "informational";
+          [k: string]: unknown;
+        };
+        applicationImpact?: {
+          status: "affected" | "not_affected" | "inconclusive";
+          summary: string;
+          evidence: {
+            path: string;
+            startLine: number;
+            code: string;
+            explanation: string;
+            [k: string]: unknown;
+          }[];
+          limitations: string[];
+          [k: string]: unknown;
+        };
+        [k: string]: unknown;
+      };
       candidateId?: string;
       ledgerRowId?: string;
       reportId?: string;
@@ -334,6 +354,7 @@ export interface CoverageDocument {
       cacheHit?: boolean;
       findingCount?: number;
       affectedProjects?: string[];
+      selected?: boolean;
     }[];
     edges: {
       from: string;

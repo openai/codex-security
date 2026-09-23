@@ -1,4 +1,5 @@
 export { CodexSecurity, createSecurity } from "./api.js";
+export type { DependencyIdentity } from "./dependency-selection.js";
 export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
 export type {
   ResolvedProjectConfig,

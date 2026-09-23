@@ -39,6 +39,8 @@ def read_workflow(connection: sqlite3.Connection, workflow_id: str) -> dict[str,
     elif row["scope_all_repositories"] is not None:
         state["scope"] = {"allRepositories": bool(row["scope_all_repositories"])}
     results = json.loads(row["results_json"])
+    if "dependencyCalculation" in results:
+        state["dependencyCalculation"] = results["dependencyCalculation"]
     for stage in WORKFLOW_STAGES:
         current = {"status": row[f"{stage}_status"]}
         if row[f"{stage}_error"] is not None:
@@ -60,6 +62,8 @@ def save_workflow(connection: sqlite3.Connection, state: dict[str, Any], timesta
         scope_all_repositories=scope.get("allRepositories"),
     )
     results = {}
+    if "dependencyCalculation" in state:
+        results["dependencyCalculation"] = state["dependencyCalculation"]
     for stage in WORKFLOW_STAGES:
         current = state["stages"][stage]
         values[f"{stage}_status"] = current["status"]
@@ -184,7 +188,23 @@ def finding_workflow(
             }
         bind_workflow(state, payload.get("binding", {}))
         action = payload["action"]
-        if action != "bind":
+        if action in {"prepare-dependency-calculation", "complete-dependency-calculation"}:
+            digest = payload["requestDigest"]
+            if not isinstance(digest, str) or not digest.strip():
+                raise SystemExit("Dependency calculation requestDigest must be a nonempty string.")
+            calculation = state.get("dependencyCalculation")
+            if calculation is None:
+                if action != "prepare-dependency-calculation":
+                    raise SystemExit("Prepare the dependency calculation before saving its result.")
+                calculation = state["dependencyCalculation"] = {"requestDigest": digest}
+            if calculation["requestDigest"] != digest:
+                raise SystemExit(
+                    f"Workflow {workflow_id} is already bound to a different dependency calculation. "
+                    "Use another --workflow-id."
+                )
+            if action == "complete-dependency-calculation":
+                calculation.setdefault("result", payload["result"])
+        elif action != "bind":
             stage = payload["stage"]
             if stage not in state["stages"]:
                 raise SystemExit("Unknown workflow stage.")

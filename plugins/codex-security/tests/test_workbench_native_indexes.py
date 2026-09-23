@@ -292,3 +292,61 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     assert second["latestScan"]["scanId"] == latest_second["scanId"]
     assert second["openFindingsCount"] == 1
     assert second["scanCount"] == 1
+
+
+def test_application_impact_filters_preserve_unknown_and_ordinary_findings(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "repo"
+    target.mkdir()
+    scans = {}
+    for label in ("affected", "not_affected", "inconclusive", "legacy", "ordinary"):
+        scan = complete_scan(state_dir, target, identity_anchor=f"impact-{label}")
+        scans[label] = scan
+        if label == "ordinary":
+            continue
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            row = connection.execute(
+                "SELECT details_json FROM finding_occurrences WHERE scan_id = ?", (scan["scanId"],)
+            ).fetchone()
+            finding = json.loads(row[0])
+            dependency = {}
+            if label != "legacy":
+                dependency["applicationImpact"] = {"status": label}
+            finding["extensions"] = {"dependency": dependency}
+            connection.execute(
+                "UPDATE finding_occurrences SET details_json = ? WHERE scan_id = ?",
+                (json.dumps(finding), scan["scanId"]),
+            )
+
+    all_findings = run_workbench(state_dir, "list-global-findings")["findings"]
+    assert len(all_findings) == 5
+    by_scan = {finding["scanId"]: finding for finding in all_findings}
+    assert by_scan[scans["ordinary"]["scanId"]]["applicationImpact"] is None
+    assert by_scan[scans["legacy"]["scanId"]]["applicationImpact"] == "inconclusive"
+    for status in ("affected", "not_affected", "inconclusive"):
+        matching = run_workbench(
+            state_dir, "list-global-findings", "--application-impact", status, "--limit", "1"
+        )
+        assert len(matching["findings"]) == 1
+        assert matching["findings"][0]["applicationImpact"] == status
+        assert matching["nextOffset"] == (1 if status == "inconclusive" else None)
+        scoped = run_workbench(
+            state_dir,
+            "list-findings",
+            "--scan-id",
+            str(scans[status]["scanId"]),
+            "--application-impact",
+            status,
+        )["findingsPage"]
+        assert len(scoped["findings"]) == 1
+        assert scoped["total"] == 1
+        excluded = run_workbench(
+            state_dir,
+            "list-findings",
+            "--scan-id",
+            str(scans["ordinary"]["scanId"]),
+            "--application-impact",
+            status,
+        )["findingsPage"]
+        assert excluded["findings"] == []
+        assert excluded["total"] == 0

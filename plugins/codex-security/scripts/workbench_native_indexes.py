@@ -29,6 +29,10 @@ def list_global_findings(
         and (args.severity is None or row["severity"] == args.severity)
         and (args.status is None or row["status"] == args.status)
         and (
+            getattr(args, "application_impact", None) is None
+            or row["application_impact"] == args.application_impact
+        )
+        and (
             not query
             or any(
                 query in value.casefold()
@@ -49,6 +53,7 @@ def list_global_findings(
             {
                 "confirmedInLatestScan": row["confirmed_in_latest_scan"],
                 "createdAt": row["created_at"],
+                "applicationImpact": row["application_impact"],
                 "findingId": row["finding_id"],
                 "knownSince": row["known_since"],
                 "knownScanIds": row["known_scan_ids"],
@@ -107,7 +112,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
 
     grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
     for row in connection.execute(
-        """
+        f"""
         SELECT
             occurrences.id AS occurrence_id,
             occurrences.finding_id,
@@ -124,6 +129,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
             triage.updated_at AS decision_updated_at,
             occurrences.title,
             occurrences.summary,
+            {scan_history.APPLICATION_IMPACT_SQL} AS application_impact,
             (
                 SELECT locations.relative_path
                 FROM finding_locations AS locations

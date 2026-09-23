@@ -5,6 +5,10 @@ import { pathToFileURL } from "node:url";
 import { resolveCodexProfile, type JsonObject } from "./config.js";
 import { CodexSecurityError, IncompleteScanError } from "./errors.js";
 import type { NormalizedTarget } from "./targets.js";
+import {
+  parseDependencyIdentities,
+  type DependencyIdentity,
+} from "./dependency-selection.js";
 
 export const DEPENDENCY_GRAPH_FILE = "dependency-resolver-output.json";
 export const DEPENDENCY_CALCULATION_MODEL = "gpt-5.6-luna";
@@ -87,16 +91,31 @@ export function parseDependencyDepthCounts(value: unknown): number[] {
   return value["depthCounts"];
 }
 
+export function parseDependencyInventory(
+  value: unknown,
+): DependencyIdentity[] | undefined {
+  if (!isRecord(value) || value["dependencies"] === undefined) return undefined;
+  try {
+    return parseDependencyIdentities(value["dependencies"]);
+  } catch (error) {
+    throw new IncompleteScanError(
+      "Dependency calculation returned an invalid selectable dependency inventory.",
+      { cause: error },
+    );
+  }
+}
+
 export async function saveDependencyGraphSetup(
   graphPath: string,
   setup: DependencyGraphSetup,
   depthCounts: number[],
   signal: AbortSignal,
+  dependencies?: DependencyIdentity[],
 ): Promise<void> {
   await requireDependencyGraph(graphPath);
   await writeFile(
     `${graphPath}.setup.json`,
-    `${JSON.stringify({ ...setup, depthCounts })}\n`,
+    `${JSON.stringify({ ...setup, depthCounts, ...(dependencies === undefined ? {} : { dependencies }) })}\n`,
     {
       mode: 0o600,
       flag: "wx",
@@ -109,7 +128,11 @@ export async function reusableDependencyGraph(
   graphPath: string,
   setup: DependencyGraphSetup,
   signal?: AbortSignal,
-): Promise<{ depthCounts: number[]; dependencyGraphPath: string }> {
+): Promise<{
+  depthCounts: number[];
+  dependencyGraphPath: string;
+  dependencies?: DependencyIdentity[];
+}> {
   const saved: unknown = JSON.parse(
     await readFile(`${graphPath}.setup.json`, { encoding: "utf8", signal }),
   );
@@ -120,7 +143,9 @@ export async function reusableDependencyGraph(
   }
   await requireDependencyGraph(graphPath);
   signal?.throwIfAborted();
+  const dependencies = parseDependencyInventory(saved);
   return {
+    ...(dependencies === undefined ? {} : { dependencies }),
     depthCounts: parseDependencyDepthCounts(saved),
     dependencyGraphPath: graphPath,
   };

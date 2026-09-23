@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, sep } from "node:path";
 import type { JsonObject } from "./config.js";
+import type { DependencyIdentity } from "./dependency-selection.js";
 import { CodexSecurityError, safeErrorMessage } from "./errors.js";
 import type { FindingSearchScope } from "./finding-retrieval.js";
 import {
@@ -22,7 +23,16 @@ export interface WorkflowBinding {
   destination?: string;
   scope?: FindingSearchScope;
 }
+export interface WorkflowDependencyCalculation {
+  requestDigest: string;
+  result?: {
+    dependencyGraphPath: string;
+    dependencies?: DependencyIdentity[];
+    costUsd: number;
+  };
+}
 export interface WorkflowState extends WorkflowBinding {
+  dependencyCalculation?: WorkflowDependencyCalculation;
   id: string;
   stages: Record<
     WorkflowStage,
@@ -91,6 +101,28 @@ export class FindingWorkflow {
 
   async bind(binding: WorkflowBinding): Promise<WorkflowState> {
     return (await this.command({ action: "bind", binding }))!;
+  }
+
+  async prepareDependencyCalculation(
+    requestDigest: string,
+  ): Promise<WorkflowDependencyCalculation> {
+    const state = await this.command({
+      action: "prepare-dependency-calculation",
+      requestDigest,
+    });
+    return state!.dependencyCalculation!;
+  }
+
+  async completeDependencyCalculation(
+    requestDigest: string,
+    result: NonNullable<WorkflowDependencyCalculation["result"]>,
+  ): Promise<WorkflowDependencyCalculation> {
+    const state = await this.command({
+      action: "complete-dependency-calculation",
+      requestDigest,
+      result,
+    });
+    return state!.dependencyCalculation!;
   }
 
   async begin(stage: WorkflowStage): Promise<WorkflowState> {
