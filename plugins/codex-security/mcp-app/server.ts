@@ -7,6 +7,10 @@ import { promisify } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import {
+  getDependencyScan,
+  prepareDependencyScanSubmission,
+} from "./src/dependency-scans.js";
+import {
   missingPythonHelperMessage,
   resolvePythonCommand,
 } from "./src/python_command.js";
@@ -20,6 +24,7 @@ import {
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { createScanArtifactContext } from "./src/artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
+import { estimateDependencyDepthCounts } from "./src/server/dependency-estimation.js";
 import {
   DeepScanCoordinatorRegistry,
   DeepScanStartLock,
@@ -57,6 +62,51 @@ let workbenchStateSelectionTail: Promise<void> = Promise.resolve();
 
 const userContextSchema = z.string().trim().min(1);
 const editableUserContextSchema = z.string().trim();
+const dependencyScanDependencySchema = z
+  .object({
+    ecosystem: z.string().trim().min(1),
+    registry: z.string().trim().url(),
+    package: z.string().trim().min(1),
+    oldVersion: z.string().trim().min(1).nullable(),
+    newVersion: z.string().trim().min(1),
+  })
+  .strict();
+const dependencyScanRoleModelSettingsSchema = z
+  .object({
+    model: z.string().optional(),
+    reasoningEffort: z.string().optional(),
+  })
+  .strict();
+const dependencyScanModelSettingsSchema = z
+  .object({
+    acquisition: dependencyScanRoleModelSettingsSchema.optional(),
+    scan: dependencyScanRoleModelSettingsSchema.optional(),
+    verification: dependencyScanRoleModelSettingsSchema.optional(),
+    history: dependencyScanRoleModelSettingsSchema.optional(),
+  })
+  .strict();
+const dependencyDepthSchema = z.number().int().positive().nullable();
+const dependencyScanTargetSchema = z.enum([
+  "malware",
+  "malware-and-vulnerabilities",
+]);
+const submitDependencyScanSchema = {
+  dependencies: z.array(dependencyScanDependencySchema).min(1),
+  dependencyScanTarget: dependencyScanTargetSchema.optional(),
+  modelSettings: dependencyScanModelSettingsSchema.optional(),
+  scanId: z.string().uuid().optional(),
+};
+const getDependencyScanSchema = {
+  jobId: z.string().regex(/^dps_[A-Za-z0-9_-]+$/),
+};
+const scanModeSchema = z.enum([
+  "diff",
+  "standard",
+  "deep",
+  "dependency_update",
+  "full_dependency",
+]);
+
 const verifiedAccessGrantSchema = z
   .object({
     level: z.enum(["tac1", "tac2", "tac3", "government"]),
@@ -167,13 +217,16 @@ const currentScanPreflightCheckSchema = z
   })
   .strict();
 const openSchema = {
+  dependencyDepth: dependencyDepthSchema.optional(),
+  dependencyScanTarget: dependencyScanTargetSchema.optional(),
   diffTarget: diffTargetSchema
     .optional()
     .describe("Exact local Git revisions for Review changes mode."),
-  mode: z
-    .enum(["diff", "standard", "deep"])
+  mode: scanModeSchema
     .optional()
     .describe("Initial scan mode inferred from the user's request."),
+  modelSettings: dependencyScanModelSettingsSchema.optional(),
+  scanDependencies: z.boolean().optional(),
   scope: z
     .string()
     .trim()
@@ -222,11 +275,14 @@ const startScanSchema = {
   reasoningEffort: z.string().trim().min(1).max(32).optional(),
 };
 const startPromptOnlyScanSchema = {
+  dependencyScanTarget: dependencyScanTargetSchema.optional(),
   diffTarget: diffTargetSchema
     .optional()
-    .describe("Exact local Git revisions for Review changes mode."),
+    .describe(
+      "Exact local Git revisions for Review changes or Dependency Update mode.",
+    ),
   mode: z
-    .enum(["diff", "standard"])
+    .enum(["diff", "standard", "dependency_update", "full_dependency"])
     .describe(
       "Prompt-driven scan mode. Deep Scan uses start_codex_security_deep_scan instead.",
     ),
@@ -280,8 +336,9 @@ const startHeadlessStandardScanSchema = {
     .describe("Optional security focus supplied by the user."),
 };
 type PromptOnlyScanInput = {
+  dependencyScanTarget?: z.output<typeof dependencyScanTargetSchema>;
   diffTarget?: z.output<typeof diffTargetSchema>;
-  mode: "diff" | "standard";
+  mode: "diff" | "standard" | "dependency_update" | "full_dependency";
   scope: string;
   targetPath: string;
   targetSummary?: string;
@@ -349,8 +406,12 @@ const targetInspectionSchema = {
   targetPath: z.string().trim().min(1).max(4096),
 };
 const submissionSchema = {
+  dependencyDepth: dependencyDepthSchema.optional(),
+  dependencyScanTarget: dependencyScanTargetSchema.optional(),
   diffTarget: diffTargetSchema.optional(),
-  mode: z.enum(["diff", "standard", "deep"]),
+  mode: scanModeSchema,
+  modelSettings: dependencyScanModelSettingsSchema.optional(),
+  scanDependencies: z.boolean().optional(),
   scope: z.string().trim().min(1).max(4096),
   sessionId: z.string().uuid(),
   targetPath: z.string().trim().min(1).max(4096),
@@ -359,7 +420,7 @@ const submissionSchema = {
 };
 const setupInspectionSchema = {
   diffTarget: diffTargetSchema.optional(),
-  mode: z.enum(["diff", "standard", "deep"]),
+  mode: scanModeSchema,
   scope: z.string().trim().min(1).max(4096),
   targetPath: z.string().trim().min(1).max(4096),
 };
@@ -592,7 +653,7 @@ const globalFindingsPageSchema = {
 const scanListSchema = {
   ...collectionPageSchema,
   ...targetCollectionFiltersSchema,
-  mode: z.enum(["diff", "standard", "deep"]).optional(),
+  mode: scanModeSchema.optional(),
   status: z.enum(["running", "complete", "failed", "canceled"]).optional(),
 };
 const repositoryListSchema = {
@@ -621,10 +682,232 @@ export function createCodexSecurityServer(): McpServer {
       threadId: string;
     }
   >();
+  const dependencyScanSubmissionTails = new Map<string, Promise<void>>();
   server.server.onclose = () =>
     deepScanCoordinators.shutdown("mcp_transport_closed");
   const appMeta = { ui: { visibility: ["app"] as const } };
   const modelActionMeta = { ui: { visibility: ["model"] as const } };
+
+  const serializeDependencyScanSubmission = async <T>(
+    scanId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    const predecessor =
+      dependencyScanSubmissionTails.get(scanId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+    dependencyScanSubmissionTails.set(scanId, current);
+    await predecessor;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (dependencyScanSubmissionTails.get(scanId) === current) {
+        dependencyScanSubmissionTails.delete(scanId);
+      }
+    }
+  };
+
+  server.registerTool(
+    "submit_codex_security_dependency_scan",
+    {
+      title: "Submit Codex Security Dependency Scan",
+      description:
+        "Submit public dependency versions for published-artifact security scans. Include only ecosystem, public registry, package, and old/new versions. An optional scanId associates an existing owner-verified local scan with its upstream job and is never sent upstream. Never include first-party repository contents, paths, dependency chains, projects, or credentials.",
+      inputSchema: submitDependencyScanSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      _meta: modelActionMeta,
+    },
+    async (input, extra) => {
+      const submit = async () => {
+        const { dependencies, dependencyScanTarget, modelSettings, scanId } =
+          input;
+        try {
+          let scan: JsonObject | undefined;
+          let threadId: string | undefined;
+          if (scanId !== undefined) {
+            threadId = threadIdFromExtra(extra);
+            if (!threadId) {
+              return toolErrorResult(
+                "Associating a dependency scan requires its owning Codex thread.",
+              );
+            }
+            const scanContext = await runWorkbench([
+              "get-scan",
+              "--scan-id",
+              scanId,
+            ]);
+            scan = isJsonObject(scanContext.scan)
+              ? scanContext.scan
+              : undefined;
+            if (!scan) {
+              return toolErrorResult("The dependency scan no longer exists.");
+            }
+          }
+
+          const selectedModelSettings = selectedDependencyScanModelSettings(
+            scan,
+            modelSettings,
+          );
+          const selectedScanTarget =
+            scan === undefined
+              ? dependencyScanTarget
+              : dependencyScanTargetSchema.parse(
+                  scan.dependencyScanTarget ?? "malware-and-vulnerabilities",
+                );
+          const request = {
+            dependencies,
+            ...(selectedScanTarget === undefined
+              ? {}
+              : { dependencyScanTarget: selectedScanTarget }),
+            ...(selectedModelSettings === undefined
+              ? {}
+              : { modelSettings: selectedModelSettings }),
+          };
+          const submitPreparedRequest =
+            await prepareDependencyScanSubmission(request);
+          if (scanId !== undefined) {
+            const claimed = await runWorkbench(
+              [
+                "claim-dependency-submission",
+                "--scan-id",
+                scanId,
+                "--thread-id",
+                threadId!,
+              ],
+              JSON.stringify(request),
+            );
+            const claimedScan = isJsonObject(claimed.scan)
+              ? claimed.scan
+              : undefined;
+            if (typeof claimedScan?.dependencyJobId === "string") {
+              const existing = await getDependencyScan(
+                claimedScan.dependencyJobId,
+              );
+              return scanActionResult(
+                existing,
+                `Rejoined Codex Security dependency scan ${claimedScan.dependencyJobId}.`,
+              );
+            }
+          }
+          const result = await submitPreparedRequest();
+          if (scanId !== undefined) {
+            if (typeof result.jobId !== "string") {
+              throw new Error(
+                "Dependency scanning returned an invalid job identifier.",
+              );
+            }
+            await runWorkbench([
+              "bind-dependency-job",
+              "--scan-id",
+              scanId,
+              "--job-id",
+              result.jobId,
+              "--thread-id",
+              threadId!,
+            ]);
+          }
+          return scanActionResult(
+            result,
+            `Submitted Codex Security dependency scan ${String(result.jobId)}.`,
+          );
+        } catch (error) {
+          return toolErrorResult(
+            error instanceof Error
+              ? error.message
+              : "Unable to submit the Codex Security dependency scan.",
+          );
+        }
+      };
+      return input.scanId === undefined
+        ? await submit()
+        : await serializeDependencyScanSubmission(input.scanId, submit);
+    },
+  );
+
+  server.registerTool(
+    "get_codex_security_dependency_scan",
+    {
+      title: "Get Codex Security Dependency Scan",
+      description:
+        "Read an account-owned public dependency scan job and its published-artifact findings. Poll the returned job ID until its status is completed or failed; preserve partial package results.",
+      inputSchema: getDependencyScanSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      _meta: modelActionMeta,
+    },
+    async ({ jobId }) => {
+      try {
+        const result = await getDependencyScan(jobId);
+        return scanActionResult(
+          result,
+          `Codex Security dependency scan ${jobId} is ${String(result.status)}.`,
+        );
+      } catch (error) {
+        return toolErrorResult(
+          error instanceof Error
+            ? error.message
+            : "Unable to read the Codex Security dependency scan.",
+        );
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_codex_security_scan_dependency_progress",
+    {
+      title: "Get Codex Security Scan Dependency Progress",
+      description:
+        "App-only. Read the account-owned upstream dependency job durably associated with an existing local Codex Security scan. Includes existing per-package status, active phase, cache hits, and published-artifact findings.",
+      inputSchema: { scanId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      _meta: appMeta,
+    },
+    async ({ scanId }) => {
+      try {
+        const scanContext = await runWorkbench([
+          "get-scan",
+          "--scan-id",
+          scanId,
+        ]);
+        const scan = isJsonObject(scanContext.scan)
+          ? scanContext.scan
+          : undefined;
+        if (typeof scan?.dependencyJobId !== "string") {
+          return toolErrorResult(
+            "This Codex Security scan has no associated dependency scan job.",
+          );
+        }
+        const result = await getDependencyScan(scan.dependencyJobId);
+        return scanActionResult(
+          result,
+          `Codex Security dependency scan ${scan.dependencyJobId} is ${String(result.status)}.`,
+        );
+      } catch (error) {
+        return toolErrorResult(
+          error instanceof Error
+            ? error.message
+            : "Unable to read Codex Security dependency scan progress.",
+        );
+      }
+    },
+  );
 
   server.registerTool(
     "get_codex_security_daybreak_access",
@@ -788,7 +1071,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Start Codex Security Prompt-Only Scan",
       description:
-        "Start or rejoin a Standard or diff Codex Security scan from its owning conversation. Use the returned authoritative scanId and scanDir. Standard and diff scans save progress checkpoints before their final semantic draft; the workbench writes the unsealed canonical artifacts. Complete the same scan once. Deep Scan uses start_codex_security_deep_scan instead.",
+        "Start or rejoin a Standard, diff, dependency-update, or full-dependency Codex Security scan from its owning conversation. Use the returned authoritative scanId and scanDir. Standard and diff scans save progress checkpoints before their final semantic draft; the workbench writes the unsealed canonical artifacts. Complete the same scan once. Deep Scan uses start_codex_security_deep_scan instead.",
       inputSchema: startPromptOnlyScanSchema,
       annotations: {
         readOnlyHint: false,
@@ -799,22 +1082,37 @@ export function createCodexSecurityServer(): McpServer {
       _meta: modelActionMeta,
     },
     async (
-      { mode, targetPath, scope, targetSummary, userContext, diffTarget },
+      {
+        dependencyScanTarget,
+        mode,
+        targetPath,
+        scope,
+        targetSummary,
+        userContext,
+        diffTarget,
+      },
       extra,
     ) => {
-      if (mode === "diff" && !diffTarget) {
+      const diffMode = mode === "diff" || mode === "dependency_update";
+      if (diffMode && !diffTarget) {
         return toolErrorResult(
-          "Review changes prompt-only scans require diffTarget.",
+          mode === "diff"
+            ? "Review changes prompt-only scans require diffTarget."
+            : "Dependency-update prompt-only scans require diffTarget.",
         );
       }
-      if (mode === "standard" && diffTarget) {
+      if (!diffMode && diffTarget) {
         return toolErrorResult(
-          "Standard prompt-only scans must omit diffTarget.",
+          mode === "standard"
+            ? "Standard prompt-only scans must omit diffTarget."
+            : "Full-dependency prompt-only scans must omit diffTarget.",
         );
       }
-      if (mode === "diff" && !wholeTargetScope(scope, targetPath)) {
+      if (diffMode && !wholeTargetScope(scope, targetPath)) {
         return toolErrorResult(
-          "Review changes prompt-only scans require the whole target; use scope '.'.",
+          mode === "diff"
+            ? "Review changes prompt-only scans require the whole target; use scope '.'."
+            : "Dependency prompt-only scans require the whole target; use scope '.'.",
         );
       }
       const threadId = threadIdFromExtra(extra);
@@ -824,7 +1122,15 @@ export function createCodexSecurityServer(): McpServer {
         );
       }
       const promptOnly = await startPromptOnlyScan(
-        { mode, targetPath, scope, targetSummary, userContext, diffTarget },
+        {
+          dependencyScanTarget,
+          mode,
+          targetPath,
+          scope,
+          targetSummary,
+          userContext,
+          diffTarget,
+        },
         threadId,
         codexModelSettingsFromExtra(extra),
       );
@@ -897,7 +1203,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Open Codex Security",
       description:
-        "App-only. Create a native Codex Security workspace with the target and requested standard, diff, or deep mode, or reopen one owned by this thread by passing only sessionId. Scope is inside targetPath; use '.' or omit scope for the whole target.",
+        "App-only. Create a native Codex Security workspace with the target and requested standard, diff, deep, dependency-update, or full-dependency mode, or reopen one owned by this thread by passing only sessionId. Scope is inside targetPath; use '.' or omit scope for the whole target.",
       inputSchema: openSchema,
       annotations: {
         readOnlyHint: false,
@@ -919,16 +1225,22 @@ export function createCodexSecurityServer(): McpServer {
         );
       }
       const mode = input.mode ?? (input.diffTarget ? "diff" : "standard");
-      if (input.diffTarget && mode !== "diff") {
-        throw new Error("diffTarget requires mode 'diff'.");
+      if (input.diffTarget && mode !== "diff" && mode !== "dependency_update") {
+        throw new Error(
+          "diffTarget requires mode 'diff' or 'dependency_update'.",
+        );
       }
       if (
-        (mode === "diff" || mode === "deep") &&
+        (mode === "diff" || mode === "deep" || mode === "dependency_update") &&
         !wholeTargetScope(input.scope, input.targetPath)
       ) {
-        throw new Error(
-          `${mode === "deep" ? "Deep Scan" : "Review changes"} requires the whole target; use scope '.'.`,
-        );
+        const label =
+          mode === "deep"
+            ? "Deep Scan"
+            : mode === "dependency_update"
+              ? "Dependency Update Scan"
+              : "Review changes";
+        throw new Error(`${label} requires the whole target; use scope '.'.`);
       }
       const threadId = threadIdFromExtra(extra);
       if (!threadId && !input.sessionId) {
@@ -1019,6 +1331,89 @@ export function createCodexSecurityServer(): McpServer {
   );
 
   server.registerTool(
+    "estimate_codex_security_dependencies",
+    {
+      title: "Estimate Codex Security Dependency Scans",
+      description:
+        "Model-only. Resolve the authorized local dependency graph and return exact public package counts by genuine dependency depth, without starting or submitting a security scan.",
+      inputSchema: setupInspectionSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      _meta: modelActionMeta,
+    },
+    async ({ targetPath, scope, mode, diffTarget }, extra) => {
+      if (!threadIdFromExtra(extra)) {
+        return toolErrorResult(
+          "Dependency estimation requires the owning Codex thread context.",
+        );
+      }
+
+      let parentSandbox: DeepWorkerParentSandbox;
+      try {
+        parentSandbox = resolveDeepWorkerParentSandbox(extra);
+      } catch (error: unknown) {
+        return toolErrorResult(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+
+      const inspected = await runWorkbench([
+        "inspect-setup",
+        "--target-path",
+        targetPath,
+        "--scope",
+        scope,
+        "--mode",
+        mode,
+        ...diffTargetArgs(diffTarget),
+      ]);
+      const target = isJsonObject(inspected.target)
+        ? inspected.target
+        : undefined;
+      const resolvedTargetPath = target?.targetPath;
+      const resolvedScope = inspected.scope;
+      if (
+        typeof resolvedTargetPath !== "string" ||
+        typeof resolvedScope !== "string"
+      ) {
+        throw new Error(
+          "Codex Security could not verify the dependency estimation target.",
+        );
+      }
+      const resolvedDiff =
+        inspected.diffTarget === null || inspected.diffTarget === undefined
+          ? undefined
+          : diffTargetSchema.parse(inspected.diffTarget);
+      const signal = abortSignalFromExtra(extra);
+      const estimate = await estimateDependencyDepthCounts({
+        pluginRoot: PLUGIN_ROOT,
+        setup: {
+          targetPath: resolvedTargetPath,
+          scope: resolvedScope,
+          mode,
+          ...(resolvedDiff ? { diffTarget: resolvedDiff } : {}),
+        },
+        parentSandbox,
+        modelSettings: codexModelSettingsFromExtra(extra),
+        ...(signal ? { signal } : {}),
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "Estimated dependency scan packages by graph depth.",
+          },
+        ],
+        structuredContent: estimate,
+      };
+    },
+  );
+
+  server.registerTool(
     "submit_codex_security_setup",
     {
       title: "Save Codex Security Setup",
@@ -1034,6 +1429,8 @@ export function createCodexSecurityServer(): McpServer {
       _meta: appMeta,
     },
     async ({
+      dependencyDepth,
+      dependencyScanTarget,
       sessionId,
       targetPath,
       scope,
@@ -1041,6 +1438,8 @@ export function createCodexSecurityServer(): McpServer {
       targetSummary,
       userContext,
       diffTarget,
+      scanDependencies,
+      modelSettings,
     }) => {
       return workspaceResult(
         (await runWorkbench(
@@ -1057,6 +1456,12 @@ export function createCodexSecurityServer(): McpServer {
             ...definedArg("--target-summary", targetSummary),
             ...(userContext ? ["--user-context-stdin"] : []),
             ...diffTargetArgs(diffTarget),
+            ...dependencyDepthArgs(dependencyDepth),
+            ...optionalArg("--dependency-scan-target", dependencyScanTarget),
+            ...(scanDependencies ? ["--scan-dependencies"] : []),
+            ...(modelSettings === undefined
+              ? []
+              : ["--model-settings", JSON.stringify(modelSettings)]),
           ],
           userContext,
         )) as WorkspaceState,
@@ -2145,8 +2550,12 @@ export function createCodexSecurityServer(): McpServer {
 
 async function createWorkspace(
   input: {
+    dependencyDepth?: number | null;
+    dependencyScanTarget?: z.infer<typeof dependencyScanTargetSchema>;
     diffTarget?: z.infer<typeof diffTargetSchema>;
-    mode?: "diff" | "standard" | "deep";
+    mode?: z.infer<typeof scanModeSchema>;
+    modelSettings?: z.infer<typeof dependencyScanModelSettingsSchema>;
+    scanDependencies?: boolean;
     scope?: string;
     targetPath?: string;
     targetSummary?: string;
@@ -2168,9 +2577,21 @@ async function createWorkspace(
       ...optionalArg("--scope", input.scope),
       ...(input.userContext ? ["--user-context-stdin"] : []),
       ...diffTargetArgs(input.diffTarget),
+      ...dependencyDepthArgs(input.dependencyDepth),
+      ...optionalArg("--dependency-scan-target", input.dependencyScanTarget),
+      ...(input.scanDependencies ? ["--scan-dependencies"] : []),
+      ...(input.modelSettings === undefined
+        ? []
+        : ["--model-settings", JSON.stringify(input.modelSettings)]),
     ],
     input.userContext,
   )) as WorkspaceState;
+}
+
+function dependencyDepthArgs(depth: number | null | undefined): string[] {
+  return depth === undefined
+    ? []
+    : ["--dependency-depth", depth === null ? "all" : String(depth)];
 }
 
 async function getWorkspace(
@@ -2190,8 +2611,15 @@ async function startPromptOnlyScan(
   threadId: string,
   modelSettings: { model?: string; reasoningEffort?: string } = {},
 ): Promise<JsonObject> {
-  const { mode, targetPath, scope, targetSummary, userContext, diffTarget } =
-    input;
+  const {
+    dependencyScanTarget,
+    mode,
+    targetPath,
+    scope,
+    targetSummary,
+    userContext,
+    diffTarget,
+  } = input;
   return await runWorkbench(
     [
       "start-prompt-only-scan",
@@ -2203,6 +2631,7 @@ async function startPromptOnlyScan(
       scope,
       "--mode",
       mode,
+      ...optionalArg("--dependency-scan-target", dependencyScanTarget),
       ...optionalArg("--model", modelSettings.model),
       ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
       ...optionalArg("--target-summary", targetSummary),
@@ -2703,6 +3132,39 @@ function diffTargetArgs(
       "contentDigest" in target ? target.contentDigest : undefined,
     ),
   ];
+}
+
+function selectedDependencyScanModelSettings(
+  scan: JsonObject | undefined,
+  requested: z.infer<typeof dependencyScanModelSettingsSchema> | undefined,
+): z.infer<typeof dependencyScanModelSettingsSchema> | undefined {
+  const configured =
+    process.env.CODEX_SECURITY_DEPENDENCY_MODEL_SETTINGS?.trim();
+  if (configured) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(configured);
+    } catch {
+      throw new Error("Configured dependency scan model settings are invalid.");
+    }
+    const result = dependencyScanModelSettingsSchema.safeParse(parsed);
+    if (!result.success) {
+      throw new Error("Configured dependency scan model settings are invalid.");
+    }
+    return result.data;
+  }
+
+  if (scan?.modelSettings !== undefined && scan.modelSettings !== null) {
+    const result = dependencyScanModelSettingsSchema.safeParse(
+      scan.modelSettings,
+    );
+    if (!result.success) {
+      throw new Error("Saved dependency scan model settings are invalid.");
+    }
+    return result.data;
+  }
+
+  return requested;
 }
 
 function isJsonObject(value: unknown): value is JsonObject {
