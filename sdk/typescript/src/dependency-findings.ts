@@ -411,7 +411,7 @@ function defaultDependencies(
       ) {
         delete features["plugins"];
       }
-      await using security = createSecurityInternal(
+      const security = createSecurityInternal(
         {
           pythonPath: options.pythonPath,
           codexOverrides: {
@@ -424,7 +424,14 @@ function defaultDependencies(
         },
         { surface, environment },
       );
-      return await security.runDependencyFindingSkill(request, options.signal);
+      try {
+        return await security.runDependencyFindingSkill(
+          request,
+          options.signal,
+        );
+      } finally {
+        await security.close();
+      }
     },
   };
 }

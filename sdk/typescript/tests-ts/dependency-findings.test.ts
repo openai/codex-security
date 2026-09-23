@@ -520,7 +520,7 @@ describe("imported finding SDK sessions", () => {
           overrides = config.codexOverrides;
           return {
             runDependencyFindingSkill: async () => "complete",
-            async [Symbol.asyncDispose]() {},
+            async close() {},
           };
         },
       }));
