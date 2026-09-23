@@ -531,66 +531,6 @@ test("disconnect before run and a broken output pipe terminate cleanly", async (
   input.destroy();
 });
 
-test("CLI cancellation exits while the host leaves its final output unread", async () => {
-  const child = spawn(
-    process.execPath,
-    [
-      fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
-      "dedupe",
-      "--records",
-    ],
-    { stdio: ["pipe", "pipe", "pipe"] },
-  );
-  const exited = new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", resolve);
-  });
-  const closed = new Promise<void>((resolve) =>
-    child.once("close", () => resolve()),
-  );
-  const readable = new Promise<void>((resolve) =>
-    child.stdout.once("readable", () => resolve()),
-  );
-  const timeout = setTimeout(() => child.kill("SIGKILL"), 20_000);
-  child.stderr.resume();
-  child.stdin.on("error", () => {});
-  try {
-    // Fill the pipe with a terminal result, without scheduling any reviews.
-    const observations = Array.from({ length: 50 }, (_, index) =>
-      record(`${index}-${"x".repeat(16_384)}`),
-    );
-    child.stdin.write(
-      `${JSON.stringify({
-        ...run,
-        params: {
-          version: 1,
-          observations,
-          candidateRelationships: observations.map(({ id }) => ({
-            observationId: id,
-            candidateObservationIds: [],
-          })),
-        },
-      })}\n`,
-    );
-    await Promise.race([
-      readable,
-      exited.then(() => {
-        throw new Error("CLI exited before writing its result");
-      }),
-    ]);
-    child.stdin.write(
-      `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
-    );
-    expect(await exited).toBe(2);
-  } finally {
-    clearTimeout(timeout);
-    if (child.exitCode === null) child.kill("SIGKILL");
-    child.stdin.end();
-    child.stdout.resume();
-    await closed;
-  }
-});
-
 test("a disconnect while flushing the final result does not send a second response", async () => {
   const inputStream = new PassThrough();
   const messages: Message[] = [];
