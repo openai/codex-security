@@ -769,7 +769,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   }
 }
 
-async function assertDeepScanPersistsWorkerStartupFailure() {
+async function assertDeepScanPersistsRetryableWorkerStartupError() {
   const fixtureRoot = await mkdtemp(
     path.join(tmpdir(), "codex-security-deep-inventory-"),
   );
@@ -779,13 +779,14 @@ async function assertDeepScanPersistsWorkerStartupFailure() {
   await mkdir(path.join(fixtureTarget, "app"), { recursive: true });
   await writeFile(path.join(fixtureTarget, "app", "routes.py"), "route = 1\n");
 
+  const fixtureEnvironment = {
+    CODEX_CLI_PATH: path.join(fixtureRoot, "missing-deep-scan-codex"),
+    CODEX_SECURITY_SCAN_ROOT: fixtureScanRoot,
+    CODEX_SECURITY_STATE_DIR: fixtureState,
+  };
   const deepServer = startTestServer({
     cwd: pluginRoot,
-    env: {
-      CODEX_CLI_PATH: path.join(fixtureRoot, "missing-deep-scan-codex"),
-      CODEX_SECURITY_SCAN_ROOT: fixtureScanRoot,
-      CODEX_SECURITY_STATE_DIR: fixtureState,
-    },
+    env: fixtureEnvironment,
   });
   try {
     assertNoError(
@@ -799,7 +800,7 @@ async function assertDeepScanPersistsWorkerStartupFailure() {
       }),
     );
 
-    const started = await deepServer.requestAndWait(2, "tools/call", {
+    deepServer.sendRequest(2, "tools/call", {
       name: "start_codex_security_deep_scan",
       arguments: { targetPath: fixtureTarget },
       _meta: {
@@ -807,20 +808,64 @@ async function assertDeepScanPersistsWorkerStartupFailure() {
         "codex/sandbox-state-meta": parentSandboxState,
       },
     });
-    assert.equal(started.result.isError, true);
-    assert.match(
-      started.result.content.map((item) => item.text).join(" "),
-      /missing-deep-scan-codex/,
+    let scan;
+    let startupErrorWorker;
+    const pollingStarted = Date.now();
+    for (
+      let requestId = 100;
+      Date.now() - pollingStarted < 30_000;
+      requestId++
+    ) {
+      const listed = await deepServer.requestAndWait(requestId, "tools/call", {
+        name: "list_codex_security_scans",
+        arguments: {},
+      });
+      assertNoError(listed);
+      [scan] = listed.result.structuredContent.scans;
+      if (scan) {
+        assert.equal(listed.result.structuredContent.scans.length, 1);
+        assert.equal(scan.progress.status, "running");
+        const { deepScan } = JSON.parse(
+          execFileSync(
+            process.env.PYTHON?.trim() || "python3",
+            [
+              path.join(pluginRoot, "scripts", "workbench_db.py"),
+              "get-deep-scan",
+              "--scan-id",
+              scan.scanId,
+              "--thread-id",
+              "fixture-deep-inventory-thread",
+            ],
+            {
+              env: { ...process.env, ...fixtureEnvironment },
+              encoding: "utf8",
+            },
+          ),
+        );
+        assert.equal(deepScan.status, "running");
+        startupErrorWorker = deepScan.workers.find((worker) =>
+          worker.error?.includes("missing-deep-scan-codex"),
+        );
+        if (startupErrorWorker) break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(
+      startupErrorWorker,
+      "Expected a persisted retryable startup error",
     );
+    assert.equal(startupErrorWorker.status, "running");
 
-    const listed = await deepServer.requestAndWait(3, "tools/call", {
-      name: "list_codex_security_scans",
-      arguments: {},
+    const canceled = await deepServer.requestAndWait(3, "tools/call", {
+      name: "cancel_codex_security_scan",
+      arguments: { scanId: scan.scanId },
+      _meta: { "openai/threadId": "fixture-deep-inventory-thread" },
     });
-    assertNoError(listed);
-    assert.equal(listed.result.structuredContent.scans.length, 1);
-    const scan = listed.result.structuredContent.scans[0];
-    assert.equal(scan.progress.status, "failed");
+    assertNoError(canceled);
+    await deepServer.waitForMessage(
+      (message) => message.id === 2,
+      "Deep Scan start response after cancellation",
+    );
     await assert.rejects(
       readFile(
         path.join(
@@ -1506,7 +1551,7 @@ try {
   await assertUnavailableUserInputFallback();
   await assertWorkspaceWorksWithoutUiCapability();
   await assertHeadlessStandardScanWorksWithoutUiCapability();
-  await assertDeepScanPersistsWorkerStartupFailure();
+  await assertDeepScanPersistsRetryableWorkerStartupError();
   await assertUserInputFailureLogging();
   if (process.platform !== "win32") {
     await rm(launchCwd, { recursive: true, force: true });
