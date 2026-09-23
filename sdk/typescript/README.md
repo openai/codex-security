@@ -1425,6 +1425,49 @@ once before they can be reused.
 Pass `signal` to cancel any classification operation. Keep human overrides in the
 calling workflow or issue tracker; assessments remain separate recommendations.
 
+### Suggest finding owners
+
+Suggest contributors who can fix findings in a local Git repository:
+
+```bash
+npx @openai/codex-security suggest-owners findings.json --source-root /path/to/repo --json > owners.json
+```
+
+The input is a Codex Security findings document or a JSON object containing a
+`findings` array, such as the output of `export --export-format json`. The source
+root defaults to the current directory. The command reads committed `HEAD`,
+source around each finding location, blame for the affected lines, and file
+history reachable from that commit. It does not read uncommitted source or change
+findings, files, or ticket assignments.
+
+Each result preserves the finding and occurrence IDs and has status `identified`,
+`abstained`, or `error`. Identified results include an observed Git author name
+and email, a reason, and checked Git citations. Missing source or unclear
+ownership produces an abstention. Git identities do not establish active
+employment or an issue tracker account. Match accounts before assigning tickets.
+Use a checkout that matches the findings; otherwise their line ranges may be stale.
+
+The command uses existing Codex credentials and the Codex Security default model and effort.
+Use `--model` and `--effort` to override them. Model selection runs with tools and
+network access disabled. Exit code `0` includes successful recommendations and
+abstentions; `2` means invalid input or at least one failed recommendation. A
+per-finding failure retains the other results in the report. Cancellation uses
+exit code `130` for SIGINT or `143` for SIGTERM.
+
+The SDK accepts finding IDs, titles, summaries, and source locations directly:
+
+```ts
+import { suggestOwners } from "@openai/codex-security";
+
+const owners = await suggestOwners("/path/to/repo", result.findings, {
+  reasoningEffort: "high",
+});
+```
+
+SDK inputs may include `sourceRevision`. If it differs from `HEAD`, the collector
+ignores the old line ranges and reports the mismatch. Reports record the analyzed
+revision, model, effort, and limitations; they remain separate from scan artifacts.
+
 ### Feedback
 
 Send a problem report to OpenAI and share the returned feedback ID with support:

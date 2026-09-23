@@ -73,6 +73,8 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract } from "./contract.js";
+import { suggestOwnersInternal } from "./suggest-owners.js";
+import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
@@ -1153,6 +1155,7 @@ interface CliDependencies {
   deduplicateScan?: typeof deduplicateScanInternal;
   classifyScanSeverity?: typeof classifyScanSeverityInternal;
   classifyScanDirectorySeverity?: typeof classifyScanDirectorySeverityInternal;
+  suggestOwners?: typeof suggestOwnersInternal;
   recordsInput?: Readable;
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
@@ -3817,6 +3820,82 @@ export async function main(
     .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
+    .command("suggest-owners", {
+      description:
+        "Suggest finding owners from committed source and Git history.",
+      destructive: false,
+      mcp: false,
+      args: z.object({
+        findings: z
+          .string()
+          .min(1)
+          .describe("Codex Security findings JSON file."),
+      }),
+      options: z.object({
+        sourceRoot: optionValue("--source-root")
+          .optional()
+          .describe(
+            "Local Git repository (default: current directory); analyzes committed HEAD.",
+          ),
+        model: optionValue("--model")
+          .optional()
+          .describe(
+            "Model for owner suggestions (default: Codex Security model).",
+          ),
+        effort: effortOption().describe(
+          "Reasoning effort (default: Codex Security effort).",
+        ),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, options }) {
+        const controller = new AbortController();
+        const onInterrupt = () => controller.abort("SIGINT");
+        const onTerminate = () => controller.abort("SIGTERM");
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          const directory = dependencies.currentDirectory();
+          const repository = resolveCliPath(
+            directory,
+            options.sourceRoot ?? ".",
+          );
+          const findings = await parseImportedFindings(
+            await readRegularInputFile(
+              resolveCliPath(directory, args.findings),
+              repository,
+            ),
+            "json",
+            await bundledPluginRoot(),
+          );
+          const result = await (
+            dependencies.suggestOwners ?? suggestOwnersInternal
+          )(
+            repository,
+            findings,
+            {
+              environment: dependencies.environment,
+              signal: controller.signal,
+              model: options.model,
+              reasoningEffort: options.effort,
+            },
+            "cli",
+          );
+          if (result.results.some(({ status }) => status === "error"))
+            exitCode = 2;
+          return { ...result };
+        } catch (error) {
+          const signal = controller.signal.reason;
+          errorOutput.write(
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : safeErrorMessage(error)}\n`,
+          );
+          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          return undefined;
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command("classify-severity", {
       description:
         "Classify saved findings using an optional rubric and save a separate severity assessment.",
@@ -6196,6 +6275,7 @@ function validateCliArguments(
       "import",
       "validate",
       "verify-fix",
+      "suggest-owners",
       "patch",
       "login",
       "logout",
