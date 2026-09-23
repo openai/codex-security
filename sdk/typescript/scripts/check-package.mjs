@@ -189,6 +189,7 @@ const distFiles = new Set(
     "custom-validation-prompt",
     "custom-publish",
     "deep-progress",
+    "dependency-calculation",
     "deep-config",
     "deep-scan-defaults",
     "project-config",
