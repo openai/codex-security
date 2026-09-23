@@ -9,6 +9,7 @@
 - bump the third-party group across 2 directories with 6 updates ([#1003](https://github.com/openai/codex-security/pull/1003))
 - bump docker/setup-buildx-action from 4.3.0 to 4.4.1 ([#1002](https://github.com/openai/codex-security/pull/1002))
 - support Codex 0.156.1 with Bubblewrap ([#997](https://github.com/openai/codex-security/pull/997))
+- suggest finding owners ([#1010](https://github.com/openai/codex-security/pull/1010))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
