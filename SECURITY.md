@@ -48,6 +48,12 @@ operations can use repository configuration, hooks, filters, attributes,
 credential helpers, worktrees, and executables on your `PATH`. These are not
 separate security boundaries.
 
+The optional Git pre-commit hook installed by `codex-security install-hook` is
+an advisory check under the developer's control. When Git invokes the installed
+hook, it blocks commits on findings at or above the configured severity or if
+the scan cannot complete. Use a required CI check when a passing scan must be
+enforced.
+
 ### Local trust and attacker prerequisites
 
 The product does not isolate users, tasks, repositories, or scan jobs that
@@ -121,7 +127,8 @@ Report reproducible issues in an official release, such as:
 - Path traversal, a symlink, an archive, or a file-replacement race that writes
   outside the approved output or sends an unrelated local file to a model.
 - An incomplete, forged, or incorrectly scoped scan accepted as complete or as
-  a passing CI result.
+  a passing CI result, including Codex Security or an official Codex Security
+  CI integration reporting success when no scan ran.
 - GitHub, package, update, dependency, or model-service input that causes an
   unauthorized local action or compromises a release.
 - A reachable vulnerability in the published package, bundled runtime, build,
@@ -136,6 +143,9 @@ The following are not security vulnerabilities by themselves:
 - Reading selected repository files, resolving worktrees, running Git, or
   using configured hooks, filters, credential helpers, and executables within
   the authority you granted.
+- A local Git pre-commit hook being changed, disabled, or skipped without Codex
+  Security or an official CI integration falsely reporting a completed or
+  passing scan.
 - An attack that assumes prior control of your operating-system account,
   trusted local Git settings, private Codex state, or private scan outputs
   without showing how a supported input gains that control.
