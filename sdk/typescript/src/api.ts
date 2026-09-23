@@ -69,6 +69,20 @@ import {
   type ScanSessionEvent,
 } from "./cost.js";
 import {
+  DEPENDENCY_CALCULATION_EFFORT,
+  DEPENDENCY_CALCULATION_MODEL,
+  DEPENDENCY_GRAPH_FILE,
+  dependencyCalculationConfig,
+  dependencyCalculationPrompt,
+  parseDependencyDepthCounts,
+  parseDependencyGraphSetup,
+  requireDependencyGraph,
+  reusableDependencyGraph,
+  sameDependencyGraphSetup,
+  saveDependencyGraphSetup,
+  stageDependencyGraph,
+} from "./dependency-calculation.js";
+import {
   DeepScanProgressTracker,
   type DeepScanProgress,
 } from "./deep-progress.js";
@@ -112,6 +126,7 @@ import {
   CodexSecurityError,
   ConfigurationError,
   IncompleteScanError,
+  InvalidTargetError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   errorMessage,
@@ -268,7 +283,29 @@ interface PreparedSession {
 const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
+export interface DependencyScanRoleModelSettings {
+  model?: string;
+  reasoningEffort?: string;
+}
+
+export type DependencyScanTarget = "malware" | "malware-and-vulnerabilities";
+
+export interface DependencyScanModelSettings {
+  acquisition?: DependencyScanRoleModelSettings;
+  scan?: DependencyScanRoleModelSettings;
+  verification?: DependencyScanRoleModelSettings;
+  history?: DependencyScanRoleModelSettings;
+}
+
 export interface ScanOptions extends ScanSettings {
+  scanDependencies?: boolean;
+  dependencyScanTarget?: DependencyScanTarget;
+  dependencyModelSettings?: DependencyScanModelSettings;
+  /** Published-artifact review depth: 1 by default, or null for all depths. */
+  dependencyDepth?: number | null;
+  /** Raw resolver output saved by calculateDependencies, with its setup sidecar. */
+  dependencyGraphPath?: string;
+
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
   resumeScanId?: string;
   /** Save synthetic Standard scan results without calling Codex or a model. */
@@ -302,6 +339,33 @@ export interface ScanOptions extends ScanSettings {
   onWarning?: (warning: string, details?: ScanWarningDetails) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
+}
+
+export interface DependencyCalculationOptions extends Pick<
+  ScanOptions,
+  | "auth"
+  | "target"
+  | "outputDir"
+  | "archiveExisting"
+  | "dependencyGraphPath"
+  | "maxCostUsd"
+  | "onCost"
+  | "onOutputArchived"
+  | "onOutputDirReady"
+  | "onAuthentication"
+  | "onActivity"
+  | "onWarning"
+  | "onObserverError"
+  | "signal"
+> {
+  model?: string;
+  reasoningEffort?: string;
+}
+
+export interface DependencyCalculationResult {
+  /** Number of distinct public packages at each shortest dependency depth. */
+  depthCounts: number[];
+  dependencyGraphPath: string;
 }
 
 export interface ValidationOptions extends Pick<
@@ -397,6 +461,9 @@ type ScanObserverName =
   | "onWarning";
 
 export interface ScanPreflight extends DeepScanOptions {
+  dependencyDepth?: number | null;
+  dependencyGraphPath?: string;
+
   repository: string;
   target: NormalizedTarget;
   mode: ScanMode;
@@ -515,6 +582,7 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions,
     workflowId: string,
+    dependencyOnly = false,
   ): Promise<ScanResult> {
     this.#requireOpen();
     const signal = AbortSignal.any([
@@ -538,6 +606,7 @@ export class CodexSecurity {
       repositoryPath: local.repository,
       scanRequestDigest: workflowDigest({
         config: this.config,
+        ...(dependencyOnly ? { dependencyOnly: true } : {}),
         options: {
           ...options,
           ...local.prompts,
@@ -591,7 +660,12 @@ export class CodexSecurity {
     }
     await workflow.begin("scan");
     try {
-      const result = await this.#run(repository, options, local);
+      const result = await this.#run(
+        repository,
+        options,
+        local,
+        dependencyOnly,
+      );
       await workflow.protectArtifacts(result.scanDir);
       await workflow.bind({
         scanId: result.manifest.scan.id,
@@ -613,6 +687,339 @@ export class CodexSecurity {
       await workflow.fail("scan", error);
       throw error;
     }
+  }
+
+  public async scanDependencies(
+    repository: string,
+    options: Omit<ScanOptions, "scanDependencies"> = {},
+  ): Promise<ScanResult> {
+    const scanOptions = { ...options, scanDependencies: true };
+    return await this.#trackOperation(() =>
+      options.workflowId === undefined
+        ? this.#run(repository, scanOptions, undefined, true)
+        : this.#runWorkflow(repository, scanOptions, options.workflowId, true),
+    );
+  }
+
+  /** Resolve and count dependencies without registering a scan or submitting package jobs. */
+  public async calculateDependencies(
+    repository: string,
+    options: DependencyCalculationOptions = {},
+  ): Promise<DependencyCalculationResult> {
+    return await this.#trackOperation(async () => {
+      const costAbortController = new AbortController();
+      const signal = AbortSignal.any([
+        this.#abortController.signal,
+        costAbortController.signal,
+        ...(options.signal === undefined ? [] : [options.signal]),
+      ]);
+      let outputDir = "";
+      let tracker: ScanCostTracker | null = null;
+
+      try {
+        const requestedGraphPath =
+          options.dependencyGraphPath === undefined
+            ? undefined
+            : resolveRepositoryPath(options.dependencyGraphPath);
+        const inputs = await this.#prepareLocalInputs(
+          repository,
+          { ...options, scanDependencies: true },
+          signal,
+        );
+        const model = options.model ?? DEPENDENCY_CALCULATION_MODEL;
+        const reasoningEffort =
+          options.reasoningEffort ?? DEPENDENCY_CALCULATION_EFFORT;
+        scanModelConfiguration({
+          model,
+          model_reasoning_effort: reasoningEffort,
+        });
+        validateScanCostLimit(options.maxCostUsd, model);
+        const stateDirectory = inputs.stateDirectory;
+        const temporaryRoot = await realpath(tmpdir());
+        requireOutputOutsideRepositories(
+          inputs.protectedRoots,
+          temporaryRoot,
+          "temporary",
+        );
+        let session = await this.#prepareSession(
+          inputs,
+          options,
+          signal,
+          temporaryRoot,
+          false,
+          false,
+        );
+        const {
+          runtime,
+          python,
+          modelProvider,
+          effectiveConfig,
+          approvalPolicy,
+        } = session;
+        const recipe = scanRecipe({
+          repository: inputs.repository,
+          target: inputs.target,
+          mode: "standard",
+          repositoryRevision: null,
+          pluginVersion: runtime.plugin.version,
+          config: effectiveConfig,
+          auth: options.auth,
+        });
+        const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+        const inspect = async () =>
+          parseDependencyGraphSetup(
+            await workbench(
+              {
+                python,
+                pluginRoot: runtime.plugin.pluginRoot,
+                environment: {
+                  ...selectedScanEnvironment(
+                    runtime.environment,
+                    options.auth,
+                    modelProvider,
+                  ),
+                  CODEX_SECURITY_STATE_DIR: stateDirectory,
+                },
+                signal,
+                failureMessage:
+                  "Could not inspect the dependency calculation target",
+              },
+              [
+                "inspect-cli-dependencies",
+                "--repository",
+                inputs.repository,
+                "--recipe-json",
+                JSON.stringify(recipe),
+              ],
+            ),
+          );
+        const setup = await inspect();
+        throwIfAborted(signal);
+        if (requestedGraphPath !== undefined) {
+          try {
+            return await reusableDependencyGraph(
+              requestedGraphPath,
+              setup,
+              signal,
+            );
+          } catch (error) {
+            throwIfAborted(signal);
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              `Could not reuse the saved dependency graph; calculating dependencies again. ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        session = await this.#prepareSession(
+          inputs,
+          options,
+          signal,
+          temporaryRoot,
+        );
+        let outputRoot = temporaryRoot;
+        if (
+          inputs.outputDir === null &&
+          this.#dependencies.prepareOutputDir === undefined
+        ) {
+          outputRoot = join(stateDirectory, "dependency-calculations");
+          await mkdir(outputRoot, { recursive: true, mode: 0o700 });
+          outputRoot = await realpath(outputRoot);
+          requireOutputOutsideRepository(inputs.protectedRoot, outputRoot);
+        }
+        outputDir = await (
+          this.#dependencies.prepareOutputDir ?? prepareOutputDir
+        )(
+          inputs.outputDir ?? undefined,
+          basename(inputs.repository),
+          outputRoot,
+          (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
+          options.archiveExisting,
+          (archiveDir) =>
+            notifyObserver(
+              "onOutputArchived",
+              options.onOutputArchived,
+              options.onObserverError,
+              archiveDir,
+            ),
+        );
+        requireOutputOutsideRepository(inputs.protectedRoot, outputDir);
+        requireModelSafeOutputDir(outputDir);
+        notifyObserver(
+          "onOutputDirReady",
+          options.onOutputDirReady,
+          options.onObserverError,
+          outputDir,
+        );
+        const dependencyGraphPath = join(outputDir, DEPENDENCY_GRAPH_FILE);
+        const prompt = await dependencyCalculationPrompt(
+          runtime.plugin.pluginRoot,
+          setup,
+          dependencyGraphPath,
+        );
+        tracker = new ScanCostTracker({
+          codexHome: runtime.codexHome,
+          model,
+          repository: inputs.repository,
+          maxCostUsd: options.maxCostUsd,
+          onActivity: (activity) =>
+            notifyObserver(
+              "onActivity",
+              options.onActivity,
+              options.onObserverError,
+              activity,
+            ),
+          onCost: (cost) => {
+            notifyObserver(
+              "onCost",
+              options.onCost,
+              options.onObserverError,
+              cost,
+            );
+            if (
+              options.maxCostUsd !== undefined &&
+              cost.estimatedUsd > options.maxCostUsd
+            ) {
+              costAbortController.abort(
+                new ScanCostLimitExceededError(
+                  options.maxCostUsd,
+                  cost,
+                  outputDir,
+                ),
+              );
+            }
+          },
+          onError: (error) => {
+            if (options.maxCostUsd !== undefined)
+              costAbortController.abort(error);
+            else
+              notifyObserver(
+                "onWarning",
+                options.onWarning,
+                options.onObserverError,
+                `Could not track dependency calculation cost: ${errorMessage(error)}`,
+              );
+          },
+        });
+        const calculationConfig = dependencyCalculationConfig(
+          model,
+          reasoningEffort,
+          session.sessionConfig,
+        );
+        const configOverrides: string[] = [];
+        // Native dotted overrides cannot represent literal MCP server names containing dots.
+        for (const name of ["permissions", "mcp_servers"]) {
+          const value = calculationConfig[name];
+          if (value !== undefined) {
+            configOverrides.push(`${name}=${inlineToml(value)}`);
+            delete calculationConfig[name];
+          }
+        }
+        const { codex } = this.#createSessionCodex(
+          session,
+          {
+            CODEX_SECURITY_REPOSITORY: inputs.repository,
+            CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
+            CODEX_SECURITY_SURFACE: this.#surface,
+          },
+          options.auth,
+          calculationConfig,
+          configOverrides,
+        );
+        const thread = codex.startThread({
+          workingDirectory: outputDir,
+          skipGitRepoCheck: true,
+          approvalPolicy,
+          threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
+        });
+        throwIfAborted(signal, outputDir);
+        const { events } = await thread.runStreamed(prompt, { signal });
+        if (thread.id !== null) tracker.start(thread.id);
+        const { status, finalResponse, usage, lastStreamError } =
+          await readCodexTurn({
+            thread,
+            events,
+            onEvent: (event) => {
+              throwIfAborted(signal, outputDir);
+              for (const activity of scanActivitiesFromEvent(
+                event,
+                inputs.repository,
+              ))
+                notifyObserver(
+                  "onActivity",
+                  options.onActivity,
+                  options.onObserverError,
+                  activity,
+                );
+              if (
+                event.type === "thread.started" &&
+                typeof event["thread_id"] === "string"
+              )
+                tracker!.start(event["thread_id"]);
+            },
+          });
+        throwIfAborted(signal, outputDir);
+        if (status !== "completed")
+          throw new IncompleteScanError(
+            lastStreamError ??
+              "Dependency calculation ended before its turn completed.",
+          );
+        const snapshot = await tracker.stop(usage);
+        tracker = null;
+        throwIfAborted(signal, outputDir);
+        if (options.maxCostUsd !== undefined && snapshot.cost === null) {
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            "Dependency calculation completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
+          );
+        }
+        let parsedResponse: unknown;
+        if (
+          finalResponse.trim().startsWith("Dependency estimation unavailable:")
+        ) {
+          throw new IncompleteScanError(
+            finalResponse.replace(/\s+/g, " ").trim(),
+          );
+        }
+        try {
+          parsedResponse = JSON.parse(finalResponse);
+        } catch (error) {
+          throw new IncompleteScanError(
+            "Dependency calculation did not return valid depthCounts JSON.",
+            { cause: error },
+          );
+        }
+        const depthCounts = parseDependencyDepthCounts(parsedResponse);
+        await requireDependencyGraph(dependencyGraphPath);
+        const currentSetup = await inspect();
+        if (sameDependencyGraphSetup(setup, currentSetup)) {
+          await saveDependencyGraphSetup(
+            dependencyGraphPath,
+            setup,
+            depthCounts,
+            signal,
+          );
+        } else {
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            "The dependency target changed during calculation. These counts describe the earlier snapshot; the saved graph will not be reused.",
+            { kind: "target_changed" },
+          );
+        }
+        throwIfAborted(signal, outputDir);
+        return { depthCounts, dependencyGraphPath };
+      } catch (error) {
+        await tracker?.stop().catch(() => null);
+        if (this.#closed) this.#requireOpen();
+        throwIfAborted(signal, outputDir);
+        throw error;
+      }
+    });
   }
 
   public async validate(options: ValidationOptions): Promise<ValidationResult> {
@@ -786,6 +1193,17 @@ export class CodexSecurity {
         modelProvider,
         hasCommandAuth(configuration),
       ),
+      ...(options.scanDependencies === true
+        ? {
+            dependencyDepth:
+              options.dependencyDepth === undefined
+                ? 1
+                : options.dependencyDepth,
+            ...(options.dependencyGraphPath === undefined
+              ? {}
+              : { dependencyGraphPath: options.dependencyGraphPath }),
+          }
+        : {}),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
       ...(options.maxCostUsd === undefined
@@ -1177,6 +1595,7 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions,
     preparedInputs?: LocalScanInputs,
+    dependencyOnly = false,
   ): Promise<ScanResult> {
     this.#requireOpen();
     if (options.mock) return await this.#runMock(repository, options);
@@ -1222,6 +1641,10 @@ export class CodexSecurity {
       prepareScanArtifactRestorer;
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
     try {
+      const requestedGraphPath =
+        options.dependencyGraphPath === undefined
+          ? undefined
+          : resolveRepositoryPath(options.dependencyGraphPath);
       const checkOpen = (): void => {
         this.#requireOpen();
         throwIfAborted(signal, scanDir);
@@ -1363,7 +1786,14 @@ export class CodexSecurity {
           `Shell-visible plugin root must be outside CODEX_HOME: ${canonicalShellPluginRoot}`,
         );
       }
-      const skillName = skillNameFor(normalized, mode);
+      const dependencyArtifactScan =
+        environmentValue(
+          this.#dependencies.environment,
+          "CODEX_SECURITY_DEPENDENCY_ARTIFACT_SCAN",
+        )?.trim() === "1";
+      const skillName = dependencyOnly
+        ? "dependency-update-scan"
+        : skillNameFor(normalized, mode);
       const discoveryPrompt =
         options.validationPrompt === undefined
           ? undefined
@@ -1386,6 +1816,19 @@ export class CodexSecurity {
         throw new IncompleteScanError(
           `Installed plugin is missing scan skill: ${skillName}`,
         );
+      }
+      if (options.scanDependencies && !dependencyOnly) {
+        const dependencySkill = await lstat(
+          join(shellPluginRoot, "skills", "dependency-update-scan", "SKILL.md"),
+        ).catch(() => null);
+        if (
+          dependencySkill === null ||
+          !dependencySkill.isFile() ||
+          dependencySkill.isSymbolicLink()
+        )
+          throw new IncompleteScanError(
+            "Installed plugin is missing scan skill: dependency-update-scan",
+          );
       }
       checkOpen();
       const expectation: ScanExpectation = {
@@ -1565,6 +2008,11 @@ export class CodexSecurity {
         maxCostUsd: options.maxCostUsd,
         deepScan: deepScanConfiguration?.settings,
         auth: options.auth,
+        dependencyScan: dependencyScanRecipe(
+          options,
+          dependencyOnly,
+          normalized,
+        ),
       });
       if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
       if (options.safetyIdentifier !== undefined)
@@ -1603,6 +2051,38 @@ export class CodexSecurity {
                 "--scan-dir",
                 scanDir,
                 "--registration-json-stdin",
+                ...(dependencyOnly
+                  ? [
+                      "--dependency-mode",
+                      normalized.kind === "refs" ||
+                      normalized.kind === "working_tree"
+                        ? "dependency_update"
+                        : "full_dependency",
+                    ]
+                  : options.scanDependencies === true
+                    ? ["--scan-dependencies"]
+                    : []),
+                ...(options.scanDependencies === true &&
+                options.dependencyDepth !== undefined
+                  ? [
+                      "--dependency-depth",
+                      options.dependencyDepth === null
+                        ? "all"
+                        : String(options.dependencyDepth),
+                    ]
+                  : []),
+                ...(options.scanDependencies === true &&
+                options.dependencyScanTarget !== undefined
+                  ? ["--dependency-scan-target", options.dependencyScanTarget]
+                  : []),
+                ...(options.scanDependencies === true &&
+                options.dependencyModelSettings !== undefined
+                  ? [
+                      "--model-settings",
+                      JSON.stringify(options.dependencyModelSettings),
+                    ]
+                  : []),
+
                 ...(options.archiveExisting === true
                   ? ["--archive-existing"]
                   : []),
@@ -1775,6 +2255,9 @@ export class CodexSecurity {
           : options.scanPrompt,
         options.maxCostUsd !== undefined,
         discoveryPrompt,
+        options.scanDependencies === true,
+        dependencyOnly,
+        dependencyArtifactScan,
       );
       checkOpen();
       const feedback = await workbench(
@@ -1807,6 +2290,31 @@ export class CodexSecurity {
         scopeFileCount === null
           ? basePrompt
           : `${basePrompt}\nThe SDK's current in-scope file-count estimate is ${scopeFileCount}; use it for scan progress unless exact scoped-source enumeration establishes a different total before review begins.`;
+      if (
+        options.scanDependencies === true &&
+        requestedGraphPath !== undefined
+      ) {
+        try {
+          await stageDependencyGraph(
+            requestedGraphPath,
+            scanDir,
+            repo,
+            normalized,
+            registration,
+            signal,
+          );
+          prompt +=
+            '\nThe SDK staged saved native resolver output at "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/dependency-update-scan/dependency-resolver-output.json" for this exact target and scope. Reuse every complete ecosystem output there; do not rerun covered ecosystems. Resolve only ecosystems not covered by that output.';
+        } catch (error) {
+          throwIfAborted(signal, scanDir);
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            `Could not reuse the saved dependency graph; resolving dependencies normally. ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       if (options.resumeScanId !== undefined) {
         prompt +=
           "\nResume the existing Deep Scan through its coordinator. Preserve completed workers and saved artifacts; do not recreate the scan directory or restart completed analysis. If the coordinator already finished, continue with completion of this same scan.";
@@ -1851,6 +2359,14 @@ export class CodexSecurity {
         CODEX_SECURITY_REPOSITORY: repo,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: shellPluginRoot,
+        ...(options.scanDependencies === true &&
+        options.dependencyModelSettings !== undefined
+          ? {
+              CODEX_SECURITY_DEPENDENCY_MODEL_SETTINGS: JSON.stringify(
+                options.dependencyModelSettings,
+              ),
+            }
+          : {}),
         CODEX_SECURITY_STATE_DIR: stateDirectory,
         CODEX_SECURITY_SURFACE: this.#surface,
         CODEX_SECURITY_SCAN_ID: scanId,
@@ -1927,7 +2443,20 @@ export class CodexSecurity {
 
       const result = await runScanEvents({
         thread,
-        events,
+        events: dependencyArtifactScan
+          ? dependencyArtifactScanEvents(
+              thread,
+              events,
+              scanId,
+              signal,
+              scanDir,
+              async (usage) => {
+                tracker.recordUsage(usage);
+                await tracker.refresh().catch(reportTrackingError);
+                checkOpen();
+              },
+            )
+          : events,
         signal,
         scanDir,
         pluginRoot: runtime.plugin.installedRoot,
@@ -2038,6 +2567,16 @@ export class CodexSecurity {
             );
           }
           completionCost = snapshot.cost;
+          if (dependencyArtifactScan) {
+            await workbench(workbenchOptions, [
+              "update-progress",
+              "--scan-id",
+              scanId,
+              "--phase",
+              "reporting",
+            ]);
+          }
+
           let preparation: JsonObject;
           try {
             preparation = await workbench(workbenchOptions, [
@@ -2723,6 +3262,7 @@ export class CodexSecurity {
     options: Pick<
       ScanOptions,
       | "auth"
+      | "scanDependencies"
       | "safetyIdentifier"
       | "expectedPluginVersion"
       | "onAuthentication"
@@ -2732,6 +3272,7 @@ export class CodexSecurity {
     signal: AbortSignal,
     temporaryRoot?: string,
     keepCredentialLock = false,
+    authenticate = true,
   ): Promise<PreparedSession> {
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     const checkOpen = (): void => {
@@ -2755,11 +3296,18 @@ export class CodexSecurity {
         modelProvider,
         commandAuth,
       );
+      if (
+        options.scanDependencies &&
+        authentication.method !== "stored_credentials"
+      )
+        throw new AuthenticationRequiredError(
+          "Dependency scanning requires a ChatGPT login. Use auth: 'chatgpt' or '--auth chatgpt'.",
+        );
       const apiKey =
         authentication.method === "api_key"
           ? environmentApiKey(this.#dependencies.environment, modelProvider)
           : null;
-      if (externalProvider !== null && apiKey === null) {
+      if (authenticate && externalProvider !== null && apiKey === null) {
         throw new AuthenticationRequiredError(
           `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
         );
@@ -2846,6 +3394,7 @@ export class CodexSecurity {
         this.#runtimeCredentialSource = "api_key";
       }
       if (
+        authenticate &&
         !runtime.credentialsAvailable &&
         authentication.method === "stored_credentials"
       ) {
@@ -2860,6 +3409,7 @@ export class CodexSecurity {
           : null;
       }
       if (
+        authenticate &&
         !runtime.credentialsAvailable &&
         apiKey === null &&
         !commandAuth &&
@@ -2867,7 +3417,7 @@ export class CodexSecurity {
       ) {
         throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
       }
-      if (!commandAuth)
+      if (authenticate && !commandAuth)
         authentication = await runtimeScanAuthentication(
           this.#dependencies.environment,
           runtime.codexHome,
@@ -2886,12 +3436,21 @@ export class CodexSecurity {
           "safetyIdentifier requires API-key authentication.",
         );
       }
-      notifyObserver(
-        "onAuthentication",
-        options.onAuthentication,
-        options.onObserverError,
-        authentication,
-      );
+      if (
+        options.scanDependencies &&
+        authentication.method === "stored_credentials" &&
+        authentication.credentialType === "api_key"
+      )
+        throw new AuthenticationRequiredError(
+          "Dependency scanning requires a ChatGPT login. Use auth: 'chatgpt' or '--auth chatgpt'.",
+        );
+      if (authenticate)
+        notifyObserver(
+          "onAuthentication",
+          options.onAuthentication,
+          options.onObserverError,
+          authentication,
+        );
       const python = await (
         this.#dependencies.resolvePluginPython ?? resolvePluginPython
       )({
@@ -3290,6 +3849,11 @@ export class CodexSecurity {
     signal?: AbortSignal,
     protectedRoots?: readonly string[],
   ): Promise<LocalScanInputs> {
+    if (options.scanDependencies === true && options.mode === "deep") {
+      throw new InvalidTargetError(
+        "Dependency scanning does not support Deep mode. Use Standard mode; dependencyDepth controls transitive package analysis independently.",
+      );
+    }
     if (
       options.resumeScanId !== undefined &&
       (options.mode !== "deep" ||
@@ -3313,6 +3877,27 @@ export class CodexSecurity {
     ) {
       throw new CodexSecurityError(
         "Mock scans support Standard mode without custom validation or post-scan prompts; those workflows require model calls.",
+      );
+    }
+    if (
+      options.scanDependencies === true &&
+      environmentValue(
+        this.#dependencies.environment,
+        "CODEX_SECURITY_DEPENDENCY_ARTIFACT_SCAN",
+      )?.trim() === "1"
+    ) {
+      throw new InvalidTargetError(
+        "Recursive dependency scanning is disabled inside published dependency artifact scans.",
+      );
+    }
+    if (
+      options.dependencyDepth !== undefined &&
+      options.dependencyDepth !== null &&
+      (!Number.isSafeInteger(options.dependencyDepth) ||
+        options.dependencyDepth < 1)
+    ) {
+      throw new InvalidTargetError(
+        "Dependency depth must be a positive integer or null for all depths.",
       );
     }
     const deep = deepScanOptions(options);
@@ -3608,6 +4193,102 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
     if (process.platform !== "win32") throw error;
     await chmod(path, 0o600);
     await rm(path, { force: true });
+  }
+}
+
+async function* dependencyArtifactScanEvents(
+  thread: CodexThreadLike,
+  initialEvents: AsyncGenerator<ScanEvent>,
+  scanId: string,
+  signal: AbortSignal,
+  scanDir: string,
+  onUnrecordedTurn: (usage: unknown) => Promise<void>,
+): AsyncGenerator<ScanEvent> {
+  let events = initialEvents;
+  const priorUsage: Record<string, number> = {};
+  let previousToolError: string | undefined;
+
+  for (;;) {
+    let recorded = false;
+    let completed = false;
+
+    for await (const event of events) {
+      if (event.type === "item.completed" && isRecord(event["item"])) {
+        const item = event["item"];
+        if (
+          item["type"] === "mcp_tool_call" &&
+          item["server"] === "codex-security" &&
+          item["tool"] === "record_codex_security_dependency_artifact_result"
+        ) {
+          const result = isRecord(item["result"])
+            ? item["result"]["structured_content"]
+            : undefined;
+          if (
+            item["status"] === "completed" &&
+            isRecord(result) &&
+            result["scanId"] === scanId &&
+            result["status"] === "recorded" &&
+            result["operation"] === "replace"
+          ) {
+            recorded = true;
+          } else if (
+            item["status"] === "failed" &&
+            isRecord(item["error"]) &&
+            typeof item["error"]["message"] === "string"
+          ) {
+            previousToolError = item["error"]["message"];
+          }
+        }
+      }
+
+      if (event.type !== "turn.completed") {
+        yield event;
+        continue;
+      }
+
+      completed = true;
+      const usage = isRecord(event["usage"]) ? event["usage"] : null;
+      if (!recorded) {
+        if (usage !== null) {
+          for (const [name, value] of Object.entries(usage)) {
+            if (typeof value === "number") {
+              priorUsage[name] = (priorUsage[name] ?? 0) + value;
+            }
+          }
+        }
+        await onUnrecordedTurn(priorUsage);
+        continue;
+      }
+
+      if (Object.keys(priorUsage).length === 0) {
+        yield event;
+        continue;
+      }
+      const combinedUsage: Record<string, unknown> = { ...usage };
+      for (const [name, value] of Object.entries(priorUsage)) {
+        const current = combinedUsage[name];
+        combinedUsage[name] =
+          typeof current === "number" ? current + value : value;
+      }
+      yield { ...event, usage: combinedUsage };
+    }
+
+    if (recorded || !completed) return;
+    throwIfAborted(signal, scanDir);
+
+    const correction = [
+      "Your previous turn ended without a successful semantic dependency artifact result.",
+      `Continue the same registered scan ${scanId}. Submit the already-reviewed published artifact result now with record_codex_security_dependency_artifact_result.`,
+      "Include every genuine finding and every required prior-finding assessment. Use an empty findings array only if the artifact is genuinely clean; never discard or replace an actual finding.",
+      ...(previousToolError === undefined
+        ? []
+        : [
+            `The previous semantic submission was rejected: ${previousToolError}`,
+          ]),
+      "Correct any rejected arguments and retry that existing tool until it returns one successful recorded result for this scan.",
+      "Do not restart analysis. Do not create or complete a scan, launch another scan, submit a draft, or write canonical scan artifacts. Do not end your turn before the semantic result is accepted.",
+    ].join("\n");
+    ({ events } = await thread.runStreamed(correction, { signal }));
   }
 }
 
@@ -3949,13 +4630,62 @@ function scanPrompt(
   additionalPrompt?: string,
   enforceCostLimit = false,
   discoveryPrompt?: string,
+  scanDependencies = false,
+  dependencyOnly = false,
+  dependencyArtifactScan = false,
 ): string {
   const python = pluginPythonCommand();
+  const fullDependencyScan =
+    scanDependencies &&
+    target.kind !== "refs" &&
+    target.kind !== "working_tree";
+  const dependencyScope =
+    target.kind === "paths"
+      ? "within the selected paths"
+      : "across the repository";
   const customValidation = discoveryPrompt !== undefined;
+  if (dependencyArtifactScan) {
+    return [
+      `Use the installed $codex-security:${skillName} skill at "$CODEX_SECURITY_PLUGIN_ROOT/skills/${skillName}/SKILL.md" only for static analysis.`,
+      "This is a published dependency artifact scan. Never invoke the dependency-update-scan skill. Never submit cloud dependency scan jobs. Never reconstruct the artifact's own dependency graph. Scan only the current published artifact contents.",
+      "The SDK has already registered this scan and owns its trusted inventory, authoritative metadata, preparation, completion, report generation, and sealing.",
+      'After static analysis, make exactly one successful call to record_codex_security_dependency_artifact_result with {"scanId":"$CODEX_SECURITY_SCAN_ID","findings":[]}. Include every genuine finding; use an empty findings array only if the artifact is genuinely clean. If the tool rejects the submission, correct its arguments and retry the same tool. Do not end your turn before the tool accepts the result.',
+      "For each finding provide its ruleId, identity, title, summary, severity, confidence, taxonomy, locations, code evidence when available, and remediation.",
+      "Do not finalize or complete the scan, create another scan, submit a draft, or author canonical scan artifacts. Return after the single semantic result is recorded.",
+      ...(hasKnowledgeBase
+        ? [
+            'Read every seeded prior finding from the trusted "$CODEX_SECURITY_KNOWLEDGE_BASE" as context. Investigate each against the current published artifact and include exactly one "priorFindingAssessments" entry for every prior finding in the same semantic result call.',
+            'Each assessment must include the exact "upstreamFindingId", a "status" of "present", "fixed", or "unknown", and a specific "reason". When the current artifact source supports the assessment, include optional "evidence" using the same canonical code-evidence shape as finding codeEvidence.',
+            'Use "present" when the prior issue remains, "fixed" when investigated artifact code establishes that it no longer applies, and "unknown" only after investigating and being unable to establish either status. Never skip a seeded prior finding, fabricate evidence, submit a separate assessment call, or launch another scan.',
+          ]
+        : []),
+      targetInstruction(target, python),
+    ].join("\n");
+  }
+
   return [
     discoveryPrompt ??
       `Use the installed $codex-security:${skillName} skill at ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", `/skills/${skillName}/SKILL.md`)}.`,
+    ...(scanDependencies && !dependencyOnly
+      ? [
+          `Also use the installed $codex-security:dependency-update-scan skill at "$CODEX_SECURITY_PLUGIN_ROOT/skills/dependency-update-scan/SKILL.md" before finalization, including when discovery produces no first-party candidates. ${
+            fullDependencyScan
+              ? `Inspect all current dependencies ${dependencyScope}`
+              : "Inspect the original Git diff"
+          } and merge dependency findings into this same registered scan; do not create another scan.`,
+        ]
+      : []),
     "Run this Codex Security scan non-interactively.",
+    ...(dependencyOnly
+      ? [
+          `Run the dependency-update-scan skill directly in the parent agent. ${
+            fullDependencyScan
+              ? `Resolve all current dependencies ${dependencyScope} and scan published artifacts through the registered dependency depth.`
+              : "Resolve and scan dependency versions changed by the selected Git diff."
+          } Do not spawn local subagents, delegate first-party scans, or perform an exhaustive repository review. Submit public package work through the existing Workbench MCP tools; Cloud workers own concurrent artifact scans.`,
+        ]
+      : []),
+
     ...(mode === "deep"
       ? [
           `The SDK has already registered this scan. Call start_codex_security_deep_scan with ${JSON.stringify({ scanId })}; never pass targetPath or create another scan.`,
@@ -3969,7 +4699,7 @@ function scanPrompt(
       ? [
           "This Standard scan authorizes its independent baseline auditor and focused investigators; use available subagent tools and continue with parent-agent fallback if capacity changes.",
         ]
-      : skillName === "deep-security-scan"
+      : skillName === "deep-security-scan" || dependencyOnly
         ? []
         : [
             "This exhaustive scan authorizes the delegated-worker phases required by the selected skill; use available subagent tools and continue with parent-agent fallback if capacity changes.",
@@ -3985,15 +4715,17 @@ function scanPrompt(
     `When ${shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION")} is set, use its exact value as scan.target.revision.`,
     `When ${shellEnvironmentReference("CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST")} is set, use its exact value as scan.target.snapshotDigest. For git_revision, omit scan.target.snapshotDigest.`,
     'Use exactly "codex-security-plugin" as scan.producer.name.',
-    ...(skillName === "security-scan"
-      ? [
-          'At discovery start, after meaningful completed-review batches, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line using the best established file total and actual fully reviewed file count. Do not create inventories or receipts solely for progress.',
-          "Collect truthful completed-review counts from delegated workers; the parent owns global progress updates.",
-        ]
-      : [
-          'After the file inventory, after each fully reviewed file batch, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line in a completed command output or agent message. Use the actual phase and file counts. Never count unread or partially reviewed files.',
-          'Every delegated review assignment must say: After each completed batch, emit CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} on its own line using your worker-local reviewed and assigned file counts.',
-        ]),
+    ...(dependencyOnly
+      ? []
+      : skillName === "security-scan"
+        ? [
+            'At discovery start, after meaningful completed-review batches, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line using the best established file total and actual fully reviewed file count. Do not create inventories or receipts solely for progress.',
+            "Collect truthful completed-review counts from delegated workers; the parent owns global progress updates.",
+          ]
+        : [
+            'After the file inventory, after each fully reviewed file batch, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line in a completed command output or agent message. Use the actual phase and file counts. Never count unread or partially reviewed files.',
+            'Every delegated review assignment must say: After each completed batch, emit CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} on its own line using your worker-local reviewed and assigned file counts.',
+          ]),
     ...(hasConfigPath
       ? [
           `For normal config-preflight helper calls, append --config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")} so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.`,
@@ -4066,6 +4798,7 @@ function scanRecipe({
   maxCostUsd,
   deepScan,
   auth,
+  dependencyScan,
 }: {
   repository: string;
   target: NormalizedTarget;
@@ -4078,6 +4811,7 @@ function scanRecipe({
   maxCostUsd?: number;
   deepScan?: Required<DeepScanOptions>;
   auth?: ScanAuthMode;
+  dependencyScan?: JsonObject;
 }): JsonObject {
   return {
     repository,
@@ -4094,12 +4828,45 @@ function scanRecipe({
     pluginVersion,
     config,
     ...(auth === undefined ? {} : { auth }),
+    ...dependencyScan,
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
     ...(deepScan === undefined
       ? {}
       : { deepScan: { ...deepScan }, deepScanResolved: true }),
+  };
+}
+
+function dependencyScanRecipe(
+  options: ScanOptions,
+  dependencyOnly: boolean,
+  target: NormalizedTarget,
+): JsonObject {
+  if (options.scanDependencies !== true) return {};
+  const modelSettings: JsonObject = {};
+  for (const [role, settings] of Object.entries(
+    options.dependencyModelSettings ?? {},
+  )) {
+    if (settings !== undefined) modelSettings[role] = { ...settings };
+  }
+  return {
+    scanDependencies: true,
+    ...(dependencyOnly
+      ? {
+          dependencyMode:
+            target.kind === "refs" || target.kind === "working_tree"
+              ? "dependency_update"
+              : "full_dependency",
+        }
+      : {}),
+    dependencyDepth:
+      options.dependencyDepth === undefined ? 1 : options.dependencyDepth,
+    dependencyScanTarget:
+      options.dependencyScanTarget ?? "malware-and-vulnerabilities",
+    ...(options.dependencyModelSettings === undefined
+      ? {}
+      : { dependencyModelSettings: modelSettings }),
   };
 }
 

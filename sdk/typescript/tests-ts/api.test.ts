@@ -83,7 +83,13 @@ const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
 afterEach(cleanup);
 
-test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
+test.each([
+  "completed",
+  "receipt-lost",
+  "scan-interrupted",
+  "prompt-files",
+  "dependency-only",
+])(
   "durable scan workflow resumes after %s without rerunning completed work",
   async (scenario) => {
     const root = await temporaryDirectory();
@@ -99,6 +105,10 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     };
     const workflowId = "durable-scan";
+    const runScan = (client: CodexSecurity, options: ScanOptions) =>
+      scenario === "dependency-only"
+        ? client.scanDependencies(repository, options)
+        : client.run(repository, options);
     const scanPrompt = "Review synthetic authentication boundaries.";
     const promptFile = join(root, "instructions.md");
     if (scenario === "prompt-files") await writeFile(promptFile, scanPrompt);
@@ -141,6 +151,11 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
               };
             if (args[0] === "register-cli-scan") {
               expect(JSON.parse(input!).workflowId).toBe(workflowId);
+              if (scenario === "dependency-only") {
+                expect(args[args.indexOf("--dependency-mode") + 1]).toBe(
+                  "full_dependency",
+                );
+              }
               const registration = mockScanRegistration(args, input);
               await new FindingWorkflow(workflowId, environment).bind({
                 scanId: registration["scanId"] as string,
@@ -171,9 +186,13 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
     const first = await makeClient(1);
     let original: Record<string, unknown> | undefined;
     try {
-      if (scenario === "completed" || scenario === "prompt-files")
+      if (
+        scenario === "completed" ||
+        scenario === "prompt-files" ||
+        scenario === "dependency-only"
+      )
         original = (
-          await first.run(repository, {
+          await runScan(first, {
             workflowId,
             ...(scenario === "prompt-files"
               ? { scanPromptFile: promptFile }
@@ -181,7 +200,7 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
           })
         ).toJSON();
       else
-        await expect(first.run(repository, { workflowId })).rejects.toThrow(
+        await expect(runScan(first, { workflowId })).rejects.toThrow(
           "Synthetic",
         );
     } finally {
@@ -191,7 +210,7 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
     try {
       const replacement = join(root, "replacement-instructions.md");
       if (scenario === "prompt-files") await writeFile(replacement, scanPrompt);
-      const result = await resumed.run(repository, {
+      const result = await runScan(resumed, {
         workflowId,
         ...(scenario === "prompt-files" ? { scanPromptFile: replacement } : {}),
       });
@@ -203,7 +222,12 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
           .status,
       ).toBe("completed");
       await expect(
-        resumed.run(repository, { workflowId, mode: "deep" }),
+        resumed.run(repository, {
+          workflowId,
+          ...(scenario === "dependency-only"
+            ? { scanDependencies: true }
+            : { mode: "deep" as const }),
+        }),
       ).rejects.toThrow("already bound to a different");
     } finally {
       await resumed.close();

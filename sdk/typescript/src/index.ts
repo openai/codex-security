@@ -51,6 +51,11 @@ export type {
 } from "./scan-comparison.js";
 export type {
   CodexSecurityMetadata,
+  DependencyCalculationOptions,
+  DependencyCalculationResult,
+  DependencyScanModelSettings,
+  DependencyScanRoleModelSettings,
+  DependencyScanTarget,
   DeepScanOptions,
   ScanAuthMode,
   ScanAuthentication,
