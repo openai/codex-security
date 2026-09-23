@@ -2649,6 +2649,8 @@ def _write_sarif_projection_if_possible(
         )
 
 
+ScanDraftDocuments = tuple[dict[str, Any], dict[str, Any], dict[str, Any]]
+
 PreparedScanFinalization = tuple[
     Path,
     Path,
@@ -2667,21 +2669,34 @@ def _prepare_scan_finalization(
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
     completion_warnings: list[str] | None = None,
-    draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+    draft_documents: ScanDraftDocuments | None = None,
 ) -> PreparedScanFinalization:
     """Read, populate, and validate a scan without writing any output files."""
 
     scan_dir = _require_scan_directory(scan_dir)
     schema_dir = schema_dir or Path(__file__).resolve().parent.parent / "schemas"
-    manifest = (
-        copy.deepcopy(draft_documents[0])
-        if draft_documents is not None
-        else _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
-    )
+    if draft_documents is None:
+        manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
+    else:
+        if not isinstance(draft_documents, tuple) or len(draft_documents) != 3:
+            raise ContractError(
+                "draft documents: expected manifest, findings, and coverage objects"
+            )
+        for name, document in zip(
+            ("scan-manifest.json", "findings.json", "coverage.json"),
+            draft_documents,
+            strict=True,
+        ):
+            if not isinstance(document, dict):
+                raise ContractError(f"{name}: expected a JSON object")
+        manifest, findings, coverage = copy.deepcopy(draft_documents)
+        _contract_json_bytes("scan-manifest.json", manifest)
     scan = _require_dict(manifest, "scan", "manifest")
     if scan.get("sealedAt") is None and scan.get("artifacts") == []:
         del scan["artifacts"]
     was_sealed = scan.get("sealedAt") is not None or scan.get("artifacts") is not None
+    if draft_documents is not None and was_sealed:
+        raise ContractError("draft documents: manifest must be unsealed")
     if not was_sealed:
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
@@ -2693,7 +2708,6 @@ def _prepare_scan_finalization(
             scan_dir, scan["coverageRef"], scan["coverageRef"]
         )
     else:
-        findings, coverage = copy.deepcopy(draft_documents[1:])
         findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
     if not was_sealed:
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, completion_binding)

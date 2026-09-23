@@ -50,6 +50,14 @@ def parse_args(description: str) -> argparse.Namespace:
     create_workspace.add_argument("--diff-base-revision")
     create_workspace.add_argument("--diff-head-revision")
     create_workspace.add_argument("--diff-content-digest")
+    create_workspace.add_argument("--scan-dependencies", action="store_true")
+    create_workspace.add_argument("--dependency-depth", type=dependency_depth, default=1)
+    create_workspace.add_argument(
+        "--dependency-scan-target",
+        choices=("malware", "malware-and-vulnerabilities"),
+        default="malware-and-vulnerabilities",
+    )
+    create_workspace.add_argument("--model-settings")
 
     get_workspace = subparsers.add_parser("get-workspace")
     get_workspace.add_argument("--workspace-id", required=True)
@@ -67,6 +75,10 @@ def parse_args(description: str) -> argparse.Namespace:
     inspect_setup.add_argument("--diff-head-revision")
     inspect_setup.add_argument("--diff-content-digest")
 
+    inspect_cli_dependencies = subparsers.add_parser("inspect-cli-dependencies")
+    inspect_cli_dependencies.add_argument("--repository", required=True)
+    inspect_cli_dependencies.add_argument("--recipe-json", required=True)
+
     save_workspace = subparsers.add_parser("save-workspace")
     save_workspace.add_argument("--workspace-id", required=True)
     save_workspace.add_argument("--target-path", required=True)
@@ -78,6 +90,14 @@ def parse_args(description: str) -> argparse.Namespace:
     save_workspace.add_argument("--diff-base-revision")
     save_workspace.add_argument("--diff-head-revision")
     save_workspace.add_argument("--diff-content-digest")
+    save_workspace.add_argument("--scan-dependencies", action="store_true")
+    save_workspace.add_argument("--dependency-depth", type=dependency_depth, default=1)
+    save_workspace.add_argument(
+        "--dependency-scan-target",
+        choices=("malware", "malware-and-vulnerabilities"),
+        default="malware-and-vulnerabilities",
+    )
+    save_workspace.add_argument("--model-settings")
 
     start_scan = subparsers.add_parser("start-scan")
     start_scan.add_argument("--workspace-id", required=True)
@@ -89,7 +109,11 @@ def parse_args(description: str) -> argparse.Namespace:
     start_prompt_only_scan.add_argument("--thread-id", required=True)
     start_prompt_only_scan.add_argument("--target-path", required=True)
     start_prompt_only_scan.add_argument("--scope", required=True)
-    start_prompt_only_scan.add_argument("--mode", choices=("diff", "standard"), required=True)
+    start_prompt_only_scan.add_argument(
+        "--mode",
+        choices=("diff", "standard", "dependency_update", "full_dependency"),
+        required=True,
+    )
     start_prompt_only_scan.add_argument("--target-summary")
     add_user_context(start_prompt_only_scan)
     start_prompt_only_scan.add_argument("--diff-target-kind", choices=DIFF_TARGET_KINDS)
@@ -97,6 +121,12 @@ def parse_args(description: str) -> argparse.Namespace:
     start_prompt_only_scan.add_argument("--diff-head-revision")
     start_prompt_only_scan.add_argument("--diff-content-digest")
     start_prompt_only_scan.add_argument("--scan-root")
+    start_prompt_only_scan.add_argument("--dependency-depth", type=dependency_depth, default=1)
+    start_prompt_only_scan.add_argument(
+        "--dependency-scan-target",
+        choices=("malware", "malware-and-vulnerabilities"),
+        default="malware-and-vulnerabilities",
+    )
     start_prompt_only_scan.add_argument("--model")
     start_prompt_only_scan.add_argument("--reasoning-effort")
 
@@ -107,6 +137,9 @@ def parse_args(description: str) -> argparse.Namespace:
     start_headless_standard_scan.add_argument("--target-summary")
     add_user_context(start_headless_standard_scan)
     start_headless_standard_scan.add_argument("--scan-root")
+    start_headless_standard_scan.add_argument(
+        "--dependency-depth", type=dependency_depth, default=1
+    )
     start_headless_standard_scan.add_argument("--model")
     start_headless_standard_scan.add_argument("--reasoning-effort")
     start_headless_standard_scan.set_defaults(
@@ -122,6 +155,15 @@ def parse_args(description: str) -> argparse.Namespace:
     get_scan = subparsers.add_parser("get-scan")
     get_scan.add_argument("--scan-id", required=True)
     get_scan.add_argument("--occurrence-id")
+
+    claim_dependency_submission = subparsers.add_parser("claim-dependency-submission")
+    claim_dependency_submission.add_argument("--scan-id", required=True)
+    claim_dependency_submission.add_argument("--thread-id", required=True)
+
+    bind_dependency_job = subparsers.add_parser("bind-dependency-job")
+    bind_dependency_job.add_argument("--scan-id", required=True)
+    bind_dependency_job.add_argument("--job-id", required=True)
+    bind_dependency_job.add_argument("--thread-id", required=True)
 
     get_scan_feedback = subparsers.add_parser("get-scan-feedback")
     get_scan_feedback.add_argument("--scan-id", required=True)
@@ -158,6 +200,17 @@ def parse_args(description: str) -> argparse.Namespace:
     register_cli_scan.add_argument("--parent-scan-id")
     register_cli_scan.add_argument("--archive-existing", action="store_true")
     register_cli_scan.add_argument("--archived-scan-dir")
+    register_cli_scan.add_argument(
+        "--dependency-mode", choices=("dependency_update", "full_dependency")
+    )
+    register_cli_scan.add_argument("--scan-dependencies", action="store_true")
+    register_cli_scan.add_argument("--dependency-depth", type=dependency_depth, default=1)
+    register_cli_scan.add_argument(
+        "--dependency-scan-target",
+        choices=("malware", "malware-and-vulnerabilities"),
+        default="malware-and-vulnerabilities",
+    )
+    register_cli_scan.add_argument("--model-settings")
 
     set_scan_thread = subparsers.add_parser("set-scan-thread")
     set_scan_thread.add_argument("--scan-id", required=True)
@@ -407,6 +460,10 @@ def positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("expected a positive integer")
     return parsed
+
+
+def dependency_depth(value: str) -> int | None:
+    return None if value == "all" else positive_int(value)
 
 
 if __name__ == "__main__":

@@ -304,6 +304,7 @@ def list_scans(
             {
                 "completedAt": row["completed_at"],
                 "continuationThreadId": row["continuation_thread_id"],
+                "dependencyJobId": row["dependency_job_id"],
                 **stored_scan_cost_fields(row["cost_json"]),
                 "findingCount": row["finding_count"],
                 "handoffStatus": row["handoff_status"],
@@ -613,6 +614,17 @@ def compare_scans(
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
+        elif after["dependency_scan_target"] == "malware":
+            previous_details = json.loads(previous["details_json"])
+            if (
+                previous_details.get("provenance", {}).get("source") == "dependency_update_scan"
+                and isinstance(previous_details.get("extensions", {}).get("dependency"), dict)
+                and previous_details.get("taxonomy", {}).get("category") != "malware"
+            ):
+                status = "unknown"
+                item["reason"] = "The later scan did not review dependency vulnerabilities."
+            else:
+                status = "resolved"
         else:
             status = "resolved"
         if len(previous_rows) == 1:

@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import pytest
 from workbench_test_support import (
     create_saved_workspace,
     initialize_git_repository,
@@ -116,6 +117,168 @@ def test_cli_registration_returns_authoritative_target_contract(tmp_path: Path) 
             assert target_contract["requiredSnapshotDigest"] == snapshot_digest
         else:
             assert "requiredSnapshotDigest" not in target_contract
+
+
+@pytest.mark.parametrize(
+    ("kind", "state"),
+    [
+        ("repository", "clean"),
+        ("repository", "dirty"),
+        ("repository", "unversioned"),
+        ("paths", "clean"),
+        ("paths", "dirty"),
+        ("paths", "unversioned"),
+        ("refs", "dirty"),
+        ("working_tree", "clean"),
+        ("working_tree", "dirty"),
+    ],
+)
+def test_cli_dependency_inspection_matches_registration_without_creating_state(
+    tmp_path: Path, kind: str, state: str
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    if state == "unversioned":
+        target.mkdir()
+        (target / "README.md").write_text("fixture\n")
+        revision = "unversioned"
+    else:
+        revision = initialize_git_repository(target)
+        if state == "dirty":
+            (target / "README.md").write_text("changed after commit\n")
+    requested_target: dict[str, Any] = {
+        "kind": kind,
+        "paths": ["README.md"] if kind == "paths" else [],
+    }
+    if kind in {"refs", "working_tree"}:
+        requested_target.update(base="HEAD", head="main", baseRef="HEAD", headRef="main")
+    recipe_json = json.dumps(
+        {
+            "config": {},
+            "mode": "standard",
+            "repository": str(target),
+            "target": requested_target,
+        }
+    )
+    inspected = run_workbench(
+        state_dir,
+        "inspect-cli-dependencies",
+        "--repository",
+        str(target),
+        "--recipe-json",
+        recipe_json,
+    )
+    assert not state_dir.exists()
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    registered = run_workbench(
+        state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(scan_dir),
+        "--recipe-json",
+        recipe_json,
+        "--dependency-mode",
+        "dependency_update" if kind in {"refs", "working_tree"} else "full_dependency",
+    )
+    contract = registered["contract"]
+    expected_target: dict[str, Any] = {"kind": kind, "paths": requested_target["paths"]}
+    if kind in {"refs", "working_tree"}:
+        diff_target = contract["diffTarget"]
+        expected_target.update(base=diff_target["baseRevision"], head=diff_target["headRevision"])
+        snapshot_digest = diff_target.get("contentDigest")
+    else:
+        snapshot_digest = contract["target"].get("requiredSnapshotDigest")
+    assert inspected == {
+        "repository": str(target.resolve()),
+        "target": expected_target,
+        "targetRevision": revision,
+        "snapshotDigest": snapshot_digest,
+    }
+    assert registered["targetRevision"] == revision
+    assert (snapshot_digest is not None) == (
+        kind == "working_tree" or (kind != "refs" and state != "clean")
+    )
+
+
+def test_cli_dependency_inspection_canonicalizes_path_union_and_tracks_content(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.write_text("Read-only inspection must not access the workbench database.\n")
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "a.py").write_text("a = 1\n")
+    (target / "b.py").write_text("b = 1\n")
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+
+    def inspect(paths: list[str]) -> dict[str, object]:
+        return run_workbench(
+            state_dir,
+            "inspect-cli-dependencies",
+            "--repository",
+            str(alias),
+            "--recipe-json",
+            json.dumps(
+                {
+                    "config": {},
+                    "mode": "standard",
+                    "repository": str(alias),
+                    "target": {"kind": "paths", "paths": paths},
+                }
+            ),
+        )
+
+    before = inspect(["b.py", "a.py", "b.py"])
+    assert before == inspect(["a.py", "b.py"])
+    assert before["repository"] == str(target.resolve())
+    assert before["target"] == {"kind": "paths", "paths": ["a.py", "b.py"]}
+    (target / "b.py").write_text("b = 2\n")
+    after = inspect(["a.py", "b.py"])
+    assert after["snapshotDigest"] != before["snapshotDigest"]
+    assert after["targetRevision"] == before["targetRevision"] == "unversioned"
+    assert state_dir.is_file()
+
+
+@pytest.mark.parametrize("invalid_target", ["repository", "paths", "refs", "working_tree"])
+def test_cli_dependency_inspection_preserves_registration_target_validation(
+    tmp_path: Path, invalid_target: str
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    initial_revision = initialize_git_repository(target)
+    (target / "README.md").write_text("another commit\n")
+    subprocess.run(["git", "commit", "-qam", "Update fixture"], cwd=target, check=True)
+    recipe: dict[str, Any] = {
+        "config": {},
+        "mode": "standard",
+        "repository": str(target),
+        "target": {"kind": invalid_target, "paths": []},
+    }
+    if invalid_target == "repository":
+        other = tmp_path / "other"
+        other.mkdir()
+        recipe["repository"] = str(other)
+    elif invalid_target == "paths":
+        recipe["target"]["paths"] = ["../outside"]
+    elif invalid_target == "refs":
+        recipe["target"].update(base="missing-revision", head="HEAD")
+    else:
+        recipe["target"].update(base=initial_revision, head=initial_revision)
+    recipe_json = json.dumps(recipe)
+    arguments = ("--repository", str(target), "--recipe-json", recipe_json)
+    inspected = run_workbench(state_dir, "inspect-cli-dependencies", *arguments, check=False)
+    assert not state_dir.exists()
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    registered = run_workbench(
+        state_dir, "register-cli-scan", "--scan-dir", str(scan_dir), *arguments, check=False
+    )
+    assert inspected["returncode"] != 0
+    assert inspected == registered
 
 
 def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: Path) -> None:

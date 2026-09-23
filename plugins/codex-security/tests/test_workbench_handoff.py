@@ -9,6 +9,85 @@ import pytest
 from workbench_test_support import create_saved_workspace, run_workbench
 
 
+@pytest.mark.parametrize("workspace_thread_id", (None, "workspace-owner"))
+def test_dependency_job_binds_only_to_authoritative_native_continuation(
+    tmp_path: Path, workspace_thread_id: str | None
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(
+        state_dir,
+        target,
+        thread_id=workspace_thread_id,
+        mode="full_dependency",
+    )
+    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    scan_id = str(started["results"]["scanId"])
+    continuation_thread_id = "trusted-native-continuation"
+
+    if workspace_thread_id is None:
+        unowned = run_workbench(
+            state_dir,
+            "bind-dependency-job",
+            "--scan-id",
+            scan_id,
+            "--job-id",
+            "dps_native",
+            "--thread-id",
+            continuation_thread_id,
+            check=False,
+        )
+        assert unowned["returncode"] != 0
+
+    claim_token = str(uuid.uuid4())
+    run_workbench(
+        state_dir,
+        "claim-handoff-delivery",
+        "--scan-id",
+        scan_id,
+        "--claim-token",
+        claim_token,
+    )
+    run_workbench(
+        state_dir,
+        "attach-scan-continuation-thread",
+        "--scan-id",
+        scan_id,
+        "--claim-token",
+        claim_token,
+        "--thread-id",
+        continuation_thread_id,
+    )
+
+    for wrong_thread_id in {"unrelated-thread", workspace_thread_id} - {None}:
+        rejected = run_workbench(
+            state_dir,
+            "bind-dependency-job",
+            "--scan-id",
+            scan_id,
+            "--job-id",
+            "dps_native",
+            "--thread-id",
+            wrong_thread_id,
+            check=False,
+        )
+        assert rejected["returncode"] != 0
+
+    linked = run_workbench(
+        state_dir,
+        "bind-dependency-job",
+        "--scan-id",
+        scan_id,
+        "--job-id",
+        "dps_native",
+        "--thread-id",
+        continuation_thread_id,
+    )
+    assert linked["scan"]["continuationThreadId"] == continuation_thread_id
+    assert linked["scan"]["dependencyJobId"] == "dps_native"
+
+
 @pytest.mark.parametrize("mode", ("standard", "deep"))
 def test_running_scan_context_is_owned_by_attached_continuation(tmp_path: Path, mode: str) -> None:
     state_dir = tmp_path / "state"

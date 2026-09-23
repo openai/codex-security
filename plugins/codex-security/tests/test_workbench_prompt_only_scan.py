@@ -190,6 +190,44 @@ def test_prompt_only_scan_creates_submitted_delivered_scan(
     assert workspace["results"]["scanId"] == scan["scanId"]
 
 
+def test_prompt_only_full_dependency_scan_preserves_repository_target(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+
+    started = start_prompt_only_scan(
+        state_dir,
+        target,
+        tmp_path / "scans",
+        mode="full_dependency",
+    )
+
+    assert started["scan"]["mode"] == "full_dependency"
+    assert started["scan"]["scanDependencies"] is True
+    assert started["scan"]["diffTarget"] is None
+    assert started["workspace"]["mode"] == "full_dependency"
+
+
+def test_prompt_only_dependency_update_scan_preserves_real_git_diff(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    (target / "README.md").write_text("updated dependency fixture\n")
+
+    started = start_prompt_only_scan(
+        state_dir,
+        target,
+        tmp_path / "scans",
+        mode="dependency_update",
+        extra_args=("--diff-target-kind", "working_tree"),
+    )
+
+    assert started["scan"]["mode"] == "dependency_update"
+    assert started["scan"]["scanDependencies"] is True
+    assert started["scan"]["diffTarget"]["kind"] == "working_tree"
+    assert started["scan"]["contract"]["target"]["allowedKinds"] == ["git_diff"]
+
+
 def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     tmp_path: Path,
 ) -> None:

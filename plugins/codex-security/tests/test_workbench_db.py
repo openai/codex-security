@@ -1042,7 +1042,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (44,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -3429,6 +3429,13 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
     draft_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     draft_target = draft_manifest["scan"]["target"]
     authored_snapshot_digest = draft_target["snapshotDigest"]
+    expected_digest = hashlib.sha256(
+        b"codex-security-diff/v1\0commit\0"
+        + str(diff_target["baseRevision"]).encode()
+        + b"\0"
+        + str(diff_target["headRevision"]).encode()
+    ).hexdigest()
+    expected_snapshot_digest = f"codex-security-snapshot/v1:sha256:{expected_digest}"
     draft_target["revision"] = "stale-revision"
     (scan_dir / "scan-manifest.json").write_text(json.dumps(draft_manifest))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
@@ -3437,8 +3444,89 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
     assert "revision" not in manifest["scan"]["target"]
     assert manifest["scan"]["target"]["baseRevision"] == diff_target["baseRevision"]
     assert manifest["scan"]["target"]["headRevision"] == diff_target["headRevision"]
-    assert manifest["scan"]["target"]["snapshotDigest"] == authored_snapshot_digest
+    assert manifest["scan"]["target"]["snapshotDigest"] == expected_snapshot_digest
+    assert manifest["scan"]["target"]["snapshotDigest"] != authored_snapshot_digest
     assert manifest["scan"]["scope"] == {"includePaths": ["."], "excludePaths": []}
+
+
+def test_workbench_restores_missing_committed_diff_digest_deterministically(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    base_revision = initialize_git_repository(target)
+    revisions = []
+    for version in ("second", "third"):
+        (target / "README.md").write_text(f"{version} commit\n")
+        subprocess.run(["git", "commit", "-qam", f"{version} commit"], cwd=target, check=True)
+        revisions.append(
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=target,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+
+    snapshot_digests = []
+    for index, head_revision in enumerate((revisions[0], revisions[0], revisions[1])):
+        state_dir = tmp_path / f"state-{index}"
+        workspace_id = str(uuid.uuid4())
+        run_workbench(
+            state_dir,
+            "create-workspace",
+            "--workspace-id",
+            workspace_id,
+            "--target-path",
+            str(target),
+        )
+        run_workbench(
+            state_dir,
+            "save-workspace",
+            "--workspace-id",
+            workspace_id,
+            "--target-path",
+            str(target),
+            "--scope",
+            ".",
+            "--mode",
+            "diff",
+            "--diff-target-kind",
+            "range",
+            "--diff-base-revision",
+            base_revision,
+            "--diff-head-revision",
+            head_revision,
+        )
+        started = start_delivered_scan(
+            state_dir,
+            "--workspace-id",
+            workspace_id,
+            "--scan-root",
+            str(tmp_path / "scans"),
+        )
+        scan_id = str(started["results"]["scanId"])
+        scan_dir = Path(str(started["results"]["scanDir"]))
+        write_completed_contract(
+            scan_dir,
+            scan_id,
+            target,
+            target_kind="git_diff",
+            diff_base_revision=base_revision,
+            diff_head_revision=head_revision,
+        )
+        manifest_path = scan_dir / "scan-manifest.json"
+        draft_manifest = json.loads(manifest_path.read_text())
+        del draft_manifest["scan"]["target"]["snapshotDigest"]
+        manifest_path.write_text(json.dumps(draft_manifest))
+
+        completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+        assert completed["scan"]["progress"]["status"] == "complete"
+        snapshot_digests.append(
+            json.loads(manifest_path.read_text())["scan"]["target"]["snapshotDigest"]
+        )
+
+    assert snapshot_digests[0].startswith("codex-security-snapshot/v1:sha256:")
+    assert snapshot_digests[0] == snapshot_digests[1]
+    assert snapshot_digests[0] != snapshot_digests[2]
 
 
 def test_workbench_preserves_invalid_requested_initial_deep_scope(

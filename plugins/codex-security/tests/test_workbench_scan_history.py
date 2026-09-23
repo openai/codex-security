@@ -829,6 +829,80 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
         assert connection.execute("SELECT COUNT(*) FROM finding_occurrences").fetchone() == (2,)
 
 
+def test_malware_only_comparison_does_not_resolve_dependency_vulnerabilities(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    root = tmp_path / "results"
+    before = create_cli_scan(
+        state_dir,
+        root,
+        repository,
+        identity_anchor="upstream-vulnerability",
+        extra_anchors=("first-party", "known-advisory", "upstream-malware"),
+    )
+    malware_only = create_cli_scan(state_dir, root, repository, finding=False)
+    comprehensive = create_cli_scan(state_dir, root, repository, finding=False)
+    finding_profiles = {
+        "upstream-vulnerability": {
+            "provenance": {"source": "dependency_update_scan"},
+            "extensions": {"dependency": {"upstreamFindingId": "dep_vulnerability"}},
+        },
+        "first-party": {},
+        "known-advisory": {
+            "ruleId": "dependency.known-prototype-pollution",
+            "extensions": {"candidateId": "known-advisory"},
+        },
+        "upstream-malware": {
+            "ruleId": "supply-chain.malicious-install-hook",
+            "taxonomy": {"category": "malware", "cwe": []},
+            "provenance": {"source": "dependency_update_scan"},
+            "extensions": {"dependency": {"upstreamFindingId": "dep_malware"}},
+        },
+    }
+    finding_ids = {}
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "UPDATE scans SET dependency_scan_target = ? WHERE id = ?",
+            ("malware", malware_only["scanId"]),
+        )
+        previous_findings = connection.execute(
+            "SELECT id, finding_id, details_json FROM finding_occurrences WHERE scan_id = ?",
+            (before["scanId"],),
+        ).fetchall()
+        for row in previous_findings:
+            finding = json.loads(row["details_json"])
+            anchor = finding["identity"]["anchor"]
+            finding.update(finding_profiles[anchor])
+            finding_ids[anchor] = row["finding_id"]
+            connection.execute(
+                "UPDATE finding_occurrences SET details_json = ? WHERE id = ?",
+                (json.dumps(finding, sort_keys=True), row["id"]),
+            )
+            connection.execute(
+                "UPDATE findings SET rule_id = ? WHERE id = ?",
+                (finding["ruleId"], row["finding_id"]),
+            )
+
+    malware_comparison = compare_scan_pair(state_dir, before, malware_only)
+    malware_findings = {finding["findingId"]: finding for finding in malware_comparison["findings"]}
+    assert malware_comparison["summary"]["unknown"] == 1
+    assert malware_comparison["summary"]["resolved"] == 3
+    assert malware_findings[finding_ids["upstream-vulnerability"]]["status"] == "unknown"
+    assert malware_findings[finding_ids["upstream-vulnerability"]]["reason"] == (
+        "The later scan did not review dependency vulnerabilities."
+    )
+    for anchor in ("first-party", "known-advisory", "upstream-malware"):
+        assert malware_findings[finding_ids[anchor]]["status"] == "resolved"
+
+    comprehensive_comparison = compare_scan_pair(state_dir, before, comprehensive)
+    assert comprehensive_comparison["summary"]["unknown"] == 0
+    assert comprehensive_comparison["summary"]["resolved"] == 4
+
+
 def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"

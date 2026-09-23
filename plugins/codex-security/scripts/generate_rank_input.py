@@ -121,6 +121,28 @@ EXCLUDED_FILENAMES = {
     "yarn.lock",
 }
 
+DEPENDENCY_ARTIFACT_TEXT_EXTENSIONS = {
+    ".bat",
+    ".bash",
+    ".cjs",
+    ".cmd",
+    ".conf",
+    ".cts",
+    ".env",
+    ".gemspec",
+    ".gradle",
+    ".ini",
+    ".jsonc",
+    ".lock",
+    ".map",
+    ".mts",
+    ".properties",
+    ".ps1",
+    ".pth",
+    ".txt",
+    ".zsh",
+}
+
 SHARD_INPUT_GLOB = "rank-shard-*.input.jsonl"
 SHARD_OUTPUT_GLOB = "rank-shard-*.output.jsonl"
 SHARD_INPUT_PATTERN = re.compile(r"^rank-shard-([0-9]{4,})\.input\.jsonl$")
@@ -284,12 +306,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def path_is_excluded(path: Path) -> bool:
+def path_is_excluded(path: Path, *, dependency_artifact_scan: bool = False) -> bool:
+    if ".git" in path.parts:
+        return True
+    if dependency_artifact_scan:
+        return False
     if any(part in EXCLUDED_DIRS for part in path.parts):
         return True
     if path.name in EXCLUDED_FILENAMES:
         return True
     return path.name.endswith((".min.js", ".map"))
+
+
+def source_like_path(path: Path, *, dependency_artifact_scan: bool = False) -> bool:
+    suffix = path.suffix.lower()
+    return suffix in TEXT_CODE_EXTENSIONS or (
+        dependency_artifact_scan and (not suffix or suffix in DEPENDENCY_ARTIFACT_TEXT_EXTENSIONS)
+    )
 
 
 def path_is_diff_excluded(path: Path) -> bool:
@@ -464,6 +497,7 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
     repo = Path(args.repo).expanduser().resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
+    dependency_artifact_scan = os.environ.get("CODEX_SECURITY_DEPENDENCY_ARTIFACT_SCAN") == "1"
     scopes = [args.scope]
     explicit_scopes = args.scopes_file is not None
     if explicit_scopes:
@@ -488,6 +522,8 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
             except (OSError, ValueError):
                 continue
             rel = path.relative_to(repo)
+            if dependency_artifact_scan and ".git" in rel.parts:
+                continue
             directly_requested = path in directly_requested_files
             excluded_path = (
                 path.relative_to(scope_abs if scope_abs.is_dir() else scope_abs.parent)
@@ -495,19 +531,21 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
                 else rel
             )
             if not directly_requested and (
-                path_is_excluded(excluded_path) or path.suffix.lower() not in TEXT_CODE_EXTENSIONS
+                path_is_excluded(excluded_path, dependency_artifact_scan=dependency_artifact_scan)
+                or not source_like_path(path, dependency_artifact_scan=dependency_artifact_scan)
             ):
                 continue
 
             if (
                 directly_requested
-                and path.suffix.lower() not in TEXT_CODE_EXTENSIONS
+                and not dependency_artifact_scan
+                and not source_like_path(path)
                 and path.name not in EXCLUDED_FILENAMES
             ):
                 preview = ""
             else:
                 preview, is_binary = preview_for(path, args.preview_bytes)
-                if is_binary and not directly_requested:
+                if is_binary and (dependency_artifact_scan or not directly_requested):
                     continue
             rows_by_path.setdefault(
                 rel.as_posix(),
@@ -681,12 +719,17 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     repo = Path(args.repo).expanduser().resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
+    dependency_artifact_scan = os.environ.get("CODEX_SECURITY_DEPENDENCY_ARTIFACT_SCAN") == "1"
 
     changed = [
         (path, status)
         for path, status in git_changed_paths(repo, args.base, args.head, args.mode)
-        if not path_is_diff_excluded(path.relative_to(repo))
-        and path.suffix.lower() in TEXT_CODE_EXTENSIONS
+        if not (
+            path_is_excluded(path.relative_to(repo), dependency_artifact_scan=True)
+            if dependency_artifact_scan
+            else path_is_diff_excluded(path.relative_to(repo))
+        )
+        and source_like_path(path, dependency_artifact_scan=dependency_artifact_scan)
     ]
     revision_paths = [
         path.relative_to(repo)
