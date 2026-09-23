@@ -1,7 +1,14 @@
 import { expect, test } from "bun:test";
 import Ajv2020 from "ajv/dist/2020.js";
 import { DeduplicationReviewError } from "../src/errors.js";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
@@ -25,6 +32,7 @@ import {
 import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runCommand } from "./support/shell.js";
 
 const document: FindingsDocument = JSON.parse(
   await readFile(
@@ -238,6 +246,7 @@ test("rejects invalid inputs before calling the host", async () => {
   const cases = [
     { ...input(), version: 2 },
     { ...input(), observations: [record("a"), record("a")] },
+    { ...input(), observations: [{ id: "a" }] },
     { ...input(), observations: [{ id: "a", finding: {} }] },
     { ...input(), canonicals: [] },
     {
@@ -286,6 +295,70 @@ test("rejects invalid inputs before calling the host", async () => {
         },
       }),
     ).rejects.toThrow();
+});
+
+test("published records input requires findings with or without strict null checks", async () => {
+  const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+  const directory = await mkdtemp(join(tmpdir(), "records-input-types-"));
+  const compiler = join(
+    packageRoot,
+    "node_modules",
+    "typescript",
+    "bin",
+    "tsc",
+  );
+  const tsc = (args: string[]) =>
+    runCommand("node", [compiler, ...args], {
+      cwd: directory,
+      timeout: 30_000,
+    });
+  try {
+    const build = await tsc([
+      "--project",
+      join(packageRoot, "tsconfig.build.json"),
+      "--emitDeclarationOnly",
+      "--outDir",
+      join(directory, "declarations"),
+    ]);
+    expect(build.status, build.stdout + build.stderr).toBe(0);
+    await symlink(
+      join(packageRoot, "node_modules"),
+      join(directory, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await writeFile(
+      join(directory, "consumer.mts"),
+      `
+import type { DeduplicateRecordsInput } from "./declarations/index.js";
+declare const finding: DeduplicateRecordsInput["observations"][number]["finding"];
+const valid: DeduplicateRecordsInput = { version: 1, observations: [{ id: "synthetic", finding }], candidateRelationships: [] };
+const missing: DeduplicateRecordsInput = {
+  version: 1, candidateRelationships: [],
+  // @ts-expect-error an observation must contain a complete finding
+  observations: [{ id: "synthetic" }],
+};
+void [valid, missing];
+`,
+    );
+    for (const strictNullChecks of ["true", "false"]) {
+      const result = await tsc([
+        "--ignoreConfig",
+        "--noEmit",
+        "--strict",
+        "--strictNullChecks",
+        strictNullChecks,
+        "--module",
+        "ESNext",
+        "--moduleResolution",
+        "Bundler",
+        "--skipLibCheck",
+        "consumer.mts",
+      ]);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("SDK aborts even while a host runner is stuck", async () => {

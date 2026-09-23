@@ -21,7 +21,7 @@ const id = z.string().min(1);
 const record = z
   .object({
     id,
-    finding: z.unknown().transform((value) => requireFinding(value)),
+    finding: z.custom<Finding>(requireFinding),
   })
   .strict();
 
