@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, toNamespacedPath } from "node:path";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import type {
   CodexOptions,
@@ -627,7 +627,7 @@ describe("imported finding SDK sessions", () => {
       expect(workbench).not.toHaveBeenCalled();
       expect(captured.codex).toMatchObject({
         apiKey: "synthetic-imported-finding-key",
-        codexPathOverride: process.execPath,
+        codexPathOverride: toNamespacedPath(process.execPath),
         config: {
           model: "synthetic-model",
           model_reasoning_effort: "high",
