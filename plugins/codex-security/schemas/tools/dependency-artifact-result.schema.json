@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/tools/dependency-artifact-result.schema.json",
+  "title": "Record a published dependency artifact security result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scanId", "findings"],
+  "properties": {
+    "scanId": {
+      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
+    },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "priorFindingAssessments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/priorFindingAssessment" }
+    }
+  },
+  "$defs": {
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanId", "findings"],
+      "properties": {
+        "scanId": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
+        },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        },
+        "priorFindingAssessments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/priorFindingAssessment" }
+        }
+      }
+    },
+    "text": {
+      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "startLine"],
+      "properties": {
+        "path": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/repositoryPath"
+        },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": "integer", "minimum": 1 },
+        "role": {
+          "enum": [
+            "entrypoint",
+            "entrypoint/wrapper",
+            "source",
+            "root_control",
+            "sink",
+            "concrete_implementation",
+            "evidence"
+          ]
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "path", "startLine", "code", "explanation"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+        },
+        "label": { "$ref": "#/$defs/text" },
+        "path": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/repositoryPath"
+        },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": "integer", "minimum": 1 },
+        "code": { "$ref": "#/$defs/evidenceCode" },
+        "explanation": { "$ref": "#/$defs/text" },
+        "role": { "$ref": "#/$defs/text" },
+        "language": { "$ref": "#/$defs/text" }
+      }
+    },
+    "evidenceCode": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![\\s\\S]*\\u0000)[\\s\\S]*\\S[\\s\\S]*$"
+    },
+    "priorFindingAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["upstreamFindingId", "status", "reason"],
+      "properties": {
+        "upstreamFindingId": { "$ref": "#/$defs/text" },
+        "status": { "enum": ["present", "fixed", "unknown"] },
+        "reason": { "$ref": "#/$defs/text" },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence" }
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ruleId",
+        "identity",
+        "title",
+        "summary",
+        "severity",
+        "confidence",
+        "taxonomy",
+        "locations",
+        "remediation"
+      ],
+      "properties": {
+        "ruleId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["anchor"],
+          "properties": {
+            "anchor": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+            },
+            "instance": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+            }
+          }
+        },
+        "title": { "$ref": "#/$defs/text" },
+        "summary": { "$ref": "#/$defs/text" },
+        "severity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level"],
+          "properties": {
+            "level": {
+              "enum": ["critical", "high", "medium", "low", "informational"]
+            },
+            "rationale": { "$ref": "#/$defs/text" },
+            "score": { "type": "number", "minimum": 0, "maximum": 10 },
+            "scoringSystem": { "$ref": "#/$defs/text" },
+            "vector": { "$ref": "#/$defs/text" },
+            "changeConditions": { "$ref": "#/$defs/text" }
+          }
+        },
+        "confidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level", "rationale"],
+          "properties": {
+            "level": { "enum": ["high", "medium", "low"] },
+            "rationale": { "$ref": "#/$defs/text" }
+          }
+        },
+        "taxonomy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["category", "cwe"],
+          "properties": {
+            "category": { "$ref": "#/$defs/text" },
+            "cwe": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^CWE-[1-9][0-9]*$" }
+            }
+          }
+        },
+        "locations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/location" }
+        },
+        "codeEvidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence" }
+        },
+        "rootCause": {
+          "anyOf": [
+            { "$ref": "#/$defs/text" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["summary"],
+              "properties": {
+                "summary": { "$ref": "#/$defs/text" },
+                "evidenceRefs": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/text" }
+                }
+              }
+            }
+          ]
+        },
+        "remediation": { "$ref": "#/$defs/text" },
+        "remediationTests": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/text" }
+        },
+        "preventiveControls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/text" }
+        }
+      }
+    }
+  }
+}
