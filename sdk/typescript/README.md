@@ -2072,6 +2072,18 @@ shape. No command, flag, or default changes are required.
 This behavior applies to post-scan Luna/Sol deduplication. Deep Scan's internal
 reducer uses a separate workflow.
 
+### Host-provided records deduplication
+
+`codex-security dedupe --records` accepts a versioned JSON-RPC run over stdin
+and emits serial `review.run` requests on stdout for a host-provided model
+backend. It requires no saved scan or Findings API and performs no local model
+execution or persistence. The SDK exposes `deduplicateRecords(input,
+{ reviewRunner, signal })`. The input contains original observations and explicit candidate links. Results
+contain groups of observation IDs and unresolved observations.
+
+See the [records protocol and Python fake-host example](docs/dedupe-records.md)
+for the complete input, review contract, cancellation, and persistence rules.
+
 ### Stored duplicate groups
 
 `POST /v1/dedupe-groups` accepts a batch of explicitly reviewed member sets:

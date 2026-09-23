@@ -76,6 +76,7 @@ import { loadContract } from "./contract.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
+import { runRecordsProtocol } from "./deduplication/records-protocol.js";
 import {
   classifyScanSeverityInternal,
   classifyScanDirectorySeverityInternal,
@@ -1152,6 +1153,7 @@ interface CliDependencies {
   deduplicateScan?: typeof deduplicateScanInternal;
   classifyScanSeverity?: typeof classifyScanSeverityInternal;
   classifyScanDirectorySeverity?: typeof classifyScanDirectorySeverityInternal;
+  recordsInput?: Readable;
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
   publishScanToCustom?: typeof publishScanToCustom;
@@ -1776,6 +1778,45 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
+  if (
+    argv[0] === "dedupe" &&
+    argv.includes("--records") &&
+    !argv.includes("--help") &&
+    !argv.includes("-h") &&
+    !argv.includes("--schema")
+  ) {
+    if (argv.length !== 2) {
+      errorOutput.write(
+        "codex-security: --records must be used alone with dedupe.\n",
+      );
+      return 2;
+    }
+    const controller = new AbortController();
+    const interrupt = () => controller.abort("SIGINT");
+    const terminate = () => controller.abort("SIGTERM");
+    dependencies.addSignalListener("SIGINT", interrupt);
+    dependencies.addSignalListener("SIGTERM", terminate);
+    let exitCode: number;
+    try {
+      const code = await runRecordsProtocol(
+        dependencies.recordsInput ?? process.stdin,
+        output,
+        controller.signal,
+      );
+      exitCode =
+        controller.signal.reason === "SIGINT"
+          ? 130
+          : controller.signal.reason === "SIGTERM"
+            ? 143
+            : code;
+    } finally {
+      dependencies.removeSignalListener("SIGINT", interrupt);
+      dependencies.removeSignalListener("SIGTERM", terminate);
+    }
+    // Protocol writes have flushed or been canceled. Node's stdout ignores destroy().
+    if (output === process.stdout) process.exit(exitCode);
+    return exitCode;
+  }
   argv = normalizeScanImportArguments(defaultListCommand(argv));
   const policyFullOutput =
     argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
@@ -3882,7 +3923,7 @@ export async function main(
     })
     .command("dedupe", {
       description:
-        "Review a saved scan with local Codex and save duplicate groups to the findings API.",
+        "Dedupe a saved scan, or use --records for host-provided reviews over JSON-RPC.",
       destructive: true,
       mcp: false,
       options: z.object({
@@ -3893,6 +3934,12 @@ export async function main(
           .default(DEFAULT_DEDUPE_CONCURRENCY)
           .describe(
             "Maximum concurrent dedupe jobs across Luna and Sol; use 1 for serial execution.",
+          ),
+        records: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Run the versioned records JSON-RPC protocol on stdin/stdout; use alone.",
           ),
         workflowId: optionValue("--workflow-id")
           .optional()
@@ -3911,6 +3958,7 @@ export async function main(
         findingsUrl: z
           .string()
           .url()
+          .optional()
           .describe(
             "Findings API base URL; the scan's findings must already be indexed.",
           ),
@@ -3935,12 +3983,18 @@ export async function main(
         })
         .optional(),
       async run({ options }) {
+        if (options.records)
+          throw new CodexSecurityError("Use dedupe --records alone.");
         const controller = new AbortController();
         const onInterrupt = () => controller.abort("SIGINT");
         const onTerminate = () => controller.abort("SIGTERM");
         dependencies.addSignalListener("SIGINT", onInterrupt);
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
+          if (options.findingsUrl === undefined)
+            throw new CodexSecurityError(
+              "Saved-scan deduplication requires --findings-url.",
+            );
           const scanId =
             options.scan ??
             (options.workflowId === undefined

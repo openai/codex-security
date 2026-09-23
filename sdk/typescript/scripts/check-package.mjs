@@ -103,6 +103,7 @@ if (files.size !== entries.length) {
 const required = [
   "package/package.json",
   "package/README.md",
+  "package/docs/dedupe-records.md",
   "package/LICENSE",
   "package/bin/codex-security.mjs",
   "package/dist/index.js",
@@ -160,6 +161,7 @@ for (const file of pluginFiles) {
 const allowedRoot = new Set([
   "package/package.json",
   "package/README.md",
+  "package/docs/dedupe-records.md",
   "package/LICENSE",
   "package/bin/codex-security.mjs",
   "package/schemas/project-config.schema.json",
@@ -235,6 +237,10 @@ const distFiles = new Set(
     "deduplication/deduplication-prompts",
     "deduplication/deduplication-reviewer",
     "deduplication/scan",
+    "deduplication/finding-schema",
+    "deduplication/records",
+    "deduplication/records-protocol",
+    "deduplication/review",
     "saved-scan",
     "server/embeddings",
     "server/dashboard",
@@ -278,6 +284,7 @@ for (const file of files) {
     ? normalized === "package" ||
       normalized === "package/bin" ||
       normalized === "package/schemas" ||
+      normalized === "package/docs" ||
       normalized === "package/dist" ||
       normalized === "package/dist/server" ||
       normalized === "package/dist/server/dashboard" ||

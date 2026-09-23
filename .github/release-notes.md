@@ -14,6 +14,7 @@
 - run Windows proofs without symlink privileges ([#988](https://github.com/openai/codex-security/pull/988))
 - pin the MCP formatter ([#990](https://github.com/openai/codex-security/pull/990))
 - check formatting across the MCP app ([#991](https://github.com/openai/codex-security/pull/991))
+- review original observation records through a host ([#946](https://github.com/openai/codex-security/pull/946))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

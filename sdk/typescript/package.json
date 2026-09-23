@@ -39,7 +39,8 @@
     "schemas",
     "_bundled_plugin",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "docs/dedupe-records.md"
   ],
   "publishConfig": {
     "access": "public",
