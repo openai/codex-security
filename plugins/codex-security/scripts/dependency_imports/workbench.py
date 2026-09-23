@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import stat
 import uuid
 from datetime import datetime, timezone
 from itertools import islice
@@ -15,6 +17,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from dependency_imports.formats import MAX_REPORT_BYTES, parse_report
+from finalize_scan_contract import open_regular_file_descriptor
 from workbench_target import git_bytes, git_revision, worktree_content_digest
 
 MAX_SELECTION = 100
@@ -96,8 +99,29 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _read(path: Path, maximum: int = MAX_REPORT_BYTES) -> bytes:
-    with path.open("rb") as stream:
+def _read(path: Path, target: Path, maximum: int = MAX_REPORT_BYTES) -> bytes:
+    path = Path(os.path.abspath(path))
+    # Resolve aliases above the selected repository, never its report components.
+    for parent in reversed(path.parents):
+        if parent.resolve() == target:
+            root, relative = target, path.relative_to(parent)
+            break
+    else:
+        # An explicitly selected external report authorizes its containing directory.
+        root, relative = path.parent.resolve(), Path(path.name)
+    expected = path.lstat()
+    if not stat.S_ISREG(expected.st_mode):
+        raise ValueError("Report input must be a regular non-symlink file.")
+    try:
+        descriptor = open_regular_file_descriptor(root, relative, "Report input")
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            "Report input could not be opened safely. Select a readable regular file "
+            "without symlinks inside the repository."
+        ) from exc
+    with os.fdopen(descriptor, "rb") as stream:
+        if not os.path.samestat(expected, os.fstat(stream.fileno())):
+            raise ValueError("Report input changed while it was being opened.")
         content = stream.read(maximum + 1)
     if len(content) > maximum:
         raise ValueError(f"Input exceeds the {maximum // 1024} KiB size limit.")
@@ -238,7 +262,7 @@ def import_report(connection: sqlite3.Connection, args: argparse.Namespace) -> d
     """Persist a report as unassessed claims without creating a completed scan."""
     target = Path(args.target_path).expanduser().resolve()
     revision, snapshot = _snapshot(target)
-    content = _read(Path(args.report_path))
+    content = _read(Path(args.report_path), target)
     parsed = parse_report(_decode(content, vendor=args.vendor), args.vendor)
     claims = [_check_inputs(revision, claim) for claim in parsed["findings"]]
     if _snapshot(target) != (revision, snapshot):

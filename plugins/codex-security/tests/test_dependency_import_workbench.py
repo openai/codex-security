@@ -153,6 +153,59 @@ def record(
     )
 
 
+@pytest.mark.parametrize("link_kind", ["file", "directory", "aliased-directory"])
+def test_import_rejects_repository_report_symlinks(tmp_path: Path, link_kind: str) -> None:
+    """Repository links cannot turn an import into a read of an outside report."""
+    target, state, _, _ = setup_report(tmp_path)
+    report_path = target / "import.json"
+    try:
+        if link_kind == "file":
+            report_path.symlink_to(tmp_path / "scanner.json")
+        else:
+            (target / "reports").symlink_to(tmp_path, target_is_directory=True)
+            report_path = target / "reports" / "scanner.json"
+            if link_kind == "aliased-directory":
+                alias = tmp_path / "alias"
+                alias.symlink_to(tmp_path, target_is_directory=True)
+                report_path = alias / "repo" / "reports" / "scanner.json"
+    except OSError as exc:
+        pytest.skip(f"Creating symlinks is unavailable: {exc}")
+
+    failed = run_workbench(
+        state,
+        "import-dependency-findings",
+        "--target-path",
+        str(target),
+        "--report-path",
+        str(report_path),
+        "--vendor",
+        "snyk",
+        check=False,
+    )
+    assert failed["returncode"] != 0
+    assert "Report input" in failed["stderr"]
+    assert len(run_workbench(state, "list-dependency-reports")["reports"]) == 1
+
+
+def test_report_read_rejects_replacement_before_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workbench_api: dict[str, Any]
+) -> None:
+    """Only read the regular file validated before opening, even during replacement."""
+    api = workbench_api["dependency_imports"]
+    path, replacement = tmp_path / "report.json", tmp_path / "replacement.json"
+    path.write_bytes(b"selected report")
+    replacement.write_bytes(b"unselected report")
+    open_descriptor = api.open_regular_file_descriptor
+
+    def replace_before_open(root: Path, relative: Path, context: str) -> int:
+        replacement.replace(path)
+        return open_descriptor(root, relative, context)
+
+    monkeypatch.setattr(api, "open_regular_file_descriptor", replace_before_open)
+    with pytest.raises(ValueError, match="Report input changed"):
+        api._read(path, tmp_path.resolve())
+
+
 @pytest.mark.parametrize("shape", ["artifact", "scores", "ndjson", "array", "wrapper"])
 def test_import_socket_report_encodings(tmp_path: Path, shape: str) -> None:
     """Persist Socket JSON and single-event NDJSON without changing source evidence."""
