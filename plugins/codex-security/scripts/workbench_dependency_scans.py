@@ -459,3 +459,7 @@ def provisional_dependency_inventory(
         return inventory
     except (KeyError, OSError, TypeError, UnicodeError, ValueError):
         return None
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()
