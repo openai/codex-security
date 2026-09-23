@@ -2506,8 +2506,9 @@ Compose accepts `CODEX_SECURITY_IMAGE`, `CODEX_SECURITY_USER`,
 `CODEX_SECURITY_SECCOMP`, `CODEX_SECURITY_CSV`, `CODEX_SECURITY_RESULTS`, and
 `CODEX_SECURITY_STATE` for the image, user, seccomp profile, and mounts.
 
+Codex 0.156.1 requires Bubblewrap for filesystem-restricted execution on Linux.
 On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
-can install the optional AppArmor profile:
+must install the AppArmor profile and use the Compose override:
 
 ```bash
 sudo install -m 0644 docker/codex-security.apparmor /etc/apparmor.d/codex-security-container
@@ -2516,7 +2517,9 @@ docker compose -f compose.yaml -f compose.apparmor.yaml run --rm codex-security
 ```
 
 The override keeps the nonroot user, dropped capabilities, no-new-privileges,
-and seccomp policy. Other Docker hosts don't need it.
+and seccomp policy. It enables the nested namespaces required by Bubblewrap.
+The legacy Landlock fallback is no longer supported for these scans. Other
+Docker hosts that permit nested user namespaces do not need this override.
 
 ## Local security model
 
