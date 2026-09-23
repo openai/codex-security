@@ -1,10 +1,19 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import { afterEach, expect, test } from "bun:test";
+import { InvalidTargetError } from "../src/errors.js";
 import type { OwnerContext } from "../src/owner-evidence.js";
 import {
   suggestOwners,
@@ -102,6 +111,113 @@ function chooseAlex(context: OwnerContext) {
       .map(({ id }) => id),
   };
 }
+
+test.each(["borrowed-gitfile", "forged-commondir"])(
+  "rejects %s before sending another checkout's evidence to Codex",
+  async (kind) => {
+    const other = await repository();
+    const selected = await realpath(
+      await mkdtemp(join(tmpdir(), "owner-unbound-")),
+    );
+    directories.push(selected);
+    const metadata = await other.git("rev-parse", "--absolute-git-dir");
+    if (kind === "borrowed-gitfile") {
+      await writeFile(join(selected, ".git"), `gitdir: ${metadata}\n`);
+    } else {
+      await mkdir(join(selected, ".git"));
+      await writeFile(
+        join(selected, ".git", "HEAD"),
+        await readFile(join(metadata, "HEAD")),
+      );
+      await writeFile(join(selected, ".git", "commondir"), `${metadata}\n`);
+      await writeFile(
+        join(selected, ".git", "gitdir"),
+        `${join(selected, ".git")}\n`,
+      );
+    }
+    const { codex, calls } = fakeCodex();
+    await expect(suggestOwners(selected, [finding], { codex })).rejects.toThrow(
+      InvalidTargetError,
+    );
+    expect(calls).toHaveLength(0);
+  },
+);
+
+test.each(["refs", "refs/heads", "HEAD", "packed-refs"])(
+  "rejects borrowed %s before sending another checkout's evidence to Codex",
+  async (reference) => {
+    const other = await repository();
+    const selected = await realpath(
+      await mkdtemp(join(tmpdir(), "owner-borrowed-ref-")),
+    );
+    directories.push(selected);
+    const branch = await other.git("symbolic-ref", "--short", "HEAD");
+    await execFile("git", [
+      "init",
+      "--quiet",
+      "--initial-branch",
+      branch,
+      selected,
+    ]);
+    const metadata = await other.git("rev-parse", "--absolute-git-dir");
+    await writeFile(
+      join(selected, ".git", "objects", "info", "alternates"),
+      `${join(metadata, "objects")}\n`,
+    );
+    if (reference === "packed-refs") await other.git("pack-refs", "--all");
+    const target =
+      reference === "HEAD" ? join("refs", "heads", branch) : reference;
+    const path = join(selected, ".git", reference);
+    await rm(path, { recursive: true, force: true });
+    await symlink(
+      join(metadata, target),
+      path,
+      reference.startsWith("refs")
+        ? process.platform === "win32"
+          ? "junction"
+          : "dir"
+        : "file",
+    );
+    const { codex, calls } = fakeCodex();
+    await expect(suggestOwners(selected, [finding], { codex })).rejects.toThrow(
+      InvalidTargetError,
+    );
+    expect(calls).toHaveLength(0);
+  },
+);
+
+test.each([
+  "linked-worktree",
+  "separate-git-directory",
+  "source-subdirectory",
+  "shared-clone",
+])("supports a bound %s", async (kind) => {
+  const repo = await repository();
+  const root = await realpath(await mkdtemp(join(tmpdir(), "owner-bound-")));
+  directories.push(root);
+  let selected = repo.path;
+  if (kind === "linked-worktree") {
+    selected = join(root, "checkout");
+    await repo.git("worktree", "add", "--quiet", "--detach", selected);
+  } else if (kind === "separate-git-directory") {
+    await repo.git("init", "--quiet", "--separate-git-dir", join(root, "git"));
+    await repo.git("config", "core.worktree", repo.path);
+  } else if (kind === "shared-clone") {
+    selected = join(root, "checkout");
+    await repo.git("clone", "--quiet", "--shared", repo.path, selected);
+  } else {
+    selected = join(repo.path, "src");
+    await mkdir(selected);
+  }
+  const { codex, calls } = fakeCodex();
+  const report = await suggestOwners(selected, [finding], { codex });
+  expect(report.revision).toBe(repo.revision);
+  expect(report.results[0]).toMatchObject({
+    status: "identified",
+    owner: { name: "Alex Example", email: "alex@example.test" },
+  });
+  expect(calls).toHaveLength(1);
+});
 
 test("combines source, affected-line authorship, and history through the restricted model runner", async () => {
   const repo = await repository();

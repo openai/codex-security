@@ -1,8 +1,16 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { lstat, readdir, realpath } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { promisify } from "node:util";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, InvalidTargetError } from "./errors.js";
 import type { OwnerFinding } from "./suggest-owners.js";
-import { normalizeRepository, validatedGitEnvironment } from "./targets.js";
+import {
+  enclosingGitWorktreeRoot,
+  gitMetadataDirectories,
+  normalizeRepository,
+  relativePathIsOutside,
+  validatedGitEnvironment,
+} from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -37,6 +45,10 @@ export async function ownerRepository(
 ) {
   repository = await normalizeRepository(repository, signal);
   validatedGitEnvironment(environment);
+  repository =
+    (await enclosingGitWorktreeRoot(repository, signal, {
+      requireIfPresent: true,
+    })) ?? repository;
   const executable = await resolveTrustedExecutable(
     "git",
     environment,
@@ -54,9 +66,14 @@ export async function ownerRepository(
     });
     return stdout;
   };
-  const gitDirectory = (
-    await run(repository, ["rev-parse", "--absolute-git-dir"])
-  ).trim();
+  const [gitDirectory, commonDirectory] = await gitMetadataDirectories(
+    repository,
+    signal,
+  );
+  await requireBoundReferences(
+    [...new Set([gitDirectory, commonDirectory])],
+    signal,
+  );
   // Blame otherwise reads an uncommitted .mailmap from the working directory.
   const git = (...args: string[]) =>
     run(gitDirectory, [
@@ -76,6 +93,44 @@ export async function ownerRepository(
   const shallow =
     (await git("rev-parse", "--is-shallow-repository")).trim() === "true";
   return { git, revision, files, shallow };
+}
+
+/** Shared objects are supported, but another checkout must not select HEAD. */
+async function requireBoundReferences(
+  metadataDirectories: string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  const pending = metadataDirectories.flatMap((directory) =>
+    ["HEAD", "refs", "packed-refs", "reftable"].map((name) =>
+      join(directory, name),
+    ),
+  );
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    signal?.throwIfAborted();
+    const path = pending.pop()!;
+    if (visited.has(path)) continue;
+    visited.add(path);
+    const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (entry?.isSymbolicLink()) {
+      const destination = await realpath(path);
+      if (
+        metadataDirectories.every((root) =>
+          relativePathIsOutside(relative(root, destination)),
+        )
+      ) {
+        throw new InvalidTargetError(
+          "Git references are not bound to the selected checkout. Select the intended checkout or repair its Git metadata.",
+        );
+      }
+      pending.push(destination);
+    } else if (entry?.isDirectory()) {
+      for (const name of await readdir(path)) pending.push(join(path, name));
+    }
+  }
 }
 
 export async function collectOwnerEvidence(
