@@ -261,7 +261,7 @@ test("combines source, affected-line authorship, and history through the restric
   ).toContain("return records[id]");
   expect(calls[0]!.context.identities).toHaveLength(2);
   expect(calls[0]!.thread).toMatchObject({
-    threadSource: "security_assignee_recommendation",
+    threadSource: "security_suggest_owners",
     model: "synthetic-model",
     modelReasoningEffort: "high",
     sandboxMode: "read-only",

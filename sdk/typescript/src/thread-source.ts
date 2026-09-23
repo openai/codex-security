@@ -4,7 +4,7 @@ export const CODEX_SECURITY_THREAD_SOURCES = {
   remediation: "security_remediation",
   scanComparison: "security_scan_comparison",
   severityClassification: "security_severity_classification",
-  assigneeRecommendation: "security_assignee_recommendation",
+  suggestOwners: "security_suggest_owners",
 } as const;
 
 export type CodexSecurityThreadSource =

@@ -145,7 +145,7 @@ export async function suggestOwnersInternal(
         },
         {
           surface,
-          threadSource: CODEX_SECURITY_THREAD_SOURCES.assigneeRecommendation,
+          threadSource: CODEX_SECURITY_THREAD_SOURCES.suggestOwners,
         },
       );
       const decision = decisionSchema.parse(JSON.parse(response));
