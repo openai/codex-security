@@ -11,6 +11,8 @@ Keep the scanner's alert separate from your assessment. The report, package code
 
 ## Import and selection
 
+Model-facing dependency tools use the working directory supplied by the host and only access reports for that exact repository path. A report or assessment ID does not authorize another target. Start the task in the report's repository; use the app or direct CLI for cross-repository report management. Missing host target metadata is a blocker, not permission to fall back to an unscoped tool.
+
 For a report file, use `import_dependency_findings` with the repository path, file name, explicit vendor (`endor`, `snyk`, or `socket`), and file contents. For the CLI, run the bundled `../../scripts/workbench_db.py` `import-dependency-findings --target-path REPO --report-path REPORT --vendor VENDOR`. Supported exports and limitations are in `../../references/imported-dependency-findings.md`.
 
 Endor accepts Finding or ListFindingsResponse JSON and findings CSV exports. Snyk and Socket require their supported JSON formats. Pass the original file contents unchanged; do not convert CSV rows into invented vendor JSON or fill in missing evidence.
@@ -19,7 +21,7 @@ Import does not authorize assessment of every item. Show the imported findings a
 
 When an assessment ID is already supplied, call `get_dependency_assessment` and assess exactly its selected findings. Reuse a pending ID after interruption. If the assessment is complete, read its recorded results instead of repeating it.
 
-CLI equivalents are `get-dependency-assessment --assessment-id ID` and `start-dependency-assessment --report-id ID --finding-id ID` (repeat the finding option for multiple selections). Use the same `CODEX_SECURITY_STATE_DIR` as the caller. Do not create a different database or manufacture scan IDs.
+CLI equivalents are `get-dependency-assessment --assessment-id ID --target-path REPO` and `start-dependency-assessment --report-id ID --finding-id ID --target-path REPO` (repeat the finding option for multiple selections). Use the same `CODEX_SECURITY_STATE_DIR` as the caller. Do not create a different database or manufacture scan IDs.
 
 ## Evidence and outcome
 
@@ -41,7 +43,7 @@ Read the result contract in `../../references/imported-dependency-findings.md`, 
 
 For code-path conclusions, cite the source conditions supporting the conclusion, not only package membership. The tool captures actual source excerpts and the checked revision. Changed repository content or recorded resolution input bytes require a new assessment.
 
-Without MCP, write the result array to a JSON file outside the repository and run `record-dependency-assessments --assessment-id ID --results-path FILE`. Do not put scanner prose in shell command text.
+Without MCP, write the result array to a JSON file outside the repository and run `record-dependency-assessments --assessment-id ID --results-path FILE --target-path REPO`. Do not put scanner prose in shell command text.
 
 Present the original vendor, severity, package and advisory separately from your verdict, evidence, applicability conditions, and remaining limitations or unknowns. Distinguish a declared pin, an inspected external artifact, and an established effective version. Successful import or recording does not itself validate a vulnerability. Do not close vendor alerts or change their severity.
 

@@ -7,11 +7,12 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -36,6 +37,7 @@ async function testDependencyAssessmentContract() {
   const { registerDependencyImportTools } = await import(
     `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
   );
+  await testDependencyTargetContext(registerDependencyImportTools);
   const server = new McpServer({
     name: "dependency-contract-test",
     version: "1.0.0",
@@ -43,7 +45,11 @@ async function testDependencyAssessmentContract() {
   let writes = 0;
   registerDependencyImportTools(server, async (args) => {
     writes += 1;
-    return { results: JSON.parse(await readFile(args.at(-1), "utf8")) };
+    return {
+      results: JSON.parse(
+        await readFile(args[args.indexOf("--results-path") + 1], "utf8"),
+      ),
+    };
   });
   const client = new Client({
     name: "dependency-contract-test",
@@ -85,6 +91,7 @@ async function testDependencyAssessmentContract() {
     const call = (result) =>
       client.callTool({
         name: "record_dependency_assessments",
+        _meta: { "codex/sandbox-state-meta": { sandboxCwd: process.cwd() } },
         arguments: {
           assessmentId: "22222222-2222-4222-8222-222222222222",
           results: [result],
@@ -227,6 +234,89 @@ async function testDependencyAssessmentContract() {
   }
 }
 
+async function testDependencyTargetContext(registerDependencyImportTools) {
+  const directory = await realpath(
+    await mkdtemp(path.join(tmpdir(), "dependency-context-")),
+  );
+  const target = path.join(directory, "target");
+  const otherTarget = path.join(directory, "other");
+  const alias = path.join(directory, "alias");
+  const handlers = new Map();
+  let calls = 0;
+  registerDependencyImportTools(
+    {
+      registerTool(name, _config, handler) {
+        handlers.set(name, handler);
+      },
+    },
+    async (args) => {
+      calls += 1;
+      if (args[0] === "import-dependency-findings") {
+        // Retarget the caller's alias before the workbench opens its target.
+        await rm(alias);
+        await symlink(otherTarget, alias, "junction");
+        assert.equal(args[args.indexOf("--target-path") + 1], target);
+      }
+      return { args };
+    },
+  );
+  const meta = (sandboxCwd) => ({ "codex/sandbox-state-meta": { sandboxCwd } });
+  const read = handlers.get("get_dependency_report");
+  const input = {
+    reportId: "11111111-1111-4111-8111-111111111111",
+    offset: 0,
+    limit: 100,
+  };
+  try {
+    await Promise.all([mkdir(target), mkdir(otherTarget)]);
+    await symlink(target, alias, "junction");
+    for (const extra of [
+      { _meta: meta(target) },
+      { requestInfo: { _meta: meta(target) } },
+      { _meta: meta(target), requestInfo: { _meta: meta(target) } },
+      { _meta: meta(pathToFileURL(target).href) },
+      { _meta: meta(alias) },
+    ]) {
+      const response = await read(input, extra);
+      assert.deepEqual(response.structuredContent.args.slice(-2), [
+        "--target-path",
+        target,
+      ]);
+    }
+    const validCalls = calls;
+    for (const extra of [
+      {},
+      { _meta: meta(undefined) },
+      { _meta: meta("relative/path") },
+      { _meta: meta(1) },
+      { _meta: { "codex/sandbox-state-meta": [] } },
+      { _meta: meta(target), requestInfo: { _meta: meta(otherTarget) } },
+      {
+        _meta: { "codex/sandbox-state-meta": null },
+        requestInfo: { _meta: meta(target) },
+      },
+    ]) {
+      await assert.rejects(() => read(input, extra));
+    }
+    assert.equal(
+      calls,
+      validCalls,
+      "Invalid host context must not reach the workbench",
+    );
+    await handlers.get("import_dependency_findings")(
+      {
+        targetPath: alias,
+        reportName: "report.json",
+        vendor: "snyk",
+        reportContent: "{}",
+      },
+      { _meta: meta(target) },
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 async function testDependencyImportTools() {
   const appRoot = fileURLToPath(new URL("..", import.meta.url));
   const pluginRoot =
@@ -289,7 +379,11 @@ async function testDependencyImportTools() {
   }
 
   async function call(client, name, args) {
-    const response = await client.callTool({ name, arguments: args });
+    const response = await client.callTool({
+      name,
+      arguments: args,
+      _meta: { "codex/sandbox-state-meta": { sandboxCwd: target } },
+    });
     assert.notEqual(
       response.isError,
       true,
@@ -303,9 +397,17 @@ async function testDependencyImportTools() {
   }
 
   async function expectError(client, name, args, pattern) {
-    const response = await client.callTool({ name, arguments: args });
+    const response = await client.callTool({
+      name,
+      arguments: args,
+      _meta: { "codex/sandbox-state-meta": { sandboxCwd: target } },
+    });
     assert.equal(response.isError, true, `${name} must reject this request`);
     assert.match(JSON.stringify(response.content), pattern);
+    assert.doesNotMatch(
+      JSON.stringify(response),
+      /synthetic-other-target-detail/,
+    );
   }
 
   try {
@@ -353,6 +455,116 @@ async function testDependencyImportTools() {
     const reportId = imported.report.id;
     assert.equal(imported.report.findingCount, 2);
     assert.equal(imported.report.vendor, "snyk");
+    const otherTarget = path.join(temporaryRoot, "other-target");
+    execFileSync("git", ["clone", "--quiet", "--local", target, otherTarget]);
+    const otherImport = await call(
+      client,
+      "import_dependency_findings_from_app",
+      {
+        targetPath: otherTarget,
+        reportName: "other-report.json",
+        vendor: "snyk",
+        reportContent: JSON.stringify({
+          packageManager: "npm",
+          vulnerabilities: [
+            { ...sourceClaim, privateField: "synthetic-other-target-detail" },
+          ],
+        }),
+      },
+    );
+    const otherReportId = otherImport.report.id;
+    const otherPage = await call(client, "get_dependency_report_from_app", {
+      reportId: otherReportId,
+    });
+    const otherFindingId = otherPage.findings[0].id;
+    const otherAssessment = await call(
+      client,
+      "start_dependency_assessment_from_app",
+      {
+        reportId: otherReportId,
+        findingIds: [otherFindingId],
+      },
+    );
+    const tools = (await client.listTools()).tools;
+    for (const name of [
+      "list_dependency_reports",
+      "claim_dependency_task_launch",
+      "settle_dependency_task_launch",
+      "get_dependency_task_launches",
+      "import_dependency_findings_from_app",
+      "get_dependency_report_from_app",
+      "get_dependency_finding_from_app",
+      "start_dependency_assessment_from_app",
+      "get_dependency_assessment_from_app",
+    ]) {
+      assert.deepEqual(
+        tools.find((tool) => tool.name === name)?._meta?.ui?.visibility,
+        ["app"],
+      );
+    }
+    assert.equal(
+      (await call(client, "list_dependency_reports", {})).reports.length,
+      2,
+    );
+    for (const [name, args] of [
+      [
+        "import_dependency_findings",
+        {
+          targetPath: otherTarget,
+          reportName: "wrong.json",
+          vendor: "snyk",
+          reportContent,
+        },
+      ],
+      ["get_dependency_report", { reportId: otherReportId }],
+      [
+        "get_dependency_finding",
+        { reportId: otherReportId, findingId: otherFindingId },
+      ],
+      [
+        "get_dependency_finding",
+        {
+          reportId: otherReportId,
+          findingId: otherFindingId,
+          requireCurrent: true,
+        },
+      ],
+      [
+        "start_dependency_assessment",
+        { reportId: otherReportId, findingIds: [otherFindingId] },
+      ],
+      [
+        "get_dependency_assessment",
+        { assessmentId: otherAssessment.assessment.id },
+      ],
+    ]) {
+      await expectError(client, name, args, /active repository/);
+    }
+    for (const sandboxCwd of [undefined, "", "relative/path", 1]) {
+      const rejected = await client.callTool({
+        name: "get_dependency_report",
+        arguments: { reportId },
+        _meta: { "codex/sandbox-state-meta": { sandboxCwd } },
+      });
+      assert.equal(
+        rejected.isError,
+        true,
+        "A model read requires a valid host target",
+      );
+    }
+    const withoutMetadata = await client.callTool({
+      name: "get_dependency_report",
+      arguments: { reportId },
+    });
+    assert.equal(withoutMetadata.isError, true);
+    const fileUriRead = await client.callTool({
+      name: "get_dependency_report",
+      arguments: { reportId },
+      _meta: {
+        "codex/sandbox-state-meta": { sandboxCwd: pathToFileURL(target).href },
+      },
+    });
+    assert.equal(fileUriRead.structuredContent.report.id, reportId);
     const listed = await call(client, "list_dependency_reports", {
       targetPath: target,
     });
@@ -522,6 +734,20 @@ async function testDependencyImportTools() {
       },
       /every selected finding exactly once/,
     );
+    await expectError(
+      client,
+      "record_dependency_assessments",
+      {
+        assessmentId: otherAssessment.assessment.id,
+        results: [{ ...assessment, findingId: otherFindingId }],
+      },
+      /active repository/,
+    );
+    const untouched = await call(client, "get_dependency_assessment_from_app", {
+      assessmentId: otherAssessment.assessment.id,
+    });
+    assert.equal(untouched.assessment.state, "pending");
+    assert.equal(untouched.results, null);
     const recorded = await call(client, "record_dependency_assessments", {
       assessmentId,
       results: [assessment],

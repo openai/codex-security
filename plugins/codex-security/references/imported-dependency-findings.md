@@ -1,5 +1,7 @@
 # Imported dependency findings
 
+Model-facing dependency MCP tools require the host's working directory and restrict report reads and assessment writes to that exact repository path. The app's global inventory, task history, and `_from_app` operations are app-only tools for local report management. Direct CLI/SDK callers retain cross-repository access; the workbench's ID-based get, start, and record commands accept `--target-path REPO` to check the stored report target before reading claims or changing assessments.
+
 Import preserves the original scanner claim. A separate assessment records what Codex checked in the application, its conclusion, and the remaining unknowns. Nothing is submitted to a cloud dependency scan or changed in the vendor system.
 
 ## File formats

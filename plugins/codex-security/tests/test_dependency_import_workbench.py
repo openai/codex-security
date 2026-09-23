@@ -153,6 +153,54 @@ def record(
     )
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "get-dependency-report",
+        "get-dependency-finding",
+        "start-dependency-assessment",
+        "get-dependency-assessment",
+        "record-dependency-assessments",
+    ],
+)
+def test_report_target_guard(tmp_path: Path, command: str) -> None:
+    """A caller's active target limits ID-based reads and writes to that report."""
+    target, state, report_id, findings = setup_report(tmp_path)
+    finding_id = findings[0]["id"]
+    selected = start(state, report_id, [finding_id])["assessment"]["id"]
+    results_path = tmp_path / "results.json"
+    results_path.write_text(json.dumps([result(finding_id, target)]))
+    arguments = {
+        "get-dependency-report": ["--report-id", report_id],
+        "get-dependency-finding": ["--report-id", report_id, "--finding-id", finding_id],
+        "start-dependency-assessment": [
+            "--report-id",
+            report_id,
+            "--finding-id",
+            findings[1]["id"],
+        ],
+        "get-dependency-assessment": ["--assessment-id", selected],
+        "record-dependency-assessments": [
+            "--assessment-id",
+            selected,
+            "--results-path",
+            str(results_path),
+        ],
+    }[command]
+    other = tmp_path / "other-repo"
+    initialize_git_repository(other)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        before = list(connection.iterdump())
+    rejected = run_workbench(state, command, *arguments, "--target-path", str(other), check=False)
+    assert rejected["returncode"] != 0
+    assert "does not belong to the active repository" in rejected["stderr"]
+    assert str(target) not in rejected["stderr"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert list(connection.iterdump()) == before
+    accepted = run_workbench(state, command, *arguments, "--target-path", str(target))
+    assert accepted
+
+
 @pytest.mark.parametrize("link_kind", ["file", "directory", "aliased-directory"])
 def test_import_rejects_repository_report_symlinks(tmp_path: Path, link_kind: str) -> None:
     """Repository links cannot turn an import into a read of an outside report."""

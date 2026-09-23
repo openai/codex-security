@@ -49,20 +49,25 @@ def add_arguments(subparsers: Any) -> None:
     command.add_argument("--offset", type=int, default=0)
     command.add_argument("--limit", type=int, default=100)
     command = subparsers.add_parser("get-dependency-report")
+    command.add_argument("--target-path")
     command.add_argument("--report-id", required=True)
     command.add_argument("--offset", type=int, default=0)
     command.add_argument("--limit", type=int, default=100)
     command.add_argument("--verdict", choices=(*VERDICTS, "pending"))
     command = subparsers.add_parser("get-dependency-finding")
+    command.add_argument("--target-path")
     command.add_argument("--report-id", required=True)
     command.add_argument("--finding-id", required=True)
     command.add_argument("--require-current", action="store_true")
     command = subparsers.add_parser("start-dependency-assessment")
+    command.add_argument("--target-path")
     command.add_argument("--report-id", required=True)
     command.add_argument("--finding-id", action="append", required=True)
     command = subparsers.add_parser("get-dependency-assessment")
+    command.add_argument("--target-path")
     command.add_argument("--assessment-id", required=True)
     command = subparsers.add_parser("record-dependency-assessments")
+    command.add_argument("--target-path")
     command.add_argument("--assessment-id", required=True)
     command.add_argument("--results-path", required=True)
 
@@ -321,9 +326,17 @@ def _page(offset: int, limit: int) -> None:
         raise ValueError("Use a nonnegative offset and a limit between 1 and 100.")
 
 
+def _require_report_target(report: sqlite3.Row, args: argparse.Namespace) -> None:
+    """Enforce the MCP host's active target before reading claims or writing results."""
+    target_path = getattr(args, "target_path", None)
+    if target_path is not None and Path(report["target_path"]) != Path(target_path).resolve():
+        raise ValueError("Dependency report does not belong to the active repository.")
+
+
 def get_report(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, object]:
     """Read report claims, optionally filtered by their latest assessment."""
     report = _report(connection, args.report_id)
+    _require_report_target(report, args)
     _page(args.offset, args.limit)
     predicate = "report_id = ?"
     parameters = [args.report_id]
@@ -368,6 +381,7 @@ def _finding(connection: sqlite3.Connection, report_id: str, finding_id: str) ->
 def get_finding(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, object]:
     """Read the original scanner claim and its separate latest assessment."""
     report = _report(connection, args.report_id)
+    _require_report_target(report, args)
     finding = _finding_result(_finding(connection, args.report_id, args.finding_id))
     if args.require_current:
         result = finding["assessment"]
@@ -413,6 +427,7 @@ def _assessment_result(row: sqlite3.Row, target_path: str) -> dict[str, object]:
 def start_assessment(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, object]:
     """Record an explicit selection and pin the current repository snapshot."""
     report = _report(connection, args.report_id)
+    _require_report_target(report, args)
     ids = sorted(args.finding_id)
     if not 1 <= len(ids) <= MAX_SELECTION or len(set(ids)) != len(ids):
         raise ValueError("Select between 1 and 100 distinct imported findings.")
@@ -451,6 +466,7 @@ def get_assessment(connection: sqlite3.Connection, args: argparse.Namespace) -> 
     """Read precisely the claims selected for an assessment."""
     row = _assessment(connection, args.assessment_id)
     report = _report(connection, row["report_id"])
+    _require_report_target(report, args)
     return {
         "assessment": _assessment_result(row, report["target_path"]),
         "report": _report_result(report),
@@ -820,11 +836,12 @@ def record_assessments(
 ) -> dict[str, object]:
     """Atomically accept complete, current, evidence-backed assessment results."""
     row = _assessment(connection, args.assessment_id)
+    report = _report(connection, row["report_id"])
+    _require_report_target(report, args)
     if row["state"] != "pending":
         raise ValueError(
             "This assessment is already complete. Start a new assessment to revise it."
         )
-    report = _report(connection, row["report_id"])
     target = Path(report["target_path"])
     results = _decode(Path(args.results_path).read_bytes())
     claims = {claim["id"]: claim for claim in json.loads(row["claims_json"])}

@@ -1,8 +1,14 @@
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type {
+  CallToolResult,
+  ToolAnnotations,
+} from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
+import { trustedSandboxState } from "../host-sandbox-state.js";
 
 type JsonObject = Record<string, unknown>;
 type RunWorkbench = (args: string[]) => Promise<JsonObject>;
@@ -137,6 +143,22 @@ async function withInputFile(
   }
 }
 
+async function activeTarget(extra: unknown): Promise<string> {
+  const { sandboxCwd } = trustedSandboxState(extra);
+  if (typeof sandboxCwd !== "string" || !sandboxCwd.trim()) {
+    throw new Error("Dependency tools require the host's active repository.");
+  }
+  const target = sandboxCwd.startsWith("file:")
+    ? fileURLToPath(sandboxCwd)
+    : sandboxCwd;
+  if (!isAbsolute(target)) {
+    throw new Error(
+      "Dependency tools require an absolute host working directory.",
+    );
+  }
+  return fs.realpath(target);
+}
+
 /** Expose local report intake and selected assessment without starting discovery. */
 export function registerDependencyImportTools(
   server: McpServer,
@@ -148,6 +170,50 @@ export function registerDependencyImportTools(
     idempotentHint: true,
     openWorldHint: false,
   };
+  const appMeta = { ui: { visibility: ["app"] as const } };
+  function registerScopedTool<Shape extends z.ZodRawShape>(
+    name: string,
+    config: {
+      title: string;
+      description: string;
+      inputSchema: Shape;
+      annotations: ToolAnnotations;
+    },
+    handler: (
+      input: z.output<z.ZodObject<Shape>>,
+      run: RunWorkbench,
+    ) => Promise<CallToolResult>,
+  ): void {
+    const inputSchema = z.object(config.inputSchema);
+    server.registerTool<z.ZodRawShape, typeof inputSchema>(
+      name,
+      { ...config, inputSchema, _meta: { ui: { visibility: ["model"] } } },
+      async (input, extra) => {
+        const target = await activeTarget(extra);
+        return handler(input, async (args) => {
+          const targetIndex = args.indexOf("--target-path");
+          if (targetIndex >= 0) {
+            const requested = await fs.realpath(args[targetIndex + 1]);
+            if (relative(target, requested) !== "") {
+              throw new Error(
+                "Dependency import must use the host's active repository.",
+              );
+            }
+            args[targetIndex + 1] = target;
+            return runWorkbench(args);
+          }
+          return runWorkbench([...args, "--target-path", target]);
+        });
+      },
+    );
+    if (name !== "record_dependency_assessments") {
+      server.registerTool<z.ZodRawShape, typeof inputSchema>(
+        `${name}_from_app`,
+        { ...config, inputSchema, _meta: appMeta },
+        (input) => handler(input, runWorkbench),
+      );
+    }
+  }
   const launchScope = {
     accountId: z.string().min(1).nullable(),
     hostId: z.string().min(1),
@@ -160,6 +226,7 @@ export function registerDependencyImportTools(
   server.registerTool(
     "claim_dependency_task_launch",
     {
+      _meta: appMeta,
       title: "Claim a dependency task launch",
       description:
         "Atomically claim an assessment or fix task for this account and execution host. Only launch when claimed is true. Existing pending or unknown attempts never expire: supply retryAttemptId only after the user checked existing tasks and explicitly chose to retry. Known task links cannot be retried; confirmed failed launches can be claimed again.",
@@ -204,6 +271,7 @@ export function registerDependencyImportTools(
   server.registerTool(
     "settle_dependency_task_launch",
     {
+      _meta: appMeta,
       title: "Save a dependency task launch outcome",
       description:
         "Save an outcome for the matching attemptId. Use settled with a known threadId (and error if its first turn is uncertain), failed only when creation definitely failed without a task, or outcome_unknown when task creation may have succeeded. A saved task link cannot be replaced or downgraded. Stale attempts are rejected.",
@@ -244,6 +312,7 @@ export function registerDependencyImportTools(
   server.registerTool(
     "get_dependency_task_launches",
     {
+      _meta: appMeta,
       title: "Read saved dependency assessments and task launches",
       description:
         "Read all saved assessment summaries for a report and task launches for this account and execution host, including pending attempts, unknown outcomes, failures, and known task links. Reading does not retry a launch.",
@@ -260,7 +329,7 @@ export function registerDependencyImportTools(
         ]),
       ),
   );
-  server.registerTool(
+  registerScopedTool(
     "import_dependency_findings",
     {
       title: "Import dependency findings",
@@ -281,7 +350,7 @@ export function registerDependencyImportTools(
         idempotentHint: false,
       },
     },
-    async ({ targetPath, reportName, vendor, reportContent }) =>
+    async ({ targetPath, reportName, vendor, reportContent }, runWorkbench) =>
       result(
         await withInputFile(reportContent, (path) =>
           runWorkbench([
@@ -301,6 +370,7 @@ export function registerDependencyImportTools(
   server.registerTool(
     "list_dependency_reports",
     {
+      _meta: appMeta,
       title: "List imported dependency reports",
       description: "List a bounded page of local imported dependency reports.",
       inputSchema: {
@@ -322,7 +392,7 @@ export function registerDependencyImportTools(
         ]),
       ),
   );
-  server.registerTool(
+  registerScopedTool(
     "get_dependency_report",
     {
       title: "Read imported dependency findings",
@@ -343,7 +413,7 @@ export function registerDependencyImportTools(
       },
       annotations,
     },
-    async ({ reportId, offset = 0, limit = 100, verdict }) =>
+    async ({ reportId, offset = 0, limit = 100, verdict }, runWorkbench) =>
       result(
         await runWorkbench([
           "get-dependency-report",
@@ -357,7 +427,7 @@ export function registerDependencyImportTools(
         ]),
       ),
   );
-  server.registerTool(
+  registerScopedTool(
     "get_dependency_finding",
     {
       title: "Read an imported dependency finding",
@@ -370,7 +440,7 @@ export function registerDependencyImportTools(
       },
       annotations,
     },
-    async ({ reportId, findingId, requireCurrent }) =>
+    async ({ reportId, findingId, requireCurrent }, runWorkbench) =>
       result(
         await runWorkbench([
           "get-dependency-finding",
@@ -382,7 +452,7 @@ export function registerDependencyImportTools(
         ]),
       ),
   );
-  server.registerTool(
+  registerScopedTool(
     "start_dependency_assessment",
     {
       title: "Select dependency findings to assess",
@@ -391,7 +461,7 @@ export function registerDependencyImportTools(
       inputSchema: { reportId: id, findingIds: z.array(id).min(1).max(100) },
       annotations: { ...annotations, readOnlyHint: false },
     },
-    async ({ reportId, findingIds }) =>
+    async ({ reportId, findingIds }, runWorkbench) =>
       result(
         await runWorkbench([
           "start-dependency-assessment",
@@ -401,7 +471,7 @@ export function registerDependencyImportTools(
         ]),
       ),
   );
-  server.registerTool(
+  registerScopedTool(
     "get_dependency_assessment",
     {
       title: "Read selected dependency assessment",
@@ -410,7 +480,7 @@ export function registerDependencyImportTools(
       inputSchema: { assessmentId: id },
       annotations,
     },
-    async ({ assessmentId }) =>
+    async ({ assessmentId }, runWorkbench) =>
       result(
         await runWorkbench([
           "get-dependency-assessment",
@@ -419,7 +489,7 @@ export function registerDependencyImportTools(
         ]),
       ),
   );
-  server.registerTool(
+  registerScopedTool(
     "record_dependency_assessments",
     {
       title: "Record dependency assessments",
@@ -435,7 +505,7 @@ export function registerDependencyImportTools(
         idempotentHint: false,
       },
     },
-    async ({ assessmentId, results }) =>
+    async ({ assessmentId, results }, runWorkbench) =>
       result(
         await withInputFile(JSON.stringify(results), (path) =>
           runWorkbench([
