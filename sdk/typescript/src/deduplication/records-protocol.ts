@@ -22,8 +22,7 @@ const cancellation = z
 const response = z.union([
   z
     .object({ jsonrpc: z.literal("2.0"), id: rpcId, result: z.unknown() })
-    .strict()
-    .refine((value) => Object.hasOwn(value, "result")),
+    .strict(),
   z
     .object({
       jsonrpc: z.literal("2.0"),

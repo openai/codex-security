@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
 import { DeduplicationReviewError } from "../src/errors.js";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
@@ -14,6 +15,13 @@ import {
 } from "../src/deduplication/records.js";
 import type { DeduplicationReviewRequest } from "../src/deduplication/review.js";
 import { runRecordsProtocol } from "../src/deduplication/records-protocol.js";
+import {
+  pairFindingFormatInstructions,
+  pairReviewInstructions,
+  screeningFindingFormatInstructions,
+  screeningInstructions,
+  sourceReviewInstructions,
+} from "../src/deduplication/deduplication-prompts.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -31,6 +39,7 @@ function record(id: string, title = id) {
     source: `synthetic/${id}`,
     revision: "synthetic-revision",
   };
+  finding["additionalEvidence"] = { id, notes: [null, { observed: true }] };
   return { id, finding };
 }
 function input(): DeduplicateRecordsInput {
@@ -86,19 +95,38 @@ function answer(review: DeduplicationReviewRequest): unknown {
 test("records groups original observations and retrieved neighbors with unique representatives", async () => {
   const original = input();
   const requests: DeduplicationReviewRequest[] = [];
+  const ajv = new Ajv2020({ strict: false });
   const result = await deduplicateRecords(original, {
     reviewRunner: {
       async run(review) {
         requests.push(review);
-        expect(review.trustedInstructions).toContain("approved repository");
-        expect(review.findingSchema).toHaveProperty("required");
+        const rules =
+          review.stage === "screening"
+            ? [screeningInstructions, screeningFindingFormatInstructions]
+            : [pairReviewInstructions, pairFindingFormatInstructions];
+        for (const rule of [sourceReviewInstructions, ...rules]) {
+          expect(review.trustedInstructions.split(rule)).toHaveLength(2);
+          expect(review.prompt).not.toContain(rule);
+        }
+        expect(review.trustedInstructions).not.toContain("synthetic-revision");
         expect(review).not.toHaveProperty("validate");
         for (const finding of assigned(review))
           expect(finding.provenance).toHaveProperty(
             "revision",
             "synthetic-revision",
           );
-        return answer(review);
+        const reply = answer(review);
+        expect(ajv.compile(review.schema as object)(reply)).toBe(true);
+        if (typeof reply === "object" && reply && "mergedFinding" in reply) {
+          const merged = reply.mergedFinding as Finding;
+          expect(ajv.compile(review.findingSchema as object)(merged)).toBe(
+            true,
+          );
+          expect(merged["additionalEvidence"]).toEqual(
+            assigned(review)[0]!["additionalEvidence"],
+          );
+        }
+        return reply;
       },
     },
   });
@@ -174,43 +202,26 @@ test("candidate-only observations are grouped without becoming additional anchor
 });
 
 test.each([
-  "malformed",
-  "unknown-slot",
-  "unknown-canonical",
-  "missing-pair",
-  "inconclusive",
-  "failed",
-  "pair-failed",
-])(
-  "%s review never becomes a unique disposition or retries",
-  async (scenario) => {
+  ["screening", "an invalid answer"],
+  ["pair-review", "an invalid answer"],
+  ["screening", "a host error"],
+  ["pair-review", "a host error"],
+] as const)(
+  "records stops after %s returns %s, without unique dispositions or retries",
+  async (stage, failure) => {
     let calls = 0;
     const result = await deduplicateRecords(input(), {
       reviewRunner: {
         async run(review) {
           calls++;
-          if (scenario === "pair-failed" && review.stage !== "pair-review")
-            return answer(review);
-          if (scenario === "failed" || scenario === "pair-failed")
+          if (review.stage !== stage) return answer(review);
+          if (failure === "a host error")
             throw new Error("Remote execution may already have been accepted");
-          if (scenario === "malformed") return "not an object";
-          if (scenario === "inconclusive") return { decision: "INCONCLUSIVE" };
-          if (scenario === "unknown-canonical") {
-            if (review.stage === "screening") return answer(review);
-            return {
-              ...decision(assigned(review)),
-              canonicalFindingId: "unknown",
-            };
-          }
-          const valid = answer(review) as {
-            decisions: Record<string, unknown>;
+          if (stage === "screening") return { decisions: {} };
+          return {
+            decision: "SAME",
+            rationale: "Synthetic answer without a merged finding.",
           };
-          if (scenario === "missing-pair") delete valid.decisions["pair-1"];
-          if (scenario === "unknown-slot") {
-            valid.decisions["unknown"] = valid.decisions["pair-1"];
-            delete valid.decisions["pair-1"];
-          }
-          return valid;
         },
       },
     });
@@ -219,9 +230,7 @@ test.each([
     expect(result.unresolved.map(({ observationId }) => observationId)).toEqual(
       ["a", "b", "c", "d"],
     );
-    expect(calls).toBe(
-      ["pair-failed", "unknown-canonical"].includes(scenario) ? 3 : 1,
-    );
+    expect(calls).toBe(stage === "pair-review" ? 3 : 1);
   },
 );
 
@@ -325,6 +334,28 @@ function fakeHost(
   return { stream, output, messages, send };
 }
 const run = { jsonrpc: "2.0", id: "run-1", method: "run", params: input() };
+
+test.each([
+  [Number.MIN_SAFE_INTEGER, 0],
+  [Number.MAX_SAFE_INTEGER, 0],
+  ["9007199254740992", 0],
+  [Number.MAX_SAFE_INTEGER + 1, 2],
+])("protocol handles run ID %p without coercion", async (id, exitCode) => {
+  const host = fakeHost(() => {});
+  const done = runRecordsProtocol(host.stream, host.output);
+  host.send({
+    ...run,
+    id,
+    params: { version: 1, observations: [], candidateRelationships: [] },
+  });
+  expect(await done).toBe(exitCode);
+  expect(host.messages).toMatchObject(
+    exitCode === 0
+      ? [{ id, result: { status: "completed" } }]
+      : [{ id: null, error: { code: -32600 } }],
+  );
+  host.stream.destroy();
+});
 
 test("CLI records mode uses only the fake host, bypassing saved scans, persistence, auth, and updates", async () => {
   const host = fakeHost((message, send) =>

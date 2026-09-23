@@ -13,6 +13,7 @@ import {
   pairReviewInstructions,
   screeningFindingFormatInstructions,
   pairFindingFormatInstructions,
+  recordsPrompt,
 } from "./deduplication-prompts.js";
 import type { DeduplicationReviewRunner } from "./review.js";
 
@@ -24,7 +25,7 @@ const record = z
   })
   .strict();
 
-const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> = z
+const deduplicateRecordsInputSchema = z
   .object({
     version: z.literal(1),
     observations: z.array(record),
@@ -39,14 +40,9 @@ const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> = z
   })
   .strict();
 
-export interface DeduplicateRecordsInput {
-  version: 1;
-  observations: { id: string; finding: Finding }[];
-  candidateRelationships: {
-    observationId: string;
-    candidateObservationIds: string[];
-  }[];
-}
+export interface DeduplicateRecordsInput extends z.output<
+  typeof deduplicateRecordsInputSchema
+> {}
 export interface DeduplicateRecordsOptions {
   reviewRunner: DeduplicationReviewRunner;
   signal?: AbortSignal;
@@ -107,51 +103,48 @@ export async function deduplicateRecords(
       );
     relationships.set(relation.observationId, relation.candidateObservationIds);
   }
-  const result: DeduplicateRecordsResult = {
-    version: 1,
-    status: "completed",
-    groups: [],
-    unresolved: [],
-  };
   const sourceFindings = [...relationships.keys()].map((id) =>
     observations.get(id)!,
   );
-  const reviewer = new CodexDeduplicationReviewer({
-    async run<T>({ validate, ...review }: CodexReview<T>): Promise<T> {
-      try {
-        return await abortable(async () => {
-          options.signal?.throwIfAborted();
-          return validate(
-            await options.reviewRunner.run(
-              {
-                ...review,
-                requestId: randomUUID(),
-                trustedInstructions: [
-                  sourceReviewInstructions,
-                  review.stage === "screening"
-                    ? screeningInstructions
-                    : pairReviewInstructions,
-                  review.stage === "screening"
-                    ? screeningFindingFormatInstructions
-                    : pairFindingFormatInstructions,
-                ].join("\n\n"),
-                findingSchema: findingSchema(),
-              },
-              { signal: options.signal },
-            ),
-          );
-        }, options.signal);
-      } catch (error) {
-        // Records mode discards the batch after any failed review.
-        if (
-          error instanceof DeduplicationReviewError &&
-          error.metadata.category === "refusal"
-        )
-          throw new Error(error.message, { cause: error });
-        throw error;
-      }
+  const reviewer = new CodexDeduplicationReviewer(
+    {
+      async run<T>({ validate, ...review }: CodexReview<T>): Promise<T> {
+        try {
+          return await abortable(async () => {
+            options.signal?.throwIfAborted();
+            return validate(
+              await options.reviewRunner.run(
+                {
+                  ...review,
+                  requestId: randomUUID(),
+                  trustedInstructions: [
+                    sourceReviewInstructions,
+                    review.stage === "screening"
+                      ? screeningInstructions
+                      : pairReviewInstructions,
+                    review.stage === "screening"
+                      ? screeningFindingFormatInstructions
+                      : pairFindingFormatInstructions,
+                  ].join("\n\n"),
+                  findingSchema: findingSchema(),
+                },
+                { signal: options.signal },
+              ),
+            );
+          }, options.signal);
+        } catch (error) {
+          // Records mode discards the batch after any failed review.
+          if (
+            error instanceof DeduplicationReviewError &&
+            error.metadata.category === "refusal"
+          )
+            throw new Error(error.message, { cause: error });
+          throw error;
+        }
+      },
     },
-  });
+    recordsPrompt,
+  );
   const algorithm = new FindingDeduplicator(
     {
       async potentialDuplicates(findingId) {
@@ -177,14 +170,17 @@ export async function deduplicateRecords(
     groups = decisions.duplicateGroups;
   } catch (error) {
     options.signal?.throwIfAborted();
-    result.status = "unresolved";
-    result.unresolved = [...relationships.keys()].map((id) => ({
-      observationId: id,
-      reason: "review_failed",
-      message:
-        error instanceof Error ? error.message : "Review did not complete.",
-    }));
-    return result;
+    return {
+      version: 1,
+      status: "unresolved",
+      groups: [],
+      unresolved: [...relationships.keys()].map((observationId) => ({
+        observationId,
+        reason: "review_failed",
+        message:
+          error instanceof Error ? error.message : "Review did not complete.",
+      })),
+    };
   }
   const grouped = new Set(groups.flat());
   groups.push(
@@ -192,12 +188,16 @@ export async function deduplicateRecords(
       .filter((finding) => !grouped.has(finding.findingId))
       .map((finding) => [finding.findingId]),
   );
-  for (const group of groups) {
-    const observationIds = group.map((id) => references.get(id)!);
-    result.groups.push({
-      representativeObservationId: observationIds[0]!,
-      observationIds,
-    });
-  }
-  return result;
+  return {
+    version: 1,
+    status: "completed",
+    groups: groups.map((group) => {
+      const observationIds = group.map((id) => references.get(id)!);
+      return {
+        representativeObservationId: observationIds[0]!,
+        observationIds,
+      };
+    }),
+    unresolved: [],
+  };
 }

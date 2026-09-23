@@ -125,14 +125,19 @@ function screeningToolSchema(neighborCount: number): object {
 }
 
 export class CodexDeduplicationReviewer implements DeduplicationReviewer {
-  constructor(private readonly runner: Pick<CodexReviewRunner, "run">) {}
+  constructor(
+    private readonly runner: Pick<CodexReviewRunner, "run">,
+    private readonly assignmentPrompt?: (
+      findings: readonly Finding[],
+    ) => string,
+  ) {}
 
   async screen(findings: readonly Finding[]): Promise<ScreeningResult> {
     return await this.runner.run({
       stage: "screening",
       model: "gpt-5.6-luna",
       effort: "xhigh",
-      prompt: screeningPrompt(findings),
+      prompt: (this.assignmentPrompt ?? screeningPrompt)(findings),
       schema: screeningToolSchema(findings.length - 1),
       validate: (value) => validateScreening(value, findings),
     });
@@ -143,7 +148,7 @@ export class CodexDeduplicationReviewer implements DeduplicationReviewer {
       stage: "pair-review",
       model: "gpt-5.6-sol",
       effort: "high",
-      prompt: pairReviewPrompt(findings),
+      prompt: (this.assignmentPrompt ?? pairReviewPrompt)(findings),
       schema: {
         type: "object",
         ...z.toJSONSchema(reviewSchema, { target: "openapi-3.0" }),

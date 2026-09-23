@@ -6,7 +6,9 @@ export interface DeduplicationReviewRequest {
   stage: DeduplicationReviewStage;
   model: string;
   effort: string;
+  /** Assignment containing the supplied findings as untrusted evidence. */
   prompt: string;
+  /** Review and source-access rules to install as trusted model instructions. */
   trustedInstructions: string;
   /** Tool submission contract, not an OpenAI strict Structured Outputs schema. */
   schema: unknown;
