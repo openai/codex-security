@@ -31,8 +31,9 @@ references before any review.
 Send one UTF-8 JSON object per line, using JSON-RPC 2.0. Keep stdin open until the
 final response; EOF is a disconnect, not an end-of-request marker. No batches,
 interactive prompts, or additional runs are supported. Stdout is exclusively
-protocol messages; CLI diagnostics use stderr. IDs are strings or integer
-numbers and are compared without coercion. Review IDs are generated strings;
+protocol messages; CLI diagnostics use stderr. IDs are strings or safe integers
+from -9007199254740991 through 9007199254740991 and are compared without coercion.
+Use strings for larger numeric identifiers. Review IDs are generated strings;
 request and response ID namespaces are directional.
 
 The host sends:
@@ -111,7 +112,14 @@ fresh review context: pair reviews must not inherit screening answers or prior
 review rationales. Serial requests can inspect the same authorized checkout.
 The host should honor the supplied model and effort or return an error. Install `trustedInstructions` as
 trusted model instructions, pass the complete `prompt` as the assignment, and
-configure structured output using `schema`. The review instructions refer to
+use `schema` as the result contract for tool submission. It is the existing
+review tool schema, not an OpenAI strict Structured Outputs schema: it includes
+`oneOf` and permits arbitrary fields in `mergedFinding`. A host using OpenAI
+function calling should use non-strict (`strict: false`) tool submission and return the tool
+arguments for validation. A host that requires strict Structured Outputs must
+adapt its submission format while preserving the result contract and all
+finding evidence; do not pass `schema` directly as a strict output format.
+The review instructions refer to
 `review_validator.submit_error` for operational blockers. The host must expose
 that error path and translate it to a JSON-RPC error (or reject the SDK call);
 never convert an execution or required source-access failure into DISTINCT. Every `SAME.mergedFinding` must also
@@ -218,6 +226,8 @@ To cancel the active run, send a notification:
 ```
 
 Cancellation stops scheduling and returns a run error with code `-32800`.
+If a terminal response is already being written, cancellation closes the output
+instead of sending a second response; the host must discard an incomplete reply.
 The host must also cancel/reconcile its remote turn; terminating this CLI cannot
 cancel host-owned execution. SIGINT/SIGTERM also stop the run. EOF, pipe errors,
 or closed pipes stop scheduling; an error is returned when stdout remains usable.

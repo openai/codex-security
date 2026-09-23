@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "incur";
+import { DeduplicationReviewError } from "../errors.js";
 import type { Finding } from "../models.js";
 import { abortable } from "../targets.js";
 import type { CodexReview } from "./codex-review.js";
@@ -117,28 +118,38 @@ export async function deduplicateRecords(
   );
   const reviewer = new CodexDeduplicationReviewer({
     async run<T>({ validate, ...review }: CodexReview<T>): Promise<T> {
-      return await abortable(async () => {
-        options.signal?.throwIfAborted();
-        return validate(
-          await options.reviewRunner.run(
-            {
-              ...review,
-              requestId: randomUUID(),
-              trustedInstructions: [
-                sourceReviewInstructions,
-                review.stage === "screening"
-                  ? screeningInstructions
-                  : pairReviewInstructions,
-                review.stage === "screening"
-                  ? screeningFindingFormatInstructions
-                  : pairFindingFormatInstructions,
-              ].join("\n\n"),
-              findingSchema: findingSchema(),
-            },
-            { signal: options.signal },
-          ),
-        );
-      }, options.signal);
+      try {
+        return await abortable(async () => {
+          options.signal?.throwIfAborted();
+          return validate(
+            await options.reviewRunner.run(
+              {
+                ...review,
+                requestId: randomUUID(),
+                trustedInstructions: [
+                  sourceReviewInstructions,
+                  review.stage === "screening"
+                    ? screeningInstructions
+                    : pairReviewInstructions,
+                  review.stage === "screening"
+                    ? screeningFindingFormatInstructions
+                    : pairFindingFormatInstructions,
+                ].join("\n\n"),
+                findingSchema: findingSchema(),
+              },
+              { signal: options.signal },
+            ),
+          );
+        }, options.signal);
+      } catch (error) {
+        // Records mode discards the batch after any failed review.
+        if (
+          error instanceof DeduplicationReviewError &&
+          error.metadata.category === "refusal"
+        )
+          throw new Error(error.message, { cause: error });
+        throw error;
+      }
     },
   });
   const algorithm = new FindingDeduplicator(
@@ -163,10 +174,6 @@ export async function deduplicateRecords(
       sourceFindings.map((finding) => finding.findingId),
     );
     options.signal?.throwIfAborted();
-    if (decisions.refusals?.length)
-      throw new Error(
-        decisions.refusals.map(({ reason }) => reason).join("\n"),
-      );
     groups = decisions.duplicateGroups;
   } catch (error) {
     options.signal?.throwIfAborted();

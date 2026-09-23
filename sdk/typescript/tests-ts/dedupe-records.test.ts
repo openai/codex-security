@@ -531,6 +531,66 @@ test("disconnect before run and a broken output pipe terminate cleanly", async (
   input.destroy();
 });
 
+test("CLI cancellation exits while the host leaves its final output unread", async () => {
+  const child = spawn(
+    process.execPath,
+    [
+      fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+      "dedupe",
+      "--records",
+    ],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
+  const exited = new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", resolve);
+  });
+  const closed = new Promise<void>((resolve) =>
+    child.once("close", () => resolve()),
+  );
+  const readable = new Promise<void>((resolve) =>
+    child.stdout.once("readable", () => resolve()),
+  );
+  const timeout = setTimeout(() => child.kill("SIGKILL"), 20_000);
+  child.stderr.resume();
+  child.stdin.on("error", () => {});
+  try {
+    // Fill the pipe with a terminal result, without scheduling any reviews.
+    const observations = Array.from({ length: 50 }, (_, index) =>
+      record(`${index}-${"x".repeat(16_384)}`),
+    );
+    child.stdin.write(
+      `${JSON.stringify({
+        ...run,
+        params: {
+          version: 1,
+          observations,
+          candidateRelationships: observations.map(({ id }) => ({
+            observationId: id,
+            candidateObservationIds: [],
+          })),
+        },
+      })}\n`,
+    );
+    await Promise.race([
+      readable,
+      exited.then(() => {
+        throw new Error("CLI exited before writing its result");
+      }),
+    ]);
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
+    );
+    expect(await exited).toBe(2);
+  } finally {
+    clearTimeout(timeout);
+    if (child.exitCode === null) child.kill("SIGKILL");
+    child.stdin.end();
+    child.stdout.resume();
+    await closed;
+  }
+});
+
 test("a disconnect while flushing the final result does not send a second response", async () => {
   const inputStream = new PassThrough();
   const messages: Message[] = [];
@@ -559,13 +619,71 @@ test("a disconnect while flushing the final result does not send a second respon
   expect(messages).toHaveLength(1);
 });
 
+test.each(["result", "error"] as const)(
+  "cancellation stops a blocked terminal %s without sending another response",
+  async (terminal) => {
+    for (const notification of [false, true]) {
+      const inputStream = new PassThrough();
+      const messages: Message[] = [];
+      let release!: () => void;
+      let started!: () => void;
+      const writing = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const output = new Writable({
+        write(chunk, _encoding, callback) {
+          messages.push(JSON.parse(chunk.toString()));
+          release = callback;
+          started();
+        },
+      });
+      const controller = new AbortController();
+      const done = runRecordsProtocol(inputStream, output, controller.signal);
+      try {
+        inputStream.write(
+          `${JSON.stringify({
+            ...run,
+            params:
+              terminal === "error"
+                ? {}
+                : {
+                    version: 1,
+                    observations: [],
+                    candidateRelationships: [],
+                  },
+          })}\n`,
+        );
+        await writing;
+        if (notification)
+          inputStream.write(
+            `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
+          );
+        else controller.abort("SIGTERM");
+        expect(output.destroyed).toBe(true);
+        expect(await done).toBe(2);
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toHaveProperty(terminal);
+      } finally {
+        release();
+        await done;
+        inputStream.destroy();
+        output.destroy();
+      }
+    }
+  },
+);
+
 test.each(["screening", "pair-review"] as const)(
-  "%s refusal leaves records unresolved when the shared algorithm continues",
+  "%s refusal stops further reviews and leaves all records unresolved",
   async (stage) => {
+    let refused = false;
+    let reviewsAfterRefusal = 0;
     const result = await deduplicateRecords(input(), {
       reviewRunner: {
         async run(review) {
-          if (review.stage === stage)
+          if (refused) reviewsAfterRefusal++;
+          if (review.stage === stage) {
+            refused = true;
             throw new DeduplicationReviewError({
               stage,
               model: review.model,
@@ -573,10 +691,13 @@ test.each(["screening", "pair-review"] as const)(
               attempts: 1,
               reason: "Synthetic review refusal.",
             });
+          }
           return answer(review);
         },
       },
     });
+    expect(refused).toBe(true);
+    expect(reviewsAfterRefusal).toBe(0);
     expect(result.status).toBe("unresolved");
     expect(result.groups).toEqual([]);
     expect(result.unresolved.map(({ observationId }) => observationId)).toEqual(

@@ -90,7 +90,15 @@ export async function runRecordsProtocol(
     fail(-32000, "Host disconnected before the run completed.");
   const inputError = (error: Error) => fail(-32000, error.message);
   const outputError = (error: Error) => fail(-32000, error.message, false);
-  const canceled = () => fail(-32800, "Deduplication canceled.");
+  const canceled = () => {
+    if (finished) {
+      // A terminal response may be blocked on a host that stopped reading.
+      if (output instanceof Writable) output.destroy();
+      complete(2);
+    } else {
+      fail(-32800, "Deduplication canceled.");
+    }
+  };
   input.on("error", inputError);
   input.on("close", disconnected);
   if (output instanceof Writable) output.on("close", disconnected);
@@ -99,7 +107,6 @@ export async function runRecordsProtocol(
   output.on?.("error", outputError);
   signal?.addEventListener("abort", canceled, { once: true });
   lines.on("line", (line) => {
-    if (finished) return;
     let message: unknown;
     try {
       message = JSON.parse(line);
@@ -114,6 +121,7 @@ export async function runRecordsProtocol(
       else canceled();
       return;
     }
+    if (finished) return;
     const run = request.safeParse(message);
     if (run.success) {
       if (runId !== undefined) {

@@ -1796,21 +1796,26 @@ export async function main(
     const terminate = () => controller.abort("SIGTERM");
     dependencies.addSignalListener("SIGINT", interrupt);
     dependencies.addSignalListener("SIGTERM", terminate);
+    let exitCode: number;
     try {
       const code = await runRecordsProtocol(
         dependencies.recordsInput ?? process.stdin,
         output,
         controller.signal,
       );
-      return controller.signal.reason === "SIGINT"
-        ? 130
-        : controller.signal.reason === "SIGTERM"
-          ? 143
-          : code;
+      exitCode =
+        controller.signal.reason === "SIGINT"
+          ? 130
+          : controller.signal.reason === "SIGTERM"
+            ? 143
+            : code;
     } finally {
       dependencies.removeSignalListener("SIGINT", interrupt);
       dependencies.removeSignalListener("SIGTERM", terminate);
     }
+    // Protocol writes have flushed or been canceled. Node's stdout ignores destroy().
+    if (output === process.stdout) process.exit(exitCode);
+    return exitCode;
   }
   argv = normalizeScanImportArguments(defaultListCommand(argv));
   const policyFullOutput =

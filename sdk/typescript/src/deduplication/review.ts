@@ -8,6 +8,7 @@ export interface DeduplicationReviewRequest {
   effort: string;
   prompt: string;
   trustedInstructions: string;
+  /** Tool submission contract, not an OpenAI strict Structured Outputs schema. */
   schema: unknown;
   /** SAME.mergedFinding must satisfy this additional schema. */
   findingSchema: unknown;
