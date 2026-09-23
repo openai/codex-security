@@ -7,6 +7,7 @@
 - explain that the local Git hook is advisory ([#1000](https://github.com/openai/codex-security/pull/1000))
 - bump docker/build-push-action from 7.3.0 to 7.4.0 ([#992](https://github.com/openai/codex-security/pull/992))
 - bump the third-party group across 2 directories with 6 updates ([#1003](https://github.com/openai/codex-security/pull/1003))
+- bump docker/setup-buildx-action from 4.3.0 to 4.4.1 ([#1002](https://github.com/openai/codex-security/pull/1002))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
