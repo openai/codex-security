@@ -312,6 +312,34 @@ export interface CoverageDocument {
     surfaceIds?: string[];
     [k: string]: unknown;
   }[];
+  dependencies?: {
+    nodes: {
+      id: string;
+      kind: "project" | "dependency";
+      name: string;
+      status:
+        | "project"
+        | "completed"
+        | "partial"
+        | "failed"
+        | "not_scanned"
+        | "unchanged";
+      changed: boolean;
+      ecosystem?: string;
+      registry?: string;
+      package?: string;
+      oldVersion?: string | null;
+      newVersion?: string;
+      dependencyTypes?: string[];
+      cacheHit?: boolean;
+      findingCount?: number;
+      affectedProjects?: string[];
+    }[];
+    edges: {
+      from: string;
+      to: string;
+    }[];
+  };
   openQuestions?: {
     question: string;
     followUpPrompt?: string;
