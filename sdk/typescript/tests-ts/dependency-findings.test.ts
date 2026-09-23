@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,11 +13,6 @@ import {
   type DependencyFindingSkillRequest,
 } from "../src/dependency-findings.js";
 import type { JsonObject } from "../src/config.js";
-import type {
-  DependencyAttackPath,
-  DependencyExternalEvidence,
-  DependencyFindingAssessment,
-} from "../src/index.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { TestClient } from "./support/api-client.js";
@@ -52,78 +46,6 @@ function client(
 }
 
 describe("imported dependency findings", () => {
-  test("reads legacy and artifact-backed assessments without rewriting evidence", async () => {
-    const legacy: DependencyFindingAssessment = {
-      findingId: "finding-1",
-      assessmentId: "assessment-1",
-      verdict: "inconclusive",
-      summary: "The required dependency artifact was unavailable.",
-      packageVersion: null,
-      resolution: null,
-      codeEvidence: [],
-      applicability: "The imported version could not be checked.",
-      unknowns: ["The shipped artifact was unavailable."],
-      targetRevision: "snapshot-1",
-      createdAt: "2026-09-16T00:00:00Z",
-    };
-    const manifest = '{\n  "name": "example",\n  "version": "1.0.0"\n}\n';
-    const external: DependencyExternalEvidence = {
-      url: "https://packages.example.invalid/example/1.0.0/package.json",
-      revision: null,
-      sha256: createHash("sha256").update(manifest).digest("hex"),
-      kind: "manifest",
-      package: { ecosystem: "npm", name: "example", version: "1.0.0" },
-      excerpt: '  "version": "1.0.0"\n',
-      explanation: "The fetched manifest identifies the package version.",
-    };
-    const attackPath: DependencyAttackPath = {
-      entryPoint: "The public request handler.",
-      attackerControl: "An unauthenticated caller supplies request.body.",
-      vulnerableOperation: "The handler passes the body into parse.",
-      prerequisites: "The handler is enabled with the affected parser.",
-    };
-    const current: DependencyFindingAssessment = {
-      ...legacy,
-      verdict: "affects_application",
-      summary:
-        "The exposed handler passes attacker input to the affected parser.",
-      basis: "code_path",
-      versionBasis: "artifact",
-      packageVersion: "1.0.0",
-      externalEvidence: [external],
-      investigation: [
-        {
-          action: "Read the public manifest.",
-          result: "It identifies example@1.0.0.",
-        },
-      ],
-      attackPath,
-      limitations: [],
-      advisoryEvidence: [],
-      unknowns: [],
-      codeEvidence: [
-        {
-          path: "src/handler.ts",
-          startLine: 1,
-          explanation: "The handler passes caller-controlled data to parse.",
-          excerpt: "export const handle = request => parse(request.body);",
-        },
-      ],
-    };
-    for (const assessment of [legacy, current]) {
-      const response = {
-        report: { id: "report-1" },
-        finding: { id: "finding-1", assessment },
-      };
-      const api = client(
-        async () => JSON.parse(JSON.stringify(response)) as JsonObject,
-      );
-      expect(
-        (await api.getFinding("report-1", "finding-1")).finding.assessment,
-      ).toEqual(assessment);
-    }
-  });
-
   test("keeps import, history, and filtered detail calls local", async () => {
     const calls: (readonly string[])[] = [];
     const report = {

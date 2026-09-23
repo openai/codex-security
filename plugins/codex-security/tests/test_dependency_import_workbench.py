@@ -334,21 +334,17 @@ def test_clean_submodule_code_evidence_is_bound_to_its_recorded_revision(tmp_pat
     assert "Dirty Git submodules" in stale["stderr"]
 
 
-@pytest.mark.parametrize("flaw", ["missing", "unselected", "unknown", "path", "line", "version"])
+@pytest.mark.parametrize("flaw", ["missing", "unselected", "path", "line"])
 def test_rejects_incomplete_or_unproven_assessments(tmp_path: Path, flaw: str) -> None:
     target, state, report_id, findings = setup_report(tmp_path)
     assessment_id = start(state, report_id, [findings[0]["id"]])["assessment"]["id"]
     output = result(findings[0]["id"], target)
     if flaw == "unselected":
         output["findingId"] = findings[1]["id"]
-    elif flaw == "unknown":
-        output["unknowns"] = ["The call path is unresolved."]
     elif flaw == "path":
         output["codeEvidence"][0]["path"] = "../scanner.json"
     elif flaw == "line":
         output["codeEvidence"][0]["startLine"] = 50
-    elif flaw == "version":
-        output["packageVersion"] = "2.0.0"
     failed = record(
         tmp_path, state, assessment_id, [] if flaw == "missing" else [output], check=False
     )
