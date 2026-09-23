@@ -42,8 +42,7 @@ def claim(
         scan_id,
         "--thread-id",
         OWNER,
-        "--request-json",
-        json.dumps(request),
+        input_text=json.dumps(request),
         check=check,
     )
 

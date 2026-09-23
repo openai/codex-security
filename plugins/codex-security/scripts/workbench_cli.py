@@ -159,7 +159,6 @@ def parse_args(description: str) -> argparse.Namespace:
     claim_dependency_submission = subparsers.add_parser("claim-dependency-submission")
     claim_dependency_submission.add_argument("--scan-id", required=True)
     claim_dependency_submission.add_argument("--thread-id", required=True)
-    claim_dependency_submission.add_argument("--request-json", required=True)
 
     bind_dependency_job = subparsers.add_parser("bind-dependency-job")
     bind_dependency_job.add_argument("--scan-id", required=True)

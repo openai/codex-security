@@ -101,7 +101,7 @@ def claim_dependency_submission(
     ctx: WorkbenchDependencyContext, connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
     """Record a request before submission and prevent ambiguous retries from creating another job."""
-    request = json.loads(args.request_json, parse_constant=reject_non_finite_json)
+    request = json.load(sys.stdin, parse_constant=reject_non_finite_json)
     request["dependencies"] = sorted(
         request["dependencies"], key=lambda entry: json.dumps(entry, sort_keys=True)
     )
