@@ -885,7 +885,7 @@ def _task_launch(connection: sqlite3.Connection, args: argparse.Namespace) -> sq
 
 def _require_current_launch(
     connection: sqlite3.Connection, args: argparse.Namespace, assessment: sqlite3.Row
-) -> None:
+) -> dict[str, Any] | None:
     if args.kind == "fix":
         saved = get_finding(
             connection,
@@ -895,15 +895,34 @@ def _require_current_launch(
         )["finding"]["assessment"]
         if saved["assessmentId"] != args.assessment_id:
             raise ValueError("The finding has a different saved assessment. Refresh before fixing.")
-    else:
-        report = _report(connection, args.report_id)
-        if assessment["state"] != "pending":
-            raise ValueError("This assessment is already complete.")
-        if _snapshot(Path(report["target_path"])) != (
-            assessment["target_revision"],
-            assessment["target_snapshot_digest"],
-        ):
-            raise ValueError("The repository changed. Start a new assessment before launching.")
+        return saved
+    report = _report(connection, args.report_id)
+    if assessment["state"] != "pending":
+        raise ValueError("This assessment is already complete.")
+    if _snapshot(Path(report["target_path"])) != (
+        assessment["target_revision"],
+        assessment["target_snapshot_digest"],
+    ):
+        raise ValueError("The repository changed. Start a new assessment before launching.")
+    return None
+
+
+def _launch_claim_state(
+    connection: sqlite3.Connection, identity: tuple[str, ...], retry_attempt_id: str | None
+) -> tuple[sqlite3.Row | None, bool]:
+    existing = connection.execute(
+        "SELECT * FROM dependency_task_launches WHERE account_id = ? AND host_id = ? "
+        "AND report_id = ? AND kind = ? AND assessment_id = ? AND finding_id = ?",
+        identity,
+    ).fetchone()
+    if retry_attempt_id:
+        if existing is None or existing["attempt_id"] != retry_attempt_id:
+            raise ValueError("The task launch attempt changed. Refresh before retrying.")
+        if existing["thread_id"] is not None:
+            raise ValueError("This launch already has a task. Open the saved task instead.")
+    elif existing is not None and existing["status"] != "failed":
+        return existing, False
+    return existing, True
 
 
 def claim_task_launch(
@@ -912,32 +931,38 @@ def claim_task_launch(
     """Claim once, or replace a failed or explicitly checked unknown attempt."""
     if args.kind not in ("assessment", "fix") or bool(args.finding_id) != (args.kind == "fix"):
         raise ValueError("Fix launches require a finding; assessment launches do not.")
+    assessment = _assessment(connection, args.assessment_id)
+    if assessment["report_id"] != args.report_id:
+        raise ValueError("Assessment does not belong to this imported report.")
+    identity = (
+        args.account_id or "",
+        args.host_id,
+        args.report_id,
+        args.kind,
+        args.assessment_id,
+        args.finding_id or "",
+    )
+    existing, claimable = _launch_claim_state(connection, identity, args.retry_attempt_id)
+    if not claimable:
+        return {"claimed": False, "launch": _launch_result(existing)}
+    saved = _require_current_launch(connection, args, assessment)
     connection.execute("BEGIN IMMEDIATE")
     with connection:
-        assessment = _assessment(connection, args.assessment_id)
-        if assessment["report_id"] != args.report_id:
-            raise ValueError("Assessment does not belong to this imported report.")
-        identity = (
-            args.account_id or "",
-            args.host_id,
-            args.report_id,
-            args.kind,
-            args.assessment_id,
-            args.finding_id or "",
-        )
-        existing = connection.execute(
-            "SELECT * FROM dependency_task_launches WHERE account_id = ? AND host_id = ? "
-            "AND report_id = ? AND kind = ? AND assessment_id = ? AND finding_id = ?",
-            identity,
-        ).fetchone()
-        if args.retry_attempt_id:
-            if existing is None or existing["attempt_id"] != args.retry_attempt_id:
-                raise ValueError("The task launch attempt changed. Refresh before retrying.")
-            if existing["thread_id"] is not None:
-                raise ValueError("This launch already has a task. Open the saved task instead.")
-        elif existing is not None and existing["status"] != "failed":
+        existing, claimable = _launch_claim_state(connection, identity, args.retry_attempt_id)
+        if not claimable:
             return {"claimed": False, "launch": _launch_result(existing)}
-        _require_current_launch(connection, args, assessment)
+        if _assessment(connection, args.assessment_id) != assessment:
+            raise ValueError(
+                "The assessment changed during launch checks. Refresh before launching."
+            )
+        if (
+            args.kind == "fix"
+            and json.loads(
+                _finding(connection, args.report_id, args.finding_id)["assessment_json"] or "null"
+            )
+            != saved
+        ):
+            raise ValueError("The finding's saved assessment changed. Refresh before fixing.")
         timestamp, attempt_id = _now(), str(uuid.uuid4())
         launch_id = existing["id"] if existing is not None else str(uuid.uuid4())
         if existing is None:

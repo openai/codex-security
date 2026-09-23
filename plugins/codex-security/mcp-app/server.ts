@@ -2625,6 +2625,7 @@ async function executeWorkbench(
         "get-workspace",
         "inspect-setup",
         "import-dependency-findings",
+        "claim-dependency-task-launch",
         "start-dependency-assessment",
         "record-dependency-assessments",
         "get-dependency-finding",

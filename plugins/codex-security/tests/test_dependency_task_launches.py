@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import pytest
 from test_dependency_import_workbench import record, result, setup_report, start
 from workbench_test_support import run_workbench
 
@@ -316,3 +318,116 @@ def test_launch_and_recovery_require_current_evidence(tmp_path: Path) -> None:
         )["stderr"]
     )
     assert claim(state, report_id, assessment_id, finding_id=finding_id)["launch"] == fix
+
+
+@pytest.mark.parametrize("kind", ["assessment", "fix"])
+def test_launch_snapshot_allows_competing_writer(
+    tmp_path: Path, workbench_api: dict[str, Any], monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Repository checks leave SQLite writable and existing tasks skip those checks."""
+    target, state, report_id, findings = setup_report(tmp_path)
+    finding_id = findings[0]["id"]
+    assessment_id = start(state, report_id, [finding_id])["assessment"]["id"]
+    if kind == "fix":
+        record(tmp_path, state, assessment_id, [result(finding_id, target)])
+    api = workbench_api["dependency_imports"]
+    snapshot = api._snapshot
+    database = state / "workbench.sqlite3"
+
+    def snapshot_with_writer(path: Path) -> tuple[str, str]:
+        with sqlite3.connect(database, timeout=0) as writer:
+            writer.execute(
+                "UPDATE dependency_reports SET report_name = 'renamed-by-another-client'"
+            )
+        return snapshot(path)
+
+    monkeypatch.setattr(api, "_snapshot", snapshot_with_writer)
+    args = argparse.Namespace(
+        account_id="account-a",
+        host_id="local",
+        report_id=report_id,
+        kind=kind,
+        assessment_id=assessment_id,
+        finding_id=finding_id if kind == "fix" else None,
+        retry_attempt_id=None,
+    )
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        first = api.claim_task_launch(connection, args)
+        assert first["claimed"] is True
+        assert connection.execute("SELECT report_name FROM dependency_reports").fetchone()[0] == (
+            "renamed-by-another-client"
+        )
+
+        def stale_repository(path: Path) -> tuple[str, str]:
+            raise AssertionError(
+                "Existing pending and known task links must skip repository reads."
+            )
+
+        monkeypatch.setattr(api, "_snapshot", stale_repository)
+        assert api.claim_task_launch(connection, args) == {**first, "claimed": False}
+        known = api.settle_task_launch(
+            connection,
+            argparse.Namespace(
+                account_id=args.account_id,
+                host_id=args.host_id,
+                launch_id=first["launch"]["id"],
+                attempt_id=first["launch"]["attemptId"],
+                status="settled",
+                thread_id="saved-task",
+                error=None,
+            ),
+        )
+        assert api.claim_task_launch(connection, args) == {**known, "claimed": False}
+
+
+@pytest.mark.parametrize("changed", ["assessment", "finding", "attempt"])
+def test_launch_rechecks_database_after_snapshot(
+    tmp_path: Path, workbench_api: dict[str, Any], monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    """A concurrent completion, replacement assessment, or retry invalidates the claim."""
+    target, state, report_id, findings = setup_report(tmp_path)
+    finding_id = findings[0]["id"]
+    assessment_id = start(state, report_id, [finding_id])["assessment"]["id"]
+    replacement_id = assessment_id
+    retry_attempt_id = None
+    if changed == "finding":
+        record(tmp_path, state, assessment_id, [result(finding_id, target)])
+        replacement_id = start(state, report_id, [finding_id])["assessment"]["id"]
+    elif changed == "attempt":
+        retry_attempt_id = claim(state, report_id, assessment_id)["launch"]["attemptId"]
+    api = workbench_api["dependency_imports"]
+    snapshot = api._snapshot
+
+    def snapshot_with_changed_owner(path: Path) -> tuple[str, str]:
+        captured = snapshot(path)
+        if changed == "attempt":
+            claim(state, report_id, assessment_id, retry_attempt_id=retry_attempt_id)
+        else:
+            record(tmp_path, state, replacement_id, [result(finding_id, target)])
+        return captured
+
+    monkeypatch.setattr(api, "_snapshot", snapshot_with_changed_owner)
+    args = argparse.Namespace(
+        account_id="account-a",
+        host_id="local",
+        report_id=report_id,
+        kind="fix" if changed == "finding" else "assessment",
+        assessment_id=assessment_id,
+        finding_id=finding_id if changed == "finding" else None,
+        retry_attempt_id=retry_attempt_id,
+    )
+    message = {
+        "assessment": "assessment changed during launch checks",
+        "finding": "saved assessment changed",
+        "attempt": "attempt changed",
+    }[changed]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        with pytest.raises(ValueError, match=message):
+            api.claim_task_launch(connection, args)
+        rows = connection.execute("SELECT attempt_id FROM dependency_task_launches").fetchall()
+        if changed == "attempt":
+            assert len(rows) == 1 and rows[0]["attempt_id"] != retry_attempt_id
+        else:
+            assert rows == []
