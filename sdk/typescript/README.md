@@ -1440,6 +1440,10 @@ source around each finding location, blame for the affected lines, and file
 history reachable from that commit. It does not read uncommitted source or change
 findings, files, or ticket assignments.
 
+The checkout must own its Git references and objects. Linked worktrees and bound
+separate Git directories are supported. Checkouts that borrow external object
+stores, including `git clone --shared`, are rejected; use an independent clone.
+
 Each result preserves the finding and occurrence IDs and has status `identified`,
 `abstained`, or `error`. Identified results include an observed Git author name
 and email, a reason, and checked Git citations. Missing source or unclear

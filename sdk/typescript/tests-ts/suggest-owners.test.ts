@@ -1,5 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import {
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -9,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { promisify } from "node:util";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import { afterEach, expect, test } from "bun:test";
@@ -160,11 +161,10 @@ test.each(["refs", "refs/heads", "HEAD", "packed-refs"])(
       selected,
     ]);
     const metadata = await other.git("rev-parse", "--absolute-git-dir");
-    await writeFile(
-      join(selected, ".git", "objects", "info", "alternates"),
-      `${join(metadata, "objects")}\n`,
-    );
     if (reference === "packed-refs") await other.git("pack-refs", "--all");
+    await cp(join(metadata, "objects"), join(selected, ".git", "objects"), {
+      recursive: true,
+    });
     const target =
       reference === "HEAD" ? join("refs", "heads", branch) : reference;
     const path = join(selected, ".git", reference);
@@ -187,10 +187,65 @@ test.each(["refs", "refs/heads", "HEAD", "packed-refs"])(
 );
 
 test.each([
+  "absolute-alternate",
+  "quoted-relative-alternate",
+  "nested-alternate",
+  "objects-link",
+  "pack-link",
+  "alternate-pack-link",
+])("rejects %s before collecting another checkout's objects", async (kind) => {
+  const other = await repository();
+  const selected = await realpath(
+    await mkdtemp(join(tmpdir(), "owner-borrowed-objects-")),
+  );
+  directories.push(selected);
+  await execFile("git", ["init", "--quiet", selected]);
+  const objects = join(selected, ".git", "objects");
+  const borrowed = join(
+    await other.git("rev-parse", "--absolute-git-dir"),
+    "objects",
+  );
+  if (kind.endsWith("link")) {
+    if (kind !== "objects-link") await other.git("repack", "-ad");
+    let path = kind === "objects-link" ? objects : join(objects, "pack");
+    if (kind === "alternate-pack-link") {
+      const alternate = join(selected, ".git", "nested-objects");
+      await mkdir(alternate);
+      await writeFile(join(objects, "info", "alternates"), `${alternate}\n`);
+      path = join(alternate, "pack");
+    }
+    await rm(path, { recursive: true, force: true });
+    await symlink(
+      kind === "objects-link" ? borrowed : join(borrowed, "pack"),
+      path,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+  } else {
+    let alternate = borrowed;
+    if (kind === "quoted-relative-alternate") {
+      alternate = JSON.stringify(relative(objects, borrowed));
+    } else if (kind === "nested-alternate") {
+      alternate = join(selected, ".git", "nested-objects");
+      await mkdir(join(alternate, "info"), { recursive: true });
+      await writeFile(join(alternate, "info", "alternates"), `${borrowed}\n`);
+    }
+    await writeFile(join(objects, "info", "alternates"), `${alternate}\n`);
+  }
+  // A regular local HEAD is enough to select a commit in the borrowed store.
+  await writeFile(join(selected, ".git", "HEAD"), `${other.revision}\n`);
+  const { codex, calls } = fakeCodex();
+  await expect(suggestOwners(selected, [finding], { codex })).rejects.toThrow(
+    InvalidTargetError,
+  );
+  expect(calls).toHaveLength(0);
+});
+
+test.each([
   "linked-worktree",
   "separate-git-directory",
   "source-subdirectory",
-  "shared-clone",
+  "local-clone",
+  "in-tree-alternate",
 ])("supports a bound %s", async (kind) => {
   const repo = await repository();
   const root = await realpath(await mkdtemp(join(tmpdir(), "owner-bound-")));
@@ -202,9 +257,16 @@ test.each([
   } else if (kind === "separate-git-directory") {
     await repo.git("init", "--quiet", "--separate-git-dir", join(root, "git"));
     await repo.git("config", "core.worktree", repo.path);
-  } else if (kind === "shared-clone") {
+  } else if (kind === "local-clone") {
     selected = join(root, "checkout");
-    await repo.git("clone", "--quiet", "--shared", repo.path, selected);
+    await repo.git("clone", "--quiet", repo.path, selected);
+  } else if (kind === "in-tree-alternate") {
+    const objects = join(repo.path, ".git", "objects");
+    const alternate = join(repo.path, ".git", "shared-objects");
+    await cp(objects, alternate, { recursive: true });
+    await rm(objects, { recursive: true });
+    await mkdir(join(objects, "info"), { recursive: true });
+    await writeFile(join(objects, "info", "alternates"), `${alternate}\n`);
   } else {
     selected = join(repo.path, "src");
     await mkdir(selected);

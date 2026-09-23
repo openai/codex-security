@@ -66,14 +66,23 @@ export async function ownerRepository(
     });
     return stdout;
   };
-  const [gitDirectory, commonDirectory] = await gitMetadataDirectories(
-    repository,
-    signal,
-  );
-  await requireBoundReferences(
-    [...new Set([gitDirectory, commonDirectory])],
-    signal,
-  );
+  const [gitDirectory, commonDirectory, ...objectDirectories] =
+    await gitMetadataDirectories(repository, signal, {
+      includeLocalObjects: true,
+    });
+  const metadataDirectories = [...new Set([gitDirectory, commonDirectory])];
+  if (
+    objectDirectories.some((path) =>
+      metadataDirectories.every((root) =>
+        relativePathIsOutside(relative(root, path)),
+      ),
+    )
+  ) {
+    throw new InvalidTargetError(
+      "Git objects are not bound to the selected checkout. Use a checkout that does not borrow external object stores.",
+    );
+  }
+  await requireBoundMetadata(metadataDirectories, objectDirectories, signal);
   // Blame otherwise reads an uncommitted .mailmap from the working directory.
   const git = (...args: string[]) =>
     run(gitDirectory, [
@@ -95,16 +104,20 @@ export async function ownerRepository(
   return { git, revision, files, shallow };
 }
 
-/** Shared objects are supported, but another checkout must not select HEAD. */
-async function requireBoundReferences(
+/** Neither references nor objects may link into another checkout. */
+async function requireBoundMetadata(
   metadataDirectories: string[],
+  objectDirectories: string[],
   signal?: AbortSignal,
 ): Promise<void> {
-  const pending = metadataDirectories.flatMap((directory) =>
-    ["HEAD", "refs", "packed-refs", "reftable"].map((name) =>
-      join(directory, name),
+  const pending = [
+    ...objectDirectories,
+    ...metadataDirectories.flatMap((directory) =>
+      ["HEAD", "refs", "packed-refs", "reftable"].map((name) =>
+        join(directory, name),
+      ),
     ),
-  );
+  ];
   const visited = new Set<string>();
   while (pending.length > 0) {
     signal?.throwIfAborted();
@@ -123,7 +136,7 @@ async function requireBoundReferences(
         )
       ) {
         throw new InvalidTargetError(
-          "Git references are not bound to the selected checkout. Select the intended checkout or repair its Git metadata.",
+          "Git metadata is not bound to the selected checkout. Select the intended checkout or repair its Git metadata.",
         );
       }
       pending.push(destination);
