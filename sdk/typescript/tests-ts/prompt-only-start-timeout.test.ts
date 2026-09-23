@@ -10,12 +10,14 @@ test("gives prompt-only scan startup the five-minute scan timeout", async () => 
   expect(source).toBeDefined();
   const execFileHelper = /\b(execFileAsync\d*)\(/u.exec(source ?? "")?.[1];
   expect(execFileHelper).toBeDefined();
+  const isJsonObjectHelper = /\b(isJsonObject\d*)\(/u.exec(source ?? "")?.[1];
+  expect(isJsonObjectHelper).toBeDefined();
 
   const executeWorkbench = new Function(
     execFileHelper!,
     "workbenchScriptPath",
     "PLUGIN_ROOT",
-    "isJsonObject2",
+    isJsonObjectHelper!,
     `${source}\nreturn executeWorkbench;`,
   )(
     async (

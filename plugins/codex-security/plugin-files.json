@@ -53,6 +53,7 @@
     "schemas/tools/candidate-attack-paths.schema.json",
     "schemas/tools/candidate-validations.schema.json",
     "schemas/tools/deep-reducer.schema.json",
+    "schemas/tools/dependency-artifact-result.schema.json",
     "schemas/tools/discovery-candidates.schema.json",
     "schemas/tools/review-items.schema.json",
     "schemas/tools/scan-draft.schema.json",

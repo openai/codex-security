@@ -7,9 +7,11 @@ test("does not request completed findings after a prompt-only scan", async () =>
     runtime,
   )?.[0];
   expect(source).toBeDefined();
+  const isJsonObjectHelper = /\b(isJsonObject\d*)\(/u.exec(source ?? "")?.[1];
+  expect(isJsonObjectHelper).toBeDefined();
 
   const promptOnlyScanResult = new Function(
-    "isJsonObject2",
+    isJsonObjectHelper!,
     "string2",
     "toolErrorResult",
     `${source}\nreturn promptOnlyScanResult;`,
