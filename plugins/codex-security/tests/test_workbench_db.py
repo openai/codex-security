@@ -21,7 +21,6 @@ from workbench_test_support import (
     run_workbench,
     stable_target_id,
     start_delivered_scan,
-    update_digest_field,
     write_completed_contract,
 )
 
@@ -3430,19 +3429,13 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
     draft_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     draft_target = draft_manifest["scan"]["target"]
     authored_snapshot_digest = draft_target["snapshotDigest"]
-    expected_digest = hashlib.sha256()
-    update_digest_field(expected_digest, b"format", b"codex-security-snapshot/v1")
-    update_digest_field(
-        expected_digest,
-        b"base-revision",
-        str(diff_target["baseRevision"]).encode(),
-    )
-    update_digest_field(
-        expected_digest,
-        b"head-revision",
-        str(diff_target["headRevision"]).encode(),
-    )
-    expected_snapshot_digest = f"codex-security-snapshot/v1:sha256:{expected_digest.hexdigest()}"
+    expected_digest = hashlib.sha256(
+        b"codex-security-diff/v1\0commit\0"
+        + str(diff_target["baseRevision"]).encode()
+        + b"\0"
+        + str(diff_target["headRevision"]).encode()
+    ).hexdigest()
+    expected_snapshot_digest = f"codex-security-snapshot/v1:sha256:{expected_digest}"
     draft_target["revision"] = "stale-revision"
     (scan_dir / "scan-manifest.json").write_text(json.dumps(draft_manifest))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
