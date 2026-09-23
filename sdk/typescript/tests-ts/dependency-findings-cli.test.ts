@@ -1,5 +1,7 @@
-import { resolve } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { BulkScanPrompt } from "../src/bulk-scan-discovery.js";
 import type { JsonObject } from "../src/config.js";
@@ -12,7 +14,10 @@ import {
 } from "../src/dependency-findings.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 
-const repository = resolve("dependency-cli-repository");
+const root = await realpath(await mkdtemp(join(tmpdir(), "dependency-cli-")));
+const repository = join(root, "repository");
+await mkdir(repository);
+afterAll(() => rm(root, { recursive: true, force: true }));
 
 function report(id = "report-1"): DependencyReport {
   return {
@@ -123,25 +128,35 @@ function fixture(
     cleared.push(timer);
   };
   deps.createDependencyFindings = (configuration: DependencyFindingsOptions) =>
-    new DependencyFindings(configuration, {
-      currentDirectory: () => repository,
-      workbench: async (args) => {
-        calls.push(args);
-        if (options.workbench) return options.workbench(args);
-        if (args[0] === "start-dependency-assessment") {
-          const result = completed();
-          return response({
-            ...result,
-            assessment: { ...result.assessment, state: "pending" },
-          });
-        }
-        if (args[0] === "get-dependency-assessment")
-          return response(completed());
-        throw new Error(`Unexpected workbench command: ${args[0]}`);
+    new DependencyFindings(
+      {
+        ...configuration,
+        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
       },
-      runSkill: async () =>
-        options.runSkill ? options.runSkill(configuration.signal) : "Complete",
-    });
+      {
+        currentDirectory: () => repository,
+        workbench: async (args) => {
+          calls.push(args);
+          if (options.workbench) return options.workbench(args);
+          if (args[0] === "get-dependency-report")
+            return response({ report: report() });
+          if (args[0] === "start-dependency-assessment") {
+            const result = completed();
+            return response({
+              ...result,
+              assessment: { ...result.assessment, state: "pending" },
+            });
+          }
+          if (args[0] === "get-dependency-assessment")
+            return response(completed());
+          throw new Error(`Unexpected workbench command: ${args[0]}`);
+        },
+        runSkill: async () =>
+          options.runSkill
+            ? options.runSkill(configuration.signal)
+            : "Complete",
+      },
+    );
   return { deps, signals, calls, timers, cleared };
 }
 
@@ -223,6 +238,8 @@ describe("dependency findings terminal workflow", () => {
         if (args[0] === "list-dependency-reports")
           return response({ reports: [saved], nextOffset: null });
         if (args[0] === "get-dependency-report") {
+          if (option(args, "--limit") === "1")
+            return response({ report: saved });
           expect(option(args, "--limit")).toBe("100");
           const offset = Number(option(args, "--offset") ?? 0);
           return response({
@@ -280,7 +297,11 @@ describe("dependency findings terminal workflow", () => {
     expect(filterPrompts).toBe(2);
     expect(findingPrompts).toBe(1);
     expect(
-      calls.filter(([command]) => command === "get-dependency-report"),
+      calls.filter(
+        (args) =>
+          args[0] === "get-dependency-report" &&
+          option(args, "--limit") === "100",
+      ),
     ).toHaveLength(2);
     expect(
       calls.find(([command]) => command === "start-dependency-assessment"),
@@ -399,6 +420,7 @@ describe("dependency findings terminal workflow", () => {
     expect(stderr.text()).toBe("");
     expect(timers).toEqual([]);
     expect(calls.map(([command]) => command)).toEqual([
+      "get-dependency-report",
       "start-dependency-assessment",
       "get-dependency-assessment",
     ]);

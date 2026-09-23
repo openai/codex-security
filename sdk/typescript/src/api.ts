@@ -793,6 +793,7 @@ export class CodexSecurity {
             session.runtime.plugin.pluginRoot,
             session.python,
             outputDir,
+            inputs.stateDirectory,
           ),
           { signal },
         );
