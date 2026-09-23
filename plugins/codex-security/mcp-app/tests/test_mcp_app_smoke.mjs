@@ -87,6 +87,9 @@ assert.deepEqual(
     "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
     "PYTHON",
     "PYTHONUTF8",
+    "CODEX_SECURITY_AARDVARK_BASE_URL",
+    "CODEX_SECURITY_DEPENDENCY_ARTIFACT_SCAN",
+    "CODEX_SECURITY_DEPENDENCY_MODEL_SETTINGS",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -1581,6 +1584,15 @@ try {
   const startHeadlessStandardScan = toolList.result.tools.find(
     (tool) => tool.name === "start_codex_security_standard_scan",
   );
+  const submitDependencyScan = toolList.result.tools.find(
+    (tool) => tool.name === "submit_codex_security_dependency_scan",
+  );
+  const getDependencyScan = toolList.result.tools.find(
+    (tool) => tool.name === "get_codex_security_dependency_scan",
+  );
+  const getDependencyScanProgress = toolList.result.tools.find(
+    (tool) => tool.name === "get_codex_security_scan_dependency_progress",
+  );
   const getScan = toolList.result.tools.find(
     (tool) => tool.name === "get_codex_security_scan",
   );
@@ -1898,6 +1910,21 @@ try {
   assert.ok(launcher);
   assert.ok(startPromptOnlyScan);
   assert.ok(startHeadlessStandardScan);
+  assert.ok(submitDependencyScan);
+  assert.ok(getDependencyScan);
+  assert.ok(getDependencyScanProgress);
+  assert.deepEqual(submitDependencyScan._meta.ui.visibility, ["model"]);
+  assert.deepEqual(getDependencyScan._meta.ui.visibility, ["model"]);
+  assert.deepEqual(getDependencyScanProgress._meta.ui.visibility, ["app"]);
+  assert.equal(submitDependencyScan.annotations.readOnlyHint, false);
+  assert.equal(submitDependencyScan.annotations.destructiveHint, false);
+  assert.equal(submitDependencyScan.annotations.idempotentHint, false);
+  assert.equal(getDependencyScan.annotations.readOnlyHint, true);
+  assert.equal(getDependencyScan.annotations.idempotentHint, true);
+  assert.equal(getDependencyScanProgress.annotations.readOnlyHint, true);
+  assert.equal(getDependencyScanProgress.annotations.idempotentHint, true);
+  assert.deepEqual(getDependencyScanProgress.inputSchema.required, ["scanId"]);
+  assert.ok(submitDependencyScan.inputSchema.properties.scanId);
   assert.ok(getScan);
   assert.ok(listScans);
   assert.ok(listGlobalFindings);
@@ -2006,7 +2033,13 @@ try {
     "diff",
     "standard",
     "deep",
+    "dependency_update",
+    "full_dependency",
   ]);
+  assert.ok(launcher.inputSchema.properties.scanDependencies);
+  assert.ok(launcher.inputSchema.properties.modelSettings);
+  assert.ok(submit.inputSchema.properties.scanDependencies);
+  assert.ok(submit.inputSchema.properties.modelSettings);
   assert.equal(getScan.annotations.readOnlyHint, false);
   assert.deepEqual(getScan._meta.ui.visibility, ["app"]);
   assert.equal(recoverScanResults.annotations.readOnlyHint, false);
@@ -2027,6 +2060,12 @@ try {
   assert.ok(getScanContext.inputSchema.properties.occurrenceId);
   assert.deepEqual(launcher._meta.ui.visibility, ["app"]);
   assert.deepEqual(startPromptOnlyScan._meta.ui.visibility, ["model"]);
+  assert.deepEqual(startPromptOnlyScan.inputSchema.properties.mode.enum, [
+    "diff",
+    "standard",
+    "dependency_update",
+    "full_dependency",
+  ]);
   assert.deepEqual(startHeadlessStandardScan._meta.ui.visibility, ["model"]);
   assert.deepEqual(startHeadlessStandardScan.inputSchema.required, [
     "targetPath",

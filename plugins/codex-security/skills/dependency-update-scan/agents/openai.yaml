@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dependency Update Scan"
+  short_description: "Scan dependency updates in Git changes"
+  default_prompt: "Use $dependency-update-scan to inspect public dependency updates and unsafe installation changes in this Git diff."
