@@ -3746,7 +3746,8 @@ export async function main(
       },
     })
     .command("install-hook", {
-      description: "Install a Git pre-commit security scan.",
+      description:
+        "Install an advisory local Git pre-commit check. Require a passing scan in CI.",
       destructive: true,
       mcp: false,
       args: z.object({
