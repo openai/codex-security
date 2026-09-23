@@ -9,6 +9,7 @@ import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -687,8 +688,11 @@ def _validate_result(
         start, end = location.get("startLine"), location.get("endLine", location.get("startLine"))
         if type(start) is not int or type(end) is not int or not 1 <= start <= end:
             raise ValueError("Code evidence must have a valid line range.")
-        lines = _read(source, 2 * 1024 * 1024).decode("utf-8").splitlines()
-        if end > len(lines) or end - start > 200:
+        if end - start > 200:
+            raise ValueError("Code evidence line range does not match the repository file.")
+        with source.open(encoding="utf-8") as stream:
+            lines = [line.rstrip("\r\n") for line in islice(stream, start - 1, end)]
+        if len(lines) != end - start + 1:
             raise ValueError("Code evidence line range does not match the repository file.")
         checked_evidence.append(
             {
@@ -696,7 +700,7 @@ def _validate_result(
                 "startLine": start,
                 "endLine": end,
                 "explanation": _text(location.get("explanation"), "evidence explanation"),
-                "excerpt": "\n".join(lines[start - 1 : end]),
+                "excerpt": "\n".join(lines),
             }
         )
         _require_assessment_size(validated)

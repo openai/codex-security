@@ -189,6 +189,8 @@ const distFiles = new Set(
     "deep-progress",
     "deep-config",
     "deep-scan-defaults",
+    "dependency-findings",
+    "dependency-findings-renderer",
     "project-config",
     "project-config-schema",
     "prompt-files",

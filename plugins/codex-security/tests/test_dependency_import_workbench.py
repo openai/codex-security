@@ -248,6 +248,21 @@ def test_import_assess_selection_and_reviewed_fix(tmp_path: Path) -> None:
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 0
 
 
+def test_assessment_cites_short_range_in_large_source_file(tmp_path: Path) -> None:
+    """Read the requested lines even when their source exceeds the former file limit."""
+    target, state, report_id, findings = setup_report(tmp_path)
+    source = "const parser = require('parser');\nparser.parse(input);\n"
+    (target / "app.js").write_text("// padding\n" * 200000 + source)
+    assessment_id = start(state, report_id, [findings[0]["id"]])["assessment"]["id"]
+    output = result(findings[0]["id"], target)
+    output["codeEvidence"][0].update(startLine=200001, endLine=200002)
+
+    recorded = record(tmp_path, state, assessment_id, [output])
+
+    assert recorded["assessment"]["state"] == "complete"
+    assert recorded["results"][0]["codeEvidence"][0]["excerpt"] == source.rstrip("\n")
+
+
 def test_assessment_batch_retains_large_native_transcripts(tmp_path: Path) -> None:
     """Record a complete selection whose resolver output exceeds the report import cap."""
     target, state, report_id, findings = setup_report(tmp_path, finding_count=100)
