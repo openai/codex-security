@@ -132,7 +132,6 @@ from workbench_target import (
     require_remediation_target,
     require_scan_target_identity,
     scan_target_warning,
-    update_digest_field,
     worktree_content_digest,
     worktree_content_digest_for_context,
 )
@@ -520,11 +519,15 @@ def workbench_completion_binding(
         if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
             target["snapshotDigest"] = scan["diff_content_digest"]
         elif scan["diff_target_kind"] in {"commit", "range"}:
-            digest = hashlib.sha256()
-            update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
-            update_digest_field(digest, b"base-revision", scan["diff_base_revision"].encode())
-            update_digest_field(digest, b"head-revision", scan["diff_head_revision"].encode())
-            target["snapshotDigest"] = f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
+            digest = hashlib.sha256(
+                b"codex-security-diff/v1\0"
+                + scan["diff_target_kind"].encode()
+                + b"\0"
+                + scan["diff_base_revision"].encode()
+                + b"\0"
+                + scan["diff_head_revision"].encode()
+            ).hexdigest()
+            target["snapshotDigest"] = f"codex-security-snapshot/v1:sha256:{digest}"
     else:
         if scan["target_revision"] != "unversioned":
             target["revision"] = scan["target_revision"]

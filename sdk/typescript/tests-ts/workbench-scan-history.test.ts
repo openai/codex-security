@@ -133,7 +133,7 @@ connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
 connection.executescript('''
 PRAGMA foreign_keys = ON;
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT);
+CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT, dependency_scan_target TEXT);
 CREATE TABLE finding_occurrences (
     id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT, severity TEXT
 );
@@ -153,7 +153,7 @@ CREATE INDEX matches_before ON scan_comparison_matches(before_occurrence_id);
 CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
 ''')
 for scan, names in [('before', ('a1', 'a2', 'b', 'c')), ('after', ('x1', 'x2', 'y', 'z'))]:
-    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', (scan, sys.argv[2], 'target', 'complete'))
+    connection.execute('INSERT INTO scans (id, target_path, target_id, status) VALUES (?, ?, ?, ?)', (scan, sys.argv[2], 'target', 'complete'))
     for name in names:
         connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?)', (name, name, scan, name, 'high'))
         connection.execute('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', (name, 'src/example.py', 'root_control', 0))
@@ -428,7 +428,7 @@ import workbench_scan_history as history
 connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
 connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT);
+CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT, dependency_scan_target TEXT);
 CREATE TABLE finding_occurrences (
     id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT, severity TEXT
 );
@@ -445,7 +445,7 @@ CREATE INDEX matches_before ON scan_comparison_matches(before_occurrence_id);
 CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
 ''')
 for scan in ('before', 'after', 'later', 'latest'):
-    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', (scan, sys.argv[2], 'target', 'complete'))
+    connection.execute('INSERT INTO scans (id, target_path, target_id, status) VALUES (?, ?, ?, ?)', (scan, sys.argv[2], 'target', 'complete'))
 for scan, names in [('before', ('a1', 'a2')), ('after', ('b1', 'b2')),
                     ('later', ('c1', 'c2')), ('latest', ('d1',))]:
     for name in names:
