@@ -5,7 +5,7 @@ import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -21,10 +21,11 @@ const { cleanup, copyCompletedScan, temporaryDirectory } =
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
-  test.each(["direct", "profile"])(
+  test.each(["direct", "profile", "native-profile"])(
     "runs native command authentication without importing credentials (%s)",
     async (selection) => {
-      const profile = selection === "profile";
+      const profile = selection !== "direct";
+      const nativeProfile = selection === "native-profile";
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const home = join(root, "model-home");
@@ -42,21 +43,36 @@ describe("CodexSecurity orchestration", () => {
         refresh_interval_ms: 1000,
         ...(profile ? { cwd: "helpers" } : {}),
       };
+      const providerConfig = {
+        name: "Synthetic",
+        base_url: "https://provider.example/v1",
+        wire_api: "responses",
+        auth,
+      };
+      if (nativeProfile) {
+        await writeFile(
+          join(home, "review.config.toml"),
+          stringify({
+            model: "native-model",
+            model_reasoning_effort: "high",
+            model_reasoning_summary: "concise",
+            model_provider: "synthetic.provider",
+            model_providers: { "synthetic.provider": providerConfig },
+          }),
+        );
+      }
       const overrides = {
-        ...(profile
-          ? {
-              profile: "review",
-              profiles: { review: { model_provider: "synthetic.provider" } },
-            }
-          : { model_provider: "synthetic.provider" }),
-        model_providers: {
-          "synthetic.provider": {
-            name: "Synthetic",
-            base_url: "https://provider.example/v1",
-            wire_api: "responses",
-            auth,
-          },
-        },
+        ...(nativeProfile
+          ? { profile: "review" }
+          : profile
+            ? {
+                profile: "review",
+                profiles: { review: { model_provider: "synthetic.provider" } },
+              }
+            : { model_provider: "synthetic.provider" }),
+        ...(nativeProfile
+          ? {}
+          : { model_providers: { "synthetic.provider": providerConfig } }),
       };
       let captured: CodexOptions | undefined;
       const client = new TestClient(
@@ -73,7 +89,7 @@ describe("CodexSecurity orchestration", () => {
               : {}),
           },
           resolvePluginPython: async () => "/managed/python",
-          ...(profile
+          ...(profile && !nativeProfile
             ? {
                 prepareRuntime: async () => ({
                   ...preparedRuntime(runtimeHome),
@@ -103,6 +119,13 @@ describe("CodexSecurity orchestration", () => {
           verified: false,
         });
         expect(JSON.stringify(preflight)).not.toContain("synthetic-auth");
+        if (nativeProfile) {
+          expect(preflight).toMatchObject({
+            model: "native-model",
+            reasoningEffort: "high",
+            modelProvider: "synthetic.provider",
+          });
+        }
         await expect(client.run(repository)).rejects.toThrow(
           "synthetic command-auth scan started",
         );
@@ -111,21 +134,28 @@ describe("CodexSecurity orchestration", () => {
         expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
         expect(captured?.env?.["CODEX_HOME"]).toBe(join(state, "codex-home"));
         const provider = {
-          ...overrides.model_providers["synthetic.provider"],
+          ...providerConfig,
           auth: { ...auth, cwd: profile ? join(home, "helpers") : home },
         };
         expect(parseToml(captured!.configOverrides![0]!)).toEqual({
           model_providers: { "synthetic.provider": provider },
         });
-        if (profile) {
-          expect(captured?.config?.["profile"]).toBe("review");
-          expect(captured?.config?.["profiles"]).toEqual({
-            review: { model_provider: "synthetic.provider" },
+        expect(captured?.config).not.toHaveProperty("profile");
+        expect(captured?.config).not.toHaveProperty("profiles");
+        expect(captured?.config?.["model_provider"]).toBe("synthetic.provider");
+        if (nativeProfile) {
+          expect(captured?.config).toMatchObject({
+            model: "native-model",
+            model_reasoning_effort: "high",
+            model_reasoning_summary: "concise",
           });
-        } else {
+        }
+        if (!profile || nativeProfile) {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),
           );
+          expect(saved).not.toHaveProperty("profile");
+          expect(saved).not.toHaveProperty("profiles");
           expect(saved["model_providers"]).toEqual({
             "synthetic.provider": provider,
           });

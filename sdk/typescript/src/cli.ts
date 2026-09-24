@@ -4308,7 +4308,12 @@ export async function main(
             const candidate = new ScanDashboard(errorOutput, {
               repository,
               presentation: "components",
-              model: scanModelConfiguration(await mergedCodexConfig(config)),
+              model: scanModelConfiguration(
+                await mergedCodexConfig(
+                  config,
+                  configuredCodexHome(dependencies.environment),
+                ),
+              ),
               mode: settings.mode,
               maxCostUsd: settings.maxCostUsd,
               showCost: options.showCost,
@@ -5762,7 +5767,10 @@ export async function main(
           dependencies,
         );
         const resolved = resolveScanSettings(project, {}, directory);
-        const codex = await mergedCodexConfig(resolved.config);
+        const codex = await mergedCodexConfig(
+          resolved.config,
+          configuredCodexHome(dependencies.environment),
+        );
         const deep =
           resolved.options.mode === "deep"
             ? await resolveDeepScanConfig(
@@ -8289,10 +8297,10 @@ async function executeScan(
       codexOverrides: arguments_.codexOverrides,
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
-    const effectiveConfiguration = {
-      ...DEFAULT_CODEX_CONFIG,
-      ...config.codexOverrides,
-    };
+    const effectiveConfiguration = await mergedCodexConfig(
+      config,
+      configuredCodexHome(dependencies.environment),
+    );
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
     const provider = scanModelProvider(effectiveConfiguration);
@@ -8376,7 +8384,7 @@ async function executeScan(
         repository,
         mode: arguments_.mode,
         showCost,
-        model: scanModelConfiguration(await mergedCodexConfig(config)),
+        model: scanModelConfiguration(effectiveConfiguration),
         ...(arguments_.maxCostUsd === undefined
           ? {}
           : { maxCostUsd: arguments_.maxCostUsd }),

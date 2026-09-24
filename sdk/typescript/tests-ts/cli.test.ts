@@ -3240,6 +3240,35 @@ describe("CLI", () => {
     }
   });
 
+  test("reports settings from a selected Codex file profile", async () => {
+    const home = await mkdtemp(join(tmpdir(), "codex-security-profile-"));
+    try {
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model = "native-model"\nmodel_reasoning_effort = "high"\n',
+      );
+      const stderr = capture();
+      expect(
+        await main(
+          ["scan", ".", "--codex", 'profile="review"', "--verbose", "--json"],
+          capture().stream,
+          stderr.stream,
+          dependencies({ environment: { CODEX_HOME: home } }),
+        ),
+      ).toBe(0);
+      const configuration = stderr
+        .text()
+        .split("\n")
+        .find((line) =>
+          line.startsWith("codex-security: debug: scan.configuration"),
+        );
+      expect(configuration).toContain('model="native-model"');
+      expect(configuration).toContain('reasoning_effort="high"');
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("reports saved model and reasoning effort for verbose scan reruns", async () => {
     const stdout = capture();
     const stderr = capture();
