@@ -259,6 +259,42 @@ def test_rank_input_includes_terraform(tmp_path: Path, mode: str) -> None:
     ]
 
 
+@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
+def test_rank_input_includes_objective_c(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    ios = repo / "ios"
+    ios.mkdir(parents=True)
+    initialize_repo(repo)
+    source = ios / "ViewController.m"
+    source.write_text('NSString *greeting = @"hello";\n', encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    changed = 'NSString *greeting = @"goodbye";'
+    source.write_text(changed + "\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "ios"]
+    else:
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
+        if mode == "revisions":
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    assert read_jsonl(output) == [
+        {
+            "path": "ios/ViewController.m",
+            "area": "ios" if mode == "repo" else "diff",
+            "preview": changed,
+        }
+    ]
+
+
 def test_make_repo_rank_input_rejects_scope_outside_repo(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
