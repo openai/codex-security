@@ -8297,10 +8297,19 @@ async function executeScan(
       codexOverrides: arguments_.codexOverrides,
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
-    const effectiveConfiguration = await mergedCodexConfig(
-      config,
-      configuredCodexHome(dependencies.environment),
-    );
+    const inlineProfiles = config.codexOverrides?.["profiles"];
+    // Saved recipes keep their existing validation path; file profiles need
+    // an early merge so CLI reporting reflects the selected file.
+    const effectiveConfiguration =
+      typeof selectedProfileName === "string" &&
+      (inlineProfiles === undefined ||
+        !isJsonObject(inlineProfiles) ||
+        !isJsonObject(inlineProfiles[selectedProfileName] ?? null))
+        ? await mergedCodexConfig(
+            config,
+            configuredCodexHome(dependencies.environment),
+          )
+        : { ...DEFAULT_CODEX_CONFIG, ...config.codexOverrides };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
     const provider = scanModelProvider(effectiveConfiguration);
