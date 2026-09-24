@@ -14,6 +14,7 @@
 - support long filenames when staging documents ([#1016](https://github.com/openai/codex-security/pull/1016))
 - include Objective-C sources in scan inventories ([#989](https://github.com/openai/codex-security/pull/989))
 - ignore URL parameters when reading device codes ([#979](https://github.com/openai/codex-security/pull/979))
+- page reducer inputs by serialized size ([#1025](https://github.com/openai/codex-security/pull/1025))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

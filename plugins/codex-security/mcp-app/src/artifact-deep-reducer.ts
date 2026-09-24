@@ -7,6 +7,7 @@ import type {
   ArtifactContext,
   DeepReducerContext,
 } from "./artifact-context.js";
+import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
   parsePersistedScanDraft,
   saveScanDraftCheckpoint,
@@ -39,7 +40,7 @@ export const deepReducerInputsInputSchema = loadArtifactZodSchema(
   schemaDocuments,
   reducerSchema.$id,
   "reducerInputs",
-) as ZodType<Record<string, never>>;
+) as ZodType<DeepReducerPageInput>;
 
 export const deepReductionInputSchema = loadArtifactZodSchema(
   schemaDocuments,

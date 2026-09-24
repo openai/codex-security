@@ -137,6 +137,7 @@ test("classifies owned worker tool failures without exposing their contents", as
       bundledFunction(runtime, recordHelper!),
       bundledFunction(runtime, "isSandboxNamespaceExhaustion"),
       bundledFunction(runtime, "appendUniqueDiagnostic"),
+      bundledFunction(runtime, "appendCodeModeFrameDiagnostic"),
       diagnosticSource,
       "return appendSafeItemDiagnostic;",
     ].join("\n"),
@@ -267,7 +268,11 @@ test("resumes only when the exact Standard worker or reducer result is missing",
   expect(standardContinuation(1)).toMatch(/retry.*until it succeeds/iu);
 
   const continuation = new Function(
-    `${bundledFunction(runtime, "reducerCompletionContinuation")}\nreturn reducerCompletionContinuation;`,
+    [
+      bundledFunction(runtime, "reducerInputRecoveryInstructions"),
+      bundledFunction(runtime, "reducerCompletionContinuation"),
+      "return reducerCompletionContinuation;",
+    ].join("\n"),
   )() as (attempt: number) => string;
   expect(continuation(1)).toContain("record_codex_security_deep_reduction");
   expect(continuation(1)).toMatch(/retry.*until it succeeds/iu);
