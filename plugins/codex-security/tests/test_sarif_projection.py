@@ -162,6 +162,22 @@ class SarifRunWarningTest(unittest.TestCase):
         self.assertNotIn("invocations", run)
         self.assertNotIn("codexSecurityCoverageCompleteness", run["properties"])
 
+    def test_file_based_finalization_preserves_draft_warnings(self) -> None:
+        coverage_path = self.scan_dir / "coverage.json"
+        coverage = json.loads(coverage_path.read_text())
+        coverage["warnings"] = [TARGET_DRIFT_WARNING]
+        coverage_path.write_text(json.dumps(coverage))
+
+        FINALIZER.finalize_scan(self.scan_dir)
+
+        sealed = json.loads(coverage_path.read_text())
+        run = json.loads((self.scan_dir / "exports" / "results.sarif").read_text())["runs"][0]
+        self.assertEqual(sealed["warnings"], [TARGET_DRIFT_WARNING])
+        self.assertEqual(
+            run["invocations"][0]["toolExecutionNotifications"],
+            [{"level": "warning", "message": {"text": TARGET_DRIFT_WARNING}}],
+        )
+
     def test_warning_already_carried_by_a_deferred_row_is_not_reported_twice(self) -> None:
         # Recovery warnings are sealed as warnings and as deferred rows at once,
         # so the deferred row is the one notification that should carry them.

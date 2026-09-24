@@ -18,7 +18,7 @@ import secrets
 import stat
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
@@ -1215,23 +1215,6 @@ def _populate_unsealed_artifact_envelope(
         coverage["includePaths"] = copy.deepcopy(scope["includePaths"])
     if "excludePaths" in scope:
         coverage["excludePaths"] = copy.deepcopy(scope["excludePaths"])
-
-
-def _populate_unsealed_coverage_warnings(
-    coverage: dict[str, Any], completion_warnings: list[str] | None
-) -> None:
-    """Seal run-level completion warnings into the coverage document.
-
-    Run warnings reach only the sealing callers, and the SARIF projection reads
-    sealed documents alone. Recording them here is what makes a completed run's
-    warnings -- target drift above all -- visible to every export path.
-    """
-
-    warnings = _completion_warning_strings(completion_warnings)
-    if warnings:
-        coverage["warnings"] = warnings
-    else:
-        coverage.pop("warnings", None)
 
 
 def _completion_warning_strings(warnings: list[str] | None) -> list[str]:
@@ -2443,32 +2426,6 @@ def _read_sealed_scan(
     return manifest, findings, coverage, findings_bytes
 
 
-def _sarif_invocation(
-    execution_successful: bool, notifications: list[dict[str, Any]]
-) -> dict[str, Any]:
-    return {
-        "executionSuccessful": execution_successful,
-        "toolExecutionNotifications": notifications,
-    }
-
-
-def _sarif_notifications(coverage: dict[str, Any], run_warnings: list[str]) -> list[dict[str, Any]]:
-    """Merge sealed run warnings into the deferred-coverage notifications.
-
-    Discarded findings and coverage recovery warnings already reach SARIF as
-    deferred rows, so only warnings with no deferred row of their own are added,
-    which keeps one notification per warning.
-    """
-
-    deferred = coverage["deferred"]
-    deferred_reasons = {item["reason"] for item in deferred}
-    return [
-        {"level": "warning", "message": {"text": warning}}
-        for warning in run_warnings
-        if warning not in deferred_reasons
-    ] + [{"level": "warning", "message": {"text": item["reason"]}} for item in deferred]
-
-
 def build_sarif_projection(
     scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
 ) -> dict[str, Any]:
@@ -2487,8 +2444,21 @@ def build_sarif_projection(
     if not execution_successful or coverage["completeness"] != "complete" or run_warnings:
         run = sarif["runs"][0]
         run["properties"]["codexSecurityCoverageCompleteness"] = coverage["completeness"]
+        deferred_reasons = {item["reason"] for item in coverage["deferred"]}
+        notifications = [
+            {"level": "warning", "message": {"text": warning}}
+            for warning in run_warnings
+            if warning not in deferred_reasons
+        ]
+        notifications.extend(
+            {"level": "warning", "message": {"text": item["reason"]}}
+            for item in coverage["deferred"]
+        )
         run["invocations"] = [
-            _sarif_invocation(execution_successful, _sarif_notifications(coverage, run_warnings))
+            {
+                "executionSuccessful": execution_successful,
+                "toolExecutionNotifications": notifications,
+            }
         ]
     _validate_sarif(sarif)
     return sarif
@@ -2713,6 +2683,8 @@ def _prepare_scan_finalization(
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
     completion_warnings: list[str] | None = None,
+    recover_drafts: bool = True,
+    refresh_completion_warnings: Callable[[], None] | None = None,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
 ) -> PreparedScanFinalization:
     """Read, populate, and validate a scan without writing any output files."""
@@ -2780,7 +2752,7 @@ def _prepare_scan_finalization(
     if was_sealed:
         _validate_findings(manifest, findings_for_validation)
         _validate_derived_finding_identities(manifest, findings)
-    elif completion_warnings is not None:
+    elif completion_warnings is not None and recover_drafts:
         discarded_findings = _recover_unsealed_findings(
             manifest, findings, schema_dir, scan_dir, completion_warnings
         )
@@ -2797,25 +2769,38 @@ def _prepare_scan_finalization(
     )
     _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)
+    if refresh_completion_warnings is not None:
+        refresh_completion_warnings()
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
         validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
         validate_against_schema(coverage, schema_dir / "coverage.schema.json")
-        report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
-        _validate_report_output_paths(scan_dir)
-        return (
-            scan_dir,
-            schema_dir,
-            manifest,
-            findings,
-            coverage,
-            was_sealed,
-            report_markdown_bytes,
-        )
+        if not any(
+            warning not in coverage.get("warnings", [])
+            for warning in _completion_warning_strings(completion_warnings)
+        ):
+            report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
+            _validate_report_output_paths(scan_dir)
+            return (
+                scan_dir,
+                schema_dir,
+                manifest,
+                findings,
+                coverage,
+                was_sealed,
+                report_markdown_bytes,
+            )
+        was_sealed = False
 
-    _populate_unsealed_coverage_warnings(coverage, completion_warnings)
+    warnings = _completion_warning_strings(
+        [*coverage.get("warnings", []), *(completion_warnings or [])]
+    )
+    if warnings:
+        coverage["warnings"] = warnings
+    else:
+        coverage.pop("warnings", None)
     findings_bytes = _contract_json_bytes("findings.json", findings)
     coverage_bytes = _contract_json_bytes("coverage.json", coverage)
     report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)

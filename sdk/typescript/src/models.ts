@@ -312,6 +312,7 @@ export interface CoverageDocument {
     surfaceIds?: string[];
     [k: string]: unknown;
   }[];
+  warnings?: string[];
   openQuestions?: {
     question: string;
     followUpPrompt?: string;
