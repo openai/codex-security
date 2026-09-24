@@ -4711,13 +4711,17 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   if (safeString(reasoningSummary)) {
     result["model_reasoning_summary"] = reasoningSummary;
   }
-  const selectedProfile = safeProfileName(config["profile"])
-    ? config["profile"]
-    : undefined;
+  const profileName = config["profile"];
+  const profiles = config["profiles"];
+  const selectedProfile =
+    safeProfileName(profileName) &&
+    isRecord(profiles) &&
+    isRecord(profiles[profileName])
+      ? profileName
+      : undefined;
   if (selectedProfile !== undefined) {
     result["profile"] = selectedProfile;
   }
-  const profiles = config["profiles"];
   if (isRecord(profiles)) {
     const sanitized: JsonObject = {};
     for (const [name, profile] of Object.entries(profiles)) {
