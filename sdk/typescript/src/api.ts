@@ -2668,9 +2668,7 @@ export class CodexSecurity {
     // cannot safely encode their path and selector keys as dotted overrides.
     delete sdkCodexConfig["projects"];
     delete sdkCodexConfig["permissions"];
-    // Provider definitions already live in the isolated Codex home. The SDK
-    // cannot quote dotted provider names when flattening this table.
-    delete sdkCodexConfig["model_providers"];
+    if (commandAuth) delete sdkCodexConfig["model_providers"];
     const configuredResponsesMetadata = isRecord(
       sdkCodexConfig["responses_api_metadata"],
     )
