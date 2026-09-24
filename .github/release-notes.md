@@ -11,6 +11,7 @@
 - support Codex 0.156.1 with Bubblewrap ([#997](https://github.com/openai/codex-security/pull/997))
 - suggest finding owners ([#1010](https://github.com/openai/codex-security/pull/1010))
 - \[codex\] align security policy with Codex bug bounty scope ([#1001](https://github.com/openai/codex-security/pull/1001))
+- support long filenames when staging documents ([#1016](https://github.com/openai/codex-security/pull/1016))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
