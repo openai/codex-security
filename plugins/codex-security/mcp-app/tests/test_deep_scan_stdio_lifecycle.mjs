@@ -772,7 +772,10 @@ async function testDeepScanStdioLifecycle() {
         ),
       );
       assertNoError(resumed);
-      assert.equal(resumed.result.structuredContent.manifestPath, manifestPath);
+      assert.deepEqual(resumed.result.structuredContent, {
+        scanId: resumedScanId,
+        manifestPath,
+      });
       assert.equal(
         resumed.result.content.some((item) =>
           item.text.includes(resumedScanId),
