@@ -13,6 +13,7 @@
 - \[codex\] align security policy with Codex bug bounty scope ([#1001](https://github.com/openai/codex-security/pull/1001))
 - support long filenames when staging documents ([#1016](https://github.com/openai/codex-security/pull/1016))
 - include Objective-C sources in scan inventories ([#989](https://github.com/openai/codex-security/pull/989))
+- ignore URL parameters when reading device codes ([#979](https://github.com/openai/codex-security/pull/979))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
