@@ -864,7 +864,7 @@ function withWorkerDiagnostics(
   );
   const diagnostic = namespaceFailure ?? diagnostics[0];
   const combined = new Error(
-    `${diagnostic.message} Deterministic artifact validation also reported: ${normalized.message}`,
+    `${diagnostics.map((item) => item.message).join(" ")} Deterministic artifact validation also reported: ${normalized.message}`,
     { cause: normalized },
   );
   Object.defineProperty(combined, "code", {
@@ -901,10 +901,19 @@ function standardScanCompletionContinuation(attempt: number): string {
 function reducerCompletionContinuation(attempt: number): string {
   return [
     `Continue the existing Deep Scan reducer after attempt ${attempt} ended without its required result.`,
+    ...reducerInputRecoveryInstructions(),
     "Submit the aggregate with record_codex_security_deep_reduction({ scanId, findings, threatModel?, scope? }).",
     "If the tool rejects the arguments, use its error to correct them and retry the call until it succeeds.",
     "Do not end your turn, write the result directly, or call the tool again after it succeeds.",
   ].join("\n");
+}
+
+function reducerInputRecoveryInstructions(): string[] {
+  return [
+    "If input retrieval exceeded a response or IPC size limit, call get_codex_security_deep_reducer_inputs({ cursor?, maxBytes, findingRef? }) with a smaller maxBytes budget (for example, halve the failed request's budget), preserving its cursor and findingRef to retry the same page.",
+    "Do not repeat an oversized request unchanged. If inputs have not been read yet, paginate all assigned findings and the previous aggregate, assembling each json fragment in code and following nextCursor until absent; inspect assembled data selectively and fetch details by findingRef.",
+    "Preserve pages already read and account for every finding before submitting the aggregate.",
+  ];
 }
 
 function transientExecutionContinuation(
@@ -922,6 +931,7 @@ function transientExecutionContinuation(
   return [
     `Continue the existing Deep Scan ${kind} worker objective after transient Codex execution failure on attempt ${attempt - 1}.`,
     "Resume from the current worker-local artifacts and conversation context.",
+    ...(kind === "dedup" ? reducerInputRecoveryInstructions() : []),
     "Do not restart or discard completed work. Finish every artifact required by the original worker contract,",
     "settle all nested work, and return only after the original objective is complete.",
   ].join("\n");
