@@ -434,7 +434,7 @@ async function testDeepScanStdioLifecycle() {
       "tools/call",
       toolCall("start_codex_security_deep_scan", { scanId }, threadId),
     );
-    assertCanceled(lateJoin, scanId);
+    assertCanceled(lateJoin, scanId, startedState.scanDir);
     assert.equal((await readJsonLines(startLogPath)).length, 1);
 
     const failureThreadId = "deep-scan-stdio-failure-thread";
@@ -772,10 +772,28 @@ async function testDeepScanStdioLifecycle() {
         ),
       );
       assertNoError(resumed);
+      const instructions = resumed.result.structuredContent.instructions;
+      assert.match(
+        instructions,
+        /Immediately call complete_codex_security_scan once/,
+      );
+      assert.match(
+        instructions,
+        /Return output only after completion succeeds/,
+      );
+      assert.match(
+        instructions,
+        /If completion fails, surface that exact error/,
+      );
       assert.deepEqual(resumed.result.structuredContent, {
         scanId: resumedScanId,
+        scanDir: resumedScan.scanDir,
         manifestPath,
+        instructions,
       });
+      assert.deepEqual(resumed.result.content, [
+        { type: "text", text: instructions },
+      ]);
       assert.equal(
         resumed.result.content.some((item) =>
           item.text.includes(resumedScanId),
@@ -1192,12 +1210,26 @@ function assertNoError(response) {
   );
 }
 
-function assertCanceled(response, scanId) {
+function assertCanceled(response, scanId, scanDir) {
   assertNoError(response);
+  const instructions = response.result.structuredContent.instructions;
+  assert.match(
+    instructions,
+    /Saved findings and pending candidates remain available/,
+  );
+  assert.match(
+    instructions,
+    /Do not start additional scan work or claim complete coverage/,
+  );
   assert.deepEqual(response.result.structuredContent, {
     status: "canceled",
     scanId,
+    scanDir,
+    instructions,
   });
+  assert.deepEqual(response.result.content, [
+    { type: "text", text: instructions },
+  ]);
 }
 
 function assertProcessAlive(pid) {
