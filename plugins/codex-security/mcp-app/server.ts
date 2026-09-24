@@ -1098,7 +1098,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Start or Join Codex Security Deep Scan",
       description:
-        "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The call blocks until the aggregate draft is ready, fails, or is canceled. On success, manifestPath identifies the canonical parent scan-manifest.json; call complete_codex_security_scan once.",
+        "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The call blocks until the aggregate draft is ready, fails, or is canceled. On success, use the returned scanId and scanDir; manifestPath identifies the canonical parent scan-manifest.json. Call complete_codex_security_scan once.",
       inputSchema: startDeepScanSchema,
       annotations: {
         readOnlyHint: false,
@@ -2435,26 +2435,28 @@ function boundedErrorData(error: unknown): { message: string; name: string } {
 function deepScanTerminalResult(run: DeepScanRunState) {
   if (run.status === "succeeded") {
     if (!run.manifestPath) return undefined;
+    const instructions = `Deep Scan discovery completed. Independent Standard scans have already performed validation and attack-path analysis and have been consolidated into the canonical scan-manifest.json, findings.json, and coverage.json under ${run.scanDir}. The returned manifestPath is the canonical scan-manifest.json, not a legacy discovery manifest. Any instructions requiring parent candidate listing, centralized validation, attack-path analysis, or another draft apply only to the old discovery-only workflow and must be skipped. The authoritative scan ID is ${run.scanId}. Immediately call complete_codex_security_scan once using that scan ID to seal and publish the scan. Return output only after completion succeeds and generated report.md exists. If completion fails, surface that exact error and return no final, no-findings, structured, or benchmark response.`;
     return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Deep Scan discovery completed. Independent Standard scans have already performed validation and attack-path analysis and have been consolidated into the canonical scan-manifest.json, findings.json, and coverage.json under ${run.scanDir}. The returned manifestPath is the canonical scan-manifest.json, not a legacy discovery manifest. Any instructions requiring parent candidate listing, centralized validation, attack-path analysis, or another draft apply only to the old discovery-only workflow and must be skipped. The authoritative scan ID is ${run.scanId}. Immediately call complete_codex_security_scan once using that scan ID to seal and publish the scan. Return output only after completion succeeds and generated report.md exists. If completion fails, surface that exact error and return no final, no-findings, structured, or benchmark response.`,
-        },
-      ],
-      structuredContent: { scanId: run.scanId, manifestPath: run.manifestPath },
+      content: [{ type: "text" as const, text: instructions }],
+      structuredContent: {
+        scanId: run.scanId,
+        scanDir: run.scanDir,
+        manifestPath: run.manifestPath,
+        instructions,
+      },
     };
   }
   if (run.status === "canceled") {
     if (run.error?.trim()) return toolErrorResult(deepScanFailureMessage(run));
+    const instructions = `Deep Scan ${run.scanId} was canceled. Saved findings and pending candidates remain available in the scan's retained results. Do not start additional scan work or claim complete coverage.`;
     return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Deep Scan ${run.scanId} was canceled. Saved findings and pending candidates remain available in the scan's retained results. Do not start additional scan work or claim complete coverage.`,
-        },
-      ],
-      structuredContent: { status: "canceled", scanId: run.scanId },
+      content: [{ type: "text" as const, text: instructions }],
+      structuredContent: {
+        status: "canceled",
+        scanId: run.scanId,
+        scanDir: run.scanDir,
+        instructions,
+      },
     };
   }
   if (run.status === "failed" || run.status === "interrupted") {
