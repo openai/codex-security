@@ -1840,7 +1840,9 @@ def test_legacy_resume_imports_accepted_progress_once(tmp_path: Path) -> None:
     reduced = json.loads(reducer.read_text())
     reduced["findings"][0]["summary"] = "Accepted reducer detail retained during migration."
     reducer.write_text(json.dumps(reduced))
-    _, pending = accepted_standard_worker(state, codex_home, scan_dir, scan_id, name="unmerged")
+    pending_worker_id, pending = accepted_standard_worker(
+        state, codex_home, scan_dir, scan_id, name="unmerged"
+    )
     unmerged = json.loads(pending.read_text())
     unmerged["findings"] = [{**original, "identity": {"anchor": "unmerged-finding"}}]
     pending.write_text(json.dumps(unmerged))
@@ -1880,12 +1882,18 @@ def test_legacy_resume_imports_accepted_progress_once(tmp_path: Path) -> None:
     assert checkpoint["noNewStreak"] == 2
     assert checkpoint["consecutiveErrors"] == 1
     assert checkpoint["passes"] == checkpoint["mergedScanIds"] == []
-    assert len(checkpoint["aggregate"]["findings"]) == 1
-    retained = checkpoint["aggregate"]["findings"][0]
+    findings = checkpoint["aggregate"]["findings"]
+    assert len(findings) == 2
+    retained = next(finding for finding in findings if finding["identity"] == original["identity"])
     assert retained["identity"] == original["identity"]
     assert retained["summary"] == reduced["findings"][0]["summary"]
     assert retained["provenance"]["sourceFindings"][0]["finding"]["summary"] == retained["summary"]
-    assert any(
+    unmerged_finding = next(
+        finding for finding in findings if finding["identity"] == {"anchor": "unmerged-finding"}
+    )
+    assert unmerged_finding["summary"] == original["summary"]
+    assert unmerged_finding["provenance"]["workerId"] == pending_worker_id
+    assert not any(
         "unmerged" in item["reason"] for item in checkpoint["legacy"]["coverage"]["deferred"]
     )
     assert all(path.read_bytes() == contents for path, contents in snapshots.items())
@@ -1919,9 +1927,95 @@ def test_legacy_resume_imports_accepted_progress_once(tmp_path: Path) -> None:
         state, "fail-scan", "--scan-id", scan_id, "--message", "New scan stopped."
     )["scan"]
     assert failed["progress"]["status"] == "failed"
-    assert failed["findingCount"] == 1
-    assert failed["findings"][0]["identity"] == original["identity"]
+    assert failed["findingCount"] == 2
+    assert {finding["identity"]["anchor"] for finding in failed["findings"]} == {
+        original["identity"]["anchor"],
+        "unmerged-finding",
+    }
     assert all(path.read_bytes() == contents for path, contents in snapshots.items())
+
+
+@pytest.mark.parametrize("merge_state", ["buffered", "merging"])
+def test_legacy_resume_at_discovery_cap_retains_unmerged_results(
+    tmp_path: Path, merge_state: str
+) -> None:
+    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    contract_dir = tmp_path / "contract"
+    contract_dir.mkdir()
+    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    rejected = {**finding, "identity": {"anchor": "rejected-history"}}
+    rejected["extensions"] = {"candidateId": "rejected-candidate"}
+    document = json.loads(result.read_text())
+    write_checkpoint(
+        result.parent / "checkpoints",
+        {**document, "complete": False, "findings": [rejected]},
+    )
+    document["findings"] = [finding]
+    document["coverage"]["surfaces"] = [
+        {
+            "label": "Rejected candidate",
+            "candidateId": "rejected-candidate",
+            "disposition": "rejected",
+            "receiptRefs": [],
+        }
+    ]
+    result.write_text(json.dumps(document))
+    saved_result = result.read_bytes()
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET discovery_runs_dispatched = 1, max_discovery_runs = 1, "
+            "completion_sequence = 1 WHERE scan_id = ?",
+            (scan_id,),
+        )
+        connection.execute(
+            "UPDATE deep_scan_workers SET merge_state = ?, completion_sequence = 1 WHERE id = ?",
+            (merge_state, worker_id),
+        )
+
+    run_workbench(state, "get-cli-scan-resume", "--migrate", "--scan-id", scan_id)
+
+    checkpoint_path = scan_dir / "artifacts/deep-scan/checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    assert checkpoint["legacy"]["discoveryRuns"] == 1
+    assert checkpoint["passes"] == []
+    aggregate = checkpoint["aggregate"]
+    assert len(aggregate["findings"]) == 1
+    retained = aggregate["findings"][0]
+    assert retained["identity"] == finding["identity"]
+    assert retained["provenance"]["workerId"] == worker_id
+    assert (
+        retained["provenance"]["sourceFindings"][0]["finding"]["validation"]
+        == finding["validation"]
+    )
+    assert any(row["disposition"] == "rejected" for row in aggregate["coverage"]["surfaces"])
+
+    # With the discovery cap exhausted, the host publishes this migrated aggregate
+    # without another child scan or merge; exercise the ordinary completion path.
+    checkpoint["terminalReason"] = "capped"
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        scan_id,
+        "--artifact-path",
+        "artifacts/deep-scan/checkpoint.json",
+        input_text=json.dumps(checkpoint),
+    )
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": aggregate["findings"]}))
+    coverage_path = scan_dir / "coverage.json"
+    coverage = {**json.loads(coverage_path.read_text()), **aggregate["coverage"]}
+    coverage_path.write_text(json.dumps(coverage))
+    completed = run_workbench(state, "complete-scan", "--scan-id", scan_id)["scan"]
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    assert completed["findings"][0]["identity"] == finding["identity"]
+    assert finding["title"] in (scan_dir / "report.md").read_text()
+    assert result.read_bytes() == saved_result
 
 
 @pytest.mark.parametrize(

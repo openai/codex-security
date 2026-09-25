@@ -935,7 +935,8 @@ def build_report_markdown(
         for number, (finding, report_path) in enumerate(
             zip(findings, writeup_paths, strict=True), 1
         ):
-            if report_path is not None:
+            # Composed details can go beyond any one retained source write-up.
+            if report_path is not None and not finding.get("provenance", {}).get("sourceFindings"):
                 lines.extend(["", *_linked_finding_section(number, finding, report_path)])
             else:
                 lines.extend(["", *_finding_section(number, finding)])

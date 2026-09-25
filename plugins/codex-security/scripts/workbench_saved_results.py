@@ -1134,7 +1134,7 @@ def retire_legacy_run(connection: Any, scan_id: str) -> None:
 
 
 def migrate_legacy_scan(db: Any, connection: Any, scan: Any) -> Any:
-    """Import committed v1 progress once; ordinary scans own all subsequent execution."""
+    """Import completed v1 results once; ordinary scans own all subsequent execution."""
     scan = db.require_scan(connection, scan["id"])
     if scan["mode"] != "deep":
         return scan
@@ -1190,12 +1190,7 @@ def migrate_legacy_scan(db: Any, connection: Any, scan: Any) -> Any:
     accepted = [
         worker
         for worker in workers
-        if worker == reducer
-        or (
-            worker["kind"] == "discovery"
-            and worker["status"] == "succeeded"
-            and worker["merge_state"] == "merged"
-        )
+        if worker == reducer or (worker["kind"] == "discovery" and worker["status"] == "succeeded")
     ]
     warnings: list[str] = []
     binding = db.workbench_completion_binding(scan, db.now())

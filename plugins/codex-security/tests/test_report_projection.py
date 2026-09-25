@@ -463,6 +463,34 @@ def test_projection_links_detailed_writeup_without_repeating_inline_finding() ->
     assert "## Injected remediation" not in markdown
 
 
+@pytest.mark.parametrize("source_count", [1, 2])
+def test_projection_renders_composed_details_alongside_source_writeup(source_count: int) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["mode"] = "deep_repository"
+    finding = findings["findings"][0]
+    report_path = "findings/first-parser/first-parser.md"
+    finding["writeup"] = {"reportPath": report_path}
+    finding["provenance"] = {
+        "source": "local_plugin",
+        "sourceFindingIds": [f"scan-{index}:0" for index in range(source_count)],
+        "sourceFindings": [
+            {"id": f"scan-{index}:0", "finding": copy.deepcopy(finding)}
+            for index in range(source_count)
+        ],
+    }
+    finding["summary"] = "Combined evidence establishes both affected entry points."
+    finding["remediation"] = "Apply the shared fix to both entry points."
+    original = copy.deepcopy(findings)
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert finding["summary"] in markdown
+    assert finding["remediation"] in markdown
+    assert f"]({report_path})" in markdown
+    assert "See the [detailed technical write-up]" not in markdown
+    assert findings == original
+
+
 @pytest.mark.parametrize("coverage_mode", ["deep_repository", "scoped_path"])
 def test_projection_groups_deep_reports_by_candidate_id(coverage_mode: str) -> None:
     manifest, findings, coverage = canonical_documents()
