@@ -710,6 +710,11 @@ def merge_saved_results(
             "deferred": [],
         }
     )
+    if isinstance(coverage.get("openQuestions"), list):
+        coverage["openQuestions"] = [
+            {"question": item.strip()} if isinstance(item, str) else item
+            for item in coverage["openQuestions"]
+        ]
     canonical_rows = (
         {
             id(item)
