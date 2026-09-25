@@ -1033,10 +1033,21 @@ async function testOpenAiCredentialsReachWorker() {
       true,
       entry.accountResult ?? noAccount,
     );
+    const runtimeEnvironment = {
+      PATH: path.dirname(process.execPath),
+      HOME: path.join(fixture.root, "home"),
+      PYTHON: path.join(fixture.root, "tools", "python3"),
+      PYTHONUTF8: "1",
+      CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state"),
+    };
     const previousEnvironment = Object.fromEntries(
-      ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_CLI_PATH", "CODEX_HOME"].map(
-        (name) => [name, process.env[name]],
-      ),
+      [
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "CODEX_CLI_PATH",
+        "CODEX_HOME",
+        ...Object.keys(runtimeEnvironment),
+      ].map((name) => [name, process.env[name]]),
     );
     const originalSpawn = childProcess.spawn;
     try {
@@ -1044,6 +1055,7 @@ async function testOpenAiCredentialsReachWorker() {
       restoreEnv("CODEX_API_KEY", entry.codex);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
+      Object.assign(process.env, runtimeEnvironment);
       childProcess.spawn = (command, args, options) =>
         originalSpawn(
           command,
@@ -1077,6 +1089,10 @@ async function testOpenAiCredentialsReachWorker() {
           );
           assert.equal(preflight.codexHome, fixture.root);
           assert.equal(invocation.codexHome, fixture.root);
+          assert.deepEqual(invocation.runtimeEnvironment, runtimeEnvironment);
+          for (const [name, value] of Object.entries(runtimeEnvironment)) {
+            assert.equal(process.env[name], value);
+          }
           assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             entry.expected,
@@ -2147,7 +2163,8 @@ async function fakeCodexFixture(
       "for await (const chunk of process.stdin) stdin += chunk;",
       "const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;",
       "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
-      "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
+      "const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'CODEX_SECURITY_STATE_DIR'].map(name => [name, process.env[name]]));",
+      "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, runtimeEnvironment, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
       "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
       "if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }",
       "if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }",

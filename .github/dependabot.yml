@@ -2,6 +2,7 @@ version: 2
 updates:
   - package-ecosystem: npm
     directories:
+      - /github-action
       - /sdk/typescript
       - /plugins/codex-security/mcp-app
       - /plugins/codex-security/skills/triage-finding/evals

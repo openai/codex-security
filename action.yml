@@ -1,0 +1,95 @@
+name: Codex Security
+description: Scan code with Codex Security, enforce findings policy, and produce JSON, coverage, and SARIF reports.
+branding:
+  icon: shield
+  color: black
+inputs:
+  repository:
+    description: Checkout root. Use paths to select folders within the checkout.
+    default: ${{ github.workspace }}
+  scope:
+    description: 'repository or diff. Select diff for PR changes only; repository scans the full checkout.'
+    default: repository
+  paths:
+    description: Newline-delimited literal repository-relative files or folders. Only for repository scope; no globs.
+  diff-base:
+    description: Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff.
+  mode:
+    description: 'standard or deep. Deep supports repository scans, including selected paths; not diff scans.'
+    default: standard
+  model:
+    description: Model with access through your API key. Cost limits require CLI pricing support for the model.
+    default: gpt-5.6-sol
+  effort:
+    description: 'Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).'
+    default: xhigh
+  max-cost:
+    description: Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.
+  max-time-hours:
+    description: Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.
+  fail-on-severity:
+    description: 'none, low, medium, high, or critical. Applies to complete scans. Valid partial results warn; scanner and required reporting errors fail.'
+    default: none
+  verbose:
+    description: Stream bounded, credential-redacted CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.
+    default: 'true'
+  dry-run:
+    description: Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job.
+    default: 'false'
+  summary:
+    description: Write a human-readable job summary.
+    default: 'true'
+  annotations:
+    description: Emit up to 50 source finding annotations; complete findings remain in reports.
+    default: 'true'
+  upload-artifacts:
+    description: Upload an allowlist of validated reports. Reports may contain source and vulnerability details.
+    default: 'false'
+  artifact-name:
+    description: Report artifact name; choose distinct names for matrix jobs and multiple invocations.
+    default: codex-security
+  retention-days:
+    description: Artifact retention, 1–90 days (subject to repository limits).
+    default: '7'
+outputs:
+  sarif-path:
+    description: Absolute validated SARIF file path, or empty when unavailable or withheld.
+  json-path:
+    description: Absolute canonical findings JSON path, or empty when unavailable or withheld.
+  coverage-path:
+    description: Absolute coverage JSON path, or empty when unavailable or withheld.
+  results-directory:
+    description: Runner-local reports directory; do not upload it recursively.
+  scan-status:
+    description: 'completed, incomplete, failed, or skipped. Valid partial results are incomplete and warn without failing the step. Skipped is reserved for empty diffs or dry-run.'
+  skip-reason:
+    description: empty-diff or dry-run when no scan ran; otherwise empty.
+  policy-status:
+    description: 'passed, failed, or not-evaluated. Incomplete scans are not-evaluated, even when a severity threshold is configured.'
+  report-status:
+    description: 'ready, partial, or failed. Missing optional SARIF yields partial without failing the scan; required reporting failures yield failed.'
+  exit-code:
+    description: CLI exit code, or empty if the CLI was not started. Valid partial results may return 2 without failing the Action step.
+  scanned-sha:
+    description: Verified checkout commit SHA.
+  analysis-ref:
+    description: GitHub ref matching the scanned revision.
+  sarif-upload-ready:
+    description: 'true only for complete, validated reports with a publishable immutable revision. Remains true after severity-policy failure.'
+  critical-count:
+    description: Available critical findings, or empty before results are available.
+  high-count:
+    description: Available high findings, or empty before results are available.
+  medium-count:
+    description: Available medium findings, or empty before results are available.
+  low-count:
+    description: Available low findings, or empty before results are available.
+  informational-count:
+    description: Available informational findings, or empty before results are available.
+  estimated-cost:
+    description: Estimated USD cost reported by the CLI. Empty means unavailable, not zero.
+runs:
+  using: node24
+  main: github-action/dist/index.cjs
+  post: github-action/dist/post.cjs
+  post-if: always()
