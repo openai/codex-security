@@ -3080,7 +3080,11 @@ export class CodexSecurity {
     } finally {
       budgetAbortController.abort();
       deepProgressTracker?.stop();
-      releaseExecution?.();
+      try {
+        releaseExecution?.();
+      } catch (error) {
+        warnCleanupFailed(options, error);
+      }
       // Removing the temporary scan inputs is best effort. A throw here would replace the
       // outcome the try and catch blocks already produced, so these failures are reported
       // as warnings: a scan that failed has to say why it failed, not why its temporary

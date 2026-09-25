@@ -34,7 +34,13 @@ export class ScanCostTrackingError extends ScanInterruptedError {}
 export interface DeepScanCheckpoint {
   version: 2;
   startedAt: string;
-  passes: Array<{ directory: string; scanId?: string; failed?: true }>;
+  passes: Array<{
+    directory: string;
+    scanId?: string;
+    failed?: true;
+    // Saved with the failure streak so recovery accounts for each success once.
+    completed?: true;
+  }>;
   mergedScanIds: string[];
   aggregate: SemanticScan | null;
   noNewStreak: number;
@@ -50,6 +56,7 @@ export interface DeepScanCheckpoint {
 }
 
 interface SavedPass {
+  completedAt?: string | null;
   scanId: string;
   scanDir: string;
   parentScanId: string;
@@ -170,13 +177,19 @@ export async function runDeepScans(
         scanDir,
       );
   };
-  const refreshPasses = async (recoverFailures = false): Promise<void> => {
+  const refreshPasses = async (recoverOutcomes = false): Promise<void> => {
     const listed = await workbench([
       "list-scans",
       "--scan-root",
       join(scanDir, "artifacts/deep-scan/passes"),
     ]);
-    for (const record of listed["scans"] as unknown as SavedPass[]) {
+    const records = listed["scans"] as unknown as SavedPass[];
+    if (recoverOutcomes)
+      records.sort((a, b) =>
+        (a.completedAt ?? "").localeCompare(b.completedAt ?? ""),
+      );
+    let recoveredSuccess = false;
+    for (const record of records) {
       const index = state.passes.findIndex(
         (pass) =>
           relative(join(scanDir, pass.directory), record.scanDir) === "",
@@ -194,9 +207,9 @@ export async function runDeepScans(
       }
       pass.scanId = record.scanId;
       if (
-        recoverFailures &&
+        recoverOutcomes &&
         record.progress.status === "failed" &&
-        !pass.failed
+        (!pass.failed || recoveredSuccess)
       ) {
         pass.failed = true;
         state.consecutiveErrors += 1;
@@ -226,6 +239,17 @@ export async function runDeepScans(
             signal,
           ),
         );
+        if (
+          recoverOutcomes &&
+          (recoveredSuccess ||
+            (!pass.completed &&
+              !state.mergedScanIds.includes(record.scanId))) &&
+          state.consecutiveErrors < settings.stopAfterConsecutiveErrors
+        ) {
+          state.consecutiveErrors = 0;
+          recoveredSuccess = true;
+        }
+        pass.completed = true;
       }
     }
     await save();
@@ -386,6 +410,7 @@ export async function runDeepScans(
           );
           reportPassCost(pass.directory, result.cost);
           executionSignal.throwIfAborted();
+          pass.completed = true;
           state.consecutiveErrors = 0;
           await save();
           return;

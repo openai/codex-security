@@ -93,6 +93,7 @@ function result(
 }
 
 interface SavedRecord {
+  completedAt?: string;
   scanId: string;
   scanDir: string;
   parentScanId: string;
@@ -424,7 +425,7 @@ describe("ordinary scan composition", () => {
       await h.seed({
         version: 2,
         startedAt: h.input.startedAt,
-        passes: [{ directory: childDirectory }],
+        passes: [{ directory: childDirectory, completed: true }],
         mergedScanIds: [],
         aggregate: null,
         noNewStreak: 0,
@@ -798,6 +799,144 @@ describe("ordinary scan composition", () => {
       expect(h.calls).toEqual([]);
       expect(h.mergeInputs).toEqual([]);
       expect(h.published).toEqual([]);
+    },
+  );
+
+  test.each(["recovered", "completed", "merged"] as const)(
+    "only an unobserved success resets the saved failure streak (%s)",
+    async (success) => {
+      retryDelay = spyOn(timers, "setTimeout").mockImplementation(
+        async <T>(_delay?: number, value?: T): Promise<T> => value as T,
+      );
+      const h = await harness({ workers: 3, maxDiscoveryRuns: 4 });
+      const directory = "artifacts/deep-scan/passes/pass-3";
+      const scanDir = join(h.input.scanDir, directory);
+      await mkdir(dirname(scanDir), { recursive: true });
+      await cp(example, scanDir, { recursive: true });
+      await chmod(scanDir, 0o700);
+      const scanId = exampleManifest.scan.id;
+      h.records.set(scanId, {
+        scanId,
+        scanDir,
+        parentScanId: h.input.scanId,
+        targetPath: h.input.repository,
+        progress: { status: "complete" },
+      });
+      await h.seed({
+        version: 2,
+        startedAt: h.input.startedAt,
+        passes: [
+          { directory: "artifacts/deep-scan/passes/pass-1", failed: true },
+          { directory: "artifacts/deep-scan/passes/pass-2", failed: true },
+          {
+            directory,
+            scanId,
+            ...(success === "completed" ? { completed: true as const } : {}),
+          },
+        ],
+        mergedScanIds: success === "merged" ? [scanId] : [],
+        aggregate: null,
+        noNewStreak: 0,
+        consecutiveErrors: 2,
+      });
+      h.setRun(async () => {
+        throw new Error("Synthetic next pass failure");
+      });
+      if (success === "recovered") {
+        await expect(runDeepScans(h.input)).resolves.toMatchObject({
+          terminalReason: "capped",
+          consecutiveErrors: 1,
+        });
+      } else {
+        await expect(runDeepScans(h.input)).rejects.toThrow(
+          "consecutive error limit",
+        );
+        expect((await h.checkpoint()).consecutiveErrors).toBe(3);
+      }
+    },
+  );
+
+  test.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ])(
+    "recovers terminal outcomes in completion order across repeated resumes (success last: %p, failure saved: %p)",
+    async (successLast, failureSaved) => {
+      const h = await harness({ maxDiscoveryRuns: 3 });
+      const directory = "artifacts/deep-scan/passes/pass-2";
+      const scanDir = join(h.input.scanDir, directory);
+      await mkdir(dirname(scanDir), { recursive: true });
+      await cp(example, scanDir, { recursive: true });
+      await chmod(scanDir, 0o700);
+      const scanId = exampleManifest.scan.id;
+      const failedId = randomUUID();
+      const records: SavedRecord[] = [
+        {
+          scanId,
+          scanDir,
+          parentScanId: h.input.scanId,
+          targetPath: h.input.repository,
+          progress: { status: "complete" },
+          completedAt: successLast
+            ? "2026-01-01T00:00:02Z"
+            : "2026-01-01T00:00:01Z",
+        },
+        {
+          scanId: failedId,
+          scanDir: join(h.input.scanDir, "artifacts/deep-scan/passes/pass-3"),
+          parentScanId: h.input.scanId,
+          targetPath: h.input.repository,
+          progress: { status: "failed" },
+          completedAt: successLast
+            ? "2026-01-01T00:00:01Z"
+            : "2026-01-01T00:00:02Z",
+        },
+      ];
+      // The workbench lists the most recently finished scan first.
+      for (const record of records.sort((a, b) =>
+        b.completedAt!.localeCompare(a.completedAt!),
+      ))
+        h.records.set(record.scanId, record);
+      await h.seed({
+        version: 2,
+        startedAt: h.input.startedAt,
+        passes: [
+          { directory: "artifacts/deep-scan/passes/pass-1", failed: true },
+          { directory, scanId },
+          {
+            directory: "artifacts/deep-scan/passes/pass-3",
+            scanId: failedId,
+            ...(failureSaved ? { failed: true as const } : {}),
+          },
+        ],
+        mergedScanIds: [],
+        aggregate: null,
+        noNewStreak: 0,
+        consecutiveErrors: failureSaved ? 2 : 1,
+      });
+      const workbench = h.input.workbench;
+      h.input.workbench = async (args, contents) => {
+        const result = await workbench(args, contents);
+        if (
+          args[0] === "save-scan-artifact" &&
+          JSON.parse(contents!).passes[1].completed
+        )
+          throw new ScanTransportClosedError(
+            "Synthetic interruption after recovery",
+          );
+        return result;
+      };
+      await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+        ScanTransportClosedError,
+      );
+      h.input.workbench = workbench;
+      await expect(runDeepScans(h.input)).resolves.toMatchObject({
+        terminalReason: "capped",
+        consecutiveErrors: successLast ? 0 : 1,
+      });
+      expect(h.calls).toEqual([]);
     },
   );
 

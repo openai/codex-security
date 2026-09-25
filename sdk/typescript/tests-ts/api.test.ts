@@ -2162,6 +2162,69 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each([false, true])(
+    "preserves the scan outcome and remaining cleanup when lock release fails (failed: %p)",
+    async (failed) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      await mkdir(join(repository, "src"), { recursive: true });
+      await mkdir(codexHome);
+      const failure = new Error("Synthetic scan failure");
+      const warnings: string[] = [];
+      let targetPathsFile: string | undefined;
+      const client = new TestClient(
+        {},
+        {
+          environment: { OPENAI_API_KEY: "synthetic-key" },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          repositoryRevision: async () => "deadbeef",
+          acquireScanExecution: async () => () => {
+            throw new Error("Synthetic execution-lock cleanup failure");
+          },
+          createCodex: (options: CodexOptions) => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                targetPathsFile =
+                  options.env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
+                if (failed) throw failure;
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              },
+            }),
+          }),
+        },
+      );
+      try {
+        const run = client.run(repository, {
+          outputDir: join(root, "scan"),
+          ...(failed ? { target: ["src"] } : {}),
+          onWarning: (warning) => {
+            warnings.push(warning);
+          },
+        });
+        if (failed) await expect(run).rejects.toBe(failure);
+        else
+          await expect(run).resolves.toMatchObject({
+            manifest: { scan: { status: "completed" } },
+          });
+        expect(
+          warnings.some((warning) =>
+            warning.includes("Synthetic execution-lock cleanup failure"),
+          ),
+        ).toBe(true);
+        if (failed) {
+          expect(targetPathsFile).toBeDefined();
+          expect(existsSync(targetPathsFile!)).toBe(false);
+        }
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test("reports the real scan failure when scan cleanup also fails", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

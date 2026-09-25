@@ -106,7 +106,8 @@ def cli_scan_resume(
         manifest = read_json_object(manifest_path)
         manifest_scan = manifest.get("scan")
         if isinstance(manifest_scan, dict) and (
-            manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") is not None
+            manifest_scan.get("sealedAt") is not None
+            or manifest_scan.get("artifacts") not in (None, [])
         ):
             try:
                 binding = workbench_completion_binding(scan, scan["started_at"], manifest)

@@ -190,6 +190,41 @@ def test_standard_resume_retains_registration_before_and_after_thread_binding(
     assert "original checkout revision or contents changed" in rejected["stderr"]
 
 
+@pytest.mark.parametrize("compact", [False, True])
+def test_resume_distinguishes_empty_artifact_drafts_from_sealed_results(
+    tmp_path: Path, compact: bool
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
+    state, directory = tmp_path / "state", tmp_path / "scan"
+    scan = register(state, target, directory)
+    run_workbench(state, "set-scan-thread", "--scan-id", scan["scanId"], "--thread-id", "execution")
+    path = directory / "scan-manifest.json"
+    path.write_text(json.dumps({"scan": {"artifacts": []}}))
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert "sealedProducerVersion" not in resumed
+    assert not (directory / "findings.json").exists()
+
+    write_completed_contract(directory, scan["scanId"], target)
+    manifest = json.loads(path.read_text())
+    manifest["scan"]["artifacts"] = []
+    if compact:
+        del manifest["scan"]["producer"]
+    path.write_text(json.dumps(manifest))
+    draft = path.read_bytes()
+
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert "sealedProducerVersion" not in resumed
+    assert path.read_bytes() == draft
+
+    run_workbench(state, "prepare-scan-completion", "--scan-id", scan["scanId"])
+    sealed = path.read_bytes()
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert resumed["sealedProducerVersion"] == json.loads(sealed)["scan"]["producer"]["version"]
+    assert path.read_bytes() == sealed
+
+
 @pytest.mark.parametrize("rejoin_context", [None, "Different optional context."])
 def test_native_parent_binds_once_and_keeps_native_claim(
     tmp_path: Path, rejoin_context: str | None
