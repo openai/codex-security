@@ -108,17 +108,14 @@ const scanHandoffSource = await readFile(
   path.join(mcpAppRoot, "src", "scan-handoff.ts"),
   "utf8",
 );
-const serverSource = await readFile(
-  path.join(mcpAppRoot, "server.ts"),
-  "utf8",
-);
+const serverSource = await readFile(path.join(mcpAppRoot, "server.ts"), "utf8");
 assert.match(
   serverSource,
-  /timeout:\s*\[[^\]]*"start-prompt-only-scan"[^\]]*\]\.includes\(args\[0\] \?\? ""\) \? 300_000 : 30_000/,
+  /timeout:\s*\[[^\]]*"start-prompt-only-scan"[^\]]*\]\.includes\(args\[0\] \?\? ""\)\s*\?\s*300_000\s*:\s*30_000/,
   "Prompt-only scan startup must use the same five-minute timeout as other scan starts.",
 );
 const authenticatedArtifactClaimSource = serverSource.match(
-  /if \(\s*handoffClaimToken\s*&& threadId[\s\S]*?authenticatedArtifactClaims\.set\(scanId,[\s\S]*?\n\s*\}/,
+  /if \(\s*handoffClaimToken\s*&&\s*threadId[\s\S]*?authenticatedArtifactClaims\.set\(scanId,[\s\S]*?\n\s*\}/,
 )?.[0];
 assert.ok(
   authenticatedArtifactClaimSource,
@@ -350,7 +347,11 @@ async function assertBundledNodeLauncher() {
   const emptyPath = await mkdtemp(
     path.join(tmpdir(), "codex-security-empty-path-"),
   );
-  const launcherPath = path.join(pluginRoot, "scripts", "launch_codex_security_mcp");
+  const launcherPath = path.join(
+    pluginRoot,
+    "scripts",
+    "launch_codex_security_mcp",
+  );
   const windows = process.platform === "win32";
   if (!windows) {
     const bundledNodePath = path.join(
@@ -369,8 +370,12 @@ async function assertBundledNodeLauncher() {
       ? ["/d", "/s", "/c", "call", `${launcherPath}.cmd`, "--stdio"]
       : ["--stdio"],
     command: windows
-      ? process.env.ComSpec ??
-        path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe")
+      ? (process.env.ComSpec ??
+        path.join(
+          process.env.SystemRoot ?? "C:\\Windows",
+          "System32",
+          "cmd.exe",
+        ))
       : launcherPath,
     cwd: emptyPath,
     env: {
@@ -388,12 +393,18 @@ async function assertBundledNodeLauncher() {
       await bundledNodeServer.requestAndWait(1, "initialize", {
         protocolVersion: "2025-11-25",
         capabilities: {},
-        clientInfo: { name: "codex-security-bundled-node-smoke", version: "0.1.0" },
+        clientInfo: {
+          name: "codex-security-bundled-node-smoke",
+          version: "0.1.0",
+        },
       }),
     );
     assertNoError(await bundledNodeServer.requestAndWait(2, "tools/list"));
     if (!windows) {
-      assert.equal(await readFile(path.join(emptyPath, "bundled-node-used"), "utf8"), "bundled");
+      assert.equal(
+        await readFile(path.join(emptyPath, "bundled-node-used"), "utf8"),
+        "bundled",
+      );
     }
   } finally {
     bundledNodeServer.stop();
@@ -582,9 +593,8 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     },
   });
   const ownerThread = "fixture-headless-standard-thread";
-  const headlessContext = (
-    `Review https://example.test/internal. ${"Assess the HTTP boundary. ".repeat(44_000)}`
-  ).trim();
+  const headlessContext =
+    `Review https://example.test/internal. ${"Assess the HTTP boundary. ".repeat(44_000)}`.trim();
   assert.ok(headlessContext.length > 1_000_000);
   try {
     assertNoError(
@@ -599,7 +609,10 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       arguments: { targetPath: target },
     });
     assert.equal(withoutOwner.result.isError, true);
-    assert.match(withoutOwner.result.content[0].text, /owning Codex thread context/);
+    assert.match(
+      withoutOwner.result.content[0].text,
+      /owning Codex thread context/,
+    );
 
     const started = await headlessServer.requestAndWait(3, "tools/call", {
       name: "start_codex_security_standard_scan",
@@ -655,18 +668,28 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": "fixture-headless-other-thread" },
     });
     assert.equal(wrongThread.result.isError, true);
-    assert.match(wrongThread.result.content[0].text, /current continuation claim/);
+    assert.match(
+      wrongThread.result.content[0].text,
+      /current continuation claim/,
+    );
 
-    const standardInventory = await headlessServer.requestAndWait(7, "tools/call", {
-      name: "list_codex_security_review_items",
-      arguments: {
-        scanId: result.scanId,
-        handoffClaimToken: result.handoffClaimToken,
+    const standardInventory = await headlessServer.requestAndWait(
+      7,
+      "tools/call",
+      {
+        name: "list_codex_security_review_items",
+        arguments: {
+          scanId: result.scanId,
+          handoffClaimToken: result.handoffClaimToken,
+        },
+        _meta: { "openai/threadId": "fixture-headless-delegated-thread" },
       },
-      _meta: { "openai/threadId": "fixture-headless-delegated-thread" },
-    });
+    );
     assert.equal(standardInventory.result.isError, true);
-    assert.match(standardInventory.result.content[0].text, /only available for Deep or diff scans/);
+    assert.match(
+      standardInventory.result.content[0].text,
+      /only available for Deep or diff scans/,
+    );
 
     const progressed = await headlessServer.requestAndWait(8, "tools/call", {
       name: "update_codex_security_scan_progress",
@@ -689,17 +712,27 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": ownerThread },
     });
     assertNoError(advanced);
-    const rejoinedAfterPreflight = await headlessServer.requestAndWait(82, "tools/call", {
-      name: "start_codex_security_standard_scan",
-      arguments: {
-        targetPath: target,
-        userContext: headlessContext,
+    const rejoinedAfterPreflight = await headlessServer.requestAndWait(
+      82,
+      "tools/call",
+      {
+        name: "start_codex_security_standard_scan",
+        arguments: {
+          targetPath: target,
+          userContext: headlessContext,
+        },
+        _meta: { "openai/threadId": ownerThread },
       },
-      _meta: { "openai/threadId": ownerThread },
-    });
+    );
     assertNoError(rejoinedAfterPreflight);
-    assert.equal(rejoinedAfterPreflight.result.structuredContent.startDisposition, "joined");
-    assert.equal(rejoinedAfterPreflight.result.structuredContent.scan.progress.phase, "threat_model");
+    assert.equal(
+      rejoinedAfterPreflight.result.structuredContent.startDisposition,
+      "joined",
+    );
+    assert.equal(
+      rejoinedAfterPreflight.result.structuredContent.scan.progress.phase,
+      "threat_model",
+    );
 
     await writeCompletedContract(
       result.scanDir,
@@ -715,7 +748,10 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": ownerThread },
     });
     assertNoError(completed);
-    assert.equal(completed.result.structuredContent.scan.progress.status, "complete");
+    assert.equal(
+      completed.result.structuredContent.scan.progress.status,
+      "complete",
+    );
   } finally {
     await headlessServer.stop();
     await rm(headlessStateDir, { recursive: true, force: true });
@@ -779,22 +815,39 @@ async function assertDeepScanRetainsStartupFailureAndTerminalState() {
     const scan = listed.result.structuredContent.scans[0];
     assert.equal(scan.progress.status, "running");
     await assert.rejects(
-      readFile(path.join(scan.scanDir, "artifacts", "02_discovery", "in_scope_files.txt")),
+      readFile(
+        path.join(
+          scan.scanDir,
+          "artifacts",
+          "02_discovery",
+          "in_scope_files.txt",
+        ),
+      ),
       { code: "ENOENT" },
     );
 
-    const handoffClaimToken = execFileSync(process.env.PYTHON?.trim() || "python3", [
-      "-c",
-      "import sqlite3, sys; connection = sqlite3.connect(sys.argv[1]); print(connection.execute('SELECT handoff_claim_token FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()[0])",
-      path.join(fixtureState, "workbench.sqlite3"),
-      scan.scanId,
-    ], { encoding: "utf8" }).trim();
+    const handoffClaimToken = execFileSync(
+      process.env.PYTHON?.trim() || "python3",
+      [
+        "-c",
+        "import sqlite3, sys; connection = sqlite3.connect(sys.argv[1]); print(connection.execute('SELECT handoff_claim_token FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()[0])",
+        path.join(fixtureState, "workbench.sqlite3"),
+        scan.scanId,
+      ],
+      { encoding: "utf8" },
+    ).trim();
     const failureMessage = "Fixture retained ordinary scan failure";
-    assertNoError(await deepServer.requestAndWait(4, "tools/call", {
-      name: "fail_codex_security_scan",
-      arguments: { scanId: scan.scanId, handoffClaimToken, message: failureMessage },
-      _meta: { "openai/threadId": "fixture-deep-inventory-thread" },
-    }));
+    assertNoError(
+      await deepServer.requestAndWait(4, "tools/call", {
+        name: "fail_codex_security_scan",
+        arguments: {
+          scanId: scan.scanId,
+          handoffClaimToken,
+          message: failureMessage,
+        },
+        _meta: { "openai/threadId": "fixture-deep-inventory-thread" },
+      }),
+    );
     const rejoined = await deepServer.requestAndWait(5, "tools/call", {
       name: "start_codex_security_deep_scan",
       arguments: { scanId: scan.scanId, handoffClaimToken },
@@ -804,7 +857,10 @@ async function assertDeepScanRetainsStartupFailureAndTerminalState() {
       },
     });
     assert.equal(rejoined.result.isError, true);
-    assert.equal(rejoined.result.content.map((item) => item.text).join(" "), failureMessage);
+    assert.equal(
+      rejoined.result.content.map((item) => item.text).join(" "),
+      failureMessage,
+    );
   } finally {
     await deepServer.stop();
     await rm(fixtureRoot, { recursive: true, force: true });
@@ -1062,7 +1118,10 @@ try {
     initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
     {},
   );
-  assert.deepEqual(initialized.result.capabilities.extensions["com.openai"], {});
+  assert.deepEqual(
+    initialized.result.capabilities.extensions["com.openai"],
+    {},
+  );
   assert.deepEqual(initialized.result.capabilities.logging, {});
 
   const trustedAccessToolList = await requestAndWait(9600, "tools/list");
@@ -1070,7 +1129,10 @@ try {
   const trustedAccessTool = trustedAccessToolList.result.tools.find(
     (tool) => tool.name === "get_codex_security_daybreak_access",
   );
-  assert.ok(trustedAccessTool, "Expected the plugin-owned Daybreak access tool.");
+  assert.ok(
+    trustedAccessTool,
+    "Expected the plugin-owned Daybreak access tool.",
+  );
   assert.doesNotMatch(
     JSON.stringify({
       name: trustedAccessTool.name,
@@ -1113,7 +1175,10 @@ try {
       Date.parse(unknownTrustedAccess.result.structuredContent.checkedAt),
     ),
   );
-  assert.doesNotMatch(unknownTrustedAccess.result.content[0].text, /protected results may not be displayable/);
+  assert.doesNotMatch(
+    unknownTrustedAccess.result.content[0].text,
+    /protected results may not be displayable/,
+  );
 
   const grantedTrustedAccess = {
     schemaVersion: 1,
@@ -1154,7 +1219,10 @@ try {
     hostedTrustedAccess.result.structuredContent,
     grantedDaybreakAccess,
   );
-  assert.doesNotMatch(JSON.stringify(hostedTrustedAccess.result), /\btac(?:[123])?\b/i);
+  assert.doesNotMatch(
+    JSON.stringify(hostedTrustedAccess.result),
+    /\btac(?:[123])?\b/i,
+  );
   assert.match(hostedTrustedAccess.result.content[0].text, /Daybreak Blue/);
   assert.match(hostedTrustedAccess.result.content[0].text, /Daybreak Red/);
 
@@ -1209,7 +1277,10 @@ try {
     checkedAt: grantedTrustedAccess.checkedAt,
     stale: true,
   });
-  assert.doesNotMatch(staleGrantedAccess.result.content[0].text, /protected results may not be displayable/);
+  assert.doesNotMatch(
+    staleGrantedAccess.result.content[0].text,
+    /protected results may not be displayable/,
+  );
 
   const untrustedReplay = await requestAndWait(9603, "tools/call", {
     name: "get_codex_security_daybreak_access",
@@ -1243,19 +1314,22 @@ try {
   });
   assertNoError(refreshedTrustedAccess);
   assert.equal(refreshedTrustedAccess.result._meta, undefined);
-  assert.deepEqual(
-    refreshedTrustedAccess.result.structuredContent,
-    {
-      schemaVersion: 1,
-      status: "not_granted",
-      programs: [],
-      checkedAt: "2026-07-13T12:01:00.000Z",
-      stale: false,
-      enrollmentUrl: "https://chatgpt.com/cyber",
-    },
+  assert.deepEqual(refreshedTrustedAccess.result.structuredContent, {
+    schemaVersion: 1,
+    status: "not_granted",
+    programs: [],
+    checkedAt: "2026-07-13T12:01:00.000Z",
+    stale: false,
+    enrollmentUrl: "https://chatgpt.com/cyber",
+  });
+  assert.doesNotMatch(
+    JSON.stringify(refreshedTrustedAccess.result),
+    /\btac(?:[123])?\b/i,
   );
-  assert.doesNotMatch(JSON.stringify(refreshedTrustedAccess.result), /\btac(?:[123])?\b/i);
-  assert.match(refreshedTrustedAccess.result.content[0].text, /protected results may not be displayable/);
+  assert.match(
+    refreshedTrustedAccess.result.content[0].text,
+    /protected results may not be displayable/,
+  );
 
   const timestampedTrustedAccess = await requestAndWait(9608, "tools/call", {
     name: "get_codex_security_daybreak_access",
@@ -1276,7 +1350,10 @@ try {
     },
   });
   assertNoError(timestampedTrustedAccess);
-  assert.equal(timestampedTrustedAccess.result.structuredContent.status, "granted");
+  assert.equal(
+    timestampedTrustedAccess.result.structuredContent.status,
+    "granted",
+  );
   assert.deepEqual(timestampedTrustedAccess.result.structuredContent.programs, [
     "Daybreak Blue",
   ]);
@@ -1319,7 +1396,10 @@ try {
     },
   });
   assertNoError(malformedTrustedAccess);
-  assert.equal(malformedTrustedAccess.result.structuredContent.status, "unknown");
+  assert.equal(
+    malformedTrustedAccess.result.structuredContent.status,
+    "unknown",
+  );
 
   const argumentTrustedAccess = await requestAndWait(9607, "tools/call", {
     name: "get_codex_security_daybreak_access",
@@ -1341,7 +1421,10 @@ try {
     _meta: { threadId: "fixture-trusted-access-thread" },
   });
   assertNoError(replayedTrustedAccess);
-  assert.equal(replayedTrustedAccess.result.structuredContent.status, "unknown");
+  assert.equal(
+    replayedTrustedAccess.result.structuredContent.status,
+    "unknown",
+  );
 
   const spoofedThreadTrustedAccess = await requestAndWait(9610, "tools/call", {
     name: "get_codex_security_daybreak_access",
@@ -1362,13 +1445,20 @@ try {
     spoofedThreadTrustedAccess.result.structuredContent,
     grantedDaybreakAccess,
   );
-  const canonicalThreadTrustedAccess = await requestAndWait(9611, "tools/call", {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-    _meta: { threadId: "fixture-trusted-access-owner" },
-  });
+  const canonicalThreadTrustedAccess = await requestAndWait(
+    9611,
+    "tools/call",
+    {
+      name: "get_codex_security_daybreak_access",
+      arguments: {},
+      _meta: { threadId: "fixture-trusted-access-owner" },
+    },
+  );
   assertNoError(canonicalThreadTrustedAccess);
-  assert.equal(canonicalThreadTrustedAccess.result.structuredContent.status, "unknown");
+  assert.equal(
+    canonicalThreadTrustedAccess.result.structuredContent.status,
+    "unknown",
+  );
 
   const isolatedHostedTrustedAccess = await requestAndWait(9612, "tools/call", {
     name: "get_codex_security_daybreak_access",
@@ -1394,7 +1484,10 @@ try {
     _meta: { threadId: "fixture-isolated-trusted-access-other" },
   });
   assertNoError(isolatedOtherTrustedAccess);
-  assert.equal(isolatedOtherTrustedAccess.result.structuredContent.status, "unknown");
+  assert.equal(
+    isolatedOtherTrustedAccess.result.structuredContent.status,
+    "unknown",
+  );
 
   await assertBundledNodeLauncher();
   await assertBundledPythonRuntime();
@@ -1880,7 +1973,9 @@ try {
   assert.deepEqual(launcher._meta.ui.visibility, ["app"]);
   assert.deepEqual(startPromptOnlyScan._meta.ui.visibility, ["model"]);
   assert.deepEqual(startHeadlessStandardScan._meta.ui.visibility, ["model"]);
-  assert.deepEqual(startHeadlessStandardScan.inputSchema.required, ["targetPath"]);
+  assert.deepEqual(startHeadlessStandardScan.inputSchema.required, [
+    "targetPath",
+  ]);
   assert.equal(
     startHeadlessStandardScan.inputSchema.properties.userContext.maxLength,
     undefined,
@@ -1889,9 +1984,18 @@ try {
   assert.deepEqual(updateScanContext._meta.ui.visibility, ["model"]);
   assert.deepEqual(updateScanContextFromApp._meta.ui.visibility, ["app"]);
   assert.ok(updateScanContext.inputSchema.properties.handoffClaimToken);
-  assert.equal(updateScanContext.inputSchema.properties.userContext.maxLength, undefined);
-  assert.equal(updateScanContextFromApp.inputSchema.properties.userContext.maxLength, undefined);
-  assert.deepEqual(updateScanContextFromApp.inputSchema.required, ["scanId", "userContext"]);
+  assert.equal(
+    updateScanContext.inputSchema.properties.userContext.maxLength,
+    undefined,
+  );
+  assert.equal(
+    updateScanContextFromApp.inputSchema.properties.userContext.maxLength,
+    undefined,
+  );
+  assert.deepEqual(updateScanContextFromApp.inputSchema.required, [
+    "scanId",
+    "userContext",
+  ]);
   assert.deepEqual(submit._meta.ui.visibility, ["app"]);
   assert.deepEqual(inspectTarget._meta.ui.visibility, ["app"]);
   assert.deepEqual(inspectSetup._meta.ui.visibility, ["app"]);
@@ -1923,7 +2027,13 @@ try {
       `${tool.name} must be callable by the native Codex Security workbench.`,
     );
   }
-  for (const tool of [getScanContext, updateScanContext, progress, complete, fail]) {
+  for (const tool of [
+    getScanContext,
+    updateScanContext,
+    progress,
+    complete,
+    fail,
+  ]) {
     assert.ok(tool._meta.ui.visibility.includes("model"));
     assert.ok(tool.inputSchema.properties.handoffClaimToken);
   }
@@ -2031,14 +2141,15 @@ try {
   assert.match(fail.description, /use cancel_codex_security_scan/i);
   assert.equal(setFindingRemediation.annotations.idempotentHint, false);
 
-  const urlContext = "Deployment details came from https://example.test/internal.";
+  const urlContext =
+    "Deployment details came from https://example.test/internal.";
   const urlContextAccepted = await requestAndWait(1290, "tools/call", {
     name: "open_codex_security_workspace",
     arguments: {
       targetPath: target,
-      userContext: urlContext
+      userContext: urlContext,
     },
-    _meta: { "openai/threadId": "fixture-url-context-thread" }
+    _meta: { "openai/threadId": "fixture-url-context-thread" },
   });
   assertNoError(urlContextAccepted);
   assert.equal(
@@ -2396,7 +2507,10 @@ try {
     ),
     true,
   );
-  assert.equal(initializedScanDir.startsWith(`${resolvedScanRoot}${path.sep}`), false);
+  assert.equal(
+    initializedScanDir.startsWith(`${resolvedScanRoot}${path.sep}`),
+    false,
+  );
   const scanId = startedWorkspace.results.scanId;
   assert.equal(startedWorkspace.results.progress.phase, "preflight");
   assert.equal(startedWorkspace.results.progress.status, "running");
@@ -2432,7 +2546,11 @@ try {
   );
   const attachedHandoff = await requestAndWait(20021, "tools/call", {
     name: "attach_codex_security_scan_continuation_thread",
-    arguments: { claimToken: handoffClaimToken, scanId, threadId: "fixture-thread" },
+    arguments: {
+      claimToken: handoffClaimToken,
+      scanId,
+      threadId: "fixture-thread",
+    },
   });
   assertNoError(attachedHandoff);
   const threadOwnedScan = await requestAndWait(2202, "tools/call", {
@@ -2519,22 +2637,28 @@ try {
   const updatedContext = await requestAndWait(92010, "tools/call", {
     name: "update_codex_security_scan_context",
     arguments: { handoffClaimToken, scanId, userContext: longUserContext },
-    _meta: { "openai/threadId": "fixture-thread" }
+    _meta: { "openai/threadId": "fixture-thread" },
   });
   assertNoError(updatedContext);
-  assert.equal(updatedContext.result.structuredContent.scan.userContext, longUserContext);
+  assert.equal(
+    updatedContext.result.structuredContent.scan.userContext,
+    longUserContext,
+  );
   assert.equal(
     updatedContext.result.structuredContent.workspace.userContext,
-    longUserContext
+    longUserContext,
   );
 
   const appUserContext = "Focus on account recovery. ".repeat(120).trim();
   const appUpdatedContext = await requestAndWait(92011, "tools/call", {
     name: "update_codex_security_scan_context_from_app",
-    arguments: { scanId, userContext: appUserContext }
+    arguments: { scanId, userContext: appUserContext },
   });
   assertNoError(appUpdatedContext);
-  assert.equal(appUpdatedContext.result.structuredContent.scan.userContext, appUserContext);
+  assert.equal(
+    appUpdatedContext.result.structuredContent.scan.userContext,
+    appUserContext,
+  );
 
   const urlContextUpdate = "Read https://example.test/context.";
   const updatedContextUrl = await requestAndWait(92012, "tools/call", {
@@ -2542,9 +2666,9 @@ try {
     arguments: {
       handoffClaimToken,
       scanId,
-      userContext: urlContextUpdate
+      userContext: urlContextUpdate,
     },
-    _meta: { "openai/threadId": "fixture-thread" }
+    _meta: { "openai/threadId": "fixture-thread" },
   });
   assertNoError(updatedContextUrl);
   assert.equal(
@@ -3300,7 +3424,8 @@ try {
     undefined,
   );
   assert.equal(
-    fallbackContext.result.structuredContent.workspace.results.handoffClaimToken,
+    fallbackContext.result.structuredContent.workspace.results
+      .handoffClaimToken,
     undefined,
   );
   const recoveredThreadContext = await requestAndWait(20172, "tools/call", {

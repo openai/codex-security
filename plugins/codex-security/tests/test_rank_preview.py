@@ -109,6 +109,62 @@ def test_preview_for_bounds_a_source_like_binary_after_the_initial_sample(tmp_pa
     assert preview_for(source, DEFAULT_PREVIEW_BYTES, max_read_bytes=64 * 1024) == ("", True)
 
 
+@pytest.mark.parametrize("max_read_bytes", [None, 1024, 4096, 4097, 128 * 1024])
+def test_preview_for_bounds_large_text_reads(tmp_path: Path, max_read_bytes: int | None) -> None:
+    source = tmp_path / "large.py"
+    source.write_bytes(b"# source comment\n" * (128 * 1024))
+    limit = 64 * 1024 if max_read_bytes is None else max_read_bytes
+    bytes_read = 0
+    with source.open("rb") as reader:
+        read = reader.read
+
+        def bounded_read(size: int = -1) -> bytes:
+            nonlocal bytes_read
+            assert 0 <= size <= limit - bytes_read
+            data = read(size)
+            bytes_read += len(data)
+            return data
+
+        with (
+            patch.object(Path, "open", return_value=reader),
+            patch.object(reader, "read", side_effect=bounded_read),
+        ):
+            if max_read_bytes is None:
+                preview, binary = preview_for(source, 128)
+            else:
+                preview, binary = preview_for(source, 128, max_read_bytes=max_read_bytes)
+
+    assert bytes_read == limit
+    assert not binary
+    assert preview
+    assert len(preview.encode("utf-8")) <= 128
+
+
+@pytest.mark.parametrize("max_read_bytes", [0, -1])
+def test_preview_for_rejects_nonpositive_read_limit(max_read_bytes: int) -> None:
+    with patch.object(Path, "open", side_effect=AssertionError("unexpected file read")):
+        with pytest.raises(ValueError, match="max_read_bytes must be positive"):
+            preview_for(Path("source.py"), 128, max_read_bytes=max_read_bytes)
+
+
+@pytest.mark.parametrize(
+    ("filename", "prefix", "suffix", "expected"),
+    [
+        ("source.py", b"def visible():\n    value = (", b"1)\n", "function visible"),
+        ("source.css", b"body { color: red; }\n\xf0\x9f", b"\x98\x80", "body { color: red; }"),
+        ("source.css", b"body { color: red; }\n", b"\0binary", "body { color: red; }"),
+    ],
+)
+def test_preview_for_uses_only_the_bounded_prefix(
+    tmp_path: Path, filename: str, prefix: bytes, suffix: bytes, expected: str
+) -> None:
+    source = tmp_path / filename
+    source.write_bytes(prefix + suffix)
+
+    for _ in range(2):
+        assert preview_for(source, 128, max_read_bytes=len(prefix)) == (expected, False)
+
+
 def generate_preview(
     tmp_path: Path, filename: str, source: str, *, preview_bytes: int | None = None
 ) -> str:
@@ -527,10 +583,13 @@ def test_fallback_preview_omits_marker_when_no_lines_are_skipped(tmp_path: Path)
     assert "..." not in preview
 
 
-def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filename", ["styles.css", "main.tf", "ViewController.m"])
+def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(
+    tmp_path: Path, filename: str
+) -> None:
     source = "\n".join(f"line_{index:02d} {'😀' * 20}" for index in range(40))
 
-    preview = generate_preview(tmp_path, "styles.css", source, preview_bytes=220)
+    preview = generate_preview(tmp_path, filename, source, preview_bytes=220)
 
     assert len(preview.encode("utf-8")) <= 220
     assert "..." in preview

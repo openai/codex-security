@@ -8,26 +8,61 @@ import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
 
 const root = resolve(import.meta.dirname, "..");
-const sdkRequire = createRequire(join(root, "../../../sdk/typescript/package.json"));
+const sdkRequire = createRequire(
+  join(root, "../../../sdk/typescript/package.json"),
+);
 const maxChunkBytes = 140_000;
 
-export async function buildMcpApp({ output }) {
+export async function buildMcpApp({ output, native = "universal" }) {
+  if (native !== "universal" && native !== "host") {
+    throw new Error("Native packaging must be universal or host.");
+  }
   const mcpDir = resolve(output);
+  const nativeRoot = join(
+    root,
+    "../native",
+    native === "host" ? "dist" : "prebuilt",
+  );
+  const hostTarget =
+    native === "host"
+      ? (await import("../../native/platform.mjs")).nativeTarget
+      : undefined;
+  const contract = JSON.parse(
+    await readFile(join(root, "../plugin-files.json"), "utf8"),
+  );
+  const nativeFiles = contract.shippedExact.filter((path) =>
+    path.startsWith("mcp/native/"),
+  );
+  if (
+    hostTarget &&
+    !nativeFiles.some(
+      (path) =>
+        path.startsWith(`mcp/native/${hostTarget}/`) && path.endsWith(".node"),
+    )
+  ) {
+    throw new Error(`Unsupported native target: ${hostTarget}.`);
+  }
 
   execFileSync(process.execPath, ["--run", "build"], {
     cwd: root,
-    stdio: "inherit"
+    stdio: "inherit",
   });
   await rm(mcpDir, { recursive: true, force: true });
   await mkdir(mcpDir, { recursive: true });
 
   await writeRuntime("server", "main.ts");
-  const contract = JSON.parse(await readFile(join(root, "../plugin-files.json"), "utf8"));
-  for (const file of contract.shippedExact.filter((path) => path.startsWith("mcp/native/"))) {
+  for (const file of nativeFiles) {
     const path = file.slice("mcp/native/".length);
+    if (
+      hostTarget &&
+      path.endsWith(".node") &&
+      !path.startsWith(`${hostTarget}/`)
+    ) {
+      continue;
+    }
     const destination = join(mcpDir, "native", path);
     await mkdir(dirname(destination), { recursive: true });
-    await copyFile(join(root, "../native/prebuilt", path), destination);
+    await copyFile(join(nativeRoot, path), destination);
   }
   await writeRuntime("helpers", "helpers-main.ts");
 
@@ -36,10 +71,15 @@ export async function buildMcpApp({ output }) {
     try {
       await build({
         bundle: true,
-        banner: { js: "const __codexSecurityModuleUrl = require('node:url').pathToFileURL(__filename).href;" },
+        banner: {
+          js: "const __codexSecurityModuleUrl = require('node:url').pathToFileURL(__filename).href;",
+        },
         define: { "import.meta.url": "__codexSecurityModuleUrl" },
         entryPoints: [join(root, entryPoint)],
-        inject: name === "server" ? [sdkRequire.resolve("pdfjs-dist/legacy/build/pdf.worker.mjs")] : [],
+        inject:
+          name === "server"
+            ? [sdkRequire.resolve("pdfjs-dist/legacy/build/pdf.worker.mjs")]
+            : [],
         external: ["fsevents"],
         format: "cjs",
         loader: { ".md": "text" },
@@ -47,10 +87,10 @@ export async function buildMcpApp({ output }) {
         logOverride: { "empty-import-meta": "silent" },
         outfile: bundle,
         platform: "node",
-        target: "node20"
+        target: "node20",
       });
       const runtime = brotliCompressSync(await readFile(bundle), {
-        params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 }
+        params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 },
       });
       const chunkPrefix = name + ".mjs.br.part-";
       await writeFile(join(mcpDir, name + ".mjs"), loader(chunkPrefix), "utf8");
@@ -61,7 +101,7 @@ export async function buildMcpApp({ output }) {
       ) {
         await writeFile(
           join(mcpDir, chunkPrefix + String(index).padStart(3, "0")),
-          runtime.subarray(offset, offset + maxChunkBytes)
+          runtime.subarray(offset, offset + maxChunkBytes),
         );
       }
     } finally {
@@ -72,15 +112,20 @@ export async function buildMcpApp({ output }) {
 
 const invokedPath = process.argv[1];
 if (
-  invokedPath !== undefined
-  && pathToFileURL(resolve(invokedPath)).href === import.meta.url
+  invokedPath !== undefined &&
+  pathToFileURL(resolve(invokedPath)).href === import.meta.url
 ) {
   const args = process.argv.slice(2);
-  if (args.length !== 2 || args[0] !== "--output") {
-    console.error("Usage: node scripts/build_mcp_app.mjs --output <directory>");
+  if (
+    args[0] !== "--output" ||
+    (args.length !== 2 && !(args.length === 4 && args[2] === "--native"))
+  ) {
+    console.error(
+      "Usage: node scripts/build_mcp_app.mjs --output <directory> [--native universal|host]",
+    );
     process.exitCode = 1;
   } else {
-    buildMcpApp({ output: args[1] }).catch((error) => {
+    buildMcpApp({ output: args[1], native: args[3] }).catch((error) => {
       console.error(error instanceof Error ? error.message : error);
       process.exitCode = 1;
     });

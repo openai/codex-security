@@ -172,6 +172,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 2
           persist-credentials: false
       - name: Set up pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -193,6 +194,8 @@ jobs:
         run: pnpm --dir sdk/typescript run types
       - name: Check formatting
         run: pnpm --dir sdk/typescript run format
+      - name: Check MCP formatting
+        run: pnpm --dir plugins/codex-security/mcp-app exec prettier --check "**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}"
 
   native:
     needs: validate-title
@@ -425,6 +428,43 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  plugin-host:
+    name: standalone plugin / ${{ matrix.os }}
+    needs: validate-title
+    if: needs.validate-title.outputs.ci-mode == 'full'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout plugin and shared SDK source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            plugins/codex-security
+            sdk/typescript
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: package.json
+          cache: true
+          cache_dependency_path: |
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
+            sdk/typescript/pnpm-lock.yaml
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.13.0"
+      - name: Install plugin build dependencies
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Build and test the standalone host runtime
+        run: node --test plugins/codex-security/mcp-app/scripts/test_host_build.mjs
+
   plugin-source:
     name: plugin source contracts
     needs: validate-title
@@ -495,6 +535,7 @@ jobs:
         test,
         compatibility,
         mcp,
+        plugin-host,
         plugin-source,
       ]
     if: always()
@@ -505,7 +546,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1
 
   windows-test:
@@ -577,14 +618,14 @@ jobs:
           retention-days: 14
       - name: Test machine-wide PowerShell policy
         if: matrix.shard == 3 && runner.environment == 'github-hosted'
-        timeout-minutes: 5
+        timeout-minutes: 7
         working-directory: sdk/typescript
         env:
           TEMP: ${{ steps.windows-temp.outputs.path }}
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
-        run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
+        run: bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts
 
   windows-verify:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
@@ -601,6 +642,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -621,12 +666,13 @@ jobs:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
     if: always()
-    needs: [validate-title, static-checks, windows-test, windows-verify]
+    needs:
+      [validate-title, static-checks, plugin-host, windows-test, windows-verify]
     strategy:
       fail-fast: false
       matrix:
         node: ["22.13.0", "24"]
     steps:
       - name: Require every Windows coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.plugin-host.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1

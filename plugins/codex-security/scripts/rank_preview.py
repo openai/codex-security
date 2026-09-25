@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 DEFAULT_PREVIEW_BYTES = 1024
+DEFAULT_PREVIEW_READ_BYTES = 64 * 1024
 PREVIEW_HEAD_LINES = 12
 PREVIEW_SAMPLE_LINES = 10
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
@@ -41,6 +42,7 @@ TEXT_CODE_EXTENSIONS = {
     ".kt",
     ".kts",
     ".lua",
+    ".m",
     ".mjs",
     ".mm",
     ".mts",
@@ -56,6 +58,7 @@ TEXT_CODE_EXTENSIONS = {
     ".sh",
     ".sql",
     ".swift",
+    ".tf",
     ".toml",
     ".ts",
     ".tsx",
@@ -948,18 +951,17 @@ def structural_outline(path: Path, text: str) -> list[str]:
 
 
 def preview_for(
-    path: Path, preview_bytes: int, *, max_read_bytes: int | None = None
+    path: Path, preview_bytes: int, *, max_read_bytes: int = DEFAULT_PREVIEW_READ_BYTES
 ) -> tuple[str, bool]:
+    """Preview the first 64 KiB by default, including the binary-detection sample."""
+    if max_read_bytes <= 0:
+        raise ValueError("max_read_bytes must be positive")
     try:
         with path.open("rb") as source:
-            sample = source.read(4096)
+            sample = source.read(min(4096, max_read_bytes))
             if is_binary_sample(sample):
                 return "", True
-            remaining = (
-                source.read()
-                if max_read_bytes is None
-                else source.read(max(0, max_read_bytes - len(sample)))
-            )
+            remaining = source.read(max_read_bytes - len(sample))
             data = sample + remaining
     except OSError:
         return "", True

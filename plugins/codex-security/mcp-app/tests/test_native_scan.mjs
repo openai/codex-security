@@ -204,19 +204,28 @@ for (const outcome of ["completed", "failed"]) {
     const first = host.run(input());
     const joined = host.run(input());
     let settled = false;
-    void first.then(() => { settled = true; }, () => { settled = true; });
+    void first.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     await closing.promise;
     assert.equal(settled, false);
     assert.equal(preparations, 1);
     releaseClose.reject(cleanupError);
     for (const pending of [first, joined]) {
-      if (outcome === "failed") await assert.rejects(pending, (error) => error === primaryError);
+      if (outcome === "failed")
+        await assert.rejects(pending, (error) => error === primaryError);
       else assert.equal(await pending, result);
     }
     assert.equal(warnings.length, 1);
     assert.equal(warnings[0][1], cleanupError);
     const next = host.run(input());
-    if (outcome === "failed") await assert.rejects(next, (error) => error === primaryError);
+    if (outcome === "failed")
+      await assert.rejects(next, (error) => error === primaryError);
     else assert.equal(await next, result);
     assert.equal(preparations, 2);
     assert.equal(warnings.length, 2);
@@ -387,27 +396,53 @@ test("native scans preserve selected Codex homes and saved settings", async () =
   }
 });
 
-test("native blank Codex homes reach fresh and resumed SDK children", {
-  skip: process.platform === "win32" ? "Synthetic executable uses a POSIX shebang." : false,
-}, async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "native-blank-home-")));
-  const home = join(root, ".codex");
-  const repository = join(root, "repository");
-  const pluginRoot = join(root, "plugin");
-  const executable = join(root, "codex");
-  const capture = join(root, "child.json");
-  const keys = [
-    "HOME", "USERPROFILE", "CODEX_HOME", "CODEX_CLI_PATH", "CODEX_API_KEY",
-    "OPENAI_API_KEY", "CODEX_SECURITY_CONFIG_PATH", "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
-  ];
-  const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
-  try {
-    await Promise.all([
-      mkdir(home), mkdir(repository), mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true }),
-    ]);
-    await writeFile(join(home, "config.toml"), 'model = "synthetic-current"\n');
-    await writeFile(join(pluginRoot, ".codex-plugin/plugin.json"), JSON.stringify({ name: "codex-security", version: "0.0.0" }));
-    await writeFile(executable, `#!${process.execPath}
+test(
+  "native blank Codex homes reach fresh and resumed SDK children",
+  {
+    skip:
+      process.platform === "win32"
+        ? "Synthetic executable uses a POSIX shebang."
+        : false,
+  },
+  async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "native-blank-home-")),
+    );
+    const home = join(root, ".codex");
+    const repository = join(root, "repository");
+    const pluginRoot = join(root, "plugin");
+    const executable = join(root, "codex");
+    const capture = join(root, "child.json");
+    const keys = [
+      "HOME",
+      "USERPROFILE",
+      "CODEX_HOME",
+      "CODEX_CLI_PATH",
+      "CODEX_API_KEY",
+      "OPENAI_API_KEY",
+      "CODEX_SECURITY_CONFIG_PATH",
+      "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    ];
+    const before = Object.fromEntries(
+      keys.map((key) => [key, process.env[key]]),
+    );
+    try {
+      await Promise.all([
+        mkdir(home),
+        mkdir(repository),
+        mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true }),
+      ]);
+      await writeFile(
+        join(home, "config.toml"),
+        'model = "synthetic-current"\n',
+      );
+      await writeFile(
+        join(pluginRoot, ".codex-plugin/plugin.json"),
+        JSON.stringify({ name: "codex-security", version: "0.0.0" }),
+      );
+      await writeFile(
+        executable,
+        `#!${process.execPath}
 const fs = require("node:fs");
 ${syntheticPermissionAppServer()}
 if (process.argv.includes("app-server")) {
@@ -417,47 +452,79 @@ if (process.argv.includes("app-server")) {
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-home-thread" }));
   console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
 }
-`, { mode: 0o700 });
-    Object.assign(process.env, {
-      HOME: root, USERPROFILE: root, CODEX_HOME: " \t\n",
-      CODEX_CLI_PATH: executable, CODEX_API_KEY: "synthetic-home-key",
-    });
-    delete process.env.OPENAI_API_KEY;
-    delete process.env.CODEX_SECURITY_CONFIG_PATH;
-    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
-    for (const resumed of [false, true]) {
-      const prepared = await prepareNativeScan({
-        ...input(), pluginRoot, model: "synthetic-current", reasoningEffort: "ultra",
-        recipe: { auth: "api-key", ...(resumed ? { config: { model: "synthetic-saved" } } : {}) },
+`,
+        { mode: 0o700 },
+      );
+      Object.assign(process.env, {
+        HOME: root,
+        USERPROFILE: root,
+        CODEX_HOME: " \t\n",
+        CODEX_CLI_PATH: executable,
+        CODEX_API_KEY: "synthetic-home-key",
       });
-      const runtime = await prepared.client.dependencies.prepareRuntime({});
-      try {
-        const sdk = prepared.client.dependencies.createCodex({
-          codexPathOverride: executable,
-          config: scanRuntimeCodexConfig(prepared.client.config.codexOverrides, repository, prepared.client.dependencies.inheritedPermissions),
-          env: runtime.environment,
+      delete process.env.OPENAI_API_KEY;
+      delete process.env.CODEX_SECURITY_CONFIG_PATH;
+      delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+      for (const resumed of [false, true]) {
+        const prepared = await prepareNativeScan({
+          ...input(),
+          pluginRoot,
+          model: "synthetic-current",
+          reasoningEffort: "ultra",
+          recipe: {
+            auth: "api-key",
+            ...(resumed ? { config: { model: "synthetic-saved" } } : {}),
+          },
         });
-        const options = { workingDirectory: repository, skipGitRepoCheck: true, approvalPolicy: "never" };
-        const thread = resumed ? sdk.resumeThread("synthetic-home-thread", options) : sdk.startThread(options);
-        const events = await collectNativeEvents(thread, "Synthetic home selection only.");
-        assert.equal(events.at(-1).type, "turn.completed");
-        const observed = JSON.parse(await readFile(capture, "utf8"));
-        assert.equal(observed.home, await realpath(home));
-        assert.equal(observed.argv.includes("resume"), resumed);
-        assert.ok(observed.argv.includes(`model=${JSON.stringify(resumed ? "synthetic-saved" : "synthetic-current")}`));
-        assert.equal(process.env.CODEX_HOME, " \t\n");
-      } finally {
-        await rm(runtime.bootstrapWorkspace, { recursive: true, force: true });
+        const runtime = await prepared.client.dependencies.prepareRuntime({});
+        try {
+          const sdk = prepared.client.dependencies.createCodex({
+            codexPathOverride: executable,
+            config: scanRuntimeCodexConfig(
+              prepared.client.config.codexOverrides,
+              repository,
+              prepared.client.dependencies.inheritedPermissions,
+            ),
+            env: runtime.environment,
+          });
+          const options = {
+            workingDirectory: repository,
+            skipGitRepoCheck: true,
+            approvalPolicy: "never",
+          };
+          const thread = resumed
+            ? sdk.resumeThread("synthetic-home-thread", options)
+            : sdk.startThread(options);
+          const events = await collectNativeEvents(
+            thread,
+            "Synthetic home selection only.",
+          );
+          assert.equal(events.at(-1).type, "turn.completed");
+          const observed = JSON.parse(await readFile(capture, "utf8"));
+          assert.equal(observed.home, await realpath(home));
+          assert.equal(observed.argv.includes("resume"), resumed);
+          assert.ok(
+            observed.argv.includes(
+              `model=${JSON.stringify(resumed ? "synthetic-saved" : "synthetic-current")}`,
+            ),
+          );
+          assert.equal(process.env.CODEX_HOME, " \t\n");
+        } finally {
+          await rm(runtime.bootstrapWorkspace, {
+            recursive: true,
+            force: true,
+          });
+        }
       }
+    } finally {
+      for (const key of keys) {
+        if (before[key] === undefined) delete process.env[key];
+        else process.env[key] = before[key];
+      }
+      await rm(root, { recursive: true, force: true });
     }
-  } finally {
-    for (const key of keys) {
-      if (before[key] === undefined) delete process.env[key];
-      else process.env[key] = before[key];
-    }
-    await rm(root, { recursive: true, force: true });
-  }
-});
+  },
+);
 
 test("native launches snapshot safety identifiers and prefer saved recipes", async () => {
   const root = await mkdtemp(join(tmpdir(), "native-safety-identifier-"));

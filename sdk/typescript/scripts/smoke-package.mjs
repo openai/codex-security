@@ -25,7 +25,10 @@ import {
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 
-const PACKAGE_SMOKE_TIMEOUT_MS = packageSmokeTimeouts().commandTimeoutMs;
+const {
+  commandTimeoutMs: PACKAGE_SMOKE_TIMEOUT_MS,
+  installTimeoutMs: PACKAGE_SMOKE_INSTALL_TIMEOUT_MS,
+} = packageSmokeTimeouts();
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const packageManifest = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -77,14 +80,20 @@ async function resolveArchive() {
 function run(
   command,
   args,
-  { cwd, env, capture = false, windowsVerbatimArguments = false } = {},
+  {
+    cwd,
+    env,
+    capture = false,
+    windowsVerbatimArguments = false,
+    timeout = PACKAGE_SMOKE_TIMEOUT_MS,
+  } = {},
 ) {
   const result = spawnSync(command, args, {
     cwd,
     env,
     encoding: "utf8",
     stdio: capture ? "pipe" : "inherit",
-    timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+    timeout,
     killSignal: "SIGKILL",
     windowsVerbatimArguments,
     windowsHide: true,
@@ -92,7 +101,7 @@ function run(
 
   if (result.error?.code === "ETIMEDOUT") {
     throw new Error(
-      `Package smoke command timed out after ${PACKAGE_SMOKE_TIMEOUT_MS} ms: ${command}.`,
+      `Package smoke command timed out after ${timeout} ms: ${command}.`,
       { cause: result.error },
     );
   }
@@ -388,7 +397,7 @@ try {
       `typescript@${packageManifest.devDependencies.typescript}`,
       `@types/node@${packageManifest.devDependencies["@types/node"]}`,
     ],
-    { cwd: consumer },
+    { cwd: consumer, timeout: PACKAGE_SMOKE_INSTALL_TIMEOUT_MS },
   );
 
   const installedRoot = join(
@@ -439,7 +448,7 @@ try {
       "--input-type=module",
       "--eval",
       `const sdk = await import(${JSON.stringify(packageManifest.name)});
-      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff", "loadProjectConfig", "resolveProjectConfig"]) {
+      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "deduplicateRecords", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff", "loadProjectConfig", "resolveProjectConfig"]) {
         if (typeof sdk[name] !== "function") {
           throw new Error("The installed package does not export " + name + ".");
         }
@@ -773,6 +782,7 @@ try {
   try {
     const base = `http://127.0.0.1:${dashboardServer.address().port}`;
     for (const [path, contentType] of [
+      ["/", "text/html"],
       ["/dashboard", "text/html"],
       ["/dashboard/app.js", "text/javascript"],
       ["/dashboard/app.css", "text/css"],

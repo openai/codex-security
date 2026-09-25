@@ -10,10 +10,7 @@ async function main(): Promise<void> {
     closing = true;
     if (exitCode !== undefined) process.exitCode = exitCode;
     await server.close().catch((error: unknown) => {
-      console.error(
-        "Codex Security MCP server failed to close:",
-        error
-      );
+      console.error("Codex Security MCP server failed to close:", error);
     });
   };
   process.stdin.once("end", () => void close());
@@ -22,9 +19,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error(
-    "Codex Security MCP server failed to start:",
-    error
-  );
+  console.error("Codex Security MCP server failed to start:", error);
   process.exitCode = 1;
 });

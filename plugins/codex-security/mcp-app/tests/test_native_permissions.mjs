@@ -4,143 +4,190 @@ import { build } from "esbuild";
 
 const bundle = await build({
   bundle: true,
-  entryPoints: [fileURLToPath(new URL("../src/native-permissions.ts", import.meta.url))],
+  entryPoints: [
+    fileURLToPath(new URL("../src/native-permissions.ts", import.meta.url)),
+  ],
   format: "esm",
   platform: "node",
-  write: false
+  write: false,
 });
-const {
-  CODEX_SANDBOX_STATE_META_CAPABILITY,
-  resolveNativeParentSandbox
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+const { CODEX_SANDBOX_STATE_META_CAPABILITY, resolveNativeParentSandbox } =
+  await import(
+    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+  );
 
 const rootRead = {
   path: { type: "special", value: { kind: "root" } },
-  access: "read"
+  access: "read",
 };
 const pinnedReadOnly = {
   type: "managed",
   file_system: { type: "restricted", entries: [rootRead] },
-  network: "restricted"
+  network: "restricted",
 };
 
 assert.equal(CODEX_SANDBOX_STATE_META_CAPABILITY, "codex/sandbox-state-meta");
 assert.deepEqual(resolveNativeParentSandbox(extra(pinnedReadOnly)), {
-  filesystemDenies: []
+  filesystemDenies: [],
 });
-assert.deepEqual(resolveNativeParentSandbox(extra({
-  ...pinnedReadOnly,
-  network: "enabled"
-})), {
-  filesystemDenies: []
-});
-assert.deepEqual(resolveNativeParentSandbox(extra({
-  type: "managed",
-  file_system: { type: "unrestricted" },
-  network: "restricted"
-})), {
-  filesystemDenies: []
-});
-assert.deepEqual(resolveNativeParentSandbox(extra({
-  ...pinnedReadOnly,
-  file_system: {
-    type: "restricted",
-    entries: [
-      rootRead,
-      {
-        path: { type: "special", value: { kind: "project_roots" } },
-        access: "write"
-      },
-      {
-        path: { type: "special", value: { kind: "tmpdir" } },
-        access: "write"
-      }
-    ]
-  }
-})), {
-  filesystemDenies: []
-});
-assert.deepEqual(resolveNativeParentSandbox(extra({
-  ...pinnedReadOnly,
-  file_system: {
-    type: "restricted",
-    entries: [
-      rootRead,
-      {
-        path: { type: "path", path: "/repo/.env" },
-        access: "deny"
-      },
-      {
-        path: { type: "generated_default_path", path: "/repo/.secrets" },
-        access: "none"
-      },
-      {
-        path: { type: "glob_pattern", pattern: "/repo-a/**/.env" },
-        access: "deny"
-      },
-      {
-        path: { type: "glob_pattern", pattern: "/repo-b/**/*.pem" },
-        access: "none"
-      }
-    ],
-    glob_scan_max_depth: 3
-  }
-})), {
-  filesystemDenies: [
-    "/repo/.env",
-    "/repo/.secrets",
-    "/repo-a/**/.env",
-    "/repo-b/**/*.pem"
-  ],
-  globScanMaxDepth: 3
-});
-
-assert.throws(
-  () => resolveNativeParentSandbox(extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [
-        rootRead,
-        {
-          path: {
-            type: "glob_pattern",
-            pattern: "codex-project-roots://**/*.pem"
+assert.deepEqual(
+  resolveNativeParentSandbox(
+    extra({
+      ...pinnedReadOnly,
+      network: "enabled",
+    }),
+  ),
+  {
+    filesystemDenies: [],
+  },
+);
+assert.deepEqual(
+  resolveNativeParentSandbox(
+    extra({
+      type: "managed",
+      file_system: { type: "unrestricted" },
+      network: "restricted",
+    }),
+  ),
+  {
+    filesystemDenies: [],
+  },
+);
+assert.deepEqual(
+  resolveNativeParentSandbox(
+    extra({
+      ...pinnedReadOnly,
+      file_system: {
+        type: "restricted",
+        entries: [
+          rootRead,
+          {
+            path: { type: "special", value: { kind: "project_roots" } },
+            access: "write",
           },
-          access: "deny"
-        }
-      ]
-    }
-  })),
-  (error) => error.name === "Error"
-    && /symbolic project-roots denial metadata/i.test(error.message)
+          {
+            path: { type: "special", value: { kind: "tmpdir" } },
+            access: "write",
+          },
+        ],
+      },
+    }),
+  ),
+  {
+    filesystemDenies: [],
+  },
+);
+assert.deepEqual(
+  resolveNativeParentSandbox(
+    extra({
+      ...pinnedReadOnly,
+      file_system: {
+        type: "restricted",
+        entries: [
+          rootRead,
+          {
+            path: { type: "path", path: "/repo/.env" },
+            access: "deny",
+          },
+          {
+            path: { type: "generated_default_path", path: "/repo/.secrets" },
+            access: "none",
+          },
+          {
+            path: { type: "glob_pattern", pattern: "/repo-a/**/.env" },
+            access: "deny",
+          },
+          {
+            path: { type: "glob_pattern", pattern: "/repo-b/**/*.pem" },
+            access: "none",
+          },
+        ],
+        glob_scan_max_depth: 3,
+      },
+    }),
+  ),
+  {
+    filesystemDenies: [
+      "/repo/.env",
+      "/repo/.secrets",
+      "/repo-a/**/.env",
+      "/repo-b/**/*.pem",
+    ],
+    globScanMaxDepth: 3,
+  },
 );
 
-const pinnedFileUri = extra(pinnedReadOnly, "file:///tmp/codex-security-parent");
+assert.throws(
+  () =>
+    resolveNativeParentSandbox(
+      extra({
+        ...pinnedReadOnly,
+        file_system: {
+          type: "restricted",
+          entries: [
+            rootRead,
+            {
+              path: {
+                type: "glob_pattern",
+                pattern: "codex-project-roots://**/*.pem",
+              },
+              access: "deny",
+            },
+          ],
+        },
+      }),
+    ),
+  (error) =>
+    error.name === "Error" &&
+    /symbolic project-roots denial metadata/i.test(error.message),
+);
+
+const pinnedFileUri = extra(
+  pinnedReadOnly,
+  "file:///tmp/codex-security-parent",
+);
 assert.deepEqual(resolveNativeParentSandbox(pinnedFileUri), {
-  filesystemDenies: []
+  filesystemDenies: [],
 });
-assert.deepEqual(resolveNativeParentSandbox(extra(pinnedReadOnly, "/tmp/codex-security-parent")), {
-  filesystemDenies: []
-});
-assert.deepEqual(resolveNativeParentSandbox({
-  requestInfo: pinnedFileUri
-}), {
-  filesystemDenies: []
-});
-assert.deepEqual(resolveNativeParentSandbox({
-  _meta: pinnedFileUri._meta,
-  requestInfo: pinnedFileUri
-}), {
-  filesystemDenies: []
-});
-assert.deepEqual(resolveNativeParentSandbox(extra({
-  ...pinnedReadOnly
-}, "file:///tmp/codex-security-parent", { type: "readOnly" })), {
-  filesystemDenies: []
-});
+assert.deepEqual(
+  resolveNativeParentSandbox(
+    extra(pinnedReadOnly, "/tmp/codex-security-parent"),
+  ),
+  {
+    filesystemDenies: [],
+  },
+);
+assert.deepEqual(
+  resolveNativeParentSandbox({
+    requestInfo: pinnedFileUri,
+  }),
+  {
+    filesystemDenies: [],
+  },
+);
+assert.deepEqual(
+  resolveNativeParentSandbox({
+    _meta: pinnedFileUri._meta,
+    requestInfo: pinnedFileUri,
+  }),
+  {
+    filesystemDenies: [],
+  },
+);
+assert.deepEqual(
+  resolveNativeParentSandbox(
+    extra(
+      {
+        ...pinnedReadOnly,
+      },
+      "file:///tmp/codex-security-parent",
+      { type: "readOnly" },
+    ),
+  ),
+  {
+    filesystemDenies: [],
+  },
+);
 
 for (const invalid of [
   undefined,
@@ -155,30 +202,35 @@ for (const invalid of [
   extra({ ...pinnedReadOnly, network: { enabled: true } }),
   extra({ ...pinnedReadOnly, file_system: null }),
   extra({ ...pinnedReadOnly, file_system: { type: "unknown" } }),
-  extra({ ...pinnedReadOnly, file_system: { type: "restricted", entries: "not-an-array" } }),
   extra({
     ...pinnedReadOnly,
-    file_system: { type: "restricted", entries: [] }
+    file_system: { type: "restricted", entries: "not-an-array" },
+  }),
+  extra({
+    ...pinnedReadOnly,
+    file_system: { type: "restricted", entries: [] },
   }),
   extra({
     ...pinnedReadOnly,
     file_system: {
       type: "restricted",
-      entries: [{ path: { type: "path", path: "/limited" }, access: "read" }]
-    }
+      entries: [{ path: { type: "path", path: "/limited" }, access: "read" }],
+    },
   }),
   extra({
     ...pinnedReadOnly,
     file_system: {
       type: "restricted",
-      entries: [{
-        path: {
-          type: "special",
-          value: { kind: "root", subpath: "only-this-subtree" }
+      entries: [
+        {
+          path: {
+            type: "special",
+            value: { kind: "root", subpath: "only-this-subtree" },
+          },
+          access: "read",
         },
-        access: "read"
-      }]
-    }
+      ],
+    },
   }),
   extra({
     ...pinnedReadOnly,
@@ -186,9 +238,12 @@ for (const invalid of [
       type: "restricted",
       entries: [
         rootRead,
-        { path: { type: "special", value: { kind: "tmpdir" } }, access: "deny" }
-      ]
-    }
+        {
+          path: { type: "special", value: { kind: "tmpdir" } },
+          access: "deny",
+        },
+      ],
+    },
   }),
   extra({
     ...pinnedReadOnly,
@@ -196,9 +251,9 @@ for (const invalid of [
       type: "restricted",
       entries: [
         rootRead,
-        { path: { type: "glob_pattern", pattern: "**/*.env" }, access: "deny" }
-      ]
-    }
+        { path: { type: "glob_pattern", pattern: "**/*.env" }, access: "deny" },
+      ],
+    },
   }),
   extra({
     ...pinnedReadOnly,
@@ -209,38 +264,49 @@ for (const invalid of [
         {
           path: { type: "path", path: "/private" },
           access: "deny",
-          missing_path_behavior: "skip"
-        }
-      ]
-    }
+          missing_path_behavior: "skip",
+        },
+      ],
+    },
   }),
-  ...["", "relative/private", "/repo/*.env", "/repo/?.env", "/repo/[literal]"].map((deniedPath) => extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [
-        rootRead,
-        { path: { type: "path", path: deniedPath }, access: "deny" }
-      ]
-    }
-  })),
+  ...[
+    "",
+    "relative/private",
+    "/repo/*.env",
+    "/repo/?.env",
+    "/repo/[literal]",
+  ].map((deniedPath) =>
+    extra({
+      ...pinnedReadOnly,
+      file_system: {
+        type: "restricted",
+        entries: [
+          rootRead,
+          { path: { type: "path", path: deniedPath }, access: "deny" },
+        ],
+      },
+    }),
+  ),
   extra({
     ...pinnedReadOnly,
     file_system: {
       type: "restricted",
       entries: [
         rootRead,
-        { path: { type: "glob_pattern", pattern: "/repo/**/*.env" }, access: "read" }
-      ]
-    }
+        {
+          path: { type: "glob_pattern", pattern: "/repo/**/*.env" },
+          access: "read",
+        },
+      ],
+    },
   }),
   extra({
     ...pinnedReadOnly,
     file_system: {
       type: "restricted",
       entries: [rootRead],
-      glob_scan_max_depth: 0
-    }
+      glob_scan_max_depth: 0,
+    },
   }),
   extra({
     ...pinnedReadOnly,
@@ -248,34 +314,40 @@ for (const invalid of [
       type: "restricted",
       entries: [rootRead],
       glob_scan_max_depth: 2,
-      globScanMaxDepth: 3
-    }
+      globScanMaxDepth: 3,
+    },
   }),
   extra({
     ...pinnedReadOnly,
     file_system: {
       type: "restricted",
-      entries: [{ path: { type: "special", value: { kind: "unknown" } }, access: "read" }]
-    }
+      entries: [
+        {
+          path: { type: "special", value: { kind: "unknown" } },
+          access: "read",
+        },
+      ],
+    },
   }),
   extra({
     ...pinnedReadOnly,
     file_system: {
       type: "restricted",
-      entries: [{ path: { type: "path", path: "" }, access: "read" }]
-    }
+      entries: [{ path: { type: "path", path: "" }, access: "read" }],
+    },
   }),
   extra(pinnedReadOnly, "relative/working-directory"),
   extra(pinnedReadOnly, "file://remote-host/tmp/codex-security-parent"),
   {
     _meta: extra(pinnedReadOnly)._meta,
-    requestInfo: extra({ ...pinnedReadOnly, network: "enabled" })
-  }
+    requestInfo: extra({ ...pinnedReadOnly, network: "enabled" }),
+  },
 ]) {
   assert.throws(
     () => resolveNativeParentSandbox(invalid),
-    (error) => error.name === "Error"
-      && error.message.startsWith("Deep Scan cannot preserve the parent sandbox:")
+    (error) =>
+      error.name === "Error" &&
+      error.message.startsWith("Deep Scan cannot preserve the parent sandbox:"),
   );
 }
 
@@ -285,8 +357,8 @@ function extra(permissionProfile, sandboxCwd, sandboxPolicy) {
       [CODEX_SANDBOX_STATE_META_CAPABILITY]: {
         permissionProfile,
         ...(sandboxCwd !== undefined ? { sandboxCwd } : {}),
-        ...(sandboxPolicy !== undefined ? { sandboxPolicy } : {})
-      }
-    }
+        ...(sandboxPolicy !== undefined ? { sandboxPolicy } : {}),
+      },
+    },
   };
 }

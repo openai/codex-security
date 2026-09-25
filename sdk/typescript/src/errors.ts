@@ -33,7 +33,7 @@ export class CodexSecurityError extends Error {
 
 export type DeduplicationReviewStage = "screening" | "pair-review";
 export type DeduplicationReviewFailureCategory =
-  "validation" | "no-submission" | "model" | "transport";
+  "validation" | "no-submission" | "model" | "transport" | "refusal";
 
 export interface DeduplicationReviewFailureMetadata {
   stage: DeduplicationReviewStage;

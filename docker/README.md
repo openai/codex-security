@@ -221,10 +221,11 @@ no-new-privileges, and seccomp profile. It does not override Codex approval or
 filesystem settings. On hosts that restrict nested user namespaces, install the
 existing [AppArmor profile](../sdk/typescript/README.md#containerized-bulk-scans)
 and append `-f compose.apparmor.yaml` to the runner Compose commands. This override
-works because both examples use the `codex-security` service name. The entrypoint's
-bulk-scan-specific Landlock selection remains unchanged; it is not applied to
-other commands. Source inspection needs a host that supports the selected Codex
-sandbox; do not disable sandboxing to work around host restrictions.
+works because both examples use the `codex-security` service name. Codex 0.156.1
+requires Bubblewrap for filesystem-restricted execution; the legacy Landlock
+fallback is no longer supported. The entrypoint preserves Codex sandbox settings.
+Source inspection needs a host that supports Bubblewrap; do not disable sandboxing
+to work around host restrictions.
 
 `run --rm` removes only the finished runner container. Preserve its host mounts
 for later stages and retries; use the same image version and source paths.

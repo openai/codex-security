@@ -1433,6 +1433,53 @@ once before they can be reused.
 Pass `signal` to cancel any classification operation. Keep human overrides in the
 calling workflow or issue tracker; assessments remain separate recommendations.
 
+### Suggest finding owners
+
+Suggest contributors who can fix findings in a local Git repository:
+
+```bash
+npx @openai/codex-security suggest-owners findings.json --source-root /path/to/repo --json > owners.json
+```
+
+The input is a Codex Security findings document or a JSON object containing a
+`findings` array, such as the output of `export --export-format json`. The source
+root defaults to the current directory. The command reads committed `HEAD`,
+source around each finding location, blame for the affected lines, and file
+history reachable from that commit. It does not read uncommitted source or change
+findings, files, or ticket assignments.
+
+The checkout must own its Git references and objects. Linked worktrees and bound
+separate Git directories are supported. Checkouts that borrow external object
+stores, including `git clone --shared`, are rejected; use an independent clone.
+
+Each result preserves the finding and occurrence IDs and has status `identified`,
+`abstained`, or `error`. Identified results include an observed Git author name
+and email, a reason, and checked Git citations. Missing source or unclear
+ownership produces an abstention. Git identities do not establish active
+employment or an issue tracker account. Match accounts before assigning tickets.
+Use a checkout that matches the findings; otherwise their line ranges may be stale.
+
+The command uses existing Codex credentials and the Codex Security default model and effort.
+Use `--model` and `--effort` to override them. Model selection runs with tools and
+network access disabled. Exit code `0` includes successful recommendations and
+abstentions; `2` means invalid input or at least one failed recommendation. A
+per-finding failure retains the other results in the report. Cancellation uses
+exit code `130` for SIGINT or `143` for SIGTERM.
+
+The SDK accepts finding IDs, titles, summaries, and source locations directly:
+
+```ts
+import { suggestOwners } from "@openai/codex-security";
+
+const owners = await suggestOwners("/path/to/repo", result.findings, {
+  reasoningEffort: "high",
+});
+```
+
+SDK inputs may include `sourceRevision`. If it differs from `HEAD`, the collector
+ignores the old line ranges and reports the mismatch. Reports record the analyzed
+revision, model, effort, and limitations; they remain separate from scan artifacts.
+
 ### Feedback
 
 Send a problem report to OpenAI and share the returned feedback ID with support:
@@ -1618,9 +1665,45 @@ runtime/export error, `130` for interruption, and `143` for termination.
 JSON scans do not use interactive controls. `validate`, `login`, and `logout`
 reject `--json`.
 
-`install-hook` scans staged and unstaged changes before each commit. It blocks
-on high-severity findings or failed scans, respects `core.hooksPath`, and leaves
-existing hooks alone. Change the threshold with `--fail-on-severity`.
+`install-hook` adds an optional local Git pre-commit check for staged and
+unstaged changes. It's advisory; use a required CI check to enforce a passing
+scan. When Git runs the hook, it blocks commits if the scan can't finish or
+finds an issue at or above the threshold (`high` by default). Set it when
+installing with `--fail-on-severity`. The installer respects `core.hooksPath`
+and leaves custom hooks alone.
+
+We recommend installing the CLI outside the repository and running that copy
+directly. For a global installation:
+
+```bash
+npm install --global @openai/codex-security
+```
+
+If the repository also has a local copy, `npx` may run it instead.
+
+Before installing or replacing a hook, run
+`git -C /path/to/repository rev-parse --git-path hooks/pre-commit`. Git may
+return a path relative to `/path/to/repository`. Check the hook, if it exists,
+and the path to its directory for symlinks or shared locations. Leave custom,
+linked, shared, or unverified hooks alone. If they need to change, contact the
+owner or use a required CI check. Check older generated hooks too; the installer
+can update them automatically.
+
+If the hooks directory belongs only to this repository and there is no hook,
+run the global CLI from outside the repository:
+
+```bash
+codex-security install-hook /path/to/repository
+```
+
+To migrate a hook, confirm it's a regular file used only by this repository
+and contains only the generated Codex Security command. Keep its severity.
+The installer can update older hooks that invoke `npx` if you use the same
+severity. Newer hooks store absolute paths to Node and the CLI. If either path
+changes, the installer won't replace the hook: back it up, remove it, and rerun
+`codex-security install-hook /path/to/repository` with the same
+`--fail-on-severity` value (default: `high`). If reinstallation fails, restore
+the backup and verify the hook before relying on it.
 
 ### Import alerts from the CLI
 
@@ -1649,6 +1732,26 @@ Use the SDK loop for a disposition per alert.
 `validate` assesses candidates; `patch` fixes and verifies them. Both accept
 files or literal text and work in the current directory. Pass a saved finding
 or occurrence ID to `patch` to use its original repository.
+
+Add `--validation-prompt-file PATH` to supply custom dynamic validation
+instructions, using the same UTF-8 prompt file format as `scan`. The patch task
+uses these instructions to set up the environment, build or start the application,
+exercise the fix, check legitimate behavior, and clean up. Include the commands,
+authorized targets, expected results, and cleanup steps for your environment.
+The task must report validation evidence or explain which checks failed or could
+not run before claiming the patch is fixed or verified.
+
+```bash
+npx @openai/codex-security patch OCCURRENCE_ID --validation-prompt-file validation.md
+npx @openai/codex-security patch issues.md --validation-prompt-file validation.md
+```
+
+The flag works with saved findings, issue text/files, and Linear inputs. Relative
+prompt paths resolve from the directory where you invoke the CLI, including when
+the saved finding belongs to another repository. The file is read once before
+patching; missing, empty, or non-regular files fail before the patch task starts.
+Without the flag, the usual fix-finding verification applies. The flag does not
+change sandbox permissions and cannot be combined with `--resume-pr`.
 
 Add `--assess-patch-risk` to a `patch` command to run the bundled patch-risk
 assessment skill once on the completed patch. The assessment is advisory and
@@ -1697,6 +1800,8 @@ its read-only Codex sandbox.
 to select findings and add patch instructions. Results include a `patches`
 entry per finding with status `verified`, `no_change`, `blocked`, or `failed`.
 Verified and already-fixed findings no longer fail `--fail-on-severity`.
+Patching shows each finding's position, elapsed time, and live Codex activity.
+Progress goes to stderr; completed results stay in the terminal history.
 
 `--create-pr` commits generated patch files and opens a draft GitHub pull request
 with `gh` or a draft GitLab merge request with `glab`. Install and authenticate
@@ -1800,6 +1905,12 @@ cancels, resumes, publishes, edits, or deduplicates anything.
 
 The dashboard opens on Findings, followed by Duplicate groups. Both views
 support search, repository filtering, sorting, pagination, and record details.
+Click any column header to sort all matching records; click it again to reverse
+the order. The arrow marks the active column and direction. Changing the sort
+returns to the first page, and automatic refreshes keep the selected order.
+By default, findings sort by last update descending, then severity descending,
+then ID ascending to break ties. Groups sort by last update descending and ID
+ascending.
 Findings show stored content and links to their duplicate groups. Groups link
 back to their member findings, preserving separate overlapping groups and the
 original finding records.
@@ -1816,7 +1927,10 @@ repository choices, a page of records, and optional selected-record details:
 
 - `view`: `findings` (default) or `groups`.
 - `query`, `repository`: optional search text and exact repository ID.
-- `sort`: `activity` (default; most recently updated first) or `newest`.
+- `sort`: `activity` (default; last update), `newest` (created), `title`,
+  `repository`, `severity` (findings only), or `members` (groups only).
+- `direction`: `asc` or `desc` (default). Text sorts alphabetically without
+  case sensitivity, severity by level, and member counts numerically.
 - `limit`, `offset`: existing pagination conventions, defaulting to 50 and 0.
 - `id`: optional exact record ID to include in `detail`; unknown IDs return
   `detail: null` without hiding the list.
@@ -1943,7 +2057,7 @@ console.log(receipt.repositoryId, receipt.findingIds);
 Publish the scan with `--to custom` (or import it through the bulk API with its
 `repositoryId`) before deduplicating. The
 workflow reads a completed saved scan, queries candidates by finding ID, and
-runs Luna and Sol in the calling SDK/CLI process. Once all reviews succeed,
+runs Luna and Sol in the calling SDK/CLI process. Once all reviews finish,
 it posts accepted groups to the service. It does not re-upload findings or
 change scan artifacts.
 
@@ -1964,7 +2078,14 @@ has finished and none voted `DISTINCT`. It can run while unrelated Luna
 screenings continue. Results are combined in input order so completion timing
 does not change the groups.
 
-If a job fails after its retries, queued jobs stop and already running jobs
+An explicit model refusal keeps the affected pairs separate and allows unrelated
+reviews to continue. It is recorded as `NO_DECISION`, not a reviewed `DISTINCT`
+verdict. A screening refusal applies to every anchor/candidate pair in that
+screening; a pair-review refusal applies only to its assigned pair. Neither pair
+can be merged indirectly through other findings. Recognized policy errors and
+explicit refusal responses are not retried or sent to another model.
+
+If another kind of job fails after its retries, queued jobs stop and already running jobs
 finish before the command reports the failure. No groups are posted from an
 incomplete review. To retain completed reviews across runs, use a
 `--workflow-id` as described below.
@@ -2027,6 +2148,31 @@ members of an accepted group, with its canonical finding first. The canonical
 has the highest reported severity; ties use finding ID. Results do not delete,
 merge, or change stored finding documents. Accepted groups are saved as durable
 associations in the service before `deduplicationStatus` becomes `completed`.
+
+When any review is refused, the result instead has
+`deduplicationStatus: "completed_with_refusals"` and a `refusals` array. Each
+entry contains `decision: "NO_DECISION"`, `stage`, `model`, `findingIds`, and
+`reason`. For screening, the first finding ID is the anchor and the remaining
+IDs are its candidates. The CLI logs each refusal to stderr and exits
+successfully after saving the accepted groups. SDK callers can inspect and log
+the same structured entries. Findings retained because of a refusal are not
+confirmed unique. Successful runs without refusals keep their existing output
+shape. No command, flag, or default changes are required.
+
+This behavior applies to post-scan Luna/Sol deduplication. Deep Scan's internal
+reducer uses a separate workflow.
+
+### Host-provided records deduplication
+
+`codex-security dedupe --records` accepts a versioned JSON-RPC run over stdin
+and emits serial `review.run` requests on stdout for a host-provided model
+backend. It requires no saved scan or Findings API and performs no local model
+execution or persistence. The SDK exposes `deduplicateRecords(input,
+{ reviewRunner, signal })`. The input contains original observations and explicit candidate links. Results
+contain groups of observation IDs and unresolved observations.
+
+See the [records protocol and Python fake-host example](docs/dedupe-records.md)
+for the complete input, review contract, cancellation, and persistence rules.
 
 ### Stored duplicate groups
 
@@ -2129,9 +2275,15 @@ exponential backoff with jitter; HTTP retries honor `Retry-After`. Waiting to re
 occupies the job's concurrency slot.
 
 Cancellation, authentication or configuration errors, permanent HTTP errors, and
-required-source-access blockers are not retried. Exhausted retries fail deduplication;
+required-source-access blockers are not retried. Model refusals continue with
+`NO_DECISION` as described above. Other exhausted retries fail deduplication;
 invalid or unfinished reviews are not cached. Completed checkpoints remain
 available when the workflow resumes.
+
+Refusals are not saved as validated review checkpoints. A completed workflow
+retains its final `completed_with_refusals` result, including all refusal entries,
+and returns it on subsequent calls. To attempt those reviews again after
+resolving the refusal, run dedupe without that workflow ID or with a new one.
 
 Checkpoints bind to the exact original records and ordering, approved source path,
 Git revision and current file contents (including ignored files), repository scope,
@@ -2444,8 +2596,9 @@ Compose accepts `CODEX_SECURITY_IMAGE`, `CODEX_SECURITY_USER`,
 `CODEX_SECURITY_SECCOMP`, `CODEX_SECURITY_CSV`, `CODEX_SECURITY_RESULTS`, and
 `CODEX_SECURITY_STATE` for the image, user, seccomp profile, and mounts.
 
+Codex 0.156.1 requires Bubblewrap for filesystem-restricted execution on Linux.
 On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
-can install the optional AppArmor profile:
+must install the AppArmor profile and use the Compose override:
 
 ```bash
 sudo install -m 0644 docker/codex-security.apparmor /etc/apparmor.d/codex-security-container
@@ -2454,7 +2607,9 @@ docker compose -f compose.yaml -f compose.apparmor.yaml run --rm codex-security
 ```
 
 The override keeps the nonroot user, dropped capabilities, no-new-privileges,
-and seccomp policy. Other Docker hosts don't need it.
+and seccomp policy. It enables the nested namespaces required by Bubblewrap.
+The legacy Landlock fallback is no longer supported for these scans. Other
+Docker hosts that permit nested user namespaces do not need this override.
 
 ## Local security model
 

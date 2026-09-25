@@ -275,12 +275,13 @@ export async function isGitMetadataDirectory(
   }
   if (!head.isFile() && !head.isSymbolicLink()) return false;
   try {
-    // This resolver validates Git directories without loading their configuration.
+    // Resolve from outside the candidate so Git does not load its configuration.
     const directory = await gitOutput(
       repository,
       ["rev-parse", "--resolve-git-dir", repository],
       signal,
       { LC_ALL: "C" },
+      dirname(repository),
     );
     return (
       relative(await realpath(directory), await realpath(repository)) === ""
@@ -303,6 +304,7 @@ export async function isGitMetadataDirectory(
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,
+  options: { includeLocalObjects?: boolean } = {},
 ): Promise<[string, string, ...string[]]> {
   const [directory, commonDirectory] = await Promise.all([
     gitOutput(repository, ["rev-parse", "--absolute-git-dir"], signal),
@@ -312,7 +314,7 @@ export async function gitMetadataDirectories(
     abortable(() => realpath(resolve(repository, directory)), signal),
     abortable(() => realpath(resolve(repository, commonDirectory)), signal),
   ]);
-  return [...roots, ...(await gitObjectDirectories(roots, signal))];
+  return [...roots, ...(await gitObjectDirectories(roots, signal, options))];
 }
 
 function gitAlternatePaths(contents: Buffer): string[] {
@@ -372,6 +374,7 @@ function gitAlternatePaths(contents: Buffer): string[] {
 export async function gitObjectDirectories(
   metadataDirectories: readonly string[],
   signal?: AbortSignal,
+  options: { includeLocalObjects?: boolean } = {},
 ): Promise<string[]> {
   const pending = metadataDirectories.map((path) => join(path, "objects"));
   const visited = new Set<string>();
@@ -406,10 +409,12 @@ export async function gitObjectDirectories(
       pending.push(resolve(directory, path));
     }
   }
-  return [...visited].filter((path) =>
-    metadataDirectories.every((root) =>
-      relativePathIsOutside(relative(root, path)),
-    ),
+  return [...visited].filter(
+    (path) =>
+      options.includeLocalObjects ||
+      metadataDirectories.every((root) =>
+        relativePathIsOutside(relative(root, path)),
+      ),
   );
 }
 
@@ -724,6 +729,7 @@ async function gitOutput(
   args: readonly string[],
   signal?: AbortSignal,
   environment: NodeJS.ProcessEnv = {},
+  workingDirectory = repository,
 ): Promise<string> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
@@ -736,7 +742,7 @@ async function gitOutput(
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
-    ["-c", "core.fsmonitor=false", "-C", repository, ...args],
+    ["-c", "core.fsmonitor=false", "-C", workingDirectory, ...args],
     {
       encoding: "utf8",
       signal,
