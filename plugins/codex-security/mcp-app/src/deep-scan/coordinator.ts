@@ -11,6 +11,7 @@ import {
   type DeepReductionInput,
 } from "./artifact-validation.js";
 import {
+  mergeScanFileInventories,
   scanDraftInputSchema,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
@@ -311,12 +312,18 @@ export class DeepScanCoordinator {
       const schedulerResult = await this.runScheduler();
       if (this.canceled || this.externallyFailed) return;
       this.phase = "terminal";
+      const fileInventory = mergeScanFileInventories(
+        schedulerResult.accepted.map((worker) => ({
+          fileInventory: worker.fileInventory,
+        })),
+      );
       const draft = schedulerResult.result
         ? {
             ...structuredClone(schedulerResult.result),
             // Readers require coverage.json. The coordinator has accepted this
             // result, so mark it complete and leave review notes empty.
             coverage: {
+              ...(fileInventory ? { fileInventory } : {}),
               completeness: "complete",
               surfaces: [],
               explicitExclusions: [],
@@ -1083,17 +1090,20 @@ export class DeepScanCoordinator {
           `Accepted discovery ${worker.id} has incomplete persisted evidence.`,
         );
       }
-      await validateDiscoveryArtifacts(
+      const draft = await validateDiscoveryArtifacts(
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
       );
+      const fileInventory = draft.coverage
+        .fileInventory as AcceptedDiscovery["fileInventory"];
       const evidence = await persistedWorkerEvidence(worker);
       recovered.push({
         id: worker.id,
         label: basename(dirname(worker.promptPath)),
         artifactDir: worker.artifactDir,
         resultPath: worker.resultManifestPath,
+        ...(fileInventory ? { fileInventory } : {}),
         completionSequence: worker.completionSequence,
         attempt: worker.attempt,
         ...(worker.threadId ? { threadId: worker.threadId } : {}),

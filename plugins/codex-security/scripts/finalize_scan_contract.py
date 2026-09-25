@@ -282,7 +282,8 @@ def _require_scan_directory(scan_dir: Path) -> Path:
 
 def _validate_scan_local_output_path(scan_dir: Path, path: Path, relative_path: str) -> None:
     try:
-        resolved_parent = path.parent.resolve(strict=True)
+        # The scan-local writer creates new artifact directories when it publishes.
+        resolved_parent = path.parent.resolve(strict=False)
         resolved_parent.relative_to(scan_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         raise ContractError(f"{relative_path}: expected a path inside the scan directory") from exc
@@ -2311,6 +2312,48 @@ def _validate_sarif(sarif: dict[str, Any]) -> None:
             raise ContractError("SARIF: result is missing partialFingerprints")
 
 
+FILE_INVENTORY_ARTIFACTS = {
+    "inScopeFiles": "artifacts/coverage/in_scope_files.txt",
+    "reviewedFiles": "artifacts/coverage/reviewed_files.txt",
+    "remainingFiles": "artifacts/coverage/remaining_files.txt",
+}
+
+
+def merge_file_inventories(coverage: dict[str, Any], sources: list[dict[str, Any]]) -> None:
+    inventories = [
+        item["fileInventory"] for item in [coverage, *sources] if "fileInventory" in item
+    ]
+    if not inventories:
+        return
+    paths: dict[str, set[str]] = {"inScopeFiles": set(), "reviewedFiles": set()}
+    for inventory in inventories:
+        if not isinstance(inventory, dict):
+            raise ContractError("coverage.fileInventory: expected an object")
+        for field, values in paths.items():
+            for path in _require_list(inventory, field, "coverage.fileInventory"):
+                if not isinstance(path, str):
+                    raise ContractError(f"coverage.fileInventory.{field}: expected file paths")
+                values.add(_require_safe_relative_path(path, f"coverage.fileInventory.{field}"))
+    paths["reviewedFiles"].intersection_update(paths["inScopeFiles"])
+    coverage["fileInventory"] = {field: sorted(values) for field, values in paths.items()}
+    if paths["inScopeFiles"] - paths["reviewedFiles"]:
+        coverage["completeness"] = "partial"
+
+
+def file_inventory_artifacts(coverage: dict[str, Any]) -> dict[str, bytes]:
+    inventory = coverage.get("fileInventory")
+    if inventory is None:
+        return {}
+    paths = {
+        **inventory,
+        "remainingFiles": sorted(set(inventory["inScopeFiles"]) - set(inventory["reviewedFiles"])),
+    }
+    return {
+        path: "".join(f"{name}\n" for name in paths[field]).encode("utf-8")
+        for field, path in FILE_INVENTORY_ARTIFACTS.items()
+    }
+
+
 def _artifact_record(
     scan_dir: Path, relative_path: str, media_type: str, contents: bytes | None = None
 ) -> dict[str, str]:
@@ -2702,6 +2745,7 @@ def _prepare_scan_finalization(
             expected_coverage_mode=expected_coverage_mode,
         )
         _normalize_unsealed_open_questions(coverage)
+        merge_file_inventories(coverage, [])
 
     if manifest.get("schemaVersion") != SCHEMA_VERSION:
         raise ContractError(f"manifest.schemaVersion: expected {SCHEMA_VERSION}")
@@ -2773,12 +2817,18 @@ def _prepare_scan_finalization(
     coverage_bytes = _contract_json_bytes("coverage.json", coverage)
     report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
     _validate_report_output_paths(scan_dir)
+    inventory_artifacts = file_inventory_artifacts(coverage)
     scan["artifacts"] = [
         _artifact_record(scan_dir, "findings.json", "application/json", findings_bytes),
         _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
         *[
+            _artifact_record(scan_dir, path, "text/plain", contents)
+            for path, contents in inventory_artifacts.items()
+        ],
+        *[
             _artifact_record(scan_dir, ref, "application/octet-stream")
             for ref in _coverage_receipt_refs(coverage)
+            if ref not in inventory_artifacts
         ],
     ]
     _validate_sealed_coverage_receipts(scan, coverage)
@@ -2822,6 +2872,8 @@ def _write_prepared_scan_finalization(
 
     _write_scan_local_json(scan_dir, "findings.json", findings)
     _write_scan_local_json(scan_dir, "coverage.json", coverage)
+    for path, contents in file_inventory_artifacts(coverage).items():
+        write_scan_local_bytes(scan_dir, path, contents)
     write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
     _remove_scan_local_file_if_exists(scan_dir, "report.html")
     _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)

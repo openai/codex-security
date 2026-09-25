@@ -167,6 +167,30 @@
         }
       }
     },
+    "fileInventory": {
+      "type": "object",
+      "description": "Reported source inventory. reviewedFiles contains only fully security-reviewed in-scope files, not search hits or excerpts. Omit when unavailable.",
+      "properties": {
+        "inScopeFiles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "reviewedFiles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "inScopeFiles",
+        "reviewedFiles"
+      ]
+    },
     "openQuestions": {
       "type": "array",
       "items": {

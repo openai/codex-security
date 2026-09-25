@@ -20,6 +20,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
+    FILE_INVENTORY_ARTIFACTS,
     ContractError,
     _finding_strength,
     _populate_unsealed_artifact_envelope,
@@ -31,8 +32,10 @@ from finalize_scan_contract import (
     _remove_scan_local_file_if_exists,
     _validate_completion_binding,
     _write_prepared_scan_finalization,
+    file_inventory_artifacts,
     finalize_scan,
     finding_candidate_id,
+    merge_file_inventories,
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
@@ -40,6 +43,7 @@ from workbench_constants import PHASES
 from workbench_validation import path_within_scope
 
 _PUBLISHED_OUTPUTS = (
+    *FILE_INVENTORY_ARTIFACTS.values(),
     "findings.json",
     "coverage.json",
     "scan-manifest.json",
@@ -726,6 +730,7 @@ def merge_saved_results(
         return bool(document["findings"])
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
+    merge_file_inventories(coverage, [draft["coverage"] for _, draft, _ in all_sources])
     current_drafts = ([(None, parent)] if parent else []) + [
         (worker_id, draft) for relative, draft, worker_id in sources if relative in current_results
     ]
@@ -1448,6 +1453,9 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             copied_manifest, copied_findings, copied_coverage, binding
         )
         _validate_completion_binding(copied_manifest, copied_findings, copied_coverage, binding)
+        merge_file_inventories(coverage, [])
+        for path, contents in file_inventory_artifacts(coverage).items():
+            write_scan_local_bytes(scan_dir, path, contents)
         for filename, document in (
             ("findings.json", findings),
             ("coverage.json", coverage),
