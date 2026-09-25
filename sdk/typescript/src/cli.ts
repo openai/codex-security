@@ -1798,6 +1798,7 @@ export async function main(
   let renderedPolicy: string | undefined;
   let renderedPatch: string | undefined;
   let patchStructuredError = false;
+  let scanStructuredError = false;
   const runImport = (options: ImportScanOptions) =>
     runScanImport(options, errorOutput, dependencies);
   const history = async (
@@ -3683,11 +3684,12 @@ export async function main(
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           if (format === "json" || format === "jsonl") {
-            return {
-              status: "failed",
-              code: "SCAN_FAILED",
-              message: safeErrorMessage(outcome.error),
-            };
+            const message = safeErrorMessage(outcome.error);
+            if (!argv.includes("--full-output"))
+              return { status: "failed", code: "SCAN_FAILED", message };
+            // Incur would wrap returned data in an ok: true envelope.
+            scanStructuredError = true;
+            return incurError({ code: "SCAN_FAILED", message, exitCode });
           }
           return incurError({
             code: "SCAN_FAILED",
@@ -5744,7 +5746,7 @@ export async function main(
   }
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
-    if (policyFullOutput || patchStructuredError) {
+    if (policyFullOutput || patchStructuredError || scanStructuredError) {
       if (exitCode === 0) exitCode = 2;
     } else {
       if (exitCode !== 0) return exitCode;

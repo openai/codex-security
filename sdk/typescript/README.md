@@ -598,6 +598,9 @@ execution failure writes one structured object to stdout:
 }
 ```
 
+With `--full-output`, the same code and message are reported under `error` in
+an `ok: false` envelope instead.
+
 The command still exits with `2` for runtime, export, invalid-input, or
 incomplete-scan failures, and human-readable diagnostics remain on stderr.
 Use `scan --schema --format json` to discover this failure variant alongside
