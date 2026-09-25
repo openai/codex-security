@@ -84,6 +84,7 @@ async function fixture(
       "    console.log(JSON.stringify({ id: request.id, result }));",
       "  });",
       "} else {",
+      "  process.stdin.resume();",
       '  console.log(JSON.stringify({ type: "thread.started", thread_id: ' +
         JSON.stringify(threadId) +
         " }));",
