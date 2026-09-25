@@ -300,14 +300,22 @@ export async function runDeepScans(
       input.writer,
     );
     let merged: ReturnType<typeof validateMerge>;
+    let validationError: unknown;
     for (;;) {
       executionSignal.throwIfAborted();
       try {
-        merged = validateMerge(
-          await input.merge(prompt, executionSignal),
-          pending,
-          state.aggregate,
+        const response = await input.merge(
+          validationError === undefined
+            ? prompt
+            : `${prompt}\n\nYour previous merge response failed validation: ${safeErrorMessage(validationError)}\nReturn a complete corrected JSON object using the same source findings and schema.`,
+          executionSignal,
         );
+        try {
+          merged = validateMerge(response, pending, state.aggregate);
+        } catch (error) {
+          validationError = error;
+          throw error;
+        }
         break;
       } catch (error) {
         if (

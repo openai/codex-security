@@ -531,6 +531,30 @@ describe("ordinary scan composition", () => {
     expect((await h.checkpoint()).mergeFailures).toBe(3);
   });
 
+  test("retries an invalid merge with the missing field diagnostic", async () => {
+    const h = await harness({ maxDiscoveryRuns: 1 });
+    h.setRun(async (options) =>
+      result(options.resumeScanId!, options.outputDir!, "supported-issue"),
+    );
+    const merge = h.input.merge;
+    const prompts: string[] = [];
+    h.input.merge = async (prompt, signal) => {
+      prompts.push(prompt);
+      const output = await merge(prompt, signal);
+      if (prompts.length !== 1) return output;
+      const invalid = structuredClone(output) as { findings: JsonObject[] };
+      delete (invalid.findings[0]!["confidence"] as JsonObject)["rationale"];
+      return invalid;
+    };
+
+    await runDeepScans(h.input);
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("rationale");
+    expect((await h.checkpoint()).mergeFailures).toBe(0);
+    expect(h.published.at(-1)!.findings).toHaveLength(1);
+  });
+
   test("continues the already reserved final pass before applying the run cap", async () => {
     const h = await harness({ maxDiscoveryRuns: 1 });
     const id = randomUUID();
