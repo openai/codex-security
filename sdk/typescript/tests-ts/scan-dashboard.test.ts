@@ -1377,10 +1377,8 @@ describe("live scan dashboard", () => {
       paths: [],
     });
 
-    const frame = lastFrame(stderr);
-    expect(frame).toContain("See report, unsafe, and control.");
     expect(stderr.text()).toContain(
-      "\u001B]8;;https://example.com/report?token=[redacted]\u0007report\u001B]8;;\u0007",
+      "See \u001B]8;;https://example.com/report?token=[redacted]\u0007report\u001B]8;;\u0007, unsafe, and control.",
     );
     expect(stderr.text()).not.toContain("secret-token");
     expect(stderr.text()).not.toContain("javascript:");
