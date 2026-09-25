@@ -210,7 +210,7 @@ export function registerScanDraftTools(
     name: "record_codex_security_scan_draft",
     title: "Record Codex Security Scan Draft",
     description:
-      "Save semantic findings and coverage as an unsealed draft. Use complete:false for progress checkpoints, then complete:true for the final result; keep unvalidated candidates in coverage.deferred.",
+      "Save semantic findings and coverage as an unsealed draft. Use complete:false for progress checkpoints, then complete:true for the final result; keep unvalidated candidates in coverage.deferred. Use coverage.resolvedDeferred:[{id,reason}] on terminal drafts to close resolved generic work.",
     inputSchema: scanDraftInputSchema,
     readOnly: false,
     handler: async (value, requestContext) => {
@@ -250,7 +250,6 @@ function signalFromRequestContext(
   return signal instanceof AbortSignal ? signal : undefined;
 }
 
-/** Keep each vertical operation independently reviewable and registered. */
 export function registerCompactArtifactTools(
   server: McpServer,
   options: CompactArtifactToolOptions,
@@ -332,7 +331,7 @@ export function registerCompactWorkerArtifactTools(
       name: "record_codex_security_scan_draft",
       title: "Record Codex Security Scan Draft",
       description:
-        "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred.",
+        "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred. Use coverage.resolvedDeferred:[{id,reason}] on terminal drafts to close resolved generic work.",
       inputSchema: scanDraftInputSchema,
       readOnly: false,
       handler: async (value) =>

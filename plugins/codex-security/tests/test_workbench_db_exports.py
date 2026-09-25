@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
 import json
@@ -9,7 +10,9 @@ import sqlite3
 import subprocess
 import sys
 import uuid
+from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from workbench_test_support import (
@@ -1370,3 +1373,123 @@ def test_remediation_apply_rejects_replaced_scan_directory_ancestor(tmp_path: Pa
         check=False,
     )
     assert "canonical non-symlink directory" in str(failed["stderr"])
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_parent_draft_preserves_reconciled_candidate_identity_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool
+) -> None:
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    import workbench_db as db
+    import workbench_saved_results as results
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target)
+    started = start_delivered_scan(
+        state_dir,
+        "--workspace-id",
+        str(saved["id"]),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )["results"]
+    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    write_completed_contract(scan_dir, scan_id, target)
+    documents = {
+        key: json.loads((scan_dir / filename).read_text())
+        for key, filename in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    documents["findings"]["findings"] = []
+    documents["coverage"].update(completeness="partial", surfaces=[], deferred=[])
+    for identity in ("review-a", "review-b"):
+        documents["coverage"]["deferred"].append(
+            {
+                "id": identity,
+                "reason": "Caller requires validation.",
+                "candidate": {"title": identity},
+            }
+        )
+    raw = {
+        "scanId": scan_id,
+        "findings": [],
+        "coverage": {
+            "completeness": "partial",
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [
+                {key: value for key, value in row.items() if key != "id"}
+                for row in documents["coverage"]["deferred"]
+            ],
+        },
+    }
+    drafts = scan_dir / "drafts"
+    drafts.mkdir()
+    staged = drafts / f"{uuid.uuid4()}.json"
+    staged.write_text(json.dumps(documents))
+    raw_path = drafts / f"{uuid.uuid4()}.checkpoint.json"
+    raw_bytes = json.dumps(raw).encode()
+    raw_path.write_bytes(raw_bytes)
+    args = SimpleNamespace(
+        scan_id=scan_id,
+        claim_token=None,
+        draft_path=str(staged),
+        checkpoint_path=str(raw_path),
+        expected_draft_digest=None,
+    )
+    original_write = results.write_scan_local_bytes
+
+    def interrupt_coverage(scan_root: Path, relative: str, contents: bytes) -> None:
+        if relative == "coverage.json":
+            raise OSError("Interrupted canonical publication")
+        original_write(scan_root, relative, contents)
+
+    with closing(db.connect()) as connection:
+        if interrupted:
+            with monkeypatch.context() as context:
+                context.setattr(results, "write_scan_local_bytes", interrupt_coverage)
+                with pytest.raises(OSError, match="Interrupted canonical publication"):
+                    db.write_scan_draft(connection, args)
+        else:
+            db.write_scan_draft(connection, args)
+        head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        normalized_path = scan_dir / "checkpoints" / head["checkpoint"]
+        normalized_bytes = normalized_path.read_bytes()
+        normalized = json.loads(normalized_bytes)
+        assert normalized["coverage"]["deferred"] == documents["coverage"]["deferred"]
+        assert normalized["scanId"] == scan_id
+        retained_raw = scan_dir / "checkpoints" / f"{hashlib.sha256(raw_bytes).hexdigest()}.json"
+        assert retained_raw.read_bytes() == raw_bytes
+
+        rejected = copy.deepcopy(documents["coverage"]["deferred"][0])
+        documents["coverage"]["deferred"] = documents["coverage"]["deferred"][1:]
+        documents["coverage"]["surfaces"] = [
+            {
+                "id": "caller",
+                "label": "Caller",
+                "disposition": "rejected",
+                "candidateId": rejected["id"],
+                "candidate": rejected["candidate"],
+            }
+        ]
+        raw["coverage"]["deferred"] = []
+        raw["coverage"]["surfaces"] = documents["coverage"]["surfaces"]
+        raw_path.write_text(json.dumps(raw))
+        staged.write_text(json.dumps(documents))
+        db.write_scan_draft(connection, args)
+        assert normalized_path.read_bytes() == normalized_bytes
+        assert retained_raw.read_bytes() == raw_bytes
+        canonical = json.loads((scan_dir / "coverage.json").read_text())
+        assert [row["id"] for row in canonical["deferred"]] == ["review-b"]
+        head_bytes = (scan_dir / "checkpoint-head.json").read_bytes()
+        checkpoints = set((scan_dir / "checkpoints").iterdir())
+        args.expected_draft_digest = "0" * 64
+        with pytest.raises(SystemExit, match="scan_draft_conflict"):
+            db.write_scan_draft(connection, args)
+        assert (scan_dir / "checkpoint-head.json").read_bytes() == head_bytes
+        assert set((scan_dir / "checkpoints").iterdir()) == checkpoints

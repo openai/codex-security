@@ -589,6 +589,1390 @@ try {
     1,
   );
 
+  for (const layout of ["standard", "diff", "worker"]) {
+    const closureRoot = path.join(
+      root,
+      `resolved-deferred-${layout}`,
+      "output",
+    );
+    await mkdir(closureRoot, { recursive: true });
+    const closureContext =
+      layout === "worker"
+        ? { ...workerContext, root: closureRoot }
+        : {
+            ...context,
+            root: closureRoot,
+            mode: layout,
+            ...(layout === "diff"
+              ? {
+                  targetContract: {
+                    ...context.targetContract,
+                    target: {
+                      ...context.targetContract.target,
+                      allowedKinds: ["git_diff"],
+                    },
+                    diffTarget: {
+                      kind: "range",
+                      baseRevision: "a".repeat(40),
+                      headRevision: "b".repeat(40),
+                    },
+                  },
+                }
+              : {}),
+          };
+    const record = (draft) =>
+      layout === "worker"
+        ? recordCodexSecurityWorkerScanDraft(closureContext, draft)
+        : recordCodexSecurityScanDraft(closureContext, draft);
+    const readCoverage = async () =>
+      layout === "worker"
+        ? (await readJson(closureRoot, "result.json")).coverage
+        : readJson(closureRoot, "coverage.json");
+    const generic = {
+      ...(layout === "diff" ? { id: "review-closeout" } : {}),
+      reason: "Review is recorded; final submission remains.",
+      paths: ["src/example.py"],
+    };
+    const terminal = {
+      ...workerInput,
+      ...(layout === "worker" ? {} : { handoffClaimToken: claimToken }),
+      complete: true,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [
+          { id: "example", label: "Example", disposition: "no_issue_found" },
+        ],
+      },
+    };
+    await record({
+      ...terminal,
+      complete: false,
+      coverage: {
+        ...terminal.coverage,
+        completeness: "partial",
+        deferred: [generic],
+      },
+    });
+    const checkpointRoot = path.join(closureRoot, "checkpoints");
+    const originals = await Promise.all(
+      (await readdir(checkpointRoot)).map(async (name) => [
+        name,
+        await readFile(path.join(checkpointRoot, name), "utf8"),
+      ]),
+    );
+    const checkpointCoverage = await readCoverage();
+    assert.equal(
+      typeof checkpointCoverage.deferred[0].id,
+      "string",
+      "the first checkpoint exposes the deferred ID needed for closure",
+    );
+    if (layout === "worker") {
+      const head = await readJson(closureRoot, "checkpoint-head.json");
+      const checkpoint = await readJson(checkpointRoot, head.checkpoint);
+      assert.deepEqual(
+        checkpoint.coverage.deferred,
+        checkpointCoverage.deferred,
+      );
+    }
+    const closure = {
+      id: checkpointCoverage.deferred[0].id,
+      reason: "The reviewed scope and final decisions are recorded.",
+    };
+    await record({
+      ...terminal,
+      coverage: { ...terminal.coverage, resolvedDeferred: [closure] },
+    });
+    const closed = await readCoverage();
+    assert.equal(closed.completeness, "complete");
+    assert.deepEqual(closed.deferred, []);
+    assert.deepEqual(closed.resolvedDeferred, [closure]);
+    const updatedClosure = {
+      ...closure,
+      reason: "Follow-up review confirmed the recorded decisions.",
+    };
+    await record({
+      ...terminal,
+      coverage: { ...terminal.coverage, resolvedDeferred: [updatedClosure] },
+    });
+    await record(terminal);
+    const resubmittedCoverage = await readCoverage();
+    assert.deepEqual(
+      resubmittedCoverage.resolvedDeferred,
+      [updatedClosure],
+      "repeat submissions preserve the latest accepted closure reason",
+    );
+    assert.deepEqual(resubmittedCoverage.deferred, []);
+    for (const [name, contents] of originals)
+      assert.equal(
+        await readFile(path.join(checkpointRoot, name), "utf8"),
+        contents,
+      );
+
+    const reopened = {
+      id: closure.id,
+      reason: "A newly inspected caller needs review.",
+    };
+    const reopeningDraft = {
+      ...terminal,
+      coverage: {
+        ...terminal.coverage,
+        completeness: "partial",
+        deferred: [reopened],
+      },
+    };
+    const assertReopened = async () => {
+      const saved = await readCoverage();
+      assert.equal(saved.completeness, "partial");
+      assert.deepEqual(saved.deferred, [reopened]);
+      assert.deepEqual(saved.resolvedDeferred ?? [], []);
+    };
+    await record(reopeningDraft);
+    await assertReopened();
+    await record(terminal);
+    await assertReopened();
+
+    for (const explicitSurfaceId of layout === "worker" ? [] : [false, true]) {
+      const progressRoot = path.join(
+        root,
+        `workbench-progress-${layout}-${explicitSurfaceId}`,
+      );
+      await mkdir(progressRoot);
+      const progressContext = { ...closureContext, root: progressRoot };
+      const writeProgress = (draft) =>
+        recordCodexSecurityScanDraftViaWorkbench(
+          progressContext,
+          draft,
+          async (arguments_) => {
+            const checkpointPath =
+              arguments_[arguments_.indexOf("--checkpoint-path") + 1];
+            const checkpoint = JSON.parse(
+              await readFile(checkpointPath, "utf8"),
+            );
+            await saveScanDraftCheckpoint(progressContext, checkpoint);
+            const draftPath =
+              arguments_[arguments_.indexOf("--draft-path") + 1];
+            const staged = JSON.parse(await readFile(draftPath, "utf8"));
+            for (const [name, document] of [
+              ["findings.json", staged.findings],
+              ["coverage.json", staged.coverage],
+              ["scan-manifest.json", staged.manifest],
+            ])
+              await writeFile(
+                path.join(progressRoot, name),
+                JSON.stringify(document),
+              );
+          },
+        );
+      const surface = {
+        id: "progress-api",
+        label: "API",
+        disposition: "needs_follow_up",
+        notes: "The new caller still needs review.",
+        receiptRefs: ["artifacts/new-caller.md"],
+      };
+      const pending = { ...reopened, surfaceIds: [surface.id] };
+      const progress = {
+        ...terminal,
+        complete: false,
+        coverage: {
+          ...coverage,
+          completeness: "partial",
+          surfaces: [surface],
+          deferred: [pending],
+        },
+      };
+      await writeProgress({ ...progress, complete: true });
+      await writeProgress({
+        ...terminal,
+        coverage: {
+          ...coverage,
+          surfaces: [{ ...surface, disposition: "no_issue_found" }],
+          resolvedDeferred: [updatedClosure],
+        },
+      });
+      const reopeningSurface = { ...surface };
+      if (!explicitSurfaceId) delete reopeningSurface.id;
+      await writeProgress({
+        ...progress,
+        coverage: { ...progress.coverage, surfaces: [reopeningSurface] },
+      });
+      for (const complete of [false, true]) {
+        await writeProgress({
+          ...terminal,
+          complete,
+          coverage: { ...coverage, surfaces: [] },
+        });
+        const saved = await readJson(progressRoot, "coverage.json");
+        assert.equal(saved.completeness, "partial");
+        assert.deepEqual(saved.deferred, [pending]);
+        assert.deepEqual(saved.resolvedDeferred ?? [], []);
+        assert.deepEqual(saved.surfaces, [surface]);
+      }
+    }
+
+    for (const pendingKind of ["generic", "candidate-id", "candidate-alias"]) {
+      const progressRoot = path.join(
+        root,
+        `closure-progress-${layout}-${pendingKind}`,
+      );
+      await mkdir(progressRoot);
+      const progressContext = { ...closureContext, root: progressRoot };
+      const writeProgress = (draft) =>
+        layout === "worker"
+          ? recordCodexSecurityWorkerScanDraft(progressContext, draft)
+          : recordCodexSecurityScanDraft(progressContext, draft);
+      const readProgress = async () =>
+        layout === "worker"
+          ? (await readJson(progressRoot, "result.json")).coverage
+          : readJson(progressRoot, "coverage.json");
+      await writeProgress({
+        ...reopeningDraft,
+        complete: false,
+      });
+      await writeProgress({
+        ...terminal,
+        coverage: { ...terminal.coverage, resolvedDeferred: [updatedClosure] },
+      });
+      const pending = {
+        ...reopened,
+        ...(pendingKind === "generic"
+          ? {}
+          : {
+              ...(pendingKind === "candidate-alias"
+                ? { id: "pending-review", candidateId: reopened.id }
+                : {}),
+              candidate: { title: "Another caller needs validation." },
+            }),
+      };
+      const progress = {
+        ...reopeningDraft,
+        complete: false,
+        coverage: { ...reopeningDraft.coverage, deferred: [pending] },
+      };
+      if (pendingKind === "generic") {
+        for (const name of await readdir(
+          path.join(progressRoot, "checkpoints"),
+        ))
+          await utimes(path.join(progressRoot, "checkpoints", name), 1, 1);
+        await utimes(
+          path.join(
+            progressRoot,
+            layout === "worker" ? "result.json" : "coverage.json",
+          ),
+          1,
+          1,
+        );
+        if (layout === "worker")
+          await utimes(path.join(progressRoot, "checkpoint-head.json"), 1, 1);
+        await saveScanDraftCheckpoint(progressContext, progress);
+        await writeProgress({ ...terminal, complete: false });
+        const saved = await readProgress();
+        assert.equal(saved.completeness, "partial");
+        assert.deepEqual(saved.deferred, [pending]);
+        assert.deepEqual(saved.resolvedDeferred ?? [], []);
+        await writeProgress(terminal);
+        assert.deepEqual((await readProgress()).deferred, [pending]);
+      } else {
+        await writeProgress(progress);
+        await writeProgress({
+          ...terminal,
+          coverage: {
+            ...terminal.coverage,
+            surfaces: [
+              {
+                id: "candidate-outcome",
+                label: "Another caller",
+                disposition: "rejected",
+                candidateId: reopened.id,
+              },
+            ],
+          },
+        });
+        const saved = await readProgress();
+        assert.deepEqual(saved.deferred, []);
+        assert.deepEqual(saved.resolvedDeferred ?? [], []);
+        const outcome = saved.surfaces.find(
+          (row) => row.candidateId === reopened.id,
+        );
+        assert.equal(outcome.disposition, "rejected");
+        assert.deepEqual(outcome.candidate, pending.candidate);
+      }
+    }
+
+    {
+      const rawRoot = path.join(root, `raw-deferred-identities-${layout}`);
+      await mkdir(rawRoot);
+      const rawContext = { ...closureContext, root: rawRoot };
+      const rows = ["First caller", "Second caller"].map((title) => ({
+        reason: "Validation remains.",
+        paths: ["src/example.py"],
+        candidate: { title },
+      }));
+      for (const row of rows) {
+        const progress = {
+          ...terminal,
+          complete: false,
+          coverage: { ...coverage, completeness: "partial", deferred: [row] },
+        };
+        if (layout === "worker") {
+          await saveScanDraftCheckpoint(rawContext, progress, false);
+        } else {
+          await assert.rejects(
+            recordCodexSecurityScanDraftViaWorkbench(
+              rawContext,
+              progress,
+              async (arguments_) => {
+                const checkpointPath =
+                  arguments_[arguments_.indexOf("--checkpoint-path") + 1];
+                const checkpoint = JSON.parse(
+                  await readFile(checkpointPath, "utf8"),
+                );
+                await saveScanDraftCheckpoint(rawContext, checkpoint);
+                throw new Error("interrupted draft write");
+              },
+            ),
+            /interrupted draft write/,
+          );
+        }
+      }
+      const checkpoints = await Promise.all(
+        (await readdir(path.join(rawRoot, "checkpoints"))).map(async (name) => [
+          name,
+          await readFile(path.join(rawRoot, "checkpoints", name), "utf8"),
+        ]),
+      );
+      const writeRaw = (draft) =>
+        layout === "worker"
+          ? recordCodexSecurityWorkerScanDraft(rawContext, draft)
+          : recordCodexSecurityScanDraft(rawContext, draft);
+      const readRaw = async () =>
+        layout === "worker"
+          ? (await readJson(rawRoot, "result.json")).coverage
+          : readJson(rawRoot, "coverage.json");
+      await writeRaw(terminal);
+      const first = await readRaw();
+      assert.equal(first.completeness, "partial");
+      assert.equal(first.deferred.length, 2);
+      assert.deepEqual(
+        first.deferred
+          .map(({ id, ...row }) => row)
+          .sort((a, b) => a.candidate.title.localeCompare(b.candidate.title)),
+        rows,
+      );
+      const baseId = expectedReasonOnlyDeferredId(rows[0]);
+      assert.deepEqual(
+        new Set(first.deferred.map((row) => row.id)),
+        new Set([baseId, `${baseId}-2`]),
+      );
+      await writeRaw(terminal);
+      assert.deepEqual((await readRaw()).deferred, first.deferred);
+      const [resolved, remaining] = first.deferred;
+      await writeRaw({
+        ...terminal,
+        coverage: {
+          ...coverage,
+          surfaces: [
+            {
+              label: resolved.candidate.title,
+              candidateId: resolved.id,
+              disposition: "rejected",
+            },
+          ],
+        },
+      });
+      assert.deepEqual((await readRaw()).deferred, [remaining]);
+      await writeRaw(terminal);
+      assert.deepEqual((await readRaw()).deferred, [remaining]);
+      for (const [name, contents] of checkpoints)
+        assert.equal(
+          await readFile(path.join(rawRoot, "checkpoints", name), "utf8"),
+          contents,
+        );
+    }
+
+    {
+      const outcomeRoot = path.join(root, `new-raw-candidate-${layout}`);
+      await mkdir(outcomeRoot);
+      const outcomeContext = { ...closureContext, root: outcomeRoot };
+      const writeOutcome = (draft) =>
+        layout === "worker"
+          ? recordCodexSecurityWorkerScanDraft(outcomeContext, draft)
+          : recordCodexSecurityScanDraft(outcomeContext, draft);
+      const readOutcome = async () =>
+        layout === "worker"
+          ? (await readJson(outcomeRoot, "result.json")).coverage
+          : readJson(outcomeRoot, "coverage.json");
+      const candidates = ["First caller", "Second caller"].map((title) => ({
+        reason: "Validation remains.",
+        paths: ["src/example.py"],
+        candidate: { title },
+      }));
+      const progress = (candidate) => ({
+        ...terminal,
+        complete: false,
+        coverage: {
+          ...coverage,
+          completeness: "partial",
+          deferred: [candidate],
+        },
+      });
+      await writeOutcome(progress(candidates[0]));
+      const first = (await readOutcome()).deferred[0];
+      if (layout === "worker") {
+        await saveScanDraftCheckpoint(
+          outcomeContext,
+          progress(candidates[1]),
+          false,
+        );
+      } else {
+        await assert.rejects(
+          recordCodexSecurityScanDraftViaWorkbench(
+            outcomeContext,
+            progress(candidates[1]),
+            async (arguments_) => {
+              const checkpointPath =
+                arguments_[arguments_.indexOf("--checkpoint-path") + 1];
+              const checkpoint = JSON.parse(
+                await readFile(checkpointPath, "utf8"),
+              );
+              await saveScanDraftCheckpoint(outcomeContext, checkpoint);
+              throw new Error("interrupted draft write");
+            },
+          ),
+          /interrupted draft write/,
+        );
+      }
+      await writeOutcome({
+        ...terminal,
+        coverage: {
+          ...coverage,
+          surfaces: [
+            {
+              candidateId: first.id,
+              label: "First caller",
+              disposition: "rejected",
+            },
+          ],
+        },
+      });
+      const pending = (await readOutcome()).deferred;
+      assert.equal(pending.length, 1);
+      assert.deepEqual(pending[0].candidate, candidates[1].candidate);
+      assert.notEqual(pending[0].id, first.id);
+      await writeOutcome(terminal);
+      assert.deepEqual((await readOutcome()).deferred, pending);
+    }
+
+    for (const surfaceKind of ["candidate", "idless"]) {
+      const surfaceRoot = path.join(
+        root,
+        `reopened-surface-evidence-${layout}-${surfaceKind}`,
+      );
+      await mkdir(surfaceRoot);
+      const surfaceContext = { ...closureContext, root: surfaceRoot };
+      const writeSurface = (draft) =>
+        layout === "worker"
+          ? recordCodexSecurityWorkerScanDraft(surfaceContext, draft)
+          : recordCodexSecurityScanDraft(surfaceContext, draft);
+      const readSurface = async () =>
+        layout === "worker"
+          ? (await readJson(surfaceRoot, "result.json")).coverage
+          : readJson(surfaceRoot, "coverage.json");
+      const pending = {
+        ...reopened,
+        ...(surfaceKind === "candidate"
+          ? { candidate: { title: "Another API caller." } }
+          : {}),
+      };
+      const original = { label: "API", disposition: "needs_follow_up" };
+      const unrelated = {
+        id: "other-result",
+        candidateId: "other-candidate",
+        label: "Other entry point",
+        disposition: "rejected",
+        notes: "The accepted rejection remains valid.",
+        receiptRefs: ["artifacts/accepted-rejection.md"],
+      };
+      await writeSurface({
+        ...terminal,
+        complete: false,
+        coverage: {
+          ...coverage,
+          completeness: "partial",
+          surfaces: [original],
+          deferred: [reopened],
+        },
+      });
+      await writeSurface({
+        ...terminal,
+        coverage: {
+          ...coverage,
+          surfaces: [{ ...original, disposition: "no_issue_found" }, unrelated],
+          resolvedDeferred: [updatedClosure],
+        },
+      });
+      const followUp = {
+        ...original,
+        ...(surfaceKind === "candidate" ? { candidateId: reopened.id } : {}),
+        notes: "A newly inspected caller still needs validation.",
+        receiptRefs: ["artifacts/reopened-caller.md"],
+      };
+      const unrelatedProgress = {
+        ...unrelated,
+        disposition: "needs_follow_up",
+        notes: "An unrelated progress observation.",
+      };
+      await writeSurface({
+        ...terminal,
+        complete: false,
+        coverage: {
+          ...coverage,
+          completeness: "partial",
+          surfaces: [followUp, unrelatedProgress],
+          deferred: [pending],
+        },
+      });
+      for (let retry = 0; retry < 2; retry += 1) {
+        const saved = await readSurface();
+        assert.equal(saved.completeness, "partial");
+        assert.deepEqual(saved.deferred, [pending]);
+        assert.deepEqual(saved.resolvedDeferred ?? [], []);
+        assert(
+          saved.surfaces.some(
+            (surface) =>
+              surface.label === followUp.label &&
+              surface.disposition === followUp.disposition &&
+              surface.notes === followUp.notes &&
+              surface.receiptRefs.includes(followUp.receiptRefs[0]) &&
+              surface.candidateId === followUp.candidateId,
+          ),
+        );
+        assert(
+          saved.surfaces.some((surface) =>
+            Object.entries(unrelated).every(
+              ([key, value]) =>
+                JSON.stringify(surface[key]) === JSON.stringify(value),
+            ),
+          ),
+        );
+        await writeSurface({
+          ...terminal,
+          coverage: { ...coverage, surfaces: [] },
+        });
+      }
+    }
+
+    for (const scenario of [
+      "candidate",
+      "finding",
+      "terminal",
+      "progress",
+      "surface-progress",
+      "tied",
+      "saved-outcome",
+      "newer-candidate",
+    ]) {
+      const surfaceRoot = path.join(
+        root,
+        `surface-history-${layout}-${scenario}`,
+      );
+      await mkdir(surfaceRoot);
+      const surfaceContext = { ...closureContext, root: surfaceRoot };
+      const writeSurface = (draft) =>
+        layout === "worker"
+          ? recordCodexSecurityWorkerScanDraft(surfaceContext, draft)
+          : recordCodexSecurityScanDraft(surfaceContext, draft);
+      const readSurface = async () =>
+        layout === "worker"
+          ? (await readJson(surfaceRoot, "result.json")).coverage
+          : readJson(surfaceRoot, "coverage.json");
+      const payload = scenario === "candidate" || scenario === "finding";
+      const savedOutcome =
+        scenario === "saved-outcome" || scenario === "newer-candidate";
+      const progress =
+        scenario === "progress" || scenario === "surface-progress";
+      const api = {
+        id: "api",
+        label: "API",
+        disposition: "needs_follow_up",
+        receiptRefs: ["artifacts/original.md"],
+        ...(payload
+          ? { [scenario]: { title: "Pending candidate evidence." } }
+          : {}),
+      };
+      const review = {
+        id: "api-review",
+        reason: "Inspect callers.",
+        surfaceIds: [api.id],
+      };
+      const candidate = {
+        id: "candidate-review",
+        candidateId: "candidate-api",
+        reason: "Validate the candidate.",
+        surfaceIds: [api.id],
+      };
+      const resolution = {
+        id: review.id,
+        reason: "Original callers were inspected.",
+      };
+      const closing = {
+        ...terminal,
+        coverage: {
+          ...coverage,
+          surfaces: [{ label: api.label, disposition: "no_issue_found" }],
+          resolvedDeferred: [resolution],
+        },
+      };
+      await writeSurface({
+        ...terminal,
+        complete: false,
+        coverage: {
+          ...coverage,
+          completeness: "partial",
+          surfaces: [api],
+          deferred: [review, ...(savedOutcome ? [candidate] : [])],
+        },
+      });
+      if (!savedOutcome) await writeSurface(closing);
+      if (!payload) {
+        const checkpoints = path.join(surfaceRoot, "checkpoints");
+        for (const name of await readdir(checkpoints)) {
+          const saved = await readJson(checkpoints, name);
+          const time = saved.coverage.resolvedDeferred?.length ? 2 : 1;
+          await utimes(path.join(checkpoints, name), time, time);
+        }
+        const baselineTime = savedOutcome ? 1 : 2;
+        await utimes(
+          path.join(
+            surfaceRoot,
+            layout === "worker" ? "result.json" : "coverage.json",
+          ),
+          baselineTime,
+          baselineTime,
+        );
+        if (layout === "worker")
+          await utimes(
+            path.join(surfaceRoot, "checkpoint-head.json"),
+            baselineTime,
+            baselineTime,
+          );
+        const originals = new Set(await readdir(checkpoints));
+        const followUp = {
+          ...api,
+          notes: "A new caller needs investigation.",
+          receiptRefs: ["artifacts/new-caller.md"],
+        };
+        await saveScanDraftCheckpoint(
+          surfaceContext,
+          savedOutcome
+            ? {
+                ...closing,
+                coverage: {
+                  ...closing.coverage,
+                  surfaces: [
+                    ...closing.coverage.surfaces,
+                    {
+                      label: "Candidate review",
+                      candidateId: candidate.candidateId,
+                      disposition: "rejected",
+                      notes: "The operation is unreachable.",
+                    },
+                  ],
+                },
+              }
+            : {
+                ...terminal,
+                complete: !progress,
+                coverage: {
+                  ...coverage,
+                  completeness: "partial",
+                  surfaces: [followUp],
+                  deferred:
+                    scenario === "progress"
+                      ? [{ ...review, reason: "Review the new caller." }]
+                      : [],
+                },
+              },
+          false,
+        );
+        for (const name of await readdir(checkpoints)) {
+          if (!originals.has(name)) {
+            const time = scenario === "tied" ? 2 : 3;
+            await utimes(path.join(checkpoints, name), time, time);
+          }
+        }
+        await writeSurface({
+          ...terminal,
+          complete: !progress,
+          coverage: {
+            ...coverage,
+            surfaces:
+              scenario === "newer-candidate" ? closing.coverage.surfaces : [],
+            ...(scenario === "newer-candidate"
+              ? { completeness: "partial", deferred: [candidate] }
+              : {}),
+          },
+        });
+      }
+      for (let retry = 0; retry < 3; retry += 1) {
+        const saved = await readSurface();
+        assert.equal(
+          saved.completeness,
+          scenario === "saved-outcome" ? "complete" : "partial",
+        );
+        if (payload) {
+          assert.deepEqual(
+            saved.surfaces.find((row) => row[scenario])?.[scenario],
+            api[scenario],
+          );
+        } else if (savedOutcome) {
+          assert.deepEqual(
+            saved.deferred,
+            scenario === "newer-candidate" ? [candidate] : [],
+          );
+          assert.equal(
+            saved.surfaces.some(
+              (row) =>
+                row.candidateId === candidate.candidateId &&
+                row.disposition === "rejected",
+            ),
+            scenario === "saved-outcome",
+          );
+          if (scenario === "saved-outcome")
+            assert.equal(
+              saved.surfaces.filter((row) => row.label === api.label).length,
+              1,
+            );
+          else
+            assert(
+              saved.surfaces.some(
+                (row) => row.disposition === "needs_follow_up",
+              ),
+            );
+        } else {
+          const surfaces = saved.surfaces.filter(
+            (row) => row.label === api.label,
+          );
+          assert.equal(surfaces.length, 1);
+          assert.equal(surfaces[0].disposition, "needs_follow_up");
+          assert.equal(surfaces[0].notes, "A new caller needs investigation.");
+          assert(surfaces[0].receiptRefs.includes("artifacts/new-caller.md"));
+          assert.equal(saved.deferred.length, scenario === "progress" ? 1 : 0);
+        }
+        await writeSurface({
+          ...terminal,
+          complete: retry !== 1,
+          coverage: { ...coverage, surfaces: [] },
+        });
+      }
+      if (!payload && !savedOutcome) {
+        await writeSurface(closing);
+        const saved = await readSurface();
+        assert.equal(saved.completeness, "complete");
+        assert.deepEqual(saved.deferred, []);
+        assert.equal(
+          saved.surfaces.filter((row) => row.label === api.label).length,
+          1,
+        );
+        assert.equal(saved.surfaces[0].disposition, "no_issue_found");
+      }
+    }
+
+    const closingAgain = {
+      ...terminal,
+      coverage: { ...terminal.coverage, resolvedDeferred: [updatedClosure] },
+    };
+    await record(closingAgain);
+    const interrupted = { ...reopened, reason: "Another caller needs review." };
+    const interruptedDraft = {
+      ...reopeningDraft,
+      coverage: { ...reopeningDraft.coverage, deferred: [interrupted] },
+    };
+    const publicationPath = path.join(
+      closureRoot,
+      layout === "worker" ? "result.json" : "coverage.json",
+    );
+    await utimes(publicationPath, 1, 1);
+    await interruptDraftWrite(publicationPath, () => record(interruptedDraft));
+    await record(terminal);
+    const recovered = await readCoverage();
+    assert.deepEqual(recovered.deferred, [interrupted]);
+    assert.deepEqual(recovered.resolvedDeferred ?? [], []);
+    assert.equal(recovered.completeness, "partial");
+
+    await record(closingAgain);
+    const tied = {
+      ...interrupted,
+      reason: "Review remains when write times are tied.",
+    };
+    await interruptDraftWrite(publicationPath, () =>
+      record({
+        ...interruptedDraft,
+        coverage: { ...interruptedDraft.coverage, deferred: [tied] },
+      }),
+    );
+    await utimes(publicationPath, 100, 100);
+    for (const name of await readdir(checkpointRoot)) {
+      const checkpoint = await readJson(checkpointRoot, name);
+      const time = checkpoint.coverage.deferred.some(
+        (row) => row.reason === tied.reason,
+      )
+        ? 100
+        : 1;
+      await utimes(path.join(checkpointRoot, name), time, time);
+    }
+    await record(terminal);
+    const tiedCoverage = await readCoverage();
+    assert.deepEqual(tiedCoverage.deferred, [tied]);
+    assert.deepEqual(tiedCoverage.resolvedDeferred ?? [], []);
+
+    if (layout === "worker") {
+      await interruptDraftWrite(publicationPath, () => record(closingAgain));
+      await record(terminal);
+      const replayed = await readCoverage();
+      assert.deepEqual(replayed.deferred, []);
+      assert.deepEqual(replayed.resolvedDeferred, [updatedClosure]);
+      const headInterrupted = {
+        ...reopened,
+        reason: "The worker stopped before updating its head.",
+      };
+      await interruptDraftWrite(
+        path.join(closureRoot, "checkpoint-head.json"),
+        () =>
+          record({
+            ...reopeningDraft,
+            coverage: {
+              ...reopeningDraft.coverage,
+              deferred: [headInterrupted],
+            },
+          }),
+      );
+      await record(terminal);
+      const recoveredHead = await readCoverage();
+      assert.deepEqual(recoveredHead.deferred, [headInterrupted]);
+      assert.deepEqual(recoveredHead.resolvedDeferred ?? [], []);
+    } else {
+      const mixedRoot = path.join(root, `mixed-publication-${layout}`);
+      await mkdir(mixedRoot);
+      const mixedContext = { ...closureContext, root: mixedRoot };
+      const writeMixed = (draft) =>
+        recordCodexSecurityScanDraft(mixedContext, draft);
+      await writeMixed({
+        ...reopeningDraft,
+        complete: false,
+        coverage: {
+          ...reopeningDraft.coverage,
+          deferred: [{ ...generic, id: closure.id }],
+        },
+      });
+      await interruptDraftWrite(
+        path.join(mixedRoot, "scan-manifest.json"),
+        () => writeMixed(closingAgain),
+      );
+      assert.equal(
+        (await readJson(mixedRoot, "scan-manifest.json")).scan.complete,
+        false,
+      );
+      assert.deepEqual(
+        (await readJson(mixedRoot, "coverage.json")).resolvedDeferred,
+        [updatedClosure],
+      );
+      await writeMixed(terminal);
+      const mixedCoverage = await readJson(mixedRoot, "coverage.json");
+      assert.deepEqual(mixedCoverage.deferred, []);
+      assert.deepEqual(mixedCoverage.resolvedDeferred, [updatedClosure]);
+      assert.equal(
+        (await readJson(mixedRoot, "scan-manifest.json")).scan.complete,
+        undefined,
+      );
+
+      for (const scenario of [
+        "generated",
+        "linked",
+        "unrelated",
+        "duplicate",
+        "explicit",
+      ]) {
+        const surfaceRoot = path.join(
+          root,
+          `closure-surfaces-${layout}-${scenario}`,
+        );
+        await mkdir(surfaceRoot);
+        const surfaceContext = { ...closureContext, root: surfaceRoot };
+        const writeSurface = (draft) =>
+          recordCodexSecurityScanDraft(surfaceContext, draft);
+        const api = {
+          ...(scenario === "generated" ? {} : { id: "api" }),
+          label: "API",
+          disposition: "needs_follow_up",
+          receiptRefs: ["artifacts/api-review.md"],
+        };
+        const apiReview = {
+          id: "api-review",
+          reason: "API review remains.",
+          ...(scenario === "generated" ? {} : { surfaceIds: ["api"] }),
+        };
+        const otherCandidate = {
+          candidateId: "candidate-other",
+          reason: "Another entry point needs validation.",
+        };
+        await writeSurface({
+          ...terminal,
+          complete: false,
+          coverage: {
+            ...coverage,
+            completeness: "partial",
+            surfaces: [
+              api,
+              ...(scenario === "duplicate"
+                ? [{ ...api, id: "api-other" }]
+                : scenario === "unrelated"
+                  ? [
+                      {
+                        id: "other",
+                        label: "Other entry point",
+                        disposition: "needs_follow_up",
+                      },
+                    ]
+                  : []),
+            ],
+            deferred: [
+              apiReview,
+              ...(scenario === "unrelated" ? [otherCandidate] : []),
+            ],
+          },
+        });
+        const before = await readJson(surfaceRoot, "coverage.json");
+        const apiId = before.surfaces[0].id;
+        const apiClosure = {
+          id: apiReview.id,
+          reason: "API review is complete.",
+        };
+        await writeSurface({
+          ...terminal,
+          coverage: {
+            ...coverage,
+            surfaces: [
+              {
+                ...(scenario === "explicit" ? { id: "other-api" } : {}),
+                label: "API",
+                disposition: "no_issue_found",
+              },
+            ],
+            resolvedDeferred: [apiClosure],
+          },
+        });
+        const after = await readJson(surfaceRoot, "coverage.json");
+        if (scenario === "duplicate" || scenario === "explicit") {
+          assert.equal(after.completeness, "partial");
+          for (const surface of before.surfaces) {
+            assert.deepEqual(
+              after.surfaces.find((row) => row.id === surface.id),
+              surface,
+            );
+          }
+        } else {
+          const updatedApi = after.surfaces.find((row) => row.id === apiId);
+          assert.equal(updatedApi.disposition, "no_issue_found");
+          assert.deepEqual(updatedApi.receiptRefs, api.receiptRefs);
+          assert.equal(
+            after.surfaces.filter((row) => row.label === "API").length,
+            1,
+          );
+          assert.equal(
+            after.completeness,
+            scenario === "unrelated" ? "partial" : "complete",
+          );
+          if (scenario === "unrelated") {
+            assert.equal(
+              after.surfaces.find((row) => row.id === "other").disposition,
+              "needs_follow_up",
+            );
+            assert.equal(
+              after.deferred[0].candidateId,
+              otherCandidate.candidateId,
+            );
+          }
+        }
+        if (scenario === "linked") {
+          await writeSurface({
+            ...terminal,
+            coverage: {
+              ...coverage,
+              completeness: "partial",
+              surfaces: [
+                {
+                  id: apiId,
+                  label: "API",
+                  disposition: "needs_follow_up",
+                  candidateId: otherCandidate.candidateId,
+                },
+              ],
+              deferred: [otherCandidate],
+            },
+          });
+          const newWork = await readJson(surfaceRoot, "coverage.json");
+          assert.equal(newWork.completeness, "partial");
+          assert.equal(
+            newWork.deferred[0].candidateId,
+            otherCandidate.candidateId,
+          );
+          assert.deepEqual(newWork.resolvedDeferred, [apiClosure]);
+        }
+      }
+    }
+
+    for (const pendingKind of ["generic", "candidate"]) {
+      for (const includePending of [false, true]) {
+        const inferenceRoot = path.join(
+          root,
+          `partial-surface-inference-${layout}-${pendingKind}-${includePending}`,
+        );
+        await mkdir(inferenceRoot);
+        const inferenceContext = { ...closureContext, root: inferenceRoot };
+        const writeInference = (draft) =>
+          layout === "worker"
+            ? recordCodexSecurityWorkerScanDraft(inferenceContext, draft)
+            : recordCodexSecurityScanDraft(inferenceContext, draft);
+        const first = {
+          id: "review-a",
+          reason: "First review remains.",
+          surfaceIds: ["shared"],
+        };
+        const remaining = {
+          id: "review-b",
+          reason: "Second review remains.",
+          surfaceIds: ["shared"],
+          ...(pendingKind === "candidate"
+            ? {
+                candidateId: "candidate-b",
+                candidate: { title: "Pending validation." },
+              }
+            : {}),
+        };
+        const followUp = {
+          id: "shared",
+          label: "Shared entry point",
+          disposition: "needs_follow_up",
+          notes: "The second caller remains unchecked.",
+          receiptRefs: ["artifacts/second-caller.md"],
+        };
+        await writeInference({
+          ...terminal,
+          complete: false,
+          coverage: {
+            ...coverage,
+            completeness: "partial",
+            surfaces: [followUp],
+            deferred: [first, remaining],
+          },
+        });
+        const resolution = {
+          id: first.id,
+          reason: "First review is complete.",
+        };
+        for (const resolvedDeferred of [[resolution], undefined]) {
+          await writeInference({
+            ...terminal,
+            coverage: {
+              ...coverage,
+              completeness: "partial",
+              surfaces: [
+                { label: followUp.label, disposition: "no_issue_found" },
+              ],
+              deferred: includePending ? [remaining] : [],
+              ...(resolvedDeferred ? { resolvedDeferred } : {}),
+            },
+          });
+          const saved =
+            layout === "worker"
+              ? (await readJson(inferenceRoot, "result.json")).coverage
+              : await readJson(inferenceRoot, "coverage.json");
+          assert.equal(saved.completeness, "partial");
+          assert.deepEqual(saved.deferred, [remaining]);
+          assert.deepEqual(saved.resolvedDeferred, [resolution]);
+          assert.deepEqual(
+            saved.surfaces.find((row) => row.id === followUp.id),
+            followUp,
+          );
+        }
+      }
+    }
+
+    for (const repeatClosure of layout === "worker" ? [] : [false, true]) {
+      const inheritedRoot = path.join(
+        root,
+        `inherited-surface-${layout}-${repeatClosure}`,
+      );
+      await mkdir(inheritedRoot);
+      const inheritedContext = { ...closureContext, root: inheritedRoot };
+      const savedSurface = {
+        id: "api",
+        label: "API",
+        disposition: "needs_follow_up",
+        receiptRefs: ["artifacts/api-review.md"],
+      };
+      await recordCodexSecurityScanDraft(inheritedContext, {
+        ...terminal,
+        complete: false,
+        coverage: {
+          ...coverage,
+          completeness: "partial",
+          surfaces: [savedSurface],
+          deferred: [{ ...reopened, surfaceIds: [savedSurface.id] }],
+        },
+      });
+      await assert.rejects(
+        recordCodexSecurityScanDraftViaWorkbench(
+          inheritedContext,
+          {
+            ...terminal,
+            coverage: {
+              ...coverage,
+              surfaces: [
+                { label: savedSurface.label, disposition: "no_issue_found" },
+              ],
+              resolvedDeferred: [updatedClosure],
+            },
+          },
+          async (arguments_) => {
+            const checkpointPath =
+              arguments_[arguments_.indexOf("--checkpoint-path") + 1];
+            const checkpoint = JSON.parse(
+              await readFile(checkpointPath, "utf8"),
+            );
+            await saveScanDraftCheckpoint(inheritedContext, checkpoint);
+            throw new Error("interrupted draft write");
+          },
+        ),
+        /interrupted draft write/,
+      );
+      for (let retry = 0; retry < 2; retry += 1) {
+        await recordCodexSecurityScanDraft(inheritedContext, {
+          ...terminal,
+          coverage: {
+            ...coverage,
+            surfaces: [],
+            ...(repeatClosure && retry === 0
+              ? { resolvedDeferred: [updatedClosure] }
+              : {}),
+          },
+        });
+        const saved = await readJson(inheritedRoot, "coverage.json");
+        assert.equal(saved.completeness, "complete");
+        assert.deepEqual(saved.deferred, []);
+        assert.deepEqual(saved.resolvedDeferred, [updatedClosure]);
+        assert.deepEqual(saved.surfaces, [
+          { ...savedSurface, disposition: "no_issue_found" },
+        ]);
+      }
+    }
+
+    for (const pendingKind of ["generic", "candidate"]) {
+      const sharedRoot = path.join(
+        root,
+        `shared-surface-${layout}-${pendingKind}`,
+      );
+      await mkdir(sharedRoot);
+      const sharedContext = { ...closureContext, root: sharedRoot };
+      const writeShared = (draft) =>
+        layout === "worker"
+          ? recordCodexSecurityWorkerScanDraft(sharedContext, draft)
+          : recordCodexSecurityScanDraft(sharedContext, draft);
+      const first = {
+        id: "review-a",
+        reason: "First review remains.",
+        surfaceIds: ["shared"],
+      };
+      const remaining = {
+        id: "review-b",
+        reason: "Second review remains.",
+        surfaceIds: ["shared"],
+        ...(pendingKind === "candidate"
+          ? {
+              candidateId: "candidate-shared",
+              candidate: { title: "Another caller needs validation." },
+            }
+          : {}),
+      };
+      const partial = {
+        ...coverage,
+        completeness: "partial",
+        surfaces: [
+          {
+            id: "shared",
+            label: "Shared entry point",
+            disposition: "needs_follow_up",
+          },
+        ],
+        deferred: [remaining],
+      };
+      await writeShared({
+        ...terminal,
+        complete: false,
+        coverage: { ...partial, deferred: [first, remaining] },
+      });
+      const resolution = { id: first.id, reason: "First review is complete." };
+      for (const resolvedDeferred of [[resolution], [resolution], undefined]) {
+        await writeShared({
+          ...terminal,
+          coverage: {
+            ...partial,
+            ...(resolvedDeferred ? { resolvedDeferred } : {}),
+          },
+        });
+        const saved =
+          layout === "worker"
+            ? (await readJson(sharedRoot, "result.json")).coverage
+            : await readJson(sharedRoot, "coverage.json");
+        assert.equal(saved.completeness, "partial");
+        assert.deepEqual(saved.deferred, [remaining]);
+        assert.deepEqual(saved.resolvedDeferred, [resolution]);
+        assert.equal(saved.surfaces[0].disposition, "needs_follow_up");
+      }
+    }
+
+    if (layout === "worker") {
+      const attemptsRoot = path.join(path.dirname(closureRoot), "attempts");
+      await mkdir(attemptsRoot);
+      await record({
+        ...terminal,
+        coverage: { ...terminal.coverage, resolvedDeferred: [updatedClosure] },
+      });
+      await rename(closureRoot, path.join(attemptsRoot, "attempt-01"));
+      await mkdir(closureRoot);
+      await record(reopeningDraft);
+      await assertReopened();
+      await record(terminal);
+      await assertReopened();
+      await rename(closureRoot, path.join(attemptsRoot, "attempt-02"));
+      await mkdir(closureRoot);
+      await record(terminal);
+      await assertReopened();
+    }
+  }
+
+  const unresolvedRoot = path.join(root, "resolved-deferred-retains-work");
+  await mkdir(unresolvedRoot);
+  const unresolvedContext = { ...context, root: unresolvedRoot };
+  const closeout = {
+    id: "review-closeout",
+    reason: "Final submission remains.",
+  };
+  const unresolved = {
+    id: "unavailable-library",
+    reason: "Dependency implementation is unavailable.",
+  };
+  const pendingCandidates = [
+    {
+      candidateId: "candidate-still-pending",
+      reason: "Source validation remains.",
+    },
+    {
+      id: "candidate-with-payload",
+      reason: "Source validation remains.",
+      candidate: { title: "Archive path needs review." },
+    },
+    {
+      id: "finding-with-payload",
+      reason: "The previous finding needs review.",
+      finding,
+    },
+  ];
+  const pendingCoverage = {
+    ...coverage,
+    completeness: "partial",
+    deferred: [closeout, unresolved, ...pendingCandidates],
+  };
+  await recordCodexSecurityScanDraft(unresolvedContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: pendingCoverage,
+  });
+  const closingDraft = {
+    ...input,
+    complete: true,
+    findings: [],
+    coverage: {
+      ...coverage,
+      resolvedDeferred: [
+        { id: closeout.id, reason: "Final review decisions are recorded." },
+      ],
+    },
+  };
+  await recordCodexSecurityScanDraft(unresolvedContext, closingDraft);
+  const retained = await readJson(unresolvedRoot, "coverage.json");
+  assert.equal(retained.completeness, "partial");
+  assert.deepEqual(
+    retained.deferred.map((row) => row.candidateId ?? row.id).sort(),
+    [
+      ...pendingCandidates.map((row) => row.candidateId ?? row.id),
+      unresolved.id,
+    ].sort(),
+  );
+  for (const [draft, message] of [
+    [{ ...closingDraft, complete: false }, /only on a terminal draft/],
+    [
+      {
+        ...closingDraft,
+        coverage: {
+          ...coverage,
+          resolvedDeferred: [{ id: "unknown-review", reason: "Done." }],
+        },
+      },
+      /no saved generic deferral/,
+    ],
+    ...pendingCandidates.map((row) => [
+      {
+        ...closingDraft,
+        coverage: {
+          ...coverage,
+          resolvedDeferred: [
+            { id: row.candidateId ?? row.id, reason: "Done." },
+          ],
+        },
+      },
+      /cannot close candidate/,
+    ]),
+    [
+      {
+        ...closingDraft,
+        coverage: {
+          ...pendingCoverage,
+          resolvedDeferred: closingDraft.coverage.resolvedDeferred,
+        },
+      },
+      /still active/,
+    ],
+  ]) {
+    const before = await readFile(
+      path.join(unresolvedRoot, "coverage.json"),
+      "utf8",
+    );
+    const checkpoints = await readdir(path.join(unresolvedRoot, "checkpoints"));
+    await assert.rejects(
+      recordCodexSecurityScanDraft(unresolvedContext, draft),
+      message,
+    );
+    assert.equal(
+      await readFile(path.join(unresolvedRoot, "coverage.json"), "utf8"),
+      before,
+    );
+    assert.deepEqual(
+      await readdir(path.join(unresolvedRoot, "checkpoints")),
+      checkpoints,
+    );
+  }
+  await assert.rejects(
+    recordCodexSecurityScanDraft(
+      { ...unresolvedContext, mode: "deep" },
+      closingDraft,
+    ),
+    /terminal Deep drafts cannot resolve child deferred work/,
+  );
+
   const interruptedParentRoot = path.join(
     root,
     "interrupted-checkpoint-parent",
@@ -3160,7 +4544,12 @@ try {
     ...coverage,
     completeness: "partial",
     surfaces: [
-      { id: "surface-web-ui", label: "Web UI", disposition: "reported" },
+      {
+        id: "surface-web-ui",
+        label: "Web UI",
+        disposition: "reported",
+        receiptRefs: ["artifacts/primary.json"],
+      },
       { id: "surface-web-ui", label: "Admin UI", disposition: "reported" },
       { id: "surface-web-ui-2", label: "Existing UI", disposition: "reported" },
       { label: "Uploads", disposition: "reported" },
@@ -3180,6 +4569,9 @@ try {
       },
     ],
   };
+  const originalDuplicateSurfaceCoverage = structuredClone(
+    duplicateSurfaceCoverage,
+  );
   await recordFreshScanDraft(context, {
     ...input,
     coverage: duplicateSurfaceCoverage,
@@ -3201,6 +4593,15 @@ try {
     normalizedDuplicateCoverage.deferred,
     duplicateSurfaceCoverage.deferred,
   );
+  assert.deepEqual(
+    normalizedDuplicateCoverage.surfaces.map((surface) => surface.label),
+    duplicateSurfaceCoverage.surfaces.map((surface) => surface.label),
+  );
+  assert.deepEqual(normalizedDuplicateCoverage.surfaces[0].receiptRefs, [
+    "artifacts/primary.json",
+  ]);
+  assert.deepEqual(normalizedDuplicateCoverage.surfaces[1].receiptRefs, []);
+  assert.deepEqual(duplicateSurfaceCoverage, originalDuplicateSurfaceCoverage);
 
   const partialCoverage = {
     completeness: "partial",
@@ -3348,6 +4749,19 @@ console.log("Codex Security scan draft artifact tests passed");
 
 async function readJson(rootDirectory, name) {
   return JSON.parse(await readFile(path.join(rootDirectory, name), "utf8"));
+}
+
+async function interruptDraftWrite(destination, action) {
+  const originalRename = fsPromises.rename;
+  fsPromises.rename = async (source, target) => {
+    if (target === destination) throw new Error("interrupted draft write");
+    return originalRename(source, target);
+  };
+  try {
+    await assert.rejects(action(), /interrupted draft write/);
+  } finally {
+    fsPromises.rename = originalRename;
+  }
 }
 
 function expectedReasonOnlyDeferredId(item) {

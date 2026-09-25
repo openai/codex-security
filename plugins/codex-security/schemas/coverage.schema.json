@@ -167,6 +167,28 @@
         }
       }
     },
+    "resolvedDeferred": {
+      "description": "Resolved generic deferred work, identified by its saved ID and completion reason.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
     "openQuestions": {
       "type": "array",
       "items": {
