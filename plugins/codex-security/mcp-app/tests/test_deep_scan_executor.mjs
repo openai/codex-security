@@ -1108,6 +1108,10 @@ async function testWorkerReasoningSummaries() {
     ['model_reasoning_summary = "none"\n', "none"],
     ['model_reasoning_summary = "auto"\n', "auto"],
     [
+      'model = "native-model"\nmodel_reasoning_summary = "concise"\n',
+      "concise",
+    ],
+    [
       'model_reasoning_summary = "none"\nprofile = "selected"\n[profiles.selected]\nmodel_reasoning_summary = "concise"\n',
       "concise",
     ],
@@ -1189,6 +1193,13 @@ async function testWorkerReasoningSummaries() {
             invocation.argv.includes('model_reasoning_effort="xhigh"'),
             true,
           );
+          if (configuration.includes('model = "native-model"')) {
+            assertFlagPair(invocation.argv, "--model", "fixture-model");
+            assert.equal(
+              invocation.argv.some((arg) => arg.startsWith("profile=")),
+              false,
+            );
+          }
           assert.equal(invocation.configPath, configPath);
           assert.equal(
             invocation.deepConfigPath,

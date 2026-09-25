@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, rename, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { stringify } from "smol-toml";
+import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -119,8 +119,9 @@ export function scanModelProvider(config: Readonly<JsonObject>): unknown {
 
 /** @internal Native Codex validates the auth table, including invalid selections. */
 export function hasCommandAuth(config: Readonly<JsonObject>): boolean {
-  const selected = scanModelProvider(config);
-  const providers = config["model_providers"];
+  const resolved = resolveCodexProfile(config as JsonObject);
+  const selected = resolved["model_provider"];
+  const providers = resolved["model_providers"];
   const provider =
     typeof selected === "string" && isObject(providers)
       ? providers[selected]
@@ -134,8 +135,12 @@ export function resolveCommandAuthConfig(
   home: string,
 ): JsonObject {
   const resolved = cloneJson(config);
-  const providers = resolved["model_providers"];
-  if (isObject(providers)) {
+  const selectedProfile = selectedScanProfile(resolved);
+  for (const providers of [
+    resolved["model_providers"],
+    selectedProfile?.["model_providers"],
+  ]) {
+    if (!isObject(providers)) continue;
     for (const provider of Object.values(providers)) {
       if (!isObject(provider) || !isObject(provider["auth"])) continue;
       const auth = provider["auth"];
@@ -204,6 +209,7 @@ export function resolveCodexProfile(config: JsonObject): JsonObject {
 
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
+  profileHome?: string,
 ): Promise<JsonObject> {
   if (config.codexOverrides !== undefined && !isObject(config.codexOverrides)) {
     throw new ConfigurationError("codexOverrides must be an object.");
@@ -213,6 +219,43 @@ export async function mergedCodexConfig(
   validateOverrides(overrides);
   validateNativeMultiAgentV2Overrides(overrides);
   normalizeLegacyWindowsSandboxOverride(overrides);
+  let nativeProfile: JsonObject = {};
+  const profileName = overrides["profile"];
+  if (profileName !== undefined && typeof profileName !== "string") {
+    throw new ConfigurationError("Codex profile must be a name.");
+  }
+  if (
+    profileHome !== undefined &&
+    typeof profileName === "string" &&
+    selectedScanProfile(overrides) === undefined
+  ) {
+    if (!/^[A-Za-z0-9_-]+$/u.test(profileName)) {
+      throw new ConfigurationError("Codex profile must be a plain name.");
+    }
+    try {
+      nativeProfile = parse(
+        await readFile(join(profileHome, `${profileName}.config.toml`), "utf8"),
+      ) as JsonObject;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new ConfigurationError(
+          `Could not read Codex profile ${profileName}.`,
+          {
+            cause: error,
+          },
+        );
+      }
+    }
+    if ("profile" in nativeProfile || "profiles" in nativeProfile) {
+      throw new ConfigurationError(
+        `Codex profile ${profileName} contains legacy profile settings.`,
+      );
+    }
+    validateOverrideKeys(nativeProfile);
+    validateOverrides(nativeProfile);
+    validateNativeMultiAgentV2Overrides(nativeProfile);
+    normalizeLegacyWindowsSandboxOverride(nativeProfile);
+  }
   const profiles = overrides["profiles"];
   if (isObject(profiles)) {
     for (const profile of Object.values(profiles)) {
@@ -222,11 +265,12 @@ export async function mergedCodexConfig(
     }
   }
   const defaults: JsonObject = cloneJson(DEFAULT_CODEX_CONFIG);
-  if (scanModelProvider(overrides) === "amazon-bedrock") {
+  const effectiveOverrides = deepMerge(nativeProfile, overrides);
+  if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
     defaults["model_reasoning_summary"] = "none";
   }
-  return deepMerge(defaults, overrides);
+  return deepMerge(defaults, effectiveOverrides);
 }
 
 function normalizeLegacyWindowsSandboxOverride(overrides: JsonObject): void {

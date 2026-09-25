@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 import { z } from "zod";
+import { configuredCodexHome } from "./auth.js";
 import {
   ownerRepository,
   collectOwnerEvidence,
@@ -93,7 +94,10 @@ export async function suggestOwnersInternal(
     options.signal,
   );
   const configured = scanModelConfiguration(
-    await mergedCodexConfig(options.config ?? {}),
+    await mergedCodexConfig(
+      options.config ?? {},
+      configuredCodexHome(options.environment ?? process.env),
+    ),
   );
   const model = options.model ?? configured.model;
   const reasoningEffort = (options.reasoningEffort ??

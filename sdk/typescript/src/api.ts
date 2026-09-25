@@ -46,7 +46,6 @@ import {
   shellEnvironmentReference,
 } from "./codex-prompt.js";
 import {
-  DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
   inlineToml,
   isExternalModelProvider,
@@ -758,7 +757,10 @@ export class CodexSecurity {
       );
       await knowledgeBase.cleanup();
     }
-    const configuration = await mergedCodexConfig(this.config);
+    const configuration = await mergedCodexConfig(
+      this.config,
+      configuredCodexHome(this.#dependencies.environment),
+    );
     const model = scanModelConfiguration(configuration);
     const modelProvider = scanModelProvider(configuration);
     validateScanCostLimit(options.maxCostUsd, model.model);
@@ -2661,7 +2663,7 @@ export class CodexSecurity {
     if (session.safetyIdentifier !== undefined) {
       environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
     }
-    const sdkCodexConfig = { ...(config ?? sessionConfig) };
+    const sdkCodexConfig = resolveCodexProfile(config ?? sessionConfig);
     // Projects and permissions already live in generated TOML files; the SDK
     // cannot safely encode their path and selector keys as dotted overrides.
     delete sdkCodexConfig["projects"];
@@ -2694,7 +2696,9 @@ export class CodexSecurity {
         ? {
             configOverrides: [
               ...(commandAuth
-                ? modelProviderConfigOverride(sessionConfig)
+                ? modelProviderConfigOverride(
+                    resolveCodexProfile(sessionConfig),
+                  )
                 : []),
               ...configOverrides,
             ],
@@ -2740,7 +2744,10 @@ export class CodexSecurity {
     };
     try {
       const requestedConfig = resolveCommandAuthConfig(
-        await mergedCodexConfig(this.config),
+        await mergedCodexConfig(
+          this.config,
+          configuredCodexHome(this.#dependencies.environment),
+        ),
         configuredCodexHome(this.#dependencies.environment),
       );
       const commandAuth = hasCommandAuth(requestedConfig);
@@ -3012,7 +3019,12 @@ export class CodexSecurity {
   ): Promise<
     LocalScanInputs & { policyPaths: string[]; gitMetadataPaths: string[] }
   > {
-    policyCodexConfig(await mergedCodexConfig(this.config));
+    policyCodexConfig(
+      await mergedCodexConfig(
+        this.config,
+        configuredCodexHome(this.#dependencies.environment),
+      ),
+    );
     const sources = await inspectSecurityPolicySources(target, signal);
     const protectedRoots = [
       ...new Set([
@@ -3127,10 +3139,12 @@ export class CodexSecurity {
         scanDir,
       );
       const revision = await repositoryRevision(local.repository, signal);
-      const { model } = scanModelConfiguration({
-        ...DEFAULT_CODEX_CONFIG,
-        ...this.config.codexOverrides,
-      });
+      const { model } = scanModelConfiguration(
+        await mergedCodexConfig(
+          this.config,
+          configuredCodexHome(this.#dependencies.environment),
+        ),
+      );
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
         pluginRoot,
@@ -3462,7 +3476,11 @@ export class CodexSecurity {
       );
       const ambientHome = configuredAmbientHome ?? nodeAmbientHome;
       const mergedConfig =
-        requestedConfig ?? (await mergedCodexConfig(this.config));
+        requestedConfig ??
+        (await mergedCodexConfig(
+          this.config,
+          configuredCodexHome(this.#dependencies.environment),
+        ));
       const codexConfig = await preserveCodexSecurityPluginRegistration(
         codexHome,
         sharedCredentialCodexConfig(mergedConfig, codexHome),
@@ -4499,6 +4517,7 @@ export function scanRuntimeCodexConfig(
       delete profile["default_permissions"];
       delete profile["permissions"];
       delete profile["sandbox_mode"];
+      delete profile["allow_login_shell"];
     }
   }
   const configuredPermissions = isRecord(hardened["permissions"])
@@ -4597,23 +4616,19 @@ function sharedCredentialCodexConfig(
   config: JsonObject,
   credentialHome: string,
 ): JsonObject {
+  const selected = resolveCodexProfile(config);
   const shared: JsonObject = {
     approval_policy: scanApprovalPolicy(config),
     features: { plugins: true },
   };
   for (const key of CODEX_AUTH_CONFIG_KEYS) {
-    if (Object.hasOwn(config, key)) shared[key] = structuredClone(config[key]!);
+    if (Object.hasOwn(selected, key))
+      shared[key] = structuredClone(selected[key]!);
   }
-  const modelProvider = scanModelProvider(config);
-  if (hasCommandAuth(config)) {
-    for (const key of ["profile", "profiles"]) {
-      if (Object.hasOwn(config, key))
-        shared[key] = structuredClone(config[key]!);
-    }
-  }
+  const modelProvider = scanModelProvider(selected);
   if (typeof modelProvider === "string" && modelProvider.length > 0) {
     shared["model_provider"] = modelProvider;
-    const providers = config["model_providers"];
+    const providers = selected["model_providers"];
     if (isRecord(providers) && Object.hasOwn(providers, modelProvider)) {
       shared["model_providers"] = {
         [modelProvider]: structuredClone(providers[modelProvider]!),
@@ -4694,13 +4709,17 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   if (safeString(reasoningSummary)) {
     result["model_reasoning_summary"] = reasoningSummary;
   }
-  const selectedProfile = safeProfileName(config["profile"])
-    ? config["profile"]
-    : undefined;
+  const profileName = config["profile"];
+  const profiles = config["profiles"];
+  const selectedProfile =
+    safeProfileName(profileName) &&
+    isRecord(profiles) &&
+    isRecord(profiles[profileName])
+      ? profileName
+      : undefined;
   if (selectedProfile !== undefined) {
     result["profile"] = selectedProfile;
   }
-  const profiles = config["profiles"];
   if (isRecord(profiles)) {
     const sanitized: JsonObject = {};
     for (const [name, profile] of Object.entries(profiles)) {

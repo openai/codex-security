@@ -767,6 +767,34 @@ describe("CodexSecurity preflight configuration", () => {
     ).resolves.toBeUndefined();
   });
 
+  test("uses resolved native file settings without a legacy profile selector", async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, "config-preflight.toml");
+    const snapshot = scanPreflightCodexConfig({
+      profile: "review",
+      model: "native-model",
+      model_reasoning_summary: "concise",
+      features: { goals: true },
+    });
+    expect(snapshot).toEqual({
+      model: "native-model",
+      model_reasoning_summary: "concise",
+      features: { goals: true },
+    });
+    await writeCodexConfig(path, snapshot);
+    const { status, payload } = runPreflight(path, "security_scan", [
+      "--cwd",
+      root,
+      "--runtime-check",
+      "delegation_available=true",
+      "--runtime-check",
+      "goal_tools_available=true",
+    ]);
+    expect(status).toBe(0);
+    expect(payload["status"]).toBe("ready");
+    expect(payload["config_profile"]).toBeNull();
+  });
+
   test("keeps every valid profile, project, and root marker", () => {
     const activeProject = "/workspace/active";
     const profiles = Object.fromEntries([
