@@ -606,6 +606,14 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   const headlessContext =
     `Review https://example.test/internal. ${"Assess the HTTP boundary. ".repeat(44_000)}`.trim();
   assert.ok(headlessContext.length > 1_000_000);
+  const scopedTarget = await mkdtemp(
+    path.join(tmpdir(), "codex-security-scoped-target-"),
+  );
+  for (const directory of ["service", "library"]) {
+    await mkdir(path.join(scopedTarget, directory), { recursive: true });
+    await writeFile(path.join(scopedTarget, directory, "code.py"), "pass\n");
+  }
+
   try {
     assertNoError(
       await headlessServer.requestAndWait(1, "initialize", {
@@ -671,6 +679,34 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       joined.result.structuredContent.handoffClaimToken,
       result.handoffClaimToken,
     );
+
+    const scoped = await headlessServer.requestAndWait(40, "tools/call", {
+      name: "start_codex_security_standard_scan",
+      arguments: {
+        targetPath: scopedTarget,
+        include_paths: ["service", "library"],
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    assertNoError(scoped);
+    assert.deepEqual(
+      scoped.result.structuredContent.scan.contract.scope.requiredIncludePaths,
+      ["library", "service"],
+    );
+    assert.deepEqual(
+      scoped.result.structuredContent.scan.executionThreadIds,
+      [],
+    );
+    const conflict = await headlessServer.requestAndWait(41, "tools/call", {
+      name: "start_codex_security_standard_scan",
+      arguments: {
+        targetPath: scopedTarget,
+        scope: ".",
+        include_paths: ["service"],
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    assert.equal(conflict.result.isError, true);
 
     const wrongThread = await headlessServer.requestAndWait(6, "tools/call", {
       name: "list_codex_security_review_items",
@@ -766,6 +802,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     await headlessServer.stop();
     await rm(headlessStateDir, { recursive: true, force: true });
     await rm(headlessScanRoot, { recursive: true, force: true });
+    await rm(scopedTarget, { recursive: true, force: true });
   }
 }
 

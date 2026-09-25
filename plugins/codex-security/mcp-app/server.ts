@@ -260,6 +260,14 @@ const startHeadlessStandardScanSchema = {
     .min(1)
     .max(4096)
     .describe("Resolved local target path."),
+  include_paths: z
+    .array(z.string().min(1).max(1024))
+    .min(1)
+    .max(32)
+    .optional()
+    .describe(
+      "Repository-relative directories to scan. Mutually exclusive with scope. Omit both for the whole repository.",
+    ),
   scope: z
     .string()
     .trim()
@@ -718,7 +726,13 @@ export function createCodexSecurityServer(): McpServer {
       },
       _meta: modelActionMeta,
     },
-    async ({ targetPath, scope, targetSummary, userContext }, extra) => {
+    async (
+      { targetPath, scope, include_paths, targetSummary, userContext },
+      extra,
+    ) => {
+      if (scope !== undefined && include_paths !== undefined) {
+        return toolErrorResult("Provide include_paths or scope, not both.");
+      }
       const threadId = threadIdFromExtra(extra);
       if (!threadId) {
         return toolErrorResult(
@@ -726,7 +740,7 @@ export function createCodexSecurityServer(): McpServer {
         );
       }
       const started = await startHeadlessStandardScan(
-        { targetPath, scope, targetSummary, userContext },
+        { targetPath, scope, include_paths, targetSummary, userContext },
         threadId,
         codexModelSettingsFromExtra(extra),
       );
@@ -2219,6 +2233,7 @@ async function startHeadlessStandardScan(
   input: {
     targetPath: string;
     scope?: string;
+    include_paths?: string[];
     targetSummary?: string;
     userContext?: string;
   },
@@ -2232,8 +2247,9 @@ async function startHeadlessStandardScan(
       threadId,
       "--target-path",
       input.targetPath,
-      "--scope",
-      input.scope ?? ".",
+      ...(input.include_paths !== undefined
+        ? ["--include-paths-json", JSON.stringify(input.include_paths)]
+        : ["--scope", input.scope ?? "."]),
       ...optionalArg("--model", modelSettings.model),
       ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
       ...optionalArg("--target-summary", input.targetSummary),
