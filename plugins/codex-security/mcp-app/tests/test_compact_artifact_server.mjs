@@ -26,7 +26,7 @@ try {
   await testParentToolList(runtimeBundle);
   await testClaimedParentArtifactOperations(runtimeBundle, "source");
   await testPromptDrivenPrivateRecipe(runtimeBundle, "source");
-  await testCompletedNativeDeepRejoin(runtimeBundle, "source");
+  await testNativeDeepTerminalResults(runtimeBundle, "source");
   await testSemanticScanDraftCompletion(runtimeBundle, "source");
   await testCompactDiffScanCompletion(runtimeBundle, "source");
 
@@ -34,7 +34,7 @@ try {
   await testParentToolList(shippedRuntime);
   await testClaimedParentArtifactOperations(shippedRuntime, "shipped");
   await testPromptDrivenPrivateRecipe(shippedRuntime, "shipped");
-  await testCompletedNativeDeepRejoin(shippedRuntime, "shipped");
+  await testNativeDeepTerminalResults(shippedRuntime, "shipped");
   await testSemanticScanDraftCompletion(shippedRuntime, "shipped");
   await testCompactDiffScanCompletion(shippedRuntime, "shipped");
 } finally {
@@ -1036,7 +1036,7 @@ async function testPromptDrivenPrivateRecipe(bundle, runtimeLabel) {
   }
 }
 
-async function testCompletedNativeDeepRejoin(bundle, runtimeLabel) {
+async function testNativeDeepTerminalResults(bundle, runtimeLabel) {
   const fixtureRoot = path.join(temporaryRoot, `completed-native-${runtimeLabel}`);
   const repoRoot = path.join(fixtureRoot, "repository");
   const invocationPath = path.join(fixtureRoot, "unexpected-codex-invocation");
@@ -1100,8 +1100,17 @@ process.exit(1);
   const rejoin = () => call("start_codex_security_deep_scan", { scanId, handoffClaimToken });
   const expectedResult = {
     scanId,
+    scanDir,
     manifestPath: path.join(scanDir, "scan-manifest.json"),
     reportPath: path.join(scanDir, "report.md")
+  };
+  const assertCompleted = (response, label) => {
+    const result = requireSuccessfulTool(response, label);
+    const { instructions } = result;
+    assert.match(instructions, /is complete/);
+    assert.match(instructions, /Do not call complete_codex_security_scan or start another scan/);
+    assert.deepEqual(result, { ...expectedResult, instructions });
+    assert.deepEqual(response.content, [{ type: "text", text: instructions }]);
   };
 
   try {
@@ -1123,16 +1132,10 @@ process.exit(1);
     const originalDraft = await snapshotScanDraft(scanDir);
 
     for (let repeat = 0; repeat < 2; repeat += 1) {
-      assert.deepEqual(
-        requireSuccessfulTool(await rejoin(), `${runtimeLabel}: rejoin intact completed native parent`),
-        expectedResult
-      );
+      assertCompleted(await rejoin(), `${runtimeLabel}: rejoin intact completed native parent`);
     }
     await rm(expectedResult.reportPath);
-    assert.deepEqual(
-      requireSuccessfulTool(await rejoin(), `${runtimeLabel}: regenerate missing report before native success`),
-      expectedResult
-    );
+    assertCompleted(await rejoin(), `${runtimeLabel}: regenerate missing report before native success`);
     assert.ok((await readFile(expectedResult.reportPath, "utf8")).length > 0);
     assert.deepEqual(await snapshotScanDraft(scanDir), originalDraft);
 
@@ -1157,6 +1160,35 @@ process.exit(1);
     assert.deepEqual(await snapshotScanDraft(scanDir), originalDraft);
     await assert.rejects(readFile(invocationPath), { code: "ENOENT" });
     assert.equal(runWorkbenchFixture(runtimeLabel, environment, ["list-scans"]).scans.length, 1);
+
+    const canceledRepo = path.join(fixtureRoot, "canceled-repository");
+    await mkdir(canceledRepo);
+    await writeFile(path.join(canceledRepo, "fixture.py"), "print('fixture')\n");
+    const { scan: canceledScan } = runWorkbenchFixture(runtimeLabel, environment, [
+      "begin-deep-scan", "--target-path", canceledRepo, "--scope", ".", "--thread-id", ownerThread
+    ]);
+    runWorkbenchFixture(runtimeLabel, environment, [
+      "cancel-scan", "--scan-id", canceledScan.scanId, "--thread-id", ownerThread, "--defer-publication"
+    ]);
+    const canceledResponse = await call("start_codex_security_deep_scan", {
+      scanId: canceledScan.scanId,
+      handoffClaimToken: canceledScan.handoffClaimToken
+    });
+    const canceledResult = requireSuccessfulTool(canceledResponse, `${runtimeLabel}: rejoin canceled scan`);
+    const { instructions } = canceledResult;
+    assert.match(instructions, /was canceled/);
+    assert.match(instructions, /Do not start additional scan work or claim complete coverage/);
+    assert.deepEqual(canceledResult, {
+      status: "canceled",
+      scanId: canceledScan.scanId,
+      scanDir: canceledScan.scanDir,
+      instructions
+    });
+    assert.deepEqual(canceledResponse.content, [{ type: "text", text: instructions }]);
+    assert.equal(runWorkbenchFixture(runtimeLabel, environment, [
+      "get-scan", "--scan-id", canceledScan.scanId
+    ]).scan.progress.status, "canceled");
+    await assert.rejects(readFile(invocationPath), { code: "ENOENT" });
   } finally {
     await client.close();
   }

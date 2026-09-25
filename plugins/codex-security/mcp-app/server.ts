@@ -688,7 +688,7 @@ export function createCodexSecurityServer(): McpServer {
 
   server.registerTool("start_codex_security_deep_scan", {
     title: "Start or Join Codex Security Deep Scan",
-    description: "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The call blocks until the aggregate is complete, fails, or is canceled. On success, manifestPath identifies the sealed parent scan-manifest.json and report.md is ready.",
+    description: "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The call blocks until the aggregate is complete, fails, or is canceled. On success, use the returned scanId and scanDir; manifestPath identifies the sealed parent scan-manifest.json and reportPath identifies the generated report.md. Follow the returned instructions.",
     inputSchema: startDeepScanSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: modelActionMeta
@@ -1556,15 +1556,15 @@ async function nativeScanCompletedResult(scan: ScanResults) {
   } catch (error) {
     return toolErrorResult(completionFailureMessage(error));
   }
+  const instructions = `Deep Scan ${scan.scanId} is complete. The ordinary scans have been merged, and the parent artifacts are sealed under ${scan.scanDir}. The generated report.md is ready. Return the report and requested results. Do not call complete_codex_security_scan or start another scan.`;
   return {
-    content: [{
-      type: "text" as const,
-      text: `Deep Scan ${scan.scanId} is complete. The ordinary scans have been merged, and the parent artifacts are sealed under ${scan.scanDir}. The generated report.md is ready. Return the report and requested results. Do not call complete_codex_security_scan or start another scan.`
-    }],
+    content: [{ type: "text" as const, text: instructions }],
     structuredContent: {
       scanId: scan.scanId,
+      scanDir: scan.scanDir,
       manifestPath: join(scan.scanDir, "scan-manifest.json"),
-      reportPath: join(scan.scanDir, "report.md")
+      reportPath: join(scan.scanDir, "report.md"),
+      instructions
     }
   };
 }
@@ -1573,9 +1573,15 @@ async function nativeScanTerminalResult(scan: ScanResults) {
   const status = scan.progress?.status;
   if (status === "complete") return nativeScanCompletedResult(scan);
   if (status === "canceled") {
+    const instructions = `Deep Scan ${scan.scanId} was canceled. Saved findings and pending candidates remain available in the scan's retained results. Do not start additional scan work or claim complete coverage.`;
     return {
-      content: [{ type: "text" as const, text: `Deep Scan ${scan.scanId} was canceled. Saved findings and pending candidates remain available in the scan's retained results. Do not start additional scan work or claim complete coverage.` }],
-      structuredContent: { status: "canceled", scanId: scan.scanId }
+      content: [{ type: "text" as const, text: instructions }],
+      structuredContent: {
+        status: "canceled",
+        scanId: scan.scanId,
+        scanDir: scan.scanDir,
+        instructions
+      }
     };
   }
   if (status === "failed") {
