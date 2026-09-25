@@ -72,7 +72,7 @@
   },
   "dependencies": {
     "@inquirer/prompts": "8.7.2",
-    "@linear/sdk": "95.0.0",
+    "@linear/sdk": "95.1.0",
     "@octokit/core": "7.0.8",
     "@openai/codex": "0.156.1",
     "@openai/codex-sdk": "0.156.1",
@@ -107,7 +107,7 @@
     "json-schema-to-typescript": "16.0.0",
     "minimatch": "10.2.6",
     "postcss": "8.5.28",
-    "prettier": "3.9.7",
+    "prettier": "3.9.8",
     "react-dom": "19.3.0",
     "saxes": "6.0.0",
     "tailwindcss": "4.3.3",

@@ -5,6 +5,7 @@
 
 - return the Deep Scan ID in structured output ([#1026](https://github.com/openai/codex-security/pull/1026))
 - keep Deep Scan guidance in structured output ([#1029](https://github.com/openai/codex-security/pull/1029))
+- bump the third-party group across 2 directories with 4 updates ([#1032](https://github.com/openai/codex-security/pull/1032))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
