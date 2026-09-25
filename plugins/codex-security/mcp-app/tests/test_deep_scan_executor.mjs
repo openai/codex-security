@@ -236,6 +236,7 @@ function testWorkerErrorClassificationPreservesExplicitFailures() {
     "This content was flagged for potentially high-risk cyber activity.",
     "This request has been flagged for possible cybersecurity risk.",
     "This request has been flagged for potentially high-risk cyber activity.",
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
   ];
   for (const message of refusalMessages) {
     const original = new Error(message);
@@ -1792,6 +1793,7 @@ async function testPolicyFailuresRemainWorkerErrors() {
     "HIGH_RISK_CYBER_ACTIVITY_ERROR",
     "UPSTREAM_CYBERSECURITY_RISK_ERROR",
     "UPSTREAM_HIGH_RISK_CYBER_ACTIVITY_ERROR",
+    "CYBERSECURITY_RISK_GUIDANCE_ERROR",
   ]) {
     const fixture = await fakeCodexFixture();
     const previousPath = process.env.CODEX_CLI_PATH;
@@ -2186,6 +2188,7 @@ async function fakeCodexFixture(
       "if (stdin.includes('UPSTREAM_HIGH_RISK_CYBER_ACTIVITY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This request has been flagged for potentially high-risk cyber activity.' } })); process.exit(0); }",
       "if (stdin.includes('CYBERSECURITY_RISK_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This content was flagged for possible cybersecurity risk.' } })); process.exit(0); }",
       "if (stdin.includes('HIGH_RISK_CYBER_ACTIVITY_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This content was flagged for potentially high-risk cyber activity.' } })); process.exit(0); }",
+      "if (stdin.includes('CYBERSECURITY_RISK_GUIDANCE_ERROR')) { console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber' } })); process.exit(0); }",
       "if (stdin.includes('RETRYABLE_STREAM_ERROR')) console.log(JSON.stringify({ type: 'error', message: 'Reconnecting... 2/5 (stream disconnected before completion: websocket closed by server before response.completed)' }));",
       "if (stdin.includes('INCOMPLETE_STREAM')) { console.log(JSON.stringify({ type: 'error', message: 'fixture stream interrupted' })); process.exit(0); }",
       "if (stdin.includes('BWRAP_NAMESPACE_FAILURE')) console.log(JSON.stringify({ type: 'item.completed', item: { id: 'command-1', type: 'command_execution', command: 'super-secret-command', aggregated_output: 'private source text\\nbwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_user_namespaces exceeded (ENOSPC)', exit_code: 1, status: 'failed' } }));",
