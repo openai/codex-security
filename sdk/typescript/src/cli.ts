@@ -991,6 +991,7 @@ interface ScanArguments extends ResolvedScanSettings {
   pluginPath?: string;
   pythonPath?: string;
   patch?: boolean;
+  validate?: boolean;
   patchSeverity?: FailureSeverity;
   createPr?: boolean;
   showCost?: boolean;
@@ -1092,6 +1093,7 @@ interface SkillRunOptions {
   readonly auth?: ScanAuthMode;
   safetyIdentifier?: string;
   directory?: string;
+  validationRepository?: string;
   findings?: readonly Finding[];
   findingInstructions?: Readonly<Record<string, string>>;
   validationPrompt?: string;
@@ -3563,6 +3565,10 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Patch and verify confirmed findings after the scan."),
+          validate: z
+            .boolean()
+            .default(false)
+            .describe("Run standalone finding validation after the scan."),
           patchSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
@@ -3601,10 +3607,16 @@ export async function main(
         .refine((options) => !options.patch || !options.dryRun, {
           message: "--patch cannot be combined with --dry-run.",
         })
+        .refine((options) => !options.validate || !options.dryRun, {
+          message: "--validate cannot be combined with --dry-run.",
+        })
         .refine(
-          (options) => !options.mock || (!options.dryRun && !options.patch),
+          (options) =>
+            !options.mock ||
+            (!options.dryRun && !options.patch && !options.validate),
           {
-            message: "--mock cannot be combined with --dry-run or --patch.",
+            message:
+              "--mock cannot be combined with --dry-run, --patch, or --validate.",
           },
         ),
       examples: [
@@ -3690,6 +3702,11 @@ export async function main(
               "--archive-existing requires --output-dir.",
             );
           }
+          if (options.validate && settings.maxCostUsd !== undefined) {
+            throw new CodexSecurityError(
+              "--validate cannot be combined with a scan cost limit because standalone validation is not cost-tracked.",
+            );
+          }
           outcome = await runScan(
             {
               ...settings,
@@ -3703,6 +3720,7 @@ export async function main(
               pluginPath: options.pluginPath,
               pythonPath: options.python,
               patch: options.patch,
+              validate: options.validate,
               patchSeverity: options.patchSeverity,
               createPr: options.createPr,
               showCost: options.showCost,
@@ -7470,6 +7488,7 @@ async function runSkill(
   const plugin = await bundledPluginRoot();
   const verify = skill === "verify-fix";
   const assess = skill === "assess-patch-risk";
+  const patch = skill === "fix-finding";
   const inputLabel = skill === "validation" || verify ? "Findings" : "Issues";
   let prompt = [
     ...(verify
@@ -7489,10 +7508,15 @@ async function runSkill(
         ]
       : [
           `Use the bundled $codex-security:${skill} skill at ${JSON.stringify(join(plugin, "skills", skill, "SKILL.md"))}.`,
-          ...(options.findings === undefined
+          ...(patch && options.findings !== undefined
+            ? [
+                'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"proof that the original issue is fixed and legitimate behavior still works","reason":"required for blocked or failed outcomes"}. Use "verified" only after the original issue no longer reproduces and relevant checks pass. Preserve unrelated local changes.',
+              ]
+            : []),
+          ...(options.validationRepository === undefined
             ? []
             : [
-                'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"proof that the original issue is fixed and legitimate behavior still works","reason":"required for blocked or failed outcomes"}. Use "verified" only after the original issue no longer reproduces and relevant checks pass. Preserve unrelated local changes.',
+                `Validate only these findings against repository ${JSON.stringify(options.validationRepository)}. This is a standalone validation of a completed scan; do not run or register another scan. Use ${JSON.stringify(directory)} for supporting reports, receipts, PoCs, builds, and logs. The CLI saves your final response as validation.md; do not create that file. Leave the repository unchanged.`,
               ]),
         ]),
     ...(options.findingInstructions === undefined
@@ -7529,7 +7553,6 @@ async function runSkill(
       "Start the marked report at heading level 3. Return the validated JSON object after the end marker. Use only repository-relative source paths in the report; do not include the local repository or artifact path.",
     ].join("\n");
   }
-  const patch = skill === "fix-finding";
   const appServer = patch || verify || assess;
   const threadSource = patch
     ? CODEX_SECURITY_THREAD_SOURCES.remediation
@@ -8269,7 +8292,7 @@ async function executeScan(
     DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
   let providerOptions: SkillRunOptions = { provider: "openai" };
   let auth: ScanAuthMode | undefined = arguments_.auth;
-  let patchAnalyticsOverride: string | undefined;
+  let skillAnalyticsOverride: string | undefined;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
@@ -8302,7 +8325,7 @@ async function executeScan(
       isJsonObject(analytics) &&
       analytics["enabled"] !== undefined
     ) {
-      patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
+      skillAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
     }
     auth =
       !arguments_.dryRun && !arguments_.mock && interactive
@@ -8832,6 +8855,89 @@ async function executeScan(
     showCost,
     deepScanStop,
   );
+  let validationExitCode = 0;
+  if (arguments_.validate) {
+    if (targetWarnings.length > 0) {
+      scanData = {
+        ...scanData,
+        validation: {
+          status: "skipped",
+          reason: "The scan target changed during execution.",
+        },
+      };
+    } else if (findings.length === 0) {
+      scanData = {
+        ...scanData,
+        validation: { status: "complete", findings: 0 },
+      };
+    } else {
+      try {
+        progress?.stage(`Validating ${findings.length} scan findings`);
+      } catch {}
+      let report = "";
+      const validationOutput: Writable = {
+        write(value: string | Uint8Array): boolean {
+          report += value.toString();
+          return true;
+        },
+      };
+      try {
+        const status = await runSkill(
+          "validation",
+          [],
+          [
+            `model=${JSON.stringify(effectiveModel)}`,
+            `model_reasoning_effort=${JSON.stringify(effectiveReasoningEffort)}`,
+            ...(skillAnalyticsOverride === undefined
+              ? []
+              : [skillAnalyticsOverride]),
+          ],
+          undefined,
+          validationOutput,
+          errorOutput,
+          dependencies,
+          {
+            ...providerOptions,
+            safetyIdentifier: arguments_.safetyIdentifier,
+            auth,
+            directory: result.scanDir,
+            validationRepository: repository,
+            findings,
+            environment: dependencies.environment,
+          },
+        );
+        if (status !== 0) {
+          validationExitCode = status === 130 || status === 143 ? status : 2;
+          scanData = {
+            ...scanData,
+            validation: { status: "failed", exitCode: validationExitCode },
+          };
+        } else {
+          const reportPath = join(result.scanDir, "validation.md");
+          await writeFile(reportPath, report, { flag: "wx", mode: 0o600 });
+          scanData = {
+            ...scanData,
+            validation: {
+              status: "complete",
+              findings: findings.length,
+              reportPath,
+            },
+          };
+          try {
+            progress?.stage(`Finding validation saved to ${reportPath}`);
+          } catch {}
+        }
+      } catch (error) {
+        validationExitCode = 2;
+        const message = safeErrorMessage(error);
+        errorOutput.write(`codex-security: Validation failed: ${message}\n`);
+        scanData = {
+          ...scanData,
+          validation: { status: "failed", message },
+        };
+      }
+    }
+  }
   const completedScan = (exitCode: number): ScanOutcome => {
     diagnostic("scan.completed", {
       coverage: result.coverage.completeness,
@@ -8847,6 +8953,9 @@ async function executeScan(
     progress?.stopTimer();
     return { exitCode, data: scanData };
   };
+  if (validationExitCode === 130 || validationExitCode === 143) {
+    return completedScan(validationExitCode);
+  }
   if (targetWarnings.length > 0) {
     errorOutput.write(
       "codex-security: Scan target changed during execution; results do not represent the current checkout.\n",
@@ -8917,9 +9026,9 @@ async function executeScan(
         selected,
         [
           `model=${JSON.stringify(effectiveModel)}`,
-          ...(patchAnalyticsOverride === undefined
+          ...(skillAnalyticsOverride === undefined
             ? []
-            : [patchAnalyticsOverride]),
+            : [skillAnalyticsOverride]),
         ],
         effectiveReasoningEffort as ScanReasoningEffort,
         errorOutput,
@@ -8968,7 +9077,11 @@ async function executeScan(
             meetsSeverity(finding, threshold) &&
             !resolved.has(finding.occurrenceId),
         ).length;
-  const exitCode = Math.max(blockingCount > 0 ? 1 : 0, patchExitCode(patches));
+  const exitCode = Math.max(
+    blockingCount > 0 ? 1 : 0,
+    patchExitCode(patches),
+    validationExitCode,
+  );
   return completedScan(exitCode);
 }
 

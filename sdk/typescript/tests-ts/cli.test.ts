@@ -5,6 +5,7 @@ import {
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,6 +31,7 @@ import {
   PluginPythonUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
+  ScanResult,
   VERSION,
 } from "../src/index.js";
 import {
@@ -59,6 +61,21 @@ import { runCommand } from "./support/shell.js";
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
+
+function scanResultAt(
+  scanDir: string,
+  levels: Parameters<typeof fakeResult>[0],
+): ScanResult {
+  const base = fakeResult(levels);
+  return new ScanResult({
+    manifest: base.manifest,
+    findings: base.findings,
+    coverage: base.coverage,
+    scanDir,
+    threadId: base.threadId,
+    turnResult: base.turnResult,
+  });
+}
 
 async function multiscanInventory(root: string): Promise<void> {
   const repository = join(root, "repository");
@@ -112,6 +129,151 @@ describe("CLI", () => {
     ).toBe(0);
     expect(options).toMatchObject({ safetyIdentifier: "synthetic-user" });
     expect(stderr.text()).not.toContain("synthetic-user");
+  });
+
+  test("runs standalone validation on scan findings and saves its report", async () => {
+    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+    try {
+      const result = scanResultAt(scanDir, ["high"]);
+      result.findings.findings[0]!.title = "Example finding";
+      const stdout = capture();
+      let validationPrompt = "";
+      expect(
+        await main(
+          [
+            "scan",
+            ".",
+            "--validate",
+            "--safety-identifier",
+            "synthetic-user",
+            "--json",
+          ],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            result,
+            onCodex: (args, command, _environment, input) => {
+              expect(command?.command).toBe("validate");
+              expect(command?.directory).toBe(scanDir);
+              expect(args).toContain('safety_identifier="synthetic-user"');
+              validationPrompt = input ?? "";
+              command?.stdout.write("# Independent validation\n");
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(validationPrompt).toContain("Example finding");
+      expect(validationPrompt).toContain("Leave the repository unchanged.");
+      expect(validationPrompt).not.toContain('"patches" array');
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        validation: {
+          status: "complete",
+          findings: 1,
+          reportPath: join(scanDir, "validation.md"),
+        },
+      });
+      expect(await readFile(join(scanDir, "validation.md"), "utf8")).toBe(
+        "# Independent validation\n",
+      );
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not overwrite a validation path created during the scan", async () => {
+    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+    const outsideDir = await mkdtemp(
+      join(tmpdir(), "scan-validation-outside-"),
+    );
+    const reportPath = join(scanDir, "validation.md");
+    const outsidePath = join(outsideDir, "outside.txt");
+    try {
+      await writeFile(outsidePath, "keep");
+      if (process.platform === "win32") {
+        await writeFile(reportPath, "keep");
+      } else {
+        await symlink(outsidePath, reportPath);
+      }
+      const stdout = capture();
+      expect(
+        await main(
+          ["scan", ".", "--validate", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            result: scanResultAt(scanDir, ["high"]),
+            onCodex: (_args, command) => {
+              command?.stdout.write("# Validation report\n");
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        validation: { status: "failed" },
+      });
+      expect(await readFile(reportPath, "utf8")).toBe("keep");
+      expect(await readFile(outsidePath, "utf8")).toBe("keep");
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  test("retains a completed scan when follow-up validation fails", async () => {
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", ".", "--validate", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          result: fakeResult(["high"]),
+          onCodex: () => 1,
+        }),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      manifest: { scan: { status: "completed" } },
+      validation: { status: "failed", exitCode: 2 },
+    });
+  });
+
+  test("does not start patching after validation is interrupted", async () => {
+    let commands = 0;
+    expect(
+      await main(
+        ["scan", ".", "--validate", "--patch", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          result: fakeResult(["high"]),
+          onCodex: () => {
+            commands += 1;
+            return 130;
+          },
+        }),
+      ),
+    ).toBe(130);
+    expect(commands).toBe(1);
+  });
+
+  test("rejects a cost limit the standalone validator cannot enforce", async () => {
+    let started = false;
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", ".", "--validate", "--max-cost", "1", "--json"],
+        capture().stream,
+        stderr.stream,
+        dependencies({ onRun: () => (started = true) }),
+      ),
+    ).toBe(2);
+    expect(started).toBe(false);
+    expect(stderr.text()).toContain(
+      "standalone validation is not cost-tracked",
+    );
   });
 
   test("exposes Incur help, schemas, manifests, and completions", async () => {
@@ -169,6 +331,7 @@ describe("CLI", () => {
           },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
           patch: { type: "boolean" },
+          validate: { type: "boolean", default: false },
           patchSeverity: { enum: ["critical", "high", "medium", "low"] },
           createPr: { type: "boolean" },
           headless: { type: "boolean" },
