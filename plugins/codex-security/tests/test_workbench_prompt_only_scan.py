@@ -325,3 +325,37 @@ def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
     assert started["scan"]["diffTarget"]["baseRevision"] == head
     assert started["scan"]["diffTarget"]["headRevision"] == head
     assert started["workspace"]["diffTarget"] == started["scan"]["diffTarget"]
+
+
+def test_headless_directory_set_controls_identity_and_coverage(tmp_path: Path) -> None:
+    import json
+
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    for directory in ("service", "library", "dependency"):
+        (target / directory).mkdir()
+        (target / directory / "code.py").write_text("pass\n")
+    state = tmp_path / "state"
+
+    def start(paths: list[str]) -> dict[str, object]:
+        return run_workbench(
+            state,
+            "start-headless-standard-scan",
+            "--thread-id",
+            "directory-scan",
+            "--target-path",
+            str(target),
+            "--include-paths-json",
+            json.dumps(paths),
+            "--scan-root",
+            str(tmp_path / "scans"),
+        )
+
+    first = start(["service", "library"])
+    assert first["scan"]["executionThreadIds"] == []
+    joined = start(["library", "service", "service"])
+    other = start(["dependency", "library"])
+    assert joined["startDisposition"] == "joined"
+    assert first["scan"]["scanId"] == joined["scan"]["scanId"]
+    assert other["scan"]["scanId"] != first["scan"]["scanId"]
+    assert first["scan"]["contract"]["scope"]["requiredIncludePaths"] == ["library", "service"]

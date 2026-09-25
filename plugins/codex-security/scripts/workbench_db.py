@@ -111,6 +111,7 @@ from workbench_schema import (
 from workbench_schema import (
     sql_statements as sql_statements,
 )
+from workbench_scope import require_include_paths, require_scope
 from workbench_source_excerpt import finding_source_excerpt, safe_source_path
 from workbench_target import (
     clean_worktree_content_digest,
@@ -438,6 +439,8 @@ def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
 
 
 def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
+    if "include_paths_json" in scan.keys() and scan["include_paths_json"] is not None:
+        return json.loads(scan["include_paths_json"], parse_constant=reject_non_finite_json)
     if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
         recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
         target = recipe["target"]
@@ -487,7 +490,7 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
         if mode is None:
             raise SystemExit("This migrated diff scan does not have a validated change set.")
         return mode
-    if scan["scope"] != "." or (
+    if requested_scan_paths(scan) != ["."] or (
         "recipe_json" in scan.keys()
         and scan["recipe_json"] is not None
         and json.loads(scan["recipe_json"])["target"]["kind"] == "paths"
@@ -609,28 +612,6 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
             include_path, requested_scope
         ):
             raise SystemExit("scan-manifest.json scope must stay inside the workbench scan scope.")
-
-
-def require_scope(scope: str, mode: str, target: Path) -> str:
-    value = scope.strip() or "."
-    requested_scope = Path(value)
-    if "\\" in value and (os.name != "nt" or not requested_scope.is_absolute()):
-        raise SystemExit("Scan scope must use repository-relative POSIX paths.")
-    if ".." in requested_scope.parts:
-        raise SystemExit("Scan scope must stay inside the scanned target.")
-    try:
-        resolved_scope = (
-            requested_scope if requested_scope.is_absolute() else target / requested_scope
-        ).resolve()
-        relative_scope = resolved_scope.relative_to(target)
-    except (RuntimeError, ValueError) as exc:
-        raise SystemExit("Scan scope must stay inside the scanned target.") from exc
-    normalized = relative_scope.as_posix() or "."
-    if mode == "deep" and normalized != ".":
-        raise SystemExit("Deep Scan is repository-wide and cannot use a scoped path.")
-    if not resolved_scope.is_dir():
-        raise SystemExit("Scan scope must reference an existing directory inside the target.")
-    return normalized
 
 
 def require_workspace(connection: sqlite3.Connection, workspace_id: str) -> sqlite3.Row:
@@ -938,7 +919,7 @@ def _start_prompt_driven_scan(
         raise SystemExit("thread-id is required.")
     inspected = inspect_setup_values(
         args.target_path,
-        args.scope,
+        args.scope or ".",
         args.mode,
         args.diff_target_kind,
         args.diff_base_revision,
@@ -947,14 +928,22 @@ def _start_prompt_driven_scan(
     )
     target = Path(inspected["target"]["targetPath"])
     target_path = str(target)
-    scope = inspected["scope"]
+    include_paths_json = getattr(args, "include_paths_json", None)
+    if include_paths_json is not None and args.scope is not None:
+        raise SystemExit("Provide include_paths or scope, not both.")
+    include_paths = (
+        require_include_paths(include_paths_json, target)
+        if include_paths_json is not None
+        else [inspected["scope"]]
+    )
+    scope = include_paths[0] if len(include_paths) == 1 else "."
     diff_target = inspected["diffTarget"]
     user_context = user_context_argument(args)
     target_summary = optional_text(args.target_summary, maximum=2400)
     if diff_target is not None and not target_summary:
         target_summary = diff_target_summary(diff_target)
-    scope_file_count = directory_snapshot_regular_file_count(
-        target if scope == "." else target / scope
+    scope_file_count = sum(
+        directory_snapshot_regular_file_count(target / path) for path in include_paths
     )
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
@@ -994,6 +983,7 @@ def _start_prompt_driven_scan(
                 AND scans.target_snapshot_digest IS ? AND scans.target_device = ?
                 AND scans.target_inode = ? AND scans.status = 'running'
                 AND scans.handoff_status = 'delivered'
+                AND COALESCE(scans.include_paths_json, json_extract(scans.recipe_json, '$.target.paths'), json_array(scans.scope)) = json(?)
                 AND (
                     (? = 0 AND scans.handoff_claim_token IS NULL)
                     OR (
@@ -1012,6 +1002,7 @@ def _start_prompt_driven_scan(
                 target_summary,
                 *diff_identity,
                 *target_identity,
+                json.dumps(include_paths),
                 int(headless_standard),
                 int(headless_standard),
                 thread_id,
@@ -1068,6 +1059,11 @@ def _start_prompt_driven_scan(
             model=args.model,
             reasoning_effort=args.reasoning_effort,
         )
+        if include_paths_json is not None:
+            connection.execute(
+                "UPDATE scans SET include_paths_json = ? WHERE id = ?",
+                (json.dumps(include_paths, separators=(",", ":")), scan_id),
+            )
         if headless_standard:
             claimed = connection.execute(
                 """
