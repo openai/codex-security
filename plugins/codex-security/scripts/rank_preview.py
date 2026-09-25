@@ -56,6 +56,7 @@ TEXT_CODE_EXTENSIONS = {
     ".rs",
     ".scala",
     ".sh",
+    ".sol",
     ".sql",
     ".swift",
     ".tf",

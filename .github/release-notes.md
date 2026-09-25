@@ -9,6 +9,7 @@
 - bump ruff from 0.16.7 to 0.16.8 in /plugins/codex-security ([#1022](https://github.com/openai/codex-security/pull/1022))
 - bump the codex group across 3 directories with 2 updates ([#1033](https://github.com/openai/codex-security/pull/1033))
 - patch vulnerable development dependencies ([#1034](https://github.com/openai/codex-security/pull/1034))
+- include Solidity sources in scan inventories ([#1021](https://github.com/openai/codex-security/pull/1021))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

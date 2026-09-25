@@ -460,6 +460,29 @@ def test_diff_inventory_includes_changed_objective_c(tmp_path: Path, mode: str) 
     assert output.read_text(encoding="utf-8").splitlines() == sorted(sources)
 
 
+@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
+def test_diff_inventory_includes_changed_solidity(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    source = b"pragma solidity ^0.8.24;\ncontract Vault {}\n"
+    write_file(repository, "contracts/Vault.sol", source)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    write_file(repository, "contracts/Vault.sol", source + b"// Changed.\n")
+    arguments = ["--diff-base", base, "--diff-mode", mode]
+    if mode == "revisions":
+        git(repository, "add", ".")
+        git(repository, "commit", "-qm", "change")
+        arguments.extend(["--diff-head", git(repository, "rev-parse", "HEAD")])
+        git(repository, "checkout", "-q", base)
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output, arguments=arguments)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "contracts/Vault.sol\n"
+
+
 def test_diff_inventory_keeps_every_javascript_module_extension(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     git(repository, "add", ".")
