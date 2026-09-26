@@ -22,72 +22,124 @@ const { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } =
 const generic = { reason: "Review remains.", paths: ["src/example.py"] };
 const close = (id, reason = "Review completed.") => ({ id, reason });
 
-test("worker: reopening preserves findings and independent pending work from the same draft", async (t) => {
-  const f = await fixture(t, "worker");
-  const reopened = { id: "reopened-review", ...generic, surfaceIds: ["api"] };
-  const stillClosed = { id: "closed-review", ...generic };
-  await f.write(f.draft({ deferred: [reopened, stillClosed] }));
-  await f.write(
-    f.draft(
-      { resolvedDeferred: [close(reopened.id), close(stillClosed.id)] },
-      true,
-    ),
-  );
-  const independent = { id: "independent-review", ...generic };
-  const finding = {
-    ruleId: "fixture.review",
-    title: "Synthetic review finding",
-    summary: "A separate review result must survive progress publication.",
-    severity: { level: "low" },
-    confidence: { level: "high", rationale: "Synthetic persistence fixture." },
-    taxonomy: { category: "other", cwe: [] },
-    locations: [{ path: "src/example.py", startLine: 1 }],
-    remediation: "Complete the independent review.",
-    provenance: { source: "local_plugin", candidateId: "new-finding" },
-  };
-  const surfaces = [
-    {
-      id: "api",
-      label: "API",
-      disposition: "needs_follow_up",
-      receiptRefs: [],
-    },
-    {
-      id: "new-finding",
-      candidateId: "new-finding",
-      label: "Independent review",
-      disposition: "reported",
-    },
-  ];
-  const progress = {
-    ...f.draft({ deferred: [reopened, independent], surfaces }),
-    findings: [finding],
-  };
-  for (const input of [progress, f.draft()]) {
-    const result = await f.write(input);
-    assert.equal(result.findingCount, 1);
-    assert.equal(result.coverage.completeness, "partial");
-    assert.deepEqual(result.coverage.deferred, [reopened, independent]);
-    assert.deepEqual(result.coverage.resolvedDeferred, [close(stillClosed.id)]);
-    assert.deepEqual(result.coverage.surfaces, surfaces);
-    const published = JSON.parse(
-      await readFile(path.join(f.root, "result.json"), "utf8"),
+for (const updateSavedSurface of [false, true]) {
+  test(`worker: repeated progress preserves independent evidence, saved surface update=${updateSavedSurface}`, async (t) => {
+    const f = await fixture(t, "worker");
+    const reopened = { id: "reopened-review", ...generic, surfaceIds: ["api"] };
+    const stillClosed = { id: "closed-review", ...generic };
+    const independentSurface = {
+      id: "configuration",
+      label: "Configuration",
+      disposition: "no_issue_found",
+      notes: "Initial review.",
+    };
+    await f.write(
+      f.draft({
+        deferred: [reopened, stillClosed],
+        surfaces: updateSavedSurface ? [independentSurface] : [],
+      }),
     );
-    assert.deepEqual(published.findings, [finding]);
-    const head = JSON.parse(
-      await readFile(path.join(f.root, "checkpoint-head.json"), "utf8"),
-    );
-    assert.deepEqual(
-      JSON.parse(
-        await readFile(
-          path.join(f.root, "checkpoints", head.checkpoint),
-          "utf8",
-        ),
+    await f.write(
+      f.draft(
+        { resolvedDeferred: [close(reopened.id), close(stillClosed.id)] },
+        true,
       ),
-      published,
     );
-  }
-});
+    const independent = { id: "independent-review", ...generic };
+    const finding = {
+      ruleId: "fixture.review",
+      title: "Synthetic review finding",
+      summary: "A separate review result must survive progress publication.",
+      severity: { level: "low" },
+      confidence: {
+        level: "high",
+        rationale: "Synthetic persistence fixture.",
+      },
+      taxonomy: { category: "other", cwe: [] },
+      locations: [{ path: "src/example.py", startLine: 1 }],
+      remediation: "Complete the independent review.",
+      provenance: { source: "local_plugin", candidateId: "new-finding" },
+    };
+    const surfaces = [
+      {
+        id: "api",
+        label: "API",
+        disposition: "needs_follow_up",
+        receiptRefs: [],
+      },
+      {
+        id: "new-finding",
+        candidateId: "new-finding",
+        label: "Independent review",
+        disposition: "reported",
+      },
+    ];
+    if (updateSavedSurface)
+      surfaces.push({ ...independentSurface, notes: "Updated review." });
+    const progress = {
+      ...f.draft({ deferred: [reopened, independent], surfaces }),
+      findings: [finding],
+    };
+    for (const input of [progress, f.draft()]) {
+      const result = await f.write(input);
+      assert.equal(result.findingCount, 1);
+      assert.equal(result.coverage.completeness, "partial");
+      assert.deepEqual(result.coverage.deferred, [reopened, independent]);
+      assert.deepEqual(result.coverage.resolvedDeferred, [
+        close(stillClosed.id),
+      ]);
+      assert.deepEqual(result.coverage.surfaces, surfaces);
+      const published = JSON.parse(
+        await readFile(path.join(f.root, "result.json"), "utf8"),
+      );
+      assert.deepEqual(published.findings, [finding]);
+      const head = JSON.parse(
+        await readFile(path.join(f.root, "checkpoint-head.json"), "utf8"),
+      );
+      assert.deepEqual(
+        JSON.parse(
+          await readFile(
+            path.join(f.root, "checkpoints", head.checkpoint),
+            "utf8",
+          ),
+        ),
+        published,
+      );
+    }
+    const nextTask = { id: "next-review", ...generic };
+    const nextFinding = {
+      ...finding,
+      ruleId: "fixture.second-review",
+      provenance: { ...finding.provenance, candidateId: "next-finding" },
+    };
+    const nextSurface = {
+      id: "next-finding",
+      candidateId: "next-finding",
+      label: "Next review",
+      disposition: "reported",
+    };
+    const nextProgress = {
+      ...f.draft({ deferred: [nextTask], surfaces: [nextSurface] }),
+      findings: [nextFinding],
+    };
+    for (const input of [nextProgress, f.draft()]) {
+      const result = await f.write(input);
+      assert.equal(result.findingCount, 2);
+      assert.equal(result.coverage.completeness, "partial");
+      assert.deepEqual(
+        new Set(result.coverage.deferred.map(({ id }) => id)),
+        new Set([reopened.id, independent.id, nextTask.id]),
+      );
+      assert.deepEqual(result.coverage.resolvedDeferred, [
+        close(stillClosed.id),
+      ]);
+      assert.deepEqual(
+        new Set(result.coverage.surfaces.map(({ id }) => id)),
+        new Set([...surfaces, nextSurface].map(({ id }) => id)),
+      );
+    }
+  });
+}
 
 for (const layout of ["standard", "diff", "worker"]) {
   test(`${layout}: returned deferred IDs support closure, retries and explicit reopening`, async (t) => {
@@ -659,8 +711,16 @@ test("worker: generated surface IDs preserve distinct observations and reserved 
   assert.equal(saved[2].id, ids[0]);
   assert.equal(saved[3].candidateId, ids[1]);
   assert.notEqual(saved[0].id, ids[0]);
-  assert.equal(saved[1].id, ids[1]);
   assert.notEqual(saved[3].id, ids[1]);
+  for (const input of [other.draft({ surfaces: [saved[3]] }), other.draft()]) {
+    const retained = (await other.write(input)).coverage.surfaces;
+    assert.equal(retained.length, saved.length);
+    assert.deepEqual(
+      retained.find((row) => row.notes === second.notes),
+      saved[1],
+    );
+  }
+  assert.notEqual(saved[1].id, ids[1]);
 });
 
 test("worker: archived closures cannot discard a later explicitly reopened task", async (t) => {

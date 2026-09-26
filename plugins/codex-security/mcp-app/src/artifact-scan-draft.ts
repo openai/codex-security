@@ -400,42 +400,32 @@ async function preserveScanDraft(
       .map(({ input }) => input)
       .reverse();
     progressSources.push(input);
+    let acceptProgress = coverageHasOutstandingWork(result.coverage);
     for (const observation of progressSources) {
-      const reopened = (observation.coverage.deferred as JsonObject[]).filter(
-        (row) =>
-          closedIds.has(row.id as string) ||
-          closedIds.has(row.candidateId as string),
+      const progress = structuredClone(observation);
+      const reopenedIds = new Set(
+        (progress.coverage.deferred as JsonObject[]).flatMap((row) =>
+          [row.id, row.candidateId].filter(
+            (id): id is string => typeof id === "string" && closedIds.has(id),
+          ),
+        ),
       );
-      if (reopened.length > 0) {
-        const reopenedIds = new Set(
-          reopened.flatMap((row) =>
-            [row.id, row.candidateId].filter(
-              (id): id is string => typeof id === "string" && closedIds.has(id),
-            ),
-          ),
-        );
-        const progress = structuredClone(observation);
-        const { resolved, updated } = reconcileDeferredSurfaces(
-          progress.coverage,
-          sources,
-          reopenedIds,
-          new Set(),
-          [],
-        );
-        for (const surface of resolved) reopenedSurfaces.add(surface);
-        result.coverage = preserveScanCoverage(
-          { ...result.coverage, surfaces: [...updated] },
-          [result.coverage],
-          false,
-        );
-        result.coverage.surfaces = exactUnion(
-          result.coverage.surfaces as JsonObject[],
-          (progress.coverage.surfaces as JsonObject[]).filter(
-            (surface) => !updated.has(surface),
-          ),
-        );
-        sources.unshift(progress);
-      }
+      if (reopenedIds.size > 0) acceptProgress = true;
+      if (!acceptProgress) continue;
+      const { resolved } = reconcileDeferredSurfaces(
+        progress.coverage,
+        sources,
+        reopenedIds,
+        new Set(),
+        [],
+      );
+      for (const surface of resolved) reopenedSurfaces.add(surface);
+      result.coverage = preserveScanCoverage(
+        { ...result.coverage, surfaces: progress.coverage.surfaces },
+        [result.coverage],
+        false,
+      );
+      sources.unshift(progress);
     }
   }
   const resolvedCandidateIds = completedCandidateIds(result, sources);
@@ -2162,7 +2152,9 @@ function buildCoverage(
 function normalizeSurfaces(surfaces: JsonObject[]): JsonObject[] {
   const reservedSurfaceIds = new Set(
     surfaces.flatMap((surface) =>
-      typeof surface.id === "string" ? [surface.id] : [],
+      [surface.id, surface.candidateId].filter(
+        (id): id is string => typeof id === "string",
+      ),
     ),
   );
   const surfaceIds = new Set<string>();
