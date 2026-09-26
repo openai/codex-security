@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -9,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import pytest
 from workbench_test_support import (
     create_saved_workspace,
     initialize_git_repository,
@@ -17,6 +19,7 @@ from workbench_test_support import (
     source_plugin_version,
     stable_target_id,
     start_delivered_scan,
+    write_checkpoint,
     write_completed_contract,
 )
 
@@ -69,7 +72,13 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
     return state_dir, scan_id, scan_dir
 
 
-def register_cli_scan(state_dir: Path, target: Path, scan_dir: Path) -> dict[str, Any]:
+def register_cli_scan(
+    state_dir: Path,
+    target: Path,
+    scan_dir: Path,
+    *,
+    scan_target: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     scan_dir.mkdir(mode=0o700)
     return run_workbench(
         state_dir,
@@ -84,10 +93,191 @@ def register_cli_scan(state_dir: Path, target: Path, scan_dir: Path) -> dict[str
                 "config": {},
                 "mode": "standard",
                 "repository": str(target),
-                "target": {"kind": "repository", "paths": []},
+                "target": scan_target or {"kind": "repository", "paths": []},
             }
         ),
     )
+
+
+def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, dict[str, Any]]:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    base = initialize_git_repository(target)
+    (target / "README.md").write_text("changed fixture\n")
+    subprocess.run(["git", "commit", "-qam", "Update fixture"], cwd=target, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=target, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    if kind == "commit":
+        workspace_id = str(uuid.uuid4())
+        for command in ("create-workspace", "save-workspace"):
+            run_workbench(
+                state_dir,
+                command,
+                "--workspace-id",
+                workspace_id,
+                "--target-path",
+                str(target),
+                "--scope",
+                ".",
+                "--mode",
+                "diff",
+                "--diff-target-kind",
+                kind,
+                "--diff-head-revision",
+                head,
+            )
+        registered = start_delivered_scan(
+            state_dir,
+            "--workspace-id",
+            workspace_id,
+            "--scan-root",
+            str(tmp_path / "scans"),
+        )["results"]
+    else:
+        if kind == "working_tree":
+            (target / "README.md").write_text("uncommitted fixture\n")
+            base = head
+        registered = register_cli_scan(
+            state_dir,
+            target,
+            tmp_path / "scan",
+            scan_target={
+                "kind": "refs" if kind == "range" else "working_tree",
+                "paths": [],
+                "base": base,
+                "head": head,
+            },
+        )
+    diff_target = registered["contract"]["diffTarget"]
+    write_completed_contract(
+        Path(registered["scanDir"]),
+        registered["scanId"],
+        target,
+        relative_path="README.md",
+        target_kind="git_diff",
+        diff_base_revision=diff_target["baseRevision"],
+        diff_head_revision=diff_target["headRevision"],
+        snapshot_digest=f"codex-security-snapshot/v1:sha256:{'a' * 64}",
+        coverage_mode="branch_diff" if kind == "range" else kind,
+        inventory_strategy="diff",
+    )
+    return state_dir, target, registered
+
+
+def _seal_draft(scan_dir: Path, target: Path) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parent.parent / "scripts" / "finalize_scan_contract.py"),
+            "--scan-dir",
+            str(scan_dir),
+            "--source-root",
+            str(target),
+        ],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+
+
+def _sealed_artifacts(scan_dir: Path) -> dict[str, bytes]:
+    return {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+
+
+@pytest.mark.parametrize("kind", ["commit", "range", "working_tree"])
+@pytest.mark.parametrize("draft_digest", [None, "incorrect-draft-digest"])
+def test_completion_binds_diff_snapshot_digest(
+    tmp_path: Path, kind: str, draft_digest: str | None
+) -> None:
+    state_dir, _, registered = _start_diff_scan_with_draft(tmp_path, kind)
+    scan_id, scan_dir = registered["scanId"], Path(registered["scanDir"])
+    diff_target = registered["contract"]["diffTarget"]
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if draft_digest is None:
+        manifest["scan"]["target"].pop("snapshotDigest")
+    else:
+        manifest["scan"]["target"]["snapshotDigest"] = draft_digest
+    manifest_path.write_text(json.dumps(manifest))
+
+    prepared = run_workbench(state_dir, "prepare-scan-completion", "--scan-id", scan_id)
+
+    assert prepared["scan"]["progress"]["status"] == "running"
+    if kind == "working_tree":
+        expected = diff_target["contentDigest"]
+    else:
+        digest = hashlib.sha256(
+            f"codex-security-diff/v1\0{kind}\0{diff_target['baseRevision']}\0"
+            f"{diff_target['headRevision']}".encode()
+        ).hexdigest()
+        expected = f"codex-security-snapshot/v1:sha256:{digest}"
+    sealed_manifest = json.loads(manifest_path.read_text())
+    assert sealed_manifest["scan"]["target"]["snapshotDigest"] == expected
+    assert sealed_manifest["scan"]["sealedAt"]
+    sealed_artifacts = _sealed_artifacts(scan_dir)
+    for _ in range(2):
+        completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+        assert completed["scan"]["progress"]["status"] == "complete"
+        assert _sealed_artifacts(scan_dir) == sealed_artifacts
+
+
+@pytest.mark.parametrize("kind", ["commit", "range"])
+def test_completion_preserves_legacy_sealed_diff_snapshot_digest(tmp_path: Path, kind: str) -> None:
+    state_dir, target, registered = _start_diff_scan_with_draft(tmp_path, kind)
+    scan_id, scan_dir = registered["scanId"], Path(registered["scanDir"])
+    _seal_draft(scan_dir, target)
+    sealed_artifacts = _sealed_artifacts(scan_dir)
+    for command in ("prepare-scan-completion", "complete-scan", "complete-scan"):
+        run_workbench(state_dir, command, "--scan-id", scan_id)
+        assert _sealed_artifacts(scan_dir) == sealed_artifacts
+
+
+@pytest.mark.parametrize("kind", ["commit", "range"])
+def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: str) -> None:
+    state_dir, target, registered = _start_diff_scan_with_draft(tmp_path, kind)
+    scan_id, scan_dir = registered["scanId"], Path(registered["scanDir"])
+    legacy_digest = f"codex-security-snapshot/v1:sha256:{'a' * 64}"
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["status"] = "failed"
+    manifest_path.write_text(json.dumps(manifest))
+    _seal_draft(scan_dir, target)
+    original_findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET status = 'failed', completed_at = ?, failure_message = ? WHERE id = ?",
+            (manifest["scan"]["completedAt"], "Scan stopped.", scan_id),
+        )
+
+    recovered = run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+
+    assert recovered["scan"]["progress"]["status"] == "failed"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["scan"]["target"]["snapshotDigest"] == legacy_digest
+    assert manifest["scan"]["preservedSources"]
+    assert json.loads((scan_dir / "findings.json").read_text())["findings"] == original_findings
+    sealed_artifacts = _sealed_artifacts(scan_dir)
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert _sealed_artifacts(scan_dir) == sealed_artifacts
+
+    late_review = {"id": "late-review", "reason": "Review remains pending.", "paths": ["README.md"]}
+    write_checkpoint(
+        scan_dir / "checkpoints",
+        {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
+    )
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["scan"]["target"]["snapshotDigest"] == legacy_digest
+    assert json.loads((scan_dir / "findings.json").read_text())["findings"] == original_findings
+    assert late_review in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
+    sealed_artifacts = _sealed_artifacts(scan_dir)
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert _sealed_artifacts(scan_dir) == sealed_artifacts
 
 
 def test_cli_registration_returns_authoritative_target_contract(tmp_path: Path) -> None:
@@ -230,19 +420,7 @@ def test_cli_completion_accepts_sealed_clean_git_revision_without_snapshot_diges
     manifest = json.loads(manifest_path.read_text())
     manifest["scan"]["target"].pop("snapshotDigest")
     manifest_path.write_text(json.dumps(manifest))
-    subprocess.run(
-        [
-            sys.executable,
-            str(Path(__file__).resolve().parent.parent / "scripts" / "finalize_scan_contract.py"),
-            "--scan-dir",
-            str(scan_dir),
-            "--source-root",
-            str(target),
-        ],
-        capture_output=True,
-        check=True,
-        text=True,
-    )
+    _seal_draft(scan_dir, target)
 
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
 
