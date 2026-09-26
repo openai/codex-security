@@ -440,6 +440,9 @@ try {
           throw new Error("The installed package does not export " + name + ".");
         }
       }
+      if (typeof sdk.CodexSecurity.prototype.patch !== "function") {
+        throw new Error("The installed CodexSecurity client does not expose patch().");
+      }
       if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function") {
         throw new Error("The installed package does not export generatePolicy.");
       }
