@@ -6,8 +6,13 @@ export function bashCommand(): string {
   if (process.platform !== "win32") return "bash";
   const git = Bun.which("git");
   if (git === null) return "bash";
-  const gitBash = join(dirname(dirname(git)), "bin", "bash.exe");
-  return existsSync(gitBash) ? gitBash : "bash";
+  const parent = dirname(dirname(git));
+  // Git for Windows exposes git.exe from cmd, bin, and mingw64/bin.
+  for (const root of [parent, dirname(parent)]) {
+    const gitBash = join(root, "bin", "bash.exe");
+    if (existsSync(gitBash)) return gitBash;
+  }
+  return "bash";
 }
 
 export function runCommand(
