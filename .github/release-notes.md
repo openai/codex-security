@@ -14,6 +14,7 @@
 - propagate wizard cancellation to prompts ([#540](https://github.com/openai/codex-security/pull/540))
 - preserve explicit virtualenv launchers ([#227](https://github.com/openai/codex-security/pull/227))
 - upgrade Codex CLI and SDK to 0.157.1 ([#1041](https://github.com/openai/codex-security/pull/1041))
+- honor the requested output format when rerunning a scan ([#203](https://github.com/openai/codex-security/pull/203))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
