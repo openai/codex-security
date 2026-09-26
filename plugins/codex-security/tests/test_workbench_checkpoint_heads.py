@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 from test_workbench_standard_deep_results import accepted_standard_worker, deep_scan_fixture
-from workbench_test_support import run_workbench, write_checkpoint, write_completed_contract
+from workbench_test_support import (
+    replay_saved_results,
+    run_workbench,
+    saved_discovery_worker,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import finalize_scan_contract
@@ -149,15 +155,7 @@ def test_frozen_observations_survive_live_head_changes(
     workers = (
         []
         if layout == "parent"
-        else [
-            {
-                "id": "worker",
-                "kind": "discovery",
-                "artifact_dir": str(output),
-                "result_manifest_path": None,
-                "attempt": 1 if layout == "worker" else 2,
-            }
-        ]
+        else [saved_discovery_worker(output, "worker", 1 if layout == "worker" else 2)]
     )
 
     def merge(frozen=None):
@@ -205,7 +203,7 @@ def test_multiple_parent_observations_keep_latest_selection_and_pending_ties(
     os.utime(reopened, ns=(200, 200))
     for checkpoint, observed in ((completed, 300), (reopened, 400), (completed, 500)):
         select(tmp_path, checkpoint, observed)
-        saved._capture_checkpoint_head(tmp_path, "checkpoint-head.json", scan_id)
+        saved._capture_saved_source(tmp_path, "checkpoint-head.json", scan_id)
     first = saved.merge_saved_results(
         tmp_path, scan_id, binding, [], [], stopped=True, reason="interrupted"
     )
@@ -215,16 +213,7 @@ def test_multiple_parent_observations_keep_latest_selection_and_pending_ties(
         tmp_path, scan_id, binding, [], [], stopped=True, reason="interrupted"
     )
     assert pending["coverage"]["deferred"][0] in tied[2]["deferred"]
-    replay = saved.merge_saved_results(
-        tmp_path,
-        scan_id,
-        binding,
-        [],
-        [],
-        stopped=True,
-        reason="interrupted",
-        frozen_source_digests=tied[0]["scan"]["preservedSources"],
-    )
+    replay = replay_saved_results(saved, tied, tmp_path, scan_id, binding, [], stopped=True)
     assert replay[2] == tied[2]
 
 
@@ -250,7 +239,7 @@ def test_head_snapshot_reads_content_and_time_from_one_descriptor(
     monkeypatch.setattr(
         finalize_scan_contract, "open_scan_local_file_descriptor", replace_after_open
     )
-    captured = saved._capture_checkpoint_head(tmp_path, "checkpoint-head.json", scan_id)
+    captured = saved._capture_saved_source(tmp_path, "checkpoint-head.json", scan_id)
     snapshot = next(path for path in captured if path.startswith("checkpoint-heads/"))
     assert json.loads((tmp_path / snapshot).read_text()) == {
         "checkpoint": completed.name,

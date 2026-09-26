@@ -380,143 +380,8 @@ async function preserveScanDraft(
     result.threatModel = structuredClone(retainedThreatModel);
   }
 
-  const ownedDeferred = sources.flatMap((source) =>
-    (source.coverage.deferred as JsonObject[]).filter(
-      (row) => typeof row.id === "string",
-    ),
-  );
-  const reservedCandidateIds = new Set(
-    [
-      ...ownedDeferred
-        .filter(
-          (row) =>
-            typeof row.candidateId === "string" ||
-            "candidate" in row ||
-            "finding" in row,
-        )
-        .flatMap((row) => [row.id, row.candidateId]),
-      ...[result, ...sources].flatMap((source) => [
-        ...completedCandidateIds(source),
-      ]),
-    ].filter((id): id is string => typeof id === "string"),
-  );
-  const occupiedIds = new Set([
-    ...reservedCandidateIds,
-    ...ownedDeferred.map((row) => row.id as string),
-    ...[result, ...sources].flatMap((source) =>
-      resolvedDeferred(source.coverage).map((row) => row.id as string),
-    ),
-  ]);
-  const uniqueOwnedDeferred = exactUnion(ownedDeferred);
-  const ownedDeferredByReason = new Map<string, JsonObject[]>();
-  for (const row of uniqueOwnedDeferred) {
-    const reason = row.reason as string;
-    const rows = ownedDeferredByReason.get(reason);
-    if (rows) rows.push(row);
-    else ownedDeferredByReason.set(reason, [row]);
-  }
-  const deferredMatches = new Map<
-    string,
-    { rows: JsonObject[]; exactIds: Set<string> }
-  >();
-  const matchingSavedDeferred = (row: JsonObject) => {
-    const candidate = "candidate" in row || "finding" in row;
-    const key = JSON.stringify(row);
-    let match = deferredMatches.get(key);
-    if (!match) {
-      const candidates =
-        typeof row.reason === "string"
-          ? (ownedDeferredByReason.get(row.reason) ?? [])
-          : uniqueOwnedDeferred;
-      const matches = candidates.filter(
-        (saved) =>
-          candidate ===
-            (typeof saved.candidateId === "string" ||
-              "candidate" in saved ||
-              "finding" in saved) && containsSavedValue(saved, row),
-      );
-      const exact = matches.filter(({ id: _id, ...saved }) =>
-        isDeepStrictEqual(saved, row),
-      );
-      const exactIds = new Set(exact.map((saved) => saved.id as string));
-      match = { rows: exactIds.size === 1 ? exact : matches, exactIds };
-      deferredMatches.set(key, match);
-    }
-    return match;
-  };
-  const inferredDeferred = new WeakMap<
-    JsonObject,
-    { id?: string; candidateId?: string }
-  >();
-  const reservedObservationIds = new Map<string, Set<string>>();
-  const normalizeSavedDeferred = (rows: JsonObject[]) => {
-    const claims = new Map<string, JsonObject | undefined>();
-    const matches = rows.map((row) => {
-      const match =
-        typeof row.id === "string" || typeof row.candidateId === "string"
-          ? undefined
-          : matchingSavedDeferred(row);
-      const identities =
-        typeof row.id === "string"
-          ? [row.id]
-          : new Set(match?.rows.map((row) => row.id as string));
-      const { id: _id, ...value } = row;
-      for (const id of identities) {
-        if (!claims.has(id)) claims.set(id, value);
-        else if (!isDeepStrictEqual(claims.get(id), value))
-          claims.set(id, undefined);
-      }
-      return match;
-    });
-    return normalizeDeferred(
-      rows.map((row, index) => {
-        if (typeof row.id === "string" || typeof row.candidateId === "string")
-          return row;
-        const match = matches[index]!;
-        const accepted = match.rows.filter(
-          (saved) => claims.get(saved.id as string) !== undefined,
-        );
-        const identities = new Set(accepted.map((saved) => saved.id as string));
-        const candidateIds = new Set(
-          accepted.map((saved) => (saved.candidateId ?? saved.id) as string),
-        );
-        const id =
-          identities.size === 1 ? (accepted[0]!.id as string) : undefined;
-        inferredDeferred.set(row, {
-          id,
-          candidateId:
-            candidateIds.size === 1 ? [...candidateIds][0] : undefined,
-        });
-        if (id !== undefined) {
-          const observation = structuredClone(accepted[0]!);
-          if (candidateIds.size > 1) delete observation.candidateId;
-          return observation;
-        }
-        if (match.rows.length > 0) {
-          const key = JSON.stringify(row);
-          const reserved = reservedObservationIds.get(key) ?? new Set<string>();
-          for (const saved of match.rows) {
-            const id = saved.id as string;
-            if (!match.exactIds.has(id) || claims.get(id) === undefined)
-              reserved.add(id);
-          }
-          reservedObservationIds.set(key, reserved);
-        }
-        return row;
-      }),
-      reservedCandidateIds,
-      occupiedIds,
-      reservedObservationIds,
-    );
-  };
-  result.coverage.deferred = normalizeSavedDeferred(
-    result.coverage.deferred as JsonObject[],
-  );
   let deferredBySource = new Map(
-    sources.map((source) => [
-      source,
-      normalizeSavedDeferred(source.coverage.deferred as JsonObject[]),
-    ]),
+    sources.map((source) => [source, source.coverage.deferred as JsonObject[]]),
   );
   const reopenedSurfaces = new Set<JsonObject>();
   if (retainedFinal) {
@@ -536,9 +401,7 @@ async function preserveScanDraft(
       .reverse();
     progressSources.push(input);
     for (const observation of progressSources) {
-      const reopened = normalizeSavedDeferred(
-        observation.coverage.deferred as JsonObject[],
-      ).filter(
+      const reopened = (observation.coverage.deferred as JsonObject[]).filter(
         (row) =>
           closedIds.has(row.id as string) ||
           closedIds.has(row.candidateId as string),
@@ -690,25 +553,14 @@ async function preserveScanDraft(
     );
     const previousCoverage = {
       ...source.coverage,
-      deferred: (source.coverage.deferred as JsonObject[]).flatMap(
-        (item, index) => {
-          const identified = deferredBySource.get(source)![index]!;
-          const inferred = inferredDeferred.get(item);
-          let candidateId = item.candidateId ?? item.id;
-          if (candidateId === undefined)
-            candidateId =
-              "candidate" in item || "finding" in item
-                ? inferred?.candidateId
-                : identified.id;
-          if (
-            (typeof candidateId === "string" && resolvedIds.has(candidateId)) ||
-            closedDeferredIds.has(identified.id as string) ||
-            coverageEntryPresent(result.coverage.deferred as unknown[], item)
-          )
-            return [];
-          return [inferred?.id === identified.id ? identified : item];
-        },
-      ),
+      deferred: (source.coverage.deferred as JsonObject[]).flatMap((item) => {
+        const candidateId = item.candidateId ?? item.id;
+        return (typeof candidateId === "string" &&
+          resolvedIds.has(candidateId)) ||
+          closedDeferredIds.has(item.id as string)
+          ? []
+          : [item];
+      }),
       surfaces: (source.coverage.surfaces as JsonObject[]).filter((surface) => {
         if (resolvedSurfaces.has(surface)) return false;
         const candidateId = surface.candidateId ?? surface.id;
@@ -750,9 +602,6 @@ async function preserveScanDraft(
   }
   result.coverage.deferred = normalizeDeferred(
     result.coverage.deferred as JsonObject[],
-    reservedCandidateIds,
-    occupiedIds,
-    reservedObservationIds,
   );
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
@@ -970,10 +819,9 @@ function reconcileDeferredSurfaces(
   ]) {
     const saved = !current.includes(original);
     let surface = saved ? structuredClone(original) : original;
-    if (carriesCandidate(surface)) continue;
-    const sameSurface = (other: JsonObject) =>
-      other.label === surface.label &&
-      (other.riskArea ?? "") === (surface.riskArea ?? "");
+    if (typeof surface.id !== "string" || carriesCandidate(surface)) continue;
+    const id = surface.id;
+    const sameSurface = (other: JsonObject) => other.id === id;
     const currentMatches = current.filter(sameSurface);
     if (saved ? currentMatches.length > 0 : currentMatches.length !== 1)
       continue;
@@ -1005,18 +853,6 @@ function reconcileDeferredSurfaces(
       surface = structuredClone((pendingAtSameTime ?? latest).surfaces[0]!);
     }
     const previousSurfaces = matches.flatMap(({ surfaces }) => surfaces);
-    const ids = new Set(
-      previousSurfaces.flatMap((row) =>
-        typeof row.id === "string" ? [row.id] : [],
-      ),
-    );
-    if (ids.size !== 1) continue;
-    const id = [...ids][0]!;
-    if (
-      (surface.id !== undefined && surface.id !== id) ||
-      current.some((other) => other !== original && other.id === id)
-    )
-      continue;
     if (
       surface.disposition !== "needs_follow_up" &&
       pending.some(
@@ -1029,18 +865,14 @@ function reconcileDeferredSurfaces(
     const linked = matches.some(
       ({ surfaces, deferred }) =>
         surfaces.length > 0 &&
-        (deferred.some(
+        deferred.some(
           (row) =>
             workIds.has(row.id as string) &&
             (row.id === id ||
               ((row.surfaceIds as string[] | undefined) ?? []).includes(id)),
-        ) ||
-          (deferred.length > 0 &&
-            deferred.every((row) => workIds.has(row.id as string)))),
+        ),
     );
     if (!linked) continue;
-    // Reuse a saved surface ID only when its match is unambiguous.
-    surface.id = id;
     surface.receiptRefs = exactUnion(
       (surface.receiptRefs as unknown[] | undefined) ?? [],
       previousSurfaces.flatMap(
@@ -1576,6 +1408,20 @@ function containsSavedValue(current: unknown, previous: unknown): boolean {
   return current === previous;
 }
 
+function deferredEntryPresent(entries: unknown[], previous: unknown): boolean {
+  return entries.some(
+    (current) =>
+      isDeepStrictEqual(current, previous) ||
+      (isObject(current) &&
+        isObject(previous) &&
+        [previous.id, previous.candidateId].some(
+          (id) =>
+            typeof id === "string" &&
+            (current.id === id || current.candidateId === id),
+        )),
+  );
+}
+
 function coverageEntryPresent(entries: unknown[], previous: unknown): boolean {
   return entries.some((entry) => {
     const current =
@@ -1593,7 +1439,6 @@ function coverageEntryPresent(entries: unknown[], previous: unknown): boolean {
       ) {
         return true;
       }
-      if (current.id === undefined) delete original.id;
       if (
         current.receiptRefs === undefined &&
         Array.isArray(original.receiptRefs) &&
@@ -1612,13 +1457,7 @@ function coverageEntryIdentities(entry: JsonObject): string[] {
     if (typeof value === "string" && value.trim())
       stable.push(`stable:${value}`);
   }
-  if (stable.length > 0) return stable;
-  if (typeof entry.label === "string" && entry.label.trim()) {
-    return [
-      `surface:${typeof entry.riskArea === "string" ? entry.riskArea : ""}:${entry.label}`,
-    ];
-  }
-  return [];
+  return stable;
 }
 
 /** Reducers cannot resolve source review by omitting its coverage records. */
@@ -1638,8 +1477,9 @@ export function preserveScanCoverage(
     const values = [...current];
     for (const source of sources) {
       for (const value of (source[field] as unknown[] | undefined) ?? []) {
-        if (!coverageEntryPresent(values, value))
-          values.push(structuredClone(value));
+        const present =
+          field === "deferred" ? deferredEntryPresent : coverageEntryPresent;
+        if (!present(values, value)) values.push(structuredClone(value));
       }
     }
     if (
@@ -1778,6 +1618,9 @@ export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
     throw new Error(
       "scan draft: coverage.resolvedDeferred is allowed only on a terminal draft.",
     );
+  parsed.coverage.deferred = normalizeDeferred(
+    parsed.coverage.deferred as JsonObject[],
+  );
   return parsed;
 }
 
@@ -2348,18 +2191,12 @@ function buildCoverage(
   };
 }
 
-function normalizeDeferred(
-  deferred: JsonObject[],
-  reservedIds: ReadonlySet<string> = new Set(),
-  reservedPayloadIds: ReadonlySet<string> = new Set(),
-  reservedObservationIds: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
-): JsonObject[] {
+function normalizeDeferred(deferred: JsonObject[]): JsonObject[] {
   // Reserve later owned identities before deriving any earlier missing ones.
   const deferredIds = new Set(
     deferred.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])),
   );
   const reservedCandidateIds = new Set([
-    ...reservedIds,
     ...deferred.flatMap((item) =>
       typeof item.candidateId === "string" ? [item.candidateId] : [],
     ),
@@ -2368,29 +2205,18 @@ function normalizeDeferred(
     if (typeof item.id === "string") return item;
 
     const candidateId = item.candidateId;
-    const matchedIds = reservedObservationIds.get(JSON.stringify(item));
     const baseId =
       typeof candidateId === "string"
         ? candidateId
         : `deferred-${createHash("sha256")
-            .update(
-              JSON.stringify([
-                item.reason,
-                item.paths ?? [],
-                item.surfaceIds ?? [],
-              ]),
-            )
+            .update(JSON.stringify(item))
             .digest("hex")
             .slice(0, 16)}`;
     let id = baseId;
     let suffix = 2;
     while (
       deferredIds.has(id) ||
-      (typeof candidateId !== "string" &&
-        (reservedCandidateIds.has(id) ||
-          matchedIds?.has(id) ||
-          (("candidate" in item || "finding" in item) &&
-            reservedPayloadIds.has(id))))
+      (typeof candidateId !== "string" && reservedCandidateIds.has(id))
     ) {
       id = `${baseId}-${suffix}`;
       suffix += 1;

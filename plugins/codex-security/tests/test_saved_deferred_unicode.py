@@ -25,7 +25,7 @@ import workbench_saved_results as saved
         pytest.param("A\U0001f600Z", "deferred-93fabecbc432e3f8", id="embedded-emoji"),
     ],
 )
-def test_recovery_matches_unicode_ids_from_the_public_writer(
+def test_recovery_accepts_unicode_ids_from_legacy_writers(
     tmp_path: Path, reason: str, identity: str
 ) -> None:
     pending = {"reason": reason, "paths": ["src/example.py"]}

@@ -1,453 +1,454 @@
 import assert from "node:assert/strict";
 import {
-  mkdtemp,
+  mkdir,
   readFile,
   readdir,
-  realpath,
+  rename,
   rm,
+  stat,
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { build } from "esbuild";
+import {
+  draftApi,
+  fixture,
+  interruptDraftWrite,
+} from "./scan-draft-fixture.mjs";
 
-const bundled = await build({
-  absWorkingDir: path.dirname(new URL(import.meta.url).pathname),
-  bundle: true,
-  entryPoints: ["../src/artifact-scan-draft.ts"],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-const {
-  recordCodexSecurityScanDraft,
-  recordCodexSecurityWorkerScanDraft,
-  saveScanDraftCheckpoint,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString("base64")}`
-);
-
-const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
-const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
+const { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } =
+  draftApi;
 const generic = { reason: "Review remains.", paths: ["src/example.py"] };
-
-async function fixture(t, layout) {
-  const root = await realpath(
-    await mkdtemp(path.join(tmpdir(), "draft-recovery-")),
-  );
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const context = {
-    root,
-    repoRoot: root,
-    scanId,
-    layout: layout === "worker" ? "worker" : "scan",
-    mode: layout,
-    scope: ".",
-    status: "running",
-    handoffClaimToken: claimToken,
-    targetRevision: "1234567890abcdef",
-    targetContract: {
-      target: {
-        allowedKinds: [layout === "diff" ? "git_diff" : "git_worktree"],
-        targetId: "target_example",
-        displayName: "example",
-        requiredSnapshotDigest:
-          "codex-security-snapshot/v1:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      },
-      scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
-      diffTarget:
-        layout === "diff"
-          ? {
-              kind: "range",
-              baseRevision: "a".repeat(40),
-              headRevision: "b".repeat(40),
-            }
-          : null,
-    },
-  };
-  const draft = (coverage = {}, complete = false) => ({
-    scanId,
-    ...(layout === "worker" ? {} : { handoffClaimToken: claimToken }),
-    complete,
-    findings: [],
-    coverage: {
-      completeness:
-        complete && !coverage.deferred?.length ? "complete" : "partial",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-      ...coverage,
-    },
-  });
-  return {
-    root,
-    context,
-    draft,
-    write: (input) =>
-      layout === "worker"
-        ? recordCodexSecurityWorkerScanDraft(context, input)
-        : recordCodexSecurityScanDraft(context, input),
-    read: async () => {
-      const value = JSON.parse(
-        await readFile(
-          path.join(
-            root,
-            layout === "worker" ? "result.json" : "coverage.json",
-          ),
-          "utf8",
-        ),
-      );
-      return layout === "worker" ? value.coverage : value;
-    },
-  };
-}
+const close = (id, reason = "Review completed.") => ({ id, reason });
 
 for (const layout of ["standard", "diff", "worker"]) {
-  for (const payload of ["candidate", "finding"]) {
-    for (const sameCall of [false, true]) {
-      test(`${layout}: generic work survives ${payload} rejection, same call=${sameCall}`, async (t) => {
-        const f = await fixture(t, layout);
-        const shared = { ...generic, surfaceIds: ["entry"] };
-        const candidate = {
-          ...shared,
-          notes: "Candidate review.",
-          [payload]: { title: "Caller validation." },
-        };
-        const pending = { ...shared, notes: "Independent source review." };
-        await f.write(f.draft({ deferred: [candidate] }));
-        const savedCandidate = (await f.read()).deferred[0];
-        const rejection = {
-          id: "candidate-result",
-          candidateId: savedCandidate.id,
-          label: "Caller",
-          disposition: "rejected",
-        };
-        let savedGeneric;
-        if (!sameCall) {
-          await f.write(f.draft({ deferred: [pending] }));
-          const rows = (await f.read()).deferred;
-          assert.equal(rows.length, 2);
-          assert.deepEqual(
-            rows.find((row) => row.id === savedCandidate.id),
-            savedCandidate,
-          );
-          savedGeneric = rows.find((row) => row.notes === pending.notes);
-          assert.notEqual(savedGeneric.id, savedCandidate.id);
-          assert.deepEqual(savedGeneric, { ...pending, id: savedGeneric.id });
-        }
-        await f.write(
-          f.draft(
-            {
-              deferred: sameCall ? [pending] : [],
-              surfaces: [rejection],
-            },
-            true,
-          ),
-        );
-        const rejected = await f.read();
-        assert.equal(rejected.deferred.length, 1);
-        savedGeneric ??= rejected.deferred[0];
-        assert.notEqual(savedGeneric.id, savedCandidate.id);
-        assert.deepEqual(rejected.deferred, [
-          { ...pending, id: savedGeneric.id },
-        ]);
-        assert.deepEqual(
-          rejected.surfaces.find(
-            (row) => row.candidateId === savedCandidate.id,
-          )[payload],
-          candidate[payload],
-        );
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          await f.write(f.draft({}, true));
-          const saved = await f.read();
-          assert.equal(saved.completeness, "partial");
-          assert.deepEqual(saved.deferred, [savedGeneric]);
-        }
-        await f.write(
-          f.draft(
-            {
-              resolvedDeferred: [
-                {
-                  id: savedGeneric.id,
-                  reason: "Independent review completed.",
-                },
-              ],
-            },
-            true,
-          ),
-        );
-        const completed = await f.read();
-        assert.deepEqual(completed.deferred, []);
-        assert.equal(completed.completeness, "complete");
-        assert.deepEqual(
-          completed.surfaces.find(
-            (row) => row.candidateId === savedCandidate.id,
-          )[payload],
-          candidate[payload],
-        );
-      });
-    }
-
-    for (const submitted of ["omitted", "raw", "identified"]) {
-      test(`${layout}: close generic work beside a saved ${payload}, ${submitted}`, async (t) => {
-        const f = await fixture(t, layout);
-        const pending = {
-          ...generic,
-          [payload]: { title: "Pending caller review." },
-        };
-        await f.write(f.draft({ deferred: [generic] }));
-        const savedGeneric = (await f.read()).deferred[0];
-        await f.write(f.draft({ deferred: [pending] }));
-        const savedCandidate = (await f.read()).deferred.find(
-          (row) => payload in row,
-        );
-        assert.notEqual(savedCandidate.id, savedGeneric.id);
-        const resolvedDeferred = [
-          { id: savedGeneric.id, reason: "Generic review completed." },
-        ];
-        await f.write(
-          f.draft(
-            {
-              deferred:
-                submitted === "omitted"
-                  ? []
-                  : [submitted === "raw" ? pending : savedCandidate],
-              resolvedDeferred,
-            },
-            true,
-          ),
-        );
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          const saved = await f.read();
-          assert.equal(saved.completeness, "partial");
-          assert.deepEqual(saved.deferred, [savedCandidate]);
-          assert.deepEqual(saved.resolvedDeferred, resolvedDeferred);
-          await f.write(f.draft({}, true));
-        }
-      });
-    }
-  }
-
-  test(`${layout}: changed generic evidence reopens its saved identity`, async (t) => {
-    const f = await fixture(t, layout);
-    await f.write(
-      f.draft({ deferred: [{ ...generic, notes: "Initial caller review." }] }),
-    );
-    const saved = (await f.read()).deferred[0];
-    await f.write(
-      f.draft(
-        {
-          resolvedDeferred: [
-            { id: saved.id, reason: "Original callers reviewed." },
-          ],
-        },
-        true,
-      ),
-    );
-    await f.write(
-      f.draft({
-        deferred: [{ ...generic, notes: "A new caller needs review." }],
-      }),
-    );
-    const reopened = await f.read();
-    assert.equal(reopened.completeness, "partial");
-    assert.deepEqual(reopened.deferred, [
-      { ...generic, notes: "A new caller needs review.", id: saved.id },
-    ]);
-    assert.equal(reopened.resolvedDeferred, undefined);
-  });
-
-  test(`${layout}: unmatched candidate evidence survives an unrelated generic closure`, async (t) => {
+  test(`${layout}: returned deferred IDs support closure, retries and explicit reopening`, async (t) => {
     const f = await fixture(t, layout);
     await f.write(f.draft({ deferred: [generic] }));
-    const saved = (await f.read()).deferred[0];
-    const pending = ["First caller", "Second caller"].map((title) => ({
-      ...generic,
-      candidate: { title },
-    }));
-    for (const row of pending)
-      await saveScanDraftCheckpoint(
-        f.context,
-        f.draft({ deferred: [row] }),
-        false,
+    const original = (await f.read()).deferred[0];
+    assert.equal(typeof original.id, "string");
+    const checkpointRoot = path.join(f.root, "checkpoints");
+    const originals = await Promise.all(
+      (await readdir(checkpointRoot)).map(async (name) => [
+        name,
+        await readFile(path.join(checkpointRoot, name), "utf8"),
+      ]),
+    );
+    const closure = close(original.id);
+    await f.write(f.draft({ resolvedDeferred: [closure] }, true));
+    const updated = close(
+      original.id,
+      "A second review confirmed the decision.",
+    );
+    await f.write(f.draft({ resolvedDeferred: [updated] }, true));
+    await f.write(f.draft({}, true));
+    const saved = await f.read();
+    assert.equal(saved.completeness, "complete");
+    assert.deepEqual(saved.deferred, []);
+    assert.deepEqual(saved.resolvedDeferred, [updated]);
+    for (const [name, contents] of originals)
+      assert.equal(
+        await readFile(path.join(checkpointRoot, name), "utf8"),
+        contents,
       );
-    const resolvedDeferred = [
-      { id: saved.id, reason: "Generic review completed." },
-    ];
-    await f.write(f.draft({ resolvedDeferred }, true));
-    const recovered = await f.read();
-    assert.equal(recovered.deferred.length, 2);
-    assert.equal(new Set(recovered.deferred.map((row) => row.id)).size, 2);
-    assert.equal(
-      recovered.deferred.some((row) => row.id === saved.id),
-      false,
-    );
-    assert.deepEqual(
-      recovered.deferred.map((row) => row.candidate.title).sort(),
-      pending.map((row) => row.candidate.title).sort(),
-    );
-    await f.write(f.draft({}, true));
-    assert.deepEqual((await f.read()).deferred, recovered.deferred);
+    const reopened = { ...original, reason: "A new caller needs review." };
+    await f.write(f.draft({ deferred: [reopened] }, true));
+    for (const complete of [false, true]) {
+      await f.write(f.draft({}, complete));
+      const pending = await f.read();
+      assert.equal(pending.completeness, "partial");
+      assert.deepEqual(pending.deferred, [reopened]);
+      assert.deepEqual(pending.resolvedDeferred ?? [], []);
+    }
   });
-}
 
-for (const complete of [false, true]) {
-  test(`worker: retain a valid ${complete ? "terminal" : "progress"} draft before reading a malformed result`, async (t) => {
-    const f = await fixture(t, "worker");
-    const destination = path.join(f.root, "result.json");
-    await writeFile(destination, "{broken");
-    const submitted = f.draft(
-      { deferred: [{ id: "pending", ...generic }] },
-      complete,
-    );
-    await assert.rejects(f.write(submitted), /stored JSON is malformed/);
-    const files = await readdir(path.join(f.root, "checkpoints"));
-    assert.equal(files.length, 1);
-    assert.deepEqual(
-      JSON.parse(
-        await readFile(path.join(f.root, "checkpoints", files[0]), "utf8"),
-      ),
-      submitted,
-    );
-    await rm(destination);
-    await f.write(f.draft({}, true));
-    assert.deepEqual((await f.read()).deferred, submitted.coverage.deferred);
-  });
-}
-
-for (const malformed of [false, true]) {
-  test(`worker: reject an unknown closure without a checkpoint, malformed result=${malformed}`, async (t) => {
-    const f = await fixture(t, "worker");
-    if (malformed) await writeFile(path.join(f.root, "result.json"), "{broken");
-    await assert.rejects(
-      f.write(
-        f.draft(
-          {
-            resolvedDeferred: [
-              { id: "unknown", reason: "Unsupported closure." },
-            ],
-          },
-          true,
-        ),
-      ),
-      malformed
-        ? /stored JSON is malformed/
-        : /names no saved generic deferral/,
-    );
-    assert.deepEqual(await readdir(f.root), malformed ? ["result.json"] : []);
-  });
-}
-
-for (const layout of ["standard", "diff", "worker"]) {
-  for (const explicit of [false, true]) {
-    test(`${layout}: split generic work closes independently, explicit sibling=${explicit}`, async (t) => {
+  for (const payload of ["candidate", "finding"]) {
+    test(`${layout}: generic closure preserves ${payload} evidence until its explicit outcome`, async (t) => {
       const f = await fixture(t, layout);
-      const broad = {
-        reason: "Review callers.",
-        paths: ["src/a.ts", "src/b.ts"],
+      const pending = {
+        id: "caller-review",
+        candidateId: "candidate-review",
+        ...generic,
+        [payload]: {
+          title: "Caller validation.",
+          evidence: "Check both callers.",
+        },
       };
-      await f.write(f.draft({ deferred: [broad] }));
-      const original = (await f.read()).deferred[0];
-      const split = broad.paths.map((file, index) => ({
-        reason: broad.reason,
-        paths: [file],
-        ...(explicit && index === 0 ? { id: original.id } : {}),
-      }));
-      await f.write(f.draft({ deferred: split }));
-      const saved = (await f.read()).deferred;
-      const narrow = split.map((row) =>
-        saved.find(
-          (item) => item.paths.length === 1 && item.paths[0] === row.paths[0],
-        ),
-      );
-      assert.equal(new Set(narrow.map((row) => row.id)).size, 2);
-      if (explicit) assert.equal(narrow[0].id, original.id);
-      else {
-        assert.ok(narrow.every((row) => row.id !== original.id));
-        assert.ok(
-          saved.some((row) => row.id === original.id && row.paths.length === 2),
-        );
-      }
+      const independent = { id: "source-review", ...generic };
+      await f.write(f.draft({ deferred: [pending, independent] }));
+      const closure = close(independent.id);
+      await f.write(f.draft({ resolvedDeferred: [closure] }, true));
+      await f.write(f.draft({}, true));
+      assert.deepEqual((await f.read()).deferred, [pending]);
       await f.write(
         f.draft(
           {
-            deferred: [narrow[1]],
-            resolvedDeferred: [
-              { id: narrow[0].id, reason: "First caller reviewed." },
+            surfaces: [
+              {
+                id: "candidate-outcome",
+                candidateId: pending.candidateId,
+                label: "Caller",
+                disposition: "rejected",
+              },
             ],
           },
           true,
         ),
       );
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const retained = (await f.read()).deferred;
-        assert.ok(retained.some((row) => row.id === narrow[1].id));
-        assert.ok(retained.every((row) => row.id !== narrow[0].id));
-        if (!explicit)
-          assert.ok(retained.some((row) => row.id === original.id));
-        await f.write(f.draft({}, true));
-      }
-    });
-  }
-
-  for (const payload of ["candidate", "finding"]) {
-    test(`${layout}: split ${payload} evidence survives the broad rejection`, async (t) => {
-      const f = await fixture(t, layout);
-      const broad = {
-        reason: "Review callers.",
-        paths: ["src/a.ts", "src/b.ts"],
-        [payload]: { title: "Caller validation." },
-      };
-      await f.write(f.draft({ deferred: [broad] }));
-      const original = (await f.read()).deferred[0];
-      const split = broad.paths.map((file) => ({ ...broad, paths: [file] }));
-      await f.write(f.draft({ deferred: split }));
-      const narrow = (await f.read()).deferred.filter(
-        (row) => row.paths.length === 1,
+      await f.write(f.draft({}, true));
+      const saved = await f.read();
+      assert.deepEqual(saved.deferred, []);
+      assert.deepEqual(saved.resolvedDeferred, [closure]);
+      assert.deepEqual(
+        saved.surfaces.find((row) => row.candidateId === pending.candidateId)[
+          payload
+        ],
+        pending[payload],
       );
-      assert.equal(narrow.length, 2);
-      assert.equal(new Set(narrow.map((row) => row.id)).size, 2);
-      assert.ok(narrow.every((row) => row.id !== original.id));
-      const reject = (id) => ({
-        candidateId: id,
-        label: "Caller review",
-        disposition: "rejected",
-      });
-      await f.write(f.draft({ surfaces: [reject(original.id)] }, true));
-      assert.deepEqual((await f.read()).deferred, narrow);
-      await f.write(f.draft({ surfaces: [reject(narrow[0].id)] }, true));
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        assert.deepEqual((await f.read()).deferred, [narrow[1]]);
-        await f.write(f.draft({}, true));
-      }
     });
   }
 
   for (const payload of ["generic", "candidate", "finding"]) {
-    test(`${layout}: duplicate ${payload} observations retain their saved identity`, async (t) => {
+    test(`${layout}: ID-less ${payload} checkpoints cannot borrow a saved identity`, async (t) => {
       const f = await fixture(t, layout);
-      const row = {
-        ...generic,
-        ...(payload === "generic"
+      const evidence =
+        payload === "generic"
           ? {}
-          : { [payload]: { title: "Caller validation." } }),
+          : { [payload]: { title: "Caller validation." } };
+      const named = {
+        id: "caller-review",
+        ...generic,
+        ...evidence,
+        paths: [...generic.paths, "src/alternate.py"],
+        notes: "Both callers remain pending.",
+        ...(payload === "generic" ? {} : { candidateId: "candidate-review" }),
       };
-      const reordered = Object.fromEntries(Object.entries(row).reverse());
-      await f.write(f.draft({ deferred: [row] }));
-      const original = (await f.read()).deferred[0];
-      await f.write(f.draft({ deferred: [row, reordered] }));
-      assert.ok(
-        (await f.read()).deferred.every((item) => item.id === original.id),
+      const raw = { ...generic, ...evidence };
+      await f.write(f.draft({ deferred: [named] }));
+      await interruptDraftWrite(
+        path.join(
+          f.root,
+          layout === "worker" ? "result.json" : "coverage.json",
+        ),
+        () => f.write(f.draft({ deferred: [raw] })),
       );
-      await f.write(f.draft({ deferred: [original, reordered] }));
-      assert.ok(
-        (await f.read()).deferred.every((item) => item.id === original.id),
+      await f.write(f.draft({}, true));
+      const saved = await f.read();
+      assert.equal(saved.completeness, "partial");
+      assert.deepEqual(
+        saved.deferred.find((row) => row.id === named.id),
+        named,
+      );
+      const independent = saved.deferred.find((row) => row.id !== named.id);
+      assert.ok(independent);
+      assert.deepEqual(independent, { ...raw, id: independent.id });
+      const outcome =
+        payload === "generic"
+          ? { resolvedDeferred: [close(named.id)] }
+          : {
+              surfaces: [
+                {
+                  candidateId: named.candidateId,
+                  label: "Caller",
+                  disposition: "rejected",
+                },
+              ],
+            };
+      await f.write(f.draft(outcome, true));
+      await f.write(f.draft({}, true));
+      assert.deepEqual((await f.read()).deferred, [independent]);
+    });
+  }
+
+  for (const submittedId of [undefined, "api", "other-api"]) {
+    test(`${layout}: surface closeout requires matching ID ${submittedId ?? "omitted"}`, async (t) => {
+      const f = await fixture(t, layout);
+      const surface = {
+        id: "api",
+        label: "API",
+        disposition: "needs_follow_up",
+        receiptRefs: ["artifacts/api-review.md"],
+      };
+      const other = {
+        ...surface,
+        id: "another-api",
+        notes: "Independent entry point.",
+      };
+      await f.write(
+        f.draft({
+          surfaces: [surface, other],
+          deferred: [
+            { id: "api-review", ...generic, surfaceIds: [surface.id] },
+          ],
+        }),
+      );
+      await f.write(
+        f.draft(
+          {
+            resolvedDeferred: [close("api-review")],
+            surfaces: [
+              {
+                ...(submittedId ? { id: submittedId } : {}),
+                label: surface.label,
+                disposition: "no_issue_found",
+              },
+            ],
+          },
+          true,
+        ),
+      );
+      await f.write(f.draft({}, true));
+      const saved = await f.read();
+      assert.deepEqual(saved.deferred, []);
+      assert.deepEqual(
+        saved.surfaces.find((row) => row.id === other.id),
+        other,
+      );
+      assert.equal(saved.completeness, "partial");
+      assert.deepEqual(
+        saved.surfaces.find((row) => row.id === surface.id),
+        submittedId === surface.id
+          ? { ...surface, disposition: "no_issue_found" }
+          : surface,
       );
     });
   }
+
+  for (const payload of ["generic", "candidate"]) {
+    test(`${layout}: closing one task retains ${payload} work on a shared surface`, async (t) => {
+      const f = await fixture(t, layout);
+      const first = { id: "review-a", ...generic, surfaceIds: ["shared"] };
+      const remaining = {
+        id: "review-b",
+        ...generic,
+        surfaceIds: ["shared"],
+        ...(payload === "candidate"
+          ? {
+              candidateId: "candidate-b",
+              candidate: { title: "Pending caller." },
+            }
+          : {}),
+      };
+      const surface = {
+        id: "shared",
+        label: "Shared entry point",
+        disposition: "needs_follow_up",
+        receiptRefs: [],
+      };
+      await f.write(
+        f.draft({ surfaces: [surface], deferred: [first, remaining] }),
+      );
+      const closure = close(first.id);
+      for (const resolvedDeferred of [[closure], [closure], undefined]) {
+        await f.write(
+          f.draft({ ...(resolvedDeferred ? { resolvedDeferred } : {}) }, true),
+        );
+        const saved = await f.read();
+        assert.equal(saved.completeness, "partial");
+        assert.deepEqual(saved.deferred, [remaining]);
+        assert.deepEqual(saved.resolvedDeferred, [closure]);
+        assert.deepEqual(saved.surfaces, [surface]);
+      }
+    });
+  }
+
+  for (const observation of ["terminal", "progress", "surface-only", "tied"]) {
+    test(`${layout}: explicit surface follow-up survives ${observation} checkpoint recovery`, async (t) => {
+      const f = await fixture(t, layout);
+      const pending = { id: "api-review", ...generic, surfaceIds: ["api"] };
+      const surface = {
+        id: "api",
+        label: "API",
+        disposition: "needs_follow_up",
+        receiptRefs: ["artifacts/original.md"],
+      };
+      await f.write(f.draft({ deferred: [pending], surfaces: [surface] }));
+      const closed = f.draft(
+        {
+          resolvedDeferred: [close(pending.id)],
+          surfaces: [{ ...surface, disposition: "no_issue_found" }],
+        },
+        true,
+      );
+      await f.write(closed);
+      const checkpoints = path.join(f.root, "checkpoints");
+      for (const name of await readdir(checkpoints)) {
+        const file = path.join(checkpoints, name);
+        const row = JSON.parse(await readFile(file, "utf8"));
+        const time = row.coverage.resolvedDeferred?.length ? 2 : 1;
+        await utimes(file, time, time);
+      }
+      for (const name of layout === "worker"
+        ? ["result.json", "checkpoint-head.json"]
+        : ["coverage.json", "scan-manifest.json", "findings.json"])
+        await utimes(path.join(f.root, name), 2, 2);
+      const before = new Set(await readdir(checkpoints));
+      const followUp = {
+        ...surface,
+        notes: "A new caller needs review.",
+        receiptRefs: ["artifacts/new-caller.md"],
+      };
+      const deferred =
+        observation === "surface-only"
+          ? []
+          : [{ ...pending, reason: followUp.notes }];
+      await saveScanDraftCheckpoint(
+        f.context,
+        f.draft(
+          { deferred, surfaces: [followUp] },
+          observation === "terminal" || observation === "tied",
+        ),
+        false,
+      );
+      for (const name of await readdir(checkpoints)) {
+        if (!before.has(name)) {
+          const time = observation === "tied" ? 2 : 3;
+          await utimes(path.join(checkpoints, name), time, time);
+        }
+      }
+      for (const complete of [true, false, true]) {
+        await f.write(f.draft({}, complete));
+        const saved = await f.read();
+        assert.equal(saved.completeness, "partial");
+        assert.deepEqual(saved.deferred, deferred);
+        assert.equal(saved.surfaces.length, 1);
+        assert.equal(saved.surfaces[0].id, surface.id);
+        assert.equal(saved.surfaces[0].disposition, "needs_follow_up");
+        assert.equal(saved.surfaces[0].notes, followUp.notes);
+        assert.ok(
+          saved.surfaces[0].receiptRefs.includes("artifacts/new-caller.md"),
+        );
+      }
+      await f.write(closed);
+      const saved = await f.read();
+      assert.equal(saved.completeness, "complete");
+      assert.deepEqual(saved.deferred, []);
+      assert.equal(saved.surfaces[0].disposition, "no_issue_found");
+    });
+  }
+
+  for (const destination of layout === "worker"
+    ? ["result.json", "checkpoint-head.json"]
+    : ["coverage.json", "scan-manifest.json"]) {
+    test(`${layout}: recover explicit work after ${destination} publication fails`, async (t) => {
+      const f = await fixture(t, layout);
+      const pending = { id: "review", ...generic };
+      const closing = f.draft({ resolvedDeferred: [close(pending.id)] }, true);
+      const fail = (input) =>
+        interruptDraftWrite(path.join(f.root, destination), () =>
+          f.write(input),
+        );
+      await f.write(f.draft({ deferred: [pending] }));
+      await fail(closing);
+      await f.write(f.draft({}, true));
+      assert.deepEqual((await f.read()).deferred, []);
+      assert.deepEqual((await f.read()).resolvedDeferred, [close(pending.id)]);
+      const checkpointRoot = path.join(f.root, "checkpoints");
+      const originalClosures = [];
+      for (const name of await readdir(checkpointRoot)) {
+        const file = path.join(checkpointRoot, name);
+        const saved = JSON.parse(await readFile(file, "utf8"));
+        if (saved.coverage.resolvedDeferred?.length)
+          originalClosures.push([file, (await stat(file)).mtimeMs]);
+      }
+      const reopened = {
+        ...pending,
+        reason: "A newly inspected caller needs review.",
+      };
+      await fail(f.draft({ deferred: [reopened] }, true));
+      await f.write(f.draft({}, true));
+      const saved = await f.read();
+      assert.equal(saved.completeness, "partial");
+      assert.deepEqual(saved.deferred, [reopened]);
+      assert.deepEqual(saved.resolvedDeferred ?? [], []);
+      await fail(closing);
+      for (const [file, modified] of originalClosures)
+        assert.equal((await stat(file)).mtimeMs, modified);
+      await f.write(f.draft({}, true));
+      const accepted =
+        destination === "result.json" || destination === "scan-manifest.json";
+      assert.deepEqual((await f.read()).deferred, accepted ? [] : [reopened]);
+      await f.write(closing);
+      await f.write(f.draft({}, true));
+      assert.deepEqual((await f.read()).deferred, []);
+      assert.deepEqual((await f.read()).resolvedDeferred, [close(pending.id)]);
+    });
+  }
 }
+
+for (const layout of ["standard", "diff"]) {
+  test(`${layout}: a staged explicit surface closeout survives omitted and repeated retries`, async (t) => {
+    const f = await fixture(t, layout);
+    const surface = {
+      id: "api",
+      label: "API",
+      disposition: "needs_follow_up",
+      receiptRefs: ["artifacts/api-review.md"],
+    };
+    await f.write(
+      f.draft({
+        surfaces: [surface],
+        deferred: [{ id: "review", ...generic, surfaceIds: [surface.id] }],
+      }),
+    );
+    const resolvedDeferred = [close("review")];
+    const closed = f.draft(
+      {
+        resolvedDeferred,
+        surfaces: [
+          {
+            id: surface.id,
+            label: surface.label,
+            disposition: "no_issue_found",
+          },
+        ],
+      },
+      true,
+    );
+    await assert.rejects(
+      recordCodexSecurityScanDraftViaWorkbench(
+        f.context,
+        closed,
+        async (args) => {
+          const checkpoint = JSON.parse(
+            await readFile(args[args.indexOf("--checkpoint-path") + 1], "utf8"),
+          );
+          await saveScanDraftCheckpoint(f.context, checkpoint);
+          throw new Error("interrupted draft write");
+        },
+      ),
+      /interrupted draft write/,
+    );
+    for (const coverage of [{}, { resolvedDeferred }, {}]) {
+      await f.write(f.draft(coverage, true));
+      const saved = await f.read();
+      assert.equal(saved.completeness, "complete");
+      assert.deepEqual(saved.deferred, []);
+      assert.deepEqual(saved.resolvedDeferred, resolvedDeferred);
+      assert.deepEqual(saved.surfaces, [
+        { ...surface, disposition: "no_issue_found" },
+      ]);
+    }
+  });
+}
+
+test("worker: archived closures cannot discard a later explicitly reopened task", async (t) => {
+  const f = await fixture(t, "worker");
+  const pending = { id: "review", ...generic };
+  await f.write(f.draft({ deferred: [pending] }));
+  await f.write(f.draft({ resolvedDeferred: [close(pending.id)] }, true));
+  const attempts = path.join(path.dirname(f.root), "attempts");
+  await mkdir(attempts);
+  await rename(f.root, path.join(attempts, "attempt-01"));
+  await mkdir(f.root);
+  await f.write(f.draft({ deferred: [pending] }, true));
+  await rename(f.root, path.join(attempts, "attempt-02"));
+  await mkdir(f.root);
+  await f.write(f.draft({}, true));
+  assert.deepEqual((await f.read()).deferred, [pending]);
+  assert.deepEqual((await f.read()).resolvedDeferred ?? [], []);
+});
 
 for (const layout of ["standard", "diff"]) {
   for (const selectedTime of [150, 200, 300]) {
@@ -498,218 +499,94 @@ for (const layout of ["standard", "diff"]) {
   }
 }
 
-for (const layout of ["standard", "diff", "worker"]) {
-  for (const payload of ["generic", "candidate", "finding"]) {
-    test(`${layout}: interrupted raw ${payload} retains its saved ID through closeout`, async (t) => {
-      const f = await fixture(t, layout);
-      const row = {
-        ...generic,
-        ...(payload === "generic"
-          ? {}
-          : { [payload]: { title: "Caller validation." } }),
-      };
-      const named = {
-        id: "caller-review",
-        ...(payload === "generic" ? {} : { candidateId: "candidate-review" }),
-        ...row,
-        paths: [...row.paths, "src/alternate.py"],
-        notes: "Both callers still need review.",
-        ...(payload === "generic"
-          ? {}
-          : {
-              [payload]: { ...row[payload], evidence: "Inspect both callers." },
-            }),
-      };
-      await f.write(f.draft({ deferred: [named] }));
-      for (const name of await readdir(path.join(f.root, "checkpoints")))
-        await utimes(path.join(f.root, "checkpoints", name), 1, 1);
-      for (const name of layout === "worker"
-        ? ["result.json", "checkpoint-head.json"]
-        : ["coverage.json", "findings.json", "scan-manifest.json"])
-        await utimes(path.join(f.root, name), 1, 1);
-      await saveScanDraftCheckpoint(
-        f.context,
-        f.draft({ deferred: [row] }),
-        false,
-      );
-      await f.write(f.draft({}, true));
-      assert.deepEqual((await f.read()).deferred, [named]);
-      const outcome =
-        payload === "generic"
-          ? {
-              resolvedDeferred: [{ id: named.id, reason: "Callers reviewed." }],
-            }
-          : {
-              surfaces: [
-                {
-                  candidateId: named.candidateId,
-                  label: "Caller review",
-                  disposition: "rejected",
-                },
-              ],
-            };
-      await f.write(f.draft(outcome, true));
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        assert.deepEqual((await f.read()).deferred, []);
-        await f.write(f.draft({}, true));
-      }
-    });
-  }
-
-  for (const complete of [false, true]) {
-    test(`${layout}: abbreviated generic observations preserve saved context, complete=${complete}`, async (t) => {
-      const f = await fixture(t, layout);
-      const broad = {
-        id: "caller-review",
-        reason: "Review callers.",
-        paths: ["src/a.ts", "src/b.ts"],
-        notes: "Both callers still need review.",
-      };
-      const abbreviated = { reason: broad.reason, paths: [broad.paths[0]] };
-      await f.write(f.draft({ deferred: [broad] }));
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        await f.write(f.draft({ deferred: [abbreviated] }, complete));
-        assert.deepEqual((await f.read()).deferred, [broad]);
-      }
-      const updated = {
-        ...broad,
-        paths: abbreviated.paths,
-        notes: "Only the first caller remains.",
-      };
-      await f.write(f.draft({ deferred: [updated] }, complete));
-      assert.deepEqual((await f.read()).deferred, [updated]);
-      await f.write(f.draft({ deferred: [abbreviated] }, complete));
-      assert.deepEqual((await f.read()).deferred, [updated]);
-      await f.write(
-        f.draft(
-          { resolvedDeferred: [{ id: broad.id, reason: "Caller reviewed." }] },
-          true,
-        ),
-      );
-      await f.write(f.draft({}, true));
-      assert.deepEqual((await f.read()).deferred, []);
-    });
-  }
-
-  test(`${layout}: ambiguous summary preserves both saved contexts and closes independently`, async (t) => {
-    const f = await fixture(t, layout);
-    const detailed = ["First caller context.", "Second caller context."].map(
-      (notes) => ({ ...generic, notes }),
+for (const payload of ["generic", "candidate"]) {
+  test(`worker: legacy unnamed ${payload} evidence remains pending after a named closeout`, async (t) => {
+    const f = await fixture(t, "worker");
+    const raw = {
+      ...generic,
+      ...(payload === "candidate"
+        ? { candidate: { title: "Caller review." } }
+        : {}),
+    };
+    const named = {
+      ...raw,
+      id: "named-review",
+      notes: "Saved caller context.",
+      ...(payload === "candidate" ? { candidateId: "named-candidate" } : {}),
+    };
+    await f.write(f.draft({ deferred: [named] }));
+    await saveScanDraftCheckpoint(
+      f.context,
+      f.draft({ deferred: [raw] }),
+      false,
     );
-    await f.write(f.draft({ deferred: detailed }));
-    const original = (await f.read()).deferred;
-    await f.write(f.draft({ deferred: [generic] }));
-    const saved = (await f.read()).deferred;
-    for (const row of original)
-      assert.ok(
-        saved.some((item) => item.id === row.id && item.notes === row.notes),
-      );
-    const summary = saved.find((row) => row.notes === undefined);
-    assert.ok(summary);
-    assert.ok(original.every((row) => row.id !== summary.id));
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      await f.write(f.draft({ deferred: [generic] }));
-      assert.deepEqual((await f.read()).deferred, saved);
+    const outcome =
+      payload === "generic"
+        ? { resolvedDeferred: [close(named.id)] }
+        : {
+            surfaces: [
+              {
+                candidateId: named.candidateId,
+                label: "Caller",
+                disposition: "rejected",
+              },
+            ],
+          };
+    await f.write(f.draft(outcome, true));
+    await f.write(f.draft({}, true));
+    const saved = await f.read();
+    assert.equal(saved.completeness, "partial");
+    assert.ok(saved.deferred.length > 0);
+    for (const { id, ...row } of saved.deferred) {
+      assert.notEqual(id, named.id);
+      assert.deepEqual(row, raw);
     }
-    for (const closed of [original[0], summary, original[1]]) {
-      await f.write(
+  });
+}
+
+for (const complete of [false, true]) {
+  test(`worker: retain a valid ${complete ? "terminal" : "progress"} draft before reading a malformed result`, async (t) => {
+    const f = await fixture(t, "worker");
+    const destination = path.join(f.root, "result.json");
+    await writeFile(destination, "{broken");
+    const submitted = f.draft(
+      { deferred: [{ id: "pending", ...generic }] },
+      complete,
+    );
+    await assert.rejects(f.write(submitted), /stored JSON is malformed/);
+    const files = await readdir(path.join(f.root, "checkpoints"));
+    assert.equal(files.length, 1);
+    assert.deepEqual(
+      JSON.parse(
+        await readFile(path.join(f.root, "checkpoints", files[0]), "utf8"),
+      ),
+      submitted,
+    );
+    await rm(destination);
+    await f.write(f.draft({}, true));
+    assert.deepEqual((await f.read()).deferred, submitted.coverage.deferred);
+  });
+}
+
+for (const malformed of [false, true]) {
+  test(`worker: reject an unknown closure without a checkpoint, malformed result=${malformed}`, async (t) => {
+    const f = await fixture(t, "worker");
+    if (malformed) await writeFile(path.join(f.root, "result.json"), "{broken");
+    await assert.rejects(
+      f.write(
         f.draft(
           {
-            resolvedDeferred: [{ id: closed.id, reason: "Review completed." }],
+            resolvedDeferred: [
+              { id: "unknown", reason: "Unsupported closure." },
+            ],
           },
           true,
         ),
-      );
-      await f.write(f.draft({}, true));
-      const remaining = (await f.read()).deferred;
-      assert.ok(remaining.every((row) => row.id !== closed.id));
-      if (closed === original[0]) {
-        assert.ok(
-          remaining.some(
-            (row) =>
-              row.id === original[1].id && row.notes === original[1].notes,
-          ),
-        );
-        assert.ok(remaining.some((row) => row.id === summary.id));
-      }
-    }
-    assert.deepEqual((await f.read()).deferred, []);
+      ),
+      malformed
+        ? /stored JSON is malformed/
+        : /names no saved generic deferral/,
+    );
+    assert.deepEqual(await readdir(f.root), malformed ? ["result.json"] : []);
   });
 }
-
-for (const enriched of [false, true]) {
-  test(`worker: equivalent named observations keep repeated raw IDs, extra context=${enriched}`, async (t) => {
-    const f = await fixture(t, "worker");
-    const original = ["first-review", "second-review"].map((id) => ({
-      id,
-      ...generic,
-    }));
-    if (enriched) {
-      await f.write(
-        f.draft({
-          deferred: [{ ...generic, notes: "Keep the caller context." }],
-        }),
-      );
-      original.push((await f.read()).deferred[0]);
-    }
-    await f.write(f.draft({ deferred: original }));
-    let saved;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await f.write(f.draft({ deferred: [generic] }));
-      const current = (await f.read()).deferred;
-      for (const row of original)
-        assert.deepEqual(
-          current.find((item) => item.id === row.id),
-          row,
-        );
-      if (saved) assert.deepEqual(current, saved);
-      saved = current;
-    }
-  });
-}
-
-test("worker: inferred context does not choose an ambiguous candidate alias", async (t) => {
-  const f = await fixture(t, "worker");
-  const row = {
-    id: "caller-review",
-    ...generic,
-    paths: [...generic.paths, "src/alternate.py"],
-    candidate: { title: "Caller validation." },
-  };
-  await f.write(
-    f.draft({
-      deferred: [
-        { ...row, candidateId: "first-candidate", notes: "Initial review." },
-      ],
-    }),
-  );
-  const latest = { ...row, notes: "Both callers remain pending." };
-  await f.write(
-    f.draft({ deferred: [{ ...latest, candidateId: "second-candidate" }] }),
-  );
-  const abbreviated = { ...generic, candidate: row.candidate };
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    await f.write(f.draft({ deferred: [abbreviated] }));
-    assert.deepEqual((await f.read()).deferred, [latest]);
-  }
-});
-
-test("worker: inferred context retains an authored equal candidate ID", async (t) => {
-  for (const candidateId of [undefined, "caller-review"]) {
-    const f = await fixture(t, "worker");
-    const named = {
-      id: "caller-review",
-      ...(candidateId === undefined ? {} : { candidateId }),
-      ...generic,
-      paths: [...generic.paths, "src/alternate.py"],
-      notes: "Both callers remain pending.",
-      candidate: { title: "Caller validation." },
-    };
-    await f.write(f.draft({ deferred: [named] }));
-    const abbreviated = { ...generic, candidate: named.candidate };
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      await f.write(f.draft({ deferred: [abbreviated] }));
-      assert.deepEqual((await f.read()).deferred, [named]);
-    }
-  }
-});

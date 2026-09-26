@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from test_workbench_checkpoint_heads import drafts, select
 from test_workbench_standard_deep_results import accepted_standard_worker, deep_scan_fixture
-from workbench_test_support import run_workbench, write_checkpoint
+from workbench_test_support import run_workbench, saved_discovery_worker, write_checkpoint
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_db
@@ -155,15 +155,7 @@ def test_frozen_times_cover_sources_without_checkpoint_heads(
     os.utime(result, ns=(100, 100))
     checkpoint = write_checkpoint(output / "checkpoints", pending)
     os.utime(checkpoint, ns=(200, 200))
-    workers = [
-        {
-            "id": "worker",
-            "kind": "discovery",
-            "artifact_dir": str(output),
-            "result_manifest_path": None,
-            "attempt": 1,
-        }
-    ]
+    workers = [saved_discovery_worker(output, "worker", 1)]
     binding = {
         "status": "interrupted",
         "allowedTargetKinds": ["git_revision"],

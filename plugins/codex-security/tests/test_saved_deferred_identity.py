@@ -12,7 +12,7 @@ from test_workbench_standard_deep_results import (
     deep_scan_fixture,
     write_saved_parent,
 )
-from workbench_test_support import run_workbench, write_checkpoint
+from workbench_test_support import run_workbench, saved_discovery_worker, write_checkpoint
 
 
 @pytest.fixture
@@ -51,13 +51,7 @@ def save_worker(root: Path, module, worker_id: str, drafts: list[dict], result: 
     result_path = output / "result.json"
     result_path.write_text(json.dumps(result))
     os.utime(result_path, ns=(1000, 1000))
-    return {
-        "id": worker_id,
-        "kind": "discovery",
-        "artifact_dir": str(output),
-        "result_manifest_path": None,
-        "attempt": 1,
-    }
+    return saved_discovery_worker(output, worker_id, 1)
 
 
 def recover(root: Path, module, workers, frozen=None):
@@ -121,7 +115,7 @@ def test_distinct_raw_candidate_survives_another_workers_generic_closure(
         "candidate": {"title": "First caller"},
     }
     second = {**first, "candidate": {"title": "Independent caller"}}
-    first_id = saved_results._identified_deferred_rows({"deferred": [first]})[0]["id"]
+    first_id = "candidate-review"
     drafts = [
         saved_draft("identity-scan", deferred=[first]),
         saved_draft("identity-scan", deferred=[second]),
@@ -154,16 +148,12 @@ def test_distinct_raw_candidate_survives_another_workers_generic_closure(
     for documents in (result, replay):
         pending = documents[2]["deferred"]
         assert any(row.get("candidate") == second["candidate"] for row in pending)
-        assert (any(row.get("candidate") == first["candidate"] for row in pending)) is (
-            not named_history
-        )
-        independent = [row for row in pending if row.get("candidate") == second["candidate"]]
-        assert all(row["id"] != first_id for row in independent)
+        assert any(row.get("candidate") == first["candidate"] for row in pending)
 
 
 def test_two_unmatched_raw_candidates_keep_distinct_stable_ids(tmp_path: Path, saved_results):
     generic = {"reason": "Review remains.", "paths": ["api.py"]}
-    generic_id = saved_results._identified_deferred_rows({"deferred": [generic]})[0]["id"]
+    generic_id = "generic-review"
     first = {**generic, "candidate": {"title": "First caller"}}
     second = {**generic, "candidate": {"title": "Second caller"}}
     closure = saved_draft(
@@ -176,7 +166,7 @@ def test_two_unmatched_raw_candidates_keep_distinct_stable_ids(tmp_path: Path, s
         saved_results,
         "reviewer",
         [
-            saved_draft("identity-scan", deferred=[generic]),
+            saved_draft("identity-scan", deferred=[{**generic, "id": generic_id}]),
             closure,
             saved_draft("identity-scan", deferred=[first]),
             saved_draft("identity-scan", deferred=[second]),
@@ -188,15 +178,12 @@ def test_two_unmatched_raw_candidates_keep_distinct_stable_ids(tmp_path: Path, s
     pending = [row for row in documents[2]["deferred"] if "candidate" in row]
     assert {row["candidate"]["title"] for row in pending} == {"First caller", "Second caller"}
     assert len({row["id"] for row in pending}) == 2
-    assert all(row["id"] != generic_id for row in pending)
     assert replay[2] == documents[2]
 
 
-def test_generic_reopening_keeps_its_derived_id_with_changed_metadata(
-    tmp_path: Path, saved_results
-):
+def test_unnamed_changed_observation_stays_pending(tmp_path: Path, saved_results):
     generic = {"reason": "Review remains.", "paths": ["api.py"], "notes": "Initial review."}
-    identity = saved_results._identified_deferred_rows({"deferred": [generic]})[0]["id"]
+    identity = "source-review"
     closed = saved_draft(
         "identity-scan", closures=[{"id": identity, "reason": "Reviewed."}], complete=True
     )
@@ -214,17 +201,17 @@ def test_generic_reopening_keeps_its_derived_id_with_changed_metadata(
     )
     documents = recover(tmp_path, saved_results, [worker])
     pending = [row for row in documents[2]["deferred"] if row.get("notes") == reopened["notes"]]
-    assert len(pending) == 1 and pending[0]["id"] == identity
+    assert len(pending) == 1 and pending[0]["id"] != identity
 
 
 @pytest.mark.parametrize("payload_field", ["candidate", "finding"])
 @pytest.mark.parametrize("raw_modified", [200, 300], ids=["tied", "newer"])
 @pytest.mark.parametrize("layout", ["parent", "worker"])
-def test_new_raw_generic_work_survives_accepted_candidate_rejection(
+def test_new_work_survives_accepted_candidate_rejection(
     tmp_path: Path, saved_results, payload_field: str, raw_modified: int, layout: str
 ):
     generic = {"reason": "Review remains.", "paths": ["api.py"], "surfaceIds": ["entry"]}
-    candidate_id = saved_results._identified_deferred_rows({"deferred": [generic]})[0]["id"]
+    candidate_id = "candidate-review"
     candidate = {
         **generic,
         "id": candidate_id,
@@ -241,7 +228,14 @@ def test_new_raw_generic_work_survives_accepted_candidate_rejection(
     }
     rejected = saved_draft("identity-scan", surfaces=[rejection], complete=True)
     reopened = {**generic, "notes": "Independent source review."}
-    raw = saved_draft("identity-scan", deferred=[reopened], surfaces=[rejection], complete=True)
+    new_candidate = {
+        **candidate,
+        "id": "independent-caller",
+        payload_field: {"title": "Another caller needs validation."},
+    }
+    raw = saved_draft(
+        "identity-scan", deferred=[reopened, new_candidate], surfaces=[rejection], complete=True
+    )
     drafts = [saved_draft("identity-scan", deferred=[candidate]), rejected, raw]
     if layout == "worker":
         worker = save_worker(tmp_path, saved_results, "reviewer", drafts, rejected)
@@ -266,9 +260,11 @@ def test_new_raw_generic_work_survives_accepted_candidate_rejection(
     replay = recover(tmp_path, saved_results, workers, documents[0]["scan"]["preservedSources"])
     for result in (documents, replay):
         pending = [row for row in result[2]["deferred"] if row.get("id") != "scan-stopped"]
+        assert new_candidate in pending
+        pending.remove(new_candidate)
         assert len(pending) == 1
         assert {key: value for key, value in pending[0].items() if key != "id"} == reopened
-        assert pending[0]["id"] == f"{candidate_id}-2"
+        assert isinstance(pending[0]["id"], str)
         assert result[2]["surfaces"] == [rejection]
     assert replay[2] == documents[2]
 
@@ -394,9 +390,7 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
             row["id"] = f"part-{index + 1}"
         else:
             row.pop("id")
-    expected_ids = {
-        row["id"] for row in saved_results._identified_deferred_rows({"deferred": split})
-    }
+    expected_ids = {row["id"] for row in split} if explicit_ids else None
     initial = saved_draft(scan_id, deferred=[combined])
     pending = saved_draft(scan_id, deferred=split)
     checkpoints = [
@@ -410,7 +404,7 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
     head.write_text(json.dumps({"checkpoint": checkpoints[0].name}))
     os.utime(head, ns=(100, 100))
     if close_first:
-        first_id = saved_results._identified_deferred_rows({"deferred": split})[0]["id"]
+        first_id = split[0]["id"] if explicit_ids else saved_results._saved_coverage_id(split[0])
         terminal = saved_draft(
             scan_id,
             closures=[{"id": first_id, "reason": "First path reviewed."}],
@@ -420,14 +414,17 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
         os.utime(terminal_checkpoint, ns=(300, 300))
         head.write_text(json.dumps({"checkpoint": terminal_checkpoint.name}))
         os.utime(head, ns=(300, 300))
-        expected_ids.remove(first_id)
+        if explicit_ids:
+            expected_ids.remove(first_id)
     first_coverage, replay = cancel_and_preserve(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
     for coverage in (first_coverage, replay):
         retained = [row for row in coverage["deferred"] if row.get("paths") in [["a.py"], ["b.py"]]]
-        assert len(retained) == (1 if close_first else 2)
-        assert {row["id"] for row in retained} == expected_ids
+        assert len(retained) == (1 if close_first and explicit_ids else 2)
+        assert len({row["id"] for row in retained}) == len(retained)
+        if explicit_ids:
+            assert {row["id"] for row in retained} == expected_ids
         assert all(row["id"] != combined["id"] for row in retained)
         if explicit_ids:
             assert {row["id"] for row in retained} == (
@@ -438,226 +435,11 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
     assert replay == first_coverage
 
 
-@pytest.mark.parametrize("payload_field", [None, "candidate", "finding"])
-def test_duplicate_observations_keep_their_saved_identity(
-    tmp_path: Path, saved_results, payload_field: str | None
-):
-    named = {"id": "saved-review", "reason": "Review remains.", "paths": ["a.py", "b.py"]}
-    if payload_field:
-        named[payload_field] = {"title": "Caller validation."}
-    raw = {key: value for key, value in named.items() if key != "id"}
-    initial = saved_draft("identity-scan", deferred=[named])
-    repeated = saved_draft("identity-scan", deferred=[raw, raw])
-    worker = save_worker(tmp_path, saved_results, "reviewer", [initial, repeated], initial)
-    first = recover(tmp_path, saved_results, [worker])
-    replay = recover(tmp_path, saved_results, [worker], first[0]["scan"]["preservedSources"])
-    for documents in (first, replay):
-        assert [row for row in documents[2]["deferred"] if row["id"] != "scan-stopped"] == [named]
-    assert replay[2] == first[2]
-
-
-@pytest.mark.parametrize("closed", [None, "detailed", "summary"])
-@pytest.mark.parametrize(
-    "candidate_reserved", [False, True], ids=["generic-only", "candidate-owned"]
-)
-@pytest.mark.parametrize("saved_summary", [False, True], ids=["raw", "repeated"])
-def test_ambiguous_generic_summary_has_an_independent_recoverable_identity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    saved_results,
-    closed: str | None,
-    saved_summary: bool,
-    candidate_reserved: bool,
-):
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
-    summary = {"reason": "Review API callers.", "paths": ["api.py"]}
-    detailed = saved_results._identified_deferred_rows(
-        {
-            "deferred": [
-                {**summary, "notes": "First caller."},
-                {**summary, "notes": "Second caller."},
-            ]
-        }
-    )
-    summary_id = f"{detailed[0]['id']}-{4 if candidate_reserved else 3}"
-    candidate_rows = (
-        [
-            {
-                "id": f"{detailed[0]['id']}-3",
-                "reason": "Candidate review remains.",
-                "candidate": {"title": "Independent caller."},
-            }
-        ]
-        if candidate_reserved
-        else []
-    )
-    initial = saved_draft(scan_id, deferred=[*detailed, *candidate_rows])
-    raw = saved_draft(scan_id, deferred=[summary])
-    checkpoints = [
-        write_checkpoint(result_path.parent / "checkpoints", draft) for draft in (initial, raw)
-    ]
-    for index, checkpoint in enumerate(checkpoints, 1):
-        os.utime(checkpoint, ns=(index * 100, index * 100))
-    accepted = initial
-    selected = checkpoints[0]
-    observed = 100
-    if saved_summary:
-        accepted = saved_draft(
-            scan_id, deferred=[*detailed, *candidate_rows, {**summary, "id": summary_id}]
-        )
-        selected = write_checkpoint(result_path.parent / "checkpoints", accepted)
-        observed = 250
-        os.utime(selected, ns=(observed, observed))
-    result_path.write_text(json.dumps(accepted))
-    os.utime(result_path, ns=(observed, observed))
-    if closed:
-        identity = detailed[0]["id"] if closed == "detailed" else summary_id
-        terminal = saved_draft(
-            scan_id,
-            closures=[{"id": identity, "reason": "Selected review completed."}],
-            complete=True,
-        )
-        selected = write_checkpoint(result_path.parent / "checkpoints", terminal)
-        observed = 300
-        os.utime(selected, ns=(observed, observed))
-    head = result_path.parent / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(observed, observed))
-    first_coverage, replay = cancel_and_preserve(
-        monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
-    )
-    expected = [row for row in detailed if closed != "detailed" or row != detailed[0]]
-    expected.extend(candidate_rows)
-    if closed != "summary":
-        expected.append({**summary, "id": summary_id})
-    for coverage in (first_coverage, replay):
-        pending = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
-        assert len(pending) == len(expected)
-        assert all(row in pending for row in expected)
-    assert replay == first_coverage
-
-
-def test_equivalent_saved_ids_do_not_change_repeated_summary_identity(
-    tmp_path: Path, saved_results
-):
-    row = {"reason": "Review remains.", "paths": ["api.py"]}
-    named = [{**row, "id": "review-a"}, {**row, "id": "review-b"}]
-    initial = saved_draft("identity-scan", deferred=named)
-    observations = [
-        {
-            **saved_draft("identity-scan", deferred=[row]),
-            "threatModel": {"summary": f"Checkpoint {index}."},
-        }
-        for index in range(3)
-    ]
-    worker = save_worker(tmp_path, saved_results, "reviewer", [initial, *observations], initial)
-    first = recover(tmp_path, saved_results, [worker])
-    replay = recover(tmp_path, saved_results, [worker], first[0]["scan"]["preservedSources"])
-    expected = [*named, *saved_results._identified_deferred_rows({"deferred": [row]})]
-    for documents in (first, replay):
-        pending = [item for item in documents[2]["deferred"] if item["id"] != "scan-stopped"]
-        assert len(pending) == len(expected)
-        assert all(item in pending for item in expected)
-    assert replay[2] == first[2]
-
-
-@pytest.mark.parametrize("ambiguous_first", [True, False], ids=["ambiguous-first", "exact-first"])
-def test_ambiguous_fallback_reserves_later_inferred_ids(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, saved_results, ambiguous_first: bool
-):
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
-    common = {"reason": "Review API callers.", "paths": ["api.py"]}
-    named = saved_results._identified_deferred_rows(
-        {
-            "deferred": [
-                {**common, "group": "A", "notes": "First caller."},
-                {**common, "group": "A", "notes": "Second caller."},
-                {**common, "group": "B"},
-            ]
-        }
-    )
-    summary = {**common, "group": "A"}
-    exact = {key: value for key, value in named[2].items() if key != "id"}
-    initial = saved_draft(scan_id, deferred=named)
-    raw = saved_draft(scan_id, deferred=[summary, exact] if ambiguous_first else [exact, summary])
-    closed = saved_draft(
-        scan_id,
-        closures=[{"id": named[2]["id"], "reason": "Group B review completed."}],
-        complete=True,
-    )
-    checkpoints = [
-        write_checkpoint(result_path.parent / "checkpoints", draft)
-        for draft in (initial, raw, closed)
-    ]
-    for index, checkpoint in enumerate(checkpoints, 1):
-        os.utime(checkpoint, ns=(index * 100, index * 100))
-    result_path.write_text(json.dumps(initial))
-    os.utime(result_path, ns=(100, 100))
-    head = result_path.parent / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoints[2].name}))
-    os.utime(head, ns=(300, 300))
-    first_coverage, replay = cancel_and_preserve(
-        monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
-    )
-    expected = [*named[:2], {**summary, "id": f"{named[0]['id']}-4"}]
-    for coverage in (first_coverage, replay):
-        pending = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
-        assert len(pending) == len(expected)
-        assert all(row in pending for row in expected)
-    assert replay == first_coverage
-
-
 @pytest.mark.parametrize("layout", ["parent", "worker"])
 @pytest.mark.parametrize(
-    ("payload_field", "candidate_id"),
-    [
-        ("candidate", "candidate-review"),
-        ("finding", "candidate-review"),
-        ("candidate", "caller-review"),
-    ],
-    ids=["candidate-alias", "finding-alias", "same-id"],
+    "observation", ["generic", "candidate", "finding", "explicit-update", "omitted-alias"]
 )
-def test_recovered_deferred_identity_keeps_its_candidate_alias(
-    tmp_path: Path, saved_results, layout: str, payload_field: str, candidate_id: str
-):
-    raw_row = {
-        "reason": "Review the candidate caller.",
-        "paths": ["api.py"],
-        payload_field: {"title": "Caller validation."},
-    }
-    named = {**raw_row, "id": "caller-review", "candidateId": candidate_id}
-    initial = saved_draft("identity-scan", deferred=[named])
-    raw = saved_draft("identity-scan", deferred=[raw_row])
-    if layout == "worker":
-        worker = save_worker(tmp_path, saved_results, "reviewer", [initial, raw], initial)
-        workers = [worker]
-        output = Path(worker["artifact_dir"])
-        os.utime(output / "result.json", ns=(100, 100))
-        selected = output / "checkpoints" / f"{saved_results._digest(initial)}.json"
-    else:
-        workers = []
-        output = tmp_path
-        write_saved_parent(output, initial, 100)
-        checkpoints = [write_checkpoint(output / "checkpoints", draft) for draft in (initial, raw)]
-        for index, checkpoint in enumerate(checkpoints, 1):
-            os.utime(checkpoint, ns=(index * 100, index * 100))
-        selected = checkpoints[0]
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(100, 100))
-    first = recover(tmp_path, saved_results, workers)
-    replay = recover(tmp_path, saved_results, workers, first[0]["scan"]["preservedSources"])
-    for documents in (first, replay):
-        pending = [row for row in documents[2]["deferred"] if row["id"] != "scan-stopped"]
-        assert pending == [named]
-    assert replay[2] == first[2]
-
-
-@pytest.mark.parametrize("layout", ["parent", "worker"])
-@pytest.mark.parametrize("observation", ["generic", "candidate", "finding", "explicit-update"])
-def test_abbreviated_observation_keeps_latest_saved_context(
+def test_unnamed_observation_does_not_replace_saved_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     saved_results,
@@ -673,9 +455,12 @@ def test_abbreviated_observation_keeps_latest_saved_context(
         "notes": "Both caller paths require review.",
     }
     raw_row = {"reason": broad["reason"], "paths": ["app.py"]}
-    if observation in {"candidate", "finding"}:
-        broad[observation] = {"title": "Caller validation.", "evidence": "Both callers."}
-        raw_row[observation] = {"title": "Caller validation."}
+    if observation in {"candidate", "finding", "omitted-alias"}:
+        field = "candidate" if observation == "omitted-alias" else observation
+        broad[field] = {"title": "Caller validation.", "evidence": "Both callers."}
+        raw_row[field] = {"title": "Caller validation."}
+        if observation == "omitted-alias":
+            broad["candidateId"] = "owned-candidate"
     expected = (
         {**broad, "paths": ["app.py"], "notes": "Only the remaining caller needs review."}
         if observation == "explicit-update"
@@ -702,5 +487,45 @@ def test_abbreviated_observation_keeps_latest_saved_context(
     )
     for coverage in (first_coverage, replay):
         pending = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
-        assert pending == [expected]
+        assert expected in pending
+        unnamed = [row for row in pending if row.get("id") != expected["id"]]
+        assert len(unnamed) == 1
+        assert {key: value for key, value in unnamed[0].items() if key != "id"} == raw_row
+        assert "candidateId" not in unnamed[0]
     assert replay == first_coverage
+
+
+@pytest.mark.parametrize("close_summary", [False, True])
+def test_legacy_summary_stays_pending_after_an_explicit_closure(
+    tmp_path: Path, saved_results, close_summary: bool
+):
+    summary = {"reason": "Review API callers.", "paths": ["api.py"]}
+    detailed = [
+        {**summary, "id": "caller-a", "notes": "First caller."},
+        {**summary, "id": "caller-b", "notes": "Second caller."},
+    ]
+    generated = saved_results._saved_coverage_id(summary)
+    closure_id = generated if close_summary else "caller-a"
+    worker = save_worker(
+        tmp_path,
+        saved_results,
+        "reviewer",
+        [
+            saved_draft("identity-scan", deferred=detailed),
+            saved_draft("identity-scan", deferred=[summary]),
+            saved_draft(
+                "identity-scan", closures=[{"id": closure_id, "reason": "Reviewed."}], complete=True
+            ),
+        ],
+        saved_draft("identity-scan"),
+    )
+    first = recover(tmp_path, saved_results, [worker])
+    replay = recover(tmp_path, saved_results, [worker], first[0]["scan"]["preservedSources"])
+    for documents in (first, replay):
+        pending = documents[2]["deferred"]
+        assert detailed[1] in pending
+        assert (detailed[0] in pending) is close_summary
+        assert any(
+            {key: value for key, value in row.items() if key != "id"} == summary for row in pending
+        )
+    assert replay[2] == first[2]
