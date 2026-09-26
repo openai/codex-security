@@ -1,0 +1,191 @@
+- description: "SARIF input: confirmed and not actionable redirect findings"
+  metadata:
+    case_id: sarif-redirects
+    source_type: sarif
+  vars:
+    case_id: sarif-redirects
+    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    source_type_under_test: sarif
+    expected_ids: SARIF-OPEN-REDIRECT,SARIF-SAFE-REDIRECT
+    expected_source_types: sarif,sarif
+    expected_verdicts: confirmed,not_actionable
+    finding_input: |-
+      Source type: sarif
+      SARIF results:
+      1. input_id: SARIF-OPEN-REDIRECT
+         ruleId: js/open-redirect
+         message: User-controlled next query parameter reaches res.redirect without allowlist validation.
+         location: src/server.js, route /redirect
+      2. input_id: SARIF-SAFE-REDIRECT
+         ruleId: js/open-redirect
+         message: User-controlled next query parameter may reach res.redirect.
+         location: src/server.js, route /safe-redirect
+
+- description: "CVE input: confirmed vulnerable dependency and not actionable patched dependency"
+  metadata:
+    case_id: cve-dependencies
+    source_type: cve
+  vars:
+    case_id: cve-dependencies
+    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    source_type_under_test: cve
+    expected_ids: CVE-2026-0001,CVE-2026-0002
+    expected_source_types: cve,cve
+    expected_verdicts: confirmed,not_actionable
+    finding_input: |-
+      Source type: cve
+      1. input_id: CVE-2026-0001
+         title: vulnerable-parse prototype pollution
+         advisory: vulnerable-parse versions <=1.2.5 are affected.
+         affected component: vulnerable-parse
+         reachable path: src/server.js route /parse parses req.query.payload with vulnerable-parse.
+      2. input_id: CVE-2026-0002
+         title: safe-parse XML entity expansion
+         advisory: safe-parse versions <3.0.0 are affected.
+         affected component: safe-parse
+
+- description: "Advisory input: confirmed path traversal and not actionable guarded path"
+  metadata:
+    case_id: advisory-downloads
+    source_type: advisory
+  vars:
+    case_id: advisory-downloads
+    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    source_type_under_test: advisory
+    expected_ids: ADV-DOWNLOAD-TRAVERSAL,ADV-SAFE-DOWNLOAD
+    expected_source_types: advisory,advisory
+    expected_verdicts: confirmed,not_actionable
+    finding_input: |-
+      Source type: advisory
+      1. input_id: ADV-DOWNLOAD-TRAVERSAL
+         advisory: Download endpoint joins a user-controlled file parameter to the public directory and may allow path traversal.
+         affected path: src/server.js route /download
+      2. input_id: ADV-SAFE-DOWNLOAD
+         advisory: Safe download endpoint may allow path traversal.
+         affected path: src/server.js route /safe-download
+
+- description: "Scanner ticket input: production unsafe query and test-only false positive"
+  metadata:
+    case_id: scanner-query
+    source_type: scanner_ticket
+  vars:
+    case_id: scanner-query
+    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    source_type_under_test: scanner_ticket
+    expected_ids: SCAN-SQL-001,SCAN-SQL-TEST-ONLY
+    expected_source_types: scanner_ticket,scanner_ticket
+    expected_verdicts: confirmed,not_actionable
+    finding_input: |-
+      Source type: scanner_ticket
+      1. input_id: SCAN-SQL-001
+         scanner: StaticScan
+         title: SQL injection in product search
+         claim: req.query.q is concatenated into a SQL string in src/server.js.
+      2. input_id: SCAN-SQL-TEST-ONLY
+         scanner: StaticScan
+         title: SQL injection in test helper
+         claim: req.query.q is concatenated into a SQL string in tests/unsafe-query.test.js.
+
+- description: "Bug bounty input: confirmed owner check and environment-dependent review case"
+  metadata:
+    case_id: bug-bounty-access
+    source_type: bug_bounty
+  vars:
+    case_id: bug-bounty-access
+    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    source_type_under_test: bug_bounty
+    expected_ids: BB-ORDER-IDOR,BB-PARTNER-EXPORT
+    expected_source_types: bug_bounty,bug_bounty
+    expected_verdicts: confirmed,needs_review
+    finding_input: |-
+      Source type: bug_bounty
+      1. input_id: BB-ORDER-IDOR
+         report: Authenticated users can request /orders/:id and read another user's order because the handler returns by order id without comparing ownerId to req.user.id.
+         affected path: src/server.js route /orders/:id
+      2. input_id: BB-PARTNER-EXPORT
+         report: The /partner-export endpoint may expose partner data when ENABLE_PARTNER_EXPORT is enabled in production.
+         affected path: src/server.js route /partner-export
+
+- description: "Codex Security finding artifact input: artifact mapping and counterevidence"
+  metadata:
+    case_id: codex-security-findings
+    source_type: codex_security_finding
+  vars:
+    case_id: codex-security-findings
+    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    source_type_under_test: codex_security_finding
+    expected_ids: csf_111111111111111111111111,csf_222222222222222222222222
+    expected_source_types: codex_security_finding,codex_security_finding
+    expected_verdicts: confirmed,not_actionable
+    finding_input: |-
+      Source type: codex_security_finding
+      Existing codex-security.findings-like artifact:
+      {
+        "documentType": "codex-security.findings",
+        "schemaVersion": "1.0",
+        "scanId": "scan_fixture",
+        "findings": [
+          {
+            "findingId": "csf_111111111111111111111111",
+            "occurrenceId": "occ_111111111111111111111111",
+            "ruleId": "fixture.owner-check",
+            "title": "Missing order ownership check",
+            "summary": "The order route returns records by id without checking ownerId.",
+            "severity": {"level": "high"},
+            "confidence": {"level": "medium"},
+            "taxonomy": {"cwe": [{"id": "CWE-639", "name": "Authorization Bypass Through User-Controlled Key"}]},
+            "locations": [{"path": "src/server.js", "startLine": 51}],
+            "remediation": "Check order.ownerId against req.user.id before returning the record.",
+            "provenance": {"source": "fixture"}
+          },
+          {
+            "findingId": "csf_222222222222222222222222",
+            "occurrenceId": "occ_222222222222222222222222",
+            "ruleId": "fixture.safe-profile",
+            "title": "Possible profile authorization bypass",
+            "summary": "The safe profile route might return arbitrary profiles.",
+            "severity": {"level": "medium"},
+            "confidence": {"level": "low"},
+            "taxonomy": {"cwe": [{"id": "CWE-639", "name": "Authorization Bypass Through User-Controlled Key"}]},
+            "locations": [{"path": "src/server.js", "startLine": 59}],
+            "remediation": "Verify owner check.",
+            "provenance": {"source": "fixture"}
+          }
+        ]
+      }
+
+- description: "Freeform input: confirmed plain-language claim and incomplete review case"
+  metadata:
+    case_id: freeform-mixed
+    source_type: freeform
+  vars:
+    case_id: freeform-mixed
+    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    source_type_under_test: freeform
+    expected_ids: FREEFORM-REDIRECT,FREEFORM-UNSPECIFIED-AUTH
+    expected_source_types: freeform,freeform
+    expected_verdicts: confirmed,needs_review
+    finding_input: |-
+      Source type: freeform
+      1. input_id: FREEFORM-REDIRECT
+         I think the redirect route accepts a user-provided destination and sends users there directly.
+      2. input_id: FREEFORM-UNSPECIFIED-AUTH
+         I think there is an auth issue somewhere in the app, but I do not know the route, source, sink, or required preconditions.
+
+- description: "Unknown input fallback preserves proof gaps"
+  metadata:
+    case_id: unknown-fallback
+    source_type: unknown
+  vars:
+    case_id: unknown-fallback
+    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    source_type_under_test: unknown
+    expected_ids: UNKNOWN-001,UNKNOWN-002
+    expected_source_types: unknown,unknown
+    expected_verdicts: needs_review,needs_review
+    finding_input: |-
+      Source type: unknown
+      1. input_id: UNKNOWN-001
+         A pasted note says "security bug in production maybe" but gives no affected file, component, source, sink, control, exploit precondition, or impact.
+      2. input_id: UNKNOWN-002
+         A pasted alert says "critical issue from a third-party tool" but gives no rule id, package, file, route, version range, exploit path, or impact.

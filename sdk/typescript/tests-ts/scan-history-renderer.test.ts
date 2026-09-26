@@ -3,6 +3,25 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test("separates current repository findings from earlier observations", () => {
+    const text = renderScanHistory(
+      {
+        repository: "/repo",
+        findings: [true, false].map((confirmed) => ({
+          title: confirmed ? "Current finding" : "Earlier finding",
+          severity: { level: "high" },
+          locationPath: "source.ts",
+          confirmedInLatestScan: confirmed,
+        })),
+      },
+      "findings",
+      { color: false },
+    );
+    expect(text).toMatch(
+      /Seen this scan[\s\S]*Current finding[\s\S]*Not confirmed in latest scan[\s\S]*Earlier finding/,
+    );
+  });
+
   test("leads comparisons with the outcome and groups root causes", () => {
     const text = stripVTControlCharacters(
       renderScanHistory(
@@ -204,7 +223,12 @@ describe("scan history renderer", () => {
       findingsTruncated: true,
       artifacts: { markdownReport: "/demo/results/report.md" },
       recipe: {
-        config: { model: "gpt-5.6-sol", model_reasoning_effort: "high" },
+        config: {
+          model: "gpt-5.6-sol",
+          model_reasoning_effort: "high",
+          features: { goals: true, multi_agent_v2: { enabled: true } },
+          trusted_paths: ["src", "packages/core"],
+        },
       },
       findings: Array.from({ length: 20 }, (_, index) => ({
         severity: { level: "high" },
@@ -218,6 +242,8 @@ describe("scan history renderer", () => {
       "PARENT SCAN  87654321",
       "CONFIGURATION",
       "model=gpt-5.6-sol",
+      'features={"goals":true,"multi_agent_v2":{"enabled":true}}',
+      'trusted_paths=["src","packages/core"]',
       "COVERAGE",
       "12 of 15 reviewed",
       "9 files",
@@ -275,6 +301,8 @@ describe("scan history renderer", () => {
           unavailableScans: 2,
           matchedPairs: 0,
           findingMatches: 0,
+          relatedPairs: 2,
+          uncertainPairs: 1,
         },
         "match-all",
       ),
@@ -285,9 +313,64 @@ describe("scan history renderer", () => {
       "5 scans",
       "0 comparisons",
       "0 root-cause matches",
+      "2 related pairs recorded",
+      "1 uncertain pair",
       "2 scans unavailable",
     ]) {
       expect(output).toContain(expected);
+    }
+  });
+
+  test("renders related findings separately in scan details and comparisons", () => {
+    const relation = {
+      beforeTitle: "Archive writer boundary",
+      afterTitle: "Archive reader boundary",
+      title: "Archive reader boundary",
+      scanId: "12345678-abcd-4567-abcd-1234567890ab",
+      reason: "The two controls require independent corrections.",
+    };
+    const comparison = renderScanHistory(
+      {
+        beforeScanId: "before",
+        afterScanId: "after",
+        coverage: { afterCompleteness: "complete" },
+        summary: {},
+        findings: [],
+        related: [relation],
+      },
+      "compare",
+      { color: false },
+    );
+    for (const value of [
+      "Related findings, kept separate",
+      relation.beforeTitle,
+      relation.afterTitle,
+      relation.reason,
+    ]) {
+      expect(comparison).toContain(value);
+    }
+
+    const scan = {
+      scanId: "current-scan",
+      targetPath: "/synthetic/repository",
+      progress: { status: "complete" },
+      findings: [
+        { title: relation.beforeTitle, severity: "high", related: [relation] },
+      ],
+    };
+    const compact = renderScanHistory(scan, "show", { color: false });
+    expect(compact).toContain("1 related finding, kept separate");
+    expect(compact).not.toContain(relation.reason);
+    const expanded = renderScanHistory(scan, "show", {
+      color: false,
+      showLinkedFindings: true,
+    });
+    for (const value of [
+      relation.afterTitle,
+      relation.scanId.slice(0, 8),
+      relation.reason,
+    ]) {
+      expect(expanded).toContain(value);
     }
   });
 });

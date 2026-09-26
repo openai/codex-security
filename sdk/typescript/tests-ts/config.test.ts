@@ -1,16 +1,34 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
+  type JsonObject,
+  resolveCodexProfile,
+  scanModelConfiguration,
+  scanModelProvider,
+} from "../src/config.js";
+import {
   ConfigurationError,
   DEFAULT_CODEX_CONFIG,
-  type JsonObject,
   mergedCodexConfig,
   writeCodexConfig,
 } from "../src/index.js";
+import {
+  prepareCodexSecurityCredentialHome,
+  requireSecureCredentialHome,
+  resolveCodexCommand,
+} from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -28,13 +46,18 @@ async function temporaryDirectory(): Promise<string> {
   return path;
 }
 
-function runPinnedCodex(codexHome: string, arguments_: readonly string[]) {
+function runPinnedCodex(
+  codexHome: string,
+  arguments_: readonly string[],
+  overrides: NodeJS.ProcessEnv = {},
+) {
   const node = Bun.which("node");
   if (node === null) {
     throw new Error("The pinned Codex CLI requires Node.js.");
   }
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
+    ...overrides,
     CODEX_HOME: codexHome,
   };
   delete environment["OPENAI_API_KEY"];
@@ -61,7 +84,59 @@ function runPinnedCodex(codexHome: string, arguments_: readonly string[]) {
   );
 }
 
+function macOsSandboxUnavailable(): boolean {
+  if (process.platform !== "darwin") return false;
+
+  // Check the host independently of the generated scan permission profile.
+  const result = Bun.spawnSync(
+    [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default)",
+      "/usr/bin/true",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  return (
+    result.exitCode !== 0 &&
+    new TextDecoder().decode(result.stderr).trim() ===
+      "sandbox-exec: sandbox_apply: Operation not permitted"
+  );
+}
+
+async function scanSandboxFixture() {
+  const root = await temporaryDirectory();
+  const stateDirectory = join(root, "state");
+  const codexHome = await prepareCodexSecurityCredentialHome({
+    CODEX_SECURITY_STATE_DIR: stateDirectory,
+  });
+  const workspace = join(stateDirectory, "scans", "workspace");
+  const temporary = join(root, "temp");
+  await Promise.all(
+    [workspace, temporary].map((path) => mkdir(path, { recursive: true })),
+  );
+  await writeCodexConfig(
+    join(codexHome, "config.toml"),
+    scanRuntimeCodexConfig(await mergedCodexConfig({}), codexHome),
+  );
+  return {
+    root,
+    codexHome,
+    stateDirectory,
+    workspace,
+    // Native sandbox temp grants must not cover the credential-home ancestry.
+    environment: { TEMP: temporary, TMP: temporary, TMPDIR: temporary },
+  };
+}
+
 describe("Codex configuration", () => {
+  test("automatically reviews scan execution approvals by default", async () => {
+    expect(await mergedCodexConfig({})).toMatchObject({
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
+    });
+  });
+
   test("lets Codex honor native and managed credential storage", async () => {
     expect(DEFAULT_CODEX_CONFIG["cli_auth_credentials_store"]).toBe("auto");
     expect((await mergedCodexConfig({}))["cli_auth_credentials_store"]).toBe(
@@ -69,11 +144,201 @@ describe("Codex configuration", () => {
     );
   });
 
+  test("resolves selected profile model and effort before root settings", async () => {
+    const scenarios = [
+      {
+        overrides: {
+          profile: "review",
+          model: "gpt-5.6-sol",
+          model_reasoning_effort: "low",
+          profiles: {
+            review: {
+              model: "gpt-5.6-terra",
+              model_reasoning_effort: "high",
+            },
+          },
+        },
+        expected: { model: "gpt-5.6-terra", reasoningEffort: "high" },
+      },
+      {
+        overrides: {
+          profile: "review",
+          model_reasoning_effort: "low",
+          profiles: { review: { model: "gpt-5.6-terra" } },
+        },
+        expected: { model: "gpt-5.6-terra", reasoningEffort: "low" },
+      },
+      {
+        overrides: {
+          profile: "review",
+          model: "gpt-5.6-terra",
+          profiles: { review: { model_reasoning_effort: "medium" } },
+        },
+        expected: { model: "gpt-5.6-terra", reasoningEffort: "medium" },
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const config = await mergedCodexConfig({
+        codexOverrides: scenario.overrides,
+      });
+      expect(scanModelConfiguration(config)).toEqual(scenario.expected);
+    }
+  });
+
+  test("ignores model overrides from unselected Codex profiles", async () => {
+    const config = await mergedCodexConfig({
+      codexOverrides: {
+        profile: "missing",
+        model: "gpt-5.6-sol",
+        model_reasoning_effort: "low",
+        profiles: {
+          other: {
+            model: "gpt-5.6-terra",
+            model_reasoning_effort: "high",
+          },
+        },
+      },
+    });
+
+    expect(scanModelConfiguration(config)).toEqual({
+      model: "gpt-5.6-sol",
+      reasoningEffort: "low",
+    });
+  });
+
+  test("resolves the selected profile's provider before the root provider", async () => {
+    for (const [overrides, expected] of [
+      [
+        {
+          profile: "bedrock",
+          model_provider: "openai",
+          profiles: {
+            bedrock: { model_provider: "amazon-bedrock" },
+          },
+        },
+        "amazon-bedrock",
+      ],
+      [
+        {
+          profile: "bedrock",
+          model_provider: "amazon-bedrock",
+          profiles: { bedrock: { model: "openai.gpt-5.6-luna" } },
+        },
+        "amazon-bedrock",
+      ],
+      [
+        {
+          profile: "missing",
+          model_provider: "openai",
+          profiles: { bedrock: { model_provider: "amazon-bedrock" } },
+        },
+        "openai",
+      ],
+      [{}, undefined],
+    ] as const) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(scanModelProvider(config)).toBe(expected);
+    }
+  });
+
+  test("rejects invalid model settings from the selected Codex profile", async () => {
+    for (const [profile, message] of [
+      [{ model: " " }, "model must be a nonempty string"],
+      [
+        { model_reasoning_effort: " " },
+        "reasoning effort must be a nonempty string",
+      ],
+    ] as const) {
+      const config = await mergedCodexConfig({
+        codexOverrides: { profile: "review", profiles: { review: profile } },
+      });
+
+      expect(() => scanModelConfiguration(config)).toThrow(message);
+    }
+  });
+
+  test("disables reasoning summaries by default for the selected Bedrock provider", async () => {
+    const scenarios: JsonObject[] = [
+      { model_provider: "amazon-bedrock" },
+      {
+        model_provider: "openai",
+        profile: "cloud",
+        profiles: { cloud: { model_provider: "amazon-bedrock" } },
+      },
+      {
+        model_provider: "amazon-bedrock",
+        profile: "cloud",
+        profiles: { cloud: { model: "openai.gpt-5.6-luna" } },
+      },
+    ];
+    for (const overrides of scenarios) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(resolveCodexProfile(config)).toMatchObject({
+        model_reasoning_summary: "none",
+        model_reasoning_effort: "xhigh",
+      });
+    }
+  });
+
+  test("keeps reasoning summaries when the selected provider is not Bedrock", async () => {
+    const scenarios: JsonObject[] = [
+      {
+        model_provider: "amazon-bedrock",
+        profile: "direct",
+        profiles: { direct: { model_provider: "openai" } },
+      },
+      {
+        model_provider: "openai",
+        profiles: { cloud: { model_provider: "amazon-bedrock" } },
+      },
+    ];
+    for (const overrides of scenarios) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(resolveCodexProfile(config)["model_reasoning_summary"]).toBe(
+        "detailed",
+      );
+    }
+  });
+
+  test("preserves explicit Bedrock reasoning summary settings", async () => {
+    for (const [overrides, expected] of [
+      [
+        { model_provider: "amazon-bedrock", model_reasoning_summary: "auto" },
+        "auto",
+      ],
+      [
+        {
+          model_reasoning_summary: "concise",
+          profile: "cloud",
+          profiles: { cloud: { model_provider: "amazon-bedrock" } },
+        },
+        "concise",
+      ],
+      [
+        {
+          model_provider: "amazon-bedrock",
+          model_reasoning_summary: "none",
+          profile: "cloud",
+          profiles: { cloud: { model_reasoning_summary: "detailed" } },
+        },
+        "detailed",
+      ],
+    ] as const) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(resolveCodexProfile(config)["model_reasoning_summary"]).toBe(
+        expected,
+      );
+    }
+  });
+
   test("deep-merges native multi-agent v2 defaults", async () => {
     const merged = await mergedCodexConfig({
       codexOverrides: {
         features: { multi_agent_v2: { max_concurrent_threads_per_session: 4 } },
         model_reasoning_effort: "high",
+        model_reasoning_summary: "concise",
+        show_raw_agent_reasoning: false,
         windows: { sandbox: "elevated" },
       },
     });
@@ -88,6 +353,8 @@ describe("Codex configuration", () => {
     expect(merged["agents"]).toBeUndefined();
     expect(merged["model"]).toBe("gpt-5.6-sol");
     expect(merged["model_reasoning_effort"]).toBe("high");
+    expect(merged["model_reasoning_summary"]).toBe("concise");
+    expect(merged["show_raw_agent_reasoning"]).toBe(false);
     expect(merged["windows"]).toEqual({ sandbox: "elevated" });
   });
 
@@ -189,10 +456,9 @@ describe("Codex configuration", () => {
   });
 
   test("retains the Windows sandbox in the hardened scan profile", async () => {
-    const stateDirectory = join(tmpdir(), "codex-security-windows-state");
     const merged = await mergedCodexConfig({});
 
-    expect(scanRuntimeCodexConfig(merged, stateDirectory)).toMatchObject({
+    expect(scanRuntimeCodexConfig(merged)).toMatchObject({
       windows: { sandbox: "unelevated" },
       default_permissions: "codex_security_scan",
       permissions: {
@@ -200,12 +466,240 @@ describe("Codex configuration", () => {
           filesystem: {
             ":root": "read",
             ":workspace_roots": "write",
-            [stateDirectory]: "write",
           },
         },
       },
     });
   });
+
+  test("writes scan permissions accepted by the pinned Codex CLI", async () => {
+    const { codexHome, workspace, environment } = await scanSandboxFixture();
+    const result = runPinnedCodex(
+      codexHome,
+      ["--cd", workspace, "features", "list"],
+      environment,
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(result.stdout.length).toBeGreaterThan(0);
+  });
+
+  test.skipIf(macOsSandboxUnavailable())(
+    "allows scan helpers to write workspace files without writable credential ancestry",
+    async () => {
+      const { root, codexHome, stateDirectory, workspace, environment } =
+        await scanSandboxFixture();
+      const node = Bun.which("node");
+      expect(node).not.toBeNull();
+      const attemptWrite = (path: string) =>
+        runPinnedCodex(
+          codexHome,
+          [
+            "sandbox",
+            "--config",
+            "permissions.codex_security_scan.network.enabled=true",
+            "--permission-profile",
+            "codex_security_scan",
+            "--cd",
+            workspace,
+            node!,
+            "-e",
+            "require('node:fs').writeFileSync(process.argv[1], 'probe')",
+            path,
+          ],
+          environment,
+        );
+
+      const allowed = join(workspace, "inside.txt");
+      const permitted = attemptWrite(allowed);
+      const outside = join(root, "outside.txt");
+      expect(attemptWrite(outside).exitCode).not.toBe(0);
+      await expect(stat(outside)).rejects.toMatchObject({ code: "ENOENT" });
+      const stateFile = join(stateDirectory, "outside.txt");
+      expect(attemptWrite(stateFile).exitCode).not.toBe(0);
+      await expect(stat(stateFile)).rejects.toMatchObject({ code: "ENOENT" });
+      if (permitted.exitCode !== 0) {
+        const details = new TextDecoder().decode(permitted.stderr);
+        if (
+          process.platform === "linux" &&
+          /bwrap: (?:setting up uid map: Permission denied|loopback: Failed RTM_NEWADDR: Operation not permitted)/u.test(
+            details,
+          )
+        ) {
+          expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
+            0,
+          );
+          return;
+        }
+        throw new Error(
+          `The pinned Codex CLI rejected an allowed scan write: ${details}`,
+        );
+      }
+      expect(await readFile(allowed, "utf8")).toBe("probe");
+
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      await writeFile(join(repository, "fixture.txt"), "synthetic source\n");
+      const inventory = join(workspace, "in-scope-files.txt");
+      const python =
+        Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+      expect(python).not.toBeNull();
+      const helper = runPinnedCodex(
+        codexHome,
+        [
+          "sandbox",
+          "--config",
+          "permissions.codex_security_scan.network.enabled=true",
+          "--permission-profile",
+          "codex_security_scan",
+          "--cd",
+          workspace,
+          python!,
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          ".",
+          "--out",
+          inventory,
+        ],
+        environment,
+      );
+      expect(helper.exitCode, new TextDecoder().decode(helper.stderr)).toBe(0);
+      const inventoryPaths = (await readFile(inventory, "utf8"))
+        .trim()
+        .split(/\r?\n/u)
+        .map((path) => resolve(repository, path));
+      expect(inventoryPaths).toEqual([join(repository, "fixture.txt")]);
+      await requireSecureCredentialHome(codexHome);
+      expect(
+        await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        }),
+      ).toBe(codexHome);
+    },
+  );
+
+  test.skipIf(macOsSandboxUnavailable())(
+    "reads scoped policy source without exposing sibling files or changing host files",
+    async () => {
+      const { root, codexHome, workspace, stateDirectory, environment } =
+        await scanSandboxFixture();
+      const source = join(root, "repository", "component");
+      await mkdir(source, { recursive: true });
+      const sourceFile = join(source, "fixture.txt");
+      await writeFile(sourceFile, "source");
+      const config = scanRuntimeCodexConfig(
+        await mergedCodexConfig({}),
+        codexHome,
+      );
+      const permissions = config["permissions"] as Record<
+        string,
+        { filesystem: Record<string, string> }
+      >;
+      permissions["codex_security_policy"]!.filesystem[source] = "read";
+      // The debug sandbox re-execs Codex, which may live outside OS read roots.
+      permissions["codex_security_policy"]!.filesystem[
+        resolveCodexCommand({}).command
+      ] = "read";
+      await writeCodexConfig(join(codexHome, "config.toml"), config);
+      const sandbox = (operation: "read" | "write", path: string) =>
+        runPinnedCodex(
+          codexHome,
+          [
+            "sandbox",
+            "--config",
+            "permissions.codex_security_policy.network.enabled=true",
+            "--permission-profile",
+            "codex_security_policy",
+            "--cd",
+            workspace,
+            ...(process.platform === "win32"
+              ? [
+                  join(
+                    process.env["SystemRoot"] ?? "C:\\Windows",
+                    "System32",
+                    "WindowsPowerShell",
+                    "v1.0",
+                    "powershell.exe",
+                  ),
+                  "-NoLogo",
+                  "-NoProfile",
+                  "-NonInteractive",
+                  "-Command",
+                  operation === "read"
+                    ? "$ErrorActionPreference = 'Stop'; [Console]::Write((Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw))"
+                    : "$ErrorActionPreference = 'Stop'; [System.IO.File]::WriteAllText($env:POLICY_PROBE_PATH, 'probe')",
+                ]
+              : [
+                  "/bin/sh",
+                  "-c",
+                  operation === "read"
+                    ? 'cat "$POLICY_PROBE_PATH"'
+                    : 'printf probe > "$POLICY_PROBE_PATH"',
+                ]),
+          ],
+          { ...environment, POLICY_PROBE_PATH: path },
+        );
+      const evidence = join(workspace, "previous-SECURITY.md");
+      await writeFile(evidence, "original");
+      const read = sandbox("read", evidence);
+      if (read.exitCode !== 0) {
+        const details = new TextDecoder().decode(read.stderr);
+        if (
+          (process.platform === "linux" &&
+            /bwrap: (?:setting up uid map: Permission denied|loopback: Failed RTM_NEWADDR: Operation not permitted)/u.test(
+              details,
+            )) ||
+          (process.platform === "win32" &&
+            details.includes(
+              "Restricted read-only access requires the elevated Windows sandbox backend",
+            ))
+        ) {
+          expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
+            0,
+          );
+          return;
+        }
+        throw new Error(
+          `The pinned Codex CLI rejected an allowed policy read: ${details}`,
+        );
+      }
+      expect(new TextDecoder().decode(read.stdout)).toBe("original");
+      const inspected = sandbox("read", sourceFile);
+      expect(
+        inspected.exitCode,
+        new TextDecoder().decode(inspected.stderr),
+      ).toBe(0);
+      expect(new TextDecoder().decode(inspected.stdout)).toBe("source");
+      for (const path of [
+        join(root, "repository", "sibling.txt"),
+        join(stateDirectory, "private.txt"),
+        join(codexHome, "private.txt"),
+      ]) {
+        await writeFile(path, "SYNTHETIC_PRIVATE");
+        const denied = sandbox("read", path);
+        expect(denied.exitCode).not.toBe(0);
+        expect(new TextDecoder().decode(denied.stdout)).not.toContain(
+          "SYNTHETIC_PRIVATE",
+        );
+      }
+      for (const path of [
+        sourceFile,
+        join(workspace, "inside.txt"),
+        join(root, "outside.txt"),
+        join(stateDirectory, "policy.txt"),
+        join(codexHome, "policy.txt"),
+        evidence,
+      ]) {
+        sandbox("write", path);
+        if (path === sourceFile)
+          expect(await readFile(path, "utf8")).toBe("source");
+        else if (path === evidence)
+          expect(await readFile(path, "utf8")).toBe("original");
+        else await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    },
+  );
 
   test("writes Windows sandbox settings accepted by the pinned Codex CLI", async () => {
     const root = await temporaryDirectory();
@@ -234,31 +728,14 @@ describe("Codex configuration", () => {
         },
       },
     });
-    const nativeConfig = structuredClone(config);
-    delete nativeConfig["profile"];
-    delete nativeConfig["profiles"];
-    const profileConfig = (config["profiles"] as JsonObject)[
-      "elevated"
-    ] as JsonObject;
-    const profilePath = join(root, "elevated.config.toml");
-    await writeCodexConfig(path, nativeConfig);
-    await writeCodexConfig(profilePath, profileConfig);
+    await writeCodexConfig(path, resolveCodexProfile(config));
 
     expect(parse(await readFile(path, "utf8"))).toMatchObject({
-      windows: { sandbox: "unelevated" },
-    });
-    expect(parse(await readFile(profilePath, "utf8"))).toMatchObject({
       features: { elevated_windows_sandbox: true },
       windows: { sandbox: "elevated" },
     });
 
-    const result = runPinnedCodex(root, [
-      "--profile",
-      "elevated",
-      "mcp",
-      "list",
-      "--json",
-    ]);
+    const result = runPinnedCodex(root, ["mcp", "list", "--json"]);
     if (result.exitCode !== 0) {
       throw new Error(
         `The pinned Codex CLI rejected the selected Windows sandbox profile: ${new TextDecoder().decode(result.stderr)}`,
@@ -314,6 +791,8 @@ describe("Codex configuration", () => {
     expect(await mergedCodexConfig({})).toMatchObject({
       model: "gpt-5.6-sol",
       model_reasoning_effort: "xhigh",
+      model_reasoning_summary: "detailed",
+      show_raw_agent_reasoning: true,
       windows: {
         sandbox: "unelevated",
       },
@@ -344,6 +823,16 @@ describe("Codex configuration", () => {
         },
       }),
     ).rejects.toThrow("owns plugin loading configuration");
+    for (const owned of ["plugins", "marketplaces"] as const) {
+      await expect(
+        mergedCodexConfig({
+          codexOverrides: {
+            profile: "disabled",
+            profiles: { disabled: { [owned]: {} } },
+          },
+        }),
+      ).rejects.toThrow("owns plugin loading configuration");
+    }
     await expect(
       mergedCodexConfig({
         codexOverrides: {

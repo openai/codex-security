@@ -2,10 +2,13 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CoverageDocument,
+  Finding,
   FindingsDocument,
   ScanManifest,
+  SeverityLevel,
 } from "./models.js";
 import { estimateScanCost, type ScanCost } from "./cost.js";
+import { meetsSeverity, severityThresholdRank } from "./scan-settings.js";
 
 export interface TurnResultMetadata {
   id?: string;
@@ -17,6 +20,20 @@ export interface TurnResultMetadata {
   [key: string]: unknown;
 }
 
+export interface RepositoryFinding extends Pick<
+  Finding,
+  "findingId" | "occurrenceId" | "title" | "summary" | "severity"
+> {
+  scanId: string;
+  targetId: string;
+  status: "open" | "closed";
+  confirmedInLatestScan: boolean;
+  knownSince?: string;
+  knownScanIds?: string[];
+  matchedFindingIds?: string[];
+  [key: string]: unknown;
+}
+
 export interface ScanResultOptions {
   manifest: ScanManifest;
   findings: FindingsDocument;
@@ -25,6 +42,7 @@ export interface ScanResultOptions {
   threadId: string;
   turnResult: TurnResultMetadata;
   sarifPath?: string | null;
+  repositoryFindings?: readonly RepositoryFinding[];
 }
 
 export class ScanResult {
@@ -36,6 +54,7 @@ export class ScanResult {
   public readonly turnResult: Readonly<TurnResultMetadata>;
   public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;
+  public repositoryFindings: readonly RepositoryFinding[] | undefined;
 
   public constructor(options: ScanResultOptions) {
     this.manifest = options.manifest;
@@ -44,6 +63,7 @@ export class ScanResult {
     this.scanDir = options.scanDir;
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
+    this.repositoryFindings = options.repositoryFindings;
     this.cost = estimateScanCost(
       options.turnResult.model,
       options.turnResult.usage,
@@ -92,9 +112,17 @@ export class ScanResult {
     return join(this.scanDir, "artifacts");
   }
 
+  public hasFindingsAtOrAbove(threshold: SeverityLevel): boolean {
+    severityThresholdRank(threshold);
+    return this.findings.findings.some((finding) =>
+      meetsSeverity(finding, threshold),
+    );
+  }
+
   public toJSON(): Record<string, unknown> {
     return {
       manifest: this.manifest,
+      repositoryFindings: this.repositoryFindings,
       findings: this.findings,
       coverage: this.coverage,
       scanDir: this.scanDir,

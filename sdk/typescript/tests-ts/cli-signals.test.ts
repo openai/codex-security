@@ -6,7 +6,7 @@ import {
   dependencies,
   fakePreflight,
   fakeResult,
-} from "./support/cli.js";
+} from "./cli-fixtures.js";
 
 describe("CLI signals", () => {
   test("maps Ctrl-C and SIGTERM to conventional exits and preserves partial output", async () => {

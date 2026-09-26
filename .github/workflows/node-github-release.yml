@@ -1,9 +1,6 @@
 name: node-github-release
 
 on:
-  workflow_run:
-    workflows: [node-release]
-    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -26,10 +23,7 @@ jobs:
   release:
     if: >-
       github.repository == 'openai/codex-security' &&
-      ((github.event_name == 'workflow_dispatch' &&
-        github.ref == 'refs/heads/main') ||
-       (github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success'))
+      github.ref == 'refs/heads/main'
     name: publish verified GitHub release
     runs-on: ubuntu-latest
     permissions:
@@ -38,14 +32,14 @@ jobs:
 
     steps:
       - name: Checkout release automation
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: refs/heads/main
 
       - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24.15.0"
           registry-url: "https://registry.npmjs.org"
@@ -86,13 +80,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_RUN_ID: ${{ inputs.run_id }}
-          TRIGGER_TAG: ${{ github.event.workflow_run.head_branch }}
-          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
 
-          release_tag="${INPUT_TAG:-${TRIGGER_TAG:-}}"
-          release_run="${INPUT_RUN_ID:-${TRIGGER_RUN_ID:-}}"
+          release_tag="${INPUT_TAG:-}"
+          release_run="${INPUT_RUN_ID:-}"
 
           if [[ ! "$release_tag" =~ ^npm-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "GitHub releases require an existing stable npm-vX.Y.Z tag." >&2
@@ -156,11 +148,30 @@ jobs:
             exit 1
           fi
 
-          run_fields="$(
-            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$release_run" \
-              --jq '[.name, .status, .conclusion, .head_sha, .head_branch] | @tsv'
-          )"
-          IFS=$'\t' read -r run_name run_status run_conclusion run_sha run_tag <<< "$run_fields"
+          for ((attempt = 1; attempt <= 30; attempt++)); do
+            run_fields="$(
+              gh api "repos/$GITHUB_REPOSITORY/actions/runs/$release_run" \
+                --jq '[.name, .status, (.conclusion // "pending"), .head_sha, .head_branch] | @tsv'
+            )"
+            IFS=$'\t' read -r run_name run_status run_conclusion run_sha run_tag <<< "$run_fields"
+
+            if [[ "$run_name" != "node-release" ||
+                  "$run_sha" != "$release_sha" ||
+                  "$run_tag" != "$release_tag" ]]; then
+              echo "The release run must successfully publish the exact tagged commit." >&2
+              exit 1
+            fi
+
+            if [[ "$run_status" == "completed" ]]; then
+              break
+            fi
+
+            if (( attempt == 30 )); then
+              echo "Timed out waiting for protected npm release $release_run to complete." >&2
+              exit 1
+            fi
+            sleep 2
+          done
 
           if [[ "$run_name" != "node-release" ||
                 "$run_status" != "completed" ||
@@ -394,6 +405,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          release_workspace="$(mktemp -d)"
+          trap 'rm -rf "$release_workspace"' EXIT
+
           verify_release_tag() {
             local live_ref live_type live_object live_commit
             if ! live_ref="$(
@@ -484,8 +498,8 @@ jobs:
           )"
           if [[ -n "$existing_release" ]]; then
             asset_name="$(basename "$RELEASE_ARCHIVE")"
-            downloaded_assets="$(mktemp -d)"
-            trap 'rm -rf "$downloaded_assets"' EXIT
+            downloaded_assets="$release_workspace/downloaded-assets"
+            mkdir "$downloaded_assets"
             gh release download "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --pattern "$asset_name" \
@@ -501,37 +515,72 @@ jobs:
               node sdk/typescript/scripts/release-automation.mjs \
                 verify-github-release "$RELEASE_ARCHIVE" "$RELEASE_TAG" \
                 "$downloaded_archive"
+          fi
 
-            notes_args=(
-              --method POST
-              "repos/$GITHUB_REPOSITORY/releases/generate-notes"
-              -f "tag_name=$RELEASE_TAG"
-              -f "target_commitish=$RELEASE_SHA"
+          existing_notes_file="$release_workspace/existing-notes.md"
+          : > "$existing_notes_file"
+          if [[ -n "$existing_release" ]]; then
+            printf '%s\n' "$existing_release" |
+              node --input-type=module --eval '
+                import { readFileSync, writeFileSync } from "node:fs";
+                const release = JSON.parse(readFileSync(0, "utf8"));
+                if (release.body != null && typeof release.body !== "string") {
+                  throw new Error("Existing release notes must be a string.");
+                }
+                writeFileSync(
+                  process.argv[1],
+                  (release.body ?? "").replace(/(?:\r?\n)+$/u, ""),
+                );
+              ' "$existing_notes_file"
+          fi
+
+          notes_args=(
+            --method POST
+            "repos/$GITHUB_REPOSITORY/releases/generate-notes"
+            -f "tag_name=$RELEASE_TAG"
+            -f "target_commitish=$RELEASE_SHA"
+          )
+          if git cat-file -e "$RELEASE_SHA:.github/release.yml" 2>/dev/null; then
+            notes_args+=(-f "configuration_file_path=.github/release.yml")
+          fi
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            notes_args+=(-f "previous_tag_name=$PREVIOUS_TAG")
+          fi
+          generated_notes_file="$release_workspace/generated-notes.md"
+          gh api "${notes_args[@]}" |
+            node --input-type=module --eval '
+              import { readFileSync, writeFileSync } from "node:fs";
+              const response = JSON.parse(readFileSync(0, "utf8"));
+              if (typeof response.body !== "string") {
+                throw new Error("Generated GitHub release notes must be a string.");
+              }
+              writeFileSync(process.argv[1], response.body);
+            ' "$generated_notes_file"
+          release_note_args=()
+
+          tagged_notes_file="$release_workspace/tagged-notes.md"
+          if git show "$RELEASE_SHA:.github/release-notes.md" \
+            > "$tagged_notes_file" 2>/dev/null; then
+            release_note_args+=(
+              --tagged-notes-file "$tagged_notes_file"
             )
-            if git cat-file -e "$RELEASE_SHA:.github/release.yml" 2>/dev/null; then
-              notes_args+=(-f "configuration_file_path=.github/release.yml")
-            fi
-            if [[ -n "$PREVIOUS_TAG" ]]; then
-              notes_args+=(-f "previous_tag_name=$PREVIOUS_TAG")
-            fi
-            generated_notes="$(gh api "${notes_args[@]}" --jq '.body')"
-            if [[ -z "$generated_notes" ]]; then
-              echo "Generated GitHub release notes must not be empty." >&2
-              exit 1
-            fi
+          fi
 
-            existing_notes="$(
-              printf '%s\n' "$existing_release" |
-                node --input-type=module --eval '
-                  import { readFileSync } from "node:fs";
-                  const release = JSON.parse(readFileSync(0, "utf8"));
-                  if (release.body != null && typeof release.body !== "string") {
-                    throw new Error("Existing release notes must be a string.");
-                  }
-                  process.stdout.write(release.body ?? "");
-                '
-            )"
+          if [[ -s "$existing_notes_file" ]]; then
+            release_note_args+=(
+              --existing-notes-file "$existing_notes_file"
+            )
+          fi
 
+          published_notes_file="$release_workspace/published-notes.md"
+          node sdk/typescript/scripts/release-automation.mjs \
+            compose-release-notes \
+            "$RELEASE_VERSION" \
+            "$generated_notes_file" \
+            ${release_note_args[@]+"${release_note_args[@]}"} \
+            > "$published_notes_file"
+
+          if [[ -n "$existing_release" ]]; then
             latest_response="$(
               github_release_or_missing \
                 "repos/$GITHUB_REPOSITORY/releases/latest" \
@@ -561,16 +610,19 @@ jobs:
               currently_latest=true
             fi
 
-            if [[ "$existing_notes" != "$generated_notes" ||
+            notes_changed=false
+            if ! cmp -s "$existing_notes_file" "$published_notes_file"; then
+              notes_changed=true
+            fi
+            if [[ "$notes_changed" == true ||
                   "$currently_latest" != "$MAKE_LATEST" ]]; then
               verify_release_tag
-              if [[ "$existing_notes" != "$generated_notes" ]]; then
-                printf '%s\n' "$generated_notes" |
-                  gh release edit "$RELEASE_TAG" \
-                    --repo "$GITHUB_REPOSITORY" \
-                    --latest="$MAKE_LATEST" \
-                    --notes-file -
-                echo "Updated existing GitHub Release with generated notes."
+              if [[ "$notes_changed" == true ]]; then
+                gh release edit "$RELEASE_TAG" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --latest="$MAKE_LATEST" \
+                  --notes-file "$published_notes_file"
+                echo "Updated existing GitHub Release with reviewed and generated notes."
               else
                 gh release edit "$RELEASE_TAG" \
                   --repo "$GITHUB_REPOSITORY" \
@@ -591,12 +643,9 @@ jobs:
             --repo "$GITHUB_REPOSITORY"
             --title "Codex Security $RELEASE_VERSION"
             --verify-tag
-            --generate-notes
+            --notes-file "$published_notes_file"
             --latest="$MAKE_LATEST"
           )
-          if [[ -n "$PREVIOUS_TAG" ]]; then
-            release_args+=(--notes-start-tag "$PREVIOUS_TAG")
-          fi
 
           verify_release_tag
           gh release create "${release_args[@]}"

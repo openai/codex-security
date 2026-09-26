@@ -1,0 +1,43 @@
+{
+  "documentType": "codex-security.scan-manifest",
+  "schemaVersion": "1.0",
+  "scan": {
+    "id": "scan_example_001",
+    "producer": {
+      "name": "codex-security-plugin",
+      "version": "0.1.0"
+    },
+    "status": "completed",
+    "startedAt": "2026-05-31T18:00:00Z",
+    "completedAt": "2026-05-31T18:09:00Z",
+    "sealedAt": "2026-05-31T18:09:00Z",
+    "target": {
+      "kind": "git_worktree",
+      "targetId": "target_sha256_example",
+      "displayName": "example/repo",
+      "remote": "https://github.com/example/repo",
+      "revision": "deadbeef",
+      "snapshotDigest": "codex-security-snapshot/v1:sha256:ed88f96a4c1a06603a41b3f261f59c3de2555c367ef6ad3bb8b9e483495d34eb"
+    },
+    "scope": {
+      "includePaths": [
+        "."
+      ],
+      "excludePaths": []
+    },
+    "coverageRef": "coverage.json",
+    "findingsRef": "findings.json",
+    "artifacts": [
+      {
+        "path": "findings.json",
+        "sha256": "a6dc4521d6478828224fbafc33585401a47bfeb0e56e07b5d2886e8a29937f2f",
+        "mediaType": "application/json"
+      },
+      {
+        "path": "coverage.json",
+        "sha256": "d55b9b98d48323b4659dfee6531ec83ec538f2084325412b7188bf85ad68b01b",
+        "mediaType": "application/json"
+      }
+    ]
+  }
+}

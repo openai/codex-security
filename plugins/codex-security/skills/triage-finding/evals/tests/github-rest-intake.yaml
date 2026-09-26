@@ -1,0 +1,148 @@
+- description: "GitHub repo without source prompts for REST source selection"
+  metadata:
+    case_id: github-repo-source-choice
+    source_type: github_repo
+  vars:
+    case_id: github-repo-source-choice
+    target_repo: https://github.com/promptfoo/promptfoo
+    source_type_under_test: github_repo
+    finding_input: ""
+    invocation_preamble: "Use $codex-security:triage-finding with GitHub repo promptfoo/promptfoo."
+    expected_github_rest_behavior: choose_source
+    eval_instructions: |-
+      This is an automated eval. A GitHub repository was supplied, but no
+      GitHub finding source was specified. Follow the GitHub REST intake
+      behavior and do not triage findings yet.
+  options:
+    disableDefaultAsserts: true
+  assert:
+    - type: javascript
+      value: file://./assertions/github-rest-intake.js
+
+- description: "GitHub source infers attached Codex project repository"
+  metadata:
+    case_id: github-project-repo-inference
+    source_type: github_repo
+  vars:
+    case_id: github-project-repo-inference
+    target_repo: "No explicit repository supplied by the user."
+    source_type_under_test: github_repo
+    finding_input: ""
+    invocation_preamble: "Use $codex-security:triage-finding from GitHub in the current Codex project."
+    expected_github_rest_behavior: project_repo_inference
+    expected_inferred_repo: promptfoo/promptfoo
+    eval_instructions: |-
+      This is an automated eval. The user did not type an owner/repo or URL, but
+      the current Codex project attachment indicates GitHub repository
+      promptfoo/promptfoo. Infer that repository, ask only for the GitHub
+      finding source, and do not triage findings yet.
+  options:
+    disableDefaultAsserts: true
+  assert:
+    - type: javascript
+      value: file://./assertions/github-rest-intake.js
+
+- description: "GitHub Dependabot malware uses REST malware classification"
+  metadata:
+    case_id: github-dependabot-malware
+    source_type: github_dependabot
+  vars:
+    case_id: github-dependabot-malware
+    target_repo: https://github.com/promptfoo/promptfoo
+    source_type_under_test: github_dependabot_malware
+    finding_input: "Source requested: Dependabot malware"
+    invocation_preamble: "Use $codex-security:triage-finding for Dependabot malware in GitHub repo promptfoo/promptfoo."
+    expected_github_rest_behavior: dependabot_malware
+    eval_instructions: |-
+      This is an automated eval. Describe the GitHub REST intake that should be
+      used for this source. Do not query live GitHub, inspect code, or emit the
+      triage JSON result.
+  options:
+    disableDefaultAsserts: true
+  assert:
+    - type: javascript
+      value: file://./assertions/github-rest-intake.js
+
+- description: "GitHub code scanning uses REST alerts and instances"
+  metadata:
+    case_id: github-code-scanning
+    source_type: github_code_scanning
+  vars:
+    case_id: github-code-scanning
+    target_repo: https://github.com/promptfoo/promptfoo
+    source_type_under_test: github_code_scanning
+    finding_input: "Source requested: code scanning"
+    invocation_preamble: "Use $codex-security:triage-finding for code scanning alerts in GitHub repo promptfoo/promptfoo."
+    expected_github_rest_behavior: code_scanning
+    eval_instructions: |-
+      This is an automated eval. Describe the GitHub REST intake that should be
+      used for this source. Do not query live GitHub, inspect code, or emit the
+      triage JSON result.
+  options:
+    disableDefaultAsserts: true
+  assert:
+    - type: javascript
+      value: file://./assertions/github-rest-intake.js
+
+- description: "GitHub advisories include private report triage state"
+  metadata:
+    case_id: github-advisories-private-reports
+    source_type: github_advisory
+  vars:
+    case_id: github-advisories-private-reports
+    target_repo: https://github.com/promptfoo/promptfoo
+    source_type_under_test: github_advisory
+    finding_input: "Source requested: security advisories and private vulnerability reports"
+    invocation_preamble: "Use $codex-security:triage-finding for security advisories and private vulnerability reports in GitHub repo promptfoo/promptfoo."
+    expected_github_rest_behavior: advisories_private_reports
+    eval_instructions: |-
+      This is an automated eval. Describe the GitHub REST intake that should be
+      used for this source. Do not query live GitHub, inspect code, or emit the
+      triage JSON result.
+  options:
+    disableDefaultAsserts: true
+  assert:
+    - type: javascript
+      value: file://./assertions/github-rest-intake.js
+
+- description: "GitHub Connector request still uses REST-only finding retrieval"
+  metadata:
+    case_id: github-connector-rest-only
+    source_type: github_repo
+  vars:
+    case_id: github-connector-rest-only
+    target_repo: https://github.com/promptfoo/promptfoo
+    source_type_under_test: github_repo
+    finding_input: "User explicitly requested using the GitHub Connector."
+    invocation_preamble: "Use $codex-security:triage-finding with the GitHub Connector for GitHub repo promptfoo/promptfoo."
+    expected_github_rest_behavior: connector_rest_only
+    eval_instructions: |-
+      This is an automated eval. Describe how this workflow should handle a
+      user's explicit request to use the GitHub Connector. Do not query live
+      GitHub, inspect code, or emit the triage JSON result.
+  options:
+    disableDefaultAsserts: true
+  assert:
+    - type: javascript
+      value: file://./assertions/github-rest-intake.js
+
+- description: "Explicit GitHub Issue is supported outside all-source intake"
+  metadata:
+    case_id: github-explicit-issue
+    source_type: github_issue
+  vars:
+    case_id: github-explicit-issue
+    target_repo: https://github.com/promptfoo/promptfoo
+    source_type_under_test: github_issue
+    finding_input: "Specific GitHub Issue supplied: https://github.com/promptfoo/promptfoo/issues/123"
+    invocation_preamble: "Use $codex-security:triage-finding for the specific GitHub Issue supplied."
+    expected_github_rest_behavior: explicit_issue
+    eval_instructions: |-
+      This is an automated eval. Describe how GitHub Issues should be handled
+      by GitHub REST intake. Do not query live GitHub, inspect code, or emit the
+      triage JSON result.
+  options:
+    disableDefaultAsserts: true
+  assert:
+    - type: javascript
+      value: file://./assertions/github-rest-intake.js

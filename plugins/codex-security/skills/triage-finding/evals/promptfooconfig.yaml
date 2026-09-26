@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+description: "Codex Security triage-finding input-type I/O eval"
+
+prompts:
+  - file://./prompts/triage-request.txt
+
+providers:
+  - id: openai:codex-sdk:gpt-5.5
+    label: "Codex SDK triage-finding"
+    config:
+      working_dir: ../../../../..
+      sandbox_mode: read-only
+      approval_policy: never
+      network_access_enabled: false
+      cli_env:
+        HTTP_PROXY: "{{env.HTTP_PROXY}}"
+        HTTPS_PROXY: "{{env.HTTPS_PROXY}}"
+        ALL_PROXY: "{{env.ALL_PROXY}}"
+        NO_PROXY: "{{env.NO_PROXY}}"
+
+evaluateOptions:
+  maxConcurrency: 1
+
+defaultTest:
+  vars:
+    invocation_preamble: "Use $codex-security:triage-finding to triage the supplied existing security findings."
+    eval_instructions: |-
+      This is an automated eval. Do not ask follow-up questions. Inspect only the supplied
+      fixture repository, the named files/routes/components, and the smallest related
+      static evidence needed for the verdicts. Do not spawn subagents, run tests, run
+      builds, start applications, or search for unrelated vulnerabilities.
+
+      Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
+      The JSON block must conform to schema_version "triage-finding/v0", preserve the input order,
+      include source_type on every finding result, and use one of these verdicts per finding:
+      confirmed, not_actionable, needs_review. Include exploitability_stack_rank on
+      every finding: use positive integer ranks contiguously from 1 independently
+      within confirmed and needs_review findings; use rank_queue to identify the
+      verdict queue; and use null rank_queue/rank for not_actionable findings.
+  assert:
+    - type: contains-json
+      value: file://./schemas/triage-result-v0.schema.json
+    - type: javascript
+      value: file://./assertions/triage-io.js
+
+tests:
+  - file://./tests/input-types.yaml
+  - file://./tests/invocation-behavior.yaml
+  - file://./tests/ticket-intake.yaml
+  - file://./tests/github-rest-intake.yaml

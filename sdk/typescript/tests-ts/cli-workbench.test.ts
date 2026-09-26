@@ -1,16 +1,93 @@
-import { resolve } from "node:path";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget } from "../src/index.js";
 import { main } from "../src/cli.js";
 import {
+  matchScanFindings,
+  type ScanComparisonInput,
+} from "../src/scan-comparison.js";
+import {
   capture,
   dependencies,
-  REDACTED_CREDENTIALS,
+  FakeSignals,
+  fakeResult,
   SYNTHETIC_CREDENTIALS,
-} from "./support/cli.js";
+} from "./cli-fixtures.js";
 
 describe("CLI workbench", () => {
+  test("lists and summarizes open findings for the current repository", async () => {
+    const repository = resolve("/current/repository");
+    const stdout = capture();
+    const calls: Array<readonly string[]> = [];
+    const responses: JsonObject[] = [
+      {
+        repositories: [
+          { targetId: "other", targetPath: `${repository}-clone` },
+          { targetId: "selected", targetPath: repository },
+        ],
+      },
+      { findings: [{ title: "Finding 1" }], nextOffset: 1 },
+      { findings: [{ title: "Finding 2" }], nextOffset: null },
+    ];
+    expect(
+      await main(
+        ["findings", "list", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => responses[calls.push(args) - 1]!,
+        }),
+      ),
+    ).toBe(0);
+    expect(calls[0]).toEqual(["list-repositories"]);
+    expect(calls[1]).toEqual([
+      "list-global-findings",
+      "--target-id",
+      "selected",
+      "--status",
+      "open",
+    ]);
+    expect(calls[2]).toEqual([...calls[1]!, "--offset", "1"]);
+    expect(JSON.parse(stdout.text())).toEqual({
+      repository,
+      findings: [{ title: "Finding 1" }, { title: "Finding 2" }],
+    });
+    expect(
+      await main(
+        ["findings", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({ onWorkbench: () => ({ repositories: [] }) }),
+      ),
+    ).toBe(0);
+    for (const confirmed of [[true, false], []]) {
+      const result = fakeResult(["high"]);
+      Object.assign(result, {
+        repositoryFindings: confirmed.map((confirmedInLatestScan) => ({
+          severity: { level: "high" },
+          confirmedInLatestScan,
+        })),
+      });
+      const stderr = capture();
+      expect(
+        await main(
+          ["scan"],
+          capture().stream,
+          stderr.stream,
+          dependencies({ result }),
+        ),
+      ).toBe(0);
+      expect(stderr.text()).toContain(
+        confirmed.length
+          ? "FINDINGS  2 (1 confirmed this scan; 1 previously found; 2 high)"
+          : "FINDINGS  0\n",
+      );
+    }
+  });
+
   test("lists repository and scan-root history without starting Codex", async () => {
     const repository = resolve("/current/repository");
     const cases: Array<[string[], string[]]> = [
@@ -171,6 +248,161 @@ describe("CLI workbench", () => {
     }
   });
 
+  test("shows saved scan activity without starting Codex", async () => {
+    const state = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-logs-")),
+    );
+    try {
+      const sessions = join(state, "codex-home", "sessions", "2026", "08");
+      const scanDirectory = join(state, "scans", "scan-1");
+      await mkdir(sessions, { recursive: true });
+      await writeFile(
+        join(sessions, "rollout-thread-1.jsonl"),
+        [
+          {
+            type: "session_meta",
+            payload: {
+              id: "thread-1",
+              timestamp: "2026-08-11T12:00:00.000Z",
+            },
+          },
+          {
+            type: "response_item",
+            payload: {
+              type: "function_call",
+              call_id: "call-1",
+              name: "exec_command",
+              arguments: JSON.stringify({
+                cmd: "OPENAI_API_KEY=sk-proj-SYNTHETIC_KEY_123 pytest",
+              }),
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+      );
+      await writeFile(
+        join(sessions, "rollout-worker.jsonl"),
+        [
+          {
+            type: "session_meta",
+            payload: {
+              id: "worker",
+              timestamp: "2026-08-11T12:01:00.000Z",
+              cwd: join(scanDirectory, "artifacts"),
+            },
+          },
+          {
+            type: "event_msg",
+            payload: { type: "agent_message", message: "independent worker" },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+      );
+      await writeFile(
+        join(sessions, "rollout-after-completion.jsonl"),
+        [
+          {
+            type: "session_meta",
+            payload: {
+              id: "after-completion",
+              timestamp: "2026-08-11T12:03:00.000Z",
+              cwd: join(scanDirectory, "artifacts"),
+            },
+          },
+          {
+            type: "event_msg",
+            payload: {
+              type: "agent_message",
+              message: "PRIVATE LATER SESSION",
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+      );
+
+      const calls: Array<readonly string[]> = [];
+      const stdout = capture();
+      const deps = dependencies({
+        environment: { CODEX_SECURITY_STATE_DIR: state },
+        onWorkbench: (args): JsonObject => {
+          calls.push(args);
+          if (args[0] === "list-scans") {
+            return { scans: [{ scanId: "scan-1" }] };
+          }
+          return {
+            scan: {
+              scanId: "scan-1",
+              continuationThreadId: "thread-1",
+              threadIds: ["thread-1"],
+              executionThreadIds: ["thread-1"],
+              mode: "deep",
+              progress: {
+                status: "complete",
+                updatedAt: "2026-08-11T12:02:00.000Z",
+              },
+              scanDir: scanDirectory,
+            },
+          };
+        },
+      });
+      deps.createSecurity = () => {
+        throw new Error("logs must not initialize Codex");
+      };
+      expect(
+        await main(
+          ["scans", "logs", "scan-1", "--json"],
+          stdout.stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(calls).toEqual([["get-scan", "--scan-id", "scan-1"]]);
+      expect(stdout.text()).toContain("SYNTHETIC_KEY");
+      expect(stdout.text()).toContain("independent worker");
+      expect(stdout.text()).not.toContain("PRIVATE LATER SESSION");
+
+      calls.length = 0;
+      const latest = capture();
+      expect(
+        await main(
+          ["scans", "logs", "--json"],
+          latest.stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(calls).toEqual([
+        ["list-scans", "--repository", "/current/repository", "--limit", "1"],
+        ["get-scan", "--scan-id", "scan-1"],
+      ]);
+      expect(latest.text()).toContain("SYNTHETIC_KEY");
+    } finally {
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("explains when a saved scan has no associated session", async () => {
+    const stderr = capture();
+    expect(
+      await main(
+        ["scans", "logs", "scan-1"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: () => ({
+            scan: { scanId: "scan-1", targetPath: "/repo" },
+          }),
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "No session is associated with scan scan-1.",
+    );
+  });
+
   test("matches findings before matching or comparing scans", async () => {
     const before = [{ occurrenceId: "before" }];
     const after = [{ occurrenceId: "after" }];
@@ -186,36 +418,84 @@ describe("CLI workbench", () => {
       uncertain: [],
     };
 
-    for (const command of ["match", "compare"]) {
+    for (const [command, scanIds, expectedBefore, expectedAfter] of [
+      ["match", ["before", "after"], "before", "after"],
+      ["compare", ["before", "after"], "before", "after"],
+      ["compare", [], "older-scan", "latest-scan"],
+      ["compare", ["baseline-scan"], "baseline-scan", "latest-scan"],
+    ] as const) {
       const calls: Array<readonly string[]> = [];
+      let comparisonInput: string | undefined;
       const stdout = capture();
 
       expect(
         await main(
-          ["scans", command, "before", "after", "--json"],
+          ["scans", command, ...scanIds, "--json"],
           stdout.stream,
           capture().stream,
           dependencies({
-            onWorkbench: (args): JsonObject => {
+            onWorkbench: (args, input): JsonObject => {
               calls.push(args);
+              if (args[0] === "list-scans") {
+                return {
+                  scans: [{ scanId: "latest-scan" }, { scanId: "older-scan" }],
+                };
+              }
+              if (args[0] === "save-scan-comparison") comparisonInput = input;
               return args[0] === "compare-scans"
-                ? { matchingCached: false, matchingInputs: { before, after } }
+                ? {
+                    matchingCached: false,
+                    matchingInputs: {
+                      before,
+                      after,
+                      knownFindingGroups: [["known-a", "known-b"]],
+                    },
+                  }
                 : { summary: { persisting: 1 } };
             },
             onMatch: async (input) => {
-              expect(input).toEqual({ before, after });
+              expect(input).toEqual({
+                before,
+                after,
+                knownFindingGroups: [["known-a", "known-b"]],
+              });
               return matching;
             },
           }),
         ),
       ).toBe(0);
       expect(calls.map((args) => args[0])).toEqual([
+        ...(scanIds.length < 2 ? ["list-scans"] : []),
         "compare-scans",
         "save-scan-comparison",
       ]);
-      expect(JSON.parse(calls[1]![6]!)).toEqual(matching);
+      const comparison = calls.find((args) => args[0] === "compare-scans")!;
+      expect(comparison[2]).toBe(expectedBefore);
+      expect(comparison[4]).toBe(expectedAfter);
+      const save = calls.find((args) => args[0] === "save-scan-comparison")!;
+      expect(save.at(-1)).toBe("--matches-json-stdin");
+      expect(JSON.parse(comparisonInput!)).toEqual(matching);
       expect(JSON.parse(stdout.text())).toEqual({ summary: { persisting: 1 } });
     }
+  });
+
+  test("requires two completed scans for a default comparison", async () => {
+    const stderr = capture();
+    expect(
+      await main(
+        ["scans", "compare"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: () => ({
+            scans: [{ scanId: "scan-1" }],
+          }),
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "At least 2 completed scans are required for the current repository.",
+    );
   });
 
   test("reports automatic matching failures without saving a comparison", async () => {
@@ -245,24 +525,235 @@ describe("CLI workbench", () => {
     expect(calls).toEqual(["compare-scans"]);
   });
 
+  test.each([false, true])(
+    "keeps matching progress on stderr with TTY=%p",
+    async (isTTY) => {
+      const stdout = capture();
+      const stderr = capture(isTTY);
+      expect(
+        await main(
+          ["scans", "match", "before", "after", "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onWorkbench: (args): JsonObject =>
+              args[0] === "compare-scans"
+                ? { matchingInputs: { before: [], after: [] } }
+                : { summary: { persisting: 1 } },
+            onMatch: async (_input, options) => {
+              const progress = {
+                phase: "catalogue" as const,
+                beforeFindings: 10,
+                beforeIssues: 3,
+                afterFindings: 2,
+                page: 1,
+                pages: 2,
+              };
+              options?.onProgress?.(progress);
+              options?.onProgress?.(progress);
+              options?.onProgress?.({ ...progress, phase: "evidence" });
+              return { matches: [], uncertain: [] };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual({ summary: { persisting: 1 } });
+      if (isTTY) {
+        expect(stderr.text().match(/Matching 2 findings/g)).toHaveLength(1);
+        expect(stderr.text()).toContain("3 known issues");
+        expect(stderr.text()).toContain("catalogue page 1/2");
+        expect(stderr.text()).toContain("selected finding evidence");
+      } else {
+        expect(stderr.text()).toBe("");
+      }
+    },
+  );
+
+  test.each([
+    [["before", "after"], "SIGINT", 130],
+    [["--all"], "SIGTERM", 143],
+  ] as const)(
+    "cancels matching %j on %s before saving",
+    async (args, signal, expectedExit) => {
+      const signals = new FakeSignals();
+      const commands: string[] = [];
+      const stderr = capture();
+      expect(
+        await main(
+          ["scans", "match", ...args, "--json"],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            signals,
+            environment: { CODEX_SECURITY_STATE_DIR: "/synthetic/state" },
+            onWorkbench: (command): JsonObject => {
+              commands.push(command[0]!);
+              const before = [{ occurrenceId: "before" }];
+              const after = [{ occurrenceId: "after" }];
+              return command[0] === "compare-scans"
+                ? { matchingInputs: { before, after } }
+                : {
+                    batches: [
+                      {
+                        afterScanId: "after",
+                        afterFindings: after,
+                        beforeScans: [{ scanId: "before", findings: before }],
+                      },
+                    ],
+                  };
+            },
+            onMatch: async (_input, options) => {
+              expect(options).toMatchObject({
+                environment: { CODEX_SECURITY_STATE_DIR: "/synthetic/state" },
+                workingDirectory: "/current/repository",
+              });
+              signals.emit(signal);
+              expect(options?.signal?.aborted).toBe(true);
+              return { matches: [], uncertain: [] };
+            },
+          }),
+        ),
+      ).toBe(expectedExit);
+      expect(commands).not.toContain("save-scan-comparison");
+      expect(stderr.text()).toContain("Saved comparisons are preserved");
+      expect(
+        [...signals.listeners.values()].every(
+          (listeners) => listeners.size === 0,
+        ),
+      ).toBe(true);
+    },
+  );
+
+  test.each(["cached comparison", "matching plan", "final save"] as const)(
+    "reports cancellation during a %s instead of success",
+    async (stage) => {
+      const signals = new FakeSignals();
+      const stdout = capture();
+      const stderr = capture();
+      let observedSignal: AbortSignal | undefined;
+      const target =
+        stage === "cached comparison"
+          ? "compare-scans"
+          : stage === "matching plan"
+            ? "list-unmatched-scan-pairs"
+            : "save-scan-comparison";
+      const args = stage === "matching plan" ? ["--all"] : ["before", "after"];
+      expect(
+        await main(
+          ["scans", "match", ...args, "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            signals,
+            onWorkbench: (command, _input, signal): JsonObject => {
+              if (command[0] === target) {
+                observedSignal = signal;
+                signals.emit("SIGTERM");
+              }
+              if (command[0] === "compare-scans")
+                return {
+                  matchingCached: stage === "cached comparison",
+                  matchingInputs: { before: [], after: [] },
+                  summary: { persisting: 1 },
+                };
+              if (command[0] === "list-unmatched-scan-pairs")
+                return { batches: [] };
+              return { summary: { persisting: 1 } };
+            },
+          }),
+        ),
+      ).toBe(143);
+      expect(observedSignal?.aborted).toBe(true);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("terminated by SIGTERM");
+    },
+  );
+
+  test.each([
+    ["SIGINT", "SIGINT", 1_000, 130],
+    ["SIGTERM", "SIGTERM", 1_000, 143],
+    ["SIGINT", "SIGTERM", 100, 130],
+  ] as const)(
+    "debounces matching %s and allows a later %s to terminate a blocked workbench",
+    async (first, second, delay, expectedExit) => {
+      const signals = new FakeSignals();
+      let began!: () => void;
+      const started = new Promise<void>((resolve) => {
+        began = resolve;
+      });
+      let finish!: (value: JsonObject) => void;
+      const pending = new Promise<JsonObject>((resolve) => {
+        finish = resolve;
+      });
+      let observedSignal: AbortSignal | undefined;
+      const forced: string[] = [];
+      let now = 0;
+      const deps = dependencies({
+        signals,
+        onWorkbench: async (_args, _input, signal) => {
+          observedSignal = signal;
+          began();
+          return await pending;
+        },
+      });
+      deps.now = () => now;
+      deps.forceExit = (signal) => {
+        forced.push(signal);
+      };
+      const running = main(
+        ["scans", "match", "before", "after", "--json"],
+        capture().stream,
+        capture().stream,
+        deps,
+      );
+      await started;
+      signals.emit(first);
+      expect(observedSignal?.aborted).toBe(true);
+      signals.emit(first);
+      expect(forced).toEqual([]);
+      now = delay;
+      signals.emit(second);
+      expect(forced).toEqual([second]);
+      expect(
+        [...signals.listeners.values()].every(
+          (listeners) => listeners.size === 0,
+        ),
+      ).toBe(true);
+      finish({ matchingCached: true, summary: {} });
+      expect(await running).toBe(expectedExit);
+    },
+  );
+
   test("matches all scans once per later scan", async () => {
     const finding = (occurrenceId: string) => ({ occurrenceId });
     const batches = [
       {
         afterScanId: "scan-b",
-        afterFindings: [finding("b")],
-        beforeScans: [{ scanId: "scan-a", findings: [finding("a")] }],
+        afterFindings: [finding("b"), finding("b-shared")],
+        beforeScans: [
+          {
+            scanId: "scan-a",
+            findings: [finding("a"), finding("a-shared")],
+          },
+        ],
       },
       {
         afterScanId: "scan-c",
         afterFindings: [finding("c"), finding("c-shared")],
         beforeScans: [
-          { scanId: "scan-a", findings: [finding("a")] },
-          { scanId: "scan-b", findings: [finding("b")] },
+          {
+            scanId: "scan-a",
+            findings: [finding("a"), finding("a-shared")],
+          },
+          {
+            scanId: "scan-b",
+            findings: [finding("b"), finding("b-shared")],
+          },
         ],
       },
     ];
     const calls: Array<readonly string[]> = [];
+    const inputs: Array<string | undefined> = [];
     let matcherCalls = 0;
     const stdout = capture();
 
@@ -272,8 +763,9 @@ describe("CLI workbench", () => {
         stdout.stream,
         capture().stream,
         dependencies({
-          onWorkbench: (args): JsonObject => {
+          onWorkbench: (args, input): JsonObject => {
             calls.push(args);
+            inputs.push(input);
             return args[0] === "list-unmatched-scan-pairs"
               ? {
                   repository: "/current/repository",
@@ -307,7 +799,7 @@ describe("CLI workbench", () => {
                       reason: "Same root cause.",
                     },
                     {
-                      beforeOccurrenceIds: ["a"],
+                      beforeOccurrenceIds: ["a-shared"],
                       afterOccurrenceIds: ["c-shared"],
                       confidence: "high",
                       reason: "Same root cause.",
@@ -315,7 +807,7 @@ describe("CLI workbench", () => {
                   ],
                   uncertain: [
                     {
-                      beforeOccurrenceId: "b",
+                      beforeOccurrenceId: "b-shared",
                       afterOccurrenceId: "c-shared",
                       reason: "Possibly the same root cause.",
                     },
@@ -333,10 +825,10 @@ describe("CLI workbench", () => {
       "--force",
     ]);
     expect(
-      calls.slice(1).map((args) => ({
+      calls.slice(1).map((args, index) => ({
         before: args[2],
         after: args[4],
-        result: JSON.parse(args[6]!),
+        result: JSON.parse(inputs[index + 1]!),
       })),
     ).toMatchObject([
       { before: "scan-a", after: "scan-b" },
@@ -346,7 +838,10 @@ describe("CLI workbench", () => {
         result: {
           matches: [
             { beforeOccurrenceIds: ["a"], afterOccurrenceIds: ["c"] },
-            { beforeOccurrenceIds: ["a"], afterOccurrenceIds: ["c-shared"] },
+            {
+              beforeOccurrenceIds: ["a-shared"],
+              afterOccurrenceIds: ["c-shared"],
+            },
           ],
           uncertain: [],
         },
@@ -356,7 +851,7 @@ describe("CLI workbench", () => {
         after: "scan-c",
         result: {
           matches: [{ beforeOccurrenceIds: ["b"] }],
-          uncertain: [{ beforeOccurrenceId: "b" }],
+          uncertain: [{ beforeOccurrenceId: "b-shared" }],
         },
       },
     ]);
@@ -367,14 +862,139 @@ describe("CLI workbench", () => {
       matchedPairs: 3,
       skippedPairs: 1,
       findingMatches: 4,
+      relatedPairs: 0,
+      uncertainPairs: 1,
     });
+  });
+
+  test("preserves confirmed groups and related pairs while matching all scans", async () => {
+    const before = [{ occurrenceId: "before", findingId: "known-a" }];
+    const after = [{ occurrenceId: "after", findingId: "other" }];
+    const knownFindingGroups = [["known-a", "known-b"]];
+    const related = {
+      beforeOccurrenceId: "before",
+      afterOccurrenceId: "after",
+      reason: "Separate controls share a nearby trust boundary.",
+    };
+    let saved: string | undefined;
+
+    expect(
+      await main(
+        ["scans", "match", "--all", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args, input): JsonObject => {
+            if (args[0] === "save-scan-comparison") saved = input;
+            return args[0] === "list-unmatched-scan-pairs"
+              ? {
+                  repository: "/current/repository",
+                  scanCount: 2,
+                  unavailableScans: 0,
+                  skippedPairs: 0,
+                  batches: [
+                    {
+                      afterScanId: "later-scan",
+                      afterFindings: after,
+                      beforeScans: [
+                        { scanId: "earlier-scan", findings: before },
+                      ],
+                      knownFindingGroups,
+                    },
+                  ],
+                }
+              : {};
+          },
+          onMatch: async (input) => {
+            expect(input).toEqual({ before, after, knownFindingGroups });
+            return { matches: [], uncertain: [], related: [related] };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(saved!)).toEqual({
+      matches: [],
+      uncertain: [],
+      related: [related],
+    });
+  });
+
+  test("unions overlapping confirmed identities before later matching batches", async () => {
+    const first = { occurrenceId: "first", findingId: "identity-a" };
+    const second = { occurrenceId: "second", findingId: "identity-b" };
+    const third = { occurrenceId: "third", findingId: "identity-c" };
+    const fourth = { occurrenceId: "fourth", findingId: "identity-d" };
+    const existingGroups = [
+      [first.findingId, second.findingId],
+      [third.findingId, fourth.findingId],
+    ];
+    const matchedInputs: ScanComparisonInput[] = [];
+
+    expect(
+      await main(
+        ["scans", "match", "--all", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject =>
+            args[0] === "list-unmatched-scan-pairs"
+              ? {
+                  repository: "/current/repository",
+                  scanCount: 4,
+                  unavailableScans: 0,
+                  skippedPairs: 0,
+                  batches: [
+                    {
+                      afterScanId: "third-scan",
+                      afterFindings: [third],
+                      beforeScans: [
+                        { scanId: "first-scan", findings: [first] },
+                      ],
+                      knownFindingGroups: existingGroups,
+                    },
+                    {
+                      afterScanId: "fourth-scan",
+                      afterFindings: [fourth],
+                      beforeScans: [
+                        { scanId: "second-scan", findings: [second] },
+                      ],
+                      knownFindingGroups: existingGroups,
+                    },
+                  ],
+                }
+              : {},
+          onMatch: async (input) => {
+            matchedInputs.push(input);
+            return matchedInputs.length === 1
+              ? {
+                  matches: [
+                    {
+                      beforeOccurrenceIds: [first.occurrenceId],
+                      afterOccurrenceIds: [third.occurrenceId],
+                      confidence: "high",
+                      reason: "These confirmed identities describe one issue.",
+                    },
+                  ],
+                  uncertain: [],
+                }
+              : { matches: [], uncertain: [] };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(matchedInputs).toHaveLength(2);
+    expect(matchedInputs[1]!.knownFindingGroups).toEqual([
+      [first.findingId, second.findingId, third.findingId, fourth.findingId],
+    ]);
   });
 
   test("saves empty comparisons without starting Codex", async () => {
     const calls: Array<readonly string[]> = [];
+    let comparisonInput: string | undefined;
     const deps = dependencies({
-      onWorkbench: (args): JsonObject => {
+      onWorkbench: (args, input): JsonObject => {
         calls.push(args);
+        if (args[0] === "save-scan-comparison") comparisonInput = input;
         return args[0] === "list-unmatched-scan-pairs"
           ? {
               repository: "/repo",
@@ -409,31 +1029,54 @@ describe("CLI workbench", () => {
         deps,
       ),
     ).toBe(0);
-    expect(JSON.parse(calls[1]![6]!)).toEqual({ matches: [], uncertain: [] });
+    expect(calls[1]!.at(-1)).toBe("--matches-json-stdin");
+    expect(JSON.parse(comparisonInput!)).toEqual({
+      matches: [],
+      uncertain: [],
+    });
   });
 
-  test("does not save conflicting confirmed and uncertain matches", async () => {
+  test("projects historical uncertainty per scan without losing a known match", async () => {
     const calls: Array<readonly string[]> = [];
+    const inputs: Array<string | undefined> = [];
+    const stdout = capture();
     const stderr = capture();
     expect(
       await main(
-        ["scans", "match", "--all"],
-        capture().stream,
+        ["scans", "match", "--all", "--json"],
+        stdout.stream,
         stderr.stream,
         dependencies({
-          onWorkbench: (args): JsonObject => {
+          onWorkbench: (args, input): JsonObject => {
             calls.push(args);
+            inputs.push(input);
+            if (args[0] !== "list-unmatched-scan-pairs") return {};
             return {
+              repository: "/repo",
+              scanCount: 3,
+              unavailableScans: 0,
+              skippedPairs: 1,
               batches: [
                 {
                   afterScanId: "after",
-                  afterFindings: [{ occurrenceId: "after" }],
+                  afterFindings: [
+                    { occurrenceId: "after", findingId: "shared" },
+                  ],
                   beforeScans: [
                     {
                       scanId: "before",
                       findings: [
-                        { occurrenceId: "confirmed" },
-                        { occurrenceId: "uncertain" },
+                        { occurrenceId: "confirmed", findingId: "shared" },
+                      ],
+                    },
+                    {
+                      scanId: "earlier",
+                      findings: [
+                        {
+                          occurrenceId: "earlier-uncertain",
+                          findingId: "earlier-other",
+                        },
+                        { occurrenceId: "uncertain", findingId: "other" },
                       ],
                     },
                   ],
@@ -441,55 +1084,123 @@ describe("CLI workbench", () => {
               ],
             };
           },
-          onMatch: async () => ({
-            matches: [
-              {
-                beforeOccurrenceIds: ["confirmed"],
-                afterOccurrenceIds: ["after"],
-                confidence: "high",
-                reason: "Same root cause.",
+          onMatch: (input, options) =>
+            matchScanFindings(input, {
+              ...options,
+              codex: {
+                startThread() {
+                  return {
+                    async run() {
+                      return {
+                        finalResponse: JSON.stringify({
+                          matches: [],
+                          uncertain: ["uncertain", "earlier-uncertain"].map(
+                            (beforeOccurrenceId) => ({
+                              beforeOccurrenceId,
+                              afterOccurrenceId: "after",
+                              reason: "Possibly the same root cause.",
+                            }),
+                          ),
+                        }),
+                      };
+                    },
+                  };
+                },
               },
-            ],
-            uncertain: [
-              {
-                beforeOccurrenceId: "uncertain",
-                afterOccurrenceId: "after",
-                reason: "Possibly the same root cause.",
-              },
-            ],
-          }),
+            }),
         }),
       ),
-    ).toBe(2);
-    expect(stderr.text()).toContain("conflicting confirmed and uncertain");
-    expect(calls).toHaveLength(1);
+      stderr.text(),
+    ).toBe(0);
+    expect(inputs.slice(1).map((input) => JSON.parse(input!))).toMatchObject([
+      {
+        matches: [
+          {
+            beforeOccurrenceIds: ["confirmed"],
+            afterOccurrenceIds: ["after"],
+          },
+        ],
+        uncertain: [],
+      },
+      {
+        matches: [],
+        uncertain: [
+          { beforeOccurrenceId: "uncertain" },
+          { beforeOccurrenceId: "earlier-uncertain" },
+        ],
+      },
+    ]);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      matchedPairs: 2,
+      findingMatches: 1,
+      uncertainPairs: 2,
+    });
   });
 
-  test("force recomputes saved matches", async () => {
-    const calls: Array<readonly string[]> = [];
-    expect(
-      await main(
-        ["scans", "match", "before", "after", "--force"],
-        capture().stream,
-        capture().stream,
-        dependencies({
-          onWorkbench: (args): JsonObject => {
-            calls.push(args);
-            return args[0] === "compare-scans"
-              ? {
-                  matchingCached: true,
-                  matchingInputs: { before: [], after: [] },
-                }
-              : {};
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(calls.map((args) => args[0])).toEqual([
-      "compare-scans",
-      "save-scan-comparison",
-    ]);
-  });
+  test.each([false, true])(
+    "preserves surviving indirect matches during forced recomputation (%p)",
+    async (force) => {
+      const before = [{ occurrenceId: "old", findingId: "identity-old" }];
+      const after = [{ occurrenceId: "new", findingId: "identity-new" }];
+      const calls: Array<readonly string[]> = [];
+      let modelCalls = 0;
+      let saved: unknown;
+      expect(
+        await main(
+          ["scans", "match", "before", "after", ...(force ? ["--force"] : [])],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args, input): JsonObject => {
+              calls.push(args);
+              if (args[0] === "compare-scans") {
+                return {
+                  matchingCached: force,
+                  matchingInputs: {
+                    before,
+                    after,
+                    knownFindingGroups: [
+                      ["identity-old", "identity-bridge", "identity-new"],
+                    ],
+                  },
+                };
+              }
+              saved = JSON.parse(input!);
+              return {};
+            },
+            onMatch: (input, options) =>
+              matchScanFindings(input, {
+                ...options,
+                codex: {
+                  startThread: () => ({
+                    async run() {
+                      modelCalls += 1;
+                      return {
+                        finalResponse: JSON.stringify({
+                          matches: [],
+                          uncertain: [],
+                        }),
+                      };
+                    },
+                  }),
+                },
+              }),
+          }),
+        ),
+      ).toBe(0);
+      expect(modelCalls).toBe(0);
+      expect(saved).toMatchObject({
+        matches: [
+          { beforeOccurrenceIds: ["old"], afterOccurrenceIds: ["new"] },
+        ],
+        uncertain: [],
+      });
+      expect(calls.map((args) => args[0])).toEqual([
+        "compare-scans",
+        "save-scan-comparison",
+      ]);
+    },
+  );
 
   test("rejects invalid matching arguments before loading history", async () => {
     for (const args of [
@@ -548,11 +1259,42 @@ describe("CLI workbench", () => {
     );
   });
 
+  test("reruns the latest completed scan by default", async () => {
+    let parentScanId: unknown;
+
+    expect(
+      await main(
+        ["scans", "rerun"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onTurn: (_repository, options) => {
+            parentScanId = (options as { parentScanId?: string }).parentScanId;
+          },
+          onWorkbench: (args): JsonObject =>
+            args[0] === "list-scans"
+              ? { scans: [{ scanId: "latest-scan" }] }
+              : {
+                  recipe: {
+                    repository: "/current/repository",
+                    target: { kind: "repository", paths: [] },
+                    mode: "standard",
+                    config: {},
+                  },
+                },
+        }),
+      ),
+    ).toBe(0);
+    expect(parentScanId).toBe("latest-scan");
+  });
+
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
     let config: CodexSecurityConfig | undefined;
     let repository: string | undefined;
     let options: Record<string, unknown> | undefined;
+    const knowledgeBasePath = resolve("/original/security.md");
     const savedConfig = {
+      approval_policy: "on-request",
       model: "gpt-original",
       model_reasoning_effort: "high",
       features: { goals: true },
@@ -578,12 +1320,13 @@ describe("CLI workbench", () => {
               mode: "deep",
               pluginVersion: "1.2.3",
               failOnSeverity: "high",
-              knowledgeBasePaths: ["/original/security.md"],
+              knowledgeBasePaths: [knowledgeBasePath],
               deepScan: {
                 workers: 2,
                 subagents: 0,
                 stopAfterNoNew: 3,
                 maxDiscoveryRuns: 10,
+                maxTimeHours: 1.5,
               },
               config: savedConfig,
             },
@@ -599,11 +1342,12 @@ describe("CLI workbench", () => {
       parentScanId: "scan-original",
       expectedPluginVersion: "1.2.3",
       failureSeverity: "high",
-      knowledgeBasePaths: ["/original/security.md"],
+      knowledgeBasePaths: [knowledgeBasePath],
       workers: 2,
       subagents: 0,
       stopAfterNoNew: 3,
       maxDiscoveryRuns: 10,
+      maxTimeHours: 1.5,
     });
 
     const references: Array<[JsonObject, ReturnType<typeof DiffTarget.refs>]> =
@@ -650,7 +1394,49 @@ describe("CLI workbench", () => {
     }
   });
 
-  test("redacts workbench failures and does not initialize Codex", async () => {
+  test.each([
+    ["legacy", undefined, "never"],
+    ["strict", "never", "never"],
+    ["reviewed", "on-request", "on-request"],
+  ] as const)(
+    "preserves %s scan approval policy when rerunning saved scans",
+    async (_scenario, savedApprovalPolicy, expectedApprovalPolicy) => {
+      let config: CodexSecurityConfig | undefined;
+      const savedConfig = {
+        model: "gpt-original",
+        ...(savedApprovalPolicy === undefined
+          ? {}
+          : { approval_policy: savedApprovalPolicy }),
+      };
+
+      expect(
+        await main(
+          ["scans", "rerun", "scan-original"],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onConfig: (value) => {
+              config = value;
+            },
+            onWorkbench: () => ({
+              recipe: {
+                repository: "/original/repository",
+                target: { kind: "repository", paths: [] },
+                mode: "standard",
+                config: savedConfig,
+              },
+            }),
+          }),
+        ),
+      ).toBe(0);
+      expect(config?.codexOverrides).toEqual({
+        ...savedConfig,
+        approval_policy: expectedApprovalPolicy,
+      });
+    },
+  );
+
+  test("preserves workbench failures and does not initialize Codex", async () => {
     const stderr = capture();
     let started = false;
     expect(
@@ -668,8 +1454,8 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(2);
-    expect(stderr.text()).toContain(REDACTED_CREDENTIALS);
-    expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
+    expect(stderr.text()).toContain(SYNTHETIC_CREDENTIALS);
+    expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
     expect(started).toBe(false);
   });
 });

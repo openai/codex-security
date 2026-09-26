@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/tools/candidate-attack-paths.schema.json",
+  "title": "Record Codex Security candidate attack paths",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scanId", "attackPaths"],
+  "properties": {
+    "scanId": {
+      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
+    },
+    "attackPaths": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/attackPathUpdate"
+      }
+    }
+  },
+  "$defs": {
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanId", "attackPaths"],
+      "properties": {
+        "scanId": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
+        },
+        "attackPaths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attackPathUpdate"
+          }
+        }
+      }
+    },
+    "updatesPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attackPaths"],
+      "properties": {
+        "attackPaths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attackPathUpdate"
+          }
+        }
+      }
+    },
+    "attackPathUpdate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidateId", "attackPath"],
+      "properties": {
+        "candidateId": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/candidateId"
+        },
+        "attackPath": {
+          "$ref": "#/$defs/attackPath"
+        }
+      }
+    },
+    "attackPath": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/reportableAttackPath"
+        },
+        {
+          "$ref": "#/$defs/ignoredAttackPath"
+        },
+        {
+          "$ref": "#/$defs/deferredAttackPath"
+        }
+      ]
+    },
+    "attackPathFields": {
+      "dataflow": {
+        "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+      },
+      "reachability": {
+        "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+      },
+      "counterevidence": {
+        "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+      },
+      "impact": {
+        "enum": ["high", "medium", "low", "ignore", "unknown"]
+      },
+      "likelihood": {
+        "enum": ["high", "medium", "low", "ignore", "unknown"]
+      },
+      "severity_rationale": {
+        "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+      },
+      "change_conditions": {
+        "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+      }
+    },
+    "reportableAttackPath": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "decision",
+        "dataflow",
+        "reachability",
+        "counterevidence",
+        "impact",
+        "likelihood",
+        "severity",
+        "severity_rationale",
+        "change_conditions"
+      ],
+      "properties": {
+        "decision": { "const": "reportable" },
+        "dataflow": { "$ref": "#/$defs/attackPathFields/dataflow" },
+        "reachability": { "$ref": "#/$defs/attackPathFields/reachability" },
+        "counterevidence": { "$ref": "#/$defs/attackPathFields/counterevidence" },
+        "impact": { "$ref": "#/$defs/attackPathFields/impact" },
+        "likelihood": { "$ref": "#/$defs/attackPathFields/likelihood" },
+        "severity": { "enum": ["critical", "high", "medium", "low"] },
+        "severity_rationale": { "$ref": "#/$defs/attackPathFields/severity_rationale" },
+        "change_conditions": { "$ref": "#/$defs/attackPathFields/change_conditions" }
+      }
+    },
+    "ignoredAttackPath": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "decision",
+        "dataflow",
+        "reachability",
+        "counterevidence",
+        "impact",
+        "likelihood",
+        "severity",
+        "severity_rationale",
+        "change_conditions"
+      ],
+      "properties": {
+        "decision": { "const": "ignore" },
+        "dataflow": { "$ref": "#/$defs/attackPathFields/dataflow" },
+        "reachability": { "$ref": "#/$defs/attackPathFields/reachability" },
+        "counterevidence": { "$ref": "#/$defs/attackPathFields/counterevidence" },
+        "impact": { "$ref": "#/$defs/attackPathFields/impact" },
+        "likelihood": { "$ref": "#/$defs/attackPathFields/likelihood" },
+        "severity": { "const": "ignore" },
+        "severity_rationale": { "$ref": "#/$defs/attackPathFields/severity_rationale" },
+        "change_conditions": { "$ref": "#/$defs/attackPathFields/change_conditions" }
+      }
+    },
+    "deferredAttackPath": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "decision",
+        "dataflow",
+        "reachability",
+        "counterevidence",
+        "impact",
+        "likelihood",
+        "severity",
+        "severity_rationale",
+        "change_conditions",
+        "proof_gap"
+      ],
+      "properties": {
+        "decision": { "const": "deferred" },
+        "dataflow": { "$ref": "#/$defs/attackPathFields/dataflow" },
+        "reachability": { "$ref": "#/$defs/attackPathFields/reachability" },
+        "counterevidence": { "$ref": "#/$defs/attackPathFields/counterevidence" },
+        "impact": { "$ref": "#/$defs/attackPathFields/impact" },
+        "likelihood": { "$ref": "#/$defs/attackPathFields/likelihood" },
+        "severity": { "enum": ["critical", "high", "medium", "low", "unknown"] },
+        "severity_rationale": { "$ref": "#/$defs/attackPathFields/severity_rationale" },
+        "change_conditions": { "$ref": "#/$defs/attackPathFields/change_conditions" },
+        "proof_gap": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        }
+      }
+    }
+  }
+}

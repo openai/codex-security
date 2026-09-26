@@ -2,17 +2,51 @@ import { chmod, cp, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
-import { runScanEvents } from "../../src/api.js";
-import type {
-  ScanOptions,
-  ScanReconnectDetails,
-  ScanWorkerStatus,
-} from "../../src/index.js";
+import { CodexSecurity, runScanEvents } from "../../src/api.js";
+import type { ScanOptions } from "../../src/index.js";
 import { PLUGIN_ROOT } from "../plugin-root.js";
+
+type PreparedRuntime = Awaited<
+  ReturnType<
+    NonNullable<
+      ConstructorParameters<typeof CodexSecurity>[1]["prepareRuntime"]
+    >
+  >
+>;
+
+export function preparedRuntime(codexHome: string): PreparedRuntime {
+  return {
+    codexHome,
+    plugin: {
+      pluginRoot: PLUGIN_ROOT,
+      marketplaceRoot: PLUGIN_ROOT,
+      installedRoot: PLUGIN_ROOT,
+      marketplaceName: "codex-security-sdk",
+      name: "codex-security",
+      version: "0.1.0",
+    },
+    environment: {},
+    credentialsAvailable: true,
+  };
+}
 
 export type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
 >[0];
+
+type ScanEventOptions = Pick<
+  Parameters<typeof runScanEvents>[0],
+  | "authentication"
+  | "expectedFilesTotal"
+  | "onActivity"
+  | "onObserverError"
+  | "onProgress"
+  | "onReconnect"
+  | "onScanStarted"
+  | "onTrustedAccessStatus"
+  | "onWarning"
+  | "onWorkerStatus"
+> & { abortController?: AbortController };
 
 export function createApiTestFixtures() {
   const temporaryDirectories: string[] = [];
@@ -46,8 +80,10 @@ export function createApiTestFixtures() {
   };
 }
 
-export async function* completedEvents(): AsyncGenerator<ThreadEvent> {
-  yield { type: "thread.started", thread_id: "thread-1" };
+export async function* completedEvents(
+  threadId = "thread-1",
+): AsyncGenerator<ThreadEvent> {
+  yield { type: "thread.started", thread_id: threadId };
   yield { type: "turn.started" };
   yield {
     type: "item.completed",
@@ -58,6 +94,7 @@ export async function* completedEvents(): AsyncGenerator<ThreadEvent> {
     usage: {
       input_tokens: 10,
       cached_input_tokens: 2,
+      cache_write_input_tokens: 0,
       output_tokens: 3,
       reasoning_output_tokens: 1,
     },
@@ -67,16 +104,9 @@ export async function* completedEvents(): AsyncGenerator<ThreadEvent> {
 export function runEvents(
   scanDir: string,
   events: AsyncGenerator<ThreadEvent>,
-  abortController = new AbortController(),
-  onReconnect?: (
-    attempt: number,
-    maxAttempts: number,
-    details?: ScanReconnectDetails,
-  ) => void,
-  onWorkerStatus?: (status: ScanWorkerStatus) => void,
-  onScanStarted?: () => void,
-  onObserverError?: (observer: ScanObserverName, error: unknown) => void,
+  options: ScanEventOptions = {},
 ): ReturnType<typeof runScanEvents> {
+  const { abortController = new AbortController(), ...observers } = options;
   return runScanEvents({
     thread: {
       id: null,
@@ -89,10 +119,7 @@ export function runEvents(
     scanDir,
     pluginRoot: PLUGIN_ROOT,
     model: "gpt-5.6-sol",
-    onScanStarted,
-    onReconnect,
-    onWorkerStatus,
-    onObserverError,
+    ...observers,
     expectation: {
       repository: "/repository",
       repositoryRevision: "deadbeef",

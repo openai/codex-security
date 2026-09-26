@@ -1,0 +1,27 @@
+tasks:
+  install:
+    name: Install dependencies
+    command: sh .devcontainer/install.sh
+    triggeredBy:
+      - manual
+      - prebuild
+
+  build:
+    name: Build
+    command: pnpm --dir sdk/typescript run build
+    dependsOn:
+      - install
+    triggeredBy:
+      - manual
+      - prebuild
+
+  test:
+    name: Run tests
+    command: |
+      pnpm --dir sdk/typescript run test
+      pnpm --dir sdk/typescript run test:mcp
+      python -m pytest plugins/codex-security/tests -q
+    dependsOn:
+      - build
+    triggeredBy:
+      - manual

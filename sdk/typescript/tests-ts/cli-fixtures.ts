@@ -1,5 +1,3 @@
-import { lstat, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { main } from "../src/cli.js";
 import type {
   CodexSecurity,
@@ -7,12 +5,16 @@ import type {
   CoverageDocument,
   FindingsDocument,
   JsonObject,
+  ScanActivity,
   ScanCost,
   ScanManifest,
+  ScanOptions,
   ScanPreflight,
+  ScanProgress,
+  ScanWorkerStatus,
   SeverityLevel,
 } from "../src/index.js";
-import { CodexSecurityError, ScanResult } from "../src/index.js";
+import { ScanResult } from "../src/index.js";
 import type { UpdateNotice } from "../src/version.js";
 
 type MainDependencies = NonNullable<Parameters<typeof main>[3]>;
@@ -67,58 +69,6 @@ export const SYNTHETIC_CREDENTIALS = [
   "https://example.test/?oauth.refreshToken=SYNTHETIC_DOTTED_TOKEN_123&auth[token]=SYNTHETIC_BRACKET_TOKEN_123&auth%5BclientSecret%5D=SYNTHETIC_ENCODED_SECRET_123&safe=1",
   "https://example.test/?access_token%3DSYNTHETIC_ENCODED_ACCESS_123&client_secret%3DSYNTHETIC_ENCODED_CLIENT_123&safe=1",
   "https://example.test/?redirect_uri=https%3A%2F%2Finner.test%2Fcb%3Frefresh_token%3DSYNTHETIC_NESTED_REFRESH_123%26password%3DSYNTHETIC_NESTED_PASSWORD_123%26safe%3D1",
-].join(" ");
-
-export const REDACTED_CREDENTIALS = [
-  "[redacted]",
-  "Bearer [redacted]",
-  "Authorization: Basic [redacted]",
-  "Authorization: Token [redacted]",
-  "Authorization: Bearer%20[redacted]",
-  "Authorization%3A%20Bearer%20[redacted]",
-  "https://[redacted]@example.test/private",
-  "ssh://[redacted]@example.test/private",
-  "git+ssh://[redacted]@example.test/private",
-  "[redacted]",
-  "[redacted]",
-  "OPENAI_API_KEY=[redacted]",
-  "CODEX_API_KEY=[redacted]",
-  "CODEX_ACCESS_TOKEN=[redacted]",
-  "GITHUB_TOKEN=[redacted]",
-  "GH_TOKEN=[redacted]",
-  '{"OPENAI_API_KEY":"[redacted]","CODEX_API_KEY":"[redacted]"}',
-  '{\\"OPENAI_API_KEY\\":\\"[redacted]\\",\\"CODEX_API_KEY\\":\\"[redacted]\\"}',
-  '{"refresh_token":"[redacted]","id_token":"[redacted]","clientSecret":"[redacted]","dbPassword":"[redacted]","passwd":"[redacted]"}',
-  '{\\"refreshToken\\":\\"[redacted]\\",\\"idToken\\":\\"[redacted]\\",\\"clientSecret\\":\\"[redacted]\\",\\"password\\":\\"[redacted]\\"}',
-  "AWS_SECRET_ACCESS_KEY=[redacted]",
-  "AWS_ACCESS_KEY_ID=[redacted]",
-  "AWS_SESSION_TOKEN=[redacted]",
-  "NODE_AUTH_TOKEN=[redacted]",
-  "NPM_TOKEN=[redacted]",
-  "OPENAI_API_KEY=[redacted]",
-  "GITHUB_TOKEN=[redacted]",
-  "NPM_TOKEN=[redacted]",
-  "ACTIONS_ID_TOKEN_REQUEST_TOKEN=[redacted]",
-  "ACTIONS_RUNTIME_TOKEN=[redacted]",
-  "GITLAB_TOKEN=[redacted]",
-  "HF_TOKEN=[redacted]",
-  "SLACK_BOT_TOKEN=[redacted]",
-  "//registry.npmjs.org/:_authToken=[redacted]",
-  "x-api-key: [redacted]",
-  "access_token=[redacted]",
-  "[redacted]",
-  "https://example.test/?token=[redacted]&safe=1",
-  "https://example.test/?credential=[redacted]&safe=1",
-  "https://example.test/?AWS_ACCESS_KEY_ID=[redacted]&safe=1",
-  "https://example.test/?AWS%5FACCESS%5FKEY%5FID=[redacted]&AWS%2DACCESS%2DKEY%2DID=[redacted]&safe=1",
-  "https://example.test/?service-api-key=[redacted]&service-access-token=[redacted]&service-token=[redacted]&service-secret=[redacted]&signature=[redacted]&safe=1",
-  "https://example.test/?X-Amz-Signature=[redacted]&X-Amz-Credential=[redacted]&X-Amz-Security-Token=[redacted]&safe=1",
-  "https://example.test/?X-Goog-Signature=[redacted]&X-Goog-Credential=[redacted]&safe=1",
-  "https://example.test/?sv=2026-01-01&sig=[redacted]&safe=1",
-  "https://example.test/?password=[redacted]&passwd=[redacted]&safe=1",
-  "https://example.test/?oauth.refreshToken=[redacted]&auth[token]=[redacted]&auth%5BclientSecret%5D=[redacted]&safe=1",
-  "https://example.test/?access_token%3D[redacted]&client_secret%3D[redacted]&safe=1",
-  "https://example.test/?redirect_uri=https%3A%2F%2Finner.test%2Fcb%3Frefresh_token%3D[redacted]%26password%3D[redacted]%26safe%3D1",
 ].join(" ");
 
 export function capture(isTTY = false): {
@@ -240,45 +190,56 @@ export function dependencies(
     onRun?: () => void;
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
-    onCodex?: (args: readonly string[]) => number;
+    onCodex?: (
+      ...arguments_: Parameters<MainDependencies["runCodex"]>
+    ) => number | Promise<number>;
+    linearClient?: MainDependencies["linearClient"];
+    importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
+    onRepositoryCommand?: (
+      ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
+    ) => string | Promise<string>;
     bulkScan?: MainDependencies["bulkScan"];
-    onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
+    onWorkbench?: (
+      args: readonly string[],
+      input?: string,
+      signal?: AbortSignal,
+    ) => JsonObject | Promise<JsonObject>;
     onMatch?: MainDependencies["matchFindings"];
-    onUpdateCheck?: () => Promise<UpdateNotice | undefined>;
+    onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
     preflight?: ScanPreflight;
     environment?: NodeJS.ProcessEnv;
     signals?: FakeSignals;
     result?: ScanResult;
+    activities?: ScanActivity[];
     costUpdates?: ScanCost[];
-    workerStatuses?: import("../src/index.js").ScanWorkerStatus[];
+    scanProgress?: ScanProgress[];
+    workerStatuses?: ScanWorkerStatus[];
   } = {},
 ): MainDependencies {
   const signals = options.signals ?? new FakeSignals();
   const result = options.result ?? fakeResult();
   const security = {
-    run: async (repository: string, runOptions: unknown) => {
+    run: async (repository: string, runOptions: ScanOptions) => {
       options.onTurn?.(repository, runOptions);
-      const signal = (runOptions as { signal?: AbortSignal }).signal;
+      const signal = runOptions.signal;
       signal?.addEventListener("abort", () => options.onInterrupt?.(), {
         once: true,
       });
       options.onRun?.();
       if (!signal?.aborted) {
-        (runOptions as { onScanStarted?: () => void }).onScanStarted?.();
+        runOptions.onScanStarted?.();
+        for (const activity of options.activities ?? []) {
+          runOptions.onActivity?.(activity);
+        }
         for (const cost of options.costUpdates ?? []) {
-          (
-            runOptions as { onCost?: (cost: Readonly<ScanCost>) => void }
-          ).onCost?.(cost);
+          runOptions.onCost?.(cost);
+        }
+        for (const progress of options.scanProgress ?? []) {
+          runOptions.onProgress?.(progress);
         }
         for (const status of options.workerStatuses ?? []) {
-          (
-            runOptions as {
-              onWorkerStatus?: (
-                status: import("../src/index.js").ScanWorkerStatus,
-              ) => void;
-            }
-          ).onWorkerStatus?.(status);
+          runOptions.onWorkerStatus?.(status);
         }
       }
       return result;
@@ -293,7 +254,7 @@ export function dependencies(
       return security;
     },
     environment: options.environment ?? {},
-    checkForUpdate: async () => await options.onUpdateCheck?.(),
+    checkForUpdate: async (signal) => await options.onUpdateCheck?.(signal),
     currentDirectory: () => options.currentDirectory ?? "/current/repository",
     now: () => 0,
     setInterval: () => ({}) as NodeJS.Timeout,
@@ -303,31 +264,35 @@ export function dependencies(
       signals.remove(signal, listener),
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
-    runCodex: async (args) => options.onCodex?.(args) ?? 0,
+    runCodex: async (...args) => (await options.onCodex?.(...args)) ?? 0,
+    runRepositoryCommand: async (command, args, repository, commandOptions) =>
+      (await options.onRepositoryCommand?.(
+        command,
+        args,
+        repository,
+        commandOptions,
+      )) ?? (args.includes("--name-only") ? "src/finding-1.ts\0" : ""),
     ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
-    runWorkbench: async (args) =>
-      (await options.onWorkbench?.(args)) ?? { scans: [] },
-    matchFindings: async (input) =>
-      (await options.onMatch?.(input)) ?? { matches: [], uncertain: [] },
-    exportFindings: async (arguments_) => {
-      const contents = new TextEncoder().encode(
+    ...(options.linearClient === undefined
+      ? {}
+      : { linearClient: options.linearClient }),
+    ...(options.importGitHubAlerts === undefined
+      ? {}
+      : { importGitHubAlerts: options.importGitHubAlerts }),
+    runWorkbench: async (args, input, signal) =>
+      (await options.onWorkbench?.(args, input, signal)) ?? { scans: [] },
+    matchFindings: async (input, comparisonOptions) =>
+      (await options.onMatch?.(input, comparisonOptions)) ?? {
+        matches: [],
+        uncertain: [],
+      },
+    exportFindings: async (arguments_) =>
+      new TextEncoder().encode(
         arguments_.format === "csv"
           ? "occurrence_id,finding_id\n"
           : arguments_.format === "json"
             ? '{"documentType":"codex-security.findings"}\n'
             : '{"version":"2.1.0"}\n',
-      );
-      if (arguments_.output !== "-") {
-        const metadata = await lstat(arguments_.output).catch(() => undefined);
-        if (metadata?.isSymbolicLink()) {
-          throw new CodexSecurityError(
-            "results.sarif: expected a regular non-symlink file",
-          );
-        }
-        await mkdir(join(arguments_.output, ".."), { recursive: true });
-        await writeFile(arguments_.output, contents, { mode: 0o600 });
-      }
-      return contents;
-    },
+      ),
   };
 }

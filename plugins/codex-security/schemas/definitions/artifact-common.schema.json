@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/definitions/artifact-common.schema.json",
+  "$defs": {
+    "nonEmptyText": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "scanId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "repositoryPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?:\\./)?(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*//)(?!.*[\\u0000-\\u001f\\u007f])(?!.*\\/$).+$"
+    },
+    "candidateId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!\\.{1,2}$)(?!.*[\\u0000-\\u001f\\u007f])(?=.*\\S)[^/\\\\]+$"
+    },
+    "page": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]*)$"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
