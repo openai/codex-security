@@ -200,3 +200,20 @@ export {
 export type { NormalizedTarget, ScanMode, ScanTarget } from "./targets.js";
 export type { AbsolutePath } from "./config-path.js";
 export { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
+
+export { DependencyFindings } from "./dependency-findings.js";
+export type {
+  DependencyReportVendor,
+  DependencyResolutionEvidence,
+  DependencyExternalEvidence,
+  DependencyAttackPath,
+  DependencyFindingVerdict,
+  DependencyReport,
+  DependencyFindingAssessment,
+  ImportedDependencyFinding,
+  DependencyReportDetails,
+  DependencyReportList,
+  DependencyAssessmentRun,
+  DependencyAssessmentDetails,
+  DependencyFindingsOptions,
+} from "./dependency-findings.js";

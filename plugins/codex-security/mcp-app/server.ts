@@ -18,6 +18,7 @@ import {
   registerScanHandoffTools,
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
+import { registerDependencyImportTools } from "./src/server/dependency-import-tools.js";
 import { createScanArtifactContext } from "./src/artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
 import {
@@ -1354,6 +1355,7 @@ export function createCodexSecurityServer(): McpServer {
   );
 
   registerScanHandoffTools(server, { appMeta, runWorkbench, workspaceResult });
+  registerDependencyImportTools(server, runWorkbench);
 
   server.registerTool(
     "get_codex_security_scan",
@@ -2602,8 +2604,17 @@ async function executeWorkbench(
         ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
         : process.env,
       encoding: "utf8" as const,
-      // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
-      maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
+      // Artifact and imported-report responses can exceed execFile's ordinary buffer.
+      maxBuffer: [
+        "read-artifact",
+        "get-dependency-report",
+        "get-dependency-finding",
+        "start-dependency-assessment",
+        "get-dependency-assessment",
+        "record-dependency-assessments",
+      ].includes(args[0] ?? "")
+        ? Infinity
+        : 4 * 1024 * 1024,
       timeout: [
         "begin-deep-scan",
         "claim-deep-scan-dedup",
@@ -2615,6 +2626,11 @@ async function executeWorkbench(
         "get-deep-scan",
         "get-workspace",
         "inspect-setup",
+        "import-dependency-findings",
+        "claim-dependency-task-launch",
+        "start-dependency-assessment",
+        "record-dependency-assessments",
+        "get-dependency-finding",
         "list-findings",
         "preserve-scan-results",
         "recover-scan-results",

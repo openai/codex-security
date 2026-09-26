@@ -1,0 +1,74 @@
+{
+  "ok": true,
+  "data": [
+    {
+      "id": "10001",
+      "type": "pypi",
+      "name": "example-package",
+      "version": "0.0.4",
+      "alerts": [
+        {
+          "key": "example-alert-1",
+          "type": "unpopularPackage",
+          "severity": "middle",
+          "category": "quality",
+          "action": "monitor"
+        },
+        {
+          "key": "example-alert-2",
+          "type": "unidentifiedLicense",
+          "severity": "low",
+          "category": "license",
+          "file": "example-package-0.0.4/PKG-INFO",
+          "start": 192,
+          "end": 199,
+          "props": {
+            "location": "example-package-0.0.4/PKG-INFO",
+            "maybeByteSpan": {
+              "end": 199,
+              "start": 192
+            },
+            "match_strength": 0,
+            "maybeTruncatedSource": "UNKNOWN"
+          },
+          "action": "ignore"
+        },
+        {
+          "key": "example-alert-3",
+          "type": "unidentifiedLicense",
+          "severity": "low",
+          "category": "license",
+          "file": "example-package-0.0.4/src/ExamplePackage.egg-info/PKG-INFO",
+          "start": 192,
+          "end": 199,
+          "props": {
+            "location": "example-package-0.0.4/src/ExamplePackage.egg-info/PKG-INFO",
+            "maybeByteSpan": {
+              "end": 199,
+              "start": 192
+            },
+            "match_strength": 0,
+            "maybeTruncatedSource": "UNKNOWN"
+          },
+          "action": "ignore"
+        },
+        {
+          "key": "example-alert-4",
+          "type": "malware",
+          "severity": "critical",
+          "category": "supplyChainRisk",
+          "file": "example-package-0.0.4/src/example-package/__init__.py",
+          "props": {
+            "id": 10002,
+            "note": "Synthetic malware finding for import tests; no package code is included."
+          },
+          "action": "error",
+          "fix": {
+            "type": "remove",
+            "description": "Remove the example package."
+          }
+        }
+      ]
+    }
+  ]
+}

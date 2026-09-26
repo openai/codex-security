@@ -41,6 +41,7 @@ import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
 import workbench_severity as severity
+from dependency_imports import workbench as dependency_imports
 from filesystem_identity import (
     serialize_filesystem_identity as serialize_filesystem_identity,
 )
@@ -3448,7 +3449,9 @@ def main() -> None:
         return
     with closing(connect()) as connection:
         remediation.require_available(connection, args, require_scan)
-        if args.command == "create-workspace":
+        if args.command in dependency_imports.COMMANDS:
+            result = dependency_imports.run_command(connection, args)
+        elif args.command == "create-workspace":
             result = create_workspace(connection, args)
         elif args.command == "get-workspace":
             result = workspace_state(
