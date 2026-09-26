@@ -4646,6 +4646,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       "model_reasoning_summary",
       "model_provider",
       "service_tier",
+      "cyber_access_program",
     ]) {
       const value = source[key];
       if (safeString(value)) result[key] = value;
