@@ -103,7 +103,7 @@ export async function resolveTrustedExecutable(
         pathLike &&
         (isWithin(root, current.path) || isWithin(root, invocationPath))
           ? canonical
-          : current.path;
+          : invocationPath;
     } catch {
       continue;
     }

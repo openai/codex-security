@@ -181,6 +181,7 @@ describe("trusted executable resolution", () => {
       const repositoryBin = join(repository, "bin");
       const aliasedBin = join(root, "repository-bin-alias");
       const externalBin = join(repository, "external-bin");
+      const repositoryAlias = join(root, "repository-alias");
       const trusted = join(root, "trusted");
       const wrapper = join(trusted, "python3");
       const launcher = join(repositoryBin, "python");
@@ -193,11 +194,13 @@ describe("trusted executable resolution", () => {
       await symlink(wrapper, launcher);
       await symlink(repositoryBin, aliasedBin, "dir");
       await symlink(trusted, externalBin, "dir");
+      await symlink(repository, repositoryAlias, "dir");
 
       for (const candidate of [
         launcher,
         join(aliasedBin, "python"),
         join(externalBin, "python3"),
+        join(repositoryAlias, "external-bin", "python3"),
       ]) {
         await expect(
           resolveTrustedExecutable(candidate, { PATH: "" }, repository),
