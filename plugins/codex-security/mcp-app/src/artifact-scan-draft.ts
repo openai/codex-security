@@ -385,6 +385,14 @@ async function preserveScanDraft(
 
   const reopenedSurfaces = new Set<JsonObject>();
   if (retainedFinal) {
+    const terminalOutcomeIds = completedCandidateIds(retainedFinal.input);
+    for (const surface of result.coverage.surfaces as JsonObject[]) {
+      if (
+        terminalOutcomeIds.has((surface.candidateId ?? surface.id) as string) &&
+        typeof surface.id === "string"
+      )
+        terminalOutcomeIds.add(surface.id);
+    }
     const closedIds = new Set(
       resolvedDeferred(result.coverage).map((row) => row.id as string),
     );
@@ -421,7 +429,14 @@ async function preserveScanDraft(
       );
       for (const surface of resolved) reopenedSurfaces.add(surface);
       result.coverage = preserveScanCoverage(
-        { ...result.coverage, surfaces: progress.coverage.surfaces },
+        {
+          ...result.coverage,
+          surfaces: (progress.coverage.surfaces as JsonObject[]).filter(
+            (surface) =>
+              !terminalOutcomeIds.has(surface.id as string) &&
+              !terminalOutcomeIds.has(surface.candidateId as string),
+          ),
+        },
         [result.coverage],
         false,
       );

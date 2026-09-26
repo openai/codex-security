@@ -141,6 +141,84 @@ for (const updateSavedSurface of [false, true]) {
   });
 }
 
+for (const outcome of ["rejected", "reported"]) {
+  for (const surfaceLink of ["candidate", "surface", "none"]) {
+    if (surfaceLink === "none" && outcome === "rejected") continue;
+    test(`worker: accepted candidate outcomes survive progress ${outcome}/${surfaceLink}`, async (t) => {
+      const f = await fixture(t, "worker");
+      const candidateId = "accepted-candidate";
+      const surface = {
+        id: "accepted-surface",
+        candidateId,
+        label: "Accepted review",
+        disposition: outcome,
+      };
+      const finding = {
+        ruleId: "fixture.accepted-review",
+        title: "Accepted review finding",
+        summary: "A completed candidate outcome remains authoritative.",
+        severity: { level: "low" },
+        confidence: {
+          level: "high",
+          rationale: "Synthetic persistence fixture.",
+        },
+        taxonomy: { category: "other", cwe: [] },
+        locations: [{ path: "src/example.py", startLine: 1 }],
+        remediation: "Complete the independent review.",
+        provenance: { source: "local_plugin", candidateId },
+      };
+      const genericTask = { id: "generic-review", ...generic };
+      await f.write({
+        ...f.draft(
+          {
+            surfaces: surfaceLink === "none" ? [] : [surface],
+            deferred: [genericTask],
+          },
+          true,
+        ),
+        findings: outcome === "reported" ? [finding] : [],
+      });
+      const candidate = { title: "Additional candidate evidence" };
+      const update = {
+        id: surface.id,
+        ...(surfaceLink === "surface" ? {} : { candidateId }),
+        label: surface.label,
+        disposition: outcome === "reported" ? "rejected" : "needs_follow_up",
+      };
+      const progress = f.draft({
+        surfaces: [update],
+        deferred: [
+          { id: "candidate-review", candidateId, candidate, ...generic },
+        ],
+      });
+      for (const input of [progress, f.draft()]) {
+        const result = await f.write(input);
+        assert.equal(result.findingCount, outcome === "reported" ? 1 : 0);
+        assert.deepEqual(result.coverage.deferred, [genericTask]);
+        assert.deepEqual(
+          result.coverage.surfaces.map(({ id, disposition }) => ({
+            id,
+            disposition,
+          })),
+          surfaceLink === "none"
+            ? []
+            : [{ id: surface.id, disposition: outcome }],
+        );
+        if (outcome === "rejected") {
+          assert.deepEqual(result.coverage.surfaces[0].candidate, candidate);
+        } else {
+          const saved = JSON.parse(
+            await readFile(path.join(f.root, "result.json"), "utf8"),
+          );
+          assert.deepEqual(saved.findings[0].provenance.originalCandidates, [
+            candidate,
+          ]);
+        }
+      }
+    });
+  }
+}
+
 for (const layout of ["standard", "diff", "worker"]) {
   test(`${layout}: returned deferred IDs support closure, retries and explicit reopening`, async (t) => {
     const f = await fixture(t, layout);
