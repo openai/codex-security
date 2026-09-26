@@ -119,7 +119,14 @@ const stoppedScanProbe = [
   "    final_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
   "    final_findings = json.loads((scan_dir / 'findings.json').read_text(encoding='utf-8'))['findings']",
   "    connection.close()",
-  "    print(json.dumps({'firstFailed': first_failed, 'frozenAfterFailure': frozen_after_failure, 'retryPublished': retry_published, 'frozenAfterSuccess': json.loads(frozen_after_success) if frozen_after_success else None, 'status': final_manifest['scan']['status'], 'findingCount': len(final_findings)}))",
+  "    frozen_sources = json.loads(frozen_after_success)",
+  "    head_relative = next(path for path in frozen_sources if path.startswith('checkpoint-heads/'))",
+  "    head_path = scan_dir / head_relative",
+  "    head = json.loads(head_path.read_text(encoding='utf-8'))",
+  "    snapshot_bytes = (scan_dir / 'checkpoints' / head['checkpoint']).read_bytes()",
+  "    snapshot = json.loads(snapshot_bytes)",
+  "    head_evidence = head_path.read_bytes()",
+  "    print(json.dumps({'firstFailed': first_failed, 'frozenAfterFailure': frozen_after_failure, 'retryPublished': retry_published, 'frozenAfterSuccess': json.loads(frozen_after_success) if frozen_after_success else None, 'status': final_manifest['scan']['status'], 'findingCount': len(final_findings), 'scanId': scan_id, 'head': head, 'headPath': head_relative, 'headDigest': hashlib.sha256(head_evidence).hexdigest(), 'snapshot': snapshot, 'snapshotDigest': hashlib.sha256(snapshot_bytes).hexdigest()}))",
   "    raise SystemExit(0)",
   "if source == 'late-checkpoint':",
   "    manifest_before = (scan_dir / 'scan-manifest.json').read_bytes()",
@@ -259,11 +266,30 @@ test("retries a legacy stopped seal after transient publication failure", () => 
     status: "failed",
     findingCount: 1,
   });
-  const frozenSources = Object.entries(recovered.frozenAfterSuccess);
-  expect(frozenSources).toHaveLength(1);
-  const [checkpointPath, checkpointDigest] = frozenSources[0]!;
-  expect(checkpointDigest).toMatch(/^[0-9a-f]{64}$/);
-  expect(checkpointPath).toBe(`checkpoints/${checkpointDigest}.json`);
+  expect(recovered.head.checkpoint).toBe(`${recovered.snapshotDigest}.json`);
+  expect(recovered.headPath).toBe(
+    `checkpoint-heads/${recovered.headDigest}.json`,
+  );
+  expect(recovered.frozenAfterSuccess).toMatchObject({
+    [`checkpoints/${recovered.head.checkpoint}`]: recovered.snapshotDigest,
+    [recovered.headPath]: recovered.headDigest,
+  });
+  expect(recovered.snapshot).toMatchObject({
+    scanId: recovered.scanId,
+    findings: [
+      expect.objectContaining({
+        provenance: expect.objectContaining({
+          candidateId: "checkpoint-candidate",
+        }),
+      }),
+    ],
+    coverage: {
+      completeness: "partial",
+      deferred: expect.arrayContaining([
+        expect.objectContaining({ candidateId: "pending-validation" }),
+      ]),
+    },
+  });
 }, 30_000);
 
 test("preserves distinct instances from one worker candidate", () => {

@@ -312,6 +312,13 @@ export interface CoverageDocument {
     surfaceIds?: string[];
     [k: string]: unknown;
   }[];
+  /**
+   * Resolved generic deferred work, identified by its explicit saved deferred ID and completion reason.
+   */
+  resolvedDeferred?: {
+    id: string;
+    reason: string;
+  }[];
   openQuestions?: {
     question: string;
     followUpPrompt?: string;

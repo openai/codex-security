@@ -478,14 +478,15 @@ def _require_hardening_portfolio_file(scan_dir: Path, scan: dict[str, Any]) -> N
         )
 
 
-def _read_scan_local_json_bytes(
+def _read_scan_local_json_with_metadata(
     scan_dir: Path, relative_path: str, context: str
-) -> tuple[dict[str, Any], bytes]:
+) -> tuple[dict[str, Any], bytes, os.stat_result]:
     descriptor = open_scan_local_file_descriptor(scan_dir, relative_path, context)
     try:
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
             raw = handle.read()
+            metadata = os.fstat(handle.fileno())
         try:
             payload = _loads_json(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
@@ -496,6 +497,13 @@ def _read_scan_local_json_bytes(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+    return payload, raw, metadata
+
+
+def _read_scan_local_json_bytes(
+    scan_dir: Path, relative_path: str, context: str
+) -> tuple[dict[str, Any], bytes]:
+    payload, raw, _ = _read_scan_local_json_with_metadata(scan_dir, relative_path, context)
     return payload, raw
 
 
@@ -1087,6 +1095,19 @@ def _recover_unsealed_coverage(
         )
         partial = True
 
+    if "resolvedDeferred" in coverage:
+        try:
+            _validate_schema_node(
+                coverage["resolvedDeferred"],
+                properties["resolvedDeferred"],
+                "coverage.resolvedDeferred",
+            )
+            _validate_resolved_deferred(coverage)
+        except ContractError as exc:
+            coverage.pop("resolvedDeferred")
+            warnings.append(f"Skipped malformed resolved deferred work: {exc}.")
+            partial = True
+
     if coverage["deferred"] and completeness != "partial":
         if not discarded_findings:
             warnings.append("Coverage has deferred review work; marked coverage as partial.")
@@ -1394,6 +1415,30 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
         raise ContractError(f"{context}.extensions: expected an object")
 
 
+def _validate_resolved_deferred(coverage: dict[str, Any]) -> None:
+    if "resolvedDeferred" not in coverage:
+        return
+    active = {
+        identity
+        for row in coverage.get("deferred", [])
+        if isinstance(row, dict)
+        for identity in (row.get("id"), row.get("candidateId"))
+        if isinstance(identity, str)
+    }
+    resolved: set[str] = set()
+    for index, closure in enumerate(_require_list(coverage, "resolvedDeferred", "coverage")):
+        context = f"coverage.resolvedDeferred[{index}]"
+        if not isinstance(closure, dict):
+            raise ContractError(f"{context}: expected an object")
+        closure_id = _require_str(closure, "id", context)
+        _require_str(closure, "reason", context)
+        if closure_id in resolved:
+            raise ContractError(f"{context}.id: duplicate resolved deferred id")
+        if closure_id in active:
+            raise ContractError(f"{context}.id: deferred work is still active")
+        resolved.add(closure_id)
+
+
 def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_dir: Path) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     scan_id = _require_str(scan, "id", "manifest.scan")
@@ -1442,6 +1487,7 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
+    _validate_resolved_deferred(coverage)
     if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
         raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
     _require_safe_json_value(coverage, "coverage.json")

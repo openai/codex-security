@@ -32,6 +32,46 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     return checkpoint_path
 
 
+def saved_draft(scan_id: str, *, deferred=(), surfaces=(), closures=(), complete=False):
+    return {
+        "scanId": scan_id,
+        "complete": complete,
+        "findings": [],
+        "coverage": {
+            "completeness": "partial" if deferred else "complete",
+            "surfaces": list(surfaces),
+            "explicitExclusions": [],
+            "deferred": list(deferred),
+            **({"resolvedDeferred": list(closures)} if closures else {}),
+        },
+    }
+
+
+def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int = 1) -> dict:
+    return {
+        "id": worker_id,
+        "kind": "discovery",
+        "artifact_dir": str(output),
+        "result_manifest_path": None,
+        "attempt": attempt,
+    }
+
+
+def replay_saved_results(
+    module, documents, scan_dir, scan_id, binding, workers=(), *, stopped=True
+):
+    return module.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        list(workers),
+        [],
+        stopped=stopped,
+        reason="interrupted",
+        frozen_source_digests=documents[0]["scan"]["preservedSources"],
+    )
+
+
 def stable_target_id(target: Path) -> str:
     digest = hashlib.sha256(f"local-workspace\0{target.resolve()}".encode()).hexdigest()
     return f"target_sha256_{digest}"

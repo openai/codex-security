@@ -844,6 +844,30 @@ async function testDeepScanStdioLifecycle() {
         ).findings,
         [],
       );
+      const completion = await restartedServer.request(
+        3,
+        "tools/call",
+        toolCall(
+          "complete_codex_security_scan",
+          {
+            scanId: resumed.result.structuredContent.scanId,
+            handoffClaimToken,
+          },
+          resumedThreadId,
+        ),
+      );
+      assertNoError(completion);
+      const completedScan = resumed.result.structuredContent;
+      const sealedManifest = JSON.parse(
+        await readFile(completedScan.manifestPath, "utf8"),
+      );
+      assert.equal(sealedManifest.scan.status, "completed");
+      assert.ok(sealedManifest.scan.sealedAt);
+      const report = await readFile(
+        path.join(completedScan.scanDir, "report.md"),
+        "utf8",
+      );
+      assert.ok(report.length > 0);
       const executions = (await readJsonLines(startLogPath)).slice(
         restartStartIndex,
       );

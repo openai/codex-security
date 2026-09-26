@@ -12,7 +12,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from workbench_test_support import run_workbench, write_checkpoint, write_completed_contract
+from workbench_test_support import (
+    replay_saved_results,
+    run_workbench,
+    saved_discovery_worker,
+    saved_draft,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 
 @pytest.mark.parametrize("termination", ["failed", "interrupted", "canceled"])
@@ -632,10 +639,19 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
     frozen_sources = json.loads(frozen_before)
     assert published_sources.items() >= frozen_sources.items()
     parent_sources = published_sources.keys() - frozen_sources.keys()
-    assert len(parent_sources) == 1
-    parent_source = next(iter(parent_sources))
+    assert any(path.startswith("checkpoint-heads/") for path in parent_sources)
+    parent_source = next(path for path in parent_sources if path.startswith("checkpoints/"))
+    assert (
+        json.loads((scan_dir / "checkpoint-head.json").read_text())["checkpoint"]
+        == Path(parent_source).name
+    )
     assert parent_source.startswith("checkpoints/")
     assert Path(parent_source).stem == published_sources[parent_source]
+    ordering = next(path for path in parent_sources if path.startswith("source-order/"))
+    assert json.loads((scan_dir / ordering).read_text())["sources"][parent_source] == {
+        "digest": published_sources[parent_source],
+        "observedAtNs": str((scan_dir / parent_source).stat().st_mtime_ns),
+    }
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert (
             json.loads(
@@ -1414,7 +1430,10 @@ def test_failure_preserves_last_committed_reducer_without_parent_draft(tmp_path:
     assert failed["findings"][0]["summary"] == reduced["findings"][0]["summary"]
 
 
-def test_stopped_rejection_recovers_malformed_parent_surfaces(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tied_head", [False, True])
+def test_stopped_rejection_recovers_malformed_parent_surfaces(
+    tmp_path: Path, tied_head: bool
+) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     contract_dir = tmp_path / "contract"
@@ -1431,6 +1450,20 @@ def test_stopped_rejection_recovers_malformed_parent_surfaces(tmp_path: Path) ->
     (scan_dir / "scan-manifest.json").write_bytes(
         (contract_dir / "scan-manifest.json").read_bytes()
     )
+    if tied_head:
+        parent_checkpoint = write_checkpoint(
+            scan_dir / "checkpoints",
+            {
+                "scanId": scan_id,
+                "complete": True,
+                "findings": [finding],
+                "coverage": {**malformed_coverage, "surfaces": []},
+            },
+        )
+        head = scan_dir / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": parent_checkpoint.name}))
+        os.utime(head, ns=(200, 200))
+        os.utime(scan_dir / "coverage.json", ns=(200, 200))
     current = json.loads(result_path.read_text())
     checkpoint = copy.deepcopy(current)
     checkpoint["complete"] = False
@@ -1618,7 +1651,7 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
     final_coverage["completeness"] = "partial"
     final_coverage["openQuestions"] = []
     coverage_path.write_text(json.dumps(final_coverage))
-    write_checkpoint(
+    checkpoint = write_checkpoint(
         scan_dir / "checkpoints",
         {
             "scanId": scan_id,
@@ -1633,6 +1666,9 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
             },
         },
     )
+
+    os.utime(checkpoint, (1, 1))
+    os.utime(coverage_path, (2, 2))
 
     run_workbench(
         state_dir,
@@ -2607,3 +2643,1197 @@ def test_merge_saved_results_deduplicates_open_questions(
     assert result is not None
     _, _, coverage = result
     assert coverage.get("openQuestions") == expected
+
+
+@pytest.mark.parametrize(
+    "canonical_state",
+    ["missing", "incomplete", "terminal", "implicit", "reopened", "checkpoint_reopened"],
+)
+def test_recovery_retains_generic_closures_without_a_canonical_write(
+    tmp_path: Path, canonical_state: str
+) -> None:
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import workbench_saved_results
+
+    scan_dir = tmp_path.resolve() / "scan"
+    scan_dir.mkdir()
+    scan_id = "generic-closure-recovery"
+    pending_closeout = {
+        "id": "review-closeout",
+        "reason": "Final submission remains.",
+        "paths": ["src/example.py"],
+    }
+    closure = {
+        "id": "review-closeout",
+        "reason": "All review decisions are recorded.",
+    }
+    unresolved = {"id": "unavailable-library", "reason": "Source is unavailable."}
+    candidate = {"candidateId": "pending-candidate", "reason": "Validation remains."}
+    coverage = {
+        "completeness": "partial",
+        "surfaces": [],
+        "explicitExclusions": [],
+        "deferred": [
+            pending_closeout,
+            unresolved,
+            candidate,
+        ],
+    }
+    initial = {"scanId": scan_id, "complete": False, "findings": [], "coverage": coverage}
+    if canonical_state != "missing":
+        scan = (
+            {} if canonical_state == "implicit" else {"complete": canonical_state != "incomplete"}
+        )
+        (scan_dir / "scan-manifest.json").write_text(json.dumps({"scan": scan}))
+        (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+        canonical_coverage = {
+            **coverage,
+            "deferred": [{**pending_closeout, "id": closure["id"]}, unresolved, candidate],
+        }
+        (scan_dir / "coverage.json").write_text(json.dumps(canonical_coverage))
+        os.utime(scan_dir / "coverage.json", ns=(100, 100))
+    original = write_checkpoint(scan_dir / "checkpoints", initial)
+    os.utime(original, ns=(100, 100))
+    original_bytes = original.read_bytes()
+    terminal = write_checkpoint(
+        scan_dir / "checkpoints",
+        {
+            **initial,
+            "complete": True,
+            "coverage": {
+                **coverage,
+                "deferred": [unresolved, candidate],
+                "resolvedDeferred": [closure],
+            },
+        },
+    )
+    os.utime(terminal, ns=(200, 200))
+    if canonical_state == "reopened":
+        os.utime(scan_dir / "coverage.json", ns=(300, 300))
+    if canonical_state == "checkpoint_reopened":
+        # A matching checkpoint can be a newer observation of reopened work.
+        # Recovery must preserve its existing time when snapshotting the parent.
+        payload = workbench_saved_results._encoded(
+            {**initial, "complete": True, "coverage": canonical_coverage}
+        )
+        existing_checkpoint = (
+            scan_dir / "checkpoints" / f"{hashlib.sha256(payload).hexdigest()}.json"
+        )
+        existing_checkpoint.write_bytes(payload)
+        os.utime(existing_checkpoint, ns=(300, 300))
+    binding = {
+        "status": "interrupted",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {"kind": "git_revision", "repository": "test", "revision": "head"},
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": "repository",
+    }
+    result = workbench_saved_results.merge_saved_results(
+        scan_dir, scan_id, binding, [], [], stopped=True, reason="interrupted"
+    )
+    assert result is not None
+    recovered = result[2]
+    reopened = canonical_state in {"reopened", "checkpoint_reopened"}
+    assert recovered.get("resolvedDeferred", []) == ([] if reopened else [closure])
+    assert {row.get("candidateId") or row["id"] for row in recovered["deferred"]} == {
+        unresolved["id"],
+        candidate["candidateId"],
+        "scan-stopped",
+    } | ({closure["id"]} if reopened else set())
+    assert recovered["completeness"] == "partial"
+    assert original.read_bytes() == original_bytes
+    if canonical_state == "checkpoint_reopened":
+        assert existing_checkpoint.stat().st_mtime_ns == 300
+    if canonical_state == "terminal":
+        # Publication can fail after snapshotting the old canonical state. A later
+        # recovery may have only that frozen checkpoint set left to work with.
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan_dir / name).unlink()
+        replay = replay_saved_results(
+            workbench_saved_results, result, scan_dir, scan_id, binding, [], stopped=True
+        )
+        assert replay is not None
+        assert replay[2]["resolvedDeferred"] == [closure]
+        assert closure["id"] not in {row.get("id") for row in replay[2]["deferred"]}
+
+
+@pytest.mark.parametrize("closure_time", [100, 200])
+def test_recovered_generic_closure_cannot_close_another_workers_same_id(
+    tmp_path: Path, closure_time: int
+) -> None:
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import workbench_saved_results
+
+    scan_dir = tmp_path.resolve() / "scan"
+    scan_dir.mkdir()
+    scan_id = "worker-closure-recovery"
+    workers = []
+    for worker_id in ("worker-one", "worker-two"):
+        output = scan_dir / "workers" / worker_id
+        output.mkdir(parents=True)
+        workers.append(
+            {
+                "id": worker_id,
+                "kind": "discovery",
+                "artifact_dir": str(output),
+                "result_manifest_path": None,
+            }
+        )
+        draft = {
+            "scanId": scan_id,
+            "complete": False,
+            "findings": [],
+            "coverage": {
+                "completeness": "partial",
+                "surfaces": [],
+                "explicitExclusions": [],
+                "deferred": [{"id": "shared-review", "reason": f"Pending in {worker_id}."}],
+            },
+        }
+        pending = write_checkpoint(output / "checkpoints", draft)
+        os.utime(pending, ns=(100, 100))
+        if worker_id == "worker-one":
+            # Recover the accepted final checkpoint after an interrupted result write.
+            terminal = write_checkpoint(
+                output / "checkpoints",
+                {
+                    **draft,
+                    "complete": True,
+                    "coverage": {
+                        **draft["coverage"],
+                        "completeness": "complete",
+                        "deferred": [],
+                        "resolvedDeferred": [
+                            {"id": "shared-review", "reason": "Review completed."}
+                        ],
+                    },
+                },
+            )
+            os.utime(terminal, ns=(closure_time, closure_time))
+        else:
+            (output / "result.json").write_text(json.dumps(draft))
+    binding = {
+        "status": "interrupted",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {"kind": "git_revision", "repository": "test", "revision": "head"},
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": "deep_repository",
+    }
+    result = workbench_saved_results.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+    )
+    assert result is not None
+    coverage = result[2]
+    expected = {"Pending in worker-two."}
+    if closure_time == 100:
+        expected.add("Pending in worker-one.")
+    assert {
+        row["reason"] for row in coverage["deferred"] if row["id"] != "scan-stopped"
+    } == expected
+    assert coverage["completeness"] == "partial"
+    assert not coverage.get("resolvedDeferred")
+
+
+@pytest.mark.parametrize("canonical_time", [100, 200, 300])
+def test_recovery_keeps_latest_generic_closure_reason(tmp_path: Path, canonical_time: int) -> None:
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import workbench_saved_results
+
+    scan_dir = tmp_path.resolve()
+    scan_id = "closure-reason-recovery"
+    closure = {"id": "review-closeout", "reason": "Review and follow-up are complete."}
+    coverage = {
+        "completeness": "complete",
+        "surfaces": [],
+        "explicitExclusions": [],
+        "deferred": [],
+        "resolvedDeferred": [closure],
+    }
+    (scan_dir / "scan-manifest.json").write_text(
+        json.dumps({"scan": {"complete": True, "sealedAt": "2026-01-01T00:00:00Z"}})
+    )
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
+    os.utime(scan_dir / "coverage.json", ns=(canonical_time, canonical_time))
+    previous = write_checkpoint(
+        scan_dir / "checkpoints",
+        {
+            "scanId": scan_id,
+            "complete": True,
+            "findings": [],
+            "coverage": {
+                **coverage,
+                "resolvedDeferred": [{**closure, "reason": "Initial review completed."}],
+            },
+        },
+    )
+    os.utime(previous, ns=(200, 200))
+    binding = {
+        "status": "interrupted",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {"kind": "git_revision", "repository": "test", "revision": "head"},
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": "repository",
+    }
+    result = workbench_saved_results.merge_saved_results(
+        scan_dir, scan_id, binding, [], [], stopped=True, reason="interrupted"
+    )
+    assert result is not None
+    expected = (
+        closure if canonical_time >= 200 else {**closure, "reason": "Initial review completed."}
+    )
+    assert result[2]["resolvedDeferred"] == [expected]
+
+
+@pytest.mark.parametrize(
+    "case", ["candidate", "finding", "extra_property", "mixed_closures", "duplicate_closures"]
+)
+def test_recovery_rejects_closures_that_would_discard_saved_evidence(
+    tmp_path: Path, case: str
+) -> None:
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import workbench_saved_results
+
+    scan_dir = tmp_path.resolve()
+    scan_id = "retained-evidence-recovery"
+    pending = {"id": "pending-review", "reason": "Validation remains.", "paths": ["src/example.py"]}
+    if case in {"candidate", "finding"}:
+        pending[case] = {
+            "title": "Retained review evidence",
+            "evidence": "Unverified source trace.",
+        }
+    coverage = {
+        "completeness": "partial",
+        "surfaces": [],
+        "explicitExclusions": [],
+        "deferred": [pending],
+    }
+    draft = {"scanId": scan_id, "complete": False, "findings": [], "coverage": coverage}
+    original = write_checkpoint(scan_dir / "checkpoints", draft)
+    os.utime(original, ns=(100, 100))
+    original_bytes = original.read_bytes()
+    closure = {"id": pending["id"], "reason": "Review closed."}
+    closures = [closure]
+    if case == "extra_property":
+        closure["evidence"] = "Unsupported closure field."
+    elif case == "mixed_closures":
+        closures.append({"id": "another-review", "reason": "Done.", "evidence": "Invalid field."})
+    elif case == "duplicate_closures":
+        closures.append(dict(closure))
+    terminal = write_checkpoint(
+        scan_dir / "checkpoints",
+        {
+            **draft,
+            "complete": True,
+            "coverage": {
+                **coverage,
+                "completeness": "complete",
+                "deferred": [],
+                "resolvedDeferred": closures,
+            },
+        },
+    )
+    os.utime(terminal, ns=(200, 200))
+    binding = {
+        "scanId": scan_id,
+        "startedAt": "2026-01-01T00:00:00Z",
+        "completedAt": "2026-01-01T00:01:00Z",
+        "producer": {"name": "codex-security-plugin", "version": "0.1.0"},
+        "status": "interrupted",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {"targetId": "target_sha256_test", "displayName": "test", "revision": "head"},
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": "repository",
+    }
+    documents = workbench_saved_results.merge_saved_results(
+        scan_dir, scan_id, binding, [], [], stopped=True, reason="interrupted"
+    )
+    assert documents is not None
+    prepared = workbench_saved_results._prepare_scan_finalization(
+        scan_dir, completion_binding=binding, completion_warnings=[], draft_documents=documents
+    )
+    workbench_saved_results._write_prepared_scan_finalization(prepared)
+    recovered = json.loads((scan_dir / "coverage.json").read_text())
+    assert pending in recovered["deferred"]
+    assert not recovered.get("resolvedDeferred")
+    assert recovered["completeness"] == "partial"
+    assert original.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("keep_other_closure", [False, True])
+def test_recovery_restores_work_reopened_after_parent_closure(
+    tmp_path: Path, keep_other_closure: bool
+) -> None:
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import workbench_saved_results
+
+    scan_dir = tmp_path.resolve()
+    scan_id = "reopened-parent-recovery"
+    closure = {"id": "review-closeout", "reason": "Initial review completed."}
+    other = {"id": "other-review", "reason": "Separate review completed."}
+    coverage = {
+        "completeness": "complete",
+        "surfaces": [],
+        "explicitExclusions": [],
+        "deferred": [],
+        "resolvedDeferred": [closure, other] if keep_other_closure else [closure],
+    }
+    (scan_dir / "scan-manifest.json").write_text(json.dumps({"scan": {"complete": True}}))
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
+    os.utime(scan_dir / "coverage.json", ns=(100, 100))
+    pending = {"id": closure["id"], "reason": "New source evidence needs review."}
+    reopened = write_checkpoint(
+        scan_dir / "checkpoints",
+        {
+            "scanId": scan_id,
+            "complete": True,
+            "findings": [],
+            "coverage": {
+                **coverage,
+                "completeness": "partial",
+                "deferred": [pending],
+                "resolvedDeferred": [],
+            },
+        },
+    )
+    os.utime(reopened, ns=(200, 200))
+    binding = {
+        "status": "interrupted",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {"kind": "git_revision", "repository": "test", "revision": "head"},
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": "repository",
+    }
+    documents = workbench_saved_results.merge_saved_results(
+        scan_dir, scan_id, binding, [], [], stopped=True, reason="interrupted"
+    )
+    assert documents is not None
+    assert pending in documents[2]["deferred"]
+    assert documents[2].get("resolvedDeferred", []) == ([other] if keep_other_closure else [])
+    replay = replay_saved_results(
+        workbench_saved_results, documents, scan_dir, scan_id, binding, [], stopped=True
+    )
+    assert replay is not None
+    assert pending in replay[2]["deferred"]
+    assert replay[2].get("resolvedDeferred", []) == ([other] if keep_other_closure else [])
+
+
+@pytest.mark.parametrize(
+    "layout", ["current", "archived", "new_attempt_reopens", "legacy_attempt_reopens"]
+)
+def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
+    tmp_path: Path, layout: str
+) -> None:
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import workbench_saved_results
+
+    scan_dir = tmp_path.resolve()
+    scan_id = "replayed-worker-closure"
+    worker_root = scan_dir / "workers" / "worker-one"
+    output = worker_root / "output"
+    output.mkdir(parents=True)
+    attempt = output if layout == "current" else worker_root / "attempts" / "attempt-01"
+    attempt.mkdir(parents=True, exist_ok=True)
+    pending = {"id": "review-closeout", "reason": "Reopened source review."}
+    coverage = {
+        "completeness": "partial",
+        "surfaces": [],
+        "explicitExclusions": [],
+        "deferred": [pending],
+    }
+    draft = {"scanId": scan_id, "complete": True, "findings": [], "coverage": coverage}
+    closed = write_checkpoint(
+        attempt / "checkpoints",
+        {
+            **draft,
+            "coverage": {
+                **coverage,
+                "completeness": "complete",
+                "deferred": [],
+                "resolvedDeferred": [{"id": pending["id"], "reason": "Review completed."}],
+            },
+        },
+    )
+    os.utime(closed, ns=(100, 100))
+    reopened = write_checkpoint(attempt / "checkpoints", draft)
+    os.utime(reopened, ns=(200, 200))
+    (attempt / "result.json").write_text(json.dumps(draft))
+    os.utime(attempt / "result.json", ns=(200, 200))
+    head = attempt / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": closed.name}))
+    os.utime(head, ns=(300, 300))
+    if layout != "current":
+        current = (
+            draft
+            if layout.endswith("attempt_reopens")
+            else {**draft, "coverage": {**coverage, "completeness": "complete", "deferred": []}}
+        )
+        (output / "result.json").write_text(json.dumps(current))
+        os.utime(output / "result.json", ns=(300, 300))
+    workers = [saved_discovery_worker(output, "worker-one", 1 if layout == "current" else 2)]
+    if layout == "legacy_attempt_reopens":
+        workers[0].pop("attempt")
+    binding = {
+        "status": "interrupted",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {"kind": "git_revision", "repository": "test", "revision": "head"},
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": "deep_repository",
+    }
+    documents = workbench_saved_results.merge_saved_results(
+        scan_dir, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert documents is not None
+    assert (pending in documents[2]["deferred"]) is layout.endswith("attempt_reopens")
+    frozen = documents[0]["scan"]["preservedSources"]
+    head_path = next(path for path in frozen if "/checkpoint-heads/" in path)
+    assert closed.stat().st_mtime_ns == 100
+    replay = workbench_saved_results.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=frozen,
+    )
+    assert replay is not None
+    assert replay[2] == documents[2]
+    for checkpoint in (reopened, closed):
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(400, 400))
+        replay = workbench_saved_results.merge_saved_results(
+            scan_dir,
+            scan_id,
+            binding,
+            workers,
+            [],
+            stopped=True,
+            reason="interrupted",
+            frozen_source_digests=frozen,
+        )
+        assert replay is not None
+        assert replay[2] == documents[2]
+    # Legacy frozen evidence did not bind a head; a later head cannot change its result.
+    head.write_text(json.dumps({"checkpoint": closed.name}))
+    legacy = workbench_saved_results.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests={
+            path: digest
+            for path, digest in frozen.items()
+            if path != head_path and not path.startswith("source-order/")
+        },
+    )
+    assert legacy is not None
+    assert pending in legacy[2]["deferred"]
+
+
+@pytest.mark.parametrize("pending_modified", [200, 300])
+def test_recovery_keeps_worker_pending_saved_before_head_update(
+    tmp_path: Path, pending_modified: int
+) -> None:
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import workbench_saved_results
+
+    scan_dir = tmp_path.resolve()
+    scan_id = "worker-head-interruption"
+    output = scan_dir / "workers" / "worker-one" / "output"
+    coverage = {
+        "completeness": "complete",
+        "surfaces": [],
+        "explicitExclusions": [],
+        "deferred": [],
+        "resolvedDeferred": [{"id": "review-closeout", "reason": "Initial review completed."}],
+    }
+    draft = {"scanId": scan_id, "complete": True, "findings": [], "coverage": coverage}
+    closed = write_checkpoint(output / "checkpoints", draft)
+    os.utime(closed, ns=(100, 100))
+    (output / "result.json").write_text(json.dumps(draft))
+    os.utime(output / "result.json", ns=(200, 200))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": closed.name}))
+    os.utime(head, ns=(200, 200))
+    pending = {"id": "review-closeout", "reason": "New evidence needs review."}
+    reopened = write_checkpoint(
+        output / "checkpoints",
+        {
+            **draft,
+            "coverage": {
+                **coverage,
+                "completeness": "partial",
+                "deferred": [pending],
+                "resolvedDeferred": [],
+            },
+        },
+    )
+    os.utime(reopened, ns=(pending_modified, pending_modified))
+    workers = [saved_discovery_worker(output, "worker-one", 1)]
+    binding = {
+        "status": "interrupted",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {"kind": "git_revision", "repository": "test", "revision": "head"},
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": "deep_repository",
+    }
+    documents = workbench_saved_results.merge_saved_results(
+        scan_dir, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert documents is not None
+    assert pending in documents[2]["deferred"]
+    replay = replay_saved_results(
+        workbench_saved_results, documents, scan_dir, scan_id, binding, workers, stopped=True
+    )
+    assert replay is not None
+    assert replay[2] == documents[2]
+
+
+@pytest.fixture
+def generic_review_recovery():
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import workbench_saved_results
+
+    pending = saved_draft(
+        "generic-review-recovery",
+        deferred=[{"id": "review", "reason": "Review remains."}],
+        complete=True,
+    )
+    closed = saved_draft(
+        "generic-review-recovery",
+        closures=[{"id": "review", "reason": "Review completed."}],
+        complete=True,
+    )
+    binding = {
+        "status": "interrupted",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {
+            "kind": "git_revision",
+            "targetId": "target_sha256_test",
+            "displayName": "test",
+            "revision": "head",
+        },
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": "repository",
+    }
+    return workbench_saved_results, pending, closed, binding
+
+
+def write_saved_parent(scan_dir: Path, draft: dict, modified: int) -> None:
+    (scan_dir / "scan-manifest.json").write_text(
+        json.dumps({"scan": {"complete": draft["complete"]}})
+    )
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": draft["findings"]}))
+    (scan_dir / "coverage.json").write_text(json.dumps(draft["coverage"]))
+    os.utime(scan_dir / "coverage.json", ns=(modified, modified))
+
+
+@pytest.mark.parametrize("reopened", [False, True])
+def test_frozen_parent_retains_identical_latest_observation(
+    tmp_path: Path, generic_review_recovery, reopened: bool
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    latest, middle = (pending, closed) if reopened else (closed, pending)
+    # The host snapshots canonical JSON with its own encoding.
+    payload = module._encoded(latest)
+    original = tmp_path / "checkpoints" / f"{hashlib.sha256(payload).hexdigest()}.json"
+    original.parent.mkdir()
+    original.write_bytes(payload)
+    os.utime(original, ns=(100, 100))
+    checkpoint = write_checkpoint(original.parent, middle)
+    os.utime(checkpoint, ns=(200, 200))
+    write_saved_parent(tmp_path, latest, 300)
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, [], [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    assert (pending["coverage"]["deferred"][0] in first[2]["deferred"]) is reopened
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (tmp_path / name).unlink()
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, [], stopped=True
+    )
+    assert replay is not None
+    assert (pending["coverage"]["deferred"][0] in replay[2]["deferred"]) is reopened
+    assert replay[2].get("resolvedDeferred", []) == first[2].get("resolvedDeferred", [])
+    assert original.read_bytes() == payload
+    assert original.stat().st_mtime_ns == 100
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "incomplete_parent",
+        "terminal_parent",
+        "worker",
+        "worker_idless_terminal",
+        "worker_idless_progress",
+        "worker_idless_reopened",
+        "worker_idless_shared_pending",
+        "worker_idless_other_surface",
+        "reopened_parent",
+        "mixed_manifest",
+    ],
+)
+def test_recovery_applies_surface_update_with_generic_closure(
+    tmp_path: Path, generic_review_recovery, layout: str
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    pending["coverage"]["deferred"][0]["surfaceIds"] = ["api"]
+    pending["coverage"]["surfaces"] = [
+        {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
+    ]
+    closed["coverage"]["surfaces"] = [
+        {"id": "api", "label": "API", "disposition": "no_issue_found", "receiptRefs": []}
+    ]
+    idless = layout.startswith("worker_idless")
+    if idless:
+        pending["coverage"]["deferred"][0].pop("surfaceIds")
+        for draft in (pending, closed):
+            draft["coverage"]["surfaces"][0].pop("id")
+            draft["coverage"]["surfaces"][0].pop("receiptRefs")
+    if layout in {"worker_idless_progress", "worker_idless_other_surface"}:
+        pending["complete"] = False
+    if layout == "worker_idless_shared_pending":
+        remaining = {"id": "other-review", "reason": "Another caller needs review."}
+        pending["coverage"]["deferred"].append(remaining)
+        closed["coverage"]["deferred"].append(remaining)
+        closed["coverage"]["completeness"] = "partial"
+    if layout in {"reopened_parent", "worker_idless_reopened"}:
+        pending, closed = closed, pending
+    output = tmp_path / "worker" if layout.startswith("worker") else tmp_path
+    output.mkdir(exist_ok=True)
+    workers = []
+    if layout.startswith("worker"):
+        (output / "result.json").write_text(json.dumps(pending))
+        os.utime(output / "result.json", ns=(100, 100))
+        workers = [saved_discovery_worker(output, "worker", 1)]
+    else:
+        pending["complete"] = layout in {"terminal_parent", "reopened_parent"}
+        write_saved_parent(tmp_path, pending, 100)
+    checkpoint = write_checkpoint(output / "checkpoints", pending)
+    os.utime(checkpoint, ns=(100, 100))
+    terminal_draft = copy.deepcopy(closed)
+    if layout == "mixed_manifest":
+        terminal_draft["coverage"]["surfaces"][0].pop("receiptRefs")
+    terminal = write_checkpoint(output / "checkpoints", terminal_draft)
+    os.utime(terminal, ns=(200, 200))
+    if layout == "worker_idless_other_surface":
+        other = copy.deepcopy(pending)
+        other["coverage"]["surfaces"] = [
+            {"label": "Other surface", "disposition": "needs_follow_up"}
+        ]
+        remaining = {"id": "other-review", "reason": "Independent review remains."}
+        other["coverage"]["deferred"] = [remaining]
+        checkpoint = write_checkpoint(output / "checkpoints", other)
+        os.utime(checkpoint, ns=(300, 300))
+    if layout == "mixed_manifest":
+        canonical = {**closed, "complete": False}
+        write_saved_parent(tmp_path, canonical, 300)
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    if layout == "worker_idless_shared_pending":
+        assert any(row["disposition"] == "needs_follow_up" for row in first[2]["surfaces"])
+        assert remaining in first[2]["deferred"]
+    elif idless:
+        # Labels alone cannot replace saved surface evidence.
+        old_surface = pending["coverage"]["surfaces"][0]
+        assert any(
+            {key: value for key, value in row.items() if key not in {"id", "receiptRefs"}}
+            == old_surface
+            for row in first[2]["surfaces"]
+        )
+        if layout == "worker_idless_other_surface":
+            assert remaining in first[2]["deferred"]
+    else:
+        assert first[2]["surfaces"] == closed["coverage"]["surfaces"]
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
+    )
+    assert replay is not None
+    assert replay[2] == first[2]
+
+
+@pytest.mark.parametrize("outcome", ["rejected", "reported", "other_worker"])
+@pytest.mark.parametrize("candidate_identity", ["explicit", "id_only", "alias"])
+def test_reopened_candidate_respects_current_outcome(
+    tmp_path: Path,
+    generic_review_recovery,
+    outcome: str,
+    candidate_identity: str,
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    candidate = pending["coverage"]["deferred"][0]
+    candidate["candidate"] = {"title": "Caller needs validation."}
+    if candidate_identity != "id_only":
+        candidate["candidateId"] = candidate["id"]
+    if candidate_identity == "alias":
+        candidate["id"] = "pending-review"
+    for draft, modified in ((closed, 100), (pending, 200)):
+        checkpoint = write_checkpoint(tmp_path / "checkpoints", draft)
+        os.utime(checkpoint, ns=(modified, modified))
+    terminal = copy.deepcopy(closed)
+    terminal["coverage"].pop("resolvedDeferred")
+    terminal["coverage"]["surfaces"] = [
+        {
+            "id": "candidate-outcome",
+            "candidateId": "review",
+            "label": "API",
+            "disposition": "rejected",
+            "receiptRefs": [],
+        }
+    ]
+    workers = []
+    if outcome == "reported":
+        contract = tmp_path / "contract"
+        contract.mkdir()
+        write_completed_contract(contract, pending["scanId"], tmp_path, relative_path="app.py")
+        finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+        finding.setdefault("extensions", {})["candidateId"] = "review"
+        terminal["findings"] = [finding]
+        terminal["coverage"]["surfaces"] = []
+    if outcome == "other_worker":
+        output = tmp_path / "worker"
+        output.mkdir()
+        (output / "result.json").write_text(json.dumps(terminal))
+        workers = [saved_discovery_worker(output, "worker", 1)]
+        parent = copy.deepcopy(terminal)
+        parent["coverage"]["surfaces"] = []
+        write_saved_parent(tmp_path, parent, 300)
+    else:
+        write_saved_parent(tmp_path, terminal, 300)
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=False, reason=""
+    )
+    assert first is not None
+    assert (candidate in first[2]["deferred"]) is (outcome == "other_worker")
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
+    )
+    assert replay is not None
+    assert (candidate in replay[2]["deferred"]) is (outcome == "other_worker")
+
+
+def test_parent_closure_cannot_discard_reopened_worker_same_id(
+    tmp_path: Path, generic_review_recovery
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    write_saved_parent(tmp_path, closed, 300)
+    output = tmp_path / "worker"
+    output.mkdir()
+    (output / "result.json").write_text(json.dumps(closed))
+    os.utime(output / "result.json", ns=(100, 100))
+    for draft, modified in ((closed, 100), (pending, 200)):
+        checkpoint = write_checkpoint(output / "checkpoints", draft)
+        os.utime(checkpoint, ns=(modified, modified))
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    assert pending["coverage"]["deferred"][0] in first[2]["deferred"]
+
+
+@pytest.mark.parametrize("layout", ["newer_raw", "newer_head", "legacy", "legacy_parent"])
+def test_parent_head_preserves_newer_and_frozen_observations(
+    tmp_path: Path, generic_review_recovery, layout: str
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    closed_checkpoint = write_checkpoint(tmp_path / "checkpoints", closed)
+    os.utime(closed_checkpoint, ns=(100, 100))
+    pending_checkpoint = write_checkpoint(tmp_path / "checkpoints", pending)
+    os.utime(pending_checkpoint, ns=(300, 300))
+    head = tmp_path / "checkpoint-head.json"
+    selected = pending_checkpoint if layout == "newer_head" else closed_checkpoint
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    head_time = 400 if layout == "newer_head" else 200
+    os.utime(head, ns=(head_time, head_time))
+    original_head = head.read_bytes()
+    write_saved_parent(tmp_path, closed, 350 if layout.startswith("legacy") else 100)
+    frozen = None
+    if layout.startswith("legacy"):
+        frozen = {
+            path.relative_to(tmp_path).as_posix(): module._read_saved_result(
+                tmp_path, path.relative_to(tmp_path).as_posix(), pending["scanId"]
+            )[1]
+            for path in (closed_checkpoint, pending_checkpoint)
+        }
+    first = module.merge_saved_results(
+        tmp_path,
+        pending["scanId"],
+        binding,
+        [],
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=frozen,
+        allow_frozen_legacy_parent=layout == "legacy_parent",
+    )
+    assert first is not None
+    expected_pending = layout != "legacy_parent"
+    assert (pending["coverage"]["deferred"][0] in first[2]["deferred"]) is expected_pending
+    preserved = first[0]["scan"]["preservedSources"]
+    assert any(path.startswith("checkpoint-heads/") for path in preserved) is (layout != "legacy")
+    replay = module.merge_saved_results(
+        tmp_path,
+        pending["scanId"],
+        binding,
+        [],
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=preserved,
+    )
+    assert replay is not None
+    assert (pending["coverage"]["deferred"][0] in replay[2]["deferred"]) is expected_pending
+    if layout != "legacy_parent":
+        assert head.read_bytes() == original_head
+        assert head.stat().st_mtime_ns == head_time
+
+
+@pytest.mark.parametrize("later", ["shared_pending", "candidate", "ambiguous", "other_worker"])
+@pytest.mark.parametrize("idless", [False, True])
+def test_generic_surface_recovery_preserves_unresolved_evidence(
+    tmp_path: Path, generic_review_recovery, later: str, idless: bool
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    old_surface = {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
+    pending["coverage"]["surfaces"] = [old_surface]
+    pending["coverage"]["deferred"][0]["surfaceIds"] = ["api"]
+    if idless:
+        old_surface.pop("id")
+        old_surface.pop("receiptRefs")
+        pending["coverage"]["deferred"][0].pop("surfaceIds")
+    closed["coverage"]["surfaces"] = [{**old_surface, "disposition": "no_issue_found"}]
+    for draft, modified in ((pending, 100), (closed, 200)):
+        checkpoint = write_checkpoint(tmp_path / "checkpoints", draft)
+        os.utime(checkpoint, ns=(modified, modified))
+    latest = copy.deepcopy(closed)
+    latest["coverage"]["surfaces"] = [old_surface]
+    workers = []
+    if later == "shared_pending":
+        latest["coverage"]["deferred"] = [
+            {"id": "other-review", "reason": "New review remains.", "surfaceIds": ["api"]}
+        ]
+    elif later == "candidate":
+        old_surface["candidateId"] = "other-candidate"
+        latest["coverage"]["deferred"] = [
+            {
+                "id": "other-candidate",
+                "candidateId": "other-candidate",
+                "reason": "Validation remains.",
+            }
+        ]
+    elif later == "ambiguous":
+        latest["coverage"]["surfaces"].append({**old_surface, "id": "other-api"})
+    else:
+        output = tmp_path / "worker"
+        output.mkdir()
+        latest["coverage"].pop("resolvedDeferred")
+        latest["coverage"]["deferred"] = pending["coverage"]["deferred"]
+        (output / "result.json").write_text(json.dumps(latest))
+        workers = [saved_discovery_worker(output, "worker", 1)]
+    if later != "other_worker":
+        checkpoint = write_checkpoint(tmp_path / "checkpoints", latest)
+        os.utime(checkpoint, ns=(300, 300))
+    result = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert result is not None
+    assert any(row["disposition"] == "needs_follow_up" for row in result[2]["surfaces"])
+    replay = replay_saved_results(
+        module, result, tmp_path, pending["scanId"], binding, workers, stopped=True
+    )
+    assert replay is not None
+    assert any(row["disposition"] == "needs_follow_up" for row in replay[2]["surfaces"])
+
+
+@pytest.mark.parametrize("pending_time", [200, 300, 400])
+@pytest.mark.parametrize(
+    ("candidate_identity", "prior_closure"),
+    [("explicit", True), ("id_only", True), ("alias", True), ("explicit", False)],
+    ids=["explicit", "id-only", "alias", "ordinary"],
+)
+def test_worker_head_candidate_outcome_respects_newer_pending(
+    tmp_path: Path,
+    generic_review_recovery,
+    pending_time: int,
+    candidate_identity: str,
+    prior_closure: bool,
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    output = tmp_path / "worker"
+    output.mkdir()
+    candidate = pending["coverage"]["deferred"][0]
+    candidate["candidate"] = {"title": "Caller needs validation."}
+    if candidate_identity != "id_only":
+        candidate["candidateId"] = candidate["id"]
+    if candidate_identity == "alias":
+        candidate["id"] = "pending-review"
+    observations = [(closed, 100)] if prior_closure else []
+    for draft, modified in [*observations, (pending, pending_time)]:
+        checkpoint = write_checkpoint(output / "checkpoints", draft)
+        os.utime(checkpoint, ns=(modified, modified))
+    (output / "result.json").write_text(json.dumps(pending))
+    os.utime(output / "result.json", ns=(200, 200))
+    terminal = copy.deepcopy(closed)
+    terminal["coverage"].pop("resolvedDeferred")
+    terminal["coverage"]["surfaces"] = [
+        {
+            "id": "outcome",
+            "candidateId": "review",
+            "label": "API",
+            "disposition": "rejected",
+            "receiptRefs": [],
+        }
+    ]
+    selected = write_checkpoint(output / "checkpoints", terminal)
+    os.utime(selected, ns=(150, 150))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(300, 300))
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    assert (candidate in first[2]["deferred"]) is (pending_time >= 300)
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
+    )
+    assert replay is not None
+    assert (candidate in replay[2]["deferred"]) is (pending_time >= 300)
+
+
+def test_frozen_parent_keeps_unrelated_candidate_outcome(
+    tmp_path: Path, generic_review_recovery
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    candidate = {
+        "id": "candidate-review",
+        "candidateId": "candidate-review",
+        "reason": "Validation remains.",
+    }
+    pending["coverage"]["deferred"].append(candidate)
+    checkpoint = write_checkpoint(tmp_path / "checkpoints", pending)
+    os.utime(checkpoint, ns=(100, 100))
+    closed["coverage"]["surfaces"] = [
+        {
+            "id": "candidate-outcome",
+            "candidateId": "candidate-review",
+            "label": "Other review",
+            "disposition": "rejected",
+            "receiptRefs": [],
+        }
+    ]
+    write_saved_parent(tmp_path, closed, 300)
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, [], [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    assert candidate not in first[2]["deferred"]
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, [], stopped=True
+    )
+    assert replay is not None
+    assert candidate not in replay[2]["deferred"]
+    assert replay[2]["surfaces"] == closed["coverage"]["surfaces"]
+
+
+@pytest.mark.parametrize("canonical_pending", [False, True])
+@pytest.mark.parametrize("progress", [False, True])
+def test_equal_time_parent_and_head_preserve_pending_on_replay(
+    tmp_path: Path, generic_review_recovery, canonical_pending: bool, progress: bool
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    other = {"id": "other-review", "reason": "Independent review remains."}
+    closed["coverage"]["deferred"] = [other]
+    closed["coverage"]["completeness"] = "partial"
+    pending["coverage"]["resolvedDeferred"] = [
+        {"id": "other-review", "reason": "Previously reviewed."}
+    ]
+    if progress:
+        pending["complete"] = False
+    canonical, previous = (pending, closed) if canonical_pending else (closed, pending)
+    payload = module._encoded(canonical)
+    old = tmp_path / "checkpoints" / f"{hashlib.sha256(payload).hexdigest()}.json"
+    old.parent.mkdir()
+    old.write_bytes(payload)
+    os.utime(old, ns=(100, 100))
+    checkpoint = write_checkpoint(old.parent, previous)
+    os.utime(checkpoint, ns=(100, 100))
+    head = tmp_path / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(200, 200))
+    write_saved_parent(tmp_path, canonical, 200)
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, [], [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    assert pending["coverage"]["deferred"][0] in first[2]["deferred"]
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, [], stopped=True
+    )
+    assert replay is not None
+    assert pending["coverage"]["deferred"][0] in replay[2]["deferred"]
+    assert old.stat().st_mtime_ns == 100
+    assert other in first[2]["deferred"] and other in replay[2]["deferred"]
+    assert first[2]["completeness"] == replay[2]["completeness"] == "partial"
+    assert not replay[2].get("resolvedDeferred")
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+@pytest.mark.parametrize("outcome", ["rejected", "reported"])
+@pytest.mark.parametrize(
+    ("candidate_identity", "prior_closure"),
+    [("explicit", True), ("id_only", True), ("alias", True), ("explicit", False)],
+    ids=["explicit", "id-only", "alias", "ordinary"],
+)
+def test_selected_candidate_outcome_keeps_its_evidence(
+    tmp_path: Path,
+    generic_review_recovery,
+    stopped: bool,
+    outcome: str,
+    candidate_identity: str,
+    prior_closure: bool,
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    output = tmp_path / "worker"
+    output.mkdir()
+    candidate = pending["coverage"]["deferred"][0]
+    candidate["candidate"] = {"title": "Caller needs validation."}
+    if candidate_identity != "id_only":
+        candidate["candidateId"] = "review"
+    if candidate_identity == "alias":
+        candidate["id"] = "pending-review"
+    pending["coverage"]["surfaces"] = [
+        {"id": "api", "label": "API", "disposition": "needs_follow_up", "candidateId": "review"}
+    ]
+    observations = [(closed, 100)] if prior_closure else []
+    for draft, modified in [*observations, (pending, 200)]:
+        checkpoint = write_checkpoint(output / "checkpoints", draft)
+        os.utime(checkpoint, ns=(modified, modified))
+    (output / "result.json").write_text(json.dumps(pending))
+    os.utime(output / "result.json", ns=(200, 200))
+    terminal = copy.deepcopy(closed)
+    terminal["coverage"].pop("resolvedDeferred")
+    rejection = {
+        "id": "api",
+        "label": "API",
+        "disposition": outcome,
+        "candidateId": "review",
+        "notes": "The reviewed caller has a recorded outcome.",
+        "candidate": candidate["candidate"],
+        "receiptRefs": [],
+    }
+    unrelated = {
+        "id": "other",
+        "label": "Other",
+        "disposition": "no_issue_found",
+        "receiptRefs": [],
+    }
+    terminal["coverage"]["surfaces"] = [rejection, unrelated]
+    if outcome == "reported":
+        contract = tmp_path / "contract"
+        contract.mkdir()
+        write_completed_contract(contract, pending["scanId"], tmp_path, relative_path="app.py")
+        finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+        finding.setdefault("extensions", {})["candidateId"] = "review"
+        other_finding = copy.deepcopy(finding)
+        other_finding["extensions"]["candidateId"] = "other-candidate"
+        other_finding["identity"]["anchor"] = "another-entry-point"
+        terminal["findings"] = [finding, other_finding]
+    selected = write_checkpoint(output / "checkpoints", terminal)
+    os.utime(selected, ns=(300, 300))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(300, 300))
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    if not stopped:
+        parent = copy.deepcopy(closed)
+        parent["coverage"].pop("resolvedDeferred")
+        write_saved_parent(tmp_path, parent, 100)
+    result = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=stopped, reason="interrupted"
+    )
+    assert result is not None
+    assert candidate not in result[2]["deferred"]
+    assert result[2]["surfaces"] == [rejection]
+    replay = replay_saved_results(
+        module, result, tmp_path, pending["scanId"], binding, workers, stopped=stopped
+    )
+    assert replay is not None
+    assert replay[2]["surfaces"] == [rejection]
+    assert candidate not in replay[2]["deferred"]
+    if outcome == "reported":
+        for documents in (result, replay):
+            candidate_ids = {module.finding_candidate_id(row) for row in documents[1]["findings"]}
+            assert "review" in candidate_ids
+            assert "other-candidate" in candidate_ids
+
+
+@pytest.mark.parametrize("candidate_identity", ["explicit", "id_only", "alias"])
+def test_interrupted_worker_reopening_preserves_candidate_identity(
+    tmp_path: Path, generic_review_recovery, candidate_identity: str
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    output = tmp_path / "worker"
+    output.mkdir()
+    candidate = pending["coverage"]["deferred"][0]
+    candidate["candidate"] = {"title": "Caller needs validation."}
+    if candidate_identity != "id_only":
+        candidate["candidateId"] = "review"
+    if candidate_identity == "alias":
+        candidate["id"] = "pending-review"
+        pending["coverage"]["deferred"].append(
+            {**candidate, "id": "other-pending-review", "reason": "Another caller remains."}
+        )
+    (output / "result.json").write_text(json.dumps(closed))
+    os.utime(output / "result.json", ns=(100, 100))
+    for draft, modified in ((closed, 100), (pending, 200)):
+        checkpoint = write_checkpoint(output / "checkpoints", draft)
+        os.utime(checkpoint, ns=(modified, modified))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(200, 200))
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    result = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert result is not None
+    assert all(row in result[2]["deferred"] for row in pending["coverage"]["deferred"])
+    replay = replay_saved_results(
+        module, result, tmp_path, pending["scanId"], binding, workers, stopped=True
+    )
+    assert replay is not None
+    assert all(row in replay[2]["deferred"] for row in pending["coverage"]["deferred"])
