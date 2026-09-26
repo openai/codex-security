@@ -6,9 +6,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_saved_deferred_identity import recover, save_worker, saved_draft
+from test_saved_deferred_identity import recover, save_worker
 from test_workbench_standard_deep_results import accepted_standard_worker, deep_scan_fixture
-from workbench_test_support import run_workbench, write_checkpoint
+from workbench_test_support import run_workbench, saved_draft, write_checkpoint
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_saved_results as saved

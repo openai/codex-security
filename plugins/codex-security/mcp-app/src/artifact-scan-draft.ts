@@ -39,6 +39,7 @@ export interface ScanDraftResult {
   scanId: string;
   findingCount: number;
   surfaceCount: number;
+  coverage: JsonObject;
   operation: "replace";
   status: "draft_written";
 }
@@ -176,6 +177,7 @@ export async function recordCodexSecurityScanDraft(
         scanId: reconciled.scanId,
         findingCount: findings.length,
         surfaceCount: (coverage.surfaces as unknown[]).length,
+        coverage,
         operation: "replace",
         status: "draft_written",
       };
@@ -292,6 +294,7 @@ export async function recordCodexSecurityWorkerScanDraft(
     scanId: parsed.scanId,
     findingCount: scoped.findings.length,
     surfaceCount: (scoped.coverage.surfaces as unknown[]).length,
+    coverage: scoped.coverage,
     operation: "replace",
     status: "draft_written",
   };
@@ -380,9 +383,6 @@ async function preserveScanDraft(
     result.threatModel = structuredClone(retainedThreatModel);
   }
 
-  let deferredBySource = new Map(
-    sources.map((source) => [source, source.coverage.deferred as JsonObject[]]),
-  );
   const reopenedSurfaces = new Set<JsonObject>();
   if (retainedFinal) {
     const closedIds = new Set(
@@ -429,7 +429,7 @@ async function preserveScanDraft(
         };
         const { resolved, updated } = reconcileDeferredSurfaces(
           progress.coverage,
-          deferredBySource,
+          sources,
           reopenedIds,
           new Set(),
           [],
@@ -445,7 +445,6 @@ async function preserveScanDraft(
           progress.coverage.surfaces.filter((surface) => !updated.has(surface)),
         );
         sources.unshift(progress);
-        deferredBySource = new Map([[progress, reopened], ...deferredBySource]);
       }
     }
   }
@@ -453,7 +452,7 @@ async function preserveScanDraft(
   const { closedDeferredIds, resolvedSurfaces } = reconcileResolvedDeferred(
     result,
     resolvedDeferred(input.coverage),
-    deferredBySource,
+    sources,
     savedSources,
     resolvedCandidateIds,
     retainedFinal?.input,
@@ -553,13 +552,12 @@ async function preserveScanDraft(
     );
     const previousCoverage = {
       ...source.coverage,
-      deferred: (source.coverage.deferred as JsonObject[]).flatMap((item) => {
+      deferred: (source.coverage.deferred as JsonObject[]).filter((item) => {
         const candidateId = item.candidateId ?? item.id;
-        return (typeof candidateId === "string" &&
-          resolvedIds.has(candidateId)) ||
-          closedDeferredIds.has(item.id as string)
-          ? []
-          : [item];
+        return (
+          (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
+          !closedDeferredIds.has(item.id as string)
+        );
       }),
       surfaces: (source.coverage.surfaces as JsonObject[]).filter((surface) => {
         if (resolvedSurfaces.has(surface)) return false;
@@ -645,7 +643,7 @@ function resolvedDeferred(coverage: JsonObject): JsonObject[] {
 function reconcileResolvedDeferred(
   result: ScanDraftInput,
   requestedClosures: JsonObject[],
-  deferredBySource: Map<ScanDraftInput, JsonObject[]>,
+  sources: ScanDraftInput[],
   savedSources: SavedScanDraft[],
   resolvedCandidateIds: Set<string>,
   retainedFinal?: ScanDraftInput,
@@ -664,14 +662,16 @@ function reconcileResolvedDeferred(
   for (const source of savedSources) {
     const key = JSON.stringify([source.attempt, source.modifiedMs]);
     const pending = pendingByTime.get(key) ?? new Set<string>();
-    for (const row of deferredBySource.get(source.input)!) {
+    for (const row of source.input.coverage.deferred as JsonObject[]) {
       pending.add(row.id as string);
       if (typeof row.candidateId === "string") pending.add(row.candidateId);
     }
     pendingByTime.set(key, pending);
     tiedPending.set(source.input, pending);
   }
-  const historical = [...deferredBySource.values()].flat();
+  const historical = sources.flatMap(
+    (source) => source.coverage.deferred as JsonObject[],
+  );
   const candidateIds = new Set(
     historical
       .filter(
@@ -689,9 +689,9 @@ function reconcileResolvedDeferred(
   const closures = new Map<string, JsonObject>();
   const previouslyClosed = new Set<string>();
   const closureSources = new Map<string, ScanDraftInput>();
-  for (const [source, deferred] of deferredBySource) {
+  for (const source of sources) {
     // Keep the first saved state for each ID so reopened work stays pending.
-    for (const row of deferred) {
+    for (const row of source.coverage.deferred as JsonObject[]) {
       observedIds.add(row.id as string);
       if (typeof row.candidateId === "string") observedIds.add(row.candidateId);
     }
@@ -756,16 +756,16 @@ function reconcileResolvedDeferred(
   const inherited = [
     ...new Set([
       ...closureSources.values(),
-      ...[...deferredBySource]
-        .filter(([, rows]) =>
-          rows.some((row) => reopenedIds.has(row.id as string)),
-        )
-        .map(([source]) => source),
+      ...sources.filter((source) =>
+        (source.coverage.deferred as JsonObject[]).some((row) =>
+          reopenedIds.has(row.id as string),
+        ),
+      ),
     ]),
   ];
   const { resolved: resolvedSurfaces } = reconcileDeferredSurfaces(
     result.coverage,
-    deferredBySource,
+    sources,
     closedDeferredIds,
     resolvedCandidateIds,
     inherited,
@@ -778,7 +778,7 @@ function reconcileResolvedDeferred(
 
 function reconcileDeferredSurfaces(
   coverage: JsonObject,
-  deferredBySource: Map<ScanDraftInput, JsonObject[]>,
+  sources: ScanDraftInput[],
   closedDeferredIds: Set<string>,
   resolvedCandidateIds: Set<string>,
   inherited: ScanDraftInput[],
@@ -804,7 +804,7 @@ function reconcileDeferredSurfaces(
     "candidateId" in surface || "candidate" in surface || "finding" in surface;
   const pending = [
     ...(coverage.deferred as JsonObject[]),
-    ...[...deferredBySource.values()].flat(),
+    ...sources.flatMap((source) => source.coverage.deferred as JsonObject[]),
   ].filter(
     (row) =>
       !closedDeferredIds.has(row.id as string) &&
@@ -825,10 +825,10 @@ function reconcileDeferredSurfaces(
     const currentMatches = current.filter(sameSurface);
     if (saved ? currentMatches.length > 0 : currentMatches.length !== 1)
       continue;
-    const matches = [...deferredBySource].map(([source, deferred]) => ({
+    const matches = sources.map((source) => ({
       source,
       surfaces: (source.coverage.surfaces as JsonObject[]).filter(sameSurface),
-      deferred,
+      deferred: source.coverage.deferred as JsonObject[],
     }));
     if (
       matches.some(
@@ -2165,9 +2165,6 @@ function buildCoverage(
       receiptRefs: surface.receiptRefs ?? [],
     };
   });
-  const normalizedDeferred = normalizeDeferred(
-    semanticCoverage.deferred as JsonObject[],
-  );
   const openQuestions = semanticCoverage.openQuestions as
     Array<string | JsonObject> | undefined;
 
@@ -2178,7 +2175,6 @@ function buildCoverage(
     includePaths: scope.includePaths,
     excludePaths: scope.excludePaths,
     surfaces: normalizedSurfaces,
-    deferred: normalizedDeferred,
     ...(openQuestions === undefined
       ? {}
       : {
@@ -2196,11 +2192,11 @@ function normalizeDeferred(deferred: JsonObject[]): JsonObject[] {
   const deferredIds = new Set(
     deferred.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])),
   );
-  const reservedCandidateIds = new Set([
-    ...deferred.flatMap((item) =>
+  const reservedCandidateIds = new Set(
+    deferred.flatMap((item) =>
       typeof item.candidateId === "string" ? [item.candidateId] : [],
     ),
-  ]);
+  );
   return deferred.map((item) => {
     if (typeof item.id === "string") return item;
 

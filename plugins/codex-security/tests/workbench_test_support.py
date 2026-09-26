@@ -32,6 +32,21 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     return checkpoint_path
 
 
+def saved_draft(scan_id: str, *, deferred=(), surfaces=(), closures=(), complete=False):
+    return {
+        "scanId": scan_id,
+        "complete": complete,
+        "findings": [],
+        "coverage": {
+            "completeness": "partial" if deferred else "complete",
+            "surfaces": list(surfaces),
+            "explicitExclusions": [],
+            "deferred": list(deferred),
+            **({"resolvedDeferred": list(closures)} if closures else {}),
+        },
+    }
+
+
 def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int = 1) -> dict:
     return {
         "id": worker_id,

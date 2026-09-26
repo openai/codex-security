@@ -13,6 +13,7 @@ from workbench_test_support import (
     replay_saved_results,
     run_workbench,
     saved_discovery_worker,
+    saved_draft,
     write_checkpoint,
     write_completed_contract,
 )
@@ -23,22 +24,13 @@ import workbench_saved_results as saved
 
 
 def drafts(scan_id: str) -> tuple[dict, dict]:
-    pending = {
-        "scanId": scan_id,
-        "complete": True,
-        "findings": [],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [{"id": "review", "reason": "Review remains."}],
-        },
-    }
-    closed = copy.deepcopy(pending)
-    closed["coverage"].update(
-        completeness="complete",
-        deferred=[],
-        resolvedDeferred=[{"id": "review", "reason": "Review completed."}],
+    pending = saved_draft(
+        scan_id, deferred=[{"id": "review", "reason": "Review remains."}], complete=True
+    )
+    closed = saved_draft(
+        scan_id,
+        closures=[{"id": "review", "reason": "Review completed."}],
+        complete=True,
     )
     return pending, closed
 

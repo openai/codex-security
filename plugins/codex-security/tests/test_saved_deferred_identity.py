@@ -12,7 +12,12 @@ from test_workbench_standard_deep_results import (
     deep_scan_fixture,
     write_saved_parent,
 )
-from workbench_test_support import run_workbench, saved_discovery_worker, write_checkpoint
+from workbench_test_support import (
+    run_workbench,
+    saved_discovery_worker,
+    saved_draft,
+    write_checkpoint,
+)
 
 
 @pytest.fixture
@@ -23,21 +28,6 @@ def saved_results():
     import workbench_saved_results
 
     return workbench_saved_results
-
-
-def saved_draft(scan_id: str, *, deferred=(), surfaces=(), closures=(), complete=False):
-    return {
-        "scanId": scan_id,
-        "complete": complete,
-        "findings": [],
-        "coverage": {
-            "completeness": "partial" if deferred else "complete",
-            "surfaces": list(surfaces),
-            "explicitExclusions": [],
-            "deferred": list(deferred),
-            **({"resolvedDeferred": list(closures)} if closures else {}),
-        },
-    }
 
 
 def save_worker(root: Path, module, worker_id: str, drafts: list[dict], result: dict):
@@ -426,10 +416,6 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
         if explicit_ids:
             assert {row["id"] for row in retained} == expected_ids
         assert all(row["id"] != combined["id"] for row in retained)
-        if explicit_ids:
-            assert {row["id"] for row in retained} == (
-                {"part-2"} if close_first else {"part-1", "part-2"}
-            )
         if payload_field:
             assert all(row[payload_field] == combined[payload_field] for row in retained)
     assert replay == first_coverage

@@ -16,6 +16,7 @@ from workbench_test_support import (
     replay_saved_results,
     run_workbench,
     saved_discovery_worker,
+    saved_draft,
     write_checkpoint,
     write_completed_contract,
 )
@@ -3221,22 +3222,15 @@ def generic_review_recovery():
         sys.path.insert(0, str(scripts_dir))
     import workbench_saved_results
 
-    pending = {
-        "scanId": "generic-review-recovery",
-        "complete": True,
-        "findings": [],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [{"id": "review", "reason": "Review remains."}],
-        },
-    }
-    closed = copy.deepcopy(pending)
-    closed["coverage"].update(
-        completeness="complete",
-        deferred=[],
-        resolvedDeferred=[{"id": "review", "reason": "Review completed."}],
+    pending = saved_draft(
+        "generic-review-recovery",
+        deferred=[{"id": "review", "reason": "Review remains."}],
+        complete=True,
+    )
+    closed = saved_draft(
+        "generic-review-recovery",
+        closures=[{"id": "review", "reason": "Review completed."}],
+        complete=True,
     )
     binding = {
         "status": "interrupted",

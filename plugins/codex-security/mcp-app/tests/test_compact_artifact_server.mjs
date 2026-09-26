@@ -732,6 +732,9 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
+      coverage: JSON.parse(
+        await readFile(path.join(scanDirectory, "coverage.json"), "utf8"),
+      ),
       operation: "replace",
       status: "draft_written",
     });
@@ -1420,6 +1423,7 @@ async function testDiscoveryWorkerToolList(bundle) {
       scanId,
       findingCount: 0,
       surfaceCount: 0,
+      coverage: JSON.parse(await readFile(resultPath, "utf8")).coverage,
       operation: "replace",
       status: "draft_written",
     });

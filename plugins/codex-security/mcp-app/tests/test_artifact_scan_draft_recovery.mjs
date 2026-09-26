@@ -25,9 +25,13 @@ const close = (id, reason = "Review completed.") => ({ id, reason });
 for (const layout of ["standard", "diff", "worker"]) {
   test(`${layout}: returned deferred IDs support closure, retries and explicit reopening`, async (t) => {
     const f = await fixture(t, layout);
-    await f.write(f.draft({ deferred: [generic] }));
-    const original = (await f.read()).deferred[0];
+    const initial = await f.write(f.draft({ deferred: [generic] }));
+    const original = initial.coverage.deferred[0];
     assert.equal(typeof original.id, "string");
+    assert.deepEqual(initial.coverage, await f.read());
+    const enriched = { ...original, notes: "Both callers were inspected." };
+    const updatedDraft = await f.write(f.draft({ deferred: [enriched] }));
+    assert.deepEqual(updatedDraft.coverage.deferred, [enriched]);
     const checkpointRoot = path.join(f.root, "checkpoints");
     const originals = await Promise.all(
       (await readdir(checkpointRoot)).map(async (name) => [
