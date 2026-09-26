@@ -2,6 +2,9 @@
 "use strict";
 
 const assert = require("assert");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
 const triageIo = require("../assertions/triage-io.js");
 
 function outputFor({ inputId, sourceType, verdict }) {
@@ -102,5 +105,40 @@ assertFails(
   }),
   /fixed.*not_actionable|negative/,
 );
+
+// Exercise the actual fixture: SQL-shaped text is returned as data, not executed.
+const fixturePath = path.resolve(__dirname, "../fixtures/repo/src/server.js");
+const routes = new Map();
+const app = { get: (route, handler) => routes.set(route, handler) };
+vm.runInNewContext(fs.readFileSync(fixturePath, "utf8"), {
+  __dirname: path.dirname(fixturePath),
+  module: { exports: {} },
+  require(name) {
+    if (name === "express") return () => app;
+    if (name === "path") return path;
+    throw new Error("Unexpected fixture dependency: " + name);
+  },
+}, { filename: fixturePath });
+let response;
+const query = "' OR 1=1 --";
+routes.get("/search")({ query: { q: query } }, { json(value) { response = value; } });
+assert.deepEqual(Object.keys(response), ["sql"]);
+assert.equal(response.sql, "SELECT id, name FROM products WHERE name LIKE '%" + query + "%'");
+
+const inputCases = fs.readFileSync(path.resolve(__dirname, "../tests/input-types.yaml"), "utf8");
+const scannerCase = inputCases.match(/case_id: scanner-query[\s\S]*?(?=\n- description:|$)/)[0];
+const scannerContext = { vars: { case_id: "scanner-query" } };
+for (const field of ["expected_ids", "expected_source_types", "expected_verdicts"]) {
+  scannerContext.vars[field] = scannerCase.match(new RegExp(field + ": (.+)"))[1];
+}
+function queryVerdict(inputId, verdict) {
+  return JSON.parse(outputFor({ inputId, sourceType: "scanner_ticket", verdict }).match(/```json\n([\s\S]*?)\n```/)[1]);
+}
+const queryOutput = queryVerdict("SCAN-SQL-001", "not_actionable");
+queryOutput.findings.push(queryVerdict("SCAN-SQL-TEST-ONLY", "not_actionable").findings[0]);
+queryOutput.findings[1].triage_item_id = "triage-002";
+assertPasses("a SQL text response is not confirmed SQL injection", JSON.stringify(queryOutput), scannerContext);
+queryOutput.findings[0] = queryVerdict("SCAN-SQL-001", "confirmed").findings[0];
+assertFails("a missing SQL sink cannot earn a confirmed verdict", JSON.stringify(queryOutput), scannerContext, /expected verdict not_actionable/);
 
 console.log("triage-io assertion tests passed");
