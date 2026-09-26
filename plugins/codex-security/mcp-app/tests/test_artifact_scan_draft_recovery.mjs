@@ -22,6 +22,73 @@ const { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } =
 const generic = { reason: "Review remains.", paths: ["src/example.py"] };
 const close = (id, reason = "Review completed.") => ({ id, reason });
 
+test("worker: reopening preserves findings and independent pending work from the same draft", async (t) => {
+  const f = await fixture(t, "worker");
+  const reopened = { id: "reopened-review", ...generic, surfaceIds: ["api"] };
+  const stillClosed = { id: "closed-review", ...generic };
+  await f.write(f.draft({ deferred: [reopened, stillClosed] }));
+  await f.write(
+    f.draft(
+      { resolvedDeferred: [close(reopened.id), close(stillClosed.id)] },
+      true,
+    ),
+  );
+  const independent = { id: "independent-review", ...generic };
+  const finding = {
+    ruleId: "fixture.review",
+    title: "Synthetic review finding",
+    summary: "A separate review result must survive progress publication.",
+    severity: { level: "low" },
+    confidence: { level: "high", rationale: "Synthetic persistence fixture." },
+    taxonomy: { category: "other", cwe: [] },
+    locations: [{ path: "src/example.py", startLine: 1 }],
+    remediation: "Complete the independent review.",
+    provenance: { source: "local_plugin", candidateId: "new-finding" },
+  };
+  const surfaces = [
+    {
+      id: "api",
+      label: "API",
+      disposition: "needs_follow_up",
+      receiptRefs: [],
+    },
+    {
+      id: "new-finding",
+      candidateId: "new-finding",
+      label: "Independent review",
+      disposition: "reported",
+    },
+  ];
+  const progress = {
+    ...f.draft({ deferred: [reopened, independent], surfaces }),
+    findings: [finding],
+  };
+  for (const input of [progress, f.draft()]) {
+    const result = await f.write(input);
+    assert.equal(result.findingCount, 1);
+    assert.equal(result.coverage.completeness, "partial");
+    assert.deepEqual(result.coverage.deferred, [reopened, independent]);
+    assert.deepEqual(result.coverage.resolvedDeferred, [close(stillClosed.id)]);
+    assert.deepEqual(result.coverage.surfaces, surfaces);
+    const published = JSON.parse(
+      await readFile(path.join(f.root, "result.json"), "utf8"),
+    );
+    assert.deepEqual(published.findings, [finding]);
+    const head = JSON.parse(
+      await readFile(path.join(f.root, "checkpoint-head.json"), "utf8"),
+    );
+    assert.deepEqual(
+      JSON.parse(
+        await readFile(
+          path.join(f.root, "checkpoints", head.checkpoint),
+          "utf8",
+        ),
+      ),
+      published,
+    );
+  }
+});
+
 for (const layout of ["standard", "diff", "worker"]) {
   test(`${layout}: returned deferred IDs support closure, retries and explicit reopening`, async (t) => {
     const f = await fixture(t, layout);
@@ -437,65 +504,122 @@ for (const layout of ["standard", "diff"]) {
   });
 }
 
-for (const interrupted of [false, true]) {
-  test(`worker: returned surface IDs support closeout after first-write interruption=${interrupted}`, async (t) => {
-    const f = await fixture(t, "worker");
-    const input = f.draft({
-      surfaces: [{ label: "API", disposition: "needs_follow_up" }],
-      deferred: [generic],
-    });
-    const original = structuredClone(input);
-    if (interrupted) {
-      await interruptDraftWrite(path.join(f.root, "result.json"), () =>
-        f.write(input),
+for (const layout of ["standard", "diff", "worker"]) {
+  for (const interrupted of [false, true]) {
+    test(`${layout}: returned surface IDs support closeout after first-write interruption=${interrupted}`, async (t) => {
+      const f = await fixture(t, layout);
+      const input = f.draft({
+        surfaces: [{ label: "API", disposition: "needs_follow_up" }],
+        deferred: [generic],
+      });
+      const original = structuredClone(input);
+      if (interrupted) {
+        await interruptDraftWrite(
+          path.join(
+            f.root,
+            layout === "worker" ? "result.json" : "findings.json",
+          ),
+          () => f.write(input),
+        );
+      }
+      const initial = await f.write(input);
+      const [surface] = initial.coverage.surfaces;
+      const [task] = initial.coverage.deferred;
+      assert.equal(typeof surface.id, "string");
+      assert.equal(typeof task.id, "string");
+      assert.deepEqual(initial.coverage, await f.read());
+      assert.deepEqual(input, original);
+      for (const name of await readdir(path.join(f.root, "checkpoints"))) {
+        const checkpoint = JSON.parse(
+          await readFile(path.join(f.root, "checkpoints", name), "utf8"),
+        );
+        assert.equal(checkpoint.coverage.surfaces[0].id, surface.id);
+        assert.equal(checkpoint.coverage.deferred[0].id, task.id);
+      }
+      const linked = await f.write(
+        f.draft({
+          surfaces: [surface],
+          deferred: [
+            {
+              ...task,
+              surfaceIds: [surface.id],
+              notes: "Both callers inspected.",
+            },
+          ],
+        }),
       );
-    }
-    const initial = await f.write(input);
-    const [surface] = initial.coverage.surfaces;
-    const [task] = initial.coverage.deferred;
-    assert.equal(typeof surface.id, "string");
-    assert.equal(typeof task.id, "string");
-    assert.deepEqual(initial.coverage, await f.read());
-    assert.deepEqual(input, original);
-    for (const name of await readdir(path.join(f.root, "checkpoints"))) {
-      const checkpoint = JSON.parse(
-        await readFile(path.join(f.root, "checkpoints", name), "utf8"),
-      );
-      assert.equal(checkpoint.coverage.surfaces[0].id, surface.id);
-      assert.equal(checkpoint.coverage.deferred[0].id, task.id);
-    }
-    const linked = await f.write(
-      f.draft({
-        surfaces: [surface],
-        deferred: [
+      assert.equal(linked.coverage.deferred.length, 1);
+      assert.equal(linked.coverage.deferred[0].id, task.id);
+      const terminal = await f.write(
+        f.draft(
           {
-            ...task,
-            surfaceIds: [surface.id],
-            notes: "Both callers inspected.",
+            surfaces: [{ ...surface, disposition: "no_issue_found" }],
+            resolvedDeferred: [close(task.id)],
           },
-        ],
-      }),
-    );
-    assert.equal(linked.coverage.deferred.length, 1);
-    assert.equal(linked.coverage.deferred[0].id, task.id);
-    const terminal = await f.write(
-      f.draft(
-        {
-          surfaces: [{ ...surface, disposition: "no_issue_found" }],
-          resolvedDeferred: [close(task.id)],
-        },
-        true,
-      ),
-    );
-    assert.equal(terminal.coverage.completeness, "complete");
-    assert.deepEqual(terminal.coverage.deferred, []);
-    assert.deepEqual(terminal.coverage.surfaces, [
-      { ...surface, disposition: "no_issue_found", receiptRefs: [] },
-    ]);
-    await f.write(f.draft({}, true));
-    assert.deepEqual(await f.read(), terminal.coverage);
-  });
+          true,
+        ),
+      );
+      assert.equal(terminal.coverage.completeness, "complete");
+      assert.deepEqual(terminal.coverage.deferred, []);
+      assert.deepEqual(terminal.coverage.surfaces, [
+        { ...surface, disposition: "no_issue_found", receiptRefs: [] },
+      ]);
+      await f.write(f.draft({}, true));
+      assert.deepEqual(await f.read(), terminal.coverage);
+    });
+  }
 }
+
+test("worker: duplicate authored surface IDs preserve each observation", async (t) => {
+  const f = await fixture(t, "worker");
+  const rows = [
+    { id: "api", label: "First API", disposition: "needs_follow_up" },
+    { id: "api", label: "Second API", disposition: "needs_follow_up" },
+    { id: "api-2", label: "Existing API", disposition: "needs_follow_up" },
+  ];
+  const initial = await f.write(f.draft({ surfaces: rows }));
+  assert.deepEqual(
+    initial.coverage.surfaces.map(({ id }) => id),
+    ["api", "api-3", "api-2"],
+  );
+  assert.deepEqual(
+    (await f.write(f.draft({ surfaces: rows }))).coverage.surfaces,
+    initial.coverage.surfaces,
+  );
+  const updated = initial.coverage.surfaces.map((row) =>
+    row.id === "api-3" ? { ...row, disposition: "no_issue_found" } : row,
+  );
+  const saved = await f.write(f.draft({ surfaces: updated }));
+  assert.equal(saved.coverage.surfaces.length, 3);
+  assert.equal(
+    saved.coverage.surfaces.find(({ id }) => id === "api").disposition,
+    "needs_follow_up",
+  );
+  assert.equal(
+    saved.coverage.surfaces.find(({ id }) => id === "api-3").disposition,
+    "no_issue_found",
+  );
+});
+
+test("worker: surface IDs remain valid independently of candidate names", async (t) => {
+  const f = await fixture(t, "worker");
+  const candidate = {
+    candidateId: "Candidate A",
+    label: "API",
+    disposition: "needs_follow_up",
+  };
+  const initial = await f.write(f.draft({ surfaces: [candidate] }));
+  const [surface] = initial.coverage.surfaces;
+  assert.match(surface.id, /^[a-z0-9][a-z0-9._/-]*$/u);
+  assert.equal(surface.candidateId, candidate.candidateId);
+  await f.write(
+    f.draft({ surfaces: [{ ...surface, disposition: "rejected" }] }, true),
+  );
+  const retried = await f.write(f.draft({}, true));
+  assert.deepEqual(retried.coverage.surfaces, [
+    { ...surface, disposition: "rejected" },
+  ]);
+});
 
 test("worker: generated surface IDs preserve distinct observations and reserved identities", async (t) => {
   const f = await fixture(t, "worker");
@@ -535,7 +659,8 @@ test("worker: generated surface IDs preserve distinct observations and reserved 
   assert.equal(saved[2].id, ids[0]);
   assert.equal(saved[3].candidateId, ids[1]);
   assert.notEqual(saved[0].id, ids[0]);
-  assert.notEqual(saved[1].id, ids[1]);
+  assert.equal(saved[1].id, ids[1]);
+  assert.notEqual(saved[3].id, ids[1]);
 });
 
 test("worker: archived closures cannot discard a later explicitly reopened task", async (t) => {

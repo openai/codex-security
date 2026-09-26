@@ -269,11 +269,6 @@ export async function recordCodexSecurityWorkerScanDraft(
     );
   }
 
-  parsed.coverage.surfaces = normalizeReviewIds(
-    parsed.coverage.surfaces as JsonObject[],
-    "surface",
-  );
-
   const scope = context.scope;
   let scoped =
     scope && scope !== "."
@@ -419,19 +414,7 @@ async function preserveScanDraft(
             ),
           ),
         );
-        const progress = {
-          ...observation,
-          findings: [],
-          coverage: {
-            ...observation.coverage,
-            deferred: reopened,
-            surfaces: structuredClone(
-              (observation.coverage.surfaces as JsonObject[]).filter(
-                (surface) => surface.disposition === "needs_follow_up",
-              ),
-            ),
-          },
-        };
+        const progress = structuredClone(observation);
         const { resolved, updated } = reconcileDeferredSurfaces(
           progress.coverage,
           sources,
@@ -447,7 +430,9 @@ async function preserveScanDraft(
         );
         result.coverage.surfaces = exactUnion(
           result.coverage.surfaces as JsonObject[],
-          progress.coverage.surfaces.filter((surface) => !updated.has(surface)),
+          (progress.coverage.surfaces as JsonObject[]).filter(
+            (surface) => !updated.has(surface),
+          ),
         );
         sources.unshift(progress);
       }
@@ -603,9 +588,11 @@ async function preserveScanDraft(
       false,
     );
   }
-  result.coverage.deferred = normalizeReviewIds(
+  result.coverage.deferred = normalizeDeferred(
     result.coverage.deferred as JsonObject[],
-    "deferred",
+  );
+  result.coverage.surfaces = normalizeSurfaces(
+    result.coverage.surfaces as JsonObject[],
   );
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
@@ -1624,9 +1611,11 @@ export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
     throw new Error(
       "scan draft: coverage.resolvedDeferred is allowed only on a terminal draft.",
     );
-  parsed.coverage.deferred = normalizeReviewIds(
+  parsed.coverage.deferred = normalizeDeferred(
     parsed.coverage.deferred as JsonObject[],
-    "deferred",
+  );
+  parsed.coverage.surfaces = normalizeSurfaces(
+    parsed.coverage.surfaces as JsonObject[],
   );
   return parsed;
 }
@@ -2145,33 +2134,6 @@ function buildCoverage(
   scope: JsonObject,
   target: JsonObject,
 ): JsonObject {
-  const surfaces = semanticCoverage.surfaces as JsonObject[];
-  const reservedSurfaceIds = new Set(
-    surfaces.flatMap((surface) =>
-      typeof surface.id === "string" ? [surface.id] : [],
-    ),
-  );
-  const surfaceIds = new Set<string>();
-  const normalizedSurfaces = surfaces.map((surface, index) => {
-    const explicitId = typeof surface.id === "string";
-    const baseId = explicitId
-      ? (surface.id as string)
-      : `surface_${semanticIdentifier(surface.label as string, String(index + 1))}`;
-    let id = baseId;
-    if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
-      let suffix = 2;
-      do {
-        id = `${baseId}-${suffix}`;
-        suffix += 1;
-      } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
-    }
-    surfaceIds.add(id);
-    return {
-      ...surface,
-      id,
-      receiptRefs: surface.receiptRefs ?? [],
-    };
-  });
   const openQuestions = semanticCoverage.openQuestions as
     Array<string | JsonObject> | undefined;
 
@@ -2181,7 +2143,10 @@ function buildCoverage(
     inventoryStrategy: inventoryStrategy(context, scope, target),
     includePaths: scope.includePaths,
     excludePaths: scope.excludePaths,
-    surfaces: normalizedSurfaces,
+    surfaces: (semanticCoverage.surfaces as JsonObject[]).map((surface) => ({
+      ...surface,
+      receiptRefs: surface.receiptRefs ?? [],
+    })),
     ...(openQuestions === undefined
       ? {}
       : {
@@ -2194,10 +2159,35 @@ function buildCoverage(
   };
 }
 
-function normalizeReviewIds(
-  rows: JsonObject[],
-  prefix: "deferred" | "surface",
-): JsonObject[] {
+function normalizeSurfaces(surfaces: JsonObject[]): JsonObject[] {
+  const reservedSurfaceIds = new Set(
+    surfaces.flatMap((surface) =>
+      typeof surface.id === "string" ? [surface.id] : [],
+    ),
+  );
+  const surfaceIds = new Set<string>();
+  return surfaces.map((surface) => {
+    const explicitId = typeof surface.id === "string";
+    const baseId = explicitId
+      ? (surface.id as string)
+      : `surface-${createHash("sha256")
+          .update(JSON.stringify(surface))
+          .digest("hex")
+          .slice(0, 16)}`;
+    let id = baseId;
+    if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
+      let suffix = 2;
+      do {
+        id = `${baseId}-${suffix}`;
+        suffix += 1;
+      } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
+    }
+    surfaceIds.add(id);
+    return { ...surface, id };
+  });
+}
+
+function normalizeDeferred(rows: JsonObject[]): JsonObject[] {
   // Reserve later owned identities before deriving any earlier missing ones.
   const ids = new Set(
     rows.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])),
@@ -2214,7 +2204,7 @@ function normalizeReviewIds(
     const baseId =
       typeof candidateId === "string"
         ? candidateId
-        : `${prefix}-${createHash("sha256")
+        : `deferred-${createHash("sha256")
             .update(JSON.stringify(item))
             .digest("hex")
             .slice(0, 16)}`;
