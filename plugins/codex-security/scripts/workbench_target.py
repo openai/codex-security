@@ -20,6 +20,26 @@ from filesystem_identity import stored_filesystem_identity_matches
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 
+def committed_diff_snapshot_digest(kind: str, base_revision: str, head_revision: str) -> str:
+    digest = hashlib.sha256(
+        f"codex-security-diff/v1\0{kind}\0{base_revision}\0{head_revision}".encode()
+    ).hexdigest()
+    return f"codex-security-snapshot/v1:sha256:{digest}"
+
+
+def diff_snapshot_digest(scan: sqlite3.Row, manifest: dict[str, Any] | None) -> str | None:
+    if scan["diff_target_kind"] == "working_tree":
+        return scan["diff_content_digest"]
+    if scan["diff_target_kind"] in {"commit", "range"}:
+        manifest_scan = manifest.get("scan") if manifest is not None else None
+        # A previously sealed draft may contain a legacy model-authored digest.
+        if not isinstance(manifest_scan, dict) or manifest_scan.get("sealedAt") is None:
+            return committed_diff_snapshot_digest(
+                scan["diff_target_kind"], scan["diff_base_revision"], scan["diff_head_revision"]
+            )
+    return None
+
+
 def git_output(
     target: Path,
     *args: str,
