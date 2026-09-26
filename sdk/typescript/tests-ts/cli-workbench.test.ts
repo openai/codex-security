@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -18,6 +25,62 @@ import {
 } from "./cli-fixtures.js";
 
 describe("CLI workbench", () => {
+  test("lists saved findings through a repository directory link", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-findings-link-")),
+    );
+    try {
+      const repository = join(root, "repository");
+      const alias = join(root, "repository link");
+      await mkdir(repository);
+      await symlink(
+        repository,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      for (const args of [[], [alias]]) {
+        const stdout = capture();
+        const calls: Array<readonly string[]> = [];
+        expect(
+          await main(
+            ["findings", "list", ...args, "--json"],
+            stdout.stream,
+            capture().stream,
+            dependencies({
+              currentDirectory: alias,
+              onWorkbench: (args): JsonObject => {
+                calls.push(args);
+                return args[0] === "list-repositories"
+                  ? {
+                      repositories: [
+                        { targetId: "selected", targetPath: repository },
+                      ],
+                    }
+                  : {
+                      findings: [{ title: "Saved finding" }],
+                      nextOffset: null,
+                    };
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(calls[1]).toEqual([
+          "list-global-findings",
+          "--target-id",
+          "selected",
+          "--status",
+          "open",
+        ]);
+        expect(JSON.parse(stdout.text())).toEqual({
+          repository: alias,
+          findings: [{ title: "Saved finding" }],
+        });
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("lists and summarizes open findings for the current repository", async () => {
     const repository = resolve("/current/repository");
     const stdout = capture();

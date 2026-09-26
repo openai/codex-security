@@ -2084,12 +2084,15 @@ export async function main(
         dependencies.currentDirectory(),
         args.repository ?? ".",
       );
+      const canonicalRepository = await realpath(repository).catch(
+        () => repository,
+      );
       return presentHistory(
         await history(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
             const target = (value["repositories"] as JsonObject[]).find(
-              (entry) => entry["targetPath"] === repository,
+              (entry) => entry["targetPath"] === canonicalRepository,
             );
             const findings =
               target === undefined
