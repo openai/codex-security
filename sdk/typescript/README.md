@@ -599,7 +599,12 @@ execution failure writes one structured object to stdout:
 ```
 
 With `--full-output`, the same code and message are reported under `error` in
-an `ok: false` envelope instead.
+an `ok: false` envelope instead. A scan that returns partial or unknown coverage
+also uses that failure envelope and keeps its available results under `data`.
+This also applies to scans executed by `scans rerun` and `scans resume`. If the
+scan target also changed, the error explains that the results no longer represent
+the current checkout. On saved-scan commands, `--filter-output` applies to `data`;
+selecting an unavailable field can return `null` or omit `data`.
 
 The command still exits with `2` for runtime, export, invalid-input, or
 incomplete-scan failures, and human-readable diagnostics remain on stderr.

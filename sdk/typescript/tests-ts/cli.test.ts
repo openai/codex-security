@@ -4539,6 +4539,58 @@ describe("CLI", () => {
     }
   });
 
+  test("reports a changed target before incomplete coverage in full-output errors", async () => {
+    const warning =
+      "Completed findings no longer describe the selected source tree.";
+    const message =
+      "Scan target changed during execution; results do not represent the current checkout.";
+    for (const completeness of ["partial", "unknown"] as const) {
+      for (const format of ["json", "jsonl"]) {
+        for (const paginated of [false, true]) {
+          const result = fakeResult(["high"], completeness);
+          const stdout = capture();
+          const stderr = capture();
+          const deps = dependencies();
+          deps.createSecurity = () => ({
+            run: async (_repository, options) => {
+              options?.onWarning?.(warning, { kind: "target_changed" });
+              return result;
+            },
+            close: async () => {},
+            preflight: async () => fakePreflight(),
+          });
+          expect(
+            await main(
+              [
+                "scan",
+                "--format",
+                format,
+                "--full-output",
+                "--fail-on-severity",
+                "high",
+                ...(paginated ? ["--token-limit", "1"] : []),
+              ],
+              stdout.stream,
+              stderr.stream,
+              deps,
+            ),
+          ).toBe(2);
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED", message },
+            data: paginated
+              ? expect.any(String)
+              : {
+                  coverage: { completeness },
+                  warnings: [warning],
+                },
+          });
+          expect(stderr.text()).toContain(message);
+        }
+      }
+    }
+  });
+
   test("preserves non-target warnings without failing the scan", async () => {
     for (const warning of [
       "Recovered finding: normalized its semantic anchor.",
@@ -5398,6 +5450,227 @@ describe("CLI", () => {
         `Scan coverage is ${completeness}; results may be incomplete.`,
       );
     }
+  });
+
+  test.each(["partial", "unknown"] as const)(
+    "marks %s coverage as a full-output error and keeps the scan results",
+    async (completeness) => {
+      const result = fakeResult(["high"], completeness);
+      for (const format of [
+        ["--json"],
+        ["--format", "json"],
+        ["--format", "jsonl"],
+      ]) {
+        for (const policy of [false, true]) {
+          const stdout = capture();
+          const stderr = capture();
+          expect(
+            await main(
+              [
+                "scan",
+                ".",
+                ...format,
+                "--full-output",
+                ...(policy ? ["--fail-on-severity", "critical"] : []),
+              ],
+              stdout.stream,
+              stderr.stream,
+              dependencies({ result }),
+            ),
+          ).toBe(2);
+          const envelope = JSON.parse(stdout.text());
+          const message = policy
+            ? `Cannot evaluate the failure policy: coverage is ${completeness}.`
+            : `Scan coverage is ${completeness}; results may be incomplete.`;
+          expect(envelope).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED", message },
+            data: JSON.parse(JSON.stringify(result.toJSON())),
+            meta: { command: "scan" },
+          });
+          expect(stderr.text()).toContain(message);
+          if (format.includes("jsonl"))
+            expect(stdout.text().trim().split("\n")).toHaveLength(1);
+        }
+      }
+    },
+  );
+
+  test.each(["rerun", "resume"] as const)(
+    "reports incomplete %s coverage in the full-output error envelope",
+    async (command) => {
+      for (const completeness of ["partial", "unknown"] as const) {
+        for (const format of ["json", "jsonl"]) {
+          const result = fakeResult(["high"], completeness);
+          const stdout = capture();
+          const stderr = capture();
+          const recipe = {
+            repository: "/original/repository",
+            target: { kind: "repository", paths: [] },
+            mode: command === "resume" ? "deep" : "standard",
+            config: {},
+          };
+          expect(
+            await main(
+              [
+                "scans",
+                command,
+                "scan-original",
+                "--format",
+                format,
+                "--full-output",
+              ],
+              stdout.stream,
+              stderr.stream,
+              dependencies({
+                result,
+                onWorkbench: (args): JsonObject =>
+                  args[0] === "get-cli-scan-resume"
+                    ? {
+                        scanId: "scan-original",
+                        scanDir: "/tmp/saved-scan",
+                        recipe,
+                      }
+                    : args[0] === "get-scan-recipe"
+                      ? { recipe }
+                      : {},
+              }),
+            ),
+          ).toBe(2);
+          const message = `Scan coverage is ${completeness}; results may be incomplete.`;
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED", message },
+            data: JSON.parse(JSON.stringify(result.toJSON())),
+          });
+          expect(stderr.text()).toContain(message);
+          if (format === "jsonl")
+            expect(stdout.text().trim().split("\n")).toHaveLength(1);
+        }
+      }
+    },
+  );
+
+  test.each(["rerun", "resume"] as const)(
+    "matches the %s full-output error schema to filtered data",
+    async (command) => {
+      const schemaOutput = capture();
+      expect(
+        await main(
+          ["scans", command, "--schema", "--format", "json"],
+          schemaOutput.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      const schema = JSON.parse(schemaOutput.text()).output.anyOf.find(
+        (variant: { properties?: { ok?: { const?: boolean } } }) =>
+          variant.properties?.ok?.const === false,
+      );
+      expect(schema.properties.data).toEqual({});
+      expect(schema.required).toEqual(["ok", "error", "meta"]);
+
+      const result = fakeResult(["high"], "partial");
+      const recipe = {
+        repository: "/original/repository",
+        target: { kind: "repository", paths: [] },
+        mode: command === "resume" ? "deep" : "standard",
+        config: {},
+      };
+      for (const format of ["json", "jsonl"]) {
+        for (const [filter, expected] of [
+          ["cost", null],
+          ["sarifPath", null],
+          ["warnings", undefined],
+          ["threadId", result.threadId],
+          [
+            "findings",
+            {
+              findings: JSON.parse(JSON.stringify(result.toJSON()["findings"])),
+            },
+          ],
+        ] as const) {
+          const output = capture();
+          expect(
+            await main(
+              [
+                "scans",
+                command,
+                "scan-original",
+                "--format",
+                format,
+                "--full-output",
+                "--filter-output",
+                filter,
+              ],
+              output.stream,
+              capture().stream,
+              dependencies({
+                result,
+                onWorkbench: () => ({
+                  scanId: "scan-original",
+                  scanDir: "/tmp/saved-scan",
+                  recipe,
+                }),
+              }),
+            ),
+          ).toBe(2);
+          const envelope = JSON.parse(output.text());
+          expect(envelope).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED" },
+            meta: expect.any(Object),
+          });
+          if (expected === undefined)
+            expect(envelope).not.toHaveProperty("data");
+          else expect(envelope.data).toEqual(expected);
+        }
+      }
+    },
+  );
+
+  test("preserves full-output token controls and the completed findings-policy envelope", async () => {
+    const partial = fakeResult(["high"], "partial");
+    const page = capture();
+    expect(
+      await main(
+        ["scan", "--json", "--full-output", "--token-limit", "1"],
+        page.stream,
+        capture().stream,
+        dependencies({ result: partial }),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(page.text())).toMatchObject({
+      ok: false,
+      error: { code: "SCAN_FAILED" },
+      data: expect.any(String),
+      meta: { nextOffset: 1 },
+    });
+    const count = capture();
+    expect(
+      await main(
+        ["scan", "--json", "--full-output", "--token-count"],
+        count.stream,
+        capture().stream,
+        dependencies({ result: partial }),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(count.text())).toBeNumber();
+    const complete = fakeResult(["high"]);
+    const blocked = capture();
+    expect(
+      await main(
+        ["scan", "--json", "--full-output", "--fail-on-severity", "high"],
+        blocked.stream,
+        capture().stream,
+        dependencies({ result: complete }),
+      ),
+    ).toBe(1);
+    expect(JSON.parse(blocked.text())).toMatchObject({
+      ok: true,
+      data: JSON.parse(JSON.stringify(complete.toJSON())),
+    });
+    expect(JSON.parse(blocked.text())).not.toHaveProperty("error");
   });
 
   test("reports SDK errors without a stack trace", async () => {
