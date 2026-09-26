@@ -100,7 +100,10 @@ export async function resolveTrustedExecutable(
         ? join(await realpath(dirname(current.path)), basename(current.path))
         : current.path;
       executable ??=
-        pathLike && isWithin(root, invocationPath) ? canonical : current.path;
+        pathLike &&
+        (isWithin(root, current.path) || isWithin(root, invocationPath))
+          ? canonical
+          : current.path;
     } catch {
       continue;
     }
