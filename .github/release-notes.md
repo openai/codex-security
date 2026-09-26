@@ -13,6 +13,7 @@
 - include Svelte components in scan inventories ([#1028](https://github.com/openai/codex-security/pull/1028))
 - propagate wizard cancellation to prompts ([#540](https://github.com/openai/codex-security/pull/540))
 - preserve explicit virtualenv launchers ([#227](https://github.com/openai/codex-security/pull/227))
+- upgrade Codex CLI and SDK to 0.157.1 ([#1041](https://github.com/openai/codex-security/pull/1041))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
