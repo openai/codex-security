@@ -1057,6 +1057,7 @@ async function testOpenAiCredentialsReachWorker() {
       const promptPath = path.join(fixture.root, "prompt.md");
       await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH\n");
       const executor = new CodexSdkWorkerExecutor({
+        model: "gpt-daybreak-blue-latest",
         parentSandbox: trustedParentSandbox,
       });
       for (const kind of ["discovery", "dedup"]) {
@@ -1077,6 +1078,11 @@ async function testOpenAiCredentialsReachWorker() {
           );
           assert.equal(preflight.codexHome, fixture.root);
           assert.equal(invocation.codexHome, fixture.root);
+          assertFlagPair(
+            invocation.argv,
+            "--model",
+            "gpt-daybreak-blue-latest",
+          );
           assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             entry.expected,

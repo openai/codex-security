@@ -342,6 +342,32 @@ Some cybersecurity requests and protected findings require Trusted Access for
 Cyber approval. Apply or check your access at
 [chatgpt.com/cyber](https://chatgpt.com/cyber).
 
+### Daybreak Blue with an API key
+
+Use a key from a project with Daybreak Blue and model access enabled, then
+select the Daybreak Blue model with the existing `--model` option:
+
+```bash
+npx @openai/codex-security scan /path/to/repository \
+  --auth api-key --model gpt-daybreak-blue-latest
+```
+
+Add `--mode deep` for Deep Scan. The selected model is passed to discovery and
+reducer workers, including resumed workers. The SDK equivalent is
+`new CodexSecurity({ codexOverrides: { model: "gpt-daybreak-blue-latest" } })`
+with `auth: "api-key"` in the scan options.
+
+The [Responses API defaults](https://developers.openai.com/api/docs/guides/daybreak#understand-defaults-when-omitted)
+select `daybreak_blue` for this alias when `access_programs.cyber` is omitted
+and reject requests without the required access. The alias follows updates to
+its underlying model.
+
+Explicit program selection on a specific mainline model remains a separate
+[upstream limitation](https://github.com/openai/codex/issues/47834): Codex
+0.157.0 drops the app-server's `cyberAccessProgram` selection with API-key auth.
+`access_programs.cyber` is a Responses API field, not a supported `--codex`
+configuration key. Tracking: [#1024](https://github.com/openai/codex-security/issues/1024).
+
 ## Generate a security policy
 
 `policy` drafts `SECURITY.md` guidance for future scans. It does not run a

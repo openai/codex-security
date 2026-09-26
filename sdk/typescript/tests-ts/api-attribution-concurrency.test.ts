@@ -20,7 +20,7 @@ afterEach(async () => {
 
 describe("delegated scan attribution", () => {
   test.each(["standard", "deep"] as const)(
-    "keeps overlapping CLI and SDK %s scans concurrent and correctly attributed",
+    "keeps overlapping API-key CLI and SDK %s scans concurrent with isolated models and attribution",
     async (mode) => {
       const root = await fixtures.temporaryDirectory();
       const repository = join(root, "repository");
@@ -31,6 +31,7 @@ describe("delegated scan attribution", () => {
       await mkdir(ambientHome);
       let active = 0;
       let maximumActive = 0;
+      const configPaths = new Set<string>();
       let releaseConcurrentScans!: () => void;
       const concurrentScans = new Promise<void>((resolve) => {
         releaseConcurrentScans = resolve;
@@ -38,10 +39,12 @@ describe("delegated scan attribution", () => {
 
       const clients = await Promise.all(
         (["cli", "sdk"] as const).map(async (surface) => {
+          const model =
+            surface === "cli" ? "gpt-daybreak-blue-latest" : "gpt-5.6-sol";
           const scanDirectory = join(root, `${surface}-scan`);
           await mkdir(scanDirectory, { mode: 0o700 });
           return new InternalCodexSecurity(
-            { pluginPath: PLUGIN_ROOT },
+            { pluginPath: PLUGIN_ROOT, codexOverrides: { model } },
             {
               environment: {
                 CODEX_HOME: ambientHome,
@@ -55,8 +58,12 @@ describe("delegated scan attribution", () => {
               runWorkbench: async (
                 _options: unknown,
                 args: readonly string[],
+                input?: string,
               ) => {
                 if (args[0] === "register-cli-scan") {
+                  expect(JSON.parse(input!).recipe).toMatchObject({
+                    config: { model },
+                  });
                   return {
                     scanId: `scan_${surface}`,
                     targetId: `target_${surface}`,
@@ -82,17 +89,30 @@ describe("delegated scan attribution", () => {
                     maximumActive = Math.max(maximumActive, active);
                     if (active === 2) releaseConcurrentScans();
                     try {
+                      expect(options.apiKey).toBe(`synthetic-${surface}-key`);
                       expect(options.env?.["CODEX_HOME"]).toBe(credentialHome);
                       expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
                         surface,
                       );
                       expect(options.config).toMatchObject({
+                        model,
                         responses_api_metadata: {
                           codex_security_surface: surface,
                         },
                       });
                       expect(threadOptions.threadSource).toBe("security_scan");
+                      expect(threadOptions.model).toBeUndefined();
+                      const configPath =
+                        options.env?.["CODEX_SECURITY_CONFIG_PATH"];
+                      expect(typeof configPath).toBe("string");
+                      configPaths.add(configPath!);
+                      expect(
+                        parseToml(await readFile(configPath!, "utf8")),
+                      ).toMatchObject({ model });
                       await concurrentScans;
+                      expect(
+                        parseToml(await readFile(configPath!, "utf8")),
+                      ).toMatchObject({ model });
                       const sharedConfig = parseToml(
                         await readFile(
                           join(credentialHome, "config.toml"),
@@ -102,6 +122,7 @@ describe("delegated scan attribution", () => {
                       expect(sharedConfig).not.toHaveProperty(
                         "responses_api_metadata",
                       );
+                      expect(sharedConfig).not.toHaveProperty("model");
                       expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
                         surface,
                       );
@@ -119,6 +140,14 @@ describe("delegated scan attribution", () => {
       );
 
       try {
+        await Promise.all(
+          clients.map(async (client, index) => {
+            expect(await client.preflight(repository, { mode })).toMatchObject({
+              model: index === 0 ? "gpt-daybreak-blue-latest" : "gpt-5.6-sol",
+              authentication: { method: "api_key", verified: false },
+            });
+          }),
+        );
         const results = await Promise.allSettled(
           clients.map((client) =>
             client.run(repository, { mode }).finally(releaseConcurrentScans),
@@ -133,6 +162,7 @@ describe("delegated scan attribution", () => {
           });
         }
         expect(maximumActive).toBe(2);
+        expect(configPaths.size).toBe(2);
       } finally {
         releaseConcurrentScans();
         await Promise.all(clients.map(async (client) => await client.close()));
