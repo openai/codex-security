@@ -66,6 +66,7 @@ try {
     completeness: "complete",
     surfaces: [
       {
+        id: "surface_archive-extraction",
         label: "Archive extraction",
         disposition: "reported",
         notes: "Reviewed.",
@@ -428,6 +429,7 @@ try {
     ...coverage,
     surfaces: [
       {
+        id: "surface-validated-archive",
         label: "Validated archive path traversal",
         disposition: "reported",
         notes: "The archive candidate was validated.",

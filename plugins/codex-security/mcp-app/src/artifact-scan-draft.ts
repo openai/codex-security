@@ -269,6 +269,11 @@ export async function recordCodexSecurityWorkerScanDraft(
     );
   }
 
+  parsed.coverage.surfaces = normalizeReviewIds(
+    parsed.coverage.surfaces as JsonObject[],
+    "surface",
+  );
+
   const scope = context.scope;
   let scoped =
     scope && scope !== "."
@@ -598,8 +603,9 @@ async function preserveScanDraft(
       false,
     );
   }
-  result.coverage.deferred = normalizeDeferred(
+  result.coverage.deferred = normalizeReviewIds(
     result.coverage.deferred as JsonObject[],
+    "deferred",
   );
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
@@ -1618,8 +1624,9 @@ export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
     throw new Error(
       "scan draft: coverage.resolvedDeferred is allowed only on a terminal draft.",
     );
-  parsed.coverage.deferred = normalizeDeferred(
+  parsed.coverage.deferred = normalizeReviewIds(
     parsed.coverage.deferred as JsonObject[],
+    "deferred",
   );
   return parsed;
 }
@@ -2187,37 +2194,40 @@ function buildCoverage(
   };
 }
 
-function normalizeDeferred(deferred: JsonObject[]): JsonObject[] {
+function normalizeReviewIds(
+  rows: JsonObject[],
+  prefix: "deferred" | "surface",
+): JsonObject[] {
   // Reserve later owned identities before deriving any earlier missing ones.
-  const deferredIds = new Set(
-    deferred.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])),
+  const ids = new Set(
+    rows.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])),
   );
   const reservedCandidateIds = new Set(
-    deferred.flatMap((item) =>
+    rows.flatMap((item) =>
       typeof item.candidateId === "string" ? [item.candidateId] : [],
     ),
   );
-  return deferred.map((item) => {
+  return rows.map((item) => {
     if (typeof item.id === "string") return item;
 
     const candidateId = item.candidateId;
     const baseId =
       typeof candidateId === "string"
         ? candidateId
-        : `deferred-${createHash("sha256")
+        : `${prefix}-${createHash("sha256")
             .update(JSON.stringify(item))
             .digest("hex")
             .slice(0, 16)}`;
     let id = baseId;
     let suffix = 2;
     while (
-      deferredIds.has(id) ||
+      ids.has(id) ||
       (typeof candidateId !== "string" && reservedCandidateIds.has(id))
     ) {
       id = `${baseId}-${suffix}`;
       suffix += 1;
     }
-    deferredIds.add(id);
+    ids.add(id);
     return { ...item, id };
   });
 }
