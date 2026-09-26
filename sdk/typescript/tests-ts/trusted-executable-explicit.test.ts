@@ -60,10 +60,7 @@ test.skipIf(process.platform === "win32")(
       const trusted = join(root, "trusted");
       const target = join(trusted, "python-target");
       const launcher = join(bin, "python");
-      await Promise.all([
-        mkdir(bin, { recursive: true }),
-        mkdir(trusted),
-      ]);
+      await Promise.all([mkdir(bin, { recursive: true }), mkdir(trusted)]);
       await writeFile(target, "#!/bin/sh\nprintf '%s\\n' \"$0\"\n");
       await chmod(target, 0o700);
       await symlink(target, launcher);

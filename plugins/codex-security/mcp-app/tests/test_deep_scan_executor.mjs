@@ -98,7 +98,7 @@ const deniedWorkerPermissionProfile = {
 try {
   testCodeModeFrameDiagnosticBoundaries();
   await testOpenAiCredentialsReachWorker();
-  await testWorkerReasoningSummaries();
+  await testWorkerRuntimeSettings();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
@@ -1102,7 +1102,7 @@ async function testOpenAiCredentialsReachWorker() {
   }
 }
 
-async function testWorkerReasoningSummaries() {
+async function testWorkerRuntimeSettings() {
   const cases = [
     ["", undefined],
     ['model_reasoning_summary = "none"\n', "none"],
@@ -1118,6 +1118,7 @@ async function testWorkerReasoningSummaries() {
   ];
   const saved = Object.fromEntries(
     [
+      "PYTHON",
       "CODEX_CLI_PATH",
       "CODEX_SECURITY_CONFIG_PATH",
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -1131,6 +1132,14 @@ async function testWorkerReasoningSummaries() {
     delete process.env.CODEX_API_KEY;
     for (const [configuration, expected] of cases) {
       const fixture = await fakeCodexFixture(deniedWorkerPermissionProfile);
+      const python = path.join(fixture.root, "selected venv", "bin", "python");
+      const helperPython = path.join(
+        fixture.root,
+        "helper venv",
+        "bin",
+        "python",
+      );
+      process.env.PYTHON = python;
       const configPath = path.join(fixture.root, "active scan config.toml");
       const promptPath = path.join(fixture.root, "prompt.md");
       await writeFile(configPath, configuration);
@@ -1155,6 +1164,13 @@ async function testWorkerReasoningSummaries() {
         model: "fixture-model",
         reasoningEffort: "xhigh",
         parentSandbox: trustedParentSandboxWithDenials,
+        artifactContext: {
+          pluginRoot: fixture.root,
+          scanRoot: fixture.root,
+          repoRoot: fixture.root,
+          scanId: "fixture-scan",
+          pythonCommand: helperPython,
+        },
       });
       // A running coordinator retains its settings if the source file changes.
       for (const kind of ["discovery", "dedup"]) {
@@ -1165,6 +1181,15 @@ async function testWorkerReasoningSummaries() {
             workingDirectory: fixture.root,
             subagents: 0,
             resumeThreadId,
+            artifactContext: {
+              root: fixture.root,
+              layout: kind === "dedup" ? "reducer" : "worker",
+              ...(kind === "dedup"
+                ? {
+                    deepReducer: { scanRoot: fixture.root, claimedWorkers: [] },
+                  }
+                : {}),
+            },
             signal: new AbortController().signal,
           });
           const invocation = JSON.parse(
@@ -1190,6 +1215,14 @@ async function testWorkerReasoningSummaries() {
             true,
           );
           assert.equal(invocation.configPath, configPath);
+          assert.equal(invocation.python, python);
+          assert.equal(
+            invocation.argv.includes(
+              `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(helperPython)}`,
+            ),
+            true,
+          );
+          assert.equal(process.env.PYTHON, python);
           assert.equal(
             invocation.deepConfigPath,
             process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
@@ -2147,7 +2180,7 @@ async function fakeCodexFixture(
       "for await (const chunk of process.stdin) stdin += chunk;",
       "const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;",
       "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
-      "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
+      "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
       "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
       "if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }",
       "if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }",

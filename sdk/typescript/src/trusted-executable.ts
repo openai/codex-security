@@ -1,7 +1,9 @@
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import {
+  basename,
   delimiter,
+  dirname,
   extname,
   isAbsolute,
   join,
@@ -92,8 +94,13 @@ export async function resolveTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
+      // Keep explicit virtualenv launchers, but resolve repository-local aliases
+      // to the trusted target instead of invoking them from the repository.
+      const invocationPath = pathLike
+        ? join(await realpath(dirname(current.path)), basename(current.path))
+        : current.path;
       executable ??=
-        pathLike && isWithin(root, current.path) ? canonical : current.path;
+        pathLike && isWithin(root, invocationPath) ? canonical : current.path;
     } catch {
       continue;
     }
