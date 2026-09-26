@@ -55,9 +55,13 @@ export function semanticScanDraft(
 }
 
 function withoutPreviousFindings(finding: JsonObject): JsonObject {
-  const result = structuredClone(finding);
-  if (isObject(result["provenance"]))
-    delete result["provenance"]["previousFindings"];
+  // Comparisons only read nested values; clone when retaining this projection.
+  const result = { ...finding };
+  if (isObject(result["provenance"])) {
+    const provenance = { ...result["provenance"] };
+    delete provenance["previousFindings"];
+    result["provenance"] = provenance;
+  }
   return result;
 }
 
@@ -82,7 +86,8 @@ export function preserveFindingDetails(
     "previousFindings",
     "originalCandidates",
   ] as const) {
-    const values = exactUnion(
+    const union = field === "sourceFindings" ? sourceFindingUnion : exactUnion;
+    const values = union(
       Array.isArray(provenance[field]) ? provenance[field] : [],
       Array.isArray(oldProvenance[field]) ? oldProvenance[field] : [],
     );
@@ -96,9 +101,46 @@ export function preserveFindingDetails(
       Array.isArray(provenance["previousFindings"])
         ? provenance["previousFindings"]
         : [],
-      [original],
+      [structuredClone(original)],
     );
   }
+}
+
+function sourceFindingUnion(...groups: unknown[][]): unknown[] {
+  const records = groups.flat();
+  if (
+    !records.every((value): value is { id: string; finding: unknown } => {
+      if (!isObject(value) || typeof value["id"] !== "string") return false;
+      const keys = Object.keys(value);
+      return keys.length === 2 && keys[0] === "id" && keys[1] === "finding";
+    })
+  )
+    return exactUnion(...groups);
+
+  // Different IDs cannot serialize equally. Compare evidence only within an ID,
+  // and reuse the source object identity supplied by merge reconciliation.
+  const byId = new Map<
+    string,
+    Array<{ value: (typeof records)[number]; json?: string }>
+  >();
+  return records.filter((value) => {
+    const bucket = byId.get(value.id);
+    if (!bucket) {
+      byId.set(value.id, [{ value }]);
+      return true;
+    }
+    if (bucket.some((entry) => entry.value.finding === value.finding))
+      return false;
+    const json = JSON.stringify(value);
+    if (
+      bucket.some(
+        (entry) => (entry.json ??= JSON.stringify(entry.value)) === json,
+      )
+    )
+      return false;
+    bucket.push({ value, json });
+    return true;
+  });
 }
 
 export function containsSavedFinding(
@@ -114,6 +156,7 @@ export function containsSavedValue(
   current: unknown,
   previous: unknown,
 ): boolean {
+  if (current === previous) return true;
   if (Array.isArray(previous)) {
     return (
       Array.isArray(current) &&

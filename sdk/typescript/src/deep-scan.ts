@@ -133,9 +133,23 @@ export async function runDeepScans(
       throw new Error("Saved scan pass escaped its parent.");
   }
   let saveTail = Promise.resolve();
+  let savedSnapshot: string | undefined;
+  let queuedSave: { snapshot: string; pending: Promise<void> } | undefined;
   const save = async (): Promise<void> => {
     const snapshot = JSON.stringify(state);
-    const pending = saveTail.then(async () => {
+    // A newer complete snapshot includes the changes of every queued caller.
+    // All callers share its durability barrier; an in-flight write is unchanged.
+    if (queuedSave) {
+      queuedSave.snapshot = snapshot;
+      return queuedSave.pending;
+    }
+    const queued = { snapshot, pending: Promise.resolve() };
+    queued.pending = saveTail.then(async () => {
+      queuedSave = undefined;
+      const snapshot = queued.snapshot;
+      // Reuse only a successful write, after all earlier saves have settled.
+      if (snapshot === savedSnapshot) return;
+      savedSnapshot = undefined;
       await workbench(
         [
           "save-scan-artifact",
@@ -146,9 +160,11 @@ export async function runDeepScans(
         ],
         snapshot,
       );
+      savedSnapshot = snapshot;
     });
-    saveTail = pending.catch(() => undefined);
-    await pending;
+    queuedSave = queued;
+    saveTail = queued.pending.catch(() => undefined);
+    return queued.pending;
   };
   await save();
   const previousRuns = state.legacy?.discoveryRuns ?? 0;

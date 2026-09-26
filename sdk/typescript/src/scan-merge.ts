@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { join, posix, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import Ajv2020 from "ajv/dist/2020.js";
+import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { readScanFile } from "./contract.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
 import type { ScanResult } from "./result.js";
@@ -73,9 +73,7 @@ export async function projectScanMergeWriteups(
   signal?: AbortSignal,
 ): Promise<ScanMergeInput> {
   const projected = structuredClone(input);
-  for (const finding of projected.draft.findings) {
-    const writeup = finding["writeup"] as { reportPath: string } | undefined;
-    if (writeup === undefined) continue;
+  const project = async (writeup: { reportPath: string }): Promise<void> => {
     const reportPath = writeup.reportPath;
     const sourceDirectory = posix.dirname(reportPath);
     const slug = `${input.scanId}-${posix.basename(sourceDirectory)}`;
@@ -116,9 +114,38 @@ export async function projectScanMergeWriteups(
       }
     }
     writeup.reportPath = destination;
+  };
+  const writeups = projected.draft.findings.flatMap((finding) => {
+    const writeup = finding["writeup"] as { reportPath: string } | undefined;
+    return writeup === undefined ? [] : [writeup];
+  });
+  for (let start = 0; start < writeups.length; start += 8) {
+    const destinations = new Map<string, Promise<void>>();
+    const results = await Promise.allSettled(
+      writeups.slice(start, start + 8).map(async (writeup) => {
+        // Serialize destination aliases, including on case-insensitive volumes.
+        const key = posix
+          .basename(posix.dirname(writeup.reportPath))
+          .normalize("NFC")
+          .toUpperCase();
+        const pending = (destinations.get(key) ?? Promise.resolve()).then(() =>
+          project(writeup),
+        );
+        destinations.set(key, pending);
+        return pending;
+      }),
+    );
+    // Drain the batch, then surface the first error in original report order.
+    for (const result of results)
+      if (result.status === "rejected") throw result.reason;
   }
   return projected;
 }
+
+// Keep only the last compiled schema pair, independent of any scan's state.
+let compiledMergeSchema:
+  | { common: string; draft: string; validate: ValidateFunction<ScanAggregate> }
+  | undefined;
 
 export async function createScanMergeValidator(
   pluginRoot: string,
@@ -129,16 +156,34 @@ export async function createScanMergeValidator(
     previous: ScanAggregate | null,
   ) => { aggregate: ScanAggregate; newFindings: number }
 > {
-  const [common, draftSchema] = await Promise.all([
+  const [common, draft] = await Promise.all([
     readFile(
       join(pluginRoot, "schemas/definitions/artifact-common.schema.json"),
       "utf8",
-    ).then(JSON.parse),
-    readFile(
-      join(pluginRoot, "schemas/tools/scan-draft.schema.json"),
-      "utf8",
-    ).then(JSON.parse),
+    ),
+    readFile(join(pluginRoot, "schemas/tools/scan-draft.schema.json"), "utf8"),
   ]);
+  // Read every time so changed schemas and filesystem errors remain visible.
+  const validator =
+    compiledMergeSchema?.common === common &&
+    compiledMergeSchema.draft === draft
+      ? compiledMergeSchema.validate
+      : compileMergeSchema(common, draft);
+  return (raw, inputs, previous) => {
+    if (!validator(raw))
+      throw new Error(
+        `Invalid scan merge: ${JSON.stringify(validator.errors)}`,
+      );
+    validateFindingSemantics(raw.findings);
+    return reconcileScanMerge(raw, inputs, previous);
+  };
+}
+
+function compileMergeSchema(
+  common: string,
+  draft: string,
+): ValidateFunction<ScanAggregate> {
+  const draftSchema = JSON.parse(draft);
   const {
     coverage: _coverage,
     handoffClaimToken: _claim,
@@ -151,16 +196,10 @@ export async function createScanMergeValidator(
   };
   draftSchema.$ref = "#/$defs/scanMerge";
   const validator = new Ajv2020({ strict: false, formats: { uuid: true } })
-    .addSchema(common)
+    .addSchema(JSON.parse(common))
     .compile<ScanAggregate>(draftSchema);
-  return (raw, inputs, previous) => {
-    if (!validator(raw))
-      throw new Error(
-        `Invalid scan merge: ${JSON.stringify(validator.errors)}`,
-      );
-    validateFindingSemantics(raw.findings);
-    return reconcileScanMerge(raw, inputs, previous);
-  };
+  compiledMergeSchema = { common, draft, validate: validator };
+  return validator;
 }
 
 function sourceIds(finding: JsonObject): string[] {
@@ -177,8 +216,18 @@ function reconcileScanMerge(
   inputs: readonly ScanMergeInput[],
   previous: ScanAggregate | null,
 ): { aggregate: ScanAggregate; newFindings: number } {
-  const aggregate = structuredClone(raw);
-  aggregate.findings = prepareScanFindings(aggregate.findings, "deep");
+  // Only the finding and provenance containers are edited during reconciliation.
+  // Detach the entire result once, after all preservation and attribution checks.
+  const aggregate = {
+    ...raw,
+    findings: prepareScanFindings(
+      raw.findings.map((finding) => ({
+        ...finding,
+        provenance: { ...(finding["provenance"] as JsonObject) },
+      })),
+      "deep",
+    ),
+  };
   for (const source of [
     ...inputs.map((input) => input.draft),
     ...(previous ? [previous] : []),
@@ -208,16 +257,32 @@ function reconcileScanMerge(
       sources.set(`previous:${index}`, finding);
     }
   }
+  const identities = new Map<JsonObject, string>();
+  const identityOf = (finding: JsonObject): string => {
+    let identity = identities.get(finding);
+    if (identity === undefined) {
+      identity = scanFindingIdentity(finding);
+      identities.set(finding, identity);
+    }
+    return identity;
+  };
+  let sourcesByIdentity: Map<string, Array<[string, JsonObject]>> | undefined;
   const retainSources = () => {
     const claimed = new Set<string>();
     for (const finding of aggregate.findings) {
       const provenance = finding["provenance"] as JsonObject;
       let refs = provenance["sourceFindingIds"] as string[] | undefined;
       if (refs === undefined) {
-        const matches = [...sources].filter(
-          ([, source]) =>
-            scanFindingIdentity(source) === scanFindingIdentity(finding),
-        );
+        if (sourcesByIdentity === undefined) {
+          sourcesByIdentity = new Map();
+          for (const entry of sources) {
+            const identity = identityOf(entry[1]);
+            const group = sourcesByIdentity.get(identity) ?? [];
+            group.push(entry);
+            sourcesByIdentity.set(identity, group);
+          }
+        }
+        const matches = sourcesByIdentity.get(identityOf(finding)) ?? [];
         if (
           new Set(matches.map(([, source]) => JSON.stringify(source))).size > 1
         ) {
@@ -245,7 +310,7 @@ function reconcileScanMerge(
       provenance["sourceFindingIds"] = refs;
       provenance["sourceFindings"] = refs.map((id) => ({
         id,
-        finding: structuredClone(sources.get(id)!),
+        finding: sources.get(id)!,
       }));
     }
     const missing = [...sources.keys()].filter((id) => !claimed.has(id));
@@ -255,28 +320,44 @@ function reconcileScanMerge(
       );
   };
   retainSources();
+  const bySource = new Map<string, number>();
+  const byIdentity = new Map<string, JsonObject>();
+  const indexSources = (finding: JsonObject, index: number) => {
+    for (const id of sourceIds(finding)) {
+      bySource.set(id, Math.min(index, bySource.get(id) ?? index));
+    }
+  };
+  aggregate.findings.forEach((finding, index) => {
+    indexSources(finding, index);
+    byIdentity.set(identityOf(finding), finding);
+  });
   const unmatched = new Set(aggregate.findings);
   for (const finding of previous?.findings ?? []) {
-    const previousRefs = sourceIds(finding);
+    // Source matching takes precedence and uses aggregate order, even if a
+    // previous finding lists its references in a different order.
+    let sourceIndex = aggregate.findings.length;
+    for (const id of sourceIds(finding)) {
+      sourceIndex = Math.min(sourceIndex, bySource.get(id) ?? sourceIndex);
+    }
+    const identity = identityOf(finding);
+    const identityMatch = byIdentity.get(identity);
     const retained =
-      (previousRefs.length > 0
-        ? aggregate.findings.find((current) =>
-            sourceIds(current).some((ref) => previousRefs.includes(ref)),
-          )
-        : undefined) ??
-      [...unmatched].find(
-        (current) =>
-          scanFindingIdentity(current) === scanFindingIdentity(finding),
-      );
-    if (
-      !retained ||
-      scanFindingIdentity(retained) !== scanFindingIdentity(finding)
-    ) {
+      aggregate.findings[sourceIndex] ??
+      (identityMatch && unmatched.has(identityMatch)
+        ? identityMatch
+        : undefined);
+    if (!retained || identityOf(retained) !== identity) {
       throw new Error(
         "Scan merge discarded or changed a previously accepted finding identity.",
       );
     }
     preserveFindingDetails(retained, finding);
+    indexSources(
+      retained,
+      sourceIndex < aggregate.findings.length
+        ? sourceIndex
+        : aggregate.findings.indexOf(retained),
+    );
     unmatched.delete(retained);
   }
   retainSources();
@@ -295,16 +376,13 @@ function reconcileScanMerge(
       throw new Error(
         `Scan merge has ambiguous ${field}; provide the reconciled ${field} explicitly.`,
       );
-    if (distinct[0] !== undefined)
-      aggregate[field] = structuredClone(distinct[0]);
+    if (distinct[0] !== undefined) aggregate[field] = distinct[0];
   }
-  const previousIds = new Set(
-    (previous?.findings ?? []).map(scanFindingIdentity),
-  );
+  const previousIds = new Set((previous?.findings ?? []).map(identityOf));
   return {
-    aggregate,
+    aggregate: structuredClone(aggregate),
     newFindings: aggregate.findings.filter(
-      (finding) => !previousIds.has(scanFindingIdentity(finding)),
+      (finding) => !previousIds.has(identityOf(finding)),
     ).length,
   };
 }

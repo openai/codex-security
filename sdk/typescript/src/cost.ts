@@ -1,4 +1,5 @@
-import { open, readdir } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   estimateScanCost,
@@ -38,6 +39,7 @@ interface SessionReasoning {
 
 interface SessionUsage {
   offset: number;
+  fileVersion?: Stats;
   pendingLine: Buffer[];
   pendingLineBytes: number;
   unreadable: boolean;
@@ -208,20 +210,47 @@ export class ScanCostTracker {
   async #readSessions(): Promise<void> {
     if (this.#threadId === null) return;
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
-      let session = this.#sessions.get(path);
-      if (session === undefined) {
-        session = createSessionUsage();
-        this.#sessions.set(path, session);
+    const buffers: Buffer[] = [];
+    const pending: Promise<{ session: SessionUsage; error: unknown } | null>[] =
+      [];
+    const drain = async () => {
+      const results = await Promise.all(pending);
+      pending.length = 0;
+      for (const result of results) if (result) unreadable.push(result);
+      const unknown = unreadable.find(
+        ({ session }) => session.threadId === null,
+      );
+      if (unknown) throw unknown.error;
+    };
+    try {
+      for await (const path of sessionFiles(
+        join(this.#options.codexHome, "sessions"),
+      )) {
+        let session = this.#sessions.get(path);
+        if (session === undefined) {
+          session = createSessionUsage();
+          this.#sessions.set(path, session);
+        }
+        // Reuse one buffer per I/O slot, not one allocation per historical log.
+        const buffer = (buffers[pending.length] ??=
+          Buffer.alloc(SESSION_READ_SIZE));
+        const tracked = session;
+        pending.push(
+          readSessionUsage(
+            path,
+            tracked,
+            this.#options.repository,
+            buffer,
+          ).then(
+            () => null,
+            (error: unknown) => ({ session: tracked, error }),
+          ),
+        );
+        if (pending.length === 8) await drain();
       }
-      try {
-        await readSessionUsage(path, session, this.#options.repository);
-      } catch (error) {
-        if (session.threadId === null) throw error;
-        unreadable.push({ session, error });
-      }
+    } finally {
+      // Directory traversal can fail while handles are still open.
+      await drain();
     }
 
     const included = new Set([this.#threadId, ...this.#receipts.keys()]);
@@ -403,8 +432,30 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
   repository?: string,
+  buffer?: Buffer,
 ): Promise<void> {
   if (session.unreadable) return;
+  let metadata;
+  try {
+    metadata = await stat(path);
+  } catch (error) {
+    if (isMissingFile(error)) return;
+    throw error;
+  }
+  const previous = session.fileVersion;
+  if (
+    previous &&
+    session.offset === metadata.size &&
+    previous.dev === metadata.dev &&
+    previous.ino === metadata.ino &&
+    previous.size === metadata.size &&
+    previous.mtimeMs === metadata.mtimeMs &&
+    previous.ctimeMs === metadata.ctimeMs &&
+    previous.mode === metadata.mode
+  )
+    return;
+  // Invalidate before opening; failed reads or closes must be retried.
+  session.fileVersion = undefined;
   let file;
   try {
     file = await open(path, "r");
@@ -413,7 +464,7 @@ async function readSessionUsage(
     throw error;
   }
   try {
-    const buffer = Buffer.alloc(SESSION_READ_SIZE);
+    buffer ??= Buffer.alloc(SESSION_READ_SIZE);
     while (true) {
       const { bytesRead } = await file.read(
         buffer,
@@ -421,7 +472,7 @@ async function readSessionUsage(
         buffer.length,
         session.offset,
       );
-      if (bytesRead === 0) return;
+      if (bytesRead === 0) break;
       session.offset += bytesRead;
       try {
         readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
@@ -435,6 +486,7 @@ async function readSessionUsage(
   } finally {
     await file.close();
   }
+  session.fileVersion = metadata;
 }
 
 function readSessionChunk(
