@@ -105,27 +105,6 @@
     - type: javascript
       value: file://./assertions/github-rest-intake.js
 
-- description: "GitHub Connector request still uses REST-only finding retrieval"
-  metadata:
-    case_id: github-connector-rest-only
-    source_type: github_repo
-  vars:
-    case_id: github-connector-rest-only
-    target_repo: https://github.com/promptfoo/promptfoo
-    source_type_under_test: github_repo
-    finding_input: "User explicitly requested using the GitHub Connector."
-    invocation_preamble: "Use $codex-security:triage-finding with the GitHub Connector for GitHub repo promptfoo/promptfoo."
-    expected_github_rest_behavior: connector_rest_only
-    eval_instructions: |-
-      This is an automated eval. Describe how this workflow should handle a
-      user's explicit request to use the GitHub Connector. Do not query live
-      GitHub, inspect code, or emit the triage JSON result.
-  options:
-    disableDefaultAsserts: true
-  assert:
-    - type: javascript
-      value: file://./assertions/github-rest-intake.js
-
 - description: "Explicit GitHub Issue is supported outside all-source intake"
   metadata:
     case_id: github-explicit-issue

@@ -4,8 +4,10 @@ Use this reference whenever `$triage-finding` imports Jira or Linear issues. Ret
 
 ## Source Retrieval
 
-For Jira, use the Atlassian Rovo connector when it is available:
+For Jira, use the native [Atlassian Rovo](app://asdk_app_6a83901dde988191b3f3cefdcc19acfa) app. An existing legacy connection does not establish access to this app. If the app is unavailable, disabled, or disconnected, follow Connector Failure Handling below; do not switch to the legacy Jira connector or another transport.
 
+- Resolve the authenticated identity and site with `atlassianUserInfo` and `getAccessibleAtlassianResources`. Keep that connection and site for the selected issue set; ask when the destination is ambiguous.
+- Use the app's live tool schemas. Read exact issues with `getJiraIssue` and collections with `searchJiraIssuesUsingJql`; follow every returned page. For deferred metadata operations, use the app's `discover` and `executeRead` tools. Do not invoke write tools for intake.
 - Prefer structured JQL for repeatable imported collections, ordered by a stable field such as key or created date. Use natural-language search only to discover the cloud/site, project, issue family, or first matching key from a vague phrase. After discovery, switch to JQL or exact issue fetches.
 - Jira text search tokenizes punctuation. If a hyphenated marker such as `KAN-PROMPTFOO-SYNTH` returns no rows, broaden to a stable token such as `PROMPTFOO`, then filter returned summaries for the exact family before triage.
 - Fetch exact issue URLs or keys directly when the connector supports it. For a project family or saved query, use JQL and preserve the JQL string as source provenance.
