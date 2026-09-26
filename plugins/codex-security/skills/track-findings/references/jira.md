@@ -5,17 +5,13 @@ Use this reference only when the destination is `jira`.
 ## Contract
 
 - Track one validated finding or an explicitly selected batch of up to 25. Use one Jira Cloud issue per finding.
-- Use only the native [Atlassian Rovo](app://asdk_app_6a83901dde988191b3f3cefdcc19acfa) app. Reuse needs read and search access but not write access. Create and update need all three. Stop if the app is unavailable, disconnected, cannot read the destination, or cannot perform the approved mutation.
+- Use only the native [Atlassian Rovo](app://asdk_app_6a83901dde988191b3f3cefdcc19acfa) app. Reuse requires read and search access; create and update also require write access. Stop if the app is unavailable, disconnected, or lacks access to the destination.
 - Pin one authenticated Atlassian identity, site and `cloudId`, project key, and issue type from duplicate checks through readback. Use the same destination and issue type for every item in a batch. Start a separate run for work that needs another site, project, or issue type.
 - Require the user to explicitly confirm that the project audience is approved to see the finding details. One confirmation may cover an exact reviewed batch. Jira create permission does not prove who can read the issues.
 
-Do not use the legacy Jira connector, Jira Data Center, Jira Service Management request workflows, CLI tools, direct REST, browser automation, or Computer Use.
-
 ## Tool Discovery
 
-Use the tools exposed by the selected Atlassian Rovo app and their live input schemas. The current Rovo catalog exposes primary tools directly and metadata tools through `discover` and `executeRead`. If an operation is deferred, discover it and use the returned schema and execution pathway. An `executeWrite` call is a mutation and requires the same exact preview and approval as a directly exposed write tool. Do not treat discovery as permission to write.
-
-Resolve the read, search, and intended write operations before previewing a mutation. Tool availability depends on the connection and its granted permissions. If discovery cannot provide a required operation, stop and explain which access or capability is missing. Do not substitute a similarly named tool from the legacy connection.
+Use the app's live input schemas. For deferred operations, use `discover` and the returned execution tool, such as `executeRead`. Resolve the required operations before previewing a write. If an operation is unavailable, stop and report what is missing. Writes through `executeWrite` require the same preview and approval as direct write tools.
 
 ## Destination And Fields
 
@@ -28,12 +24,9 @@ Call the Rovo tools in this order:
 
 Select the site, project, and issue type from an explicit choice in the current request or one unambiguous live result. Stop on ambiguity. Fetch every page when results are paginated. For a batch, confirm each operation required by its proposed `create`, `update`, or `reuse` outcome. Keep the destination pinned.
 
-Build each create payload from the live `createJiraIssue` schema using:
+Build each `createJiraIssue` payload from its live schema using the pinned site, project, issue type, summary, approved description, and any approved optional fields.
 
-- the pinned site, project, issue type, summary, and approved description
-- any approved optional fields supported by the schema
-
-Use Markdown when supported and select its content format explicitly when the schema exposes that choice. Use the schema's designated container for priority, components, labels, and custom fields (`additional_fields` when exposed); do not copy a payload from the legacy connector. Include every field required by live metadata. Use an optional field only after verifying its key or id and value live and getting user approval. Build update payloads from the live `editJiraIssue` schema with only the approved changed fields.
+Use Markdown when supported and select that format explicitly when the schema offers a choice. Put priority, components, labels, and custom fields in the container specified by the schema, such as `additional_fields`. Include every required field from the issue-type metadata. Verify each optional field's key or id and value against live metadata before asking for approval. Build `editJiraIssue` payloads from its live schema with only the approved changes.
 
 Never:
 

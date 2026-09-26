@@ -2,7 +2,7 @@
 
 This Promptfoo suite verifies that `$codex-security:triage-finding` accepts the current supported input source types and returns the expected `triage-finding/v0`
 JSON result shape. It also covers bare skill invocation with no supplied finding,
-which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub REST intake cases cover the repository-source control flow, and endpoint selection without querying live GitHub during the eval.
+which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub REST intake cases check source and endpoint selection without querying GitHub.
 
 The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
 
