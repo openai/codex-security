@@ -506,6 +506,29 @@ def test_diff_inventory_includes_changed_svelte(tmp_path: Path, mode: str) -> No
     assert output.read_text(encoding="utf-8") == "src/routes/+page.svelte\n"
 
 
+@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
+def test_diff_inventory_includes_changed_astro(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    source = b"---\nconst title = 'Before';\n---\n<h1>{title}</h1>\n"
+    write_file(repository, "src/pages/index.astro", source)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    write_file(repository, "src/pages/index.astro", source.replace(b"Before", b"After"))
+    arguments = ["--diff-base", base, "--diff-mode", mode]
+    if mode == "revisions":
+        git(repository, "add", ".")
+        git(repository, "commit", "-qm", "change")
+        arguments.extend(["--diff-head", git(repository, "rev-parse", "HEAD")])
+        git(repository, "checkout", "-q", base)
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output, arguments=arguments)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "src/pages/index.astro\n"
+
+
 def test_diff_inventory_keeps_every_javascript_module_extension(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     git(repository, "add", ".")

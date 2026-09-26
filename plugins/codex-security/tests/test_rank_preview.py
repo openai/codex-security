@@ -584,7 +584,8 @@ def test_fallback_preview_omits_marker_when_no_lines_are_skipped(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
-    "filename", ["styles.css", "main.tf", "ViewController.m", "Vault.sol", "Counter.svelte"]
+    "filename",
+    ["styles.css", "main.tf", "ViewController.m", "Vault.sol", "Counter.svelte", "Page.astro"],
 )
 def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(
     tmp_path: Path, filename: str

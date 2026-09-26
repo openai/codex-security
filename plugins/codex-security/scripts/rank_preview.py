@@ -15,6 +15,7 @@ PREVIEW_SAMPLE_LINES = 10
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 
 TEXT_CODE_EXTENSIONS = {
+    ".astro",
     ".c",
     ".cc",
     ".cfg",
