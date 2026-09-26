@@ -1228,36 +1228,44 @@ describe("CLI workbench", () => {
     }
   });
 
-  test("rejects Markdown rerun output like scan does", async () => {
-    const stderr = capture();
-    let started = false;
+  test.each(["scan-original", undefined])(
+    "rejects Markdown rerun output before loading scan %p",
+    async (scanId) => {
+      const stdout = capture();
+      const stderr = capture();
+      let workbenchCalls = 0;
+      let started = false;
 
-    expect(
-      await main(
-        ["scans", "rerun", "scan-original", "--format", "md"],
-        capture().stream,
-        stderr.stream,
-        dependencies({
-          onRun: () => {
-            started = true;
-          },
-          onWorkbench: () => ({
-            recipe: {
-              repository: "/original/repository",
-              target: { kind: "repository", paths: [] },
-              mode: "standard",
-              pluginVersion: "1.2.3",
-              config: {},
+      expect(
+        await main(
+          [
+            "scans",
+            "rerun",
+            ...(scanId === undefined ? [] : [scanId]),
+            "--format",
+            "md",
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onRun: () => {
+              started = true;
+            },
+            onWorkbench: () => {
+              workbenchCalls += 1;
+              return {};
             },
           }),
-        }),
-      ),
-    ).toBe(2);
-    expect(started).toBe(false);
-    expect(stderr.text()).toContain(
-      "Markdown output is not supported for scan results.",
-    );
-  });
+        ),
+      ).toBe(2);
+      expect(workbenchCalls).toBe(0);
+      expect(started).toBe(false);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "Markdown output is not supported for scan results.",
+      );
+    },
+  );
 
   test("reruns the latest completed scan by default", async () => {
     let parentScanId: unknown;

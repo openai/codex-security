@@ -17,7 +17,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { main, runCodexSkillCommand } from "../src/cli.js";
-import { CodexSecurityError, type ScanOptions } from "../src/index.js";
+import {
+  CodexSecurityError,
+  type JsonObject,
+  type ScanOptions,
+} from "../src/index.js";
 import {
   codexSecurityCredentialAllowsAmbientImport,
   prepareCodexSecurityCredentialHome,
@@ -465,11 +469,8 @@ describe("CLI authentication", () => {
     for (const [argv, selection] of [
       [["scan"], "chatgpt"],
       [["scan"], "api-key"],
-      [["scans", "rerun", "scan-original", "--verbose", "--json"], "chatgpt"],
-      [
-        ["scans", "rerun", "scan-original", "--verbose", "--format", "jsonl"],
-        "chatgpt",
-      ],
+      [["scans", "rerun", "scan-original", "--verbose"], "chatgpt"],
+      [["scans", "rerun", "scan-original", "--verbose"], "api-key"],
     ] as const) {
       const stderr = capture(true);
       let selected: ScanOptions["auth"];
@@ -586,6 +587,25 @@ describe("CLI authentication", () => {
         key: true,
       },
       {
+        argv: ["scans", "rerun", "scan-original", "--verbose", "--json"],
+        terminal: true,
+        stored: true,
+        key: true,
+      },
+      {
+        argv: ["scans", "rerun", "--format", "jsonl"],
+        terminal: true,
+        stored: true,
+        key: true,
+      },
+      ...(["chatgpt", "api-key"] as const).map((recipeAuth) => ({
+        argv: ["scans", "rerun", "scan-original", "--json"],
+        terminal: true,
+        stored: true,
+        key: true,
+        recipeAuth,
+      })),
+      {
         argv: ["scan", "--dry-run"],
         terminal: true,
         stored: true,
@@ -614,9 +634,11 @@ describe("CLI authentication", () => {
         inputInteractive: false,
       },
     ]) {
+      const stdout = capture();
       const stderr = capture(scenario.terminal);
       let selected: ScanOptions["auth"];
       let prompts = 0;
+      let discoveries = 0;
       const deps = dependencies({
         environment: scenario.key
           ? { OPENAI_API_KEY: "synthetic-private-key" }
@@ -624,10 +646,29 @@ describe("CLI authentication", () => {
         onTurn: (_repository, options) => {
           selected = (options as ScanOptions).auth;
         },
+        onWorkbench: (args): JsonObject =>
+          args[0] === "list-scans"
+            ? { scans: [{ scanId: "scan-original" }] }
+            : {
+                recipe: {
+                  repository: "/original/repository",
+                  target: { kind: "repository", paths: [] },
+                  mode: "standard",
+                  ...("recipeAuth" in scenario
+                    ? { auth: scenario.recipeAuth }
+                    : {}),
+                  config: {},
+                },
+              },
       });
-      deps.hasStoredChatGPTSignIn = async () => scenario.stored;
+      deps.hasStoredChatGPTSignIn = async () => {
+        discoveries += 1;
+        return scenario.stored;
+      };
       deps.scanAuthenticationPrompt = {
-        isInteractive: () => scenario.inputInteractive !== false,
+        isInteractive: () =>
+          !("inputInteractive" in scenario) ||
+          scenario.inputInteractive !== false,
         select: async <Value extends string>(
           _message: string,
           options: readonly { label: string; value: Value }[],
@@ -638,55 +679,28 @@ describe("CLI authentication", () => {
       };
 
       expect(
-        await main(scenario.argv, capture().stream, stderr.stream, deps),
+        await main(scenario.argv, stdout.stream, stderr.stream, deps),
       ).toBe(0);
       expect(prompts).toBe(0);
-      if (!scenario.argv.includes("--dry-run")) {
-        expect(selected).toBe(
-          scenario.argv.includes("chatgpt")
-            ? "chatgpt"
-            : scenario.argv.includes("api-key")
-              ? "api-key"
-              : "auto",
+      if (scenario.argv.includes("--json") || scenario.argv.includes("jsonl")) {
+        expect(discoveries).toBe(0);
+        expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+        expect(stderr.text()).not.toMatch(/\x1b\[/u);
+        expect(stderr.text()).not.toContain(
+          "Both a ChatGPT sign-in and an API key",
         );
       }
-      expect(stderr.text()).not.toContain("synthetic-private-key");
-    }
-  });
-
-  test("never prompts when scans rerun requests machine-readable output", async () => {
-    for (const argv of [
-      ["scans", "rerun", "scan-original", "--json"],
-      ["scans", "rerun", "scan-original", "--format", "jsonl"],
-    ]) {
-      const stderr = capture(true);
-      let prompts = 0;
-      const deps = dependencies({
-        environment: { OPENAI_API_KEY: "synthetic-private-key" },
-        onWorkbench: () => ({
-          recipe: {
-            repository: "/original/repository",
-            target: { kind: "repository", paths: [] },
-            mode: "standard",
-            pluginVersion: "1.2.3",
-            config: {},
-          },
-        }),
-      });
-      deps.hasStoredChatGPTSignIn = async () => true;
-      deps.scanAuthenticationPrompt = {
-        isInteractive: () => true,
-        select: async <Value extends string>(
-          _message: string,
-          options: readonly { label: string; value: Value }[],
-        ): Promise<Value> => {
-          prompts += 1;
-          return options[0]!.value;
-        },
-      };
-
-      expect(await main(argv, capture().stream, stderr.stream, deps)).toBe(0);
-      expect(prompts).toBe(0);
+      if (!scenario.argv.includes("--dry-run")) {
+        expect(selected).toBe(
+          "recipeAuth" in scenario
+            ? scenario.recipeAuth
+            : scenario.argv.includes("chatgpt")
+              ? "chatgpt"
+              : scenario.argv.includes("api-key")
+                ? "api-key"
+                : "auto",
+        );
+      }
       expect(stderr.text()).not.toContain("synthetic-private-key");
     }
   });
