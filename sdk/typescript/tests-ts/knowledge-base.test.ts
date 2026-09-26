@@ -130,6 +130,48 @@ describe("scan knowledge bases", () => {
     }
   });
 
+  test.each([
+    ["ASCII at the staging boundary", `${"a".repeat(246)}.md`],
+    ["ASCII beyond the staging boundary", `${"a".repeat(247)}.md`],
+    ["ASCII at the source boundary", `${"a".repeat(252)}.md`],
+    ["multibyte UTF-8", `${"文".repeat(83)}.md`],
+  ])("stages long filenames: %s", async (_description, name) => {
+    const root = await temporaryDirectory();
+    const paths: string[] = [];
+    const contents: string[] = [];
+    for (let index = 0; index < 11; index++) {
+      const directory = join(root, String(index));
+      await mkdir(directory);
+      const source = join(directory, name);
+      const text = `Document ${index}.`;
+      await writeFile(source, text);
+      paths.push(source);
+      contents.push(text);
+    }
+    const scope = join(root, "scope.md");
+    await writeFile(scope, "Review application boundaries.");
+    paths.push(scope);
+    contents.push("Review application boundaries.");
+
+    const knowledgeBase = await prepareKnowledgeBase(paths);
+    temporaryDirectories.push(knowledgeBase.path);
+
+    expect(knowledgeBase.sources).toEqual(paths);
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual(
+      [...contents].sort(),
+    );
+    expect(
+      await readFile(join(knowledgeBase.path, "11-scope.md.txt"), "utf8"),
+    ).toBe("Review application boundaries.");
+    await knowledgeBase.cleanup();
+    await expect(stat(knowledgeBase.path)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(
+      await Promise.all(paths.map((path) => readFile(path, "utf8"))),
+    ).toEqual(contents);
+  });
+
   test("cancels recursive discovery before staging knowledge-base documents", async () => {
     const root = await temporaryDirectory();
     const nested = join(root, "nested", "deeper");

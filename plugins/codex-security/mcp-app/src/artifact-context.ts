@@ -5,12 +5,12 @@ import type { ArtifactContext } from "./artifact-io.js";
 export type {
   ArtifactContext,
   DeepReducerContext,
-  DeepReducerWorkerContext
+  DeepReducerWorkerContext,
 } from "./artifact-io.js";
 
 export type RunArtifactWorkbench = (
   arguments_: string[],
-  input?: string | Buffer
+  input?: string | Buffer,
 ) => Promise<Record<string, unknown>>;
 
 export interface ScanArtifactContextOptions {
@@ -44,22 +44,24 @@ export interface WorkerArtifactContextInput {
 export async function createScanArtifactContext(
   scanId: string,
   runWorkbench: RunArtifactWorkbench,
-  options: ScanArtifactContextOptions = {}
+  options: ScanArtifactContextOptions = {},
 ): Promise<ArtifactContext> {
   if (!scanId.trim()) {
-    throw new Error("Codex Security artifact context requires a scan identity.");
+    throw new Error(
+      "Codex Security artifact context requires a scan identity.",
+    );
   }
 
   const result = await runWorkbench(["get-scan", "--scan-id", scanId]);
   const scan = scanRecord(result, scanId);
   const progress = asRecord(scan.progress);
-  const status = optionalString(progress?.status)
-    ?? optionalString(scan.status);
+  const status =
+    optionalString(progress?.status) ?? optionalString(scan.status);
   if (options.requireRunning && status !== "running") {
     throw new Error(
-      "Codex Security scan "
-      + scanId
-      + " is not running; its artifacts cannot be modified."
+      "Codex Security scan " +
+        scanId +
+        " is not running; its artifacts cannot be modified.",
     );
   }
 
@@ -67,34 +69,41 @@ export async function createScanArtifactContext(
   const suppliedClaim = options.handoffClaimToken;
   if (suppliedClaim && expectedClaim && suppliedClaim !== expectedClaim) {
     throw new Error(
-      "Codex Security scan "
-      + scanId
-      + " is owned by a different continuation."
+      "Codex Security scan " +
+        scanId +
+        " is owned by a different continuation.",
     );
   }
-  if (options.requireClaim && expectedClaim && suppliedClaim !== expectedClaim) {
+  if (
+    options.requireClaim &&
+    expectedClaim &&
+    suppliedClaim !== expectedClaim
+  ) {
     throw new Error(
-      "Codex Security scan "
-      + scanId
-      + " requires its current continuation claim."
+      "Codex Security scan " +
+        scanId +
+        " requires its current continuation claim.",
     );
   }
 
   const rawRoot = requireString(
     scan.scanDir,
-    "Codex Security scan " + scanId + " has no bound artifact context."
+    "Codex Security scan " + scanId + " has no bound artifact context.",
   );
   const rawRepoRoot = requireString(
     scan.targetPath,
-    "Codex Security scan " + scanId + " has no bound target context."
+    "Codex Security scan " + scanId + " has no bound target context.",
   );
   const targetContract = asRecord(scan.contract);
   const contractTarget = asRecord(targetContract?.target);
   return {
-    root: await canonicalDirectory(rawRoot, "Codex Security scan artifact root"),
+    root: await canonicalDirectory(
+      rawRoot,
+      "Codex Security scan artifact root",
+    ),
     repoRoot: await canonicalDirectory(
       rawRepoRoot,
-      "Codex Security scan target root"
+      "Codex Security scan target root",
     ),
     layout: "scan",
     scanId,
@@ -105,12 +114,12 @@ export async function createScanArtifactContext(
     ...defined("targetRevision", optionalString(scan.targetRevision)),
     ...defined(
       "targetSnapshotDigest",
-      optionalString(scan.targetSnapshotDigest)
-      ?? optionalString(contractTarget?.requiredSnapshotDigest)
+      optionalString(scan.targetSnapshotDigest) ??
+        optionalString(contractTarget?.requiredSnapshotDigest),
     ),
     ...defined("handoffClaimToken", suppliedClaim ?? expectedClaim),
     ...defined("status", status),
-    ...defined("mode", optionalString(scan.mode))
+    ...defined("mode", optionalString(scan.mode)),
   };
 }
 
@@ -118,7 +127,7 @@ export async function createScanArtifactContext(
  * Bind a lightweight worker to host-supplied state, never model-supplied paths.
  */
 export async function createWorkerArtifactContext(
-  input: WorkerArtifactContextInput
+  input: WorkerArtifactContextInput,
 ): Promise<ArtifactContext> {
   const layout = input.layout ?? "worker";
   if (layout !== "worker" && layout !== "reducer") {
@@ -127,11 +136,11 @@ export async function createWorkerArtifactContext(
   const context: ArtifactContext = {
     root: await canonicalDirectory(
       input.root,
-      "Codex Security worker artifact root"
+      "Codex Security worker artifact root",
     ),
     repoRoot: await canonicalDirectory(
       input.repoRoot,
-      "Codex Security worker target root"
+      "Codex Security worker target root",
     ),
     layout,
     ...defined("scanId", input.scanId),
@@ -144,24 +153,26 @@ export async function createWorkerArtifactContext(
     ...defined("handoffClaimToken", input.handoffClaimToken),
     ...defined("status", input.status),
     ...defined("mode", input.mode),
-    ...defined("deepReducer", input.deepReducer)
+    ...defined("deepReducer", input.deepReducer),
   };
   if (context.deepReducer && layout !== "reducer") {
-    throw new Error("Codex Security reducer state requires a reducer-bound context.");
+    throw new Error(
+      "Codex Security reducer state requires a reducer-bound context.",
+    );
   }
   return context;
 }
 
 function scanRecord(
   result: Record<string, unknown>,
-  scanId: string
+  scanId: string,
 ): Record<string, unknown> {
   const nested = asRecord(result.scan);
   const direct = result.scanId === scanId ? result : undefined;
   const scan = nested ?? direct;
   if (!scan || scan.scanId !== scanId) {
     throw new Error(
-      "Codex Security workbench did not return the requested scan identity."
+      "Codex Security workbench did not return the requested scan identity.",
     );
   }
   return scan;
@@ -169,7 +180,7 @@ function scanRecord(
 
 async function canonicalDirectory(
   value: string,
-  label: string
+  label: string,
 ): Promise<string> {
   if (!value || !isAbsolute(value)) {
     throw new Error(label + " must be an absolute directory.");
@@ -198,13 +209,13 @@ function optionalString(value: unknown): string | undefined {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : undefined;
 }
 
 function defined<Key extends string, Value>(
   key: Key,
-  value: Value | undefined
+  value: Value | undefined,
 ): Partial<Record<Key, Value>> {
-  return value === undefined ? {} : { [key]: value } as Record<Key, Value>;
+  return value === undefined ? {} : ({ [key]: value } as Record<Key, Value>);
 }

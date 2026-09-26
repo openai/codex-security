@@ -10,6 +10,14 @@ export type {
 } from "./project-config-schema.js";
 export type { ScanSettings } from "./scan-settings.js";
 export { classifySeverity } from "./classify-severity.js";
+export { suggestOwners } from "./suggest-owners.js";
+export type {
+  OwnerFinding,
+  OwnerIdentity,
+  OwnerSuggestion,
+  OwnerSuggestions,
+  SuggestOwnersOptions,
+} from "./suggest-owners.js";
 export type {
   ClassifySeverityOptions,
   SeverityClassificationFinding,
@@ -120,6 +128,16 @@ export type {
   PublishScanToCustomOptions,
   CustomPublicationResult,
 } from "./custom-publish.js";
+export { deduplicateRecords } from "./deduplication/records.js";
+export type {
+  DeduplicateRecordsInput,
+  DeduplicateRecordsOptions,
+  DeduplicateRecordsResult,
+} from "./deduplication/records.js";
+export type {
+  DeduplicationReviewRequest,
+  DeduplicationReviewRunner,
+} from "./deduplication/review.js";
 export {
   deduplicateScan,
   deduplicateScanDirectory,
