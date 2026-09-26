@@ -43,8 +43,7 @@ export interface FailedCreateEvidence {
 }
 
 export type PublicationEventEvidence =
-  | CompletedCreateEvidence
-  | FailedCreateEvidence;
+  CompletedCreateEvidence | FailedCreateEvidence;
 
 export function collectPublicationEvents(
   output: string,
@@ -200,11 +199,14 @@ export function resolveClaims(
   if (identifiers.size === 0) {
     return { state: "absent", claims: retained };
   }
+  const url =
+    [...urls].find((value) => /^https:\/\//iu.test(value)) ??
+    urls.values().next().value;
   return {
     state: "resolved",
     claims: retained,
     issueIdentifier: identifiers.values().next().value!,
-    ...(urls.size === 0 ? {} : { url: urls.values().next().value! }),
+    ...(url === undefined ? {} : { url }),
   };
 }
 
@@ -314,7 +316,12 @@ function linearIssueReferenceFromUrl(
   } catch {
     return undefined;
   }
-  if (url.protocol !== "https:" || url.hostname !== "linear.app") {
+  // Recognize every scheme linearIssueReference parses, so a plain HTTP URL
+  // still resolves to the issue it names instead of an unrecognized claim.
+  if (
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    url.hostname !== "linear.app"
+  ) {
     return undefined;
   }
   try {

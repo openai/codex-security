@@ -166,22 +166,19 @@ test.each([
   },
 );
 
-test("does not retry Windows executable permission failures", async () => {
+test("keeps Windows executable permission failures retryable", async () => {
   const runtime = await loadBundledRuntime();
   const source =
     /function classifyCodexWorkerError\([^\n]*\) \{[\s\S]*?\n\}/u.exec(
       runtime,
     )?.[0];
   expect(source).toBeDefined();
-  class NonRetryableError extends Error {}
   const classify = new Function(
-    "DeepScanNonRetryableError",
     `${source}\nreturn classifyCodexWorkerError;`,
-  )(NonRetryableError) as (error: Error) => Error;
+  )() as (error: Error) => Error;
   const original = Object.assign(new Error("spawn codex EPERM"), {
     code: "EPERM",
   });
   const result = classify(original);
-  expect(result).toBeInstanceOf(NonRetryableError);
-  expect(result.cause).toBe(original);
+  expect(result).toBe(original);
 });

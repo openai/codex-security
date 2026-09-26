@@ -49,7 +49,7 @@ function tar(args, encoding = "buffer") {
 
 let offset = 0;
 const archiveFiles = new Map();
-for (; offset + 512 <= archiveBytes.byteLength; ) {
+for (; offset + 512 <= archiveBytes.byteLength;) {
   const header = archiveBytes.subarray(offset, offset + 512);
   if (header.every((byte) => byte === 0)) {
     offset += 512;
@@ -103,11 +103,13 @@ if (files.size !== entries.length) {
 const required = [
   "package/package.json",
   "package/README.md",
+  "package/docs/dedupe-records.md",
   "package/LICENSE",
   "package/bin/codex-security.mjs",
   "package/dist/index.js",
   "package/dist/index.d.ts",
   "package/dist/cli.js",
+  "package/schemas/project-config.schema.json",
   "package/_bundled_plugin/.codex-plugin/plugin.json",
 ];
 
@@ -159,8 +161,10 @@ for (const file of pluginFiles) {
 const allowedRoot = new Set([
   "package/package.json",
   "package/README.md",
+  "package/docs/dedupe-records.md",
   "package/LICENSE",
   "package/bin/codex-security.mjs",
+  "package/schemas/project-config.schema.json",
 ]);
 const distFiles = new Set(
   [
@@ -168,6 +172,7 @@ const distFiles = new Set(
     "auth",
     "bulk-scan-discovery",
     "cli",
+    "cli-scan-logs-json",
     "classify-severity",
     "classify-scan-severity",
     "severity-store",
@@ -176,6 +181,7 @@ const distFiles = new Set(
     "component-plan",
     "component-scan",
     "config",
+    "config-path",
     "contract",
     "cost",
     "cost-model",
@@ -183,15 +189,26 @@ const distFiles = new Set(
     "custom-validation-prompt",
     "custom-publish",
     "deep-progress",
+    "deep-config",
+    "deep-scan-defaults",
+    "project-config",
+    "project-config-schema",
+    "prompt-files",
+    "scan-modes",
+    "scan-settings",
     "errors",
+    "feedback",
     "finding-catalogue",
+    "findings-import",
     "github",
     "index",
+    "import-scan",
     "knowledge-base",
     "linear",
     "models",
     "multiscan",
     "mock-scan",
+    "owner-evidence",
     "patch-tui",
     "publication",
     "publication-events",
@@ -204,11 +221,16 @@ const distFiles = new Set(
     "scan-dashboard",
     "scan-history-renderer",
     "scan-logs",
+    "security-policy",
+    "security-policy-cli",
+    "suggest-owners",
     "scan-sessions",
     "server/index",
     "server/api",
     "deduplication/codex-review",
     "deduplication/checkpointed-review",
+    "deduplication/refusal",
+    "deduplication/retry",
     "deduplication/deduplication",
     "finding-retrieval",
     "finding-workflow",
@@ -217,6 +239,10 @@ const distFiles = new Set(
     "deduplication/deduplication-prompts",
     "deduplication/deduplication-reviewer",
     "deduplication/scan",
+    "deduplication/finding-schema",
+    "deduplication/records",
+    "deduplication/records-protocol",
+    "deduplication/review",
     "saved-scan",
     "server/embeddings",
     "server/dashboard",
@@ -259,6 +285,8 @@ for (const file of files) {
   const allowed = file.endsWith("/")
     ? normalized === "package" ||
       normalized === "package/bin" ||
+      normalized === "package/schemas" ||
+      normalized === "package/docs" ||
       normalized === "package/dist" ||
       normalized === "package/dist/server" ||
       normalized === "package/dist/server/dashboard" ||

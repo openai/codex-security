@@ -1,5 +1,23 @@
 export { CodexSecurity, createSecurity } from "./api.js";
+export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
+export type {
+  ResolvedProjectConfig,
+  ProjectConfigProvenance,
+} from "./project-config.js";
+export type {
+  ProjectConfigInput,
+  ProjectScope,
+} from "./project-config-schema.js";
+export type { ScanSettings } from "./scan-settings.js";
 export { classifySeverity } from "./classify-severity.js";
+export { suggestOwners } from "./suggest-owners.js";
+export type {
+  OwnerFinding,
+  OwnerIdentity,
+  OwnerSuggestion,
+  OwnerSuggestions,
+  SuggestOwnersOptions,
+} from "./suggest-owners.js";
 export type {
   ClassifySeverityOptions,
   SeverityClassificationFinding,
@@ -93,12 +111,33 @@ export type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
 export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
+export {
+  resolveSecurityPolicyTarget,
+  securityPolicyDiff,
+} from "./security-policy.js";
+export type {
+  SecurityPolicyDraft,
+  SecurityPolicyOptions,
+  SecurityPolicyPreflight,
+  SecurityPolicyStage,
+  SecurityPolicyTarget,
+} from "./security-policy.js";
 export { checkScanPublication, publishScan } from "./publish.js";
 export { publishScanToCustom } from "./custom-publish.js";
 export type {
   PublishScanToCustomOptions,
   CustomPublicationResult,
 } from "./custom-publish.js";
+export { deduplicateRecords } from "./deduplication/records.js";
+export type {
+  DeduplicateRecordsInput,
+  DeduplicateRecordsOptions,
+  DeduplicateRecordsResult,
+} from "./deduplication/records.js";
+export type {
+  DeduplicationReviewRequest,
+  DeduplicationReviewRunner,
+} from "./deduplication/review.js";
 export {
   deduplicateScan,
   deduplicateScanDirectory,
@@ -108,6 +147,7 @@ export type {
   DeduplicateScanOptions,
   DeduplicateScanResult,
 } from "./deduplication/scan.js";
+export type { DeduplicationRefusal } from "./deduplication/deduplication.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,
@@ -158,4 +198,5 @@ export {
   validateMode,
 } from "./targets.js";
 export type { NormalizedTarget, ScanMode, ScanTarget } from "./targets.js";
+export type { AbsolutePath } from "./config-path.js";
 export { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";

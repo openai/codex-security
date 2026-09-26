@@ -18,7 +18,7 @@ async function main(): Promise<void> {
         artifactWriter
           ? "Codex Security artifact writer failed to close:"
           : "Codex Security MCP server failed to close:",
-        error
+        error,
       );
     });
   };
@@ -32,7 +32,7 @@ main().catch((error) => {
     process.argv.includes("--artifact-writer")
       ? "Codex Security artifact writer failed to start:"
       : "Codex Security MCP server failed to start:",
-    error
+    error,
   );
   process.exitCode = 1;
 });

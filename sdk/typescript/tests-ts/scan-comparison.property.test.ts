@@ -49,6 +49,80 @@ function compare(
 }
 
 describe("finding-comparison invariants", () => {
+  test("keeps transitive identity groups separate across repeated occurrences", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          fc.record({
+            before: fc.integer({ min: 0, max: 4 }),
+            after: fc.integer({ min: 0, max: 4 }),
+          }),
+          { minLength: 1, maxLength: 20 },
+        ),
+        async (counts) => {
+          const before = counts.flatMap((count, group) =>
+            Array.from({ length: count.before }, (_, occurrence) => ({
+              occurrenceId: `before-${group}-${occurrence}`,
+              findingId: `old-${group}`,
+            })),
+          );
+          const after = counts.flatMap((count, group) =>
+            Array.from({ length: count.after }, (_, occurrence) => ({
+              occurrenceId: `after-${group}-${occurrence}`,
+              findingId: `new-${group}`,
+            })),
+          );
+          const knownFindingGroups = counts.flatMap((_, group) => [
+            [`old-${group}`, `historical-${group}`],
+            [`historical-${group}`, `new-${group}`],
+          ]);
+          const expected = counts
+            .flatMap((count, group) =>
+              count.before > 0 && count.after > 0
+                ? [
+                    [
+                      Array.from(
+                        { length: count.before },
+                        (_, occurrence) => `before-${group}-${occurrence}`,
+                      ),
+                      Array.from(
+                        { length: count.after },
+                        (_, occurrence) => `after-${group}-${occurrence}`,
+                      ),
+                    ],
+                  ]
+                : [],
+            )
+            .sort();
+
+          for (const input of [
+            { before, after, knownFindingGroups },
+            {
+              before: [...before].reverse(),
+              after: [...after].reverse(),
+              knownFindingGroups: [...knownFindingGroups].reverse(),
+            },
+          ]) {
+            const result = await compare(input, {
+              matches: [],
+              uncertain: [],
+            });
+            expect(
+              result.matches
+                .map(({ beforeOccurrenceIds, afterOccurrenceIds }) => [
+                  [...beforeOccurrenceIds].sort(),
+                  [...afterOccurrenceIds].sort(),
+                ])
+                .sort(),
+            ).toEqual(expected);
+            expect(result.uncertain).toEqual([]);
+          }
+        },
+      ),
+      propertyOptions,
+    );
+  });
+
   test("preserves valid identities regardless of finding order", async () => {
     await fc.assert(
       fc.asyncProperty(identities, async (ids) => {

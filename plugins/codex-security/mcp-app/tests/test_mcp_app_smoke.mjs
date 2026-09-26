@@ -88,6 +88,7 @@ assert.deepEqual(
     "PYTHON",
     "PYTHONUTF8",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
+    "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SECURITY_SCAN_ROOT",
     "CODEX_SECURITY_STATE_DIR",
@@ -107,17 +108,14 @@ const scanHandoffSource = await readFile(
   path.join(mcpAppRoot, "src", "scan-handoff.ts"),
   "utf8",
 );
-const serverSource = await readFile(
-  path.join(mcpAppRoot, "server.ts"),
-  "utf8",
-);
+const serverSource = await readFile(path.join(mcpAppRoot, "server.ts"), "utf8");
 assert.match(
   serverSource,
-  /timeout:\s*\[[^\]]*"start-prompt-only-scan"[^\]]*\]\.includes\(args\[0\] \?\? ""\) \? 300_000 : 30_000/,
+  /timeout:\s*\[[^\]]*"start-prompt-only-scan"[^\]]*\]\.includes\(args\[0\] \?\? ""\)\s*\?\s*300_000\s*:\s*30_000/,
   "Prompt-only scan startup must use the same five-minute timeout as other scan starts.",
 );
 const authenticatedArtifactClaimSource = serverSource.match(
-  /if \(\s*handoffClaimToken\s*&& threadId[\s\S]*?authenticatedArtifactClaims\.set\(scanId,[\s\S]*?\n\s*\}/,
+  /if \(\s*handoffClaimToken\s*&&\s*threadId[\s\S]*?authenticatedArtifactClaims\.set\(scanId,[\s\S]*?\n\s*\}/,
 )?.[0];
 assert.ok(
   authenticatedArtifactClaimSource,
@@ -359,7 +357,11 @@ async function assertBundledNodeLauncher() {
   const emptyPath = await mkdtemp(
     path.join(tmpdir(), "codex-security-empty-path-"),
   );
-  const launcherPath = path.join(pluginRoot, "scripts", "launch_codex_security_mcp");
+  const launcherPath = path.join(
+    pluginRoot,
+    "scripts",
+    "launch_codex_security_mcp",
+  );
   const windows = process.platform === "win32";
   if (!windows) {
     const bundledNodePath = path.join(
@@ -378,8 +380,12 @@ async function assertBundledNodeLauncher() {
       ? ["/d", "/s", "/c", "call", `${launcherPath}.cmd`, "--stdio"]
       : ["--stdio"],
     command: windows
-      ? process.env.ComSpec ??
-        path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe")
+      ? (process.env.ComSpec ??
+        path.join(
+          process.env.SystemRoot ?? "C:\\Windows",
+          "System32",
+          "cmd.exe",
+        ))
       : launcherPath,
     cwd: emptyPath,
     env: {
@@ -397,12 +403,18 @@ async function assertBundledNodeLauncher() {
       await bundledNodeServer.requestAndWait(1, "initialize", {
         protocolVersion: "2025-11-25",
         capabilities: {},
-        clientInfo: { name: "codex-security-bundled-node-smoke", version: "0.1.0" },
+        clientInfo: {
+          name: "codex-security-bundled-node-smoke",
+          version: "0.1.0",
+        },
       }),
     );
     assertNoError(await bundledNodeServer.requestAndWait(2, "tools/list"));
     if (!windows) {
-      assert.equal(await readFile(path.join(emptyPath, "bundled-node-used"), "utf8"), "bundled");
+      assert.equal(
+        await readFile(path.join(emptyPath, "bundled-node-used"), "utf8"),
+        "bundled",
+      );
     }
   } finally {
     bundledNodeServer.stop();
@@ -591,9 +603,8 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     },
   });
   const ownerThread = "fixture-headless-standard-thread";
-  const headlessContext = (
-    `Review https://example.test/internal. ${"Assess the HTTP boundary. ".repeat(44_000)}`
-  ).trim();
+  const headlessContext =
+    `Review https://example.test/internal. ${"Assess the HTTP boundary. ".repeat(44_000)}`.trim();
   assert.ok(headlessContext.length > 1_000_000);
   try {
     assertNoError(
@@ -608,7 +619,10 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       arguments: { targetPath: target },
     });
     assert.equal(withoutOwner.result.isError, true);
-    assert.match(withoutOwner.result.content[0].text, /owning Codex thread context/);
+    assert.match(
+      withoutOwner.result.content[0].text,
+      /owning Codex thread context/,
+    );
 
     const started = await headlessServer.requestAndWait(3, "tools/call", {
       name: "start_codex_security_standard_scan",
@@ -664,18 +678,28 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": "fixture-headless-other-thread" },
     });
     assert.equal(wrongThread.result.isError, true);
-    assert.match(wrongThread.result.content[0].text, /current continuation claim/);
+    assert.match(
+      wrongThread.result.content[0].text,
+      /current continuation claim/,
+    );
 
-    const standardInventory = await headlessServer.requestAndWait(7, "tools/call", {
-      name: "list_codex_security_review_items",
-      arguments: {
-        scanId: result.scanId,
-        handoffClaimToken: result.handoffClaimToken,
+    const standardInventory = await headlessServer.requestAndWait(
+      7,
+      "tools/call",
+      {
+        name: "list_codex_security_review_items",
+        arguments: {
+          scanId: result.scanId,
+          handoffClaimToken: result.handoffClaimToken,
+        },
+        _meta: { "openai/threadId": "fixture-headless-delegated-thread" },
       },
-      _meta: { "openai/threadId": "fixture-headless-delegated-thread" },
-    });
+    );
     assert.equal(standardInventory.result.isError, true);
-    assert.match(standardInventory.result.content[0].text, /only available for Deep or diff scans/);
+    assert.match(
+      standardInventory.result.content[0].text,
+      /only available for Deep or diff scans/,
+    );
 
     const progressed = await headlessServer.requestAndWait(8, "tools/call", {
       name: "update_codex_security_scan_progress",
@@ -698,17 +722,27 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": ownerThread },
     });
     assertNoError(advanced);
-    const rejoinedAfterPreflight = await headlessServer.requestAndWait(82, "tools/call", {
-      name: "start_codex_security_standard_scan",
-      arguments: {
-        targetPath: target,
-        userContext: headlessContext,
+    const rejoinedAfterPreflight = await headlessServer.requestAndWait(
+      82,
+      "tools/call",
+      {
+        name: "start_codex_security_standard_scan",
+        arguments: {
+          targetPath: target,
+          userContext: headlessContext,
+        },
+        _meta: { "openai/threadId": ownerThread },
       },
-      _meta: { "openai/threadId": ownerThread },
-    });
+    );
     assertNoError(rejoinedAfterPreflight);
-    assert.equal(rejoinedAfterPreflight.result.structuredContent.startDisposition, "joined");
-    assert.equal(rejoinedAfterPreflight.result.structuredContent.scan.progress.phase, "threat_model");
+    assert.equal(
+      rejoinedAfterPreflight.result.structuredContent.startDisposition,
+      "joined",
+    );
+    assert.equal(
+      rejoinedAfterPreflight.result.structuredContent.scan.progress.phase,
+      "threat_model",
+    );
 
     await writeCompletedContract(
       result.scanDir,
@@ -724,7 +758,10 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": ownerThread },
     });
     assertNoError(completed);
-    assert.equal(completed.result.structuredContent.scan.progress.status, "complete");
+    assert.equal(
+      completed.result.structuredContent.scan.progress.status,
+      "complete",
+    );
   } finally {
     await headlessServer.stop();
     await rm(headlessStateDir, { recursive: true, force: true });
@@ -732,7 +769,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   }
 }
 
-async function assertDeepScanPersistsWorkerStartupFailure() {
+async function assertDeepScanPersistsRetryableWorkerStartupError() {
   const fixtureRoot = await mkdtemp(
     path.join(tmpdir(), "codex-security-deep-inventory-"),
   );
@@ -742,13 +779,14 @@ async function assertDeepScanPersistsWorkerStartupFailure() {
   await mkdir(path.join(fixtureTarget, "app"), { recursive: true });
   await writeFile(path.join(fixtureTarget, "app", "routes.py"), "route = 1\n");
 
+  const fixtureEnvironment = {
+    CODEX_CLI_PATH: path.join(fixtureRoot, "missing-deep-scan-codex"),
+    CODEX_SECURITY_SCAN_ROOT: fixtureScanRoot,
+    CODEX_SECURITY_STATE_DIR: fixtureState,
+  };
   const deepServer = startTestServer({
     cwd: pluginRoot,
-    env: {
-      CODEX_CLI_PATH: path.join(fixtureRoot, "missing-deep-scan-codex"),
-      CODEX_SECURITY_SCAN_ROOT: fixtureScanRoot,
-      CODEX_SECURITY_STATE_DIR: fixtureState,
-    },
+    env: fixtureEnvironment,
   });
   try {
     assertNoError(
@@ -762,7 +800,7 @@ async function assertDeepScanPersistsWorkerStartupFailure() {
       }),
     );
 
-    const started = await deepServer.requestAndWait(2, "tools/call", {
+    deepServer.sendRequest(2, "tools/call", {
       name: "start_codex_security_deep_scan",
       arguments: { targetPath: fixtureTarget },
       _meta: {
@@ -770,22 +808,73 @@ async function assertDeepScanPersistsWorkerStartupFailure() {
         "codex/sandbox-state-meta": parentSandboxState,
       },
     });
-    assert.equal(started.result.isError, true);
-    assert.match(
-      started.result.content.map((item) => item.text).join(" "),
-      /missing-deep-scan-codex/,
+    let scan;
+    let startupErrorWorker;
+    const pollingStarted = Date.now();
+    for (
+      let requestId = 100;
+      Date.now() - pollingStarted < 30_000;
+      requestId++
+    ) {
+      const listed = await deepServer.requestAndWait(requestId, "tools/call", {
+        name: "list_codex_security_scans",
+        arguments: {},
+      });
+      assertNoError(listed);
+      [scan] = listed.result.structuredContent.scans;
+      if (scan) {
+        assert.equal(listed.result.structuredContent.scans.length, 1);
+        assert.equal(scan.progress.status, "running");
+        const { deepScan } = JSON.parse(
+          execFileSync(
+            process.env.PYTHON?.trim() || "python3",
+            [
+              path.join(pluginRoot, "scripts", "workbench_db.py"),
+              "get-deep-scan",
+              "--scan-id",
+              scan.scanId,
+              "--thread-id",
+              "fixture-deep-inventory-thread",
+            ],
+            {
+              env: { ...process.env, ...fixtureEnvironment },
+              encoding: "utf8",
+            },
+          ),
+        );
+        assert.equal(deepScan.status, "running");
+        startupErrorWorker = deepScan.workers.find((worker) =>
+          worker.error?.includes("missing-deep-scan-codex"),
+        );
+        if (startupErrorWorker) break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(
+      startupErrorWorker,
+      "Expected a persisted retryable startup error",
     );
+    assert.equal(startupErrorWorker.status, "running");
 
-    const listed = await deepServer.requestAndWait(3, "tools/call", {
-      name: "list_codex_security_scans",
-      arguments: {},
+    const canceled = await deepServer.requestAndWait(3, "tools/call", {
+      name: "cancel_codex_security_scan",
+      arguments: { scanId: scan.scanId },
+      _meta: { "openai/threadId": "fixture-deep-inventory-thread" },
     });
-    assertNoError(listed);
-    assert.equal(listed.result.structuredContent.scans.length, 1);
-    const scan = listed.result.structuredContent.scans[0];
-    assert.equal(scan.progress.status, "failed");
+    assertNoError(canceled);
+    await deepServer.waitForMessage(
+      (message) => message.id === 2,
+      "Deep Scan start response after cancellation",
+    );
     await assert.rejects(
-      readFile(path.join(scan.scanDir, "artifacts", "02_discovery", "in_scope_files.txt")),
+      readFile(
+        path.join(
+          scan.scanDir,
+          "artifacts",
+          "02_discovery",
+          "in_scope_files.txt",
+        ),
+      ),
       { code: "ENOENT" },
     );
 
@@ -819,8 +908,14 @@ async function assertDeepScanPersistsWorkerStartupFailure() {
       .map((item) => item.text)
       .join(" ");
     assert.equal(canceledWithPublicationFailure.result.isError, true);
-    assert.equal(canceledWithPublicationFailure.result.structuredContent, undefined);
-    assert.match(publicationFailureText, /fixture retained result publication failure/);
+    assert.equal(
+      canceledWithPublicationFailure.result.structuredContent,
+      undefined,
+    );
+    assert.match(
+      publicationFailureText,
+      /fixture retained result publication failure/,
+    );
   } finally {
     await deepServer.stop();
     await rm(fixtureRoot, { recursive: true, force: true });
@@ -1078,8 +1173,377 @@ try {
     initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
     {},
   );
-  assert.deepEqual(initialized.result.capabilities.extensions["com.openai"], {});
+  assert.deepEqual(
+    initialized.result.capabilities.extensions["com.openai"],
+    {},
+  );
   assert.deepEqual(initialized.result.capabilities.logging, {});
+
+  const trustedAccessToolList = await requestAndWait(9600, "tools/list");
+  assertNoError(trustedAccessToolList);
+  const trustedAccessTool = trustedAccessToolList.result.tools.find(
+    (tool) => tool.name === "get_codex_security_daybreak_access",
+  );
+  assert.ok(
+    trustedAccessTool,
+    "Expected the plugin-owned Daybreak access tool.",
+  );
+  assert.doesNotMatch(
+    JSON.stringify({
+      name: trustedAccessTool.name,
+      title: trustedAccessTool.title,
+      description: trustedAccessTool.description,
+    }),
+    /\btac(?:[123])?\b/i,
+  );
+  assert.deepEqual(trustedAccessTool.inputSchema.properties, {});
+  assert.deepEqual(trustedAccessTool.inputSchema.required ?? [], []);
+  assert.deepEqual(trustedAccessTool._meta.ui.visibility, ["model"]);
+  assert.deepEqual(trustedAccessTool._meta["openai/requestedEntitlements"], [
+    "cyber_trusted_access",
+  ]);
+  assert.equal(trustedAccessTool.annotations.readOnlyHint, true);
+  assert.equal(trustedAccessTool.annotations.destructiveHint, false);
+  assert.equal(trustedAccessTool.annotations.openWorldHint, false);
+
+  const unknownTrustedAccess = await requestAndWait(9601, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+  });
+  assertNoError(unknownTrustedAccess);
+  assert.equal(unknownTrustedAccess.result._meta, undefined);
+  assert.deepEqual(
+    {
+      ...unknownTrustedAccess.result.structuredContent,
+      checkedAt: undefined,
+    },
+    {
+      schemaVersion: 1,
+      status: "unknown",
+      programs: [],
+      checkedAt: undefined,
+      stale: false,
+    },
+  );
+  assert.ok(
+    Number.isFinite(
+      Date.parse(unknownTrustedAccess.result.structuredContent.checkedAt),
+    ),
+  );
+  assert.doesNotMatch(
+    unknownTrustedAccess.result.content[0].text,
+    /protected results may not be displayable/,
+  );
+
+  const grantedTrustedAccess = {
+    schemaVersion: 1,
+    status: "granted",
+    grants: [
+      { level: "tac1", source: "user" },
+      { level: "tac3", source: "current_account" },
+      { level: "tac2", source: "user" },
+      { level: "tac1", source: "project" },
+      { level: "government", source: "current_account" },
+    ],
+    checkedAt: "2026-07-13T12:00:00.000Z",
+    stale: false,
+  };
+  const grantedDaybreakAccess = {
+    schemaVersion: 1,
+    status: "granted",
+    programs: ["Daybreak Blue", "Daybreak Red"],
+    checkedAt: "2026-07-13T12:00:00.000Z",
+    stale: false,
+  };
+  const hostedTrustedAccess = await requestAndWait(9602, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-trusted-access-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: grantedTrustedAccess,
+        },
+      },
+    },
+  });
+  assertNoError(hostedTrustedAccess);
+  assert.equal(hostedTrustedAccess.result._meta, undefined);
+  assert.deepEqual(
+    hostedTrustedAccess.result.structuredContent,
+    grantedDaybreakAccess,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(hostedTrustedAccess.result),
+    /\btac(?:[123])?\b/i,
+  );
+  assert.match(hostedTrustedAccess.result.content[0].text, /Daybreak Blue/);
+  assert.match(hostedTrustedAccess.result.content[0].text, /Daybreak Red/);
+
+  const invalidGrantPairs = [
+    { level: "tac2", source: "project" },
+    { level: "tac2", source: "current_account" },
+    { level: "tac3", source: "user" },
+    { level: "tac3", source: "project" },
+    { level: "government", source: "user" },
+    { level: "government", source: "project" },
+  ];
+  for (const [index, invalidGrant] of invalidGrantPairs.entries()) {
+    const response = await requestAndWait(9620 + index, "tools/call", {
+      name: "get_codex_security_daybreak_access",
+      arguments: {},
+      _meta: {
+        threadId: "fixture-invalid-grant-thread",
+        "openai/entitlementContext": {
+          schemaVersion: 1,
+          entitlements: {
+            cyber_trusted_access: {
+              ...grantedTrustedAccess,
+              grants: [{ level: "tac1", source: "user" }, invalidGrant],
+            },
+          },
+        },
+      },
+    });
+    assertNoError(response);
+    assert.equal(response.result.structuredContent.status, "unknown");
+    assert.deepEqual(response.result.structuredContent.programs, []);
+  }
+
+  const staleGrantedAccess = await requestAndWait(9626, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-stale-granted-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: { ...grantedTrustedAccess, stale: true },
+        },
+      },
+    },
+  });
+  assertNoError(staleGrantedAccess);
+  assert.deepEqual(staleGrantedAccess.result.structuredContent, {
+    schemaVersion: 1,
+    status: "unknown",
+    programs: [],
+    checkedAt: grantedTrustedAccess.checkedAt,
+    stale: true,
+  });
+  assert.doesNotMatch(
+    staleGrantedAccess.result.content[0].text,
+    /protected results may not be displayable/,
+  );
+
+  const untrustedReplay = await requestAndWait(9603, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: { threadId: "fixture-trusted-access-thread" },
+  });
+  assertNoError(untrustedReplay);
+  assert.equal(untrustedReplay.result._meta, undefined);
+  assert.equal(untrustedReplay.result.structuredContent.status, "unknown");
+
+  const deniedTrustedAccess = {
+    schemaVersion: 1,
+    status: "not_granted",
+    grants: [],
+    checkedAt: "2026-07-13T12:01:00.000Z",
+    stale: false,
+    enrollmentUrl: "https://chatgpt.com/cyber",
+  };
+  const refreshedTrustedAccess = await requestAndWait(9604, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-trusted-access-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: deniedTrustedAccess,
+        },
+      },
+    },
+  });
+  assertNoError(refreshedTrustedAccess);
+  assert.equal(refreshedTrustedAccess.result._meta, undefined);
+  assert.deepEqual(refreshedTrustedAccess.result.structuredContent, {
+    schemaVersion: 1,
+    status: "not_granted",
+    programs: [],
+    checkedAt: "2026-07-13T12:01:00.000Z",
+    stale: false,
+    enrollmentUrl: "https://chatgpt.com/cyber",
+  });
+  assert.doesNotMatch(
+    JSON.stringify(refreshedTrustedAccess.result),
+    /\btac(?:[123])?\b/i,
+  );
+  assert.match(
+    refreshedTrustedAccess.result.content[0].text,
+    /protected results may not be displayable/,
+  );
+
+  const timestampedTrustedAccess = await requestAndWait(9608, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-timestamped-trusted-access-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: {
+            schemaVersion: 1,
+            status: "granted",
+            grants: [{ level: "tac2", source: "user" }],
+            stale: false,
+          },
+        },
+      },
+    },
+  });
+  assertNoError(timestampedTrustedAccess);
+  assert.equal(
+    timestampedTrustedAccess.result.structuredContent.status,
+    "granted",
+  );
+  assert.deepEqual(timestampedTrustedAccess.result.structuredContent.programs, [
+    "Daybreak Blue",
+  ]);
+  assert.ok(
+    Number.isFinite(
+      Date.parse(timestampedTrustedAccess.result.structuredContent.checkedAt),
+    ),
+  );
+
+  const unownedTrustedAccess = await requestAndWait(9605, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      "openai/threadId": "fixture-spoofed-missing-canonical-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: grantedTrustedAccess,
+        },
+      },
+    },
+  });
+  assertNoError(unownedTrustedAccess);
+  assert.equal(unownedTrustedAccess.result.structuredContent.status, "unknown");
+
+  const malformedTrustedAccess = await requestAndWait(9606, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-malformed-trusted-access-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: {
+            ...grantedTrustedAccess,
+            grants: [],
+          },
+        },
+      },
+    },
+  });
+  assertNoError(malformedTrustedAccess);
+  assert.equal(
+    malformedTrustedAccess.result.structuredContent.status,
+    "unknown",
+  );
+
+  const argumentTrustedAccess = await requestAndWait(9607, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: grantedTrustedAccess,
+        },
+      },
+    },
+    _meta: { threadId: "fixture-argument-trusted-access-thread" },
+  });
+  assert.equal(argumentTrustedAccess.result.isError, true);
+
+  const replayedTrustedAccess = await requestAndWait(9609, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: { threadId: "fixture-trusted-access-thread" },
+  });
+  assertNoError(replayedTrustedAccess);
+  assert.equal(
+    replayedTrustedAccess.result.structuredContent.status,
+    "unknown",
+  );
+
+  const spoofedThreadTrustedAccess = await requestAndWait(9610, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-trusted-access-owner",
+      "openai/threadId": "fixture-spoofed-trusted-access-owner",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: grantedTrustedAccess,
+        },
+      },
+    },
+  });
+  assertNoError(spoofedThreadTrustedAccess);
+  assert.deepEqual(
+    spoofedThreadTrustedAccess.result.structuredContent,
+    grantedDaybreakAccess,
+  );
+  const canonicalThreadTrustedAccess = await requestAndWait(
+    9611,
+    "tools/call",
+    {
+      name: "get_codex_security_daybreak_access",
+      arguments: {},
+      _meta: { threadId: "fixture-trusted-access-owner" },
+    },
+  );
+  assertNoError(canonicalThreadTrustedAccess);
+  assert.equal(
+    canonicalThreadTrustedAccess.result.structuredContent.status,
+    "unknown",
+  );
+
+  const isolatedHostedTrustedAccess = await requestAndWait(9612, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: {
+      threadId: "fixture-isolated-trusted-access-owner",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: grantedTrustedAccess,
+        },
+      },
+    },
+  });
+  assertNoError(isolatedHostedTrustedAccess);
+  assert.deepEqual(
+    isolatedHostedTrustedAccess.result.structuredContent,
+    grantedDaybreakAccess,
+  );
+  const isolatedOtherTrustedAccess = await requestAndWait(9613, "tools/call", {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta: { threadId: "fixture-isolated-trusted-access-other" },
+  });
+  assertNoError(isolatedOtherTrustedAccess);
+  assert.equal(
+    isolatedOtherTrustedAccess.result.structuredContent.status,
+    "unknown",
+  );
+
   await assertBundledNodeLauncher();
   await assertBundledPythonRuntime();
   await assertMissingPythonError();
@@ -1087,7 +1551,7 @@ try {
   await assertUnavailableUserInputFallback();
   await assertWorkspaceWorksWithoutUiCapability();
   await assertHeadlessStandardScanWorksWithoutUiCapability();
-  await assertDeepScanPersistsWorkerStartupFailure();
+  await assertDeepScanPersistsRetryableWorkerStartupError();
   await assertUserInputFailureLogging();
   if (process.platform !== "win32") {
     await rm(launchCwd, { recursive: true, force: true });
@@ -1564,7 +2028,9 @@ try {
   assert.deepEqual(launcher._meta.ui.visibility, ["app"]);
   assert.deepEqual(startPromptOnlyScan._meta.ui.visibility, ["model"]);
   assert.deepEqual(startHeadlessStandardScan._meta.ui.visibility, ["model"]);
-  assert.deepEqual(startHeadlessStandardScan.inputSchema.required, ["targetPath"]);
+  assert.deepEqual(startHeadlessStandardScan.inputSchema.required, [
+    "targetPath",
+  ]);
   assert.equal(
     startHeadlessStandardScan.inputSchema.properties.userContext.maxLength,
     undefined,
@@ -1573,9 +2039,18 @@ try {
   assert.deepEqual(updateScanContext._meta.ui.visibility, ["model"]);
   assert.deepEqual(updateScanContextFromApp._meta.ui.visibility, ["app"]);
   assert.ok(updateScanContext.inputSchema.properties.handoffClaimToken);
-  assert.equal(updateScanContext.inputSchema.properties.userContext.maxLength, undefined);
-  assert.equal(updateScanContextFromApp.inputSchema.properties.userContext.maxLength, undefined);
-  assert.deepEqual(updateScanContextFromApp.inputSchema.required, ["scanId", "userContext"]);
+  assert.equal(
+    updateScanContext.inputSchema.properties.userContext.maxLength,
+    undefined,
+  );
+  assert.equal(
+    updateScanContextFromApp.inputSchema.properties.userContext.maxLength,
+    undefined,
+  );
+  assert.deepEqual(updateScanContextFromApp.inputSchema.required, [
+    "scanId",
+    "userContext",
+  ]);
   assert.deepEqual(submit._meta.ui.visibility, ["app"]);
   assert.deepEqual(inspectTarget._meta.ui.visibility, ["app"]);
   assert.deepEqual(inspectSetup._meta.ui.visibility, ["app"]);
@@ -1607,7 +2082,13 @@ try {
       `${tool.name} must be callable by the native Codex Security workbench.`,
     );
   }
-  for (const tool of [getScanContext, updateScanContext, progress, complete, fail]) {
+  for (const tool of [
+    getScanContext,
+    updateScanContext,
+    progress,
+    complete,
+    fail,
+  ]) {
     assert.ok(tool._meta.ui.visibility.includes("model"));
     assert.ok(tool.inputSchema.properties.handoffClaimToken);
   }
@@ -1720,14 +2201,15 @@ try {
   assert.match(fail.description, /use cancel_codex_security_scan/i);
   assert.equal(setFindingRemediation.annotations.idempotentHint, false);
 
-  const urlContext = "Deployment details came from https://example.test/internal.";
+  const urlContext =
+    "Deployment details came from https://example.test/internal.";
   const urlContextAccepted = await requestAndWait(1290, "tools/call", {
     name: "open_codex_security_workspace",
     arguments: {
       targetPath: target,
-      userContext: urlContext
+      userContext: urlContext,
     },
-    _meta: { "openai/threadId": "fixture-url-context-thread" }
+    _meta: { "openai/threadId": "fixture-url-context-thread" },
   });
   assertNoError(urlContextAccepted);
   assert.equal(
@@ -2081,11 +2563,14 @@ try {
   const initializedScanDir = startedWorkspace.results.scanDir;
   assert.equal(
     initializedScanDir.startsWith(
-      path.join(resolvedScanRoot, "codex-security-scans-"),
+      path.join(await realpath(stateDir), "scans") + path.sep,
     ),
     true,
   );
-  assert.equal(initializedScanDir.startsWith(`${stateDir}${path.sep}`), false);
+  assert.equal(
+    initializedScanDir.startsWith(`${resolvedScanRoot}${path.sep}`),
+    false,
+  );
   const scanId = startedWorkspace.results.scanId;
   assert.equal(startedWorkspace.results.progress.phase, "preflight");
   assert.equal(startedWorkspace.results.progress.status, "running");
@@ -2121,7 +2606,11 @@ try {
   );
   const attachedHandoff = await requestAndWait(20021, "tools/call", {
     name: "attach_codex_security_scan_continuation_thread",
-    arguments: { claimToken: handoffClaimToken, scanId, threadId: "fixture-thread" },
+    arguments: {
+      claimToken: handoffClaimToken,
+      scanId,
+      threadId: "fixture-thread",
+    },
   });
   assertNoError(attachedHandoff);
   const threadOwnedScan = await requestAndWait(2202, "tools/call", {
@@ -2208,22 +2697,28 @@ try {
   const updatedContext = await requestAndWait(92010, "tools/call", {
     name: "update_codex_security_scan_context",
     arguments: { handoffClaimToken, scanId, userContext: longUserContext },
-    _meta: { "openai/threadId": "fixture-thread" }
+    _meta: { "openai/threadId": "fixture-thread" },
   });
   assertNoError(updatedContext);
-  assert.equal(updatedContext.result.structuredContent.scan.userContext, longUserContext);
+  assert.equal(
+    updatedContext.result.structuredContent.scan.userContext,
+    longUserContext,
+  );
   assert.equal(
     updatedContext.result.structuredContent.workspace.userContext,
-    longUserContext
+    longUserContext,
   );
 
   const appUserContext = "Focus on account recovery. ".repeat(120).trim();
   const appUpdatedContext = await requestAndWait(92011, "tools/call", {
     name: "update_codex_security_scan_context_from_app",
-    arguments: { scanId, userContext: appUserContext }
+    arguments: { scanId, userContext: appUserContext },
   });
   assertNoError(appUpdatedContext);
-  assert.equal(appUpdatedContext.result.structuredContent.scan.userContext, appUserContext);
+  assert.equal(
+    appUpdatedContext.result.structuredContent.scan.userContext,
+    appUserContext,
+  );
 
   const urlContextUpdate = "Read https://example.test/context.";
   const updatedContextUrl = await requestAndWait(92012, "tools/call", {
@@ -2231,9 +2726,9 @@ try {
     arguments: {
       handoffClaimToken,
       scanId,
-      userContext: urlContextUpdate
+      userContext: urlContextUpdate,
     },
-    _meta: { "openai/threadId": "fixture-thread" }
+    _meta: { "openai/threadId": "fixture-thread" },
   });
   assertNoError(updatedContextUrl);
   assert.equal(
@@ -2989,7 +3484,8 @@ try {
     undefined,
   );
   assert.equal(
-    fallbackContext.result.structuredContent.workspace.results.handoffClaimToken,
+    fallbackContext.result.structuredContent.workspace.results
+      .handoffClaimToken,
     undefined,
   );
   const recoveredThreadContext = await requestAndWait(20172, "tools/call", {

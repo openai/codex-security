@@ -22,7 +22,7 @@ type WorkerExecutorConstructor = new (settings: {
 
 async function bundledWorkerExecutor(
   events: (signal: AbortSignal) => AsyncGenerator<WorkerEvent>,
-  preflight = async () => {},
+  preflight = async () => ({ useOpenAiApiKey: false }),
 ): Promise<WorkerExecutorConstructor> {
   const runtime = await loadBundledRuntime();
   const source = /var CodexSdkWorkerExecutor = class \{[\s\S]*?\n\};/u.exec(
@@ -54,6 +54,8 @@ async function bundledWorkerExecutor(
     "workerPermissionProfile",
     "workerPermissionProfileConfigOverrides",
     "snapshotWorkerEnvironment",
+    "workerReasoningSummary",
+    "environmentVariable",
     "preflightDeepScanWorkerPermissionProfile",
     "DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID",
     "deepScanPermissionProfileFallbackError",
@@ -69,6 +71,8 @@ async function bundledWorkerExecutor(
     () => ({}),
     () => [],
     async () => ({}),
+    async () => undefined,
+    () => undefined,
     preflight,
     "codex_security_deep_scan_worker",
     () => undefined,

@@ -1,0 +1,117 @@
+name: native-windows
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  primitives:
+    name: primitives / win32-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CODEX_SECURITY_TEST_WINDOWS_SYMLINKS: required
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            arch: x64
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: plugins/codex-security/native
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: package.json
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.13.0"
+          architecture: ${{ matrix.arch }}
+      - name: Compile TypeScript tools
+        working-directory: .
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --dir sdk/typescript run build:ci
+      - name: Set up Rust
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy --target ${{ matrix.target }}
+      - name: Check Rust source
+        run: |
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked --target ${{ matrix.target }} --lib --example windows-wide-launcher -- -D warnings
+      - name: Build and verify with Node.js 22
+        run: |
+          node build.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node proof-policy-windows.mjs build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node check.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test windows-files.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nativeNode = (Get-Command node).Source
+          $env:PATH = ""
+          & $nativeNode --expose-gc proof-windows.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $nativeNode proof-policy-windows.mjs
+      - name: Verify Windows proofs without symbolic links
+        env:
+          CODEX_SECURITY_TEST_WINDOWS_SYMLINKS: disabled
+        run: |
+          $nativeNode = (Get-Command node).Source
+          $env:PATH = ""
+          $primitivesJson = & $nativeNode --expose-gc proof-windows.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $primitives = $primitivesJson | ConvertFrom-Json
+          if ($primitives.wideProcessAndPaths.cachedSymlinkTagsIncludingDanglingDirectories -ne $false -or $primitives.wideProcessAndPaths.completeWideDirectoryIteration -ne $true -or $primitives.handles.junctionMetadataAndFinalNames -ne $true) {
+            throw "The restricted proof did not report skipped symbolic links and verified directory and junction coverage."
+          }
+          $policyJson = & $nativeNode proof-policy-windows.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $policy = $policyJson | ConvertFrom-Json
+          if ($policy.proof.policySymlinkBoundary -ne $false -or $policy.proof.directoryIdentity -ne $true -or $policy.proof.policyHelperRawPaths -ne $true) {
+            throw "The restricted policy proof did not report skipped symbolic links and verified directory identity."
+          }
+      - name: Compare the existing Python completion lock
+        run: |
+          $python = (Get-Command python -ErrorAction Stop).Source
+          node --expose-gc proof-windows.mjs $python ../scripts
+      - name: Set up Node.js 20
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20.0.0"
+          architecture: ${{ matrix.arch }}
+      - name: Verify the same artifact with Node.js 20
+        run: |
+          node check.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test windows-files.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nativeNode = (Get-Command node).Source
+          $env:PATH = ""
+          & $nativeNode --expose-gc proof-windows.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $nativeNode proof-policy-windows.mjs
+      - name: Upload verified native artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-platform-win32-${{ matrix.arch }}-${{ github.sha }}
+          path: plugins/codex-security/native/dist/*/*.node
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7

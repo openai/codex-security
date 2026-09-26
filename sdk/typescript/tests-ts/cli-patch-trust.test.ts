@@ -1,7 +1,14 @@
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -115,8 +122,11 @@ test.each([
         write(chunk, _encoding, callback) {
           const request = JSON.parse(chunk.toString());
           // Inspect the native task without making a model request.
-          if (request.method === "turn/start") {
-            inspectedThreadId = request.params.threadId;
+          if (
+            request.method === "turn/start" ||
+            request.method === "command/exec"
+          ) {
+            inspectedThreadId = request.params.threadId ?? inspectedThreadId;
             child.stdin.write(
               `${JSON.stringify({
                 id: 6,
@@ -133,17 +143,18 @@ test.each([
       async function* events(): AsyncGenerator<string> {
         for await (const line of createInterface({ input: child.stdout })) {
           const event = JSON.parse(line);
+          if (event.id === 2) inspectedThreadId = event.result?.thread.id;
           if (event.id === 6) {
             analyticsEnabled = event.result?.config?.analytics?.enabled;
             child.stdin.write(
               `${JSON.stringify({
-                id: 5,
+                id: 7,
                 method: "mcpServerStatus/list",
                 params: { threadId: inspectedThreadId },
               })}\n`,
             );
           }
-          if (event.id === 5) {
+          if (event.id === 7) {
             servers = event.result?.data.map(
               (server: { name: string }) => server.name,
             );
@@ -201,6 +212,107 @@ test.each([
       }
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each(["openai", undefined])(
+  "app-server preserves explicit and native providers during ephemeral API-key login (%s)",
+  async (selectedProvider) => {
+    const codexHome = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-key-login-")),
+    );
+    const stored = JSON.stringify({
+      auth_mode: "apikey",
+      OPENAI_API_KEY: "SYNTHETIC_SAVED_KEY",
+    });
+    await writeFile(join(codexHome, "auth.json"), stored, { mode: 0o600 });
+    await writeCodexConfig(join(codexHome, "config.toml"), {
+      model_provider: "synthetic",
+      model_providers: {
+        synthetic: {
+          name: "Synthetic",
+          base_url: "http://127.0.0.1:9/v1",
+          wire_api: "responses",
+          requires_openai_auth: true,
+        },
+      },
+    });
+    let modelProvider: unknown;
+    const child = spawn(
+      resolveCodexCommand({}).command,
+      [
+        "app-server",
+        "--disable",
+        "plugins",
+        "--config",
+        'cli_auth_credentials_store="ephemeral"',
+      ],
+      {
+        cwd: codexHome,
+        env: {
+          ...Object.fromEntries(
+            Object.entries(process.env).filter(([name]) =>
+              /^(path|systemroot|comspec|temp|tmp|tmpdir)$/iu.test(name),
+            ),
+          ),
+          CODEX_HOME: codexHome,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
+    child.stderr.resume();
+    const closed = once(child, "close");
+    let account: unknown;
+    const input = new Writable({
+      write(chunk, _encoding, callback) {
+        const request = JSON.parse(chunk.toString());
+        // Inspect authentication before the first model request.
+        child.stdin.write(
+          request.method === "turn/start" || request.method === "command/exec"
+            ? JSON.stringify({
+                id: "inspect",
+                method: "account/read",
+                params: { refreshToken: false },
+              }) + "\n"
+            : chunk,
+          callback,
+        );
+      },
+      final(callback) {
+        child.stdin.end(callback);
+      },
+    });
+    async function* events() {
+      for await (const line of createInterface({ input: child.stdout })) {
+        const event = JSON.parse(line);
+        if (event.id === 2) modelProvider = event.result?.modelProvider;
+        if (event.id === "inspect") {
+          account = event.result?.account;
+          child.stdin.end();
+        }
+        yield line + "\n";
+      }
+    }
+    try {
+      const result = await readSkillCommandOutput(events(), {
+        apiKey: "SYNTHETIC_SESSION_KEY",
+        modelProvider: selectedProvider,
+        prompt: "Synthetic finding",
+        directory: codexHome,
+        threadSource: "security_remediation",
+        input,
+      });
+      expect(result.error).toBeUndefined();
+      expect(account).toEqual({ type: "apiKey" });
+      expect(modelProvider).toBe(selectedProvider ?? "synthetic");
+      expect(await closed).toEqual([0, null]);
+      expect(await readFile(join(codexHome, "auth.json"), "utf8")).toBe(stored);
+    } finally {
+      child.kill();
+      await closed;
+      await rm(codexHome, { recursive: true, force: true });
     }
   },
 );

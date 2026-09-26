@@ -55,6 +55,8 @@ than build arguments.
 
 Before the first release, an administrator must prepare the package:
 
+Prepare the [universal native payload](../plugins/codex-security/native/README.md#package-inputs) before building an image from source.
+
 1. Allow organization package creation and, if the package is missing, bootstrap
    it with a reviewed image and a non-release tag:
 
@@ -135,7 +137,7 @@ Git authentication uses the existing `GH_TOKEN`/`GITHUB_TOKEN` and optional
 the findings service's embedding credentials are configured separately.
 Use a version or digest in `CODEX_SECURITY_IMAGE` for repeatable deployments.
 To test an unreleased checkout, build the same scanner target locally instead
-of pulling:
+of pulling. First prepare the [universal native payload](../plugins/codex-security/native/README.md#package-inputs):
 
 ```bash
 docker build --target scanner -t codex-security:local .
@@ -219,10 +221,11 @@ no-new-privileges, and seccomp profile. It does not override Codex approval or
 filesystem settings. On hosts that restrict nested user namespaces, install the
 existing [AppArmor profile](../sdk/typescript/README.md#containerized-bulk-scans)
 and append `-f compose.apparmor.yaml` to the runner Compose commands. This override
-works because both examples use the `codex-security` service name. The entrypoint's
-bulk-scan-specific Landlock selection remains unchanged; it is not applied to
-other commands. Source inspection needs a host that supports the selected Codex
-sandbox; do not disable sandboxing to work around host restrictions.
+works because both examples use the `codex-security` service name. Codex 0.156.1
+requires Bubblewrap for filesystem-restricted execution; the legacy Landlock
+fallback is no longer supported. The entrypoint preserves Codex sandbox settings.
+Source inspection needs a host that supports Bubblewrap; do not disable sandboxing
+to work around host restrictions.
 
 `run --rm` removes only the finished runner container. Preserve its host mounts
 for later stages and retries; use the same image version and source paths.

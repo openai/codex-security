@@ -11,6 +11,43 @@ const args = [
   "--json",
 ];
 
+test.each([false, true])(
+  "dedupe reports refusals and succeeds even when diagnostic output fails: %j",
+  async (brokenLog) => {
+    const deps = dependencies();
+    const result = {
+      scanId: "scan-example",
+      uniqueFindingIds: ["finding-one", "finding-two"],
+      duplicateGroups: [],
+      deduplicationStatus: "completed_with_refusals" as const,
+      refusals: [
+        {
+          decision: "NO_DECISION" as const,
+          stage: "pair-review" as const,
+          model: "gpt-5.6-sol",
+          findingIds: ["finding-one", "finding-two"],
+          reason: "The model refused the deduplication review.",
+        },
+      ],
+    };
+    deps.deduplicateScan = async () => result;
+    const stdout = capture();
+    const stderr = capture();
+    if (brokenLog)
+      stderr.stream.write = () => {
+        throw new Error("Synthetic logging failure");
+      };
+    expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result);
+    if (!brokenLog) {
+      expect(stderr.text()).toContain("pair-review refused by gpt-5.6-sol");
+      expect(stderr.text()).toContain("finding-one, finding-two");
+      expect(stderr.text()).toContain("No decision was made");
+      expect(stderr.text()).toContain("kept separate");
+    }
+  },
+);
+
 test("dedupe resolves a workflow's pinned scan and passes the workflow ID to the SDK", async () => {
   const deps = dependencies();
   deps.runWorkbench = async (args, input) => {
@@ -77,6 +114,7 @@ test.each([false, true])(
       expect(scanId).toBe("latest");
       expect(options).toEqual({
         findingsUrl: "http://127.0.0.1:3000",
+        concurrency: 8,
         allRepositories,
         signal: expect.any(AbortSignal),
       });
@@ -95,6 +133,95 @@ test.each([false, true])(
     expect(stderr.text()).toBe("");
   },
 );
+
+test.each([
+  { flags: ["--concurrency", "1"], expected: 1 },
+  { flags: ["--concurrency", "3"], expected: 3 },
+  { flags: ["--concurrency=3"], expected: 3 },
+])("dedupe forwards configured concurrency %j", async ({ flags, expected }) => {
+  const deps = dependencies();
+  let called = false;
+  deps.deduplicateScan = async (scanId, options) => {
+    called = true;
+    expect(options.concurrency).toBe(expected);
+    return {
+      scanId,
+      uniqueFindingIds: [],
+      duplicateGroups: [],
+      deduplicationStatus: "completed",
+    };
+  };
+  expect(
+    await main([...args, ...flags], capture().stream, capture().stream, deps),
+  ).toBe(0);
+  expect(called).toBe(true);
+});
+
+test.each(["0", "-1", "1.5", "NaN", "Infinity", "9007199254740992"])(
+  "dedupe rejects invalid concurrency %s before calling the SDK",
+  async (value) => {
+    const deps = dependencies();
+    let called = false;
+    deps.deduplicateScan = async () => {
+      called = true;
+      throw new Error("Invalid concurrency must not reach the SDK");
+    };
+    const stderr = capture();
+    expect(
+      await main(
+        [...args, "--concurrency", value],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("concurrency");
+    expect(called).toBe(false);
+  },
+);
+
+test("dedupe requires a value for concurrency", async () => {
+  const stderr = capture();
+  expect(
+    await main(
+      [...args, "--concurrency"],
+      capture().stream,
+      stderr.stream,
+      dependencies(),
+    ),
+  ).toBe(2);
+  expect(stderr.text()).toContain("Missing value for flag: --concurrency");
+});
+
+test("dedupe help and schema expose concurrency and its default", async () => {
+  const help = capture();
+  expect(
+    await main(
+      ["dedupe", "--help"],
+      help.stream,
+      capture().stream,
+      dependencies(),
+    ),
+  ).toBe(0);
+  expect(help.text()).toContain("--concurrency");
+  expect(help.text()).toContain("serial execution");
+
+  const schema = capture();
+  expect(
+    await main(
+      ["dedupe", "--schema", "--format", "json"],
+      schema.stream,
+      capture().stream,
+      dependencies(),
+    ),
+  ).toBe(0);
+  expect(
+    JSON.parse(schema.text()).options.properties.concurrency,
+  ).toMatchObject({
+    type: "integer",
+    default: 8,
+  });
+});
 
 test("dedupe requires both explicit inputs and reports SDK failures", async () => {
   const deps = dependencies();

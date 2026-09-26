@@ -173,6 +173,42 @@ describe("trusted executable resolution", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "canonicalizes aliased parents before preserving explicit launchers",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const repositoryBin = join(repository, "bin");
+      const aliasedBin = join(root, "repository-bin-alias");
+      const externalBin = join(repository, "external-bin");
+      const repositoryAlias = join(root, "repository-alias");
+      const trusted = join(root, "trusted");
+      const wrapper = join(trusted, "python3");
+      const launcher = join(repositoryBin, "python");
+      await Promise.all([
+        mkdir(repositoryBin, { recursive: true }),
+        mkdir(trusted),
+      ]);
+      await writeFile(wrapper, "#!/bin/sh\nexit 0\n");
+      await chmod(wrapper, 0o700);
+      await symlink(wrapper, launcher);
+      await symlink(repositoryBin, aliasedBin, "dir");
+      await symlink(trusted, externalBin, "dir");
+      await symlink(repository, repositoryAlias, "dir");
+
+      for (const candidate of [
+        launcher,
+        join(aliasedBin, "python"),
+        join(externalBin, "python3"),
+        join(repositoryAlias, "external-bin", "python3"),
+      ]) {
+        await expect(
+          resolveTrustedExecutable(candidate, { PATH: "" }, repository),
+        ).resolves.toEqual({ executable: wrapper, environment: { PATH: "" } });
+      }
+    },
+  );
+
   test("selects runnable Windows executables ahead of extensionless and batch files", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

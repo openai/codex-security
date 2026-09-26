@@ -2,11 +2,7 @@ import { basename, relative } from "node:path";
 import type { JsonObject } from "./config.js";
 
 export type HistoryCommand =
-  | "list"
-  | "show"
-  | "findings"
-  | "compare"
-  | "match-all";
+  "list" | "show" | "findings" | "compare" | "match-all";
 type RendererOptions = {
   columns?: number;
   color?: boolean;
@@ -291,8 +287,7 @@ export function renderScanHistory(
       );
     }
     const coverage = (result["progress"] as JsonObject)["coverage"] as
-      | JsonObject
-      | undefined;
+      JsonObject | undefined;
     if (coverage) {
       const parts = [
         ...(coverage["worklistRows"] == null
@@ -311,8 +306,7 @@ export function renderScanHistory(
       }
     }
     const knowledgeBase = recipe?.["knowledgeBasePaths"] as
-      | string[]
-      | undefined;
+      string[] | undefined;
     if (knowledgeBase?.length) {
       lines.push(
         `  ${strong("KNOWLEDGE BASE")}  ${knowledgeBase.map((path) => dim(clean(path))).join(", ")}`,

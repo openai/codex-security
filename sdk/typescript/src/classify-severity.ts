@@ -29,13 +29,7 @@ export interface ClassifySeverityOptions {
   environment?: NodeJS.ProcessEnv;
   model?: string;
   reasoningEffort?:
-    | "minimal"
-    | "low"
-    | "medium"
-    | "high"
-    | "xhigh"
-    | "max"
-    | "ultra";
+    "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   signal?: AbortSignal;
   workingDirectory?: string;
   /** @internal Test client for the shared read-only runtime. */

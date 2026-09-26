@@ -2,6 +2,8 @@
 
 Use the pnpm version in `package.json` and Bun 1.3.14, matching required CI.
 Install both the SDK and MCP app dependencies before building or testing.
+Prepare the [universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
+before running a command that builds the bundled plugin.
 Run these commands from `sdk/typescript`:
 
 ```sh
@@ -138,6 +140,9 @@ with `--changed`: Python files, schemas, fixtures, and workflows loaded at
 runtime are not necessarily part of Bun's import graph.
 
 ## Mutation testing
+
+Mutation tests require Node 22.18+ or 24.11+ because Stryker 10 uses Babel 8.
+CI runs this tooling on Node 24.15.0. The SDK itself still supports Node 22.13+.
 
 ```sh
 pnpm run test:mutation

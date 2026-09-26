@@ -18,10 +18,20 @@ When changing `plugins/codex-security`, run its portable source checks before
 submitting the change:
 
 ```bash
-python -m ruff check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
-python -m ruff format --check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
-python .github/scripts/check_plugin_source_compatibility.py
+python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
+python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
+pnpm --dir sdk/typescript run build:ci
+node .github/scripts/check_plugin_source_compatibility.mjs
+node --test .github/scripts/test_check_plugin_source_compatibility.mjs
 ```
+
+## Deep Scan worker settings
+
+When changing runtime settings, authentication, environment forwarding,
+permissions, or executable selection, trace the change through Deep Scan
+discovery and reducer workers, including resumed workers. Extend the worker
+launch tests to verify inherited values and intentional overrides at the
+child-process boundary. Keep per-scan settings isolated from concurrent scans.
 
 ## Avoid speculative defenses
 
