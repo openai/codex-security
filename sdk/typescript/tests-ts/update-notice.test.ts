@@ -123,8 +123,10 @@ describe("CLI update notice", () => {
   test("ignores current, older, invalid, and lower prerelease versions", async () => {
     for (const [current, latest, available] of [
       ["0.1.0", "0.1.0", false],
+      ["0.1.0+local", "0.1.0+registry", false],
       ["0.2.0", "0.1.0", false],
       ["0.2.0", "not-a-version", false],
+      ["not-a-version", "0.2.0", false],
       ["0.2.0", "0.2.0-beta.1", false],
       ["0.2.0-beta.2", "0.2.0-beta.1", false],
       ["0.2.0-beta.1", "0.2.0-beta.2", true],
@@ -146,6 +148,33 @@ describe("CLI update notice", () => {
         fetch: registryResponse(null),
       }),
     ).toBeUndefined();
+  });
+
+  test("orders prerelease identifiers by SemVer precedence, not locale collation", async () => {
+    for (const [current, latest, available] of [
+      // ASCII case ordering: "a" (97) sorts after "A" (65) in SemVer.
+      ["1.0.0-A", "1.0.0-a", true],
+      ["1.0.0-a", "1.0.0-A", false],
+      // Numeric identifiers have lower precedence than non-numeric ones.
+      ["1.0.0-1", "1.0.0-alpha", true],
+      ["1.0.0-alpha", "1.0.0-1", false],
+      // When shared identifiers are equal, the longer list wins.
+      ["1.0.0-alpha", "1.0.0-alpha.1", true],
+      ["1.0.0-alpha.1", "1.0.0-alpha", false],
+      // Numeric identifiers compare numerically regardless of width.
+      ["1.0.0-alpha.9", "1.0.0-alpha.10", true],
+      ["1.0.0-alpha.10", "1.0.0-alpha.9", false],
+      // Mixed identifier lists follow pairwise precedence.
+      ["1.0.0-alpha.2", "1.0.0-alpha.10", true],
+      ["1.0.0-alpha.2", "1.0.0-alpha.beta", true],
+    ] as const) {
+      const notice = await checkForUpdate({
+        environment: {},
+        currentVersion: current,
+        fetch: registryResponse(latest),
+      });
+      expect(notice !== undefined).toBe(available);
+    }
   });
 
   test("suppresses registry checks in CI or when disabled", async () => {

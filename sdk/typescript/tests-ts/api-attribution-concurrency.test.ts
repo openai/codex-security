@@ -1,6 +1,6 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { CodexOptions } from "@openai/codex-sdk";
+import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { CodexSecurity } from "../src/index.js";
@@ -75,7 +75,7 @@ describe("delegated scan attribution", () => {
                 return {};
               },
               createCodex: (options: CodexOptions) => ({
-                startThread: () => ({
+                startThread: (threadOptions: ThreadOptions) => ({
                   id: null,
                   async runStreamed() {
                     active += 1;
@@ -91,6 +91,7 @@ describe("delegated scan attribution", () => {
                           codex_security_surface: surface,
                         },
                       });
+                      expect(threadOptions.threadSource).toBe("security_scan");
                       await concurrentScans;
                       const sharedConfig = parseToml(
                         await readFile(

@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -24,13 +25,22 @@ import {
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 
-const PACKAGE_SMOKE_TIMEOUT_MS = packageSmokeTimeouts().commandTimeoutMs;
+const {
+  commandTimeoutMs: PACKAGE_SMOKE_TIMEOUT_MS,
+  installTimeoutMs: PACKAGE_SMOKE_INSTALL_TIMEOUT_MS,
+} = packageSmokeTimeouts();
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const packageManifest = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
 const pluginContract = JSON.parse(
-  await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+  await readFile(
+    new URL(
+      "../../../plugins/codex-security/plugin-files.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
 );
 
 async function resolveArchive() {
@@ -70,14 +80,20 @@ async function resolveArchive() {
 function run(
   command,
   args,
-  { cwd, env, capture = false, windowsVerbatimArguments = false } = {},
+  {
+    cwd,
+    env,
+    capture = false,
+    windowsVerbatimArguments = false,
+    timeout = PACKAGE_SMOKE_TIMEOUT_MS,
+  } = {},
 ) {
   const result = spawnSync(command, args, {
     cwd,
     env,
     encoding: "utf8",
     stdio: capture ? "pipe" : "inherit",
-    timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+    timeout,
     killSignal: "SIGKILL",
     windowsVerbatimArguments,
     windowsHide: true,
@@ -85,7 +101,7 @@ function run(
 
   if (result.error?.code === "ETIMEDOUT") {
     throw new Error(
-      `Package smoke command timed out after ${PACKAGE_SMOKE_TIMEOUT_MS} ms: ${command}.`,
+      `Package smoke command timed out after ${timeout} ms: ${command}.`,
       { cause: result.error },
     );
   }
@@ -203,6 +219,50 @@ async function smokeNestedDeepScanWorker(installedRoot, consumer) {
     "The installed plugin must propagate the bundled Codex path into nested workers.",
   );
 
+  const pluginRoot = join(installedRoot, "_bundled_plugin");
+  const mcpLauncher = join(pluginRoot, "scripts", "launch_codex_security_mcp");
+  const windows = process.platform === "win32";
+  const initialized = spawnSync(
+    windows
+      ? (process.env.ComSpec ??
+          join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe"))
+      : mcpLauncher,
+    windows
+      ? ["/d", "/s", "/c", "call", `${mcpLauncher}.cmd`, "--stdio"]
+      : ["--stdio"],
+    {
+      cwd: pluginRoot,
+      encoding: "utf8",
+      env: { ...workerEnvironment, CODEX_MCP_NODE_PATH: process.execPath },
+      input: `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: {
+            name: "codex-security-package-smoke",
+            version: "0.1.0",
+          },
+        },
+      })}\n`,
+      timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  if (initialized.error !== undefined) {
+    throw new Error("Installed MCP launcher did not start.", {
+      cause: initialized.error,
+    });
+  }
+  assert.equal(initialized.status, 0, initialized.stderr);
+  assert.equal(
+    JSON.parse(initialized.stdout.trim()).result.serverInfo.name,
+    "codex-security",
+    "The installed MCP launcher must initialize the bundled security server.",
+  );
+
   const globalCodex = spawnSync("codex", ["--version"], {
     cwd: consumer,
     encoding: "utf8",
@@ -242,6 +302,7 @@ async function smokeNestedDeepScanWorker(installedRoot, consumer) {
     });
     const { events } = await codex
       .startThread({
+        threadSource: "security_scan",
         workingDirectory: workerHome,
         skipGitRepoCheck: true,
         sandboxMode: "read-only",
@@ -320,8 +381,10 @@ try {
       "--no-audit",
       "--no-fund",
       archive,
+      `typescript@${packageManifest.devDependencies.typescript}`,
+      `@types/node@${packageManifest.devDependencies["@types/node"]}`,
     ],
-    { cwd: consumer },
+    { cwd: consumer, timeout: PACKAGE_SMOKE_INSTALL_TIMEOUT_MS },
   );
 
   const installedRoot = join(
@@ -341,12 +404,94 @@ try {
     "Installed npm package does not match the complete bundled-plugin contract.",
   );
 
+  const libc =
+    process.platform === "linux"
+      ? process.report.getReport().header.glibcVersionRuntime === undefined
+        ? "-musl"
+        : "-gnu"
+      : "";
+  const nativeLibrary = join(
+    installedRoot,
+    "_bundled_plugin",
+    "mcp",
+    "native",
+    `${process.platform}-${process.arch}${libc}`,
+    process.platform === "win32" ? "windows.node" : "unix.node",
+  );
+  run(
+    process.execPath,
+    [
+      "--input-type=commonjs",
+      "--eval",
+      "require(process.argv[1])",
+      nativeLibrary,
+    ],
+    { cwd: consumer, env: { ...process.env, PATH: "" } },
+  );
+
   run(
     process.execPath,
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity."); if (typeof sdk.publishScan !== "function") throw new Error("The installed package does not export publishScan.");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)});
+      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "deduplicateRecords", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff", "loadProjectConfig", "resolveProjectConfig"]) {
+        if (typeof sdk[name] !== "function") {
+          throw new Error("The installed package does not export " + name + ".");
+        }
+      }
+      if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function") {
+        throw new Error("The installed package does not export generatePolicy.");
+      }
+      const result = await sdk.matchScanFindings({ before: [], after: [] });
+      if (result.matches.length !== 0 || result.uncertain.length !== 0) {
+        throw new Error("Empty finding comparison did not return an empty result.");
+      }       const assert = await import("node:assert/strict");
+       const { writeFile } = await import("node:fs/promises");
+       const input = { scan: { mode: "deep", deep: { subagents_per_worker: 0 } }, policy: { fail_on_severity: "high" } };
+       await writeFile("scan.json", JSON.stringify(input));
+       const loaded = await sdk.loadProjectConfig("scan.json");
+       const resolved = sdk.resolveProjectConfig(input);
+       assert.deepEqual(loaded.config, resolved.config);
+       assert.deepEqual(loaded.options, resolved.options);
+       assert.equal(loaded.options.subagents, 0);
+       assert.equal(loaded.options.failureSeverity, "high");
+       assert.equal(loaded.sources["scan.deep.subagents_per_worker"], "project");
+       assert.equal(loaded.sources["output.directory"], "default");
+       assert.equal(Object.isFrozen(loaded.sources), true);`,
+    ],
+    { cwd: consumer },
+  );
+
+  run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `const sdk = await import(${JSON.stringify(`${packageManifest.name}/server`)}); for (const name of ["OpenAiFindingEmbedder", "SqliteFindingsStore", "startFindingsServer"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
+    ],
+    { cwd: consumer },
+  );
+
+  await cp(
+    join(packageRoot, "scripts", "fixtures", "package-consumer.ts"),
+    join(consumer, "consumer.ts"),
+  );
+  run(
+    process.execPath,
+    [
+      join(consumer, "node_modules", "typescript", "bin", "tsc"),
+      "--strict",
+      "--noEmit",
+      "--target",
+      "ES2022",
+      "--lib",
+      "ESNext",
+      "--module",
+      "NodeNext",
+      "--types",
+      "node",
+      "consumer.ts",
     ],
     { cwd: consumer },
   );
@@ -401,6 +546,81 @@ try {
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
   assert.match(help, /\bpublish\b/u);
+  assert.match(help, /\bdedupe\b/u);
+  assert.match(help, /\bpolicy\b/u);
+  const policyHelp = run(process.execPath, [launcher, "policy", "--help"], {
+    cwd: consumer,
+    capture: true,
+  });
+  assert.match(policyHelp, /SECURITY\.md/u);
+  const policyTarget = join(consumer, "policy-target");
+  await mkdir(policyTarget);
+  const policyPreflight = JSON.parse(
+    run(
+      process.execPath,
+      [
+        launcher,
+        "policy",
+        policyTarget,
+        "--auth",
+        "chatgpt",
+        "--dry-run",
+        "--json",
+      ],
+      {
+        cwd: consumer,
+        capture: true,
+        env: {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: join(consumer, "policy-state"),
+        },
+      },
+    ),
+  );
+  assert.equal(
+    policyPreflight.targetPath,
+    join(await realpath(policyTarget), "SECURITY.md"),
+  );
+  assert.equal(policyPreflight.dryRun, true);
+  assert.deepEqual(await readdir(policyTarget), []);
+
+  const starterPath = join(consumer, "codex-security.yaml");
+  const starter = JSON.parse(
+    run(process.execPath, [launcher, "init", "--json"], {
+      cwd: consumer,
+      capture: true,
+    }),
+  );
+  // Compare file identities across symlink aliases and Windows short names.
+  const canonicalStarterPath = await realpath(starterPath);
+  assert.equal(await realpath(starter.path), canonicalStarterPath);
+  for (const args of [["-c", starterPath], []]) {
+    const info = JSON.parse(
+      run(process.execPath, [launcher, "info", ...args, "--json"], {
+        cwd: consumer,
+        capture: true,
+        env: { ...process.env, CODEX_SECURITY_PROJECT_CONFIG: starterPath },
+      }),
+    );
+    assert.equal(await realpath(info.configuration.path), canonicalStarterPath);
+    assert.equal(info.configuration.settings.mode, "standard");
+    assert.equal(info.configuration.sources["scan.mode"], "default");
+  }
+
+  const nestedDirectory = join(consumer, "settings");
+  await mkdir(nestedDirectory);
+  const nestedPath = join(nestedDirectory, "security.json");
+  run(process.execPath, [launcher, "init", nestedPath, "--json"], {
+    cwd: consumer,
+    capture: true,
+  });
+  const nestedConfig = JSON.parse(await readFile(nestedPath, "utf8"));
+  assert.equal(
+    await realpath(resolve(nestedDirectory, nestedConfig.$schema)),
+    await realpath(
+      join(installedRoot, "schemas", "project-config.schema.json"),
+    ),
+  );
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(
@@ -445,6 +665,43 @@ try {
   assert.equal(publication.counts.findings, 1);
   assert.equal(publication.counts.created, 0);
   assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
+  assert.match(
+    run(process.execPath, [launcher, "publish", "scan", "--help"], {
+      cwd: consumer,
+      capture: true,
+    }),
+    /--skip-existing/u,
+  );
+  const missingHistory = spawnSync(
+    process.execPath,
+    [
+      launcher,
+      "publish",
+      "check",
+      publicationScan,
+      "--to",
+      "linear",
+      "--linear-team",
+      "team-example",
+      "--json",
+    ],
+    {
+      cwd: consumer,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CODEX_SECURITY_LINEAR_API_KEY: "",
+        CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+      },
+      timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  assert.equal(missingHistory.status, 2, missingHistory.stderr);
+  assert.match(missingHistory.stderr, /scan-history database does not exist/u);
+  await assert.rejects(stat(join(consumer, "publication-state")), {
+    code: "ENOENT",
+  });
 
   const networkGuard = join(consumer, "reject-publication-network.cjs");
   await writeFile(
@@ -493,10 +750,76 @@ try {
     /lin_api_|security@example\.test/u,
   );
 
+  const { startFindingsServer } = await import(
+    pathToFileURL(join(installedRoot, "dist/server/server.js")).href
+  );
+  const dashboardServer = await startFindingsServer({
+    // Package builders need only Node. Native and runtime-container tests cover SQLite.
+    store: {
+      async initialize() {},
+    },
+    embeddings: {
+      async embed() {
+        throw new Error("Dashboard reads must not call a model");
+      },
+    },
+    host: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    const base = `http://127.0.0.1:${dashboardServer.address().port}`;
+    for (const [path, contentType] of [
+      ["/", "text/html"],
+      ["/dashboard", "text/html"],
+      ["/dashboard/app.js", "text/javascript"],
+      ["/dashboard/app.css", "text/css"],
+    ]) {
+      const response = await fetch(`${base}${path}`);
+      assert.equal(response.status, 200);
+      assert.ok(response.headers.get("content-type").startsWith(contentType));
+      const body = await response.text();
+      assert.ok(body.length > 0);
+      if (contentType === "text/html") {
+        const mounted = new URL("/service/dashboard/", base);
+        const assets = [...body.matchAll(/(?:href|src)="([^"]+)"/g)].map(
+          (match) => new URL(match[1], mounted).pathname,
+        );
+        assert.deepEqual(assets, [
+          "/service/dashboard/app.css",
+          "/service/dashboard/app.js",
+        ]);
+      }
+    }
+    assert.equal((await fetch(`${base}/dashboard/package.json`)).status, 404);
+  } finally {
+    await new Promise((resolve, reject) =>
+      dashboardServer.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "fixtures", "credential-lock.mjs"),
+      pathToFileURL(join(installedRoot, "dist", "runtime.js")).href,
+      join(consumer, "credential-lock-state"),
+    ],
+    { cwd: consumer },
+  );
+
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "fixtures", "package-behavior.mjs"),
+      installedRoot,
+      consumer,
+    ],
+    { cwd: consumer },
+  );
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI, ${expectedPluginFiles.length} bundled plugin files, bundled Codex version, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, dashboard assets, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {

@@ -1,6 +1,16 @@
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
-import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
 export interface TrustedExecutable {
   executable: string;
@@ -15,33 +25,52 @@ export async function resolveTrustedExecutable(
   const root = await realpath(protectedRoot).catch(() =>
     resolve(protectedRoot),
   );
-  const path = Object.entries(environment).find(
-    ([name]) => name.toUpperCase() === "PATH",
-  )?.[1];
+  const path =
+    environment["PATH"] ??
+    Object.entries(environment).find(
+      ([name]) => name.toUpperCase() === "PATH",
+    )?.[1];
   const entries: string[] = [];
-  for (const entry of path?.split(delimiter) ?? []) {
+  for (let entry of path?.split(delimiter) ?? []) {
+    if (
+      process.platform === "win32" &&
+      entry.startsWith('"') &&
+      entry.endsWith('"')
+    ) {
+      entry = entry.slice(1, -1);
+    }
     if (entry.length === 0) continue;
     const canonical = await realpath(entry).catch(() => null);
     if (canonical === null || isWithin(root, canonical)) continue;
     if (!entries.includes(canonical)) entries.push(canonical);
   }
 
+  const pathLike = candidate.includes("/") || candidate.includes("\\");
   // execFile cannot launch batch files, but their symlink targets still affect PATH trust.
+  // CreateProcess appends .exe to an extensionless explicit path, so inspect the file that
+  // will actually run instead of rejecting an otherwise valid Windows configuration.
   const extensions =
     process.platform === "win32"
       ? /\.(?:exe|com)$/iu.test(candidate)
         ? [{ suffix: "", runnable: true }]
-        : [
-            { suffix: ".exe", runnable: true },
-            { suffix: ".com", runnable: true },
-            { suffix: ".bat", runnable: false },
-            { suffix: ".cmd", runnable: false },
-            { suffix: "", runnable: false },
-          ]
+        : pathLike
+          ? extname(candidate) === ""
+            ? [{ suffix: ".exe", runnable: true }]
+            : [{ suffix: "", runnable: false }]
+          : [
+              { suffix: ".exe", runnable: true },
+              { suffix: ".com", runnable: true },
+              { suffix: ".bat", runnable: false },
+              { suffix: ".cmd", runnable: false },
+              { suffix: "", runnable: false },
+            ]
       : [{ suffix: "", runnable: true }];
-  const pathLike = candidate.includes("/") || candidate.includes("\\");
   const candidates = pathLike
-    ? [{ entry: null, path: resolve(candidate), runnable: true }]
+    ? extensions.map((extension) => ({
+        entry: null,
+        path: resolve(`${candidate}${extension.suffix}`),
+        runnable: extension.runnable,
+      }))
     : entries.flatMap((entry) =>
         extensions.map((extension) => ({
           entry,
@@ -65,7 +94,16 @@ export async function resolveTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
-      executable ??= pathLike ? canonical : current.path;
+      // Keep explicit virtualenv launchers, but resolve repository-local aliases
+      // to the trusted target instead of invoking them from the repository.
+      const invocationPath = pathLike
+        ? join(await realpath(dirname(current.path)), basename(current.path))
+        : current.path;
+      executable ??=
+        pathLike &&
+        (isWithin(root, current.path) || isWithin(root, invocationPath))
+          ? canonical
+          : invocationPath;
     } catch {
       continue;
     }
