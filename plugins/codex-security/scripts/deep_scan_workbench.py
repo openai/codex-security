@@ -628,6 +628,7 @@ def terminal_deep_scan_for_target_snapshot(
     thread_id: str,
     target_path: str,
     scope: str,
+    user_context: str | None,
     revision: str,
     snapshot_digest: str,
     target_device: int | str,
@@ -637,7 +638,8 @@ def terminal_deep_scan_for_target_snapshot(
 
     A continuation may safely consume a finished coordinator manifest while the
     parent scan is still open. It must not adopt live orchestration owned by a
-    different thread, or reuse results after the repository snapshot changed.
+    different thread, or reuse results after the repository snapshot or user
+    context changed.
     """
     return connection.execute(
         """
@@ -647,6 +649,7 @@ def terminal_deep_scan_for_target_snapshot(
         JOIN workspaces ON workspaces.id = scans.workspace_id
         WHERE scans.target_path = ?
             AND scans.scope = ?
+            AND scans.user_context IS ?
             AND scans.mode = 'deep'
             AND scans.status = 'running'
             AND scans.canceled_at IS NULL
@@ -670,6 +673,7 @@ def terminal_deep_scan_for_target_snapshot(
         (
             target_path,
             scope,
+            user_context,
             revision,
             snapshot_digest,
             target_device,
@@ -771,6 +775,7 @@ def begin_deep_scan_for_target(
     existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
     if existing is not None:
         return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
+    user_context = user_context_argument(args)
     target_metadata = target.stat()
     revision = git_revision(target)
     target_snapshot_digest = (
@@ -816,6 +821,7 @@ def begin_deep_scan_for_target(
             thread_id,
             target_path,
             scope,
+            user_context,
             revision,
             target_snapshot_digest,
             target_device,
@@ -839,7 +845,6 @@ def begin_deep_scan_for_target(
         if target_root == target or target in target_root.parents:
             raise SystemExit("The scan artifact directory must be outside the selected target.")
         target_root.mkdir(parents=True, exist_ok=True)
-        user_context = user_context_argument(args)
         model = optional_text(args.model, maximum=200)
         reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
         workspace_id = str(uuid.uuid4())
