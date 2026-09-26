@@ -1,20 +1,21 @@
-<!-- release-version: 0.1.31 -->
+<!-- release-version: 0.1.32 -->
 
 <!-- release-section: highlights:start -->
 ## Highlights
 
-- require explicit scan-fatal worker errors ([#996](https://github.com/openai/codex-security/pull/996))
-- explain that the local Git hook is advisory ([#1000](https://github.com/openai/codex-security/pull/1000))
-- bump docker/build-push-action from 7.3.0 to 7.4.0 ([#992](https://github.com/openai/codex-security/pull/992))
-- bump the third-party group across 2 directories with 6 updates ([#1003](https://github.com/openai/codex-security/pull/1003))
-- bump docker/setup-buildx-action from 4.3.0 to 4.4.1 ([#1002](https://github.com/openai/codex-security/pull/1002))
-- support Codex 0.156.1 with Bubblewrap ([#997](https://github.com/openai/codex-security/pull/997))
-- suggest finding owners ([#1010](https://github.com/openai/codex-security/pull/1010))
-- \[codex\] align security policy with Codex bug bounty scope ([#1001](https://github.com/openai/codex-security/pull/1001))
-- support long filenames when staging documents ([#1016](https://github.com/openai/codex-security/pull/1016))
-- include Objective-C sources in scan inventories ([#989](https://github.com/openai/codex-security/pull/989))
-- ignore URL parameters when reading device codes ([#979](https://github.com/openai/codex-security/pull/979))
-- page reducer inputs by serialized size ([#1025](https://github.com/openai/codex-security/pull/1025))
+- return the Deep Scan ID in structured output ([#1026](https://github.com/openai/codex-security/pull/1026))
+- keep Deep Scan guidance in structured output ([#1029](https://github.com/openai/codex-security/pull/1029))
+- bump the third-party group across 2 directories with 4 updates ([#1032](https://github.com/openai/codex-security/pull/1032))
+- bump ruff from 0.16.7 to 0.16.8 in /plugins/codex-security ([#1022](https://github.com/openai/codex-security/pull/1022))
+- bump the codex group across 3 directories with 2 updates ([#1033](https://github.com/openai/codex-security/pull/1033))
+- patch vulnerable development dependencies ([#1034](https://github.com/openai/codex-security/pull/1034))
+- include Solidity sources in scan inventories ([#1021](https://github.com/openai/codex-security/pull/1021))
+- include Svelte components in scan inventories ([#1028](https://github.com/openai/codex-security/pull/1028))
+- propagate wizard cancellation to prompts ([#540](https://github.com/openai/codex-security/pull/540))
+- preserve explicit virtualenv launchers ([#227](https://github.com/openai/codex-security/pull/227))
+- upgrade Codex CLI and SDK to 0.157.1 ([#1041](https://github.com/openai/codex-security/pull/1041))
+- honor the requested output format when rerunning a scan ([#203](https://github.com/openai/codex-security/pull/203))
+- calculate diff digests at completion ([#1040](https://github.com/openai/codex-security/pull/1040))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
