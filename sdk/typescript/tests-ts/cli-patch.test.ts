@@ -1654,9 +1654,11 @@ describe("scan and patch workflow", () => {
                     files: status === "outside" ? ["../outside.ts"] : [],
                     ...(status === "outside"
                       ? { verification: "Focused checks pass." }
-                      : status === "blocked"
-                        ? { reason: "A required service is unavailable." }
-                        : {}),
+                      : status === "no_change"
+                        ? { verification: "Current code is already safe." }
+                        : status === "blocked"
+                          ? { reason: "A required service is unavailable." }
+                          : {}),
                   },
                 ],
               }),
@@ -1708,8 +1710,13 @@ describe("scan and patch workflow", () => {
     });
   });
 
-  test("keeps blocked findings in the failure policy and rejects unverified results", async () => {
-    for (const failure of ["blocked", "malformed", "unverified"] as const) {
+  test("keeps blocked findings in the failure policy and rejects unverified successful results", async () => {
+    for (const failure of [
+      "blocked",
+      "malformed",
+      "unverified",
+      "unverified_no_change",
+    ] as const) {
       const outcome = await runWorkflow(
         ["scan", "--patch", "--fail-on-severity", "high", "--json"],
         {
@@ -1723,7 +1730,14 @@ describe("scan and patch workflow", () => {
               output?.stdout.write(
                 JSON.stringify({
                   patches: [
-                    { occurrenceId: "occ_1", status: "verified", files: [] },
+                    {
+                      occurrenceId: "occ_1",
+                      status:
+                        failure === "unverified_no_change"
+                          ? "no_change"
+                          : "verified",
+                      files: [],
+                    },
                   ],
                 }),
               );
@@ -1738,7 +1752,7 @@ describe("scan and patch workflow", () => {
           {
             occurrenceId: "occ_1",
             status: failure === "blocked" ? "blocked" : "failed",
-            ...(failure === "unverified"
+            ...(failure.startsWith("unverified")
               ? { reason: "Patch verification was not reported." }
               : {}),
           },
