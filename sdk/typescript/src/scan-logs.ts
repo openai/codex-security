@@ -37,7 +37,7 @@ export function readSavedScanLogs(
   codexHome: string | readonly string[],
   options: { allowMissingRoot?: boolean } = {},
 ) {
-  const threadId = scan.continuationThreadId;
+  const threadId = scan.continuationThreadId ?? scan.threadIds?.[0];
   if (!threadId && !options.allowMissingRoot) {
     throw new CodexSecurityError(
       `No session is associated with scan ${scan.scanId}.`,
@@ -45,7 +45,7 @@ export function readSavedScanLogs(
   }
   return readScanLogs({
     scanId: scan.scanId,
-    threadId: threadId ?? scan.threadIds?.[0],
+    threadId,
     threadIds: scan.threadIds,
     executionThreadIds: scan.executionThreadIds ?? [],
     codexHome,

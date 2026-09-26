@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+EXECUTION_THREADS = "artifacts/deep-scan/execution-threads.json"
+
 TOKEN_FIELDS = {
     "input_tokens": "inputTokens",
     "cached_input_tokens": "cachedInputTokens",
@@ -190,6 +192,28 @@ def _scan_root_thread_ids(
         if workspace is not None:
             candidates.append(workspace["thread_id"])
     if scan["mode"] == "deep":
+        from finalize_scan_contract import ContractError, open_scan_local_file_descriptor
+        from workbench_scan_start import composition_children
+
+        scan_dir = Path(scan["scan_dir"])
+        try:
+            (scan_dir / EXECUTION_THREADS).lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            descriptor = open_scan_local_file_descriptor(
+                scan_dir, EXECUTION_THREADS, "Deep Scan execution threads"
+            )
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                additional = json.load(handle)
+            if not isinstance(additional, list) or any(
+                not isinstance(thread_id, str) for thread_id in additional
+            ):
+                raise ContractError("Deep Scan execution threads must be an array of strings.")
+            candidates.extend(additional)
+        candidates.extend(
+            child["continuation_thread_id"] for child in composition_children(connection, scan)
+        )
         candidates.extend(
             row["sdk_thread_id"]
             for row in connection.execute(

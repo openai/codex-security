@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import json
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,26 +44,3 @@ def test_remediation_leases_on_python310(monkeypatch, fields, active) -> None:
         **fields,
     }
     assert remediation.remediation_claim_is_active(claim) is active
-
-
-def test_deep_scan_deadline_and_heartbeat_on_python310(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
-    deep = importlib.import_module("deep_scan_workbench")
-    monkeypatch.setattr(deep, "datetime", Python310DateTime)
-    monkeypatch.setattr(deep, "now", lambda: "2026-08-15T12:00:00Z")
-    assert deep.deep_scan_deadline_reached(
-        {"created_at": "2026-08-15T11:00:00z", "max_time_hours": 1}
-    )
-    heartbeat = tmp_path / "artifacts/deep_discovery/coordinator-heartbeat-2.json"
-    heartbeat.parent.mkdir(parents=True)
-    heartbeat.write_text(
-        json.dumps({"coordinatorGeneration": 2, "updatedAt": "2026-08-15T11:59:45z"})
-    )
-    run = {"coordinator_generation": 2, "updated_at": "2026-08-15T11:00:00Z"}
-    with sqlite3.connect(":memory:") as connection:
-        assert deep.coordinator_lease_is_live(
-            connection, run, {"scan_dir": str(tmp_path)}, "2026-08-15T12:00:00Z"
-        )
-        assert not deep.coordinator_lease_is_live(
-            connection, run, {"scan_dir": str(tmp_path)}, "2026-08-15T12:00:15Z"
-        )

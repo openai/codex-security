@@ -13,6 +13,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
 from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
+from workbench_scan_start import composition_child_ids
 from workbench_validation import bounded_output_text
 
 
@@ -75,6 +76,7 @@ def list_global_findings(
 
 
 def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]]:
+    child_ids = composition_child_ids(connection)
     parents: dict[tuple[str, str], tuple[str, str]] = {}
 
     def group(identity: tuple[str, str]) -> tuple[str, str]:
@@ -85,7 +87,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
     for match in connection.execute(
         """
         SELECT before_scans.target_id, before.finding_id AS before_finding_id,
-            after.finding_id AS after_finding_id
+            after.finding_id AS after_finding_id, before.scan_id AS before_scan_id, after.scan_id AS after_scan_id
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
         JOIN scans AS before_scans ON before_scans.id = before.scan_id
@@ -94,16 +96,20 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         WHERE before_scans.target_id = after_scans.target_id
         """
     ):
+        if match["before_scan_id"] in child_ids or match["after_scan_id"] in child_ids:
+            continue
         before = group((match["target_id"], match["before_finding_id"]))
         after = group((match["target_id"], match["after_finding_id"]))
         if before != after:
             parents[after] = before
 
-    latest_scan_by_target = dict(
-        connection.execute(
+    latest_scan_by_target = {
+        row["target_id"]: row["id"]
+        for row in connection.execute(
             "SELECT target_id, id FROM scans WHERE status = 'complete' ORDER BY started_at, id"
         )
-    )
+        if row["id"] not in child_ids
+    }
 
     grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
     for row in connection.execute(
@@ -139,7 +145,8 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
         """,
     ):
-        grouped.setdefault(group((row["target_id"], row["finding_id"])), []).append(row)
+        if row["scan_id"] not in child_ids:
+            grouped.setdefault(group((row["target_id"], row["finding_id"])), []).append(row)
 
     findings = []
     for occurrences in grouped.values():
@@ -201,7 +208,8 @@ def list_repositories(
     for row in connection.execute(
         "SELECT id, target_id FROM scans ORDER BY started_at DESC, id DESC"
     ):
-        latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
+        if row["id"] in scans_by_id:
+            latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
 
     open_findings_by_target = Counter(
         row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"

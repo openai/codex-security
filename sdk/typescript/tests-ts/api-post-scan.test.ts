@@ -14,10 +14,7 @@ import {
 import { dirname, join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
-import {
-  prepareScanArtifactRestorer,
-  type ScanArtifactRestorer,
-} from "../src/runtime.js";
+import { prepareScanArtifactRestorer } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import {
@@ -28,6 +25,9 @@ import {
 
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
+type ScanArtifactRestorer = Awaited<
+  ReturnType<typeof prepareScanArtifactRestorer>
+>;
 
 afterEach(cleanup);
 

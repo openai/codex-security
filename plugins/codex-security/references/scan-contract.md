@@ -106,9 +106,9 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 `coverage.json` records scan scope and completion information. Standard and diff summaries also describe reviewed surfaces and outstanding work.
 
-For a Deep parent scan, the host copies the configured paths into `includePaths` and `excludePaths` and sets `completeness` from the coordinator's outcome. A successful aggregate uses `complete`; `surfaces`, `explicitExclusions`, and `deferred` are empty arrays, and `openQuestions` is omitted. If the configured time limit expires before any review completes, the coordinator writes `partial` and records the explanation in `deferred`. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
+Deep Scan repeats ordinary Standard scans and merges their completed results. The host combines their reviewed surfaces, explicit exclusions, deferred work and open questions, preserving references to the child artifacts. Parent coverage stays partial when a child is partial, no completed input is available, or a pass remains unresolved. Otherwise, unknown child coverage stays unknown. Reaching a discovery limit alone does not make complete child coverage partial. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
 
-Each Deep worker writes an ordinary Standard result, including its own coverage. A reducer submits `record_codex_security_deep_reduction({ scanId, findings, scope?, threatModel? })`; its saved results and checkpoints contain the accepted findings and optional scope and threat-model context.
+Each pass retains its ordinary result and coverage. The host preserves every original finding in the merged finding's provenance, along with accepted scope and threat-model context. The merger does not decide coverage or perform another discovery scan.
 
 For Standard and diff scans, record:
 

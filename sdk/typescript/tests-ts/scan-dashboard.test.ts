@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import type { ComponentReceipt } from "../src/component-scan.js";
@@ -1272,7 +1273,7 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("/private/tmp/");
     expect(frame.match(/\[09:41:00\]/gu)).toHaveLength(1);
     expect(stderr.text()).toContain(
-      `\u001B]8;;file:///private/tmp/codex%20security/scans/promptfoo-cloud/artifacts/02_discovery/raw_candidates_02.jsonl\u0007raw_candidates_02.jsonl\u001B]8;;\u0007`,
+      `\u001B]8;;${pathToFileURL(target).href}\u0007raw_candidates_02.jsonl\u001B]8;;\u0007`,
     );
     dashboard.stop();
   });
@@ -1340,9 +1341,11 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("`db.raw(  input  )`");
     expect(stderr.text()).toContain("\u001B[2mdb.raw(  input  )\u001B[22m");
     expect(stderr.text()).toContain(
-      "\u001B]8;;file:///tmp/report.md\u0007report\u001B]8;;\u0007",
+      `\u001B]8;;${pathToFileURL("/tmp/report.md").href}\u0007report\u001B]8;;\u0007`,
     );
-    expect(stderr.text()).not.toContain("\u001B]8;;file:///tmp/example.md");
+    expect(stderr.text()).not.toContain(
+      `\u001B]8;;${pathToFileURL("/tmp/example.md").href}`,
+    );
 
     dashboard.record({
       id: "command-inline-code",
@@ -1377,10 +1380,8 @@ describe("live scan dashboard", () => {
       paths: [],
     });
 
-    const frame = lastFrame(stderr);
-    expect(frame).toContain("See report, unsafe, and control.");
     expect(stderr.text()).toContain(
-      "\u001B]8;;https://example.com/report?token=[redacted]\u0007report\u001B]8;;\u0007",
+      "See \u001B]8;;https://example.com/report?token=[redacted]\u0007report\u001B]8;;\u0007, unsafe, and control.",
     );
     expect(stderr.text()).not.toContain("secret-token");
     expect(stderr.text()).not.toContain("javascript:");
@@ -1395,7 +1396,9 @@ describe("live scan dashboard", () => {
       paths: [],
     });
     expect(lastFrame(stderr)).toContain("printf '[report](/tmp/report.md)'");
-    expect(stderr.text()).not.toContain("\u001B]8;;file:///tmp/report.md");
+    expect(stderr.text()).not.toContain(
+      `\u001B]8;;${pathToFileURL("/tmp/report.md").href}`,
+    );
     dashboard.stop();
   });
 

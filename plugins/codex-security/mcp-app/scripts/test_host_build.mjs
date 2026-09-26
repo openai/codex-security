@@ -23,7 +23,7 @@ function runNode(args, options = {}) {
   });
 }
 
-test("builds and loads the host runtime from standalone plugin source", async (t) => {
+test("builds and loads the standalone host runtime from shared source", async (t) => {
   const output = await mkdtemp(join(tmpdir(), "codex-security-host-build-"));
   const mcp = join(output, "mcp");
   t.after(() => rm(output, { recursive: true, force: true }));

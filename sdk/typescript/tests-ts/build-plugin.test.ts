@@ -125,6 +125,48 @@ describe("bundled plugin build", () => {
     ]);
     expect(helper.stdout).toBe("[]\n");
     expect(helper.stderr).toBe("");
+    const execution = execFileAsync(
+      "node",
+      [join(destination, "server.mjs"), "--stdio"],
+      {
+        cwd: root,
+        timeout: 10_000,
+      },
+    );
+    execution.child.stdin?.end(
+      [
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "standalone-package-test", version: "1" },
+          },
+        }),
+        JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/list",
+          params: {},
+        }),
+        "",
+      ].join("\n"),
+    );
+    const standalone = await execution;
+    const responses = standalone.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(
+      responses.find((response) => response.id === 2)?.result.tools,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "start_codex_security_deep_scan" }),
+      ]),
+    );
   });
 
   test("builds from a source snapshot without Git metadata", async () => {

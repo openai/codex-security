@@ -36,10 +36,12 @@ describe("delegated scan attribution", () => {
         releaseConcurrentScans = resolve;
       });
 
+      const controllers = [new AbortController(), new AbortController()];
       const clients = await Promise.all(
-        (["cli", "sdk"] as const).map(async (surface) => {
+        (["cli", "sdk"] as const).map(async (surface, index) => {
           const scanDirectory = join(root, `${surface}-scan`);
           await mkdir(scanDirectory, { mode: 0o700 });
+          let registrations = 0;
           return new InternalCodexSecurity(
             { pluginPath: PLUGIN_ROOT },
             {
@@ -50,24 +52,36 @@ describe("delegated scan attribution", () => {
                 OPENAI_API_KEY: `synthetic-${surface}-key`,
               },
               resolvePluginPython: async () => "/managed/python",
-              prepareOutputDir: async () => scanDirectory,
+              prepareOutputDir: async (requested: string | undefined) => {
+                const directory = requested ?? scanDirectory;
+                await mkdir(directory, { recursive: true, mode: 0o700 });
+                return directory;
+              },
+              prepareScanArtifactRestorer: async () => ({
+                prepareDirectory: async () => {},
+                restore: async () => {},
+                remove: async () => {},
+              }),
               repositoryRevision: async () => "deadbeef",
               runWorkbench: async (
                 _options: unknown,
                 args: readonly string[],
               ) => {
+                if (args[0] === "list-scans") return { scans: [] };
+                if (args[0] === "get-scan")
+                  return { scan: { progress: { status: "running" } } };
                 if (args[0] === "register-cli-scan") {
                   return {
-                    scanId: `scan_${surface}`,
+                    scanId: `scan_${surface}_${++registrations}`,
                     targetId: `target_${surface}`,
                     targetRevision: "deadbeef",
-                    scanDir: scanDirectory,
+                    scanDir: args[args.indexOf("--scan-dir") + 1],
                     contract: { target: { allowedKinds: ["git_revision"] } },
                   };
                 }
                 if (args[0] === "get-scan-feedback") {
                   return {
-                    scanId: `scan_${surface}`,
+                    scanId: args[args.indexOf("--scan-id") + 1],
                     targetId: `target_${surface}`,
                     falsePositives: [],
                   };
@@ -78,37 +92,61 @@ describe("delegated scan attribution", () => {
                 startThread: (threadOptions: ThreadOptions) => ({
                   id: null,
                   async runStreamed() {
-                    active += 1;
-                    maximumActive = Math.max(maximumActive, active);
-                    if (active === 2) releaseConcurrentScans();
-                    try {
-                      expect(options.env?.["CODEX_HOME"]).toBe(credentialHome);
-                      expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
-                        surface,
-                      );
-                      expect(options.config).toMatchObject({
-                        responses_api_metadata: {
-                          codex_security_surface: surface,
-                        },
-                      });
-                      expect(threadOptions.threadSource).toBe("security_scan");
-                      await concurrentScans;
-                      const sharedConfig = parseToml(
-                        await readFile(
-                          join(credentialHome, "config.toml"),
-                          "utf8",
-                        ),
-                      );
-                      expect(sharedConfig).not.toHaveProperty(
-                        "responses_api_metadata",
-                      );
-                      expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
-                        surface,
-                      );
-                      throw new Error("delegated attribution observed");
-                    } finally {
-                      active -= 1;
-                    }
+                    return {
+                      events: (async function* () {
+                        active += 1;
+                        maximumActive = Math.max(maximumActive, active);
+                        if (active === 2) releaseConcurrentScans();
+                        try {
+                          expect(options.env?.["CODEX_HOME"]).toBe(
+                            credentialHome,
+                          );
+                          expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
+                            surface,
+                          );
+                          expect(options.config).toMatchObject({
+                            responses_api_metadata: {
+                              codex_security_surface: surface,
+                            },
+                          });
+                          expect(threadOptions.threadSource).toBe(
+                            "security_scan",
+                          );
+                          expect(options.env?.["CODEX_SECURITY_SCAN_DIR"]).toBe(
+                            mode === "deep"
+                              ? join(
+                                  scanDirectory,
+                                  "artifacts/deep-scan/passes/pass-1",
+                                )
+                              : scanDirectory,
+                          );
+                          yield {
+                            type: "thread.started",
+                            thread_id: `synthetic-${surface}`,
+                          };
+                          await concurrentScans;
+                          const sharedConfig = parseToml(
+                            await readFile(
+                              join(credentialHome, "config.toml"),
+                              "utf8",
+                            ),
+                          );
+                          expect(sharedConfig).not.toHaveProperty(
+                            "responses_api_metadata",
+                          );
+                          expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
+                            surface,
+                          );
+                          const observed = new Error(
+                            "delegated attribution observed",
+                          );
+                          controllers[index]!.abort(observed);
+                          throw observed;
+                        } finally {
+                          active -= 1;
+                        }
+                      })(),
+                    };
                   },
                 }),
               }),
@@ -120,17 +158,21 @@ describe("delegated scan attribution", () => {
 
       try {
         const results = await Promise.allSettled(
-          clients.map((client) =>
-            client.run(repository, { mode }).finally(releaseConcurrentScans),
+          clients.map((client, index) =>
+            client
+              .run(repository, {
+                mode,
+                ...(mode === "deep" ? { workers: 1, maxDiscoveryRuns: 1 } : {}),
+                signal: controllers[index]!.signal,
+              })
+              .finally(releaseConcurrentScans),
           ),
         );
-        for (const result of results) {
-          expect(result).toMatchObject({
-            status: "rejected",
-            reason: expect.objectContaining({
-              message: "delegated attribution observed",
-            }),
-          });
+        for (const result of results) expect(result.status).toBe("rejected");
+        for (const controller of controllers) {
+          expect(controller.signal.reason?.message).toBe(
+            "delegated attribution observed",
+          );
         }
         expect(maximumActive).toBe(2);
       } finally {

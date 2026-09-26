@@ -13,11 +13,11 @@ from typing import Any
 
 import pytest
 from test_workbench_db import HEAD_CHANGED_WARNING
-from test_workbench_deep_scan import begin_target_scan
 from test_workbench_prompt_only_scan import start_headless_standard_scan, start_prompt_only_scan
 from workbench_test_support import (
+    begin_legacy_scan,
     initialize_git_repository,
-    mark_deep_coordinator_succeeded,
+    mark_deep_aggregate_ready,
     stable_target_id,
     write_completed_contract,
 )
@@ -128,15 +128,7 @@ def create_cli_scan(
     if not complete:
         return launched
     if mode == "deep":
-        run_workbench(
-            state_dir,
-            "begin-deep-scan",
-            "--scan-id",
-            launched["scanId"],
-            "--thread-id",
-            "thread-scan-history",
-        )
-        mark_deep_coordinator_succeeded(state_dir, launched["scanId"], scan_dir)
+        mark_deep_aggregate_ready(state_dir, launched["scanId"], scan_dir)
 
     coverage_mode = (
         "scoped_path" if paths else "deep_repository" if mode == "deep" else "repository"
@@ -324,10 +316,10 @@ def test_get_scan_includes_desktop_deep_worker_threads_without_continuation(tmp_
     repository, other_repository = tmp_path / "repository", tmp_path / "other-repository"
     repository.mkdir()
     other_repository.mkdir()
-    scan = begin_target_scan(
+    scan = begin_legacy_scan(
         state_dir, codex_home, repository, tmp_path / "results", thread_id="desktop-owner"
     )["deepScan"]
-    other = begin_target_scan(
+    other = begin_legacy_scan(
         state_dir, codex_home, other_repository, tmp_path / "results", thread_id="other-owner"
     )["deepScan"]
     workers = [

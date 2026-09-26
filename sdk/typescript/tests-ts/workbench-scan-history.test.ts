@@ -314,7 +314,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "connection.row_factory = sqlite3.Row",
     "connection.executescript('''",
     "CREATE TABLE security_targets (id TEXT, current_path TEXT);",
-    "CREATE TABLE scans (id TEXT, target_path TEXT, target_id TEXT, status TEXT, started_at TEXT);",
+    "CREATE TABLE scans (id TEXT, target_path TEXT, target_id TEXT, status TEXT, started_at TEXT, mode TEXT DEFAULT 'standard', parent_scan_id TEXT, scan_dir TEXT);",
     "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT);",
     "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT);",
     "CREATE TABLE finding_occurrences (id TEXT, finding_id TEXT, scan_id TEXT, details_json TEXT, remediation TEXT, severity TEXT, summary TEXT, title TEXT);",
@@ -323,7 +323,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "''')",
     "for index in range(3):",
     "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
+    "    connection.execute('INSERT INTO scans(id, target_path, target_id, status, started_at) VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "queries = []",
     "connection.set_trace_callback(queries.append)",
@@ -342,7 +342,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "link_queries = [query for query in queries if 'FROM scan_comparison_matches' in query]",
     "for index in (3, 4):",
     "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
+    "    connection.execute('INSERT INTO scans(id, target_path, target_id, status, started_at) VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, f'scan-{index - 3}', scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "def coverage(scan):",
     "    if scan['id'] in {'scan-0', 'scan-1', 'scan-2'}:",
@@ -654,7 +654,7 @@ from workbench_scan_history import finding_matches
 connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
 connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, started_at TEXT);
+CREATE TABLE scans (id TEXT PRIMARY KEY, started_at TEXT, mode TEXT DEFAULT 'standard', parent_scan_id TEXT, scan_dir TEXT);
 CREATE TABLE finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT);
 CREATE TABLE scan_comparison_matches (
     before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT
@@ -662,7 +662,7 @@ CREATE TABLE scan_comparison_matches (
 ''')
 scans = [('a', 'a'), ('b', 'b'), ('c', 'c'), ('a-repeat', 'a'), ('c-repeat', 'c'), ('unlinked', 'unlinked')]
 for index, (scan, finding) in enumerate(scans):
-    connection.execute('INSERT INTO scans VALUES (?, ?)', (scan, str(index)))
+    connection.execute('INSERT INTO scans(id, started_at) VALUES (?, ?)', (scan, str(index)))
     connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', (scan, finding, scan, scan))
 connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, ?)', [
     ('a', 'b', 'a', 'b', 'First confirmed link.'),

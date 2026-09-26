@@ -57,6 +57,7 @@ import {
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
+  scanPreflightCodexConfig,
   runtimeScanAuthentication,
   selectedScanEnvironment,
   type DeepScanOptions,
@@ -982,6 +983,8 @@ interface ScanArguments extends ResolvedScanSettings {
   codexOverrides: JsonObject;
   projectConfig?: ProjectConfigProvenance;
   resumeScanId?: string;
+  inheritedPermissions?: ScanOptions["inheritedPermissions"];
+  preserveProviderEnvironment?: boolean;
   mock?: boolean;
   workflowId?: string;
   safetyIdentifier?: string;
@@ -1868,7 +1871,26 @@ export async function main(
       value,
   ): Promise<JsonObject> => {
     try {
-      return await select(await dependencies.runWorkbench(args));
+      let result = await dependencies.runWorkbench(args);
+      const recipe = result["recipe"];
+      if (recipe !== undefined && isJsonObject(recipe)) {
+        const config = recipe["config"];
+        if (config !== undefined && isJsonObject(config)) {
+          result = {
+            ...result,
+            recipe: {
+              ...recipe,
+              config: {
+                ...scanPreflightCodexConfig(config),
+                ...(config["approval_policy"] === undefined
+                  ? {}
+                  : { approval_policy: config["approval_policy"] }),
+              },
+            },
+          };
+        }
+      }
+      return await select(result);
     } catch (error) {
       errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
       exitCode = 2;
@@ -2272,6 +2294,10 @@ export async function main(
             },
             dependencies.currentDirectory(),
           );
+          if (scanArguments.mode !== "deep")
+            throw new CodexSecurityError(
+              "Only Deep Scans can be resumed with this command.",
+            );
           scanArguments.resumeScanId = saved["scanId"];
           scanArguments.outputDir = resolveCliPath(
             dependencies.currentDirectory(),
@@ -4682,7 +4708,11 @@ export async function main(
                             saved["threadId"],
                           )
                         : null;
-                    if (session?.workingDirectory !== scanDir) {
+                    if (
+                      typeof saved["threadId"] === "string" &&
+                      session?.workingDirectory !==
+                        join(scanDir, "artifacts/deep-scan/merge")
+                    ) {
                       errorOutput.write(
                         `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
                       );
@@ -4710,6 +4740,9 @@ export async function main(
                         resumeScanId: scan.scanId,
                         outputDir: scanDir,
                         safetyIdentifier: recipe.safetyIdentifier,
+                        inheritedPermissions: recipe.inheritedPermissions,
+                        preserveProviderEnvironment:
+                          recipe.preserveProviderEnvironment,
                         postScanPrompt:
                           recipe.postScanPrompt ?? prompts.postScanPrompt,
                         signal: controller.signal,
@@ -6133,6 +6166,17 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe contains invalid configuration.",
     );
   }
+  const inheritedPermissions = recipe["inheritedPermissions"];
+  if (
+    inheritedPermissions !== undefined &&
+    (!isJsonObject(inheritedPermissions) ||
+      !isJsonObject(inheritedPermissions["filesystem"] ?? null) ||
+      !isJsonObject(inheritedPermissions["network"] ?? null))
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid native permissions.",
+    );
+  }
   const reference = target["baseRef"] ?? target["base"];
   if (
     (reference !== undefined && typeof reference !== "string") ||
@@ -6221,6 +6265,9 @@ async function prepareScanArgumentsFromRecipe(
   }
   return {
     repository,
+    inheritedPermissions:
+      inheritedPermissions as ScanOptions["inheritedPermissions"],
+    preserveProviderEnvironment: recipe["preserveProviderEnvironment"] === true,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
     target:
       paths.length > 0
@@ -8433,6 +8480,8 @@ async function executeScan(
     }
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
+      inheritedPermissions: arguments_.inheritedPermissions,
+      preserveProviderEnvironment: arguments_.preserveProviderEnvironment,
       ...(arguments_.resumeScanId === undefined
         ? {}
         : { resumeScanId: arguments_.resumeScanId }),
@@ -9158,21 +9207,18 @@ async function readDeepScanStop(
     };
   }
   const response = await runWorkbench([
-    "get-deep-scan",
+    "get-scan",
     "--scan-id",
     result.manifest.scan.id,
-    "--thread-id",
-    result.threadId,
   ]);
-  const state = response["deepScan"] as
+  const state = response["compositionCheckpoint"] as
     | {
-        terminalReason: string;
-        dispatchedCount: number;
-        completionSequence: number;
+        terminalReason?: string;
+        passes: unknown[];
+        mergedScanIds: string[];
         noNewStreak: number;
-        config: Required<DeepScanOptions>;
-        createdAt: string;
-        completedAt: string;
+        startedAt: string;
+        legacy?: { discoveryRuns: number };
       }
     | undefined;
   if (state?.terminalReason === "saturated") {
@@ -9181,17 +9227,25 @@ async function readDeepScanStop(
     };
   }
   if (state?.terminalReason !== "capped") return undefined;
-  const { maxDiscoveryRuns, maxTimeHours } = state.config;
-  if (state.dispatchedCount >= maxDiscoveryRuns) {
+  const recipe = response["recipe"] as
+    { deepScan?: Required<DeepScanOptions> } | undefined;
+  if (recipe?.deepScan === undefined) return undefined;
+  const { maxDiscoveryRuns, maxTimeHours } = recipe.deepScan;
+  if (
+    state.passes.length + (state.legacy?.discoveryRuns ?? 0) >=
+    maxDiscoveryRuns
+  ) {
     const stillFindingIssues =
-      state.completionSequence > 0 && state.noNewStreak === 0;
+      state.mergedScanIds.length > 0 && state.noNewStreak === 0;
     return {
       reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${stillFindingIssues ? "The latest review still found new issues." : "More issues may remain."}`,
       nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
     };
   }
   const elapsedHours =
-    (Date.parse(state.completedAt) - Date.parse(state.createdAt)) / 3_600_000;
+    (Date.parse(result.manifest.scan.completedAt) -
+      Date.parse(state.startedAt)) /
+    3_600_000;
   if (elapsedHours >= maxTimeHours) {
     return {
       reason: `Reached the ${maxTimeHours}-hour time limit. More issues may remain.`,

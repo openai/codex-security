@@ -41,7 +41,6 @@ const fixture = await realpath(
 try {
   await testSchemaSourceOfTruth();
   await testScanContext();
-  await testWorkerStandardLayout();
   await testSafeJsonAndJsonl();
   await testAtomicReplaceAndAppend();
   await testBoundedPagination();
@@ -234,70 +233,6 @@ async function testScanContext() {
     })),
     /requested scan identity/,
   );
-}
-
-async function testWorkerStandardLayout() {
-  const root = path.join(fixture, "worker", "output");
-  const repoRoot = path.join(fixture, "repository");
-  await mkdir(root, { recursive: true });
-  const context = await contextApi.createWorkerArtifactContext({
-    root,
-    repoRoot,
-    scope: ".",
-    pluginRoot: "/fixture/plugin",
-  });
-  const inventory = await io.artifactDestination(
-    context,
-    ["artifacts", "02_discovery", "in_scope_files.txt"],
-    "review_items",
-  );
-  const candidates = await io.artifactDestination(
-    context,
-    ["artifacts", "02_discovery", "candidate_ledger.jsonl"],
-    "discovery_candidates",
-  );
-  assert.equal(
-    inventory,
-    path.join(
-      await realpath(root),
-      "artifacts",
-      "02_discovery",
-      "in_scope_files.txt",
-    ),
-  );
-  assert.equal(
-    candidates,
-    path.join(
-      await realpath(root),
-      "artifacts",
-      "02_discovery",
-      "candidate_ledger.jsonl",
-    ),
-  );
-  assert.equal(context.layout, "worker");
-  assert.equal(context.scope, ".");
-
-  await assert.rejects(
-    contextApi.createWorkerArtifactContext({
-      root,
-      repoRoot,
-      deepReducer: { scanRoot: root, claimedWorkers: [] },
-    }),
-    /reducer-bound context/,
-  );
-  const reducer = await contextApi.createWorkerArtifactContext({
-    root,
-    repoRoot,
-    layout: "reducer",
-    deepReducer: {
-      scanRoot: root,
-      claimedWorkers: [
-        { id: "worker-1", resultPath: path.join(root, "worker-result.json") },
-      ],
-    },
-  });
-  assert.equal(reducer.layout, "reducer");
-  assert.equal(reducer.deepReducer.claimedWorkers[0].id, "worker-1");
 }
 
 async function testSafeJsonAndJsonl() {

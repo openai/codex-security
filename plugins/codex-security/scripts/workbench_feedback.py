@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -20,6 +21,8 @@ from workbench_validation import bounded_output_text
 
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
+    from workbench_scan_start import composition_child_ids
+
     rows = connection.execute(
         """
         WITH ranked_decisions AS (
@@ -52,6 +55,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             WHERE source_scans.target_id = ?
                 AND source_scans.id != ?
                 AND source_scans.status = 'complete'
+                AND source_scans.id NOT IN (SELECT value FROM json_each(?))
         )
         SELECT *
         FROM ranked_decisions
@@ -63,7 +67,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
         ORDER BY updated_at DESC, source_completed_at DESC, source_scan_id DESC, finding_id DESC
         LIMIT 50
         """,
-        (scan["target_id"], scan["id"]),
+        (scan["target_id"], scan["id"], json.dumps(sorted(composition_child_ids(connection)))),
     )
     false_positives = []
     for row in rows:

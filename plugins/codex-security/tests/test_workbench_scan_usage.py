@@ -15,7 +15,7 @@ import pytest
 from workbench_test_support import (
     create_saved_workspace,
     initialize_git_repository,
-    mark_deep_coordinator_succeeded,
+    mark_deep_aggregate_ready,
     run_workbench,
     start_delivered_scan,
     write_completed_contract,
@@ -78,7 +78,7 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
     else:
         target.mkdir()
         (target / "app.py").write_text("print('fixture')\n", encoding="utf-8")
-        workspace = create_saved_workspace(state_dir, target, thread_id="scan-parent")
+        workspace = create_saved_workspace(state_dir, target, thread_id="scan-parent", mode=mode)
         workspace_id = str(workspace["id"])
 
     started = start_delivered_scan(
@@ -239,7 +239,7 @@ def _complete_scan(fixture: ScanFixture) -> dict[str, Any]:
         )
     elif fixture.mode == "deep":
         options["coverage_mode"] = "deep_repository"
-        mark_deep_coordinator_succeeded(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
+        mark_deep_aggregate_ready(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
     write_completed_contract(
         fixture.scan_dir,
         fixture.scan_id,
@@ -527,68 +527,45 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
     }
 
 
-def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> None:
-    state_dir = tmp_path / "workbench-state"
-    target = tmp_path / "target"
-    target.mkdir()
-    environment = {
-        "CODEX_HOME": str(tmp_path / "codex-home"),
-        "CODEX_SQLITE_HOME": str(tmp_path / "codex-sqlite"),
-        "CODEX_STATE_DB": "",
-    }
-    deep = run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--thread-id",
-        "scan-parent",
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--scan-root",
-        str(tmp_path / "scans"),
-        "--available-parallelism",
-        "4",
-        environment=environment,
-    )["deepScan"]
-    scan_id = str(deep["scanId"])
-    scan_dir = Path(str(deep["scanDir"]))
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        row = connection.execute("SELECT started_at FROM scans WHERE id = ?", (scan_id,)).fetchone()
-    assert row is not None
-    fixture = ScanFixture(
-        state_dir,
-        target,
-        scan_id,
-        scan_dir,
-        datetime.fromisoformat(row[0]),
-        environment,
-        "deep",
-    )
+def test_completion_counts_ordinary_child_scans_and_descendants(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    environment = fixture.environment
     counted = fixture.started_at + timedelta(microseconds=1)
-    artifact = scan_dir / "artifacts" / "usage-worker"
-    artifact.mkdir(parents=True)
-    prompt = artifact / "prompt.md"
-    prompt.write_text("Review the fixture target.\n", encoding="utf-8")
+    directory = fixture.scan_dir / "artifacts" / "deep-scan" / "passes" / "pass-1"
+    directory.mkdir(parents=True, mode=0o700)
+    child = run_workbench(
+        fixture.state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(fixture.target),
+        "--scan-dir",
+        str(directory),
+        "--parent-scan-id",
+        fixture.scan_id,
+        "--recipe-json",
+        json.dumps(
+            {
+                "repository": str(fixture.target),
+                "mode": "standard",
+                "target": {"kind": "repository", "paths": []},
+                "config": {},
+            }
+        ),
+        environment=environment,
+    )
     run_workbench(
-        state_dir,
-        "upsert-deep-scan-worker",
+        fixture.state_dir,
+        "set-scan-thread",
         "--scan-id",
-        scan_id,
-        "--worker-id",
-        str(uuid.uuid4()),
-        "--kind",
-        "discovery",
-        "--status",
-        "running",
-        "--prompt-path",
-        str(prompt),
-        "--artifact-dir",
-        str(artifact),
-        "--sdk-thread-id",
+        child["scanId"],
+        "--thread-id",
         "sdk-worker",
         environment=environment,
     )
+    checkpoint = mark_deep_aggregate_ready(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
+    document = json.loads(checkpoint.read_text())
+    document["passes"] = [{"directory": str(directory), "scanId": child["scanId"]}]
+    checkpoint.write_text(json.dumps(document))
     _state_graph(
         environment,
         {

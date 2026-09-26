@@ -16,7 +16,7 @@ from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
     initialize_git_repository,
-    mark_deep_coordinator_succeeded,
+    mark_deep_aggregate_ready,
     run_workbench,
     start_delivered_scan,
     write_checkpoint,
@@ -753,7 +753,7 @@ def test_deep_csv_export_adds_only_candidate_id_column(
         "thread-deep-export",
         environment={"CODEX_HOME": str(codex_home)},
     )
-    mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
+    mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
     write_completed_contract(
         scan_dir,
         scan_id,

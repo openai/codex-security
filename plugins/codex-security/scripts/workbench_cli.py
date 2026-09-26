@@ -8,7 +8,6 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import deep_scan_workbench as deep_scan
 import workbench_remediation as remediation
 from workbench_constants import (
     DIFF_TARGET_KINDS,
@@ -117,7 +116,25 @@ def parse_args(description: str) -> argparse.Namespace:
         diff_content_digest=None,
     )
 
-    deep_scan.register_subcommands(subparsers, positive_int)
+    begin_deep_scan = subparsers.add_parser("begin-deep-scan")
+    begin_deep_scan.add_argument("--thread-id", required=True)
+    begin_target = begin_deep_scan.add_mutually_exclusive_group(required=True)
+    begin_target.add_argument("--scan-id")
+    begin_target.add_argument("--target-path")
+    begin_deep_scan.add_argument("--scope", default=".")
+    add_user_context(begin_deep_scan)
+    begin_deep_scan.add_argument("--scan-root")
+    begin_deep_scan.add_argument("--claim-token")
+    begin_deep_scan.add_argument("--model")
+    begin_deep_scan.add_argument("--reasoning-effort")
+    begin_deep_scan.set_defaults(
+        mode="deep",
+        target_summary=None,
+        diff_target_kind=None,
+        diff_base_revision=None,
+        diff_head_revision=None,
+        diff_content_digest=None,
+    )
 
     get_scan = subparsers.add_parser("get-scan")
     get_scan.add_argument("--scan-id", required=True)
@@ -161,6 +178,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     set_scan_thread = subparsers.add_parser("set-scan-thread")
     set_scan_thread.add_argument("--scan-id", required=True)
+    set_scan_thread.add_argument("--claim-token")
     set_scan_thread.add_argument("--thread-id", required=True)
 
     set_scan_cost_limit = subparsers.add_parser("set-scan-cost-limit")
@@ -172,6 +190,8 @@ def parse_args(description: str) -> argparse.Namespace:
 
     get_cli_scan_resume = subparsers.add_parser("get-cli-scan-resume")
     get_cli_scan_resume.add_argument("--scan-id", required=True)
+    get_cli_scan_resume.add_argument("--claim-token")
+    get_cli_scan_resume.add_argument("--migrate", action="store_true")
     get_cli_scan_resume.add_argument("--allow-unavailable", action="store_true")
 
     compare_scans = subparsers.add_parser("compare-scans")
@@ -226,7 +246,6 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")
-    update_progress.add_argument("--coordinator-generation", type=positive_int)
     update_progress.add_argument("--model")
     update_progress.add_argument("--reasoning-effort")
 
@@ -242,24 +261,28 @@ def parse_args(description: str) -> argparse.Namespace:
 
     complete_budget_exhausted_scan = subparsers.add_parser("complete-budget-exhausted-scan")
     complete_budget_exhausted_scan.add_argument("--scan-id", required=True)
+    complete_budget_exhausted_scan.add_argument("--claim-token")
     complete_budget_exhausted_scan.add_argument("--cost-json", required=True)
     complete_budget_exhausted_scan.add_argument("--message")
 
     cancel_scan = subparsers.add_parser("cancel-scan")
     cancel_scan.add_argument("--scan-id", required=True)
     cancel_scan.add_argument("--thread-id")
+    cancel_scan.add_argument("--defer-publication", action="store_true", help=argparse.SUPPRESS)
 
     fail_scan = subparsers.add_parser("fail-scan")
     fail_scan.add_argument("--scan-id", required=True)
     fail_scan.add_argument("--message", required=True)
     fail_scan.add_argument("--claim-token")
     fail_scan.add_argument("--cost-json")
+    fail_scan.add_argument("--defer-publication", action="store_true", help=argparse.SUPPRESS)
 
     preserve_scan = subparsers.add_parser("preserve-scan-results")
     preserve_scan.add_argument("--scan-id", required=True)
     preserve_scan.add_argument("--thread-id")
     preserve_scan.add_argument("--claim-token")
-    preserve_scan.add_argument("--coordinator-generation", type=positive_int)
+    preserve_scan.add_argument("--cost-json")
+    preserve_scan.add_argument("--after-stop", action="store_true", help=argparse.SUPPRESS)
 
     recovery_help = "Validate and republish retained checkpoints for a failed, non-canceled scan."
     recover_scan = subparsers.add_parser(

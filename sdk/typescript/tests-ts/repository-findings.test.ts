@@ -15,7 +15,7 @@ connection = sqlite3.connect(":memory:")
 connection.row_factory = sqlite3.Row
 connection.executescript("""
 CREATE TABLE security_targets(id TEXT, current_path TEXT, display_name TEXT);
-CREATE TABLE scans(id TEXT, target_id TEXT, scope TEXT, updated_at TEXT, status TEXT, started_at TEXT);
+CREATE TABLE scans(id TEXT, target_id TEXT, scope TEXT, updated_at TEXT, status TEXT, started_at TEXT, mode TEXT DEFAULT 'standard', parent_scan_id TEXT, scan_dir TEXT);
 CREATE TABLE finding_occurrences(id TEXT, finding_id TEXT, severity TEXT, created_at TEXT, scan_id TEXT, title TEXT, summary TEXT);
 CREATE TABLE finding_triage(occurrence_id TEXT, status TEXT, updated_at TEXT, close_reason TEXT);
 CREATE TABLE finding_locations(occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
@@ -24,7 +24,7 @@ INSERT INTO security_targets VALUES('first', '/first', 'First'), ('second', '/se
 """)
 def add_scan(scan_id, target, day):
     timestamp = f"2026-01-{day:02d}T00:00:00Z"
-    connection.execute("INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?)", (scan_id, target, "repository", timestamp, "complete", timestamp))
+    connection.execute("INSERT INTO scans(id, target_id, scope, updated_at, status, started_at) VALUES (?, ?, ?, ?, ?, ?)", (scan_id, target, "repository", timestamp, "complete", timestamp))
 
 def add_finding(occurrence, finding, scan):
     started = connection.execute("SELECT started_at FROM scans WHERE id = ?", (scan,)).fetchone()[0]

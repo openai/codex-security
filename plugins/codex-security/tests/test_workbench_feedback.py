@@ -299,6 +299,55 @@ def test_default_open_finding_overrides_an_older_false_positive(tmp_path: Path) 
     assert _feedback(state_dir, str(current["scanId"]))["falsePositives"] == []
 
 
+def test_internal_child_keeps_false_positive_feedback_without_parent_checkpoint(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "repository"
+    workspace_id = _create_workspace(state_dir, target)
+    previous = _complete_scan(state_dir, workspace_id, tmp_path / "scans", target)
+    reason = "The original route checked the session."
+    _close_finding(
+        state_dir,
+        str(previous["findings"][0]["occurrenceId"]),
+        "false_positive",
+        reason,
+    )
+    parent_workspace = str(create_saved_workspace(state_dir, target, mode="deep")["id"])
+    parent = _start_scan(state_dir, parent_workspace, tmp_path / "scans")
+    parent_dir = Path(str(parent["scanDir"]))
+    child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
+    child_dir.mkdir(parents=True, mode=0o700)
+    child = run_workbench(
+        state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(child_dir),
+        "--parent-scan-id",
+        str(parent["scanId"]),
+        "--recipe-json",
+        json.dumps(
+            {
+                "repository": str(target),
+                "target": {"kind": "repository", "paths": []},
+                "mode": "standard",
+                "config": {"model": "synthetic-model"},
+            }
+        ),
+    )
+    write_completed_contract(child_dir, child["scanId"], target)
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", child["scanId"])["scan"]
+    assert completed["findings"][0]["triage"]["status"] == "open"
+    assert not (parent_dir / "artifacts/deep-scan/checkpoint.json").exists()
+
+    feedback = _feedback(state_dir, str(parent["scanId"]))["falsePositives"]
+    assert len(feedback) == 1
+    assert feedback[0]["reason"] == reason
+    assert feedback[0]["sourceScanId"] == previous["scanId"]
+
+
 def test_feedback_returns_only_the_50_latest_decisions(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "repository"

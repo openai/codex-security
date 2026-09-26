@@ -201,7 +201,6 @@ describe("saved scan logs", () => {
         executionThreadIds: ["worker"],
       },
       [desktop, cli, desktop],
-      { allowMissingRoot: true },
     );
 
     expect(result.threadId).toBe("desktop-owner");
@@ -245,21 +244,18 @@ describe("saved scan logs", () => {
         "worker",
         "worker-child",
       ]);
-      if (continuationThreadId === undefined) {
-        expect(() => readSavedScanLogs(scan, home)).toThrow(
-          "No session is associated with scan scan-1.",
-        );
-      } else {
-        await expect(readSavedScanLogs(scan, home)).rejects.toThrow(
-          "No saved session logs are available for scan scan-1.",
-        );
-      }
+      await expect(readSavedScanLogs(scan, home)).rejects.toThrow(
+        "No saved session logs are available for scan scan-1.",
+      );
     },
   );
 
   test("feedback returns an empty log set when no scan threads are recorded", async () => {
     const home = await temporaryHome();
     await writeSession(home, "unrelated", []);
+    expect(() => readSavedScanLogs({ scanId: "scan-1" }, home)).toThrow(
+      "No session is associated with scan scan-1.",
+    );
     expect(
       await readSavedScanLogs({ scanId: "scan-1" }, home, {
         allowMissingRoot: true,

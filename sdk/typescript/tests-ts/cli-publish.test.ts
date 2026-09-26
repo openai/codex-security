@@ -1049,7 +1049,7 @@ describe("publish scan", () => {
     const created = [
       {
         ...base,
-        issueIdentifier: "\u001B[31mSEC-400\u001B[0m\n\u009Fsafe",
+        issueIdentifier: "\u001B[31mSEC-400\u001B[0m\nsafe\u009F",
         url: "javascript:alert(1)",
       },
       {
@@ -1085,7 +1085,7 @@ describe("publish scan", () => {
         deps,
       ),
     ).toBe(0);
-    expect(stdout.text()).toContain("  SEC-400\n");
+    expect(stdout.text()).toContain("  SEC-400 safe\n");
     for (const identifier of ["SEC-401", "SEC-402", "SEC-403", "SEC-404"]) {
       expect(stdout.text()).toContain(`  ${identifier}\n`);
     }

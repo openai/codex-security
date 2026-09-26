@@ -196,7 +196,9 @@ def mark_handoff_delivered(
         if thread_id is not None:
             workspace = require_workspace(connection, scan["workspace_id"])
             validate_handoff_delivery_thread(
-                scan["continuation_thread_id"] or workspace["thread_id"],
+                scan["deep_scan_owner_thread_id"]
+                or scan["continuation_thread_id"]
+                or workspace["thread_id"],
                 thread_id,
                 claim_token,
             )

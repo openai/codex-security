@@ -741,13 +741,6 @@ describe("one-shot scan events", () => {
   });
 
   test("fails the scan for every turn.failed error payload shape", async () => {
-    const usage = {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    };
     const payloads: Array<[string, unknown]> = [
       ["object message", { message: "model refused the turn" }],
       ["null", null],
@@ -762,7 +755,7 @@ describe("one-shot scan events", () => {
       const scanDir = await copyCompletedScan(await temporaryDirectory());
       async function* failedEvents(): AsyncGenerator<ThreadEvent> {
         yield { type: "thread.started", thread_id: "thread-1" };
-        yield { type: "turn.completed", usage };
+        yield { type: "turn.started" };
         yield { type: "turn.failed", error } as unknown as ThreadEvent;
       }
       await expect(
@@ -773,16 +766,9 @@ describe("one-shot scan events", () => {
   });
 
   test("reuses only a nested turn.failed message and falls back otherwise", async () => {
-    const usage = {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    };
     async function* failedWith(error: unknown): AsyncGenerator<ThreadEvent> {
       yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.completed", usage };
+      yield { type: "turn.started" };
       yield { type: "turn.failed", error } as unknown as ThreadEvent;
     }
 
