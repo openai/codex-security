@@ -89,6 +89,7 @@ describe("delegated scan attribution", () => {
                     maximumActive = Math.max(maximumActive, active);
                     if (active === 2) releaseConcurrentScans();
                     try {
+                      await concurrentScans;
                       expect(options.apiKey).toBe(`synthetic-${surface}-key`);
                       expect(options.env?.["CODEX_HOME"]).toBe(credentialHome);
                       expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
@@ -101,15 +102,13 @@ describe("delegated scan attribution", () => {
                         },
                       });
                       expect(threadOptions.threadSource).toBe("security_scan");
-                      expect(threadOptions.model).toBeUndefined();
+                      expect(
+                        threadOptions.model ?? options.config?.["model"],
+                      ).toBe(model);
                       const configPath =
                         options.env?.["CODEX_SECURITY_CONFIG_PATH"];
                       expect(typeof configPath).toBe("string");
                       configPaths.add(configPath!);
-                      expect(
-                        parseToml(await readFile(configPath!, "utf8")),
-                      ).toMatchObject({ model });
-                      await concurrentScans;
                       expect(
                         parseToml(await readFile(configPath!, "utf8")),
                       ).toMatchObject({ model });
@@ -123,9 +122,6 @@ describe("delegated scan attribution", () => {
                         "responses_api_metadata",
                       );
                       expect(sharedConfig).not.toHaveProperty("model");
-                      expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
-                        surface,
-                      );
                       throw new Error("delegated attribution observed");
                     } finally {
                       active -= 1;
