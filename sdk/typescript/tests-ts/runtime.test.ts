@@ -23,6 +23,7 @@ import {
 import * as fsPromises from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import {
+  basename,
   delimiter,
   dirname,
   isAbsolute,
@@ -5864,21 +5865,27 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("resolves inherited Python names case-insensitively", async () => {
-    const interpreter =
+    const discovered =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-    expect(interpreter).not.toBeNull();
+    expect(discovered).not.toBeNull();
+    const interpreter = join(
+      await realpath(dirname(discovered!)),
+      basename(discovered!),
+    );
+    const repository = await temporaryDirectory();
 
     expect(
       await resolvePluginPython({
+        protectedRoot: repository,
         environment: {
           PATH: "",
-          Python: interpreter!,
+          Python: interpreter,
           ...(process.env["SystemRoot"] === undefined
             ? {}
             : { SystemRoot: process.env["SystemRoot"] }),
         },
       }),
-    ).toBe(await realpath(interpreter!));
+    ).toBe(interpreter);
   });
 
   test.skipIf(process.platform !== "win32")(
@@ -5980,6 +5987,38 @@ describe("runtime directories and plugin Python boundary", () => {
     ).rejects.toThrow(PluginPythonUnavailableError);
   });
 
+  testPosix("preserves an explicit virtualenv Python launcher", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const systemBin = join(root, "system", "bin");
+    const virtualenvBin = join(root, "venv", "bin");
+    const systemPython = join(systemBin, "python3");
+    const virtualenvPython = join(virtualenvBin, "python");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(systemBin, { recursive: true }),
+      mkdir(virtualenvBin, { recursive: true }),
+    ]);
+    await writeFile(
+      systemPython,
+      '#!/bin/sh\ncase "$0" in */venv/bin/python) ;; *) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+    );
+    await chmod(systemPython, 0o700);
+    await symlink(systemPython, virtualenvPython);
+    const aliasedBin = join(root, "venv-bin-alias");
+    await symlink(virtualenvBin, aliasedBin, "dir");
+
+    for (const candidate of [virtualenvPython, join(aliasedBin, "python")]) {
+      await expect(
+        resolvePluginPython({
+          configuredPath: candidate,
+          environment: { PATH: "" },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(virtualenvPython);
+    }
+  });
+
   test.skipIf(process.platform !== "win32")(
     "uses a configured Windows Python path without the executable suffix",
     async () => {
@@ -6057,9 +6096,13 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const marker = join(root, "sitecustomize-executed");
-      const interpreter = Bun.which("python3");
-      expect(interpreter).not.toBeNull();
-      if (interpreter === null) return;
+      const discovered = Bun.which("python3");
+      expect(discovered).not.toBeNull();
+      if (discovered === null) return;
+      const interpreter = join(
+        await realpath(dirname(discovered)),
+        basename(discovered),
+      );
 
       await mkdir(repository);
       await writeFile(
@@ -6080,7 +6123,7 @@ describe("runtime directories and plugin Python boundary", () => {
           environment,
           protectedRoot: repository,
         }),
-      ).toBe(await realpath(interpreter));
+      ).toBe(interpreter);
       expect(existsSync(marker)).toBe(false);
     },
   );

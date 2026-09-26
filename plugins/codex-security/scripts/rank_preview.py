@@ -58,6 +58,7 @@ TEXT_CODE_EXTENSIONS = {
     ".sh",
     ".sol",
     ".sql",
+    ".svelte",
     ".swift",
     ".tf",
     ".toml",
