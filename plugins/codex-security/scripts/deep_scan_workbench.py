@@ -21,6 +21,7 @@ from deep_scan_config import resolve_deep_scan_config
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import _read_scan_local_json
 from workbench.handoff import require_current_continuation
+from workbench.storage import create_private_directory
 from workbench_target import (
     directory_content_digest,
     directory_snapshot_regular_file_count,
@@ -838,7 +839,7 @@ def begin_deep_scan_for_target(
         target_root = (root / safe_segment(target.name)).resolve()
         if target_root == target or target in target_root.parents:
             raise SystemExit("The scan artifact directory must be outside the selected target.")
-        target_root.mkdir(parents=True, exist_ok=True)
+        create_private_directory(target_root)
         user_context = user_context_argument(args)
         model = optional_text(args.model, maximum=200)
         reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
